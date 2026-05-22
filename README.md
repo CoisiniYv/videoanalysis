@@ -94,6 +94,64 @@ sudo docker compose -f infra/docker-compose.dev.yml logs -f event-worker
 
 ---
 
+## Phase 1A — Savant GPU 可用性验收
+
+验证宿主 GPU、CUDA Docker 容器和 Savant DeepStream 镜像的 GPU 访问能力。
+
+### 文件
+
+```text
+harness/smoke/savant_gpu_smoke.sh
+infra/docker-compose.savant-smoke.yml
+```
+
+### 烟雾测试脚本
+
+```bash
+bash harness/smoke/savant_gpu_smoke.sh
+```
+
+脚本依次执行三项检查：
+
+1. **host nvidia-smi** — 宿主 GPU 驱动可用
+2. **CUDA container** — `nvidia/cuda:12.4.1-base-ubuntu22.04` 容器内可调用 GPU
+3. **Savant DeepStream** — `ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1` 容器内可调用 GPU
+
+每项检查输出 `[OK]`、`[FAIL]` 或 `[SKIP]`。全部通过时退出码为 0。
+
+> **注意**：Savant DeepStream 镜像有自己的默认 entrypoint（`savant/entrypoint/run.py`），不能把 `nvidia-smi` 当作普通命令参数传入。必须使用 `--entrypoint nvidia-smi` 覆盖 entrypoint。
+
+### Docker Compose 方式
+
+```bash
+sudo docker compose -f infra/docker-compose.savant-smoke.yml up
+```
+
+### 成功标准
+
+所有三项检查均 `[OK]`，且脚本 exit code 为 0。
+
+### 常见错误
+
+```
+python -m savant.entrypoint: error: argument config: can't open 'nvidia-smi'
+```
+
+**原因**：把 `nvidia-smi` 当作普通命令参数传给了 Savant 镜像，但镜像默认 entrypoint 是 Savant 启动器，它把 `nvidia-smi` 当作 pipeline 配置文件路径来解析。
+
+**修复**：使用 `--entrypoint nvidia-smi` 覆盖默认 entrypoint。
+
+### 前置依赖
+
+- NVIDIA 驱动已安装（`nvidia-smi` 可执行）
+- Docker 已配置 `nvidia-container-toolkit`
+- （可选）Savant DeepStream 镜像已拉取：
+  ```bash
+  docker pull ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+  ```
+
+---
+
 ## 常见问题
 
 ### PostgreSQL 报 role "video" does not exist

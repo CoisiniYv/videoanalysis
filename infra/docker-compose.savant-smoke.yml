@@ -1,0 +1,16 @@
+name: phase1a-savant-smoke
+
+services:
+  savant-smoke:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    entrypoint: ["nvidia-smi"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # The Savant DeepStream image defines its own default entrypoint
+    # (savant/entrypoint/run.py), so this compose file overrides it
+    # with nvidia-smi for GPU access verification.
