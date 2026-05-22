@@ -152,6 +152,71 @@ python -m savant.entrypoint: error: argument config: can't open 'nvidia-smi'
 
 ---
 
+## Phase 1B — Savant minimal module / compose smoke test
+
+验证 Savant 容器在 Docker Compose 下稳定运行，GPU 直通、目录挂载、模块骨架全部正常。
+
+### 文件
+
+```text
+infra/docker-compose.savant-smoke.yml
+modules/savant_smoke/module.yml
+modules/savant_smoke/config/cameras.yml
+scripts/smoke/check_savant_smoke.sh
+harness/tests/test_savant_smoke.sh
+```
+
+### 设计说明
+
+- compose 用 `entrypoint: ["sleep"] + command: ["infinity"]` 保持容器存活，不启动实际 pipeline
+- 挂载 `modules/savant_smoke` 到 `/opt/savant/src/module`
+- 挂载 `scripts` 目录，方便在容器内执行自检
+- GPU 通过 `deploy.resources.reservations.devices` 传递（单卡，`count: 1`）
+- healthcheck 执行 `nvidia-smi`，每 15 秒检测 GPU 可用性
+
+### 验收命令
+
+```bash
+# 1. 确保宿主数据目录存在
+sudo mkdir -p /data/video-analytics/{models,downloads,media}
+
+# 2. 验证 compose 配置
+docker compose -f infra/docker-compose.savant-smoke.yml config
+
+# 3. 启动
+docker compose -f infra/docker-compose.savant-smoke.yml up -d
+
+# 4. 确认状态
+docker compose -f infra/docker-compose.savant-smoke.yml ps
+
+# 5. 容器内 GPU 验证
+docker compose -f infra/docker-compose.savant-smoke.yml exec savant-smoke nvidia-smi
+
+# 6. 验证挂载目录
+docker compose -f infra/docker-compose.savant-smoke.yml exec savant-smoke ls -la /opt/savant/src/module/module.yml
+docker compose -f infra/docker-compose.savant-smoke.yml exec savant-smoke ls -la /models /downloads /media
+
+# 7. 运行自检脚本
+docker compose -f infra/docker-compose.savant-smoke.yml exec savant-smoke \
+  bash /opt/savant/src/scripts/smoke/check_savant_smoke.sh
+
+# 8. 运行完整验收
+bash harness/tests/test_savant_smoke.sh
+
+# 9. 清理
+docker compose -f infra/docker-compose.savant-smoke.yml down
+```
+
+### 成功标准
+
+- `docker compose ps` 显示 `healthy`
+- 容器内 `nvidia-smi` 正常输出 GPU 信息
+- `/opt/savant/src/module/module.yml` 可见
+- `/models`、`/downloads`、`/media` 可读写
+- 自检脚本全部 `[OK]`
+
+---
+
 ## 常见问题
 
 ### PostgreSQL 报 role "video" does not exist

@@ -1,16 +1,36 @@
-name: phase1a-savant-smoke
+name: phase1b-savant-smoke
 
 services:
   savant-smoke:
     image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
-    entrypoint: ["nvidia-smi"]
+    container_name: phase1b-savant-smoke
+    # The Savant DeepStream image defines its own default entrypoint
+    # (savant/entrypoint/run.py). For Phase 1B we replace it entirely
+    # so the container stays alive until a real pipeline is wired.
+    entrypoint: ["sleep"]
+    command: ["infinity"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      MAX_PARALLEL_STREAMS: ${MAX_PARALLEL_STREAMS:-1}
+    volumes:
+      # Module code — mounted read-write so changes reflect live
+      - ../modules/savant_smoke:/opt/savant/src/module:rw
+      # Smoke scripts (read-only inside container)
+      - ../scripts:/opt/savant/src/scripts:ro
+      # Shared model / download / media directories
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/media:/media:rw
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: 1
               capabilities: [gpu]
-    # The Savant DeepStream image defines its own default entrypoint
-    # (savant/entrypoint/run.py), so this compose file overrides it
-    # with nvidia-smi for GPU access verification.
+    healthcheck:
+      test: ["CMD-SHELL", "nvidia-smi >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,18 @@
+# Phase 1B — camera config placeholder
+#
+# Real camera definitions (stream URLs, zones, rules) will be
+# added when RTSP input is wired in Phase 2.
+#
+# Format (from specs/02_savant_pipeline.md):
+#   cameras:
+#     cam_001:
+#       enabled: true
+#       gpu_id: 0
+#       source_id: "site_a.gate.cam_001"
+#       fps:
+#         pose_fps: 8
+#         face_fps: 1
+#       zones: { ... }
+#       rules: { ... }
+
+cameras: {}

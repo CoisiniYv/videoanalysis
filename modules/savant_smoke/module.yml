@@ -1,0 +1,32 @@
+# PHASE 1B — Savant module skeleton
+#
+# This is the minimal module.yml for the smoke test phase.
+# No models or converters are wired yet — the pipeline is a
+# placeholder that will be filled in subsequent phases.
+#
+# Future pipeline (from specs/02_savant_pipeline.md):
+#   YOLO26-pose -> nvtracker -> behavior_rules_pyfunc
+#   -> face_roi_selector -> SCRFD_2.5G -> ArcFace
+#   -> face_intelligence_pyfunc -> event_exporter
+#
+
+name: savant_smoke
+
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+
+pipeline:
+  elements:
+    # Phase 1B: placeholder — no detector, tracker, or pyfunc elements
+    # are wired. A real source + pipeline will be added in Phase 2
+    # when RTSP input is available.
+    #
+    # Example future entry:
+    #  - element: nvinfer@detector
+    #    name: yolo26_pose
+    #    ...
+    #
+    # Savant requires at least one pipeline element. An empty list
+    # will cause startup failure. This comment serves as the
+    # structural placeholder until the full pipeline is assembled.
