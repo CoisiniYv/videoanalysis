@@ -26,7 +26,7 @@ from custom.models.pose import is_valid_track_id
 from custom.models.tracks import TrackState, TrackStateStore
 from custom.rules.intrusion import IntrusionRule
 from custom.services.cooldown import CooldownTracker
-from custom.services.event_exporter import DryRunEventExporter, EventExporter
+from custom.services.event_exporter import create_event_exporter, EventExporter
 
 _DEFAULT_LOG_INTERVAL = 15
 
@@ -147,7 +147,7 @@ class BehaviorEventExportProbe(NvDsPyFuncPlugin):
             self.rules[rule_name] = IntrusionRule(rule_cfg, zone, self.cooldown)
 
         # --- Build exporter ----------------------------------------------
-        self.exporter: EventExporter = DryRunEventExporter()
+        self.exporter: EventExporter = create_event_exporter()
 
         print(
             f"stage=phase2c_behavior_event_export_probe_init "
