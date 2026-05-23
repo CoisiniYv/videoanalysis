@@ -1,0 +1,25 @@
+name: savant_security
+
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  source_uri: ${oc.env:SRC_URL, rtsp://rtsp-server:8554/phase1c}
+  batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
+  max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+  max_same_source_frames: 1
+  queue_maxsize: 10
+
+pipeline:
+  source:
+    element: uridecodebin
+    properties:
+      uri: ${parameters.source_uri}
+  elements:
+    - element: pyfunc
+      name: frame_probe
+      module: custom.pyfuncs.minimal_frame_probe
+      class_name: MinimalFrameProbe
+      kwargs:
+        source_id: phase1c.local.test_video
+        camera_id: phase1c_cam_001
+        redis_url: ${oc.env:REDIS_URL, redis://redis:6379/0}
+        stream_name: security.pipeline_frames

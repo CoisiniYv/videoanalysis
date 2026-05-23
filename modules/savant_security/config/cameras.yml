@@ -1,0 +1,17 @@
+# Phase 1C — test source configuration
+#
+# Production camera definitions will be added
+# when RTSP camera input is wired.
+
+cameras:
+  phase1c_cam_001:
+    enabled: true
+    gpu_id: 0
+    source_id: phase1c.local.test_video
+    fps:
+      pose_fps: 30
+      face_fps: 0
+    zones: {}
+    rules: {}
+    face:
+      enabled: false

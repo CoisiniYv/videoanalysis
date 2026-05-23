@@ -217,6 +217,94 @@ docker compose -f infra/docker-compose.savant-smoke.yml down
 
 ---
 
+## Phase 1C — 单路视频 / Minimal Pipeline
+
+验证从视频文件 ffmpeg 推流 → RTSP server → Savant pipeline → frame metadata 输出的完整链路。
+
+### 文件
+
+```text
+infra/docker-compose.phase1c.yml
+modules/savant_security/module.yml
+modules/savant_security/config/cameras.yml
+modules/savant_security/custom/pyfuncs/minimal_frame_probe.py
+harness/tests/test_pipeline_smoke.py
+testVideo/test.mp4
+```
+
+### 架构
+
+```text
+testVideo/test.mp4
+  -> ffmpeg（循环推流）
+  -> mediamtx RTSP server
+  -> Savant DeepStream（uridecodebin source + MinimalFrameProbe PyFunc）
+  -> stdout log（每 30 帧输出 Frame #N）
+```
+
+### 设计说明
+
+- **RTSP server**: `bluenviron/mediamtx:1.11.3`，仅用于本阶段本地测试
+- **推流方案**: ffmpeg 以 `-stream_loop -1` 循环推送 `testVideo/test.mp4`，用 `libx264` 软件转码确保兼容性
+- **Savant pipeline**: `module.yml` 定义 `uridecodebin` 源读取 RTSP 流，经过 `MinimalFrameProbe` PyFunc
+- **FrameProbe**: 每 30 帧输出日志到 stdout（继承 `NvDsPyFuncPlugin`）
+- **输出**: stdout log 为唯一必验 output sink。不写 Redis stream / `security.events` / PostgreSQL
+- **Redis 容器**: 仅为后续阶段预留，Phase 1C 不依赖、不写入、不验收 Redis
+
+### 验收命令
+
+```bash
+# 1. 确保宿主数据目录存在
+sudo mkdir -p /data/video-analytics/{models,downloads,media}
+
+# 2. 验证 compose 配置
+docker compose -f infra/docker-compose.phase1c.yml config
+
+# 3. 启动所有服务
+sudo docker compose -f infra/docker-compose.phase1c.yml up -d
+
+# 4. 查看状态
+sudo docker compose -f infra/docker-compose.phase1c.yml ps
+
+# 5. 查看 ffmpeg 推流日志
+sudo docker compose -f infra/docker-compose.phase1c.yml logs --tail=50 phase1c-ffmpeg-source
+
+# 6. 查看 Savant 日志（确认 Frame # 输出）
+sudo docker compose -f infra/docker-compose.phase1c.yml logs --tail=100 savant-phase1c
+
+# 7. 运行结构检查（无需 GPU）
+pytest harness/tests/test_pipeline_smoke.py -q
+
+# 8. 运行完整 GPU smoke test
+pytest harness/tests/test_pipeline_smoke.py -q --gpu
+
+# 9. 清理
+sudo docker compose -f infra/docker-compose.phase1c.yml down -v
+```
+
+### 成功标准
+
+- `testVideo/test.mp4` 被使用，未被替换
+- ffmpeg 持续循环推流到 `rtsp://rtsp-server:8554/phase1c`
+- Savant 读取 RTSP 流并连续处理多帧
+- Savant 日志出现 `Phase1C Frame #N` 且帧数随时间持续增长（N >= 30）
+- 没有启动 YOLO26-pose、nvtracker、SCRFD/ArcFace、event-worker
+- 没有写入 `security.events` 或 PostgreSQL
+- 不影响 Phase 0、1A、1B
+
+### 常见问题
+
+**Savant 容器反复重启**：
+检查 ffmpeg 推流是否成功：`sudo docker compose logs phase1c-ffmpeg-source`。如果 ffmpeg 无法连接 RTSP server，mediamtx 可能尚未就绪。
+
+**Savant 日志没有 Frame # 输出**：
+Savant 启动后需要 5-15 秒初始化 GStreamer pipeline 和 GPU 资源。等待后重新查看日志。
+
+**mediamtx 端口冲突**：
+如果宿主机 8554 端口已被占用，修改 `docker-compose.phase1c.yml` 中 `rtsp-server` 的端口映射。
+
+---
+
 ## 常见问题
 
 ### PostgreSQL 报 role "video" does not exist
