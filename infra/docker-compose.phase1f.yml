@@ -1,0 +1,89 @@
+name: phase1f
+
+services:
+  # ------------------------------------------------------------------
+  # Redis — standalone instance (reserved for future phases)
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7.4.9
+    container_name: phase1f-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ------------------------------------------------------------------
+  # RTSP server — receives ffmpeg push, serves Savant
+  # ------------------------------------------------------------------
+  rtsp-server:
+    image: bluenviron/mediamtx:1.11.3
+    container_name: phase1f-rtsp-server
+    ports:
+      - "8557:8554"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # FFmpeg source — loops test.mp4 into RTSP
+  # ------------------------------------------------------------------
+  phase1f-ffmpeg-source:
+    image: jrottenberg/ffmpeg:6.1-ubuntu
+    container_name: phase1f-ffmpeg-source
+    entrypoint: ["ffmpeg"]
+    command:
+      [
+        "-re",
+        "-stream_loop", "-1",
+        "-i", "/testVideo/test.mp4",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-f", "rtsp",
+        "rtsp://rtsp-server:8554/phase1f",
+      ]
+    volumes:
+      - ../testVideo:/testVideo:ro
+    depends_on:
+      - rtsp-server
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Savant module — YOLO26-pose + PersonPoseObservation adapter
+  # ------------------------------------------------------------------
+  savant-phase1f:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: phase1f-savant
+    entrypoint: ["python", "-m", "savant.entrypoint"]
+    command: ["module.yml"]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      SRC_URL: rtsp://rtsp-server:8554/phase1f
+      REDIS_URL: redis://redis:6379/0
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      ZMQ_SINK_ENDPOINT: pub+connect:ipc:///tmp/sink.ipc
+    volumes:
+      - ../modules/savant_phase1f:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/media:/media:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis:
+        condition: service_healthy
+      rtsp-server:
+        condition: service_started
+    restart: unless-stopped
