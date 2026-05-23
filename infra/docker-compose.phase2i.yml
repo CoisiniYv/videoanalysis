@@ -1,0 +1,152 @@
+name: phase2i
+
+services:
+  # ------------------------------------------------------------------
+  # Redis — event stream
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: phase2i-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # PostgreSQL — event store + audit logs
+  # ------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: phase2i-postgres
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Event worker — Redis Stream → PostgreSQL + alerts
+  # ------------------------------------------------------------------
+  event-worker:
+    image: phase2h-event-worker:latest
+    container_name: phase2i-event-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      CONSUMER_GROUP: event-workers
+      CONSUMER_NAME: event-worker-1
+      POLL_TIMEOUT_MS: "2000"
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # FastAPI event query API + WebSocket
+  # ------------------------------------------------------------------
+  api:
+    image: phase2h-api:latest
+    container_name: phase2i-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      REDIS_URL: redis://redis:6379/0
+      ALERT_STREAM: security.alerts
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # RTSP server — serves video to Savant
+  # ------------------------------------------------------------------
+  rtsp-server:
+    image: bluenviron/mediamtx:1.11.3
+    container_name: phase2i-rtsp-server
+    ports:
+      - "8561:8554"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # FFmpeg source — loops test.mp4 into RTSP
+  # ------------------------------------------------------------------
+  ffmpeg-source:
+    image: jrottenberg/ffmpeg:6.1-ubuntu
+    container_name: phase2i-ffmpeg-source
+    entrypoint: ["ffmpeg"]
+    command:
+      [
+        "-re",
+        "-stream_loop", "-1",
+        "-i", "/testVideo/test.mp4",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-f", "rtsp",
+        "rtsp://rtsp-server:8554/phase2i",
+      ]
+    volumes:
+      - ../testVideo:/testVideo:ro
+    depends_on:
+      - rtsp-server
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Savant module — YOLO26-pose + nvtracker + BehaviorEventExportProbe
+  # Uses EVENT_EXPORTER=redis to write SecurityEvent to Redis Stream
+  # ------------------------------------------------------------------
+  savant:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: phase2i-savant
+    entrypoint:
+      [
+        "bash", "-c",
+        "pip install -q redis && exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      SRC_URL: rtsp://rtsp-server:8554/phase2i
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      ZMQ_SINK_ENDPOINT: pub+connect:ipc:///tmp/sink.ipc
+      EVENT_EXPORTER: redis
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+    volumes:
+      - ../modules/savant_phase2c:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/media:/media:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - rtsp-server
+      - redis
+    restart: unless-stopped
