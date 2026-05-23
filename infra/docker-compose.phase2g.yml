@@ -32,9 +32,12 @@ services:
     restart: unless-stopped
 
   event-worker:
+    image: phase2g-event-worker:latest
     build:
       context: ../services/event-worker
       dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
     container_name: phase2g-event-worker
     environment:
       REDIS_URL: redis://redis:6379/0
@@ -53,9 +56,12 @@ services:
     restart: unless-stopped
 
   api:
+    image: phase2g-api:latest
     build:
       context: ../services/api
       dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
     container_name: phase2g-api
     ports:
       - "8000:8000"

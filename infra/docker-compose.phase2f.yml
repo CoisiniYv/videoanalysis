@@ -41,9 +41,12 @@ services:
   # Event worker — Redis Stream → PostgreSQL
   # ------------------------------------------------------------------
   event-worker:
+    image: phase2f-event-worker:latest
     build:
       context: ../services/event-worker
       dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
     container_name: phase2f-event-worker
     environment:
       REDIS_URL: redis://redis:6379/0
@@ -64,9 +67,12 @@ services:
   # FastAPI event query API
   # ------------------------------------------------------------------
   api:
+    image: phase2f-api:latest
     build:
       context: ../services/api
       dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
     container_name: phase2f-api
     ports:
       - "8000:8000"
