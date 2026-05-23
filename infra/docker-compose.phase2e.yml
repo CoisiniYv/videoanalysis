@@ -20,7 +20,7 @@ services:
   # PostgreSQL — event store
   # ------------------------------------------------------------------
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg16
     container_name: phase2e-postgres
     environment:
       POSTGRES_USER: video

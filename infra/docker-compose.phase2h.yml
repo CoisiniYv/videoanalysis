@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg16
     container_name: phase2h-postgres
     environment:
       POSTGRES_USER: video
