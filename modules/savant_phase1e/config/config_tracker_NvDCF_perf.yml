@@ -1,0 +1,6 @@
+%YAML:1.0
+---
+TrackerType: "NvDCF_perf"
+gpuId: 0
+maxObjAge: 30
+minDetectorConfidence: 0.1
