@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from redis import Redis
@@ -55,7 +56,7 @@ class AlertPublisher:
             "snapshot_url": None,
             "clip_url": None,
             "media": media,
-            "created_at": "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
         fields = {

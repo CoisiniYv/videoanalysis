@@ -152,10 +152,12 @@ if results:
         (14, 'clip_url is null',         alert_back['clip_url'] is None),
     ]
     media = alert_back.get('media', {})
+    created_at = alert_back.get('created_at', '')
     checks += [
         (15, 'media.snapshot_status',    media.get('snapshot_status') == 'not_implemented'),
         (16, 'media.clip_status',        media.get('clip_status') == 'not_implemented'),
         (17, 'media.recording_strategy', media.get('recording_strategy') == 'reserved'),
+        (18, 'created_at non-empty',     bool(created_at) and 'T' in str(created_at)),
     ]
 
 # 8. Verify duplicate: publish same event ID again, check DB still has 1 row
@@ -164,18 +166,18 @@ with pg_conn2.cursor() as cur:
     cur.execute('SELECT COUNT(*) FROM events WHERE source_event_id = %s', (sid,))
     count = cur.fetchone()[0]
 pg_conn2.close()
-checks.append((18, 'duplicate: DB count=1 (idempotent)', count == 1))
+checks.append((19, 'duplicate: DB count=1 (idempotent)', count == 1))
 
 # 9. Verify API /health
 import httpx
 client = httpx.Client(timeout=10)
 r_health = client.get('${API_URL}/health')
-checks.append((19, '/health returns 200', r_health.status_code == 200))
+checks.append((20, '/health returns 200', r_health.status_code == 200))
 
 # 10. Verify API /api/v1/events returns the event
 r_events = client.get('${API_URL}/api/v1/events?camera_id=cam_01&track_id=t_g1')
 body = r_events.json()
-checks.append((20, 'API returns event for cam_01/t_g1',
+checks.append((21, 'API returns event for cam_01/t_g1',
     body.get('data', {}).get('total', 0) >= 1))
 
 client.close()

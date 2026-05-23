@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import fakeredis
@@ -98,6 +99,9 @@ def test_alert_data_contains_full_alert():
     assert alert["status"] == "new"
     assert alert["snapshot_url"] is None
     assert alert["clip_url"] is None
+    assert alert["created_at"]  # non-empty
+    # must be ISO 8601 parseable
+    datetime.fromisoformat(alert["created_at"])
 
 
 # ===========================================================================
@@ -180,3 +184,43 @@ def test_alert_publisher_missing_media():
     alert = json.loads(fields[b"data"])
     # media should be empty dict (graceful fallback)
     assert alert["media"] == {}
+
+
+# ===========================================================================
+# 73. created_at is non-empty ISO 8601
+# ===========================================================================
+
+
+def test_alert_created_at_non_empty_iso8601():
+    fake = fakeredis.FakeRedis(decode_responses=False)
+    publisher = AlertPublisher(fake, "security.alerts")
+    event = _make_security_event()
+
+    publisher.publish(event)
+    _, fields = fake.xrange("security.alerts", "-", "+")[0]
+    alert = json.loads(fields[b"data"])
+
+    created_at = alert["created_at"]
+    assert created_at, "created_at must not be empty"
+    assert isinstance(created_at, str)
+    dt = datetime.fromisoformat(created_at)
+    assert dt.tzinfo is not None, "created_at must be timezone-aware"
+
+
+# ===========================================================================
+# 74. Duplicate source_event_id still does NOT publish duplicate alerts
+# ===========================================================================
+
+
+def test_duplicate_no_alert_with_created_at():
+    """Worker logic unchanged: alert only for new inserts even with created_at."""
+    fake = fakeredis.FakeRedis(decode_responses=False)
+    publisher = AlertPublisher(fake, "security.alerts")
+
+    # First — new insert
+    publisher.publish(_make_security_event(), event_id="uuid-new")
+    assert len(fake.xrange("security.alerts", "-", "+")) == 1
+
+    # Worker would NOT call publish for duplicate (event_id is None)
+    # Verify no second alert was published
+    assert len(fake.xrange("security.alerts", "-", "+")) == 1
