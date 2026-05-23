@@ -16,7 +16,8 @@ set -euo pipefail
 
 SMOKE_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="${SMOKE_DIR}/../../infra/docker-compose.phase2h.yml"
-API_URL="${API_URL:-http://localhost:8000}"
+API_URL="${API_URL:-http://127.0.0.1:8000}"
+CURL="curl --noproxy '*' -s"
 PG_CMD="docker exec phase2h-postgres psql -U video -d video_analytics -t -A --no-align"
 
 RED='\033[0;31m'
@@ -93,20 +94,20 @@ check 3 "audit_logs table exists" "$([[ "$AUDIT_TABLE" == "audit_logs" ]] && ech
 # ===========================================================================
 # Check 4: /health returns 200
 # ===========================================================================
-HEALTH_CODE="$(curl -s -o /dev/null -w "%{http_code}" "${API_URL}/health" 2>/dev/null || echo "000")"
+HEALTH_CODE="$($CURL -o /dev/null -w "%{http_code}" "${API_URL}/health" 2>/dev/null || echo "000")"
 check 4 "/health returns 200" "$([[ "$HEALTH_CODE" == "200" ]] && echo pass || echo fail)"
 
 # ===========================================================================
 # Check 5: /ready returns ready
 # ===========================================================================
-READY_BODY="$(curl -s "${API_URL}/ready" 2>/dev/null || echo '{}')"
+READY_BODY="$($CURL "${API_URL}/ready" 2>/dev/null || echo '{}')"
 READY_STATUS="$(echo "$READY_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")"
 check 5 "/ready status=ready" "$([[ "$READY_STATUS" == "ready" ]] && echo pass || echo fail)"
 
 # ===========================================================================
 # Check 6: /api/v1/events/recent returns data
 # ===========================================================================
-RECENT_BODY="$(curl -s "${API_URL}/api/v1/events/recent?limit=5" 2>/dev/null || echo '{}')"
+RECENT_BODY="$($CURL "${API_URL}/api/v1/events/recent?limit=5" 2>/dev/null || echo '{}')"
 RECENT_COUNT="$(echo "$RECENT_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',{}).get('events',[])))" 2>/dev/null || echo "0")"
 check 6 "/api/v1/events/recent returns events" "$([[ "$RECENT_COUNT" -ge 0 ]] && echo pass || echo fail)"
 
@@ -144,11 +145,11 @@ fi
 # ===========================================================================
 # Check 8: POST acknowledge → status=acknowledged
 # ===========================================================================
-ACK_BODY="$(curl -s -X POST "${API_URL}/api/v1/events/${EVENT_ID}/acknowledge" \
+ACK_BODY="$($CURL -X POST "${API_URL}/api/v1/events/${EVENT_ID}/acknowledge" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op","comment":"acceptance test ack"}' 2>/dev/null || echo '{}')"
 
-ACK_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/${EVENT_ID}/acknowledge" \
+ACK_CODE="$($CURL -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/${EVENT_ID}/acknowledge" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op","comment":"acceptance test ack 2"}' 2>/dev/null || echo "000")"
 
@@ -186,7 +187,7 @@ check 11 "audit_logs has event.acknowledge row" "$([[ "$AUDIT_COUNT" -ge 1 ]] &&
 # ===========================================================================
 # Check 12: POST confirm → DB status=confirmed
 # ===========================================================================
-curl -s -X POST "${API_URL}/api/v1/events/${EVENT_ID}/confirm" \
+$CURL -X POST "${API_URL}/api/v1/events/${EVENT_ID}/confirm" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op","comment":"confirmed"}' >/dev/null 2>&1 || true
 
@@ -196,7 +197,7 @@ check 12 "POST confirm -> DB status=confirmed" "$([[ "$DB_STATUS2" == "confirmed
 # ===========================================================================
 # Check 13: POST resolve → DB status=resolved
 # ===========================================================================
-curl -s -X POST "${API_URL}/api/v1/events/${EVENT_ID}/resolve" \
+$CURL -X POST "${API_URL}/api/v1/events/${EVENT_ID}/resolve" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op","comment":"resolved"}' >/dev/null 2>&1 || true
 
@@ -206,7 +207,7 @@ check 13 "POST resolve -> DB status=resolved" "$([[ "$DB_STATUS3" == "resolved" 
 # ===========================================================================
 # Check 14: resolved -> acknowledge returns 409
 # ===========================================================================
-CONFLICT_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/${EVENT_ID}/acknowledge" \
+CONFLICT_CODE="$($CURL -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/${EVENT_ID}/acknowledge" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op"}' 2>/dev/null || echo "000")"
 check 14 "resolved -> acknowledge returns 409" "$([[ "$CONFLICT_CODE" == "409" ]] && echo pass || echo fail)"
@@ -226,7 +227,7 @@ check 16 "audit_logs rows >= 3" "$([[ "$TOTAL_AUDIT" -ge 3 ]] && echo pass || ec
 # ===========================================================================
 # Check 17: source_event_id lookup works
 # ===========================================================================
-SID_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/${SID}/resolve" \
+SID_CODE="$($CURL -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/${SID}/resolve" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op"}' 2>/dev/null || echo "000")"
 # Already resolved, should return 409 (proves it found the event by SID)
@@ -235,7 +236,7 @@ check 17 "source_event_id lookup (409=found)" "$([[ "$SID_CODE" == "409" ]] && e
 # ===========================================================================
 # Check 18: invalid event_id returns 404
 # ===========================================================================
-NOTFOUND_CODE="$(curl -s -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/00000000-0000-0000-0000-000000000000/acknowledge" \
+NOTFOUND_CODE="$($CURL -o /dev/null -w "%{http_code}" -X POST "${API_URL}/api/v1/events/00000000-0000-0000-0000-000000000000/acknowledge" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op"}' 2>/dev/null || echo "000")"
 check 18 "invalid event_id 404" "$([[ "$NOTFOUND_CODE" == "404" ]] && echo pass || echo fail)"
