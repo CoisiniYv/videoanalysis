@@ -1,0 +1,72 @@
+name: phase2c
+
+services:
+  # ------------------------------------------------------------------
+  # RTSP server — receives ffmpeg push, serves Savant
+  # ------------------------------------------------------------------
+  rtsp-server:
+    image: bluenviron/mediamtx:1.11.3
+    container_name: phase2c-rtsp-server
+    ports:
+      - "8559:8554"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # FFmpeg source — loops test.mp4 into RTSP
+  # ------------------------------------------------------------------
+  phase2c-ffmpeg-source:
+    image: jrottenberg/ffmpeg:6.1-ubuntu
+    container_name: phase2c-ffmpeg-source
+    entrypoint: ["ffmpeg"]
+    command:
+      [
+        "-re",
+        "-stream_loop", "-1",
+        "-i", "/testVideo/test.mp4",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-f", "rtsp",
+        "rtsp://rtsp-server:8554/phase2c",
+      ]
+    volumes:
+      - ../testVideo:/testVideo:ro
+    depends_on:
+      - rtsp-server
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Savant module — YOLO26-pose + nvtracker + behavior event export probe
+  # ------------------------------------------------------------------
+  savant-phase2c:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: phase2c-savant
+    entrypoint: ["python", "-m", "savant.entrypoint"]
+    command: ["module.yml"]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      SRC_URL: rtsp://rtsp-server:8554/phase2c
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      ZMQ_SINK_ENDPOINT: pub+connect:ipc:///tmp/sink.ipc
+    volumes:
+      - ../modules/savant_phase2c:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/media:/media:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - rtsp-server
+    restart: unless-stopped

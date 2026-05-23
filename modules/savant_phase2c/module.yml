@@ -1,0 +1,84 @@
+name: savant_phase2c
+
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  source_uri: ${oc.env:SRC_URL, rtsp://rtsp-server:8554/phase2c}
+  batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
+  max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+  pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+  max_same_source_frames: 1
+  queue_maxsize: 10
+
+pipeline:
+  source:
+    element: uridecodebin
+    properties:
+      uri: ${parameters.source_uri}
+
+  elements:
+    # ------------------------------------------------------------------
+    # YOLO26-pose — person detection with 17 COCO keypoints
+    # ONNX model mounted at /models/yolo26_pose/yolo26_pose.onnx
+    # ------------------------------------------------------------------
+    - element: nvinfer@complex_model
+      name: yolo26_pose
+      properties:
+        interval: 0
+      model:
+        format: onnx
+        model_file: /models/yolo26_pose/yolo26_pose.onnx
+        batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+        precision: fp16
+        input:
+          shape: [3, 640, 640]
+          scale_factor: 0.003921569
+          offsets: [0.0, 0.0, 0.0]
+          color_format: rgb
+        output:
+          layer_names: [output0]
+          converter:
+            module: custom.converters.yolo26_pose
+            class_name: Yolo26PoseConverter
+            kwargs:
+              decoder_layout: post_nms_57
+              confidence_threshold: 0.01
+              keypoint_threshold: 0.01
+              force_nms: false
+          objects:
+            - class_id: 0
+              label: person
+              selector:
+                module: savant.selector.detector
+                class_name: BBoxSelector
+                kwargs:
+                  confidence_threshold: 0.01
+                  nms_iou_threshold: 0.9
+                  min_width: 1
+                  min_height: 1
+          attributes:
+            - name: keypoints
+
+    # ------------------------------------------------------------------
+    # nvtracker — assign track_id to each person
+    # ------------------------------------------------------------------
+    - element: nvtracker
+      name: tracker
+      properties:
+        ll-lib-file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+        ll-config-file: /opt/savant/src/module/config/config_tracker_NvDCF_perf.yml
+
+    # ------------------------------------------------------------------
+    # BehaviorEventExportProbe — evaluates behavior rules and exports
+    # standardised SecurityEvent objects via DryRunEventExporter
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: behavior_event_export_probe
+      module: custom.pyfuncs.behavior_event_export_probe
+      class_name: BehaviorEventExportProbe
+      kwargs:
+        log_every_n_frames: 15
+        cameras_config_path: /opt/savant/src/module/config/cameras.yml
+        producer: savant_phase2c
+        gpu_id: 0
+        observation_window_s: 5.0
+        track_timeout_s: 10.0
