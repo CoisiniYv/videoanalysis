@@ -1,53 +1,72 @@
-import os
+"""FastAPI application — Video Analytics event query API."""
 
-import psycopg
-import redis.asyncio as redis
-from fastapi import FastAPI, HTTPException
+from __future__ import annotations
 
-app = FastAPI(title="Phase 0 API")
+import uuid
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://video:video@postgres:5432/video_analytics",
-)
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from app.db import get_conn
+from app.routers.events import router as events_router
+
+app = FastAPI(title="Video Analytics API", version="1.0.0")
+
+app.include_router(events_router)
+
+
+# ---------------------------------------------------------------------------
+# Exception handler — wrap HTTPException in structured error envelope
+# ---------------------------------------------------------------------------
+
+
+@app.exception_handler(Exception)
+async def structured_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    from fastapi import HTTPException
+
+    if isinstance(exc, HTTPException):
+        # detail might be a dict (our _err output) or a plain string
+        detail = exc.detail
+        if isinstance(detail, dict) and detail.get("request_id"):
+            return JSONResponse(status_code=exc.status_code, content=detail)
+
+    request_id = str(uuid.uuid4())
+    message = str(exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "data": None,
+            "error": {"message": message, "code": 500},
+            "request_id": request_id,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Health / Readiness
+# ---------------------------------------------------------------------------
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
+def health() -> dict:
     return {"status": "ok"}
 
 
 @app.get("/ready")
-async def ready() -> dict[str, object]:
-    checks: dict[str, bool] = {"redis": False, "postgres": False}
-
-    redis_client = redis.from_url(
-        REDIS_URL,
-        encoding="utf-8",
-        decode_responses=True,
-    )
+def ready() -> dict:
+    checks: dict[str, bool] = {"postgres": False}
     try:
-        await redis_client.ping()
-        checks["redis"] = True
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"status": "not_ready", "checks": checks, "error": str(exc)},
-        ) from exc
-    finally:
-        await redis_client.aclose()
-
-    try:
-        async with await psycopg.AsyncConnection.connect(DATABASE_URL) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT 1")
-                await cur.fetchone()
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        conn.close()
         checks["postgres"] = True
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"status": "not_ready", "checks": checks, "error": str(exc)},
-        ) from exc
+    except Exception:
+        pass
 
-    return {"status": "ready", "checks": checks}
+    all_ok = all(checks.values())
+    return {
+        "status": "ready" if all_ok else "not_ready",
+        "checks": checks,
+    }
