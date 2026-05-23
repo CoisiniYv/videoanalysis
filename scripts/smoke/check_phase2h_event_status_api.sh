@@ -16,7 +16,6 @@ set -euo pipefail
 SMOKE_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="${SMOKE_DIR}/../../infra/docker-compose.phase2h.yml"
 API_BASE="${API_BASE:-http://127.0.0.1:8000}"
-PG_CMD="docker exec phase2h-postgres psql -U video -d video_analytics -t -A"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -27,7 +26,6 @@ NC='\033[0m'
 PASS_COUNT=0
 FAIL_COUNT=0
 
-# ---- curl helper: always --noproxy '*', silent, show HTTP code ----------
 _curl() { curl --noproxy '*' -s "$@"; }
 
 check() {
@@ -47,11 +45,18 @@ fatal() {
 }
 
 # ---- DB helpers ---------------------------------------------------------
-_db_once()  { docker exec phase2h-postgres psql -U video -d video_analytics -t -A -c "$1" 2>/dev/null | tr -d '[:space:]'; }
-_db_table() { docker exec phase2h-postgres psql -U video -d video_analytics -c "$1" 2>/dev/null; }
+# psql -q: quiet (no welcome banner)
+# psql -t: tuples only (no headers/footers)
+# psql -A: unaligned output
+# We use head -n1 because psql prints command status (INSERT 0 1) after result rows.
+_db_cell()   { docker exec phase2h-postgres psql -q -U video -d video_analytics -t -A -c "$1" 2>/dev/null | head -n1 | tr -d '[:space:]'; }
+_db_table()  { docker exec phase2h-postgres psql -U video -d video_analytics -c "$1" 2>/dev/null; }
 
 # ---- JSON helpers (stdlib only) -----------------------------------------
 _json() { python3 -c "import sys,json; $1" 2>/dev/null || echo ""; }
+
+# ---- UUID validation ----------------------------------------------------
+_is_uuid() { [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
 
 # ---------------------------------------------------------------------------
 # Pre-flight
@@ -83,10 +88,10 @@ echo ""
 # ===========================================================================
 check 1 "compose file exists"    "$([[ -f "$COMPOSE_FILE" ]] && echo pass || echo fail)"
 
-EVENTS_TABLE="$(_db_once "SELECT to_regclass('public.events');")"
+EVENTS_TABLE="$(_db_cell "SELECT to_regclass('public.events');")"
 check 2 "events table exists"    "$([[ "$EVENTS_TABLE" == "events" ]] && echo pass || echo fail)"
 
-AUDIT_TABLE="$(_db_once "SELECT to_regclass('public.audit_logs');")"
+AUDIT_TABLE="$(_db_cell "SELECT to_regclass('public.audit_logs');")"
 check 3 "audit_logs table exists" "$([[ "$AUDIT_TABLE" == "audit_logs" ]] && echo pass || echo fail)"
 
 # ===========================================================================
@@ -108,35 +113,32 @@ RECENT="$(_curl "${API_BASE}/api/v1/events/recent?limit=5")"
 check 6 "/api/v1/events/recent returns 200" "$([[ -n "$RECENT" ]] && echo pass || echo fail)"
 
 # ===========================================================================
-# Insert test event
+# Insert test event — unique SID every run
 # ===========================================================================
-SID="smoke:phase2h:cam01:t_h1:intrusion:1000"
-EVENT_UUID="$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())")"
-echo -e "${BLUE}[debug] SID=${SID}${NC}"
-echo -e "${BLUE}[debug] EVENT_UUID=${EVENT_UUID}${NC}"
+UNIQ="$(date +%s%N)"
+SID="smoke:phase2h:cam01:t_h1:intrusion:${UNIQ}"
+echo -e "${BLUE}[debug] generated SID=${SID}${NC}"
 
-# Clean up any previous run's event
-_db_once "DELETE FROM audit_logs WHERE payload->>'source_event_id'='${SID}';" >/dev/null || true
-_db_once "DELETE FROM events WHERE source_event_id='${SID}';" >/dev/null || true
-
-INSERT_ID="$(_db_once "
+# Insert and capture JUST the RETURNING id (head -n1 strips psql command status)
+EVENT_UUID="$(_db_cell "
 INSERT INTO events (id, source_event_id, event_type, camera_id, source_id, track_id,
     severity, confidence, start_ts, end_ts, event_ts_ms, status, payload)
-VALUES ('${EVENT_UUID}', '${SID}', 'intrusion', 'cam_01', 'src_h1', 't_h1',
+VALUES (gen_random_uuid(), '${SID}', 'intrusion', 'cam_01', 'src_h1', 't_h1',
     'medium', 0.85, '2026-05-24T10:00:00+00:00', '2026-05-24T10:01:00+00:00', 60000,
     'new', '{\"media\":{\"snapshot_status\":\"not_implemented\",\"clip_status\":\"not_implemented\",\"recording_strategy\":\"reserved\"}}')
 RETURNING id;
 ")"
-echo -e "${BLUE}[debug] INSERT returned id=${INSERT_ID}${NC}"
+echo -e "${BLUE}[debug] INSERT RETURNING id=${EVENT_UUID}${NC}"
 
-if [[ -n "$INSERT_ID" ]]; then
-    EVENT_UUID="$INSERT_ID"
+if _is_uuid "$EVENT_UUID"; then
+    echo -e "${BLUE}[debug] EVENT_UUID is valid UUID${NC}"
     check 7 "insert test event (id=${EVENT_UUID})" pass
 else
+    echo -e "${RED}[debug] got non-UUID from insert: '${EVENT_UUID}'${NC}"
     check 7 "insert test event" fail
 fi
 
-DB_STATUS="$(_db_once "SELECT status FROM events WHERE source_event_id='${SID}';")"
+DB_STATUS="$(_db_cell "SELECT status FROM events WHERE id='${EVENT_UUID}'::uuid;")"
 echo -e "${BLUE}[debug] DB status after insert: ${DB_STATUS}${NC}"
 
 # ===========================================================================
@@ -154,14 +156,12 @@ ACK_RESP="$(_curl -w "\n%{http_code}" -X POST "$ACK_URL" \
 ACK_CODE="$(echo "$ACK_RESP" | tail -1)"
 ACK_BODY="$(echo "$ACK_RESP" | sed '$d')"
 echo -e "${BLUE}[debug] HTTP ${ACK_CODE}${NC}"
-echo -e "${BLUE}[debug] body: $(echo "$ACK_BODY" | python3 -c "import sys; print(sys.stdin.read()[:200])" 2>/dev/null || echo '<parse error>')${NC}"
 
-# Verify DB
-DB_STATUS="$(_db_once "SELECT status FROM events WHERE source_event_id='${SID}';")"
+DB_STATUS="$(_db_cell "SELECT status FROM events WHERE id='${EVENT_UUID}'::uuid;")"
 echo -e "${BLUE}[debug] DB status after acknowledge: ${DB_STATUS}${NC}"
 
-check 8 "acknowledge HTTP 200"    "$([[ "$ACK_CODE" == "200" ]] && echo pass || echo fail)"
-check 9 "DB status acknowledged"  "$([[ "$DB_STATUS" == "acknowledged" ]] && echo pass || echo fail)"
+check 8  "acknowledge HTTP 200"   "$([[ "$ACK_CODE" == "200" ]] && echo pass || echo fail)"
+check 9  "DB status acknowledged" "$([[ "$DB_STATUS" == "acknowledged" ]] && echo pass || echo fail)"
 
 # Media fields
 MEDIA_SNAP="$(echo "$ACK_BODY" | _json "print(json.load(sys.stdin).get('data',{}).get('media',{}).get('snapshot_status','error'))")"
@@ -191,7 +191,7 @@ CONF_RESP="$(_curl -w "\n%{http_code}" -X POST "$CONF_URL" \
 CONF_CODE="$(echo "$CONF_RESP" | tail -1)"
 echo -e "${BLUE}[debug] HTTP ${CONF_CODE}${NC}"
 
-DB_STATUS="$(_db_once "SELECT status FROM events WHERE source_event_id='${SID}';")"
+DB_STATUS="$(_db_cell "SELECT status FROM events WHERE id='${EVENT_UUID}'::uuid;")"
 echo -e "${BLUE}[debug] DB status after confirm: ${DB_STATUS}${NC}"
 
 check 13 "confirm HTTP 200"    "$([[ "$CONF_CODE" == "200" ]] && echo pass || echo fail)"
@@ -211,7 +211,7 @@ RESV_RESP="$(_curl -w "\n%{http_code}" -X POST "$RESV_URL" \
 RESV_CODE="$(echo "$RESV_RESP" | tail -1)"
 echo -e "${BLUE}[debug] HTTP ${RESV_CODE}${NC}"
 
-DB_STATUS="$(_db_once "SELECT status FROM events WHERE source_event_id='${SID}';")"
+DB_STATUS="$(_db_cell "SELECT status FROM events WHERE id='${EVENT_UUID}'::uuid;")"
 echo -e "${BLUE}[debug] DB status after resolve: ${DB_STATUS}${NC}"
 
 check 15 "resolve HTTP 200"   "$([[ "$RESV_CODE" == "200" ]] && echo pass || echo fail)"
@@ -231,35 +231,38 @@ REJ_RESP="$(_curl -w "\n%{http_code}" -X POST "$REJ_URL" \
 REJ_CODE="$(echo "$REJ_RESP" | tail -1)"
 echo -e "${BLUE}[debug] HTTP ${REJ_CODE} (expect 409)${NC}"
 
-DB_STATUS="$(_db_once "SELECT status FROM events WHERE source_event_id='${SID}';")"
+DB_STATUS="$(_db_cell "SELECT status FROM events WHERE id='${EVENT_UUID}'::uuid;")"
 echo -e "${BLUE}[debug] DB status after rejected request: ${DB_STATUS}${NC}"
 
-check 17 "resolved->acknowledge 409"     "$([[ "$REJ_CODE" == "409" ]] && echo pass || echo fail)"
-check 18 "status still resolved"         "$([[ "$DB_STATUS" == "resolved" ]] && echo pass || echo fail)"
+check 17 "resolved->acknowledge 409" "$([[ "$REJ_CODE" == "409" ]] && echo pass || echo fail)"
+check 18 "status still resolved"     "$([[ "$DB_STATUS" == "resolved" ]] && echo pass || echo fail)"
 
 # ===========================================================================
-# audit_logs
+# audit_logs (query by SID stored in payload JSONB)
 # ===========================================================================
 echo ""
-AUDIT_ACK="$(_db_once "SELECT COUNT(*) FROM audit_logs WHERE payload->>'source_event_id'='${SID}' AND action='event.acknowledge';")"
-AUDIT_CFM="$(_db_once "SELECT COUNT(*) FROM audit_logs WHERE payload->>'source_event_id'='${SID}' AND action='event.confirm';")"
-AUDIT_RES="$(_db_once "SELECT COUNT(*) FROM audit_logs WHERE payload->>'source_event_id'='${SID}' AND action='event.resolve';")"
-echo -e "${BLUE}[debug] audit counts: ack=${AUDIT_ACK} confirm=${AUDIT_CFM} resolve=${AUDIT_RES}${NC}"
+AUDIT_ACK="$(_db_cell "SELECT COUNT(*) FROM audit_logs WHERE payload->>'source_event_id'='${SID}' AND action='event.acknowledge';")"
+AUDIT_CFM="$(_db_cell "SELECT COUNT(*) FROM audit_logs WHERE payload->>'source_event_id'='${SID}' AND action='event.confirm';")"
+AUDIT_RES="$(_db_cell "SELECT COUNT(*) FROM audit_logs WHERE payload->>'source_event_id'='${SID}' AND action='event.resolve';")"
+echo -e "${BLUE}[debug] audit counts (SID=${SID}): ack=${AUDIT_ACK} confirm=${AUDIT_CFM} resolve=${AUDIT_RES}${NC}"
 
 check 19 "audit: event.acknowledge" "$([[ "$AUDIT_ACK" -ge 1 ]] && echo pass || echo fail)"
 check 20 "audit: event.confirm"     "$([[ "$AUDIT_CFM" -ge 1 ]] && echo pass || echo fail)"
 check 21 "audit: event.resolve"     "$([[ "$AUDIT_RES" -ge 1 ]] && echo pass || echo fail)"
 
 # ===========================================================================
-# source_event_id lookup + 404
+# source_event_id lookup (use SID, already resolved -> expect 409)
 # ===========================================================================
 echo ""
 SID_CODE="$(_curl -o /dev/null -w "%{http_code}" -X POST "${API_BASE}/api/v1/events/${SID}/resolve" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op"}')"
-echo -e "${BLUE}[debug] source_event_id lookup HTTP ${SID_CODE} (expect 409, already resolved)${NC}"
+echo -e "${BLUE}[debug] source_event_id=${SID} lookup HTTP ${SID_CODE} (expect 409, already resolved)${NC}"
 check 22 "source_event_id lookup works (409=found)" "$([[ "$SID_CODE" == "409" ]] && echo pass || echo fail)"
 
+# ===========================================================================
+# 404
+# ===========================================================================
 NF_CODE="$(_curl -o /dev/null -w "%{http_code}" -X POST "${API_BASE}/api/v1/events/00000000-0000-0000-0000-000000000000/acknowledge" \
     -H "Content-Type: application/json" \
     -d '{"operator":"smoke_op"}')"
