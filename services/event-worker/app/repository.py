@@ -70,10 +70,10 @@ class EventRepository:
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
 
-    def insert_event(self, event: Dict[str, Any]) -> bool:
+    def insert_event(self, event: Dict[str, Any]) -> str | None:
         """Insert *event* dict into the events table.
 
-        Returns True if a new row was inserted, False if a duplicate
+        Returns the UUID of the new row if inserted, or None if a duplicate
         ``source_event_id`` was skipped.
         """
         media = event.get("payload", {}).get("media", {})
@@ -101,8 +101,8 @@ class EventRepository:
 
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(_INSERT_SQL, params)
-            inserted = cur.fetchone()
-            return inserted is not None
+            row = cur.fetchone()
+            return str(row["id"]) if row else None
 
     def count_by_source_event_id(self, source_event_id: str) -> int:
         """Return the number of rows with the given *source_event_id*."""

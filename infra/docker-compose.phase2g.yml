@@ -1,0 +1,71 @@
+name: phase2g
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: phase2g-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: phase2g-postgres
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  event-worker:
+    build:
+      context: ../services/event-worker
+      dockerfile: Dockerfile
+    container_name: phase2g-event-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      CONSUMER_GROUP: event-workers
+      CONSUMER_NAME: event-worker-1
+      POLL_TIMEOUT_MS: "2000"
+      EVENT_BATCH_SIZE: "10"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    container_name: phase2g-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      REDIS_URL: redis://redis:6379/0
+      ALERT_STREAM: security.alerts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

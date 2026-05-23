@@ -27,18 +27,21 @@ from app.worker import _parse_event, _handle_event, _process_batch
 # ===========================================================================
 
 
+import uuid
+
+
 class FakeEventRepository:
     """In-memory repository matching EventRepository interface."""
 
     def __init__(self):
         self._events: dict[str, dict] = {}
 
-    def insert_event(self, event: dict) -> bool:
+    def insert_event(self, event: dict) -> str | None:
         sid = event.get("source_event_id", "")
         if sid in self._events:
-            return False
+            return None
         self._events[sid] = dict(event)
-        return True
+        return str(uuid.uuid4())
 
     def count_by_source_event_id(self, source_event_id: str) -> int:
         return 1 if source_event_id in self._events else 0
@@ -266,8 +269,8 @@ def test_parse_event_missing_source_event_id():
 def test_fake_repo_insert_and_detect_duplicate():
     repo = FakeEventRepository()
     event = _build_security_event_dict()
-    assert repo.insert_event(event) is True
-    assert repo.insert_event(event) is False  # duplicate
+    assert repo.insert_event(event) is not None
+    assert repo.insert_event(event) is None  # duplicate
 
     assert repo.count_by_source_event_id(event["source_event_id"]) == 1
     assert repo.event_exists(event["source_event_id"]) is True
@@ -296,8 +299,9 @@ def test_handle_event_inserts_and_acks():
 
     parsed = _parse_event(data)
     assert parsed is not None
-    result = _handle_event(parsed, msg_id_read, repo, consumer)
-    assert result is True  # newly inserted
+    new, event_id = _handle_event(parsed, msg_id_read, repo, consumer)
+    assert new is True  # newly inserted
+    assert event_id is not None
 
 
 # ===========================================================================
@@ -319,14 +323,16 @@ def test_handle_event_duplicate_is_idempotent():
     msgs = consumer.read_new(count=1, block_ms=100)
     assert len(msgs) == 1
     parsed = _parse_event(msgs[0][1])
-    assert _handle_event(parsed, msgs[0][0], repo, consumer) is True
+    new1, _ = _handle_event(parsed, msgs[0][0], repo, consumer)
+    assert new1 is True
 
     # Second insert — same source_event_id
     msg_id_2 = fake.xadd("test.stream", fields)
     msgs2 = consumer.read_new(count=1, block_ms=100)
     assert len(msgs2) == 1
     parsed2 = _parse_event(msgs2[0][1])
-    assert _handle_event(parsed2, msgs2[0][0], repo, consumer) is False  # duplicate
+    new2, _ = _handle_event(parsed2, msgs2[0][0], repo, consumer)
+    assert new2 is False  # duplicate
 
     # Only one row in repo
     assert repo.count_by_source_event_id(event["source_event_id"]) == 1
@@ -437,7 +443,7 @@ def test_track_id_empty_safe():
     for val in (0, "", "none"):
         sid = f"savant:cam_01:{val}:intrusion:1000"
         event = _build_security_event_dict(source_event_id=sid, track_id=val)
-        assert repo.insert_event(event) is True
+        assert repo.insert_event(event) is not None
 
 
 # 46. keyframe_uuid stored when present
@@ -488,6 +494,6 @@ def test_duplicate_with_string_track_id():
         track_id="t_999",
         source_event_id="savant:cam_01:t_999:intrusion:5000",
     )
-    assert repo.insert_event(event) is True
-    assert repo.insert_event(event) is False
+    assert repo.insert_event(event) is not None
+    assert repo.insert_event(event) is None
     assert repo.count_by_source_event_id(event["source_event_id"]) == 1

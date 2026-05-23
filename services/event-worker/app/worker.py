@@ -1,4 +1,4 @@
-"""Event worker — consume SecurityEvent from Redis Stream, insert into PostgreSQL."""
+"""Event worker — consume SecurityEvent from Redis Stream, insert into PostgreSQL, publish alerts."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Dict
 import psycopg
 from redis import Redis
 
+from app.alert_publisher import AlertPublisher
 from app.config import Config, load_config
 from app.redis_consumer import RedisStreamConsumer
 from app.repository import EventRepository
@@ -59,21 +60,34 @@ def _handle_event(
     msg_id: str,
     repo: EventRepository,
     consumer: RedisStreamConsumer,
-) -> bool:
-    """Process a single event: insert into DB, then ACK.
+    alert_publisher: AlertPublisher | None = None,
+) -> tuple[bool, str | None]:
+    """Process a single event: insert into DB, publish alert, then ACK.
 
-    Returns True if the event was newly inserted, False if duplicate.
+    Returns ``(newly_inserted, event_id)``.
     In both cases the message is ACKed (we have handled it).
     """
+    event_id = None
     try:
-        inserted = repo.insert_event(event)
+        event_id = repo.insert_event(event)
     except Exception:
         logger.exception(
             "db insert failed for source_event_id=%s msg_id=%s",
             event.get("source_event_id"),
             msg_id,
         )
-        return False
+        return False, None
+
+    newly_inserted = event_id is not None
+
+    if newly_inserted and alert_publisher is not None:
+        try:
+            alert_publisher.publish(event, event_id=event_id)
+        except Exception:
+            logger.exception(
+                "alert publish failed for source_event_id=%s",
+                event.get("source_event_id"),
+            )
 
     if not consumer.ack(msg_id):
         logger.error("ack failed for msg_id=%s", msg_id)
@@ -82,16 +96,17 @@ def _handle_event(
             "acked msg_id=%s source_event_id=%s inserted=%s",
             msg_id,
             event.get("source_event_id"),
-            inserted,
+            newly_inserted,
         )
 
-    return inserted
+    return newly_inserted, event_id
 
 
 def _process_batch(
     messages: list[tuple[str, dict[bytes, bytes]]],
     repo: EventRepository,
     consumer: RedisStreamConsumer,
+    alert_publisher: AlertPublisher | None = None,
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -101,7 +116,8 @@ def _process_batch(
             consumer.ack(msg_id)
             continue
 
-        if _handle_event(event, msg_id, repo, consumer):
+        new, _ = _handle_event(event, msg_id, repo, consumer, alert_publisher)
+        if new:
             inserted += 1
         else:
             duplicates += 1
@@ -134,12 +150,14 @@ def run_worker(
     )
     consumer.ensure_group()
     repo = EventRepository(pg_conn)
+    alert_publisher = AlertPublisher(redis_client, cfg.alert_stream)
 
     logger.info(
-        "worker started stream=%s group=%s consumer=%s",
+        "worker started stream=%s group=%s consumer=%s alert_stream=%s",
         cfg.event_stream,
         cfg.consumer_group,
         cfg.consumer_name,
+        cfg.alert_stream,
     )
 
     total_inserted = 0
@@ -151,7 +169,7 @@ def run_worker(
             # 1. Process pending messages (recovery)
             pending = consumer.read_pending(count=cfg.batch_size)
             if pending:
-                ins, dup = _process_batch(pending, repo, consumer)
+                ins, dup = _process_batch(pending, repo, consumer, alert_publisher)
                 total_inserted += ins
                 total_duplicates += dup
                 if ins or dup:
@@ -164,7 +182,7 @@ def run_worker(
                 count=cfg.batch_size, block_ms=cfg.poll_timeout_ms
             )
             if new_msgs:
-                ins, dup = _process_batch(new_msgs, repo, consumer)
+                ins, dup = _process_batch(new_msgs, repo, consumer, alert_publisher)
                 total_inserted += ins
                 total_duplicates += dup
 

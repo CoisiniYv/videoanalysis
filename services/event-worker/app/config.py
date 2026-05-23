@@ -10,6 +10,7 @@ from dataclasses import dataclass
 class Config:
     redis_url: str
     event_stream: str
+    alert_stream: str
     database_url: str
     consumer_group: str
     consumer_name: str
@@ -21,6 +22,7 @@ def load_config() -> Config:
     return Config(
         redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
         event_stream=os.getenv("EVENT_STREAM", "security.events"),
+        alert_stream=os.getenv("ALERT_STREAM", "security.alerts"),
         database_url=os.getenv(
             "DATABASE_URL",
             "postgresql://video:video@postgres:5432/video_analytics",
