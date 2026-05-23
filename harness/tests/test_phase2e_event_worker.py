@@ -399,3 +399,95 @@ def test_schema_version_unchanged_through_worker():
     assert "zone" in stored
     assert "rule_name" in stored
     assert "description" in stored
+
+
+# ===========================================================================
+# Phase 2E.1 — track_id TEXT, keyframe_uuid persistence
+# ===========================================================================
+
+
+# 43. String track_id like "t_889" stored correctly
+
+
+def test_track_id_string_preserved():
+    repo = FakeEventRepository()
+    event = _build_security_event_dict(track_id="t_889")
+    repo.insert_event(event)
+    stored = repo._events[event["source_event_id"]]
+    assert stored["track_id"] == "t_889"
+
+
+# 44. Numeric track_id stored as text
+
+
+def test_track_id_numeric_stored_as_text():
+    repo = FakeEventRepository()
+    event = _build_security_event_dict(track_id=42)
+    repo.insert_event(event)
+    stored = repo._events[event["source_event_id"]]
+    assert stored["track_id"] == 42  # json preserves numeric type
+    assert str(stored["track_id"]) == "42"
+
+
+# 45. Null/empty track_id does not crash
+
+
+def test_track_id_empty_safe():
+    repo = FakeEventRepository()
+    for val in (0, "", "none"):
+        sid = f"savant:cam_01:{val}:intrusion:1000"
+        event = _build_security_event_dict(source_event_id=sid, track_id=val)
+        assert repo.insert_event(event) is True
+
+
+# 46. keyframe_uuid stored when present
+
+
+def test_keyframe_uuid_present():
+    repo = FakeEventRepository()
+    event = _build_security_event_dict(
+        keyframe_uuid="kf-abc123",
+        source_event_id="savant:cam_01:3:intrusion:1000",
+    )
+    repo.insert_event(event)
+    stored = repo._events[event["source_event_id"]]
+    assert stored["keyframe_uuid"] == "kf-abc123"
+
+
+# 47. missing keyframe_uuid remains None
+
+
+def test_keyframe_uuid_missing():
+    repo = FakeEventRepository()
+    event = _build_security_event_dict(keyframe_uuid=None)
+    repo.insert_event(event)
+    stored = repo._events[event["source_event_id"]]
+    assert stored["keyframe_uuid"] is None
+
+
+# 48. frame_uuid stored when present
+
+
+def test_frame_uuid_present():
+    repo = FakeEventRepository()
+    event = _build_security_event_dict(
+        frame_uuid="frm-xyz789",
+        source_event_id="savant:cam_01:5:intrusion:2000",
+    )
+    repo.insert_event(event)
+    stored = repo._events[event["source_event_id"]]
+    assert stored["frame_uuid"] == "frm-xyz789"
+
+
+# 49. Duplicate detection still works with string track_id
+
+
+def test_duplicate_with_string_track_id():
+    repo = FakeEventRepository()
+    event = _build_security_event_dict(
+        track_id="t_999",
+        source_event_id="savant:cam_01:t_999:intrusion:5000",
+    )
+    assert repo.insert_event(event) is True
+    assert repo.insert_event(event) is False
+    assert repo.count_by_source_event_id(event["source_event_id"]) == 1

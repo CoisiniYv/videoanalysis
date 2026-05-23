@@ -82,7 +82,7 @@ class EventRepository:
             "event_type": event.get("event_type", ""),
             "camera_id": event.get("camera_id", ""),
             "source_id": event.get("source_id", ""),
-            "track_id": int(event.get("track_id", 0)),
+            "track_id": str(event.get("track_id", "")),
             "person_id": event.get("person_id") or None,
             "severity": event.get("severity", "medium"),
             "confidence": float(event.get("confidence", 0.0)),

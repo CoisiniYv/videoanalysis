@@ -2,6 +2,8 @@
 -- Replaces the placeholder events table with the canonical SecurityEvent schema.
 -- Safe to run repeatedly (uses IF EXISTS / IF NOT EXISTS).
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- Drop dependent tables first
 DROP TABLE IF EXISTS tracks;
 
@@ -13,7 +15,7 @@ CREATE TABLE events (
     event_type      TEXT NOT NULL,
     camera_id       TEXT NOT NULL DEFAULT '',
     source_id       TEXT NOT NULL DEFAULT '',
-    track_id        INTEGER NOT NULL DEFAULT 0,
+    track_id        TEXT NOT NULL DEFAULT '',
     person_id       INTEGER,
     severity        TEXT NOT NULL DEFAULT 'medium',
     confidence      DOUBLE PRECISION NOT NULL DEFAULT 0.0,

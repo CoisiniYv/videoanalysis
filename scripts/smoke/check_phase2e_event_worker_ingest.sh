@@ -105,7 +105,9 @@ PY_OUTPUT="$(python3 -c "
 import json, os, sys, time
 
 # --- Build test SecurityEvent --------------------------------
-sid = 'smoke:phase2e:cam_01:3:intrusion:1000'
+sid = 'smoke:phase2e:cam_01:t_889:intrusion:1000'
+kf_uuid = 'kf-smoke-abc123'
+fr_uuid = 'fr-smoke-xyz789'
 event = {
     'schema_version': '1.0',
     'source_event_id': sid,
@@ -114,14 +116,14 @@ event = {
     'event_type': 'intrusion',
     'camera_id': 'cam_01',
     'source_id': 'src_01',
-    'track_id': 3,
+    'track_id': 't_889',
     'person_id': 0,
     'start_ts_ms': 1000,
     'end_ts_ms': 2500,
     'event_ts_ms': 2000,
     'frame_id': 42,
-    'frame_uuid': None,
-    'keyframe_uuid': None,
+    'frame_uuid': fr_uuid,
+    'keyframe_uuid': kf_uuid,
     'confidence': 0.85,
     'severity': 'medium',
     'zone': 'full_frame',
@@ -144,8 +146,8 @@ event = {
             'post_seconds': 5,
             'source_id': 'src_01',
             'event_ts_ms': 2000,
-            'frame_uuid': None,
-            'keyframe_uuid': None,
+            'frame_uuid': fr_uuid,
+            'keyframe_uuid': kf_uuid,
         },
     },
 }
@@ -163,7 +165,7 @@ fields = {
     'source_event_id': sid,
     'event_type': 'intrusion',
     'camera_id': 'cam_01',
-    'track_id': '3',
+    'track_id': 't_889',
     'start_ts_ms': '1000',
     'end_ts_ms': '2500',
     'severity': 'medium',
@@ -179,29 +181,38 @@ time.sleep(3)
 import psycopg
 pg_conn = psycopg.connect('postgresql://video:video@localhost:5432/video_analytics')
 with pg_conn.cursor() as cur:
-    cur.execute('SELECT id, source_event_id, event_type, camera_id, track_id, payload FROM events WHERE source_event_id = %s', (sid,))
+    cur.execute(
+        'SELECT id, source_event_id, event_type, camera_id, track_id, '
+        'frame_uuid, keyframe_uuid, event_ts_ms, payload '
+        'FROM events WHERE source_event_id = %s',
+        (sid,)
+    )
     row = cur.fetchone()
 
 if row:
     print('8|pass|event inserted into PostgreSQL')
-    db_id, db_sid, db_type, db_cam, db_track, db_payload = row
+    (db_id, db_sid, db_type, db_cam, db_track,
+     db_fr_uuid, db_kf_uuid, db_ets_ms, db_payload) = row
     checks = [
         (9,  'event_type == intrusion',              db_type == 'intrusion'),
         (10, 'camera_id == cam_01',                  db_cam == 'cam_01'),
-        (11, 'track_id == 3',                        db_track == 3),
+        (11, 'track_id == t_889',                    str(db_track) == 't_889'),
         (12, 'source_event_id matches',              db_sid == sid),
+        (13, 'frame_uuid preserved',                 db_fr_uuid == fr_uuid),
+        (14, 'keyframe_uuid preserved',              db_kf_uuid == kf_uuid),
+        (15, 'event_ts_ms preserved',                db_ets_ms == 2000),
     ]
     payload = db_payload if isinstance(db_payload, dict) else json.loads(db_payload)
     media = payload.get('media', {})
     checks += [
-        (13, 'snapshot_status == not_implemented',   media.get('snapshot_status') == 'not_implemented'),
-        (14, 'clip_status == not_implemented',       media.get('clip_status') == 'not_implemented'),
-        (15, 'recording_strategy == reserved',       media.get('recording_strategy') == 'reserved'),
+        (16, 'snapshot_status == not_implemented',   media.get('snapshot_status') == 'not_implemented'),
+        (17, 'clip_status == not_implemented',       media.get('clip_status') == 'not_implemented'),
+        (18, 'recording_strategy == reserved',       media.get('recording_strategy') == 'reserved'),
     ]
     for n, desc, ok in checks:
         print(f'{n}|{\"pass\" if ok else \"fail\"}|{desc}')
 else:
-    for i in range(8, 16):
+    for i in range(8, 19):
         print(f'{i}|fail|event not found in PostgreSQL')
     pg_conn.close()
     sys.exit(0)
@@ -215,9 +226,9 @@ with pg_conn.cursor() as cur:
     count = cur.fetchone()[0]
 
 if count == 1:
-    print('16|pass|idempotent: duplicate not inserted (count=1)')
+    print('19|pass|idempotent: duplicate not inserted (count=1)')
 else:
-    print(f'16|fail|idempotent: count={count} (expected 1)')
+    print(f'19|fail|idempotent: count={count} (expected 1)')
 
 # --- Verify Redis ACK (pending should be 0 for this group) --
 # event-workers group should have processed and ACKed
@@ -225,15 +236,15 @@ try:
     pending_info = r.xpending(stream, 'event-workers')
     pending_count = pending_info.get('pending', 0) if isinstance(pending_info, dict) else 0
     if pending_count == 0:
-        print('17|pass|Redis ACK confirmed (pending=0)')
+        print('20|pass|Redis ACK confirmed (pending=0)')
     else:
-        print(f'17|fail|Redis pending={pending_count} (expected 0)')
+        print(f'20|fail|Redis pending={pending_count} (expected 0)')
 except Exception as e:
     # group may not exist if worker hasn't started yet
     if 'NOGROUP' in str(e):
-        print('17|fail|consumer group event-workers not found')
+        print('20|fail|consumer group event-workers not found')
     else:
-        print(f'17|fail|Redis ACK check error: {e}')
+        print(f'20|fail|Redis ACK check error: {e}')
 
 pg_conn.close()
 r.close()
