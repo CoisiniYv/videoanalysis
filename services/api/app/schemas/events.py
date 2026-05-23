@@ -103,3 +103,8 @@ class EventListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class StatusUpdateRequest(BaseModel):
+    operator: str = ""
+    comment: str = ""

@@ -124,3 +124,57 @@ class EventRepository:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, {"sid": source_event_id})
             return cur.fetchone()
+
+    # ------------------------------------------------------------------
+    # resolve event_id (UUID or source_event_id)
+    # ------------------------------------------------------------------
+
+    def get_by_id_or_sid(self, event_id: str) -> Dict[str, Any] | None:
+        row = self.get_by_id(event_id)
+        if row is None:
+            row = self.get_by_source_event_id(event_id)
+        return row
+
+    # ------------------------------------------------------------------
+    # status update with transition validation
+    # ------------------------------------------------------------------
+
+    VALID_TRANSITIONS = {
+        "new": {"acknowledged", "confirmed", "false_positive", "resolved"},
+        "acknowledged": {"confirmed", "false_positive", "resolved"},
+        "confirmed": {"resolved"},
+        "false_positive": {"resolved"},
+        "resolved": set(),
+    }
+
+    def update_status(
+        self,
+        event_id: str,
+        new_status: str,
+    ) -> Dict[str, Any] | None:
+        """Atomically update event status.
+
+        Returns the updated row, or None if the event is not found.
+        Raises ValueError for invalid status transitions.
+        """
+        row = self.get_by_id_or_sid(event_id)
+        if row is None:
+            return None
+
+        current = row["status"]
+        allowed = self.VALID_TRANSITIONS.get(current, set())
+        if new_status not in allowed:
+            raise ValueError(
+                f"Invalid transition: {current} -> {new_status}. "
+                f"Allowed: {sorted(allowed) if allowed else ['none (terminal)']}"
+            )
+
+        query = """
+            UPDATE events
+            SET status = %(status)s, updated_at = now()
+            WHERE id = %(id)s
+            RETURNING *
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, {"status": new_status, "id": row["id"]})
+            return cur.fetchone()
