@@ -153,16 +153,28 @@ else
     check 6 "sink output directory has files (may need replay job to complete; wait 30s)" fail
 fi
 
-# Check metadata.json
-META_SIZE="$(docker exec phase3a-video-file-sink stat -c%s /media/replay-sink-output/metadata.json 2>/dev/null || echo "0")"
-check 7 "metadata.json exists and non-empty" "$([[ "${META_SIZE:-0}" -gt 0 ]] && echo pass || echo fail)"
+# Find metadata.json recursively under sink output dir
+echo -e "${BLUE}[debug] Searching for metadata.json under /media/replay-sink-output...${NC}"
+META_FILE="$(docker exec phase3a-video-file-sink sh -c "find /media/replay-sink-output -type f -name metadata.json -size +0c 2>/dev/null | head -n 1" | tr -d '[:space:]' || echo "")"
+if [[ -n "$META_FILE" ]]; then
+    META_SIZE="$(docker exec phase3a-video-file-sink stat -c%s "$META_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")"
+    echo -e "${BLUE}[debug] metadata path: ${META_FILE}, size: ${META_SIZE}${NC}"
+    check 7 "metadata.json exists and non-empty (${META_FILE})" "$([[ "${META_SIZE:-0}" -gt 0 ]] && echo pass || echo fail)"
+else
+    echo -e "${YELLOW}[debug] metadata.json not found under /media/replay-sink-output${NC}"
+    check 7 "metadata.json exists and non-empty" fail
+fi
 
 # ===========================================================================
 # Check 8: video file
 # ===========================================================================
 VIDEO_COUNT="$(docker exec phase3a-video-file-sink sh -c "find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) 2>/dev/null | wc -l" | tr -d '[:space:]' || echo "0")"
-VIDEO_SIZE="$(docker exec phase3a-video-file-sink sh -c "find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) -printf '%s\n' 2>/dev/null | awk '{s+=\$1} END {print s+0}'" | tr -d '[:space:]' || echo "0")"
-echo -e "${BLUE}[debug] Video files found: ${VIDEO_COUNT}, total bytes: ${VIDEO_SIZE}${NC}"
+VIDEO_FILE="$(docker exec phase3a-video-file-sink sh -c "find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) -size +0c 2>/dev/null | head -n 1" | tr -d '[:space:]' || echo "")"
+VIDEO_SIZE=0
+if [[ -n "$VIDEO_FILE" ]]; then
+    VIDEO_SIZE="$(docker exec phase3a-video-file-sink stat -c%s "$VIDEO_FILE" 2>/dev/null | tr -d '[:space:]' || echo "0")"
+fi
+echo -e "${BLUE}[debug] Video file: ${VIDEO_FILE}, count: ${VIDEO_COUNT}, bytes: ${VIDEO_SIZE}${NC}"
 check 8 "video file exists and non-empty" "$([[ "${VIDEO_COUNT:-0}" -gt 0 && "${VIDEO_SIZE:-0}" -gt 0 ]] && echo pass || echo fail)"
 
 # ===========================================================================
