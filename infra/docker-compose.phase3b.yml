@@ -132,7 +132,7 @@ services:
       LOCATION: /testVideo/test.mp4
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       DOWNLOAD_PATH: /tmp/video-loop-cache
-      SYNC_OUTPUT: "false"
+      SYNC_OUTPUT: "true"
     volumes:
       - ../testVideo:/testVideo:ro
     depends_on:

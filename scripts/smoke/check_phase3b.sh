@@ -264,10 +264,10 @@ check 17 "failed event has error_message" "$([[ -n "$FAIL_ERROR_MSG" && "$FAIL_E
 if [[ -n "$FAIL_DB_ID" ]]; then
     _redis XADD security.events '*' type security_event source_event_id "${SID_FAIL}" event_type intrusion camera_id cam_01 source_id nonexistent_source_xyz track_id t_fail severity high data "${EVENT_FAIL_JSON}" > /dev/null 2>&1
     sleep 8
-    FAIL_COUNT="$(_pg "SELECT COUNT(*) FROM events WHERE source_event_id='${SID_FAIL}';")"
-    check 18 "failed event still count=1 after duplicate" "$([[ "$FAIL_COUNT" == "1" ]] && echo pass || echo fail)"
+    FAIL_ROW_COUNT="$(_pg "SELECT COUNT(*) FROM events WHERE source_event_id='${SID_FAIL}';")"
+    check 18 "failed event still count=1 after duplicate" "$([[ "$FAIL_ROW_COUNT" == "1" ]] && echo pass || echo fail)"
 fi
 
 echo ""
 echo "--- Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed ---"
-[[ "$FAIL_COUNT" -gt 0 ]] && exit 1
+if [[ "$FAIL_COUNT" -gt 0 ]]; then exit 1; fi

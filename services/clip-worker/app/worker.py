@@ -92,7 +92,13 @@ def run_worker(
                     keyframe_uuid = req.get("keyframe_uuid")
 
                     # Find keyframe if not provided
-                    if not keyframe_uuid:
+                    if keyframe_uuid:
+                        logger.info(
+                            "keyframe_provided_directly request_id=%s "
+                            "keyframe_uuid=%s event_id=%s",
+                            req.get("request_id"), keyframe_uuid, event_id,
+                        )
+                    else:
                         if not source_id:
                             update_clip_status(
                                 pg_conn, event_id, "failed",

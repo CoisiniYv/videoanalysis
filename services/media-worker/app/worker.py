@@ -186,17 +186,49 @@ def _process_sink_output(
             continue  # not ready yet
 
         clip_path = video_file
-        replay_job_id = meta.get("job_id", "")
+        replay_job_id = meta.get("job_id", "") or meta.get("new_job", "") or ""
         sink_path = meta_dir
 
         try:
             with pg_conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE events
-                    SET clip_path = %(clip_path)s,
-                        payload = jsonb_set(
-                            jsonb_set(
+                if replay_job_id:
+                    cur.execute(
+                        """
+                        UPDATE events
+                        SET clip_path = %(clip_path)s,
+                            payload = jsonb_set(
+                                jsonb_set(
+                                    jsonb_set(
+                                        jsonb_set(
+                                            COALESCE(payload, '{}'::jsonb),
+                                            '{media,clip_status}',
+                                            '"ready"'
+                                        ),
+                                        '{media,recording_strategy}',
+                                        '"savant_replay"'
+                                    ),
+                                    '{media,replay_job_id}',
+                                    %(replay_job_id)s::jsonb
+                                ),
+                                '{media,sink_output_path}',
+                                %(sink_path)s::jsonb
+                            ),
+                            updated_at = now()
+                        WHERE id = %(event_id)s::uuid
+                        """,
+                        {
+                            "clip_path": clip_path,
+                            "replay_job_id": json.dumps(replay_job_id),
+                            "sink_path": json.dumps(sink_path),
+                            "event_id": event_id,
+                        },
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE events
+                        SET clip_path = %(clip_path)s,
+                            payload = jsonb_set(
                                 jsonb_set(
                                     jsonb_set(
                                         COALESCE(payload, '{}'::jsonb),
@@ -206,22 +238,18 @@ def _process_sink_output(
                                     '{media,recording_strategy}',
                                     '"savant_replay"'
                                 ),
-                                '{media,replay_job_id}',
-                                %(replay_job_id)s::jsonb
+                                '{media,sink_output_path}',
+                                %(sink_path)s::jsonb
                             ),
-                            '{media,sink_output_path}',
-                            %(sink_path)s::jsonb
-                        ),
-                        updated_at = now()
-                    WHERE id = %(event_id)s::uuid
-                    """,
-                    {
-                        "clip_path": clip_path,
-                        "replay_job_id": json.dumps(replay_job_id),
-                        "sink_path": json.dumps(sink_path),
-                        "event_id": event_id,
-                    },
-                )
+                            updated_at = now()
+                        WHERE id = %(event_id)s::uuid
+                        """,
+                        {
+                            "clip_path": clip_path,
+                            "sink_path": json.dumps(sink_path),
+                            "event_id": event_id,
+                        },
+                    )
                 if cur.rowcount and cur.rowcount > 0:
                     logger.info(
                         "media_event_updated event_id=%s clip_path=%s sink_path=%s",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
@@ -11,9 +10,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def _ts_ms_to_iso(ts_ms: int) -> str:
-    """Convert epoch milliseconds to ISO 8601 UTC string."""
-    return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
+def _ts_ms_to_epoch_ns(ts_ms: int) -> int:
+    """Convert epoch milliseconds to epoch nanoseconds (u64)."""
+    return int(ts_ms * 1_000_000)
 
 
 class ReplayClient:
@@ -56,26 +55,32 @@ class ReplayClient:
         Returns:
             keyframe_uuid string, or None if not found.
         """
-        from_ts = None
-        to_ts = None
+        from_ns = None
+        to_ns = None
         if ts_ms > 0:
-            from_ts = _ts_ms_to_iso(int(ts_ms - window_s * 1000))
-            to_ts = _ts_ms_to_iso(int(ts_ms + window_s * 1000))
-            logger.debug(
+            from_ns = _ts_ms_to_epoch_ns(int(ts_ms - window_s * 1000))
+            to_ns = _ts_ms_to_epoch_ns(int(ts_ms + window_s * 1000))
+            logger.info(
                 "keyframe_lookup_anchored source_id=%s event_ts_ms=%s "
-                "window_s=%s from=%s to=%s",
-                source_id, ts_ms, window_s, from_ts, to_ts,
+                "window_s=%s from_ns=%s to_ns=%s",
+                source_id, ts_ms, window_s, from_ns, to_ns,
             )
+            # NOTE: from_ns/to_ns are epoch nanoseconds; Replay DB uses
+            # pipeline-relative timestamps. Unbounded search (omit from/to)
+            # until timestamp-domain mapping is established.
+            from_ns = None
+            to_ns = None
+
+        body: Dict[str, Any] = {"source_id": source_id, "limit": 1}
+        if from_ns is not None:
+            body["from"] = from_ns
+        if to_ns is not None:
+            body["to"] = to_ns
 
         try:
             resp = httpx.post(
                 f"{self._base_url}/api/v1/keyframes/find",
-                json={
-                    "source_id": source_id,
-                    "from": from_ts,
-                    "to": to_ts,
-                    "limit": 1,
-                },
+                json=body,
                 timeout=self._timeout,
             )
             if resp.status_code == 404:
@@ -162,7 +167,7 @@ class ReplayClient:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("job_id") or data.get("id")
+            return data.get("new_job") or data.get("job_id") or data.get("id")
         except Exception:
             logger.exception(
                 "Replay job creation failed source_id=%s keyframe=%s",
