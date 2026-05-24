@@ -28,6 +28,17 @@ docker ps --filter "name=phase3b" --format "table {{.Names}}\t{{.Status}}"
 bash scripts/smoke/check_phase3b.sh
 ```
 
+## Manual Verification Summary
+
+- Docker access confirmed: `docker ps` and `docker compose version` work without sudo (user added to `docker` group).
+- All 10 phase3b containers running.
+- `scripts/smoke/check_phase3b.sh`: **18 passed, 0 failed**.
+- clip-worker logs show `keyframe_lookup_anchored` with `event_ts_ms`, `from_ns`, `to_ns`.
+- `replay_job_created` succeeded with valid job_id.
+- DB success event: `clip_status=ready`, `recording_strategy=savant_replay`, `replay_job_id` present, `sink_output_path` present, `clip_path` present.
+- DB failure event: `clip_status=failed`, clear `error_message`.
+- clip_url HTTP 200: `curl -I http://127.0.0.1:8001/media/replay-sink-output/.../video.mov` returned `HTTP/1.1 200 OK`.
+
 ## Services Status
 
 All 10 phase3b containers running:
@@ -124,14 +135,18 @@ Failed path event:
 
 ## Remaining Technical Debt
 
-1. **Timestamp-domain mapping**: Replay DB stores pipeline-relative (CLOCK_MONOTONIC) timestamps, but event_ts_ms is epoch (CLOCK_REALTIME). Keyframe lookup currently uses unbounded search. Fix: either use `SYNC_OUTPUT=true` with epoch syncing in the source adapter, or map boot time at clip-worker startup.
+1. **Timestamp-domain mismatch**: `event_ts_ms` is business/epoch-like time; Replay DB uses pipeline-relative / CLOCK_MONOTONIC time. Keyframe lookup currently omits `from`/`to` (unbounded search) until the domain mapping is established. Fix: source adapter must produce epoch-anchored timestamps, or clip-worker must derive the mapping at startup.
 
-2. **replay_job_id pipeline**: The Replay API returns `new_job` in the response. This is forwarded to the DB via clip-worker. The media-worker metadata.json from video-file-sink does not include the replay job_id, so the clip-worker is the authoritative writer. The media-worker's conditional update ensures it does not overwrite.
+2. **Snapshot not implemented**: `snapshot_status` is `not_implemented`. No snapshot extraction from the replay sink output yet. MVP smoke accepts this gap.
 
-3. **Source adapter timestamp config**: `SYNC_OUTPUT=true` currently syncs to system monotonic clock, not epoch. A source adapter change or config option to produce epoch-anchored timestamps would close the timestamp-domain gap.
+3. **Media-worker uses polling**: `media-worker` polls `SINK_OUTPUT_DIR` on a periodic interval (`MEDIA_POLL_INTERVAL_S`). Inotify-based or event-driven notification would reduce latency and IO.
 
-4. **Smoke test idempotency check**: The smoke test's check 18 completes faster now; verify idempotency under load with concurrent workers.
+4. **No DLQ for unprocessable record_requests**: Record requests that fail irrecoverably (e.g. invalid source_id, Replay API errors) are marked `clip_status=failed` in the events table but the record_request stream message is ACK'd with no dead-letter queue. A DLQ would allow later inspection and retry.
+
+5. **Source adapter timestamp config**: `SYNC_OUTPUT=true` currently syncs to system monotonic clock, not epoch. A source adapter change or config option to produce epoch-anchored timestamps would close the timestamp-domain gap.
+
+6. **Smoke test idempotency under load**: The smoke test's check 18 verifies idempotency for a single duplicate, but concurrent workers under load have not been tested.
 
 ## Git Status
 
-5 modified files, clean build, all smoke checks pass.
+6 files committed in `ff6e3c4`; 7 untracked files (unrelated: phase1d modules, yolo model, redis-cli binary).
