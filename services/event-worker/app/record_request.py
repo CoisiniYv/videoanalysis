@@ -67,10 +67,13 @@ class RecordRequestPublisher:
                 self._stream, fields, maxlen=10000, approximate=True
             )
             logger.info(
-                "record_request_published request_id=%s event_id=%s source_event_id=%s",
+                "record_request_published request_id=%s event_id=%s source_event_id=%s "
+                "source_id=%s stream=%s",
                 request_id,
                 event_id,
                 source_event_id,
+                event.get("source_id", ""),
+                self._stream,
             )
             return msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
         except Exception:

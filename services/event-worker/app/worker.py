@@ -93,6 +93,17 @@ def _handle_event(
             )
 
     if newly_inserted and record_publisher is not None:
+        clip_required = event.get("clip_required", False)
+        payload_media = (event.get("payload") or {}).get("media", {})
+        payload_clip = payload_media.get("clip_required", False) if isinstance(payload_media, dict) else False
+        logger.info(
+            "record_request_check source_event_id=%s top_clip_required=%s "
+            "payload_clip_required=%s media_strategy=%s",
+            event.get("source_event_id"),
+            clip_required,
+            payload_clip,
+            payload_media.get("recording_strategy", "") if isinstance(payload_media, dict) else "",
+        )
         try:
             record_publisher.publish(event, event_id=event_id)
         except Exception:
@@ -171,11 +182,14 @@ def run_worker(
     )
 
     logger.info(
-        "worker started stream=%s group=%s consumer=%s alert_stream=%s",
+        "worker started stream=%s group=%s consumer=%s alert_stream=%s "
+        "recording_enabled=%s record_request_stream=%s",
         cfg.event_stream,
         cfg.consumer_group,
         cfg.consumer_name,
         cfg.alert_stream,
+        cfg.recording_enabled,
+        cfg.record_request_stream,
     )
 
     total_inserted = 0
