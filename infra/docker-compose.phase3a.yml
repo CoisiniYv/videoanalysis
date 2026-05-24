@@ -154,7 +154,7 @@ services:
   # ====================================================================
 
   replay-service:
-    image: ghcr.io/insight-platform/savant-replay-x86:latest
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
     container_name: phase3a-replay-service
     ports:
       - "8080:8080"
@@ -178,16 +178,14 @@ services:
     container_name: phase3a-video-file-sink
     entrypoint:
       [
-        "python", "-m", "savant.entrypoint", "module.yml",
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
       ]
-    working_dir: /opt/savant/src/module
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       ZMQ_SRC_ENDPOINT: pub+connect:tcp://0.0.0.0:6666
       SINK_OUTPUT_DIR: /media/replay-sink-output
       SINK_CONTAINER: mkv
     volumes:
-      - ../modules/savant_video_file_sink:/opt/savant/src/module:rw
       - /data/video-analytics/media:/media:rw
     restart: unless-stopped
 
