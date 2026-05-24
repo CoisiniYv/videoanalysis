@@ -220,7 +220,7 @@ services:
       DEFAULT_POST_SECONDS: "5"
     depends_on:
       redis: { condition: service_healthy }
-      replay-service: {}
+      replay-service: { condition: service_started }
     restart: unless-stopped
 
   # ====================================================================
