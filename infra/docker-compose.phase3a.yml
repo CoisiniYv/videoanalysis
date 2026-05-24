@@ -148,44 +148,37 @@ services:
     restart: unless-stopped
 
   # ====================================================================
-  # Savant Replay Service — records video and exposes REST API
+  # Savant Replay Service (official image) — records video, REST API
+  # Entrypoint: /opt/bin/replay /opt/etc/config.json
+  # REST API on port 8080
   # ====================================================================
 
   replay-service:
-    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    image: ghcr.io/insight-platform/savant-replay-x86:latest
     container_name: phase3a-replay-service
-    entrypoint:
-      [
-        "bash", "-c",
-        "exec python -m savant.entrypoint module.yml",
-      ]
-    working_dir: /opt/savant/src/module
     ports:
       - "8080:8080"
     environment:
-      LOGLEVEL: ${LOGLEVEL:-INFO}
-      SRC_URL: rtsp://rtsp-server:8554/phase3a
-      REPLAY_BUFFER_SECONDS: "60"
-      REPLAY_API_PORT: "8080"
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
     volumes:
-      - ../modules/savant_replay:/opt/savant/src/module:rw
+      - ../modules/savant_replay/config.json:/opt/etc/config.json:ro
       - /data/video-analytics/media:/media:rw
-      - ../testVideo:/testVideo:ro
     depends_on:
       - rtsp-server
     restart: unless-stopped
 
   # ====================================================================
-  # Video File Sink — receives ZMQ frames, writes video + metadata to disk
+  # Video File Sink (official adapter image) — ZMQ → file
+  # Uses GStreamer-based adapters, no GPU required
   # ====================================================================
 
   video-file-sink:
-    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
     container_name: phase3a-video-file-sink
     entrypoint:
       [
-        "bash", "-c",
-        "exec python -m savant.entrypoint module.yml",
+        "python", "-m", "savant.entrypoint", "module.yml",
       ]
     working_dir: /opt/savant/src/module
     environment:
