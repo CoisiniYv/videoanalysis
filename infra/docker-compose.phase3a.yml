@@ -44,8 +44,8 @@ services:
       EVENT_STREAM: security.events
       ALERT_STREAM: security.alerts
       RECORD_REQUEST_STREAM: security.record_requests
-      RECORDING_ENABLED: "${RECORDING_ENABLED:-false}"
-      RECORDING_STRATEGY: "${RECORDING_STRATEGY:-savant_replay}"
+      RECORDING_ENABLED: "true"
+      RECORDING_STRATEGY: "savant_replay"
       CONSUMER_GROUP: event-workers
       CONSUMER_NAME: event-worker-1
       POLL_TIMEOUT_MS: "2000"
