@@ -105,8 +105,9 @@ services:
     restart: unless-stopped
 
   # ====================================================================
-  # Source adapter — converts RTSP to Savant ZMQ protocol for Replay ingress
-  # Uses GStreamer pipeline: RTSP → decode → encode → ZMQ PUB → replay:5555
+  # Source adapter — official video-loop-source → Savant ZMQ → Replay ingress
+  # Entrypoint: /opt/savant/adapters/gst/sources/video_loop.sh
+  # Sends Savant protocol frames to Replay via zeromq_sink
   # ====================================================================
 
   source-adapter:
@@ -114,22 +115,17 @@ services:
     container_name: phase3a-source-adapter
     entrypoint:
       [
-        "gst-launch-1.0",
-        "-v",
-        "rtspsrc", "location=rtsp://rtsp-server:8554/phase3a", "latency=0",
-        "!", "rtph264depay",
-        "!", "h264parse",
-        "!", "avdec_h264",
-        "!", "videoconvert",
-        "!", "video/x-raw,format=I420",
-        "!", "x264enc", "tune=zerolatency", "speed-preset=ultrafast",
-        "!", "h264parse",
-        "!", "queue",
-        "!", "zmqsink", "socket-address=tcp://replay-service:5555",
-        "socket-type=PUB", "sync=false",
+        "/opt/savant/adapters/gst/sources/video_loop.sh",
       ]
+    environment:
+      SOURCE_ID: phase3a
+      LOCATION: /testVideo/test.mp4
+      ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      DOWNLOAD_PATH: /tmp/video-loop-cache
+      SYNC_OUTPUT: "false"
+    volumes:
+      - ../testVideo:/testVideo:ro
     depends_on:
-      - rtsp-server
       - replay-service
     restart: unless-stopped
 
