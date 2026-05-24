@@ -137,25 +137,57 @@ def _extract_event_id(meta: dict) -> str | None:
     return None
 
 
-def _process_sink_output(pg_conn: psycopg.Connection, sink_dir: str) -> int:
+def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
+    """Check if an event already has clip_status='ready'."""
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload->'media'->>'clip_status' FROM events WHERE id = %s::uuid",
+                (event_id,),
+            )
+            row = cur.fetchone()
+            return row is not None and row[0] == "ready"
+    except Exception:
+        return False
+
+
+def _process_sink_output(
+    pg_conn: psycopg.Connection, sink_dir: str, processed_dirs: set[str]
+) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
     for meta in _find_metadata_files(sink_dir):
+        meta_dir = meta.get("_meta_dir", "")
+
+        # Idempotency: skip already-processed directories
+        if meta_dir and meta_dir in processed_dirs:
+            continue
+
         event_id = _extract_event_id(meta)
         if not event_id:
-            logger.warning(
-                "media_skip: no event_id in metadata path=%s",
-                meta.get("_meta_dir", ""),
+            logger.error(
+                "media_failure: no event_id could be extracted from metadata "
+                "meta_dir=%s source_id=%s resulting_stream_id=%s",
+                meta_dir,
+                meta.get("source_id", ""),
+                meta.get("resulting_stream_id", ""),
             )
             continue
 
-        video_file = _find_video_file(meta["_meta_dir"])
+        # Idempotency: skip if already marked ready
+        if _is_already_ready(pg_conn, event_id):
+            if meta_dir:
+                processed_dirs.add(meta_dir)
+            logger.debug("media_skip: event already ready event_id=%s", event_id)
+            continue
+
+        video_file = _find_video_file(meta_dir)
         if not video_file:
             continue  # not ready yet
 
         clip_path = video_file
         replay_job_id = meta.get("job_id", "")
-        sink_path = meta["_meta_dir"]
+        sink_path = meta_dir
 
         try:
             with pg_conn.cursor() as cur:
@@ -198,6 +230,8 @@ def _process_sink_output(pg_conn: psycopg.Connection, sink_dir: str) -> int:
                         sink_path,
                     )
                     updated += 1
+                if meta_dir:
+                    processed_dirs.add(meta_dir)
         except Exception:
             logger.exception("failed to update event_id=%s", event_id)
 
@@ -224,7 +258,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
 
     while not shutdown_requested:
         try:
-            updates = _process_sink_output(pg_conn, cfg.sink_output_dir)
+            updates = _process_sink_output(
+                pg_conn, cfg.sink_output_dir, processed_dirs
+            )
             if updates:
                 logger.info("media_worker: updated %d events", updates)
         except Exception:
@@ -232,4 +268,4 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
 
         time.sleep(cfg.poll_interval_s)
 
-    logger.info("media-worker stopped")
+    logger.info("media-worker stopped (processed %d dirs)", len(processed_dirs))

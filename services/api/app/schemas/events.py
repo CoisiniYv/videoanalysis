@@ -20,16 +20,22 @@ def _iso(ts: Any) -> str | None:
 def _safe_media(payload: dict | None) -> dict:
     """Derive a safe MVP media dict from *payload*.
 
-    If ``payload.media`` exists it is returned as-is.  Otherwise a minimal
-    reserved/not_implemented fallback is returned.
+    If ``payload.media`` exists it is returned as-is, with missing fields
+    filled from the default fallback.  Otherwise a minimal reserved/
+    not_implemented fallback is returned.
     """
-    if payload and isinstance(payload.get("media"), dict):
-        return payload["media"]
-    return {
+    fallback = {
         "snapshot_status": "not_implemented",
         "clip_status": "not_implemented",
         "recording_strategy": "reserved",
+        "replay_job_id": None,
+        "sink_output_path": None,
+        "error_message": None,
     }
+    if payload and isinstance(payload.get("media"), dict):
+        merged = {**fallback, **payload["media"]}
+        return merged
+    return fallback
 
 
 class EventResponse(BaseModel):

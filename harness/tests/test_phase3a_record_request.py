@@ -103,32 +103,28 @@ def test_publish_is_idempotent_in_stream():
 # ===========================================================================
 
 
-def test_source_id_from_media(monkeypatch):
-    monkeypatch.delenv("DEFAULT_REPLAY_SOURCE_ID", raising=False)
+def test_source_id_from_media():
     event = _make_event()
     event["payload"] = {"media": {"source_id": "phase3a"}}
-    assert _resolve_source_id(event) == "phase3a"
+    assert _resolve_source_id(event, "default") == "phase3a"
 
 
-def test_source_id_from_event(monkeypatch):
-    monkeypatch.delenv("DEFAULT_REPLAY_SOURCE_ID", raising=False)
+def test_source_id_from_event():
     event = _make_event()
     event["source_id"] = "cam_01"
     del event["payload"]["media"]
-    assert _resolve_source_id(event) == "cam_01"
+    assert _resolve_source_id(event, "default") == "cam_01"
 
 
-def test_source_id_fallback_to_default(monkeypatch):
-    monkeypatch.setenv("DEFAULT_REPLAY_SOURCE_ID", "phase3a")
+def test_source_id_fallback_to_default():
     event = _make_event()
     event["source_id"] = "0"
     del event["payload"]["media"]
-    assert _resolve_source_id(event) == "phase3a"
+    assert _resolve_source_id(event, "phase3a") == "phase3a"
 
 
-def test_source_id_media_takes_priority(monkeypatch):
-    monkeypatch.setenv("DEFAULT_REPLAY_SOURCE_ID", "fallback")
+def test_source_id_media_takes_priority():
     event = _make_event()
     event["source_id"] = "0"
     event["payload"] = {"media": {"source_id": "replay-source-1"}}
-    assert _resolve_source_id(event) == "replay-source-1"
+    assert _resolve_source_id(event, "fallback") == "replay-source-1"

@@ -12,6 +12,7 @@ class Config:
     record_request_stream: str
     replay_api_url: str
     replay_job_sink_url: str
+    database_url: str
     consumer_group: str
     consumer_name: str
     poll_timeout_ms: int
@@ -28,6 +29,10 @@ def load_config() -> Config:
         replay_api_url=os.getenv("REPLAY_API_URL", "http://replay-service:8080"),
         replay_job_sink_url=os.getenv(
             "REPLAY_JOB_SINK_URL", "pub+connect:tcp://video-file-sink:6666"
+        ),
+        database_url=os.getenv(
+            "DATABASE_URL",
+            "postgresql://video:video@postgres:5432/video_analytics",
         ),
         consumer_group=os.getenv("CONSUMER_GROUP", "clip-workers"),
         consumer_name=os.getenv("CONSUMER_NAME", "clip-worker-1"),

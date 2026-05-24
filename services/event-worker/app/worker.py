@@ -67,7 +67,8 @@ def _handle_event(
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
     Returns ``(newly_inserted, event_id)``.
-    Alert and record request are published only for new inserts.
+    Alert is published only for new inserts.
+    Record request is published only when clip_status is unset (idempotent).
     Failures in alert/record publishing do not block ACK.
     """
     event_id = None
@@ -82,6 +83,7 @@ def _handle_event(
         return False, None
 
     newly_inserted = event_id is not None
+    source_event_id = event.get("source_event_id", "")
 
     if newly_inserted and alert_publisher is not None:
         try:
@@ -89,28 +91,54 @@ def _handle_event(
         except Exception:
             logger.exception(
                 "alert publish failed for source_event_id=%s",
-                event.get("source_event_id"),
+                source_event_id,
             )
 
-    if newly_inserted and record_publisher is not None:
+    # Record request — idempotent: check DB clip_status before publishing
+    if record_publisher is not None:
         clip_required = event.get("clip_required", False)
         payload_media = (event.get("payload") or {}).get("media", {})
-        payload_clip = payload_media.get("clip_required", False) if isinstance(payload_media, dict) else False
-        logger.info(
-            "record_request_check source_event_id=%s top_clip_required=%s "
-            "payload_clip_required=%s media_strategy=%s",
-            event.get("source_event_id"),
-            clip_required,
-            payload_clip,
-            payload_media.get("recording_strategy", "") if isinstance(payload_media, dict) else "",
+        payload_clip = (
+            payload_media.get("clip_required", False)
+            if isinstance(payload_media, dict)
+            else False
         )
-        try:
-            record_publisher.publish(event, event_id=event_id)
-        except Exception:
-            logger.exception(
-                "record_request publish failed for source_event_id=%s",
-                event.get("source_event_id"),
-            )
+        if clip_required or payload_clip:
+            existing_status = None
+            if event_id:
+                existing_status = repo.get_media_clip_status(source_event_id)
+            elif source_event_id:
+                existing_status = repo.get_media_clip_status(source_event_id)
+
+            if existing_status and existing_status not in (
+                "", "not_implemented", "not_required"
+            ):
+                logger.info(
+                    "record_request_skipped (already has clip_status=%s) "
+                    "source_event_id=%s",
+                    existing_status,
+                    source_event_id,
+                )
+            else:
+                logger.info(
+                    "record_request_check source_event_id=%s top_clip_required=%s "
+                    "payload_clip_required=%s media_strategy=%s",
+                    source_event_id,
+                    clip_required,
+                    payload_clip,
+                    payload_media.get("recording_strategy", "")
+                    if isinstance(payload_media, dict)
+                    else "",
+                )
+                try:
+                    msg = record_publisher.publish(event, event_id=event_id or "")
+                    if msg and event_id:
+                        repo.set_clip_status(event_id, "pending")
+                except Exception:
+                    logger.exception(
+                        "record_request publish failed for source_event_id=%s",
+                        source_event_id,
+                    )
 
     if not consumer.ack(msg_id):
         logger.error("ack failed for msg_id=%s", msg_id)
@@ -118,7 +146,7 @@ def _handle_event(
         logger.debug(
             "acked msg_id=%s source_event_id=%s inserted=%s",
             msg_id,
-            event.get("source_event_id"),
+            source_event_id,
             newly_inserted,
         )
 
@@ -176,7 +204,11 @@ def run_worker(
     repo = EventRepository(pg_conn)
     alert_publisher = AlertPublisher(redis_client, cfg.alert_stream)
     record_publisher = (
-        RecordRequestPublisher(redis_client, cfg.record_request_stream)
+        RecordRequestPublisher(
+            redis_client,
+            cfg.record_request_stream,
+            default_replay_source_id=cfg.default_replay_source_id,
+        )
         if cfg.recording_enabled
         else None
     )

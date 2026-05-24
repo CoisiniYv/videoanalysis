@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
 from typing import Any, Dict
 
@@ -16,14 +15,14 @@ DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
 
 
-def _resolve_source_id(event: Dict[str, Any]) -> str:
+def _resolve_source_id(event: Dict[str, Any], default_source_id: str = "") -> str:
     """Resolve the replay source_id from an event.
 
     Priority:
     1. payload.media.source_id (if present and not null/empty)
     2. event.source_id (if not "0" or empty)
-    3. DEFAULT_REPLAY_SOURCE_ID env var
-    4. fallback "default"
+    3. *default_source_id* (from Config.default_replay_source_id)
+    4. fallback "" (no hardcoded default)
     """
     payload = event.get("payload") or {}
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -37,15 +36,22 @@ def _resolve_source_id(event: Dict[str, Any]) -> str:
         logger.debug("source_id resolved from event.source_id=%s", event_sid)
         return event_sid
 
-    default_sid = os.getenv("DEFAULT_REPLAY_SOURCE_ID", "phase3a")
-    logger.info(
-        "source_id fallback to DEFAULT_REPLAY_SOURCE_ID=%s "
-        "(original_source_id=%s media_source_id=%s)",
-        default_sid,
+    if default_source_id:
+        logger.info(
+            "source_id resolved from Config.default_replay_source_id=%s "
+            "(original_source_id=%s media_source_id=%s)",
+            default_source_id,
+            event_sid,
+            media_sid,
+        )
+        return default_source_id
+
+    logger.warning(
+        "source_id could not be resolved — no media.source_id, "
+        "event.source_id=%s, and no DEFAULT_REPLAY_SOURCE_ID configured",
         event_sid,
-        media_sid,
     )
-    return default_sid
+    return ""
 
 
 class RecordRequestPublisher:
@@ -55,9 +61,12 @@ class RecordRequestPublisher:
     Does not block, does not wait for clip completion.
     """
 
-    def __init__(self, client: Redis, stream: str) -> None:
+    def __init__(
+        self, client: Redis, stream: str, default_replay_source_id: str = ""
+    ) -> None:
         self._client = client
         self._stream = stream
+        self._default_replay_source_id = default_replay_source_id
 
     def publish(self, event: Dict[str, Any], event_id: str) -> str | None:
         """Publish a record_request for *event*.
@@ -71,7 +80,15 @@ class RecordRequestPublisher:
         """
         source_event_id = event.get("source_event_id", "")
         request_id = str(uuid.uuid4())
-        source_id = _resolve_source_id(event)
+        source_id = _resolve_source_id(event, self._default_replay_source_id)
+
+        if not source_id:
+            logger.error(
+                "record_request_skipped: no source_id could be resolved "
+                "for source_event_id=%s",
+                source_event_id,
+            )
+            return None
 
         record = {
             "request_id": request_id,

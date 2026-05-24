@@ -18,6 +18,7 @@ class Config:
     consumer_name: str
     poll_timeout_ms: int
     batch_size: int
+    default_replay_source_id: str
 
 
 def load_config() -> Config:
@@ -38,4 +39,5 @@ def load_config() -> Config:
         consumer_name=os.getenv("CONSUMER_NAME", "event-worker-1"),
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
         batch_size=int(os.getenv("EVENT_BATCH_SIZE", "10")),
+        default_replay_source_id=os.getenv("DEFAULT_REPLAY_SOURCE_ID", ""),
     )

@@ -114,3 +114,69 @@ class EventRepository:
     def event_exists(self, source_event_id: str) -> bool:
         """Return True if an event with *source_event_id* exists."""
         return self.count_by_source_event_id(source_event_id) > 0
+
+    def get_media_clip_status(self, source_event_id: str) -> str | None:
+        """Get payload->'media'->>'clip_status' for an event, or None."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload->'media'->>'clip_status' FROM events "
+                "WHERE source_event_id = %s",
+                (source_event_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def set_clip_status(
+        self,
+        event_id: str,
+        status: str,
+        replay_job_id: str = "",
+        error_message: str = "",
+    ) -> bool:
+        """Set clip_status and optionally replay_job_id / error_message in payload.media.
+
+        Returns True if a row was updated.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET payload = jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                COALESCE(payload, '{}'::jsonb),
+                                '{media,clip_status}',
+                                %(status)s::jsonb
+                            ),
+                            '{media,recording_strategy}',
+                            '"savant_replay"'::jsonb
+                        ),
+                        '{media,replay_job_id}',
+                        %(replay_job_id)s::jsonb
+                    ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {
+                    "status": json.dumps(status),
+                    "replay_job_id": json.dumps(replay_job_id),
+                    "event_id": event_id,
+                },
+            )
+            if error_message:
+                cur.execute(
+                    """
+                    UPDATE events
+                    SET payload = jsonb_set(
+                        COALESCE(payload, '{}'::jsonb),
+                        '{media,error_message}',
+                        %(error)s::jsonb
+                    )
+                    WHERE id = %(event_id)s::uuid
+                    """,
+                    {
+                        "error": json.dumps(error_message),
+                        "event_id": event_id,
+                    },
+                )
+            return cur.rowcount is not None and cur.rowcount > 0

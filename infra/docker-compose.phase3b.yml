@@ -1,4 +1,4 @@
-name: phase3a
+name: phase3b
 
 services:
   # ====================================================================
@@ -7,9 +7,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: phase3a-redis
+    container_name: phase3b-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -19,13 +19,13 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: phase3a-postgres
+    container_name: phase3b-postgres
     environment:
       POSTGRES_USER: video
       POSTGRES_PASSWORD: video
       POSTGRES_DB: video_analytics
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - ../db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
@@ -41,8 +41,8 @@ services:
       dockerfile: Dockerfile
       args:
         BUILDKIT_INLINE_CACHE: "1"
-    image: phase3a-event-worker:latest
-    container_name: phase3a-event-worker
+    image: phase3b-event-worker:latest
+    container_name: phase3b-event-worker
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
@@ -51,7 +51,7 @@ services:
       RECORD_REQUEST_STREAM: security.record_requests
       RECORDING_ENABLED: "true"
       RECORDING_STRATEGY: "savant_replay"
-      DEFAULT_REPLAY_SOURCE_ID: phase3a
+      DEFAULT_REPLAY_SOURCE_ID: phase3b
       CONSUMER_GROUP: event-workers
       CONSUMER_NAME: event-worker-1
       POLL_TIMEOUT_MS: "2000"
@@ -66,10 +66,10 @@ services:
       dockerfile: Dockerfile
       args:
         BUILDKIT_INLINE_CACHE: "1"
-    image: phase3a-api:latest
-    container_name: phase3a-api
+    image: phase3b-api:latest
+    container_name: phase3b-api
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
       REDIS_URL: redis://redis:6379/0
@@ -88,14 +88,14 @@ services:
 
   rtsp-server:
     image: bluenviron/mediamtx:1.11.3
-    container_name: phase3a-rtsp-server
+    container_name: phase3b-rtsp-server
     ports:
-      - "8562:8554"
+      - "8563:8554"
     restart: unless-stopped
 
   ffmpeg-source:
     image: jrottenberg/ffmpeg:6.1-ubuntu
-    container_name: phase3a-ffmpeg-source
+    container_name: phase3b-ffmpeg-source
     entrypoint: ["ffmpeg"]
     command:
       [
@@ -107,7 +107,7 @@ services:
         "-preset", "veryfast",
         "-tune", "zerolatency",
         "-f", "rtsp",
-        "rtsp://rtsp-server:8554/phase3a",
+        "rtsp://rtsp-server:8554/phase3b",
       ]
     volumes:
       - ../testVideo:/testVideo:ro
@@ -117,19 +117,18 @@ services:
 
   # ====================================================================
   # Source adapter — official video-loop-source → Savant ZMQ → Replay ingress
-  # Entrypoint: /opt/savant/adapters/gst/sources/video_loop.sh
-  # Sends Savant protocol frames to Replay via zeromq_sink
+  # SOURCE_ID is the canonical source_id used throughout the media chain
   # ====================================================================
 
   source-adapter:
     image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
-    container_name: phase3a-source-adapter
+    container_name: phase3b-source-adapter
     entrypoint:
       [
         "/opt/savant/adapters/gst/sources/video_loop.sh",
       ]
     environment:
-      SOURCE_ID: phase3a
+      SOURCE_ID: phase3b
       LOCATION: /testVideo/test.mp4
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       DOWNLOAD_PATH: /tmp/video-loop-cache
@@ -141,12 +140,12 @@ services:
     restart: unless-stopped
 
   # ====================================================================
-  # Savant — real-time inference + event detection
+  # Savant — real-time inference + event detection (optional for Phase 3B media tests)
   # ====================================================================
 
   savant:
     image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
-    container_name: phase3a-savant
+    container_name: phase3b-savant
     entrypoint:
       [
         "bash", "-c",
@@ -155,7 +154,7 @@ services:
     working_dir: /opt/savant/src/module
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
-      SRC_URL: rtsp://rtsp-server:8554/phase3a
+      SRC_URL: rtsp://rtsp-server:8554/phase3b
       MODEL_PATH: /models
       DOWNLOAD_PATH: /downloads
       BATCH_SIZE: "1"
@@ -182,18 +181,18 @@ services:
       - rtsp-server
       - redis
     restart: unless-stopped
+    profiles:
+      - gpu
 
   # ====================================================================
-  # Savant Replay Service (official image) — records video, REST API
-  # Entrypoint: /opt/bin/replay /opt/etc/config.json
-  # REST API on port 8080
+  # Savant Replay Service (official image)
   # ====================================================================
 
   replay-service:
     image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
-    container_name: phase3a-replay-service
+    container_name: phase3b-replay-service
     ports:
-      - "8080:8080"
+      - "8081:8080"
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       DB_PATH: /opt/rocksdb
@@ -205,13 +204,12 @@ services:
     restart: unless-stopped
 
   # ====================================================================
-  # Video File Sink (official adapter image) — ZMQ → file
-  # Uses GStreamer-based adapters, no GPU required
+  # Video File Sink (official adapter image)
   # ====================================================================
 
   video-file-sink:
     image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
-    container_name: phase3a-video-file-sink
+    container_name: phase3b-video-file-sink
     entrypoint:
       [
         "python", "/opt/savant/adapters/gst/sinks/video_files.py",
@@ -226,7 +224,8 @@ services:
     restart: unless-stopped
 
   # ====================================================================
-  # Clip Worker — consumes security.record_requests, calls Replay API
+  # Clip Worker — consumes security.record_requests, calls Replay API,
+  # writes back clip_status / replay_job_id / error_message to DB
   # ====================================================================
 
   clip-worker:
@@ -235,7 +234,8 @@ services:
       dockerfile: Dockerfile
       args:
         BUILDKIT_INLINE_CACHE: "1"
-    container_name: phase3a-clip-worker
+    image: phase3b-clip-worker:latest
+    container_name: phase3b-clip-worker
     environment:
       REDIS_URL: redis://redis:6379/0
       RECORD_REQUEST_STREAM: security.record_requests
@@ -254,7 +254,7 @@ services:
     restart: unless-stopped
 
   # ====================================================================
-  # Media Worker — monitors sink output, updates events table
+  # Media Worker — monitors sink output, updates events table (idempotent)
   # ====================================================================
 
   media-worker:
@@ -263,7 +263,8 @@ services:
       dockerfile: Dockerfile
       args:
         BUILDKIT_INLINE_CACHE: "1"
-    container_name: phase3a-media-worker
+    image: phase3b-media-worker:latest
+    container_name: phase3b-media-worker
     environment:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
       SINK_OUTPUT_DIR: /media/replay-sink-output

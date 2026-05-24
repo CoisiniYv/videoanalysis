@@ -6,6 +6,8 @@ import logging
 import signal
 import sys
 
+import psycopg
+
 from app.config import load_config
 from app.worker import connect_redis, request_shutdown, run_worker
 
@@ -22,10 +24,12 @@ def main() -> None:
 
     cfg = load_config()
     redis_client = connect_redis(cfg)
+    pg_conn = psycopg.connect(cfg.database_url, autocommit=True)
 
     try:
-        run_worker(cfg, redis_client)
+        run_worker(cfg, redis_client, pg_conn)
     finally:
+        pg_conn.close()
         redis_client.close()
         logging.getLogger("clip-worker").info("clip-worker stopped")
 
