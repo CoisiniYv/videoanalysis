@@ -33,41 +33,45 @@ class ReplayClient:
     def find_keyframe(
         self,
         source_id: str,
-        ts_ms: int,
+        ts_ms: int = 0,
         window_s: float = 5.0,
     ) -> Optional[str]:
-        """GET /api/v1/keyframes/find — find nearest keyframe UUID.
+        """POST /api/v1/keyframes/find — find nearest keyframe UUID.
 
         Args:
             source_id: Replay source identifier.
-            ts_ms: Timestamp in milliseconds (event_ts_ms).
-            window_s: Search window in seconds around *ts_ms*.
+            ts_ms: Timestamp in milliseconds (event_ts_ms) — informational, not used in POST body.
+            window_s: Not used in POST body for basic lookup.
 
         Returns:
             keyframe_uuid string, or None if not found.
         """
-        ts_seconds = ts_ms / 1000.0
         try:
-            resp = httpx.get(
+            resp = httpx.post(
                 f"{self._base_url}/api/v1/keyframes/find",
-                params={
+                json={
                     "source_id": source_id,
-                    "ts": ts_seconds,
-                    "window_s": window_s,
+                    "from": None,
+                    "to": None,
+                    "limit": 1,
                 },
                 timeout=self._timeout,
             )
             if resp.status_code == 404:
-                logger.warning("no keyframe found for source_id=%s ts=%.3f", source_id, ts_seconds)
+                logger.warning("no keyframe found for source_id=%s", source_id)
                 return None
             resp.raise_for_status()
             data = resp.json()
+            # Response may be a list of keyframes or an object with keyframes field
+            kfs = data if isinstance(data, list) else data.get("keyframes", data.get("data", []))
+            if kfs and len(kfs) > 0:
+                first = kfs[0]
+                return first if isinstance(first, str) else first.get("keyframe_uuid", first.get("uuid", str(first)))
             return data.get("keyframe_uuid") or data.get("uuid")
         except Exception:
             logger.exception(
-                "Replay keyframes/find failed source_id=%s ts_ms=%s",
+                "Replay keyframes/find failed source_id=%s",
                 source_id,
-                ts_ms,
             )
             return None
 
@@ -93,15 +97,20 @@ class ReplayClient:
         Returns:
             job_id string, or None on failure.
         """
+        total_frames = (pre_seconds + post_seconds) * 30  # assume 30fps
         payload: Dict[str, Any] = {
             "source_id": source_id,
-            "keyframe_uuid": keyframe_uuid,
+            "configuration": {
+                "stored_stream_id": source_id,
+                "resulting_stream_id": labels.get("event_id", "replay-output") if labels else "replay-output",
+            },
+            "anchor_keyframe": keyframe_uuid,
             "offset": {"seconds": pre_seconds},
-            "stop_condition": {"seconds": pre_seconds + post_seconds},
+            "stop_condition": {"frame_count": total_frames},
             "sink": {"url": sink_endpoint},
         }
         if labels:
-            payload["labels"] = labels
+            payload["configuration"]["labels"] = labels
 
         try:
             resp = httpx.put(

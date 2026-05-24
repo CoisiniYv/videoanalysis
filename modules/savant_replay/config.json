@@ -33,11 +33,5 @@
       "data_expiration_ttl": {"secs": 60, "nanos": 0},
       "compaction_period": {"secs": 60, "nanos": 0}
     }
-  },
-  "sources": [
-    {
-      "source_id": "phase3a",
-      "uri": "rtsp://rtsp-server:8554/phase3a"
-    }
-  ]
+  }
 }

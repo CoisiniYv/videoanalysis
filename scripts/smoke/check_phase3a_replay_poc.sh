@@ -49,7 +49,7 @@ fatal() {
 echo "--- Phase 3A-1 Replay + Video File Sink POC Smoke Test ---"
 echo ""
 
-REQUIRED="phase3a-redis phase3a-postgres phase3a-api phase3a-event-worker phase3a-rtsp-server phase3a-ffmpeg-source phase3a-savant phase3a-replay-service phase3a-video-file-sink"
+REQUIRED="phase3a-redis phase3a-postgres phase3a-api phase3a-event-worker phase3a-rtsp-server phase3a-ffmpeg-source phase3a-source-adapter phase3a-savant phase3a-replay-service phase3a-video-file-sink"
 MISSING=""
 for c in $REQUIRED; do
     S="$(docker inspect "$c" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['State']['Status'])" 2>/dev/null || echo "missing")"
@@ -62,7 +62,7 @@ if [[ -n "$MISSING" ]]; then
     echo -e "${YELLOW}请先: sudo docker compose -f ${COMPOSE_FILE} up -d --no-build${NC}"
     fatal "容器未就绪"
 fi
-echo "  9/9 容器 running"
+echo "  10/10 容器 running"
 echo ""
 
 # ===========================================================================
@@ -93,10 +93,15 @@ fi
 # ===========================================================================
 echo ""
 echo -e "${BLUE}--- Keyframes Find ---${NC}"
-# Try with a sample source_id; Replay registers source_id from its input
-KF_RESP="$(_curl "${REPLAY_API}/api/v1/keyframes/find?source_id=phase3a&ts=10000" 2>/dev/null || echo '{}')"
-KF_CODE="$(_curl -o /dev/null -w "%{http_code}" "${REPLAY_API}/api/v1/keyframes/find?source_id=phase3a&ts=10000" 2>/dev/null || echo "000")"
-echo -e "${BLUE}[debug] keyframes/find HTTP ${KF_CODE}${NC}"
+KF_PAYLOAD='{"source_id":"phase3a","from":null,"to":null,"limit":1}'
+echo -e "${BLUE}[debug] POST /api/v1/keyframes/find payload: ${KF_PAYLOAD}${NC}"
+KF_RESP="$(_curl -X POST "${REPLAY_API}/api/v1/keyframes/find" \
+    -H "Content-Type: application/json" \
+    -d "${KF_PAYLOAD}" 2>/dev/null || echo '{}')"
+KF_CODE="$(_curl -o /dev/null -w "%{http_code}" -X POST "${REPLAY_API}/api/v1/keyframes/find" \
+    -H "Content-Type: application/json" \
+    -d "${KF_PAYLOAD}" 2>/dev/null || echo "000")"
+echo -e "${BLUE}[debug] POST keyframes/find HTTP ${KF_CODE}${NC}"
 echo -e "${BLUE}[debug] ${KF_RESP}${NC}"
 
 # 200 = found, 404 = no keyframes (Replay may not have buffered enough frames yet)
@@ -108,7 +113,14 @@ check 4 "keyframes/find returns 200 (found keyframes)" "$([[ "$KF_CODE" == "200"
 # ===========================================================================
 echo ""
 echo -e "${BLUE}--- Create Replay Job ---${NC}"
-JOB_PAYLOAD='{"source_id":"phase3a","offset":{"seconds":5},"stop_condition":{"seconds":10},"sink":{"url":"pub+connect:tcp://video-file-sink:6666"}}'
+# Build job payload with anchor_keyframe from keyframes/find response if available
+ANCHOR_KF="$(echo "$KF_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); kfs=d.get('keyframes',d.get('data',[])); print(kfs[0] if kfs else '')" 2>/dev/null || echo "")"
+if [[ -z "$ANCHOR_KF" ]]; then
+    ANCHOR_KF="00000000-0000-0000-0000-000000000000"
+fi
+echo -e "${BLUE}[debug] anchor_keyframe: ${ANCHOR_KF}${NC}"
+
+JOB_PAYLOAD="{\"source_id\":\"phase3a\",\"configuration\":{\"stored_stream_id\":\"phase3a\",\"resulting_stream_id\":\"replay-job-001\"},\"anchor_keyframe\":\"${ANCHOR_KF}\",\"offset\":{\"seconds\":5},\"stop_condition\":{\"frame_count\":150},\"sink\":{\"url\":\"pub+connect:tcp://video-file-sink:6666\"}}"
 echo -e "${BLUE}[debug] PUT /api/v1/job payload: ${JOB_PAYLOAD}${NC}"
 JOB_RESP="$(_curl -X PUT "${REPLAY_API}/api/v1/job" \
     -H "Content-Type: application/json" \

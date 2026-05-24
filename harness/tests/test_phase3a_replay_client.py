@@ -31,26 +31,27 @@ def test_replay_client_status():
 
 
 def test_replay_client_find_keyframe():
-    with patch("app.replay_client.httpx.get") as mock_get:
+    with patch("app.replay_client.httpx.post") as mock_post:
         mock_resp = MagicMock()
-        mock_resp.json.return_value = {"keyframe_uuid": "kf-abc123"}
+        mock_resp.json.return_value = [{"keyframe_uuid": "kf-abc123"}]
         mock_resp.raise_for_status.return_value = None
-        mock_get.return_value = mock_resp
+        mock_post.return_value = mock_resp
 
         client = ReplayClient("http://replay:8080")
         result = client.find_keyframe("source_1", ts_ms=5000)
 
         assert result == "kf-abc123"
-        call_args = mock_get.call_args
-        assert "source_id" in str(call_args)
-        assert "ts" in str(call_args)
+        call_args = mock_post.call_args
+        payload = call_args.kwargs["json"]
+        assert payload["source_id"] == "source_1"
+        assert payload["limit"] == 1
 
 
 def test_replay_client_find_keyframe_404():
-    with patch("app.replay_client.httpx.get") as mock_get:
+    with patch("app.replay_client.httpx.post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 404
-        mock_get.return_value = mock_resp
+        mock_post.return_value = mock_resp
 
         client = ReplayClient("http://replay:8080")
         result = client.find_keyframe("source_1", ts_ms=5000)
@@ -79,11 +80,12 @@ def test_replay_client_create_job():
         call_args = mock_put.call_args
         payload = call_args.kwargs["json"]
         assert payload["source_id"] == "source_1"
-        assert payload["keyframe_uuid"] == "kf-abc"
+        assert payload["anchor_keyframe"] == "kf-abc"
         assert payload["offset"]["seconds"] == 5
-        assert payload["stop_condition"]["seconds"] == 10
+        assert payload["stop_condition"]["frame_count"] == 300  # (5+5)*30fps
         assert payload["sink"]["url"] == "pub+connect:tcp://sink:6666"
-        assert payload["labels"]["event_id"] == "ev-001"
+        assert payload["configuration"]["stored_stream_id"] == "source_1"
+        assert payload["configuration"]["labels"]["event_id"] == "ev-001"
 
 
 def test_replay_client_status_error():

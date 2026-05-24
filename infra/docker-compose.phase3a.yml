@@ -105,6 +105,35 @@ services:
     restart: unless-stopped
 
   # ====================================================================
+  # Source adapter — converts RTSP to Savant ZMQ protocol for Replay ingress
+  # Uses GStreamer pipeline: RTSP → decode → encode → ZMQ PUB → replay:5555
+  # ====================================================================
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: phase3a-source-adapter
+    entrypoint:
+      [
+        "gst-launch-1.0",
+        "-v",
+        "rtspsrc", "location=rtsp://rtsp-server:8554/phase3a", "latency=0",
+        "!", "rtph264depay",
+        "!", "h264parse",
+        "!", "avdec_h264",
+        "!", "videoconvert",
+        "!", "video/x-raw,format=I420",
+        "!", "x264enc", "tune=zerolatency", "speed-preset=ultrafast",
+        "!", "h264parse",
+        "!", "queue",
+        "!", "zmqsink", "socket-address=tcp://replay-service:5555",
+        "socket-type=PUB", "sync=false",
+      ]
+    depends_on:
+      - rtsp-server
+      - replay-service
+    restart: unless-stopped
+
+  # ====================================================================
   # Savant — real-time inference + event detection
   # ====================================================================
 
