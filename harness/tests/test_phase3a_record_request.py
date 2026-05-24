@@ -13,7 +13,7 @@ EW_DIR = str(Path(__file__).resolve().parents[2] / "services" / "event-worker")
 if EW_DIR not in sys.path:
     sys.path.insert(0, EW_DIR)
 
-from app.record_request import RecordRequestPublisher
+from app.record_request import RecordRequestPublisher, _resolve_source_id
 
 
 def _make_event(**overrides) -> dict:
@@ -96,3 +96,39 @@ def test_publish_is_idempotent_in_stream():
     pub.publish(event, event_id="uuid-1")
     pub.publish(event, event_id="uuid-1")
     assert len(fake.xrange("security.record_requests", "-", "+")) == 2
+
+
+# ===========================================================================
+# source_id resolution tests
+# ===========================================================================
+
+
+def test_source_id_from_media(monkeypatch):
+    monkeypatch.delenv("DEFAULT_REPLAY_SOURCE_ID", raising=False)
+    event = _make_event()
+    event["payload"] = {"media": {"source_id": "phase3a"}}
+    assert _resolve_source_id(event) == "phase3a"
+
+
+def test_source_id_from_event(monkeypatch):
+    monkeypatch.delenv("DEFAULT_REPLAY_SOURCE_ID", raising=False)
+    event = _make_event()
+    event["source_id"] = "cam_01"
+    del event["payload"]["media"]
+    assert _resolve_source_id(event) == "cam_01"
+
+
+def test_source_id_fallback_to_default(monkeypatch):
+    monkeypatch.setenv("DEFAULT_REPLAY_SOURCE_ID", "phase3a")
+    event = _make_event()
+    event["source_id"] = "0"
+    del event["payload"]["media"]
+    assert _resolve_source_id(event) == "phase3a"
+
+
+def test_source_id_media_takes_priority(monkeypatch):
+    monkeypatch.setenv("DEFAULT_REPLAY_SOURCE_ID", "fallback")
+    event = _make_event()
+    event["source_id"] = "0"
+    event["payload"] = {"media": {"source_id": "replay-source-1"}}
+    assert _resolve_source_id(event) == "replay-source-1"

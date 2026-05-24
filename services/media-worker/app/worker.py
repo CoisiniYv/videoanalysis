@@ -25,6 +25,25 @@ def request_shutdown(signum: int, _frame: object) -> None:
     shutdown_requested = True
 
 
+def _parse_ndjson(filepath: Path) -> dict | None:
+    """Parse an NDJSON (JSON Lines) file, returning the first valid JSON object."""
+    try:
+        with open(filepath, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        logger.exception("failed to read %s", filepath)
+    return None
+
+
 def _find_metadata_files(sink_dir: str) -> list[dict]:
     """Scan *sink_dir* for metadata.json files and return parsed contents."""
     results = []
@@ -33,13 +52,23 @@ def _find_metadata_files(sink_dir: str) -> list[dict]:
         return results
 
     for meta_file in sink_path.rglob("metadata.json"):
-        try:
-            with open(meta_file, "r") as f:
-                data = json.load(f)
-            data["_meta_dir"] = str(meta_file.parent)
-            results.append(data)
-        except Exception:
-            logger.exception("failed to parse %s", meta_file)
+        data = _parse_ndjson(meta_file)
+        if data is None:
+            # Try single JSON object as fallback
+            try:
+                with open(meta_file, "r") as f:
+                    data = json.load(f)
+            except Exception:
+                logger.exception("failed to parse %s", meta_file)
+                continue
+        data["_meta_dir"] = str(meta_file.parent)
+        results.append(data)
+        logger.info(
+            "media_metadata_parsed path=%s source_id=%s event_id=%s",
+            str(meta_file.parent),
+            data.get("source_id", ""),
+            data.get("labels", {}).get("event_id", data.get("event_id", "")),
+        )
     return results
 
 
@@ -51,14 +80,38 @@ def _find_video_file(meta_dir: str) -> str | None:
     return None
 
 
+def _extract_event_id(meta: dict) -> str | None:
+    """Extract event_id from metadata JSON, trying multiple paths."""
+    # 1. Direct labels
+    labels = meta.get("labels", {})
+    if isinstance(labels, dict):
+        eid = labels.get("event_id")
+        if eid:
+            return str(eid)
+    # 2. Top-level event_id
+    eid = meta.get("event_id")
+    if eid:
+        return str(eid)
+    # 3. resulting_stream_id (format: "replay-event-{event_id}")
+    rsi = meta.get("resulting_stream_id", "")
+    if rsi.startswith("replay-event-"):
+        return rsi[len("replay-event-"):]
+    # 4. source_id from configuration
+    cfg = meta.get("configuration", {})
+    if isinstance(cfg, dict):
+        labels2 = cfg.get("labels", {})
+        if isinstance(labels2, dict):
+            eid = labels2.get("event_id")
+            if eid:
+                return str(eid)
+    return None
+
+
 def _process_sink_output(pg_conn: psycopg.Connection, sink_dir: str) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
     for meta in _find_metadata_files(sink_dir):
-        event_id = (
-            meta.get("labels", {}).get("event_id")
-            or meta.get("event_id")
-        )
+        event_id = _extract_event_id(meta)
         if not event_id:
             continue
 
