@@ -58,11 +58,11 @@ def test_replay_client_find_keyframe_404():
 
 
 def test_replay_client_create_job():
-    with patch("app.replay_client.httpx.post") as mock_post:
+    with patch("app.replay_client.httpx.put") as mock_put:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"job_id": "job-001"}
         mock_resp.raise_for_status.return_value = None
-        mock_post.return_value = mock_resp
+        mock_put.return_value = mock_resp
 
         client = ReplayClient("http://replay:8080")
         result = client.create_job(
@@ -70,18 +70,19 @@ def test_replay_client_create_job():
             keyframe_uuid="kf-abc",
             pre_seconds=5,
             post_seconds=5,
-            sink_endpoint="tcp://sink:6666",
+            sink_endpoint="pub+connect:tcp://sink:6666",
             labels={"event_id": "ev-001"},
         )
         assert result == "job-001"
 
         # Verify payload structure
-        call_args = mock_post.call_args
+        call_args = mock_put.call_args
         payload = call_args.kwargs["json"]
         assert payload["source_id"] == "source_1"
         assert payload["keyframe_uuid"] == "kf-abc"
         assert payload["offset"]["seconds"] == 5
         assert payload["stop_condition"]["seconds"] == 10
+        assert payload["sink"]["url"] == "pub+connect:tcp://sink:6666"
         assert payload["labels"]["event_id"] == "ev-001"
 
 

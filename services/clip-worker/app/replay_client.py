@@ -80,7 +80,7 @@ class ReplayClient:
         sink_endpoint: str,
         labels: Optional[Dict[str, str]] = None,
     ) -> Optional[str]:
-        """POST /api/v1/job — create a re-streaming job.
+        """PUT /api/v1/job — create a re-streaming job.
 
         Args:
             source_id: Replay source identifier.
@@ -98,13 +98,13 @@ class ReplayClient:
             "keyframe_uuid": keyframe_uuid,
             "offset": {"seconds": pre_seconds},
             "stop_condition": {"seconds": pre_seconds + post_seconds},
-            "sink": {"endpoint": sink_endpoint},
+            "sink": {"url": sink_endpoint},
         }
         if labels:
             payload["labels"] = labels
 
         try:
-            resp = httpx.post(
+            resp = httpx.put(
                 f"{self._base_url}/api/v1/job",
                 json=payload,
                 timeout=self._timeout,

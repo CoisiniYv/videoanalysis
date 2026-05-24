@@ -99,24 +99,27 @@ KF_CODE="$(_curl -o /dev/null -w "%{http_code}" "${REPLAY_API}/api/v1/keyframes/
 echo -e "${BLUE}[debug] keyframes/find HTTP ${KF_CODE}${NC}"
 echo -e "${BLUE}[debug] ${KF_RESP}${NC}"
 
-# 200 = found, 404 = not found (acceptable if buffer hasn't filled yet)
-check 4 "keyframes/find endpoint reachable" "$([[ "$KF_CODE" == "200" || "$KF_CODE" == "404" ]] && echo pass || echo fail)"
+# 200 = found, 404 = no keyframes (Replay may not have buffered enough frames yet)
+check 4 "keyframes/find returns 200 (found keyframes)" "$([[ "$KF_CODE" == "200" ]] && echo pass || echo fail)"
+[[ "$KF_CODE" == "404" ]] && echo -e "${YELLOW}  keyframes/find 404: No keyframes found; check source_id and Replay input stream.${NC}"
 
 # ===========================================================================
 # Check 5: /api/v1/job (create re-streaming job)
 # ===========================================================================
 echo ""
 echo -e "${BLUE}--- Create Replay Job ---${NC}"
-JOB_RESP="$(_curl -X POST "${REPLAY_API}/api/v1/job" \
+JOB_PAYLOAD='{"source_id":"phase3a","offset":{"seconds":5},"stop_condition":{"seconds":10},"sink":{"url":"pub+connect:tcp://video-file-sink:6666"}}'
+echo -e "${BLUE}[debug] PUT /api/v1/job payload: ${JOB_PAYLOAD}${NC}"
+JOB_RESP="$(_curl -X PUT "${REPLAY_API}/api/v1/job" \
     -H "Content-Type: application/json" \
-    -d '{"source_id":"phase3a","offset":{"seconds":5},"stop_condition":{"seconds":10},"sink":{"endpoint":"tcp://video-file-sink:6666"}}' 2>/dev/null || echo '{}')"
-JOB_CODE="$(_curl -o /dev/null -w "%{http_code}" -X POST "${REPLAY_API}/api/v1/job" \
+    -d "${JOB_PAYLOAD}" 2>/dev/null || echo '{}')"
+JOB_CODE="$(_curl -o /dev/null -w "%{http_code}" -X PUT "${REPLAY_API}/api/v1/job" \
     -H "Content-Type: application/json" \
-    -d '{"source_id":"phase3a","offset":{"seconds":5},"stop_condition":{"seconds":10},"sink":{"endpoint":"tcp://video-file-sink:6666"}}' 2>/dev/null || echo "000")"
-echo -e "${BLUE}[debug] POST /api/v1/job HTTP ${JOB_CODE}${NC}"
+    -d "${JOB_PAYLOAD}" 2>/dev/null || echo "000")"
+echo -e "${BLUE}[debug] PUT /api/v1/job HTTP ${JOB_CODE}${NC}"
 echo -e "${BLUE}[debug] ${JOB_RESP}${NC}"
 
-check 5 "POST /api/v1/job accepted" "$([[ "$JOB_CODE" == "200" || "$JOB_CODE" == "201" || "$JOB_CODE" == "202" ]] && echo pass || echo fail)"
+check 5 "PUT /api/v1/job accepted" "$([[ "$JOB_CODE" == "200" || "$JOB_CODE" == "201" || "$JOB_CODE" == "202" ]] && echo pass || echo fail)"
 
 # ===========================================================================
 # Check 6-7: Video File Sink output
@@ -124,7 +127,7 @@ check 5 "POST /api/v1/job accepted" "$([[ "$JOB_CODE" == "200" || "$JOB_CODE" ==
 echo ""
 echo -e "${BLUE}--- Video File Sink Output ---${NC}"
 # Check if sink output directory has files
-SINK_FILES="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -type f 2>/dev/null | head -10 || echo "")"
+SINK_FILES="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' -o -name '*.json' \) 2>/dev/null | head -10 || echo "")"
 echo -e "${BLUE}[debug] Sink files: ${SINK_FILES}${NC}"
 
 if [[ -n "$SINK_FILES" ]]; then
@@ -140,8 +143,8 @@ check 7 "metadata.json exists and non-empty" "$([[ "${META_SIZE:-0}" -gt 0 ]] &&
 # ===========================================================================
 # Check 8: video file
 # ===========================================================================
-VIDEO_COUNT="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -name '*.mkv' -o -name '*.mov' -o -name '*.webm' 2>/dev/null | wc -l || echo "0")"
-VIDEO_SIZE="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -exec stat -c%s {} + 2>/dev/null | tail -1 | tr -d '[:space:]' || echo "0")"
+VIDEO_COUNT="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) 2>/dev/null | wc -l | tr -d ' \n' || echo "0")"
+VIDEO_SIZE="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}' || echo "0")"
 echo -e "${BLUE}[debug] Video files found: ${VIDEO_COUNT}, total bytes: ${VIDEO_SIZE}${NC}"
 check 8 "video file exists and non-empty" "$([[ "${VIDEO_COUNT:-0}" -gt 0 && "${VIDEO_SIZE:-0}" -gt 0 ]] && echo pass || echo fail)"
 
