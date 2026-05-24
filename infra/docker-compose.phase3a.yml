@@ -182,8 +182,8 @@ services:
       ]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
-      ZMQ_SRC_ENDPOINT: pub+connect:tcp://0.0.0.0:6666
-      SINK_OUTPUT_DIR: /media/replay-sink-output
+      ZMQ_ENDPOINT: pub+connect:tcp://0.0.0.0:6666
+      DIR_LOCATION: /media/replay-sink-output/%source_id-%chunk_idx
       SINK_CONTAINER: mkv
     volumes:
       - /data/video-analytics/media:/media:rw
