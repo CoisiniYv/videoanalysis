@@ -11,6 +11,7 @@ class Config:
     redis_url: str
     record_request_stream: str
     replay_api_url: str
+    replay_job_sink_url: str
     consumer_group: str
     consumer_name: str
     poll_timeout_ms: int
@@ -25,6 +26,9 @@ def load_config() -> Config:
             "RECORD_REQUEST_STREAM", "security.record_requests"
         ),
         replay_api_url=os.getenv("REPLAY_API_URL", "http://replay-service:8080"),
+        replay_job_sink_url=os.getenv(
+            "REPLAY_JOB_SINK_URL", "pub+connect:tcp://video-file-sink:6666"
+        ),
         consumer_group=os.getenv("CONSUMER_GROUP", "clip-workers"),
         consumer_name=os.getenv("CONSUMER_NAME", "clip-worker-1"),
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),

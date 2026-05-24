@@ -182,7 +182,7 @@ services:
       ]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
-      ZMQ_ENDPOINT: pub+connect:tcp://0.0.0.0:6666
+      ZMQ_ENDPOINT: sub+bind:tcp://0.0.0.0:6666
       DIR_LOCATION: /media/replay-sink-output/%source_id-%chunk_idx
       SINK_CONTAINER: mkv
     volumes:
@@ -204,6 +204,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RECORD_REQUEST_STREAM: security.record_requests
       REPLAY_API_URL: http://replay-service:8080
+      REPLAY_JOB_SINK_URL: pub+connect:tcp://video-file-sink:6666
       CONSUMER_GROUP: clip-workers
       CONSUMER_NAME: clip-worker-1
       POLL_TIMEOUT_MS: "5000"

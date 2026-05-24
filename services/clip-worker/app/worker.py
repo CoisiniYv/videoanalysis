@@ -104,7 +104,7 @@ def run_worker(cfg: Config, redis_client: Redis) -> None:
                         keyframe_uuid=keyframe_uuid,
                         pre_seconds=int(req.get("pre_seconds", cfg.default_pre_seconds)),
                         post_seconds=int(req.get("post_seconds", cfg.default_post_seconds)),
-                        sink_endpoint="tcp://video-file-sink:6666",
+                        sink_endpoint=cfg.replay_job_sink_url,
                         labels={"event_id": req.get("event_id", "")},
                     )
 

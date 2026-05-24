@@ -1,10 +1,23 @@
 {
   "common": {
-    "source_id": "phase3a",
-    "buffer_seconds": 60,
-    "api_port": 8080,
-    "db_path": "/opt/rocksdb"
+    "pass_metadata_only": false,
+    "management_port": 8080,
+    "stats_period": 10,
+    "job_writer_cache_max_capacity": 100,
+    "job_writer_cache_ttl": 30,
+    "job_eviction_ttl": 60,
+    "default_job_sink_options": {}
   },
+  "in_stream": {
+    "endpoint": "router+bind:tcp://0.0.0.0:5555"
+  },
+  "storage": {
+    "rocksdb": {
+      "path": "/opt/rocksdb",
+      "data_expiration_ttl": 60
+    }
+  },
+  "out_stream": null,
   "sources": [
     {
       "source_id": "phase3a",
