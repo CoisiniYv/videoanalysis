@@ -62,11 +62,17 @@ class ReplayClient:
                 return None
             resp.raise_for_status()
             data = resp.json()
-            # Response may be a list of keyframes or an object with keyframes field
-            kfs = data if isinstance(data, list) else data.get("keyframes", data.get("data", []))
-            if kfs and len(kfs) > 0:
+            # Response format: {"keyframes": ["source_id", ["uuid1", ...]]}
+            # keyframes[0] = source_id, keyframes[1][0] = first UUID
+            kfs = data.get("keyframes", [])
+            if isinstance(kfs, list) and len(kfs) > 1:
+                uuid_list = kfs[1]
+                if isinstance(uuid_list, list) and len(uuid_list) > 0:
+                    return uuid_list[0]
+            # Fallback: try older formats
+            if isinstance(kfs, list) and len(kfs) > 0:
                 first = kfs[0]
-                return first if isinstance(first, str) else first.get("keyframe_uuid", first.get("uuid", str(first)))
+                return first if isinstance(first, str) and "-" in first else None
             return data.get("keyframe_uuid") or data.get("uuid")
         except Exception:
             logger.exception(
@@ -97,20 +103,32 @@ class ReplayClient:
         Returns:
             job_id string, or None on failure.
         """
+        event_id = labels.get("event_id", "unknown") if labels else "unknown"
         total_frames = (pre_seconds + post_seconds) * 30  # assume 30fps
         payload: Dict[str, Any] = {
-            "source_id": source_id,
-            "configuration": {
-                "stored_stream_id": source_id,
-                "resulting_stream_id": labels.get("event_id", "replay-output") if labels else "replay-output",
-            },
-            "anchor_keyframe": keyframe_uuid,
-            "offset": {"seconds": pre_seconds},
-            "stop_condition": {"frame_count": total_frames},
             "sink": {"url": sink_endpoint},
+            "configuration": {
+                "ts_sync": True,
+                "skip_intermediary_eos": False,
+                "send_eos": True,
+                "stop_on_incorrect_ts": False,
+                "ts_discrepancy_fix_duration": {"secs": 0, "nanos": 33333333},
+                "min_duration": {"secs": 0, "nanos": 10000000},
+                "max_duration": {"secs": 0, "nanos": 103333333},
+                "stored_stream_id": source_id,
+                "resulting_stream_id": f"replay-event-{event_id}",
+                "routing_labels": "bypass",
+                "max_idle_duration": {"secs": 10, "nanos": 0},
+                "max_delivery_duration": {"secs": 10, "nanos": 0},
+                "send_metadata_only": False,
+                "labels": labels or {},
+            },
+            "stop_condition": {"frame_count": total_frames},
+            "anchor_keyframe": keyframe_uuid,
+            "anchor_wait_duration": {"secs": 1, "nanos": 0},
+            "offset": {"seconds": pre_seconds},
+            "attributes": [],
         }
-        if labels:
-            payload["configuration"]["labels"] = labels
 
         try:
             resp = httpx.put(

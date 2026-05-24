@@ -113,14 +113,19 @@ check 4 "keyframes/find returns 200 (found keyframes)" "$([[ "$KF_CODE" == "200"
 # ===========================================================================
 echo ""
 echo -e "${BLUE}--- Create Replay Job ---${NC}"
-# Build job payload with anchor_keyframe from keyframes/find response if available
-ANCHOR_KF="$(echo "$KF_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); kfs=d.get('keyframes',d.get('data',[])); print(kfs[0] if kfs else '')" 2>/dev/null || echo "")"
+# Parse source_id and anchor_keyframe from keyframes response
+# Response: {"keyframes":["phase3a",["019e5910-6c0e-7451-bab0-ba019495b968"]]}
+# keyframes[0] = source_id, keyframes[1][0] = anchor UUID
+PARSED_SRC="$(echo "$KF_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); k=d.get('keyframes',[]); print(k[0] if len(k)>0 else '')" 2>/dev/null || echo "")"
+ANCHOR_KF="$(echo "$KF_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); k=d.get('keyframes',[]); print(k[1][0] if len(k)>1 and len(k[1])>0 else '')" 2>/dev/null || echo "")"
 if [[ -z "$ANCHOR_KF" ]]; then
     ANCHOR_KF="00000000-0000-0000-0000-000000000000"
 fi
-echo -e "${BLUE}[debug] anchor_keyframe: ${ANCHOR_KF}${NC}"
+echo -e "${BLUE}[debug] parsed source_id: ${PARSED_SRC}${NC}"
+echo -e "${BLUE}[debug] parsed anchor_keyframe: ${ANCHOR_KF}${NC}"
 
-JOB_PAYLOAD="{\"source_id\":\"phase3a\",\"configuration\":{\"stored_stream_id\":\"phase3a\",\"resulting_stream_id\":\"replay-job-001\"},\"anchor_keyframe\":\"${ANCHOR_KF}\",\"offset\":{\"seconds\":5},\"stop_condition\":{\"frame_count\":150},\"sink\":{\"url\":\"pub+connect:tcp://video-file-sink:6666\"}}"
+# Build complete job payload
+JOB_PAYLOAD="{\"sink\":{\"url\":\"pub+connect:tcp://video-file-sink:6666\"},\"configuration\":{\"ts_sync\":true,\"skip_intermediary_eos\":false,\"send_eos\":true,\"stop_on_incorrect_ts\":false,\"ts_discrepancy_fix_duration\":{\"secs\":0,\"nanos\":33333333},\"min_duration\":{\"secs\":0,\"nanos\":10000000},\"max_duration\":{\"secs\":0,\"nanos\":103333333},\"stored_stream_id\":\"phase3a\",\"resulting_stream_id\":\"replay-job-001\",\"routing_labels\":\"bypass\",\"max_idle_duration\":{\"secs\":10,\"nanos\":0},\"max_delivery_duration\":{\"secs\":10,\"nanos\":0},\"send_metadata_only\":false,\"labels\":{\"event_id\":\"phase3a-poc\"}},\"stop_condition\":{\"frame_count\":150},\"anchor_keyframe\":\"${ANCHOR_KF}\",\"anchor_wait_duration\":{\"secs\":1,\"nanos\":0},\"offset\":{\"seconds\":5},\"attributes\":[]}"
 echo -e "${BLUE}[debug] PUT /api/v1/job payload: ${JOB_PAYLOAD}${NC}"
 JOB_RESP="$(_curl -X PUT "${REPLAY_API}/api/v1/job" \
     -H "Content-Type: application/json" \
@@ -155,8 +160,8 @@ check 7 "metadata.json exists and non-empty" "$([[ "${META_SIZE:-0}" -gt 0 ]] &&
 # ===========================================================================
 # Check 8: video file
 # ===========================================================================
-VIDEO_COUNT="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) 2>/dev/null | wc -l | tr -d ' \n' || echo "0")"
-VIDEO_SIZE="$(docker exec phase3a-video-file-sink find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}' || echo "0")"
+VIDEO_COUNT="$(docker exec phase3a-video-file-sink sh -c "find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) 2>/dev/null | wc -l" | tr -d '[:space:]' || echo "0")"
+VIDEO_SIZE="$(docker exec phase3a-video-file-sink sh -c "find /media/replay-sink-output -type f \( -name '*.mkv' -o -name '*.mov' -o -name '*.webm' -o -name '*.mp4' \) -printf '%s\n' 2>/dev/null | awk '{s+=\$1} END {print s+0}'" | tr -d '[:space:]' || echo "0")"
 echo -e "${BLUE}[debug] Video files found: ${VIDEO_COUNT}, total bytes: ${VIDEO_SIZE}${NC}"
 check 8 "video file exists and non-empty" "$([[ "${VIDEO_COUNT:-0}" -gt 0 && "${VIDEO_SIZE:-0}" -gt 0 ]] && echo pass || echo fail)"
 
