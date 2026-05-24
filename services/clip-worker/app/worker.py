@@ -92,18 +92,54 @@ def run_worker(
                     keyframe_uuid = req.get("keyframe_uuid")
 
                     # Find keyframe if not provided
-                    if not keyframe_uuid and source_id and event_ts_ms:
-                        keyframe_uuid = replay.find_keyframe(source_id, event_ts_ms)
+                    if not keyframe_uuid:
+                        if not source_id:
+                            update_clip_status(
+                                pg_conn, event_id, "failed",
+                                error_message="missing source_id in record_request",
+                            )
+                            redis_client.xack(stream, group, msg_id)
+                            total_processed += 1
+                            continue
+
+                        if not event_ts_ms:
+                            logger.warning(
+                                "missing event_ts_ms for request_id=%s source_event_id=%s",
+                                req.get("request_id"),
+                                source_event_id,
+                            )
+                            update_clip_status(
+                                pg_conn, event_id, "failed",
+                                error_message=(
+                                    f"missing event_ts_ms in record_request "
+                                    f"source_id={source_id}"
+                                ),
+                            )
+                            redis_client.xack(stream, group, msg_id)
+                            total_processed += 1
+                            continue
+
+                        # Timestamp-anchored keyframe lookup
+                        keyframe_uuid = replay.find_keyframe(
+                            source_id, event_ts_ms,
+                            window_s=cfg.keyframe_lookup_window_s,
+                        )
 
                     if not keyframe_uuid:
                         logger.warning(
-                            "no keyframe for request_id=%s source_event_id=%s",
+                            "no keyframe for request_id=%s source_event_id=%s "
+                            "source_id=%s event_ts_ms=%s",
                             req.get("request_id"),
                             source_event_id,
+                            source_id,
+                            event_ts_ms,
                         )
                         update_clip_status(
                             pg_conn, event_id, "failed",
-                            error_message=f"no keyframe found for source_id={source_id}",
+                            error_message=(
+                                f"no keyframe found for source_id={source_id}"
+                                + (f" event_ts_ms={event_ts_ms}" if event_ts_ms else "")
+                            ),
                         )
                         redis_client.xack(stream, group, msg_id)
                         total_processed += 1

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _ts_ms_to_iso(ts_ms: int) -> str:
+    """Convert epoch milliseconds to ISO 8601 UTC string."""
+    return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat()
 
 
 class ReplayClient:
@@ -34,31 +40,49 @@ class ReplayClient:
         self,
         source_id: str,
         ts_ms: int = 0,
-        window_s: float = 5.0,
+        window_s: float = 10.0,
     ) -> Optional[str]:
         """POST /api/v1/keyframes/find — find nearest keyframe UUID.
 
+        When *ts_ms* > 0 the lookup is anchored to the event timestamp:
+        ``from`` = event_time - window_s, ``to`` = event_time + window_s.
+        When *ts_ms* is 0 the lookup is unbounded (``from``/``to`` = null).
+
         Args:
             source_id: Replay source identifier.
-            ts_ms: Timestamp in milliseconds (event_ts_ms) — informational, not used in POST body.
-            window_s: Not used in POST body for basic lookup.
+            ts_ms: Event timestamp in epoch milliseconds (event_ts_ms).
+            window_s: Search window in seconds around *ts_ms*.
 
         Returns:
             keyframe_uuid string, or None if not found.
         """
+        from_ts = None
+        to_ts = None
+        if ts_ms > 0:
+            from_ts = _ts_ms_to_iso(int(ts_ms - window_s * 1000))
+            to_ts = _ts_ms_to_iso(int(ts_ms + window_s * 1000))
+            logger.debug(
+                "keyframe_lookup_anchored source_id=%s event_ts_ms=%s "
+                "window_s=%s from=%s to=%s",
+                source_id, ts_ms, window_s, from_ts, to_ts,
+            )
+
         try:
             resp = httpx.post(
                 f"{self._base_url}/api/v1/keyframes/find",
                 json={
                     "source_id": source_id,
-                    "from": None,
-                    "to": None,
+                    "from": from_ts,
+                    "to": to_ts,
                     "limit": 1,
                 },
                 timeout=self._timeout,
             )
             if resp.status_code == 404:
-                logger.warning("no keyframe found for source_id=%s", source_id)
+                logger.warning(
+                    "no keyframe found for source_id=%s ts_ms=%s window_s=%s",
+                    source_id, ts_ms, window_s,
+                )
                 return None
             resp.raise_for_status()
             data = resp.json()
@@ -76,8 +100,8 @@ class ReplayClient:
             return data.get("keyframe_uuid") or data.get("uuid")
         except Exception:
             logger.exception(
-                "Replay keyframes/find failed source_id=%s",
-                source_id,
+                "Replay keyframes/find failed source_id=%s ts_ms=%s",
+                source_id, ts_ms,
             )
             return None
 

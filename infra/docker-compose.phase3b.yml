@@ -247,6 +247,7 @@ services:
       POLL_TIMEOUT_MS: "5000"
       DEFAULT_PRE_SECONDS: "5"
       DEFAULT_POST_SECONDS: "5"
+      KEYFRAME_LOOKUP_WINDOW_S: "10"
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }

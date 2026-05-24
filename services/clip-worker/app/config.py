@@ -18,6 +18,7 @@ class Config:
     poll_timeout_ms: int
     default_pre_seconds: int
     default_post_seconds: int
+    keyframe_lookup_window_s: int
 
 
 def load_config() -> Config:
@@ -39,4 +40,5 @@ def load_config() -> Config:
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
         default_pre_seconds=int(os.getenv("DEFAULT_PRE_SECONDS", "5")),
         default_post_seconds=int(os.getenv("DEFAULT_POST_SECONDS", "5")),
+        keyframe_lookup_window_s=int(os.getenv("KEYFRAME_LOOKUP_WINDOW_S", "10")),
     )
