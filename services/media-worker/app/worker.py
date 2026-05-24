@@ -80,30 +80,60 @@ def _find_video_file(meta_dir: str) -> str | None:
     return None
 
 
+import re
+
+_UUID_RE = re.compile(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+)
+
+
+def _extract_uuid(s: str) -> str | None:
+    """Extract the first UUID from a string like 'replay-event-{uuid}' or '{uuid}-00000000'."""
+    m = _UUID_RE.search(s)
+    return m.group(0) if m else None
+
+
 def _extract_event_id(meta: dict) -> str | None:
     """Extract event_id from metadata JSON, trying multiple paths."""
-    # 1. Direct labels
+    # 1. Direct labels.event_id
     labels = meta.get("labels", {})
     if isinstance(labels, dict):
         eid = labels.get("event_id")
         if eid:
             return str(eid)
+
     # 2. Top-level event_id
     eid = meta.get("event_id")
     if eid:
         return str(eid)
-    # 3. resulting_stream_id (format: "replay-event-{event_id}")
-    rsi = meta.get("resulting_stream_id", "")
-    if rsi.startswith("replay-event-"):
-        return rsi[len("replay-event-"):]
-    # 4. source_id from configuration
+
+    # 3. source_id with UUID (format: "replay-event-{uuid}" or just "{uuid}")
+    source_id = str(meta.get("source_id", ""))
+    eid = _extract_uuid(source_id)
+    if eid:
+        return eid
+
+    # 4. resulting_stream_id (format: "replay-event-{uuid}")
+    rsi = str(meta.get("resulting_stream_id", ""))
+    eid = _extract_uuid(rsi)
+    if eid:
+        return eid
+
+    # 5. Directory basename (format: "replay-event-{uuid}-00000000")
+    dirname = str(meta.get("_meta_dir", ""))
+    eid = _extract_uuid(dirname)
+    if eid:
+        return eid
+
+    # 6. configuration.labels.event_id
     cfg = meta.get("configuration", {})
     if isinstance(cfg, dict):
-        labels2 = cfg.get("labels", {})
-        if isinstance(labels2, dict):
-            eid = labels2.get("event_id")
+        cfg_labels = cfg.get("labels", {})
+        if isinstance(cfg_labels, dict):
+            eid = cfg_labels.get("event_id")
             if eid:
                 return str(eid)
+
     return None
 
 
@@ -113,6 +143,10 @@ def _process_sink_output(pg_conn: psycopg.Connection, sink_dir: str) -> int:
     for meta in _find_metadata_files(sink_dir):
         event_id = _extract_event_id(meta)
         if not event_id:
+            logger.warning(
+                "media_skip: no event_id in metadata path=%s",
+                meta.get("_meta_dir", ""),
+            )
             continue
 
         video_file = _find_video_file(meta["_meta_dir"])
@@ -132,15 +166,19 @@ def _process_sink_output(pg_conn: psycopg.Connection, sink_dir: str) -> int:
                         payload = jsonb_set(
                             jsonb_set(
                                 jsonb_set(
-                                    COALESCE(payload, '{}'::jsonb),
-                                    '{media,clip_status}',
-                                    '"ready"'
+                                    jsonb_set(
+                                        COALESCE(payload, '{}'::jsonb),
+                                        '{media,clip_status}',
+                                        '"ready"'
+                                    ),
+                                    '{media,recording_strategy}',
+                                    '"savant_replay"'
                                 ),
-                                '{media,recording_strategy}',
-                                '"savant_replay"'
+                                '{media,replay_job_id}',
+                                %(replay_job_id)s::jsonb
                             ),
-                            '{media,replay_job_id}',
-                            %(replay_job_id)s::jsonb
+                            '{media,sink_output_path}',
+                            %(sink_path)s::jsonb
                         ),
                         updated_at = now()
                     WHERE id = %(event_id)s::uuid
@@ -148,14 +186,16 @@ def _process_sink_output(pg_conn: psycopg.Connection, sink_dir: str) -> int:
                     {
                         "clip_path": clip_path,
                         "replay_job_id": json.dumps(replay_job_id),
+                        "sink_path": json.dumps(sink_path),
                         "event_id": event_id,
                     },
                 )
                 if cur.rowcount and cur.rowcount > 0:
                     logger.info(
-                        "media_updated event_id=%s clip_path=%s",
+                        "media_event_updated event_id=%s clip_path=%s sink_path=%s",
                         event_id,
                         clip_path,
+                        sink_path,
                     )
                     updated += 1
         except Exception:
