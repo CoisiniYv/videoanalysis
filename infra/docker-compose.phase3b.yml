@@ -269,7 +269,9 @@ services:
     environment:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
       SINK_OUTPUT_DIR: /media/replay-sink-output
+      SNAPSHOT_OUTPUT_DIR: /media/snapshots
       MEDIA_POLL_INTERVAL_S: "10"
+      DEFAULT_PRE_SECONDS: "5"
     volumes:
       - /data/video-analytics/media:/media:rw
     depends_on:

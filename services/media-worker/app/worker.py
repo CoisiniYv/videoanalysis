@@ -1,4 +1,4 @@
-"""Media worker — monitor sink output, update events table with clip paths."""
+"""Media worker — monitor sink output, update events table with clip paths and snapshots."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 import psycopg
 
 from app.config import Config, load_config
+from app.snapshot import generate_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +267,224 @@ def _process_sink_output(
     return updated
 
 
+def _snapshot_needed(pg_conn: psycopg.Connection) -> list[dict]:
+    """Return events with clip_status=ready that need snapshot generation.
+
+    Conditions: clip_status is 'ready', snap_status is not 'ready' or
+    'not_required', snapshot_required=true, and clip_path is non-null.
+    """
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, clip_path,
+                       COALESCE(
+                           (payload -> 'media' ->> 'pre_seconds')::float,
+                           (payload -> 'media' ->> 'pre_seconds')::int::float
+                       ) AS media_pre_seconds,
+                       COALESCE(payload -> 'media' ->> 'snapshot_required', 'false') = 'true'
+                           OR COALESCE((payload ->> 'snapshot_required')::bool, false)
+                           AS snapshot_required,
+                       payload -> 'media' ->> 'snapshot_status' AS snap_status
+                FROM events
+                WHERE payload -> 'media' ->> 'clip_status' = 'ready'
+                  AND clip_path IS NOT NULL
+                  AND clip_path != ''
+                """
+            )
+            rows = []
+            for row in cur.fetchall():
+                snap_status = row[4] or "not_implemented"
+                if snap_status in ("ready", "not_required"):
+                    continue
+                if not row[3]:  # snapshot_required is false
+                    continue
+                rows.append({
+                    "event_id": row[0],
+                    "clip_path": row[1],
+                    "pre_seconds": row[2],
+                    "snapshot_required": row[3],
+                    "snap_status": snap_status,
+                })
+            return rows
+    except Exception:
+        logger.exception("failed to query events needing snapshots")
+        return []
+
+
+def _update_snapshot_status(
+    pg_conn: psycopg.Connection,
+    event_id: str,
+    snapshot_path: str | None,
+    snapshot_status: str,
+    snapshot_offset_seconds: float | None = None,
+    snapshot_fallback_reason: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """Update snapshot-related fields on an event row."""
+    try:
+        with pg_conn.cursor() as cur:
+            parts = []
+            params: dict = {"event_id": event_id}
+
+            if snapshot_status:
+                parts.append(
+                    "{media,snapshot_status}")
+                params["snap_status"] = json.dumps(snapshot_status)
+
+            if snapshot_offset_seconds is not None:
+                parts.append(
+                    "{media,snapshot_offset_seconds}")
+                params["snap_offset"] = json.dumps(snapshot_offset_seconds)
+
+            if snapshot_fallback_reason:
+                parts.append(
+                    "{media,snapshot_fallback_reason}")
+                params["fallback"] = json.dumps(snapshot_fallback_reason)
+
+            if error_message:
+                parts.append(
+                    "{media,snapshot_error_message}")
+                params["err_msg"] = json.dumps(error_message)
+
+            if not parts:
+                return False
+
+            # Build nested jsonb_set chain: jsonb_set(jsonb_set(COALESCE(...), ...), ...)
+            path_param_map = {
+                "{media,snapshot_status}": "snap_status",
+                "{media,snapshot_offset_seconds}": "snap_offset",
+                "{media,snapshot_fallback_reason}": "fallback",
+                "{media,snapshot_error_message}": "err_msg",
+            }
+            payload_expr = "COALESCE(payload, '{}'::jsonb)"
+            for media_path in parts:
+                param_name = path_param_map[media_path]
+                pg_path = "{" + ",".join(media_path.strip("{}").split(",")) + "}"
+                payload_expr = (
+                    "jsonb_set(" + payload_expr
+                    + ", '" + pg_path + "'"
+                    + ", %(" + param_name + ")s::jsonb)"
+                )
+
+            set_parts = ["payload = " + payload_expr]
+            if snapshot_path:
+                set_parts.append("snapshot_path = %(snap_path)s")
+                params["snap_path"] = snapshot_path
+            set_parts.append("updated_at = now()")
+
+            sql = (
+                "UPDATE events SET "
+                + ", ".join(set_parts)
+                + " WHERE id = %(event_id)s::uuid"
+            )
+
+            cur.execute(sql, params)
+            return cur.rowcount is not None and cur.rowcount > 0
+    except Exception:
+        logger.exception(
+            "update_snapshot_status failed event_id=%s sql=%s params=%s",
+            event_id, sql, params,
+        )
+        return False
+
+
+def _mark_not_required(pg_conn: psycopg.Connection) -> int:
+    """Mark events with snapshot_required=false && clip ready as not_required."""
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET payload = jsonb_set(
+                        COALESCE(payload, '{}'::jsonb),
+                        '{media,snapshot_status}',
+                        '"not_required"'::jsonb
+                    ),
+                    updated_at = now()
+                WHERE payload -> 'media' ->> 'clip_status' = 'ready'
+                  AND (
+                      COALESCE(payload -> 'media' ->> 'snapshot_required', 'false') = 'false'
+                      OR (payload -> 'media' ? 'snapshot_required'
+                          AND payload -> 'media' ->> 'snapshot_required' = 'false')
+                  )
+                  AND COALESCE(payload -> 'media' ->> 'snapshot_status', 'not_implemented')
+                      NOT IN ('ready', 'not_required')
+                """
+            )
+            return cur.rowcount or 0
+    except Exception:
+        logger.exception("_mark_not_required failed")
+        return 0
+
+
+def _process_pending_snapshots(
+    pg_conn: psycopg.Connection,
+    snapshot_output_dir: str,
+    default_pre_seconds: float,
+) -> int:
+    """Generate snapshots for events that have clip_status=ready but no snapshot yet.
+
+    Idempotent: skips events whose snapshot_status is already 'ready' or
+    'not_required'.  If snapshot_status is 'failed' but the file exists
+    from a prior attempt, it promotes the status to 'ready'.
+
+    Also marks snapshot_required=false events as 'not_required' when clip
+    is ready.
+    """
+    _mark_not_required(pg_conn)
+
+    events = _snapshot_needed(pg_conn)
+    if not events:
+        return 0
+
+    updated = 0
+    for ev in events:
+        event_id = ev["event_id"]
+        clip_path = ev["clip_path"]
+        pre_seconds = ev["pre_seconds"] if ev["pre_seconds"] else default_pre_seconds
+
+        # Idempotency: if snapshot file already exists, just update status
+        expected_path = os.path.join(snapshot_output_dir, f"{event_id}.jpg")
+        if os.path.isfile(expected_path):
+            logger.info(
+                "snapshot_already_exists event_id=%s path=%s — promoting to ready",
+                event_id, expected_path,
+            )
+            _update_snapshot_status(
+                pg_conn, event_id,
+                snapshot_path=expected_path,
+                snapshot_status="ready",
+                snapshot_offset_seconds=float(pre_seconds),
+            )
+            updated += 1
+            continue
+
+        logger.info(
+            "generating_snapshot event_id=%s clip=%s pre_seconds=%.2f",
+            event_id, clip_path, pre_seconds,
+        )
+
+        result = generate_snapshot(
+            event_id=event_id,
+            clip_path=clip_path,
+            pre_seconds=pre_seconds,
+            output_dir=snapshot_output_dir,
+        )
+
+        _update_snapshot_status(
+            pg_conn, event_id,
+            snapshot_path=result.get("snapshot_path"),
+            snapshot_status=result["snapshot_status"],
+            snapshot_offset_seconds=result.get("snapshot_offset_seconds"),
+            snapshot_fallback_reason=result.get("snapshot_fallback_reason"),
+            error_message=result.get("error_message"),
+        )
+        updated += 1
+
+    return updated
+
+
 def connect_postgres(cfg: Config) -> psycopg.Connection:
     conn = psycopg.connect(cfg.database_url, autocommit=True)
     with conn.cursor() as cur:
@@ -277,20 +496,31 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
-        "media-worker started sink_dir=%s poll_interval=%ds",
+        "media-worker started sink_dir=%s snap_dir=%s poll_interval=%ds "
+        "default_pre_seconds=%.1f",
         cfg.sink_output_dir,
+        cfg.snapshot_output_dir,
         cfg.poll_interval_s,
+        cfg.default_pre_seconds,
     )
 
     processed_dirs: set[str] = set()
 
     while not shutdown_requested:
         try:
-            updates = _process_sink_output(
+            clip_updates = _process_sink_output(
                 pg_conn, cfg.sink_output_dir, processed_dirs
             )
-            if updates:
-                logger.info("media_worker: updated %d events", updates)
+            if clip_updates:
+                logger.info("media_worker: clip updated %d events", clip_updates)
+
+            snap_updates = _process_pending_snapshots(
+                pg_conn,
+                cfg.snapshot_output_dir,
+                cfg.default_pre_seconds,
+            )
+            if snap_updates:
+                logger.info("media_worker: snapshot updated %d events", snap_updates)
         except Exception:
             logger.exception("media worker loop error")
 

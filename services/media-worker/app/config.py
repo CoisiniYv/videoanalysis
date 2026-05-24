@@ -10,7 +10,9 @@ from dataclasses import dataclass
 class Config:
     database_url: str
     sink_output_dir: str
+    snapshot_output_dir: str
     poll_interval_s: int
+    default_pre_seconds: float
 
 
 def load_config() -> Config:
@@ -22,5 +24,9 @@ def load_config() -> Config:
         sink_output_dir=os.getenv(
             "SINK_OUTPUT_DIR", "/media/replay-sink-output"
         ),
+        snapshot_output_dir=os.getenv(
+            "SNAPSHOT_OUTPUT_DIR", "/media/snapshots"
+        ),
         poll_interval_s=int(os.getenv("MEDIA_POLL_INTERVAL_S", "10")),
+        default_pre_seconds=float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
     )
