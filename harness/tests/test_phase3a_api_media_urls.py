@@ -35,6 +35,25 @@ def test_clip_url_populated_when_clip_path_exists():
     assert resp.clip_path == "replay-sink-output/uuid/video.mkv"
 
 
+def test_clip_url_not_doubled_when_path_starts_with_media():
+    """clip_path already starts with /media — do not produce /media//media/..."""
+    row = {
+        "id": "ev-005",
+        "source_event_id": "savant:cam:t:intrusion:5000",
+        "event_type": "intrusion",
+        "camera_id": "cam_01",
+        "track_id": "t_5",
+        "clip_path": "/media/replay-sink-output/replay-event-uuid/video.mov",
+        "snapshot_path": None,
+        "payload": {"media": {}},
+        "recording_strategy": "reserved",
+        "media_status": "not_implemented",
+    }
+    resp = EventResponse.from_db_row(row, media_base_url="/media")
+    assert resp.clip_url == "/media/replay-sink-output/replay-event-uuid/video.mov"
+    assert resp.clip_url.count("/media/") == 1
+
+
 def test_both_urls_null_when_paths_null():
     row = {
         "id": "ev-002",
@@ -94,6 +113,6 @@ def test_media_fallback_still_works_with_clip_path():
         "media_status": "not_implemented",
     }
     resp = EventResponse.from_db_row(row)
-    assert resp.clip_url == "/media//media/clips/test.mkv"
+    assert resp.clip_url == "/media/clips/test.mkv"
     assert resp.media["snapshot_status"] == "not_implemented"
     assert resp.media["clip_status"] == "not_implemented"

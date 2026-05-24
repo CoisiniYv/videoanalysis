@@ -72,8 +72,18 @@ class EventResponse(BaseModel):
         clip_path = row.get("clip_path")
         snapshot_path = row.get("snapshot_path") or media.get("snapshot_path")
 
-        clip_url = f"{media_base_url}/{clip_path}" if clip_path else None
-        snapshot_url = f"{media_base_url}/{snapshot_path}" if snapshot_path else None
+        def _media_url(path: str | None) -> str | None:
+            if not path:
+                return None
+            p = str(path)
+            if p.startswith(f"{media_base_url}/"):
+                return p
+            if p.startswith("/"):
+                return f"{media_base_url}{p}"
+            return f"{media_base_url}/{p}"
+
+        clip_url = _media_url(clip_path)
+        snapshot_url = _media_url(snapshot_path)
 
         return cls(
             id=str(row.get("id", "")),

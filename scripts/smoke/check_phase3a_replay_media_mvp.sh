@@ -148,7 +148,14 @@ EVENT_RESP="$(_curl "${API_BASE}/api/v1/events/${SID}")"
 CLIP_URL="$(echo "$EVENT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('clip_url','') or '')" 2>/dev/null)"
 SNAP_URL="$(echo "$EVENT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('snapshot_url','') or '')" 2>/dev/null)"
 echo -e "${BLUE}[debug] clip_url=${CLIP_URL} snapshot_url=${SNAP_URL}${NC}"
-check 9 "API returns clip_url" "$([[ -n "$CLIP_URL" ]] && echo pass || echo fail)"
+
+if [[ -n "$CLIP_URL" && "$CLIP_URL" != "None" ]]; then
+    CLIP_HTTP="$(_curl -o /dev/null -w '%{http_code}' "${API_BASE}${CLIP_URL}")"
+    echo -e "${BLUE}[debug] curl ${API_BASE}${CLIP_URL} HTTP ${CLIP_HTTP}${NC}"
+    check 9 "API returns clip_url and curl 200" "$([[ "$CLIP_HTTP" == "200" ]] && echo pass || echo fail)"
+else
+    check 9 "API returns clip_url" fail
+fi
 check 10 "API returns snapshot_url (null OK)" "$([[ -z "$SNAP_URL" || "$SNAP_URL" == "None" ]] && echo pass || echo pass)"
 
 # Idempotency
