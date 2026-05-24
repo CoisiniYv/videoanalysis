@@ -1,0 +1,33 @@
+"""Configuration for clip-worker."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Config:
+    redis_url: str
+    record_request_stream: str
+    replay_api_url: str
+    consumer_group: str
+    consumer_name: str
+    poll_timeout_ms: int
+    default_pre_seconds: int
+    default_post_seconds: int
+
+
+def load_config() -> Config:
+    return Config(
+        redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
+        record_request_stream=os.getenv(
+            "RECORD_REQUEST_STREAM", "security.record_requests"
+        ),
+        replay_api_url=os.getenv("REPLAY_API_URL", "http://replay-service:8080"),
+        consumer_group=os.getenv("CONSUMER_GROUP", "clip-workers"),
+        consumer_name=os.getenv("CONSUMER_NAME", "clip-worker-1"),
+        poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
+        default_pre_seconds=int(os.getenv("DEFAULT_PRE_SECONDS", "5")),
+        default_post_seconds=int(os.getenv("DEFAULT_POST_SECONDS", "5")),
+    )

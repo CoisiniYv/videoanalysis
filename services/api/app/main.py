@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.db import get_conn
 from app.routers.events import router as events_router
@@ -15,6 +17,11 @@ app = FastAPI(title="Video Analytics API", version="1.0.0")
 
 app.include_router(events_router)
 app.include_router(ws_alerts_router)
+
+# Mount /media for serving clip/snapshot files
+MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/media")
+if os.path.isdir(MEDIA_ROOT):
+    app.mount("/media", StaticFiles(directory=MEDIA_ROOT), name="media")
 
 
 # ---------------------------------------------------------------------------

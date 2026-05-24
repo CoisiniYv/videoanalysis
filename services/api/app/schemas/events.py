@@ -60,7 +60,7 @@ class EventResponse(BaseModel):
     updated_at: Optional[str] = None
 
     @classmethod
-    def from_db_row(cls, row: dict) -> EventResponse:
+    def from_db_row(cls, row: dict, media_base_url: str = "/media") -> EventResponse:
         payload = row.get("payload") or {}
         if isinstance(payload, str):
             import json
@@ -68,6 +68,12 @@ class EventResponse(BaseModel):
             payload = json.loads(payload)
 
         media = _safe_media(payload)
+
+        clip_path = row.get("clip_path")
+        snapshot_path = row.get("snapshot_path") or media.get("snapshot_path")
+
+        clip_url = f"{media_base_url}/{clip_path}" if clip_path else None
+        snapshot_url = f"{media_base_url}/{snapshot_path}" if snapshot_path else None
 
         return cls(
             id=str(row.get("id", "")),
@@ -85,10 +91,10 @@ class EventResponse(BaseModel):
             frame_uuid=row.get("frame_uuid"),
             keyframe_uuid=row.get("keyframe_uuid"),
             status=row.get("status", "new"),
-            snapshot_path=row.get("snapshot_path"),
-            clip_path=row.get("clip_path"),
-            snapshot_url=None,
-            clip_url=None,
+            snapshot_path=snapshot_path,
+            clip_path=clip_path,
+            snapshot_url=snapshot_url,
+            clip_url=clip_url,
             recording_strategy=row.get("recording_strategy", "reserved"),
             media_status=row.get("media_status", "not_implemented"),
             media=media,

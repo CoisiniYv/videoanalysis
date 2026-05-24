@@ -14,6 +14,7 @@ from redis import Redis
 
 from app.alert_publisher import AlertPublisher
 from app.config import Config, load_config
+from app.record_request import RecordRequestPublisher
 from app.redis_consumer import RedisStreamConsumer
 from app.repository import EventRepository
 
@@ -61,11 +62,13 @@ def _handle_event(
     repo: EventRepository,
     consumer: RedisStreamConsumer,
     alert_publisher: AlertPublisher | None = None,
+    record_publisher: RecordRequestPublisher | None = None,
 ) -> tuple[bool, str | None]:
-    """Process a single event: insert into DB, publish alert, then ACK.
+    """Process a single event: insert into DB, publish alert + record request, then ACK.
 
     Returns ``(newly_inserted, event_id)``.
-    In both cases the message is ACKed (we have handled it).
+    Alert and record request are published only for new inserts.
+    Failures in alert/record publishing do not block ACK.
     """
     event_id = None
     try:
@@ -89,6 +92,15 @@ def _handle_event(
                 event.get("source_event_id"),
             )
 
+    if newly_inserted and record_publisher is not None:
+        try:
+            record_publisher.publish(event, event_id=event_id)
+        except Exception:
+            logger.exception(
+                "record_request publish failed for source_event_id=%s",
+                event.get("source_event_id"),
+            )
+
     if not consumer.ack(msg_id):
         logger.error("ack failed for msg_id=%s", msg_id)
     else:
@@ -107,6 +119,7 @@ def _process_batch(
     repo: EventRepository,
     consumer: RedisStreamConsumer,
     alert_publisher: AlertPublisher | None = None,
+    record_publisher: RecordRequestPublisher | None = None,
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -116,7 +129,7 @@ def _process_batch(
             consumer.ack(msg_id)
             continue
 
-        new, _ = _handle_event(event, msg_id, repo, consumer, alert_publisher)
+        new, _ = _handle_event(event, msg_id, repo, consumer, alert_publisher, record_publisher)
         if new:
             inserted += 1
         else:
@@ -151,6 +164,11 @@ def run_worker(
     consumer.ensure_group()
     repo = EventRepository(pg_conn)
     alert_publisher = AlertPublisher(redis_client, cfg.alert_stream)
+    record_publisher = (
+        RecordRequestPublisher(redis_client, cfg.record_request_stream)
+        if cfg.recording_enabled
+        else None
+    )
 
     logger.info(
         "worker started stream=%s group=%s consumer=%s alert_stream=%s",
@@ -169,7 +187,7 @@ def run_worker(
             # 1. Process pending messages (recovery)
             pending = consumer.read_pending(count=cfg.batch_size)
             if pending:
-                ins, dup = _process_batch(pending, repo, consumer, alert_publisher)
+                ins, dup = _process_batch(pending, repo, consumer, alert_publisher, record_publisher)
                 total_inserted += ins
                 total_duplicates += dup
                 if ins or dup:
@@ -182,7 +200,7 @@ def run_worker(
                 count=cfg.batch_size, block_ms=cfg.poll_timeout_ms
             )
             if new_msgs:
-                ins, dup = _process_batch(new_msgs, repo, consumer, alert_publisher)
+                ins, dup = _process_batch(new_msgs, repo, consumer, alert_publisher, record_publisher)
                 total_inserted += ins
                 total_duplicates += dup
 

@@ -1,0 +1,33 @@
+# Savant Replay Service Module
+# Records RTSP stream into buffer and exposes REST API for re-streaming jobs.
+#
+# REST API:
+#   GET  /api/v1/status            — service health + buffer info
+#   GET  /api/v1/keyframes/find    — find nearest keyframe by source_id + ts
+#   POST /api/v1/job               — create re-streaming job
+#   GET  /api/v1/job/{job_id}      — job status
+#
+# Environment:
+#   SRC_URL                              — RTSP source URI
+#   REPLAY_BUFFER_SECONDS (default 60)   — buffer duration in seconds
+#   REPLAY_API_PORT (default 8080)       — REST API port
+
+name: savant_replay
+
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  source_uri: ${oc.env:SRC_URL, rtsp://rtsp-server:8554/phase3a}
+  buffer_seconds: ${oc.decode:${oc.env:REPLAY_BUFFER_SECONDS, 60}}
+
+pipeline:
+  source:
+    element: uridecodebin
+    properties:
+      uri: ${parameters.source_uri}
+
+  elements:
+    # Buffer adapter — stores frames for replay
+    - element: buffer@replay
+      name: replay_buffer
+      properties:
+        max-size-seconds: ${parameters.buffer_seconds}
