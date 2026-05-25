@@ -93,12 +93,16 @@ class CameraRepository:
             return cur.fetchall()
 
     def get_zone_names(self, camera_id: str) -> List[str]:
-        with self._conn.cursor() as cur:
+        # The connection is opened with row_factory=dict_row in app.db, so
+        # cursors inherit that factory unless overridden. We explicitly
+        # request dict_row here to keep the dependency obvious, and read
+        # the column by name rather than by index.
+        with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT zone_name FROM camera_zones WHERE camera_id = %(id)s",
                 {"id": camera_id},
             )
-            return [row[0] for row in cur.fetchall()]
+            return [row["zone_name"] for row in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # Rule CRUD
