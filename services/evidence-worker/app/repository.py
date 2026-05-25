@@ -15,7 +15,7 @@ def find_events_needing_evidence(
     """Return intrusion events that need evidence generated.
 
     Criteria: event_type='intrusion' AND snapshot_path IS NULL.
-    Most recent events first.
+    Oldest events first (more likely to have metadata coverage).
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -25,7 +25,7 @@ def find_events_needing_evidence(
             FROM events
             WHERE event_type = 'intrusion'
               AND snapshot_path IS NULL
-            ORDER BY created_at DESC
+            ORDER BY created_at ASC
             LIMIT %s
             """,
             (limit,),

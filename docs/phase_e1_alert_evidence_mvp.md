@@ -88,20 +88,35 @@ services/evidence-worker/
 3. Print summary: event_id, track_id, frame_num, all paths
 4. Exit
 
-### 5.3 Database Updates
+### 5.3 Output Directory Structure (Phase E1.1a)
+
+Per-event evidence directory under `EVIDENCE_EVENTS_DIR`:
+
+```
+/media/evidence/events/{event_id}/
+  snapshot.jpg
+  annotated_snapshot.jpg
+  clip_raw.mp4
+  evidence_metadata.json
+```
+
+See `docs/media_output_directory_policy.md` for the mandatory directory policy.
+
+### 5.4 Database Updates
 
 | Field | Location | Value |
 |---|---|---|
-| `snapshot_path` | `events.snapshot_path` (column) | `/media/evidence/snapshots/{event_id}.jpg` |
-| `clip_path` | `events.clip_path` (column) | `/media/evidence/clips/{event_id}.mp4` |
-| `annotated_snapshot_path` | `payload.media.annotated_snapshot_path` (JSONB) | `/media/evidence/snapshots/annotated/{event_id}.jpg` |
+| `snapshot_path` | `events.snapshot_path` (column) | `/data/video-analytics/media/evidence/events/{event_id}/snapshot.jpg` |
+| `clip_path` | `events.clip_path` (column) | `/data/video-analytics/media/evidence/events/{event_id}/clip_raw.mp4` |
+| `annotated_snapshot_path` | `payload.media.annotated_snapshot_path` (JSONB) | `.../evidence/events/{event_id}/annotated_snapshot.jpg` |
 | `snapshot_status` | `payload.media.snapshot_status` | `"ready"` |
 | `clip_status` | `payload.media.clip_status` | `"ready"` |
 | `annotated_snapshot_status` | `payload.media.annotated_snapshot_status` | `"ready"` |
 | `evidence_frame_num` | `payload.media.evidence_frame_num` | matched frame number |
 | `evidence_track_id` | `payload.media.evidence_track_id` | matched track_id |
+| `output_root` | `payload.media.output_root` | `/data/video-analytics/media/evidence/events/{event_id}` |
 
-### 5.4 Bbox Coordinate Conversion
+### 5.5 Bbox Coordinate Conversion
 
 The video-file-sink metadata uses center-based coordinates (`xc`, `yc`, `width`, `height`, `angle`). The evidence-worker converts to top-left for drawing:
 

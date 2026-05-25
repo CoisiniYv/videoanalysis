@@ -169,7 +169,7 @@ services:
       SKIP_FRAMES_WITHOUT_OBJECTS: "false"
       CHUNK_SIZE: "0"
     volumes:
-      - ../media/phase3h-metadata:/media/phase3h-metadata:rw
+      - /data/video-analytics/media:/media:rw
     depends_on:
       - savant-zmq
     restart: unless-stopped
@@ -194,7 +194,7 @@ services:
       ALERT_STREAM: security.alerts
       MEDIA_ROOT: /media
     volumes:
-      - ../media/evidence:/media/evidence:ro
+      - /data/video-analytics/media:/media:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -202,7 +202,7 @@ services:
 
   # ====================================================================
   # Video File Sink — consumes Savant ZMQ sink frames+metadata, writes
-  # video.mov + metadata.json
+  # video.mov + metadata.json under /media/phase3h-savant-output/
   # ====================================================================
 
   video-file-sink:
@@ -218,7 +218,7 @@ services:
       DIR_LOCATION: /media/phase3h-savant-output/%source_id%/%src_filename%/
       CHUNK_SIZE: "0"
     volumes:
-      - ../media/phase3h-savant-output:/media/phase3h-savant-output:rw
+      - /data/video-analytics/media:/media:rw
     depends_on:
       - savant-zmq
     restart: unless-stopped
@@ -226,6 +226,7 @@ services:
   # ====================================================================
   # Evidence Worker — one-shot: generates snapshot, annotated snapshot,
   # and clip from Phase 3H.2 aligned video.mov + metadata.json output.
+  # Output per Phase E1.1a: /media/evidence/events/{event_id}/
   # Processes intrusion events needing evidence, then exits.
   # Re-run to process new events.
   # ====================================================================
@@ -238,16 +239,13 @@ services:
     container_name: phase3h-zmq-evidence-worker
     environment:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
-      VIDEO_DIR: /media/phase3h-savant-output
-      SNAPSHOT_OUTPUT_DIR: /media/evidence/snapshots
-      ANNOTATED_OUTPUT_DIR: /media/evidence/snapshots/annotated
-      CLIP_OUTPUT_DIR: /media/evidence/clips
+      EVIDENCE_EVENTS_DIR: /media/evidence/events
+      VIDEO_INPUT_DIR: /media/phase3h-savant-output
       PRE_SECONDS: "3"
       POST_SECONDS: "3"
       FPS: "30"
       EVIDENCE_MAX_EVENTS: "5"
     volumes:
-      - ../media/phase3h-savant-output:/media/phase3h-savant-output:ro
-      - ../media/evidence:/media/evidence:rw
+      - /data/video-analytics/media:/media:rw
     depends_on:
       postgres: { condition: service_healthy }

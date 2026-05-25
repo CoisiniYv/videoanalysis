@@ -4,10 +4,18 @@ Processes intrusion events from PostgreSQL, generates evidence
 (snapshot, annotated snapshot, clip) from Phase 3H.2 aligned video+metadata.
 
 One-shot: processes pending events and exits. Run again to process new events.
+
+Phase E1.1a — output directory lockdown:
+    /media/evidence/events/{event_id}/
+        snapshot.jpg
+        annotated_snapshot.jpg
+        clip_raw.mp4
+        evidence_metadata.json
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -31,7 +39,12 @@ logging.basicConfig(
 logger = logging.getLogger("evidence-worker")
 
 
-def process_event(event: dict, cfg) -> dict | None:
+def evidence_dir(events_root: str, event_id: str) -> str:
+    """Return the per-event evidence directory path."""
+    return os.path.join(events_root, event_id)
+
+
+def process_event(event: dict, cfg, conn: psycopg.Connection) -> dict | None:
     """Generate evidence for one event. Returns result dict or None on failure."""
     event_id = str(event["id"])
     event_type = str(event.get("event_type", "intrusion"))
@@ -48,10 +61,10 @@ def process_event(event: dict, cfg) -> dict | None:
     )
 
     # 1. Find metadata.json
-    metadata_path = find_metadata_file(cfg.video_dir, source_id)
+    metadata_path = find_metadata_file(cfg.video_input_dir, source_id)
     if not metadata_path:
         logger.error("metadata.json not found under %s for source_id=%s",
-                     cfg.video_dir, source_id)
+                     cfg.video_input_dir, source_id)
         return None
 
     video_path = os.path.join(os.path.dirname(metadata_path), "video.mov")
@@ -67,13 +80,20 @@ def process_event(event: dict, cfg) -> dict | None:
 
     frame_num, objects = frame_result
 
+    # Create per-event directory
+    event_dir = evidence_dir(cfg.evidence_events_dir, event_id)
+    os.makedirs(event_dir, exist_ok=True)
+
+    snapshot_path = os.path.join(event_dir, "snapshot.jpg")
+    annotated_path = os.path.join(event_dir, "annotated_snapshot.jpg")
+    clip_path = os.path.join(event_dir, "clip_raw.mp4")
+    metadata_out = os.path.join(event_dir, "evidence_metadata.json")
+
     # 3. Extract snapshot
-    snapshot_path = os.path.join(cfg.snapshot_output_dir, f"{event_id}.jpg")
     if not extract_snapshot(video_path, frame_num, snapshot_path):
         return None
 
     # 4. Draw annotated snapshot
-    annotated_path = os.path.join(cfg.annotated_output_dir, f"{event_id}.jpg")
     if not draw_bboxes_on_frame(
         snapshot_path, objects, annotated_path,
         event_id=event_id, event_type=event_type,
@@ -82,16 +102,30 @@ def process_event(event: dict, cfg) -> dict | None:
         return None
 
     # 5. Extract clip
-    clip_path = os.path.join(cfg.clip_output_dir, f"{event_id}.mp4")
     if not extract_clip(
         video_path, frame_num, cfg.pre_seconds, cfg.post_seconds,
         cfg.fps, clip_path,
     ):
-        # Clip failure is non-fatal; continue with snapshot evidence
         logger.warning("clip extraction failed, continuing without clip")
         clip_path = ""
 
-    # 6. Write back to PostgreSQL
+    # 6. Write evidence metadata
+    try:
+        meta = {
+            "event_id": event_id,
+            "track_id": track_id,
+            "frame_num": frame_num,
+            "source_id": source_id,
+            "event_type": event_type,
+            "objects_count": len(objects),
+            "phase": "E1.1a",
+        }
+        with open(metadata_out, "w") as f:
+            json.dump(meta, f, indent=2)
+    except Exception:
+        logger.warning("failed to write evidence_metadata.json")
+
+    # 7. Write back to PostgreSQL
     update_event_evidence(
         conn, event_id, snapshot_path, annotated_path,
         clip_path, frame_num, track_id,
@@ -104,14 +138,15 @@ def process_event(event: dict, cfg) -> dict | None:
         "snapshot_path": snapshot_path,
         "annotated_snapshot_path": annotated_path,
         "clip_path": clip_path,
+        "event_dir": event_dir,
     }
 
 
 def main() -> None:
     cfg = load_config()
     logger.info(
-        "evidence-worker starting: video_dir=%s max_events=%d",
-        cfg.video_dir, cfg.evidence_max_events,
+        "evidence-worker starting: video_input_dir=%s evidence_events_dir=%s max_events=%d",
+        cfg.video_input_dir, cfg.evidence_events_dir, cfg.evidence_max_events,
     )
 
     dsn = cfg.database_url
@@ -122,7 +157,7 @@ def main() -> None:
         results = []
         for event in events:
             try:
-                result = process_event(event, cfg)
+                result = process_event(event, cfg, conn)
                 if result:
                     results.append(result)
             except Exception:
@@ -137,9 +172,10 @@ def main() -> None:
         print(f"  event_id:            {r['event_id']}")
         print(f"  track_id:            {r['track_id']}")
         print(f"  selected frame_num:  {r['frame_num']}")
-        print(f"  snapshot_path:       {r['snapshot_path']}")
-        print(f"  annotated_snapshot:  {r['annotated_snapshot_path']}")
-        print(f"  clip_path:           {r['clip_path']}")
+        print(f"  event_dir:           {r['event_dir']}")
+        print(f"    snapshot.jpg       {r['snapshot_path']}")
+        print(f"    annotated_snapshot.jpg {r['annotated_snapshot_path']}")
+        print(f"    clip_raw.mp4       {r['clip_path']}")
         print("-" * 60)
     print(f"Processed: {len(results)}/{len(events)} events")
     print("=" * 60)
