@@ -324,7 +324,7 @@ def test_intrusion_unknown_zone_raises(camera_config_module, tmp_path):
                     type: polygon
                     points: [[0,0],[1,0]]
                 rules: {}
-        """, "at least 3"),
+        """, "3 to 10"),
         # duplicate source_id across cameras
         ("""
             cameras:

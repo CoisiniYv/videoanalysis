@@ -56,6 +56,12 @@ import yaml
 ALLOWED_ZONE_TYPES = ("polygon", "line", "direction_line")
 ALLOWED_SEVERITIES = ("low", "medium", "high")
 
+# Polygon ROI vertex bounds. Must match
+# services/api/app/schemas/cameras.py — config the API accepts must
+# also load at runtime, and vice versa.
+POLYGON_MIN_POINTS = 3
+POLYGON_MAX_POINTS = 10
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -268,15 +274,17 @@ def _parse_zones(camera_id: str, zones_raw: Any) -> Dict[str, ZoneEntry]:
                     )
             points.append([float(pt[0]), float(pt[1])])
 
-        if ztype == "polygon" and len(points) < 3:
-            raise CameraConfigError(
-                f"cameras.{camera_id}.zones.{zone_name} polygon requires "
-                f"at least 3 points"
-            )
+        if ztype == "polygon":
+            if len(points) < POLYGON_MIN_POINTS or len(points) > POLYGON_MAX_POINTS:
+                raise CameraConfigError(
+                    f"cameras.{camera_id}.zones.{zone_name}.points polygon "
+                    f"requires {POLYGON_MIN_POINTS} to {POLYGON_MAX_POINTS} "
+                    f"points (got {len(points)})"
+                )
         if ztype in ("line", "direction_line") and len(points) != 2:
             raise CameraConfigError(
-                f"cameras.{camera_id}.zones.{zone_name} {ztype} requires "
-                f"exactly 2 points"
+                f"cameras.{camera_id}.zones.{zone_name}.points {ztype} "
+                f"requires exactly 2 points (got {len(points)})"
             )
 
         payload = z_raw.get("payload", {})

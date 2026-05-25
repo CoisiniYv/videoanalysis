@@ -11,6 +11,11 @@ from pydantic import BaseModel, Field, field_validator
 ALLOWED_ZONE_TYPES = ("polygon", "line", "direction_line")
 ALLOWED_SEVERITIES = ("low", "medium", "high")
 
+# Polygon ROI vertex bounds. 3 keeps it a valid polygon; 10 keeps the
+# error surface manageable without ruling out reasonable site shapes.
+POLYGON_MIN_POINTS = 3
+POLYGON_MAX_POINTS = 10
+
 
 def _iso(ts: Any) -> Optional[str]:
     if ts is None:
@@ -105,18 +110,28 @@ class ZoneCreate(BaseModel):
             raise ValueError("points must be a list")
         for i, p in enumerate(v):
             if not isinstance(p, list) or len(p) != 2:
-                raise ValueError(f"points[{i}] must be [x, y]")
+                raise ValueError(f"points[{i}] must be [x, y] numeric pair")
             for j, coord in enumerate(p):
                 if not isinstance(coord, (int, float)) or isinstance(coord, bool):
-                    raise ValueError(f"points[{i}][{j}] must be a number")
+                    raise ValueError(
+                        f"points[{i}][{j}] must be a number (got {type(coord).__name__})"
+                    )
         return v
 
     def validate_for_zone_type(self) -> None:
         """Shape check that depends on both zone_type and points length."""
-        if self.zone_type == "polygon" and len(self.points) < 3:
-            raise ValueError("polygon zones require at least 3 points")
+        if self.zone_type == "polygon":
+            n = len(self.points)
+            if n < POLYGON_MIN_POINTS or n > POLYGON_MAX_POINTS:
+                raise ValueError(
+                    f"polygon zone requires {POLYGON_MIN_POINTS} to "
+                    f"{POLYGON_MAX_POINTS} points (got {n})"
+                )
         if self.zone_type in ("line", "direction_line") and len(self.points) != 2:
-            raise ValueError(f"{self.zone_type} zones require exactly 2 points")
+            raise ValueError(
+                f"{self.zone_type} zone requires exactly 2 points "
+                f"(got {len(self.points)})"
+            )
 
 
 class ZoneResponse(BaseModel):

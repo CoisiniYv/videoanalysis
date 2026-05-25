@@ -71,7 +71,7 @@ existing `{data, error, request_id}` response envelope.
 | `cameras.source_id` non-empty, globally unique | enforced (UNIQUE) |
 | `zone_name` unique per camera | enforced (UNIQUE) |
 | `zone_type ∈ {polygon, line, direction_line}` | enforced |
-| `polygon` requires ≥ 3 points | enforced |
+| `polygon` requires 3..10 points (tightened in C1.3) | enforced |
 | `line` / `direction_line` require exactly 2 points | enforced |
 | `points[i]` shape `[x, y]` numeric | enforced |
 | `rule_type` unique per camera (C1-lite) | enforced (UNIQUE) |

@@ -1,9 +1,13 @@
 # Phase C1.2 — Official Adapter Camera Runtime Control
 
 Date: 2026-05-25
-Status: **shipped** — runtime is wired, smoke is gated on a real video
-source. See `docs/phase_c1_2_official_adapter_runtime_plan.md` for the
-topology design rationale.
+Status: **shipped** — runtime is wired, smoke verified on a real video
+source (post C1.2 fix `2845d3f`). See
+`docs/phase_c1_2_official_adapter_runtime_plan.md` for the
+topology design rationale, and
+`docs/phase_c1_3_operator_camera_config_cli.md` for the operator CLI
+that wraps these endpoints. Polygon ROIs may have 3..10 vertices
+(tightened in C1.3).
 
 C1.2 closes the gap from C1.1's "configure a camera through the API"
 to "configure a camera and actually run the existing E1 evidence loop

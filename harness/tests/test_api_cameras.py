@@ -429,7 +429,7 @@ def test_polygon_zone_requires_three_points(client):
     _create_camera(client)
     resp = _create_zone(client, points=[[0, 0], [1, 1]])
     assert resp.status_code == 400
-    assert "at least 3" in resp.json()["error"]["message"]
+    assert "3 to 10" in resp.json()["error"]["message"]
 
 
 def test_line_zone_requires_two_points(client):
