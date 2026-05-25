@@ -13,6 +13,8 @@
 #           -> ZMQ sink (pub+bind:tcp)
 #             -> metadata-sink (metadata_json.py) -> NDJSON
 #             -> video-file-sink (video_files.py) -> video.mov + metadata.json
+#         -> evidence-worker (one-shot: snapshot + annotated + clip from aligned output)
+#         -> api (serves events + media URLs)
 #
 # Does NOT include: replay-service, clip-worker, media-worker.
 # Phase 3B smoke tests are unaffected (separate compose project).
@@ -173,6 +175,32 @@ services:
     restart: unless-stopped
 
   # ====================================================================
+  # API — serves events and media files
+  # ====================================================================
+
+  api:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: phase3h-zmq-api:latest
+    container_name: phase3h-zmq-api
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      REDIS_URL: redis://redis:6379/0
+      ALERT_STREAM: security.alerts
+      MEDIA_ROOT: /media
+    volumes:
+      - ../media/evidence:/media/evidence:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ====================================================================
   # Video File Sink — consumes Savant ZMQ sink frames+metadata, writes
   # video.mov + metadata.json
   # ====================================================================
@@ -194,3 +222,32 @@ services:
     depends_on:
       - savant-zmq
     restart: unless-stopped
+
+  # ====================================================================
+  # Evidence Worker — one-shot: generates snapshot, annotated snapshot,
+  # and clip from Phase 3H.2 aligned video.mov + metadata.json output.
+  # Processes intrusion events needing evidence, then exits.
+  # Re-run to process new events.
+  # ====================================================================
+
+  evidence-worker:
+    build:
+      context: ../services/evidence-worker
+      dockerfile: Dockerfile
+    image: phase3h-zmq-evidence-worker:latest
+    container_name: phase3h-zmq-evidence-worker
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      VIDEO_DIR: /media/phase3h-savant-output
+      SNAPSHOT_OUTPUT_DIR: /media/evidence/snapshots
+      ANNOTATED_OUTPUT_DIR: /media/evidence/snapshots/annotated
+      CLIP_OUTPUT_DIR: /media/evidence/clips
+      PRE_SECONDS: "3"
+      POST_SECONDS: "3"
+      FPS: "30"
+      EVIDENCE_MAX_EVENTS: "5"
+    volumes:
+      - ../media/phase3h-savant-output:/media/phase3h-savant-output:ro
+      - ../media/evidence:/media/evidence:rw
+    depends_on:
+      postgres: { condition: service_healthy }
