@@ -1,0 +1,145 @@
+# Phase 3H — Official ZeroMQ Adapter Ingestion POC
+#
+# Verifies Savant module can use the official zeromq_source_bin (default)
+# instead of uridecodebin, receiving frames from source-adapter via ZMQ.
+#
+# Topology:
+#   testVideo/test.mp4
+#     -> source-adapter (video_loop.sh -> ZMQ dealer+connect)
+#       -> savant-zmq (zeromq_source_bin router+bind)
+#         -> YOLO26-pose / nvtracker / behavior_event_export_probe
+#           -> Redis security.events
+#             -> event-worker -> PostgreSQL
+#
+# Does NOT include: replay-service, clip-worker, media-worker, video-file-sink.
+# Phase 3B smoke tests are unaffected (separate compose project).
+
+name: phase3h-zmq
+
+services:
+  # ====================================================================
+  # Backend infrastructure
+  # ====================================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: phase3h-zmq-redis
+    ports:
+      - "6382:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: phase3h-zmq-postgres
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5435:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ====================================================================
+  # Source adapter — reads test.mp4, sends frames via ZMQ to savant-zmq
+  # ====================================================================
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: phase3h-zmq-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/video_loop.sh",
+      ]
+    environment:
+      SOURCE_ID: phase3h
+      LOCATION: /testVideo/test.mp4
+      ZMQ_ENDPOINT: dealer+connect:tcp://savant-zmq:5555
+      DOWNLOAD_PATH: /tmp/video-loop-cache
+      SYNC_OUTPUT: "true"
+    volumes:
+      - ../testVideo:/testVideo:ro
+    depends_on:
+      - savant-zmq
+    restart: unless-stopped
+
+  # ====================================================================
+  # Savant — official zeromq_source_bin input + GPU inference
+  # ====================================================================
+
+  savant-zmq:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: phase3h-zmq-savant
+    entrypoint:
+      [
+        "bash", "-c",
+        "pip install -q redis && exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5555
+      ZMQ_SINK_ENDPOINT: pub+connect:ipc:///tmp/sink.ipc
+      SOURCE_ID: phase3h
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      SAVANT_EVENT_MEDIA_REQUIRED: "${SAVANT_EVENT_MEDIA_REQUIRED:-false}"
+    volumes:
+      - ../modules/savant_phase3h_zmq:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # ====================================================================
+  # Event Worker — consumes security.events, writes to PostgreSQL
+  # ====================================================================
+
+  event-worker:
+    build:
+      context: ../services/event-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: phase3h-zmq-event-worker:latest
+    container_name: phase3h-zmq-event-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      RECORD_REQUEST_STREAM: security.record_requests
+      RECORDING_ENABLED: "false"
+      CONSUMER_GROUP: event-workers-3h
+      CONSUMER_NAME: event-worker-3h-1
+      POLL_TIMEOUT_MS: "2000"
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped

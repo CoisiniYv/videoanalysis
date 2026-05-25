@@ -1,0 +1,15 @@
+cameras:
+  cam_01:
+    camera_id: cam_01
+    zones:
+      full_frame:
+        name: full_frame
+        polygon: [[-100, -100], [3000, -100], [3000, 2000], [-100, 2000]]
+    rules:
+      debug_intrusion:
+        name: debug_intrusion
+        rule_type: intrusion
+        zone: full_frame
+        enabled: true
+        min_inside_ms: 1
+        cooldown_s: 5
