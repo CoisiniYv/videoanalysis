@@ -153,12 +153,19 @@ check 6 "annotated_snapshot_status is ready" "$([[ "$ANN_STATUS" == "ready" ]] &
 check 7 "annotated_snapshot_path stored in payload.media" "$([[ -n "$ANN_PATH" && "$ANN_PATH" != "NULL" ]] && echo pass || echo fail)"
 
 # ===========================================================================
-# [8] zone_overlay_status present
+# [8] bbox_overlay_status present — must be skipped_untrusted_bbox (smoke bbox is injected)
 # ===========================================================================
-check 8 "zone_overlay_status is skipped_missing_polygon" "$([[ "$ZONE_OVERLAY" == "skipped_missing_polygon" ]] && echo pass || echo fail)"
+BBOX_OVERLAY="$(_pg "SELECT payload->'media'->>'bbox_overlay_status' FROM events WHERE source_event_id='${SID}';")"
+echo -e "${BLUE}[debug] bbox_overlay=${BBOX_OVERLAY}${NC}"
+check 8 "bbox_overlay_status is skipped_untrusted_bbox" "$([[ "$BBOX_OVERLAY" == "skipped_untrusted_bbox" ]] && echo pass || echo fail)"
 
 # ===========================================================================
-# [9] API returns annotated_snapshot_url → curl HTTP 200
+# [9] zone_overlay_status present
+# ===========================================================================
+check 9 "zone_overlay_status is skipped_missing_polygon" "$([[ "$ZONE_OVERLAY" == "skipped_missing_polygon" ]] && echo pass || echo fail)"
+
+# ===========================================================================
+# [10] API returns annotated_snapshot_url → curl HTTP 200
 # ===========================================================================
 EVENT_RESP="$(_curl "${API_BASE}/api/v1/events/${SID}")"
 ANN_URL="$(echo "$EVENT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('annotated_snapshot_url','') or '')" 2>/dev/null)"
@@ -167,40 +174,40 @@ echo -e "${BLUE}[debug] annotated_snapshot_url=${ANN_URL}${NC}"
 if [[ -n "$ANN_URL" && "$ANN_URL" != "None" ]]; then
     ANN_HTTP="$(_curl -o /dev/null -w '%{http_code}' "${API_BASE}${ANN_URL}")"
     echo -e "${BLUE}[debug] curl ${API_BASE}${ANN_URL} HTTP ${ANN_HTTP}${NC}"
-    check 9 "API returns annotated_snapshot_url and curl 200" "$([[ "$ANN_HTTP" == "200" ]] && echo pass || echo fail)"
+    check 10 "API returns annotated_snapshot_url and curl 200" "$([[ "$ANN_HTTP" == "200" ]] && echo pass || echo fail)"
 else
-    check 9 "API returns annotated_snapshot_url" fail
+    check 10 "API returns annotated_snapshot_url" fail
 fi
 
 # ===========================================================================
-# [10] Annotated file exists on filesystem
+# [11] Annotated file exists on filesystem
 # ===========================================================================
 if [[ -n "$ANN_PATH" && "$ANN_PATH" != "NULL" ]]; then
     ANN_FILE_EXISTS="$(docker exec phase3b-media-worker test -f "${ANN_PATH}" && echo yes || echo no)"
-    check 10 "annotated snapshot file exists on media volume" "$([[ "$ANN_FILE_EXISTS" == "yes" ]] && echo pass || echo fail)"
+    check 11 "annotated snapshot file exists on media volume" "$([[ "$ANN_FILE_EXISTS" == "yes" ]] && echo pass || echo fail)"
 else
-    check 10 "annotated snapshot file exists on media volume" fail
+    check 11 "annotated snapshot file exists on media volume" fail
 fi
 
 # ===========================================================================
-# [11] Raw snapshot and clip_status unchanged after annotation
+# [12] Raw snapshot and clip_status unchanged after annotation
 # ===========================================================================
 CLIP_STATUS_AFTER="$(_pg "SELECT payload->'media'->>'clip_status' FROM events WHERE source_event_id='${SID}';")"
 SNAP_STATUS_AFTER="$(_pg "SELECT payload->'media'->>'snapshot_status' FROM events WHERE source_event_id='${SID}';")"
-check 11 "clip_status remains ready after annotation" "$([[ "$CLIP_STATUS_AFTER" == "ready" ]] && echo pass || echo fail)"
-check 12 "snapshot_status remains ready after annotation" "$([[ "$SNAP_STATUS_AFTER" == "ready" ]] && echo pass || echo fail)"
+check 12 "clip_status remains ready after annotation" "$([[ "$CLIP_STATUS_AFTER" == "ready" ]] && echo pass || echo fail)"
+check 13 "snapshot_status remains ready after annotation" "$([[ "$SNAP_STATUS_AFTER" == "ready" ]] && echo pass || echo fail)"
 
 # ===========================================================================
-# [13] Media-worker re-scan idempotent — annotation unchanged
+# [14] Media-worker re-scan idempotent — annotation unchanged
 # ===========================================================================
 docker restart phase3b-media-worker > /dev/null 2>&1 || true
 sleep 20
 
 ANN_STATUS_AFTER="$(_pg "SELECT payload->'media'->>'annotated_snapshot_status' FROM events WHERE source_event_id='${SID}';")"
 ANN_PATH_AFTER="$(_pg "SELECT payload->'media'->>'annotated_snapshot_path' FROM events WHERE source_event_id='${SID}';")"
-check 13 "media-worker re-scan idempotent (annotated_snapshot_path unchanged)" "$([[ "$ANN_PATH" == "$ANN_PATH_AFTER" ]] && echo pass || echo fail)"
-check 14 "media-worker re-scan preserves annotated_snapshot_status=ready" "$([[ "$ANN_STATUS_AFTER" == "ready" ]] && echo pass || echo fail)"
+check 14 "media-worker re-scan idempotent (annotated_snapshot_path unchanged)" "$([[ "$ANN_PATH" == "$ANN_PATH_AFTER" ]] && echo pass || echo fail)"
+check 15 "media-worker re-scan preserves annotated_snapshot_status=ready" "$([[ "$ANN_STATUS_AFTER" == "ready" ]] && echo pass || echo fail)"
 
 echo ""
-echo "--- Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed ---"
+echo "--- Results: ${PASS_COUNT}/15 passed, ${FAIL_COUNT} failed ---"
 if [[ "$FAIL_COUNT" -gt 0 ]]; then exit 1; fi

@@ -126,21 +126,27 @@ def generate_annotated_snapshot(
     raw_snapshot_path: str,
     payload: Dict[str, Any],
     annotated_output_dir: str,
+    bbox_trusted: bool = False,
 ) -> Dict[str, Any]:
     """Generate an annotated snapshot from a raw Phase 3C snapshot.
 
-    Draws the event bbox, a text label block, and (if available) the zone
-    polygon onto the raw snapshot image.
+    Draws a text label block.  Optionally draws the event bbox (only when
+    *bbox_trusted* is True) and the zone polygon (if available).
 
     Args:
         event_id: Event UUID, used for the output filename.
         raw_snapshot_path: Path to the raw snapshot JPEG.
         payload: The full ``events.payload`` JSONB column.
         annotated_output_dir: Directory for annotated snapshot files.
+        bbox_trusted: If True, the payload bbox came from a trusted source
+            (e.g. real-time Savant detection) and should be drawn.  If False,
+            the bbox is skipped and ``bbox_overlay_status`` records why.
 
     Returns dict with keys:
         annotated_snapshot_path: Absolute path or None.
         annotated_snapshot_status: ``"ready"`` or ``"failed"``.
+        bbox_overlay_status: ``"ready"``, ``"skipped_missing_bbox"``,
+            ``"skipped_untrusted_bbox"``, or None.
         zone_overlay_status: ``"ok"``, ``"skipped_missing_polygon"``, or None.
         annotated_snapshot_error_message: Present only on failure.
     """
@@ -152,6 +158,7 @@ def generate_annotated_snapshot(
         return {
             "annotated_snapshot_path": None,
             "annotated_snapshot_status": "failed",
+            "bbox_overlay_status": None,
             "zone_overlay_status": None,
             "annotated_snapshot_error_message": (
                 f"raw snapshot not found: {raw_snapshot_path or '(empty)'}"
@@ -166,6 +173,7 @@ def generate_annotated_snapshot(
         return {
             "annotated_snapshot_path": None,
             "annotated_snapshot_status": "failed",
+            "bbox_overlay_status": None,
             "zone_overlay_status": None,
             "annotated_snapshot_error_message": "failed to open raw snapshot image",
         }
@@ -173,10 +181,19 @@ def generate_annotated_snapshot(
     # 3. Draw overlays
     draw = ImageDraw.Draw(img)
 
+    # 3a. Bbox — only when trusted
+    bbox_overlay_status = None
     bbox = payload.get("bbox")
     if bbox and isinstance(bbox, dict):
-        _draw_bbox(draw, bbox)
+        if bbox_trusted:
+            _draw_bbox(draw, bbox)
+            bbox_overlay_status = "ready"
+        else:
+            bbox_overlay_status = "skipped_untrusted_bbox"
+    else:
+        bbox_overlay_status = "skipped_missing_bbox"
 
+    # 3b. Label block (always drawn)
     event_type = str(payload.get("event_type") or "unknown")
     camera_id = str(payload.get("camera_id") or payload.get("source_id", "unknown"))
     track_id = str(payload.get("track_id", "unknown"))
@@ -193,7 +210,7 @@ def generate_annotated_snapshot(
         event_ts_ms=event_ts_ms,
     )
 
-    # Polygon overlay
+    # 3c. Polygon overlay
     zone_overlay_status = None
     polygon = _extract_polygon(payload)
     if polygon:
@@ -212,18 +229,20 @@ def generate_annotated_snapshot(
         return {
             "annotated_snapshot_path": None,
             "annotated_snapshot_status": "failed",
+            "bbox_overlay_status": bbox_overlay_status,
             "zone_overlay_status": zone_overlay_status,
             "annotated_snapshot_error_message": "failed to save annotated snapshot",
         }
 
     logger.info(
-        "annotated_snapshot_generated event_id=%s path=%s zone_overlay=%s",
-        event_id, output_path, zone_overlay_status,
+        "annotated_snapshot_generated event_id=%s path=%s bbox_overlay=%s zone_overlay=%s",
+        event_id, output_path, bbox_overlay_status, zone_overlay_status,
     )
 
     result: Dict[str, Any] = {
         "annotated_snapshot_path": output_path,
         "annotated_snapshot_status": "ready",
+        "bbox_overlay_status": bbox_overlay_status,
     }
     if zone_overlay_status is not None:
         result["zone_overlay_status"] = zone_overlay_status

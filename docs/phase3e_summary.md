@@ -10,13 +10,32 @@ Generate an annotated evidence snapshot from the raw Phase 3C snapshot using Pil
 
 Each annotated snapshot includes:
 
-1. **Bbox rectangle** — red outline drawn from `payload.bbox {x, y, width, height}`
+1. **Bbox rectangle** — red outline drawn from `payload.bbox {x, y, width, height}`, but ONLY when the bbox source is trusted (see Bbox Trust Guard below)
 2. **Text label block** — opaque dark block in top-left corner with:
    - Event ID (truncated to 8 chars)
    - Event type and camera ID
    - Track ID and confidence percentage
    - UTC timestamp
 3. **Zone polygon** (conditional) — green outline if polygon coordinates are in payload (`payload.polygon` or `payload.zone_polygon`)
+
+## Bbox Trust Guard (Phase 3E.1)
+
+Bbox drawing is gated on whether the bbox coordinates come from a trusted source (real Savant detection). The trust signal is derived from the replay clip's `metadata.json`: if at least one frame contains non-empty `metadata.objects`, the bbox is trusted. If every frame has empty `metadata.objects` (or metadata.json is missing), the bbox is untrusted.
+
+| Condition | `bbox_overlay_status` | Bbox drawn? |
+|---|---|---|
+| `bbox_trusted=True` + valid bbox in payload | `ready` | Yes |
+| `bbox_trusted=False` + valid bbox in payload | `skipped_untrusted_bbox` | No |
+| No bbox in payload | `skipped_missing_bbox` | No |
+| No raw snapshot / image open failure | `None` (annotation failed) | No |
+
+The text label block is always drawn regardless of bbox trust.
+
+### Why this guard exists
+
+In the current smoke/debug environment, `events.payload.bbox` is injected by the smoke script for testing, and Savant is not running (gated behind GPU profile). All replay clip `metadata.json` files have empty `metadata.objects` on every frame because no real detections were produced. Without this guard, the annotated snapshot would draw a bbox that has no corresponding real detection — misleading for evidence.
+
+When Savant runs (with GPU), detection metadata populates `metadata.objects` with real person bbox data (class_id, track_id, bbox coordinates), and the bbox will be drawn as trusted evidence.
 
 ## Zone Overlay Policy
 
@@ -53,6 +72,7 @@ Each annotated snapshot includes:
 | `annotated_snapshot_status` | string | `"ready"` or `"failed"` |
 | `annotated_snapshot_path` | string | Absolute path to annotated JPEG |
 | `annotated_snapshot_error_message` | string | Present only on failure |
+| `bbox_overlay_status` | string | `"ready"`, `"skipped_missing_bbox"`, `"skipped_untrusted_bbox"`, or absent |
 | `zone_overlay_status` | string | `"ok"` or `"skipped_missing_polygon"` or absent |
 
 Note: `annotated_snapshot_path` is stored in the JSONB payload (not a top-level column), so no DB migration is required.
@@ -60,28 +80,33 @@ Note: `annotated_snapshot_path` is stored in the JSONB payload (not a top-level 
 ## Unit Test Results
 
 ```
-harness/tests/test_phase3e_annotated_snapshot.py — 20 passed
+harness/tests/test_phase3e_annotated_snapshot.py — 27 passed
 
 Coverage:
-- annotated snapshot generates with bbox + label
-- annotated snapshot generates without bbox (label only)
+- annotated snapshot generates with bbox + label (trusted bbox)
+- bbox skipped when untrusted (bbox_overlay_status=skipped_untrusted_bbox)
+- bbox skipped when missing (bbox_overlay_status=skipped_missing_bbox)
+- annotation succeeds label-only even with untrusted bbox
 - zone_overlay_status=ok when polygon present
 - zone_overlay_status=skipped_missing_polygon when only zone_id
 - polygon from zone_polygon alt key also works
 - fails when raw snapshot missing
 - fails when raw snapshot is corrupt (not JPEG)
-- _annotation_needed returns snapshot-ready events
-- _annotation_needed skips already-annotated events
+- _annotation_needed returns snapshot-ready events (4 cols)
+- _annotation_needed skips already-annotated events (Python defense-in-depth)
 - _annotation_needed skips when no snapshots
 - _update_annotation_status writes correct JSONB paths
 - _update_annotation_status handles error_message
-- _process_pending_annotations generates via Pillow
+- _update_annotation_status includes bbox_overlay_status path
+- _process_pending_annotations generates via Pillow (trust gated)
 - _process_pending_annotations idempotent (existing file, no re-generation)
 - annotation failure doesn't modify {media,snapshot_status}
 - _extract_polygon: None when missing, None when <3 points
 - _extract_polygon: extracts from polygon and zone_polygon keys
 - _draw_bbox skips zero-size bbox
 - _draw_polygon skips <3 points
+- _metadata_has_detections: True when objects present
+- _metadata_has_detections: False when all empty / missing / None
 ```
 
 ## API Exposure

@@ -496,7 +496,7 @@ def _annotation_needed(pg_conn: psycopg.Connection) -> list[dict]:
         with pg_conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, snapshot_path, payload
+                SELECT id, snapshot_path, payload, clip_path
                 FROM events
                 WHERE payload -> 'media' ->> 'snapshot_status' = 'ready'
                   AND snapshot_path IS NOT NULL
@@ -522,6 +522,7 @@ def _annotation_needed(pg_conn: psycopg.Connection) -> list[dict]:
                     "event_id": row[0],
                     "snapshot_path": row[1],
                     "payload": payload,
+                    "clip_path": row[3],
                 })
             return rows
     except Exception:
@@ -534,6 +535,7 @@ def _update_annotation_status(
     event_id: str,
     annotated_snapshot_path: str | None,
     annotated_snapshot_status: str,
+    bbox_overlay_status: str | None = None,
     zone_overlay_status: str | None = None,
     error_message: str | None = None,
 ) -> bool:
@@ -551,6 +553,10 @@ def _update_annotation_status(
                 parts.append("{media,annotated_snapshot_path}")
                 params["ann_path"] = json.dumps(annotated_snapshot_path)
 
+            if bbox_overlay_status is not None:
+                parts.append("{media,bbox_overlay_status}")
+                params["bbox_overlay"] = json.dumps(bbox_overlay_status)
+
             if zone_overlay_status is not None:
                 parts.append("{media,zone_overlay_status}")
                 params["zone_overlay"] = json.dumps(zone_overlay_status)
@@ -565,6 +571,7 @@ def _update_annotation_status(
             path_param_map = {
                 "{media,annotated_snapshot_status}": "ann_status",
                 "{media,annotated_snapshot_path}": "ann_path",
+                "{media,bbox_overlay_status}": "bbox_overlay",
                 "{media,zone_overlay_status}": "zone_overlay",
                 "{media,annotated_snapshot_error_message}": "ann_err",
             }
@@ -594,11 +601,38 @@ def _update_annotation_status(
         return False
 
 
+def _metadata_has_detections(clip_path: str | None) -> bool:
+    """Check if the clip's metadata.json contains any non-empty objects frames.
+
+    Returns False if clip_path is None, the metadata file is missing, or
+    every frame has ``"objects": []``.
+    """
+    if not clip_path:
+        return False
+    meta_path = os.path.join(os.path.dirname(clip_path), "metadata.json")
+    try:
+        with open(meta_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if '"objects":[' in line and '"objects":[]' not in line:
+                    return True
+        return False
+    except Exception:
+        logger.debug("metadata.json unreadable for %s", clip_path)
+        return False
+
+
 def _process_pending_annotations(
     pg_conn: psycopg.Connection,
     annotated_output_dir: str,
 ) -> int:
     """Generate annotated snapshots for events with ready raw snapshots.
+
+    Determines bbox trust by checking whether the clip's metadata.json
+    contains any non-empty ``metadata.objects`` frames (i.e. real Savant
+    detection data).  The bbox is only drawn when the source is trusted.
 
     Idempotent: skips events whose annotated_snapshot_status is already
     'ready'.  If the annotated file already exists on disk, promotes the
@@ -613,6 +647,10 @@ def _process_pending_annotations(
         event_id = ev["event_id"]
         raw_snapshot_path = ev["snapshot_path"]
         payload = ev["payload"] or {}
+        clip_path = ev.get("clip_path")
+
+        # Determine bbox trust from detection metadata
+        bbox_trusted = _metadata_has_detections(clip_path)
 
         # Idempotency: if annotated file already exists, promote to ready
         expected_path = os.path.join(annotated_output_dir, f"{event_id}.jpg")
@@ -629,19 +667,24 @@ def _process_pending_annotations(
             updated += 1
             continue
 
-        logger.info("generating_annotated_snapshot event_id=%s", event_id)
+        logger.info(
+            "generating_annotated_snapshot event_id=%s bbox_trusted=%s",
+            event_id, bbox_trusted,
+        )
 
         result = generate_annotated_snapshot(
             event_id=event_id,
             raw_snapshot_path=raw_snapshot_path,
             payload=payload,
             annotated_output_dir=annotated_output_dir,
+            bbox_trusted=bbox_trusted,
         )
 
         _update_annotation_status(
             pg_conn, event_id,
             annotated_snapshot_path=result.get("annotated_snapshot_path"),
             annotated_snapshot_status=result["annotated_snapshot_status"],
+            bbox_overlay_status=result.get("bbox_overlay_status"),
             zone_overlay_status=result.get("zone_overlay_status"),
             error_message=result.get("annotated_snapshot_error_message"),
         )

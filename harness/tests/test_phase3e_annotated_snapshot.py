@@ -1,4 +1,4 @@
-"""Tests for Phase 3E — Annotated Snapshot MVP."""
+"""Tests for Phase 3E.1 — Annotated Snapshot with bbox trust guard."""
 
 from __future__ import annotations
 
@@ -28,25 +28,37 @@ from app.annotated_snapshot import (
 )
 from app.worker import (
     _annotation_needed,
+    _metadata_has_detections,
     _process_pending_annotations,
     _update_annotation_status,
 )
 
 
 def _make_test_jpeg(filepath: str, size: tuple = (320, 240)) -> None:
-    """Create a small solid-color JPEG for testing."""
     from PIL import Image
     img = Image.new("RGB", size, color=(60, 60, 80))
     img.save(filepath, "JPEG")
 
 
+def _make_metadata_json(dirpath: str, objects_frames: int = 0) -> str:
+    """Create a metadata.json with *objects_frames* non-empty objects frames."""
+    meta_path = os.path.join(dirpath, "metadata.json")
+    with open(meta_path, "w") as f:
+        for i in range(10):
+            if i < objects_frames:
+                f.write('{"frame_num":%d,"metadata":{"objects":[{"bbox":{"x":100,"y":50,"w":80,"h":120}}]}}\n' % i)
+            else:
+                f.write('{"frame_num":%d,"metadata":{"objects":[]}}\n' % i)
+    return meta_path
+
+
 # ===========================================================================
-# generate_annotated_snapshot — success paths
+# generate_annotated_snapshot — bbox trust guard
 # ===========================================================================
 
 
-def test_annotated_snapshot_generates_with_bbox():
-    """Annotated snapshot draws bbox and label on raw snapshot."""
+def test_bbox_trusted_drawn():
+    """Trusted bbox is drawn, bbox_overlay_status=ready."""
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_path = os.path.join(tmpdir, "raw.jpg")
         _make_test_jpeg(raw_path)
@@ -55,7 +67,6 @@ def test_annotated_snapshot_generates_with_bbox():
         payload = {
             "event_type": "intrusion",
             "camera_id": "cam_01",
-            "source_id": "phase3b",
             "track_id": "t_001",
             "confidence": 0.92,
             "event_ts_ms": 1717000000000,
@@ -64,17 +75,43 @@ def test_annotated_snapshot_generates_with_bbox():
         }
 
         result = generate_annotated_snapshot(
-            "ev-001", raw_path, payload, ann_dir,
+            "ev-001", raw_path, payload, ann_dir, bbox_trusted=True,
         )
 
         assert result["annotated_snapshot_status"] == "ready"
-        assert result["annotated_snapshot_path"] is not None
-        assert os.path.isfile(result["annotated_snapshot_path"])
+        assert result["bbox_overlay_status"] == "ready"
         assert result["zone_overlay_status"] == "skipped_missing_polygon"
+        assert os.path.isfile(result["annotated_snapshot_path"])
 
 
-def test_annotated_snapshot_generates_without_bbox():
-    """Annotated snapshot works when payload has no bbox (label only)."""
+def test_bbox_untrusted_skipped():
+    """Untrusted bbox is NOT drawn, bbox_overlay_status=skipped_untrusted_bbox."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        payload = {
+            "event_type": "intrusion",
+            "camera_id": "cam_01",
+            "track_id": "t_002",
+            "confidence": 0.92,
+            "event_ts_ms": 1717000000000,
+            "bbox": {"x": 100, "y": 50, "width": 200, "height": 150},
+            "zone_id": "full_frame",
+        }
+
+        result = generate_annotated_snapshot(
+            "ev-002", raw_path, payload, ann_dir, bbox_trusted=False,
+        )
+
+        assert result["annotated_snapshot_status"] == "ready"
+        assert result["bbox_overlay_status"] == "skipped_untrusted_bbox"
+        assert os.path.isfile(result["annotated_snapshot_path"])
+
+
+def test_bbox_missing():
+    """No bbox in payload → bbox_overlay_status=skipped_missing_bbox."""
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_path = os.path.join(tmpdir, "raw.jpg")
         _make_test_jpeg(raw_path)
@@ -83,35 +120,9 @@ def test_annotated_snapshot_generates_without_bbox():
         payload = {
             "event_type": "loitering",
             "camera_id": "cam_02",
-            "track_id": "t_002",
+            "track_id": "t_003",
             "confidence": 0.75,
             "event_ts_ms": 1717000001000,
-        }
-
-        result = generate_annotated_snapshot(
-            "ev-002", raw_path, payload, ann_dir,
-        )
-
-        assert result["annotated_snapshot_status"] == "ready"
-        assert os.path.isfile(result["annotated_snapshot_path"])
-        assert "zone_overlay_status" not in result
-
-
-def test_annotated_snapshot_with_zone_polygon():
-    """When polygon is present in payload, it is drawn and zone_overlay_status=ok."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        raw_path = os.path.join(tmpdir, "raw.jpg")
-        _make_test_jpeg(raw_path)
-        ann_dir = os.path.join(tmpdir, "annotated")
-
-        payload = {
-            "event_type": "intrusion",
-            "camera_id": "cam_01",
-            "track_id": "t_003",
-            "confidence": 0.88,
-            "event_ts_ms": 1717000002000,
-            "zone_id": "perimeter",
-            "polygon": [[50, 50], [250, 50], [250, 200], [50, 200]],
         }
 
         result = generate_annotated_snapshot(
@@ -119,11 +130,42 @@ def test_annotated_snapshot_with_zone_polygon():
         )
 
         assert result["annotated_snapshot_status"] == "ready"
-        assert result["zone_overlay_status"] == "ok"
+        assert result["bbox_overlay_status"] == "skipped_missing_bbox"
+        assert os.path.isfile(result["annotated_snapshot_path"])
 
 
-def test_annotated_snapshot_with_zone_polygon_alt_key():
-    """Polygon from zone_polygon key is also accepted."""
+def test_annotation_still_succeeds_label_only():
+    """Annotation succeeds with label only, even when bbox is untrusted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        payload = {
+            "event_type": "intrusion",
+            "camera_id": "cam_03",
+            "track_id": "t_004",
+            "confidence": 0.5,
+            "event_ts_ms": 1717000003000,
+            "bbox": {"x": 10, "y": 10, "width": 5, "height": 5},
+        }
+
+        result = generate_annotated_snapshot(
+            "ev-004", raw_path, payload, ann_dir, bbox_trusted=False,
+        )
+
+        assert result["annotated_snapshot_status"] == "ready"
+        assert result["bbox_overlay_status"] == "skipped_untrusted_bbox"
+        assert os.path.isfile(result["annotated_snapshot_path"])
+
+
+# ===========================================================================
+# generate_annotated_snapshot — polygon overlay (unchanged logic)
+# ===========================================================================
+
+
+def test_annotated_snapshot_with_zone_polygon():
+    """Polygon drawn, zone_overlay_status=ok, bbox_overlay_status handled."""
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_path = os.path.join(tmpdir, "raw.jpg")
         _make_test_jpeg(raw_path)
@@ -132,7 +174,33 @@ def test_annotated_snapshot_with_zone_polygon_alt_key():
         payload = {
             "event_type": "intrusion",
             "camera_id": "cam_01",
-            "track_id": "t_004",
+            "track_id": "t_005",
+            "confidence": 0.88,
+            "event_ts_ms": 1717000002000,
+            "zone_id": "perimeter",
+            "polygon": [[50, 50], [250, 50], [250, 200], [50, 200]],
+        }
+
+        result = generate_annotated_snapshot(
+            "ev-005", raw_path, payload, ann_dir,
+        )
+
+        assert result["annotated_snapshot_status"] == "ready"
+        assert result["zone_overlay_status"] == "ok"
+        assert result["bbox_overlay_status"] == "skipped_missing_bbox"
+
+
+def test_annotated_snapshot_with_zone_polygon_alt_key():
+    """Polygon from zone_polygon key accepted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        payload = {
+            "event_type": "intrusion",
+            "camera_id": "cam_01",
+            "track_id": "t_006",
             "confidence": 0.88,
             "event_ts_ms": 1717000002000,
             "zone_id": "perimeter",
@@ -140,7 +208,7 @@ def test_annotated_snapshot_with_zone_polygon_alt_key():
         }
 
         result = generate_annotated_snapshot(
-            "ev-004", raw_path, payload, ann_dir,
+            "ev-006", raw_path, payload, ann_dir,
         )
 
         assert result["annotated_snapshot_status"] == "ready"
@@ -155,11 +223,12 @@ def test_annotated_snapshot_with_zone_polygon_alt_key():
 def test_annotated_snapshot_fails_missing_raw():
     """Missing raw snapshot → annotated_snapshot_status=failed."""
     result = generate_annotated_snapshot(
-        "ev-005", "/nonexistent/snap.jpg", {}, "/tmp/ann",
+        "ev-007", "/nonexistent/snap.jpg", {}, "/tmp/ann",
     )
     assert result["annotated_snapshot_status"] == "failed"
     assert result["annotated_snapshot_path"] is None
     assert "not found" in result["annotated_snapshot_error_message"]
+    assert result["bbox_overlay_status"] is None
 
 
 def test_annotated_snapshot_fails_corrupt_image():
@@ -171,7 +240,7 @@ def test_annotated_snapshot_fails_corrupt_image():
         ann_dir = os.path.join(tmpdir, "annotated")
 
         result = generate_annotated_snapshot(
-            "ev-006", raw_path, {}, ann_dir,
+            "ev-008", raw_path, {}, ann_dir,
         )
 
         assert result["annotated_snapshot_status"] == "failed"
@@ -193,14 +262,14 @@ def test_annotation_needed_returns_snapshot_ready_not_annotated():
         },
     })
     mock_cursor.fetchall.return_value = [
-        ("ev-a", "/media/snapshots/ev-a.jpg", payload),
+        ("ev-a", "/media/snapshots/ev-a.jpg", payload, "/media/clip/video.mov"),
     ]
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     rows = _annotation_needed(mock_conn)
     assert len(rows) == 1
     assert rows[0]["event_id"] == "ev-a"
-    assert rows[0]["snapshot_path"] == "/media/snapshots/ev-a.jpg"
+    assert rows[0]["clip_path"] == "/media/clip/video.mov"
 
 
 def test_annotation_needed_skips_already_annotated():
@@ -213,7 +282,7 @@ def test_annotation_needed_skips_already_annotated():
         },
     })
     mock_cursor.fetchall.return_value = [
-        ("ev-b", "/media/snapshots/ev-b.jpg", payload),
+        ("ev-b", "/media/snapshots/ev-b.jpg", payload, None),
     ]
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
@@ -232,7 +301,7 @@ def test_annotation_needed_skips_no_snapshot():
 
 
 # ===========================================================================
-# _update_annotation_status
+# _update_annotation_status — with bbox_overlay_status
 # ===========================================================================
 
 
@@ -246,6 +315,7 @@ def test_update_annotation_status_success():
         mock_conn, "ev-001",
         annotated_snapshot_path="/media/snapshots/annotated/ev-001.jpg",
         annotated_snapshot_status="ready",
+        bbox_overlay_status="ready",
         zone_overlay_status="ok",
     )
     assert ok is True
@@ -265,11 +335,29 @@ def test_update_annotation_status_with_error():
     )
     assert ok is True
 
-    # Verify error_message and status are in the SQL
     calls = mock_cursor.execute.call_args_list
     sql = calls[0][0][0]
     assert "annotated_snapshot_status" in sql
     assert "annotated_snapshot_error_message" in sql
+
+
+def test_update_annotation_status_with_bbox_overlay():
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.rowcount = 1
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    ok = _update_annotation_status(
+        mock_conn, "ev-003",
+        annotated_snapshot_path="/media/ann/ev-003.jpg",
+        annotated_snapshot_status="ready",
+        bbox_overlay_status="skipped_untrusted_bbox",
+    )
+    assert ok is True
+
+    calls = mock_cursor.execute.call_args_list
+    sql = calls[0][0][0]
+    assert "{media,bbox_overlay_status}" in sql
 
 
 # ===========================================================================
@@ -283,27 +371,31 @@ def test_process_pending_annotations_generates():
 
     payload = {"event_type": "intrusion", "camera_id": "cam_01"}
     mock_cursor.fetchall.return_value = [
-        ("ev-x", "/media/snapshots/ev-x.jpg", payload),
+        ("ev-x", "/media/snapshots/ev-x.jpg", payload, "/media/clip/video.mov"),
     ]
     mock_cursor.rowcount = 1
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        clip_dir = os.path.join(tmpdir, "clip")
+        os.makedirs(clip_dir)
         raw_path = os.path.join(tmpdir, "raw.jpg")
         _make_test_jpeg(raw_path)
 
-        # Patch _annotation_needed to return our test data
+        ann_dir = os.path.join(tmpdir, "annotated")
+
         with patch("app.worker._annotation_needed") as mock_needed:
             mock_needed.return_value = [
                 {
                     "event_id": "ev-x",
                     "snapshot_path": raw_path,
                     "payload": payload,
+                    "clip_path": os.path.join(clip_dir, "video.mov"),
                 },
             ]
 
-            ann_dir = os.path.join(tmpdir, "annotated")
-            updated = _process_pending_annotations(mock_conn, ann_dir)
+            with patch("app.worker._metadata_has_detections", return_value=False):
+                updated = _process_pending_annotations(mock_conn, ann_dir)
 
     assert updated >= 1
 
@@ -321,7 +413,6 @@ def test_process_pending_annotations_idempotent_existing_file():
         ann_dir = os.path.join(tmpdir, "annotated")
         os.makedirs(ann_dir, exist_ok=True)
 
-        # Pre-create annotated snapshot file
         ann_path = os.path.join(ann_dir, "ev-y.jpg")
         _make_test_jpeg(ann_path)
 
@@ -331,6 +422,7 @@ def test_process_pending_annotations_idempotent_existing_file():
                     "event_id": "ev-y",
                     "snapshot_path": raw_path,
                     "payload": {},
+                    "clip_path": None,
                 },
             ]
 
@@ -338,7 +430,38 @@ def test_process_pending_annotations_idempotent_existing_file():
                 updated = _process_pending_annotations(mock_conn, ann_dir)
 
     assert updated >= 1
-    mock_gen.assert_not_called()  # no re-generation
+    mock_gen.assert_not_called()
+
+
+# ===========================================================================
+# _metadata_has_detections
+# ===========================================================================
+
+
+def test_metadata_has_detections_true():
+    """Returns True when metadata.json has non-empty objects."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clip_path = os.path.join(tmpdir, "video.mov")
+        _make_metadata_json(tmpdir, objects_frames=1)
+        assert _metadata_has_detections(clip_path) is True
+
+
+def test_metadata_has_detections_false_when_all_empty():
+    """Returns False when all frames have empty objects."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clip_path = os.path.join(tmpdir, "video.mov")
+        _make_metadata_json(tmpdir, objects_frames=0)
+        assert _metadata_has_detections(clip_path) is False
+
+
+def test_metadata_has_detections_false_when_missing():
+    """Returns False when metadata.json doesn't exist."""
+    assert _metadata_has_detections("/nonexistent/clip/video.mov") is False
+
+
+def test_metadata_has_detections_false_when_none():
+    """Returns False when clip_path is None."""
+    assert _metadata_has_detections(None) is False
 
 
 # ===========================================================================
@@ -362,12 +485,12 @@ def test_annotation_failure_does_not_change_snapshot_status():
                     "event_id": "ev-z",
                     "snapshot_path": "/nonexistent/raw.jpg",
                     "payload": {},
+                    "clip_path": None,
                 },
             ]
 
             _process_pending_annotations(mock_conn, ann_dir)
 
-    # Check that UPDATE SQL does not touch {media,snapshot_status}
     calls = mock_cursor.execute.call_args_list
     for call_args in calls:
         sql = call_args[0][0]
@@ -400,17 +523,15 @@ def test_extract_polygon_from_zone_polygon_key():
 
 
 # ===========================================================================
-# _draw_bbox edge cases
+# _draw_bbox / _draw_polygon edge cases
 # ===========================================================================
 
 
 def test_draw_bbox_skips_zero_size():
-    """bbox with zero width/height should not crash."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (100, 100), color=(0, 0, 0))
     draw = ImageDraw.Draw(img)
     _draw_bbox(draw, {"x": 10, "y": 10, "width": 0, "height": 0})
-    # No exception = pass
 
 
 def test_draw_polygon_skips_under_3_points():
@@ -418,4 +539,3 @@ def test_draw_polygon_skips_under_3_points():
     img = Image.new("RGB", (100, 100), color=(0, 0, 0))
     draw = ImageDraw.Draw(img)
     _draw_polygon(draw, [(0, 0), (10, 10)])
-    # No exception = pass
