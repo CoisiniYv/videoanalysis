@@ -184,6 +184,85 @@ work has stabilised against the new module layout.
 
 ---
 
+## 5.1 R1.1 — Behavior Rule Entrypoint (executed)
+
+R1.1 landed the behavior-rule entrypoint in `modules/savant_security/`
+*without* changing the running E1 pipeline. Concretely:
+
+- Pure-Python rule layer added under
+  `modules/savant_security/custom/`:
+  - `rules/base.py` — `BehaviorRule` abstract base class with the
+    `evaluate(track) -> Optional[SecurityEvent]` contract and a
+    `cooldown_key(track)` helper.
+  - `rules/registry.py` — `RuleRegistry` plus `@register_rule` decorator
+    and `build_rules(camera_config, cooldown)` factory.
+  - `rules/intrusion.py` — `IntrusionRule` registered as `"intrusion"`.
+  - `rules/__init__.py` — imports `intrusion` for the side-effect
+    registration and re-exports the registry surface.
+  - Supporting modules copied in: `geometry/polygon.py`,
+    `models/{pose,events,tracks,camera_config}.py`,
+    `services/{cooldown,event_exporter}.py`,
+    `adapters/person_pose_adapter.py`.
+- Single pyfunc entrypoint:
+  - `pyfuncs/behavior_rules.py` — `BehaviorRulesPyFunc` reads YAML
+    camera config, builds rules from the registry, updates
+    `TrackStateStore`, evaluates each rule per active track, and
+    exports `SecurityEvent` objects via the configurable
+    `EventExporter`. It contains **no rule-specific logic**.
+- Harness coverage:
+  - `harness/tests/test_rule_registry.py` (10 tests) — registry surface,
+    duplicate / empty / unknown rule_type handling, unknown-type warning
+    output, camera-scoped cooldown key, and an architectural guard that
+    `custom/rules`, `custom/models`, `custom/services`, `custom/geometry`,
+    `custom/adapters` import zero Savant symbols (verified by file scan
+    *and* by a subprocess that imports `custom.rules` with the `savant`
+    package masked).
+  - `harness/tests/test_intrusion_rule_entrypoint.py` (5 tests) —
+    registry-built rule fires, returns `SecurityEvent`, respects
+    cooldown, isolates per-camera cooldowns even when track_ids collide,
+    and produces one rule per enabled `RuleConfig`.
+- Cooldown key is now `camera_id:track_id:zone`. The legacy phase modules
+  retain `track_id:zone` — they continue to run unchanged.
+
+What R1.1 deliberately did **not** do:
+
+- Did not touch `modules/savant_phase3h_zmq/` — the E1 pipeline runs
+  unchanged with `custom.pyfuncs.behavior_event_export_probe`.
+- Did not wire `BehaviorRulesPyFunc` into any `module.yml`. The
+  entrypoint is staged but not active.
+- Did not implement loitering, crowd_gathering, or fall. The registry
+  tolerates unknown `rule_type` values in cameras.yml — they are logged
+  and skipped — so partial rule sets are safe.
+- Did not delete or move any historical module.
+
+### Where things live after R1.1
+
+| Capability | Canonical mainline location | Currently active runtime |
+|---|---|---|
+| Intrusion rule | `modules/savant_security/custom/rules/intrusion.py` | `modules/savant_phase3h_zmq/custom/rules/intrusion.py` (E1 pipeline) |
+| Rule registry / base / pyfunc | `modules/savant_security/custom/{rules,pyfuncs/behavior_rules.py}` | n/a (entrypoint not yet wired) |
+| Future rule insertion point | `modules/savant_security/custom/rules/<rule_name>.py` decorated with `@register_rule("<rule_type>")` | — |
+
+### How B2.1 (loitering) plugs in
+
+1. Add `modules/savant_security/custom/rules/loitering.py` with
+   `class LoiteringRule(BehaviorRule)` decorated by
+   `@register_rule("loitering")`.
+2. Import the new module from `custom/rules/__init__.py` to trigger
+   registration on package load.
+3. Add `harness/tests/test_loitering_rule.py` exercising the
+   registry-built rule the same way
+   `test_intrusion_rule_entrypoint.py` does.
+4. Add a `loitering` entry to `cameras.yml`. `build_rules` picks it up
+   automatically — `BehaviorRulesPyFunc` requires no change.
+
+The Phase 3H/E1 pipeline keeps running unchanged. A later sub-phase
+will switch `module.yml` from the phase3h_zmq pyfunc to
+`custom.pyfuncs.behavior_rules:BehaviorRulesPyFunc` once a meaningful
+set of rules has accumulated here.
+
+---
+
 ## 6. Next phase suggestions
 
 After R1 lands, the recommended order (subject to user direction):
@@ -191,6 +270,7 @@ After R1 lands, the recommended order (subject to user direction):
 1. **R1.1** — wire `BehaviorRulesPyFunc` skeleton in
    `modules/savant_security/custom/rules/` (no behavior change; just the
    entrypoint), so future rules drop in without new phase modules.
+   *Status: DONE in this commit.*
 2. **B2.1** — loitering rule + harness test + smoke (the next functional
    gap, per `docs/project_rebaseline_2026_05_25.md` Section 6).
 3. **B2.2 / B2.3** — crowd_gathering and fall rules.
