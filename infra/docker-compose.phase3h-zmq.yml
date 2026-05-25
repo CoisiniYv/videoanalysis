@@ -12,8 +12,9 @@
 #             -> event-worker -> PostgreSQL
 #           -> ZMQ sink (pub+bind:tcp)
 #             -> metadata-sink (metadata_json.py) -> NDJSON
+#             -> video-file-sink (video_files.py) -> video.mov + metadata.json
 #
-# Does NOT include: replay-service, clip-worker, media-worker, video-file-sink.
+# Does NOT include: replay-service, clip-worker, media-worker.
 # Phase 3B smoke tests are unaffected (separate compose project).
 
 name: phase3h-zmq
@@ -103,6 +104,7 @@ services:
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis
       SAVANT_EVENT_MEDIA_REQUIRED: "${SAVANT_EVENT_MEDIA_REQUIRED:-false}"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
     volumes:
       - ../modules/savant_phase3h_zmq:/opt/savant/src/module:rw
       - /data/video-analytics/models:/models:rw
@@ -166,6 +168,29 @@ services:
       CHUNK_SIZE: "0"
     volumes:
       - ../media/phase3h-metadata:/media/phase3h-metadata:rw
+    depends_on:
+      - savant-zmq
+    restart: unless-stopped
+
+  # ====================================================================
+  # Video File Sink — consumes Savant ZMQ sink frames+metadata, writes
+  # video.mov + metadata.json
+  # ====================================================================
+
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: phase3h-zmq-video-file-sink
+    entrypoint:
+      [
+        "python",
+        "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      ZMQ_ENDPOINT: sub+connect:tcp://savant-zmq:5556
+      DIR_LOCATION: /media/phase3h-savant-output/%source_id%/%src_filename%/
+      CHUNK_SIZE: "0"
+    volumes:
+      - ../media/phase3h-savant-output:/media/phase3h-savant-output:rw
     depends_on:
       - savant-zmq
     restart: unless-stopped
