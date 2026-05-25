@@ -12,6 +12,7 @@ from pathlib import Path
 
 import psycopg
 
+from app.annotated_snapshot import generate_annotated_snapshot
 from app.config import Config, load_config
 from app.snapshot import generate_snapshot
 
@@ -485,6 +486,170 @@ def _process_pending_snapshots(
     return updated
 
 
+def _annotation_needed(pg_conn: psycopg.Connection) -> list[dict]:
+    """Return events with snapshot_status=ready that need annotation.
+
+    Conditions: snapshot_status is 'ready', annotated_snapshot_status is not
+    'ready', snapshot_path is non-null.
+    """
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, snapshot_path, payload
+                FROM events
+                WHERE payload -> 'media' ->> 'snapshot_status' = 'ready'
+                  AND snapshot_path IS NOT NULL
+                  AND snapshot_path != ''
+                  AND COALESCE(
+                        payload -> 'media' ->> 'annotated_snapshot_status',
+                        'not_implemented'
+                      ) NOT IN ('ready')
+                """
+            )
+            rows = []
+            for row in cur.fetchall():
+                payload = row[2] or {}
+                if isinstance(payload, str):
+                    import json as _json
+                    payload = _json.loads(payload)
+                # Defense-in-depth: skip already-annotated events
+                media = payload.get("media", {}) if isinstance(payload, dict) else {}
+                ann_status = media.get("annotated_snapshot_status", "not_implemented")
+                if ann_status == "ready":
+                    continue
+                rows.append({
+                    "event_id": row[0],
+                    "snapshot_path": row[1],
+                    "payload": payload,
+                })
+            return rows
+    except Exception:
+        logger.exception("failed to query events needing annotation")
+        return []
+
+
+def _update_annotation_status(
+    pg_conn: psycopg.Connection,
+    event_id: str,
+    annotated_snapshot_path: str | None,
+    annotated_snapshot_status: str,
+    zone_overlay_status: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """Update annotation-related fields on an event row (all stored in payload.media)."""
+    try:
+        with pg_conn.cursor() as cur:
+            parts = []
+            params: dict = {"event_id": event_id}
+
+            if annotated_snapshot_status:
+                parts.append("{media,annotated_snapshot_status}")
+                params["ann_status"] = json.dumps(annotated_snapshot_status)
+
+            if annotated_snapshot_path:
+                parts.append("{media,annotated_snapshot_path}")
+                params["ann_path"] = json.dumps(annotated_snapshot_path)
+
+            if zone_overlay_status is not None:
+                parts.append("{media,zone_overlay_status}")
+                params["zone_overlay"] = json.dumps(zone_overlay_status)
+
+            if error_message:
+                parts.append("{media,annotated_snapshot_error_message}")
+                params["ann_err"] = json.dumps(error_message)
+
+            if not parts:
+                return False
+
+            path_param_map = {
+                "{media,annotated_snapshot_status}": "ann_status",
+                "{media,annotated_snapshot_path}": "ann_path",
+                "{media,zone_overlay_status}": "zone_overlay",
+                "{media,annotated_snapshot_error_message}": "ann_err",
+            }
+            payload_expr = "COALESCE(payload, '{}'::jsonb)"
+            for media_path in parts:
+                param_name = path_param_map[media_path]
+                pg_path = "{" + ",".join(media_path.strip("{}").split(",")) + "}"
+                payload_expr = (
+                    "jsonb_set(" + payload_expr
+                    + ", '" + pg_path + "'"
+                    + ", %(" + param_name + ")s::jsonb)"
+                )
+
+            sql = (
+                "UPDATE events SET "
+                + "payload = " + payload_expr
+                + ", updated_at = now()"
+                + " WHERE id = %(event_id)s::uuid"
+            )
+
+            cur.execute(sql, params)
+            return cur.rowcount is not None and cur.rowcount > 0
+    except Exception:
+        logger.exception(
+            "update_annotation_status failed event_id=%s", event_id,
+        )
+        return False
+
+
+def _process_pending_annotations(
+    pg_conn: psycopg.Connection,
+    annotated_output_dir: str,
+) -> int:
+    """Generate annotated snapshots for events with ready raw snapshots.
+
+    Idempotent: skips events whose annotated_snapshot_status is already
+    'ready'.  If the annotated file already exists on disk, promotes the
+    status to 'ready' without re-generation.
+    """
+    events = _annotation_needed(pg_conn)
+    if not events:
+        return 0
+
+    updated = 0
+    for ev in events:
+        event_id = ev["event_id"]
+        raw_snapshot_path = ev["snapshot_path"]
+        payload = ev["payload"] or {}
+
+        # Idempotency: if annotated file already exists, promote to ready
+        expected_path = os.path.join(annotated_output_dir, f"{event_id}.jpg")
+        if os.path.isfile(expected_path):
+            logger.info(
+                "annotated_snapshot_already_exists event_id=%s path=%s — promoting to ready",
+                event_id, expected_path,
+            )
+            _update_annotation_status(
+                pg_conn, event_id,
+                annotated_snapshot_path=expected_path,
+                annotated_snapshot_status="ready",
+            )
+            updated += 1
+            continue
+
+        logger.info("generating_annotated_snapshot event_id=%s", event_id)
+
+        result = generate_annotated_snapshot(
+            event_id=event_id,
+            raw_snapshot_path=raw_snapshot_path,
+            payload=payload,
+            annotated_output_dir=annotated_output_dir,
+        )
+
+        _update_annotation_status(
+            pg_conn, event_id,
+            annotated_snapshot_path=result.get("annotated_snapshot_path"),
+            annotated_snapshot_status=result["annotated_snapshot_status"],
+            zone_overlay_status=result.get("zone_overlay_status"),
+            error_message=result.get("annotated_snapshot_error_message"),
+        )
+        updated += 1
+
+    return updated
+
+
 def connect_postgres(cfg: Config) -> psycopg.Connection:
     conn = psycopg.connect(cfg.database_url, autocommit=True)
     with conn.cursor() as cur:
@@ -496,10 +661,11 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
-        "media-worker started sink_dir=%s snap_dir=%s poll_interval=%ds "
+        "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s poll_interval=%ds "
         "default_pre_seconds=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
+        cfg.annotated_output_dir,
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
     )
@@ -521,6 +687,12 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             )
             if snap_updates:
                 logger.info("media_worker: snapshot updated %d events", snap_updates)
+
+            ann_updates = _process_pending_annotations(
+                pg_conn, cfg.annotated_output_dir,
+            )
+            if ann_updates:
+                logger.info("media_worker: annotation updated %d events", ann_updates)
         except Exception:
             logger.exception("media worker loop error")
 
