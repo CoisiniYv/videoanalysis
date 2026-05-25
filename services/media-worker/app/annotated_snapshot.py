@@ -144,6 +144,9 @@ def generate_annotated_snapshot(
         zone_overlay_status: ``"ok"``, ``"skipped_missing_polygon"``, or None.
         annotated_snapshot_error_message: Present only on failure.
     """
+    # 0. Normalize event_id to str (psycopg returns UUID objects)
+    event_id = str(event_id)
+
     # 1. Check raw snapshot exists
     if not raw_snapshot_path or not os.path.isfile(raw_snapshot_path):
         return {
