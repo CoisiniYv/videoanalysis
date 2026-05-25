@@ -164,6 +164,7 @@ services:
       EVENT_EXPORTER: redis
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
+      SAVANT_EVENT_MEDIA_REQUIRED: "${SAVANT_EVENT_MEDIA_REQUIRED:-false}"
     volumes:
       - ../modules/savant_phase2c:/opt/savant/src/module:rw
       - /data/video-analytics/models:/models:rw

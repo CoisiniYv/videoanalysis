@@ -256,6 +256,7 @@ class BehaviorEventExportProbe(NvDsPyFuncPlugin):
                 "width": bbox.width,
                 "height": bbox.height,
             },
+            "bbox_source": "savant_detection",
             "rule": event.rule_name,
             "media": {
                 "snapshot_required": event.snapshot_required,
@@ -271,6 +272,14 @@ class BehaviorEventExportProbe(NvDsPyFuncPlugin):
                 "keyframe_uuid": None,
             },
         }
+
+        # --- Debug/MVP: enable media generation ----------------------------------
+        if os.getenv("SAVANT_EVENT_MEDIA_REQUIRED", "").lower() in ("1", "true", "yes"):
+            event.snapshot_required = True
+            event.clip_required = True
+            event.payload["media"]["snapshot_required"] = True
+            event.payload["media"]["clip_required"] = True
+            event.payload["media"]["recording_strategy"] = "savant_replay"
 
         # --- Generate source_event_id ------------------------------------
         event.source_event_id = build_source_event_id(

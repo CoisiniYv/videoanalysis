@@ -160,6 +160,84 @@ def test_annotation_still_succeeds_label_only():
 
 
 # ===========================================================================
+# generate_annotated_snapshot — bbox_source trust model (Phase 3F0.1)
+# ===========================================================================
+
+
+def test_bbox_source_savant_detection_trusted():
+    """bbox_source=savant_detection → bbox drawn, bbox_overlay_status=ready."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        payload = {
+            "event_type": "intrusion",
+            "camera_id": "cam_01",
+            "track_id": "t_010",
+            "confidence": 0.92,
+            "event_ts_ms": 1717000000000,
+            "bbox": {"x": 100, "y": 50, "width": 200, "height": 150},
+            "bbox_source": "savant_detection",
+        }
+
+        result = generate_annotated_snapshot(
+            "ev-010", raw_path, payload, ann_dir, bbox_trusted=True,
+        )
+
+        assert result["annotated_snapshot_status"] == "ready"
+        assert result["bbox_overlay_status"] == "ready"
+        assert os.path.isfile(result["annotated_snapshot_path"])
+
+
+def test_bbox_source_missing_untrusted():
+    """No bbox_source in payload → bbox untrusted even if bbox exists."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        payload = {
+            "event_type": "intrusion",
+            "camera_id": "cam_01",
+            "track_id": "t_011",
+            "confidence": 0.88,
+            "event_ts_ms": 1717000000000,
+            "bbox": {"x": 10, "y": 10, "width": 50, "height": 50},
+        }
+
+        result = generate_annotated_snapshot(
+            "ev-011", raw_path, payload, ann_dir, bbox_trusted=False,
+        )
+
+        assert result["bbox_overlay_status"] == "skipped_untrusted_bbox"
+
+
+def test_bbox_source_smoke_injected_untrusted():
+    """bbox_source=smoke_injected → bbox untrusted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        payload = {
+            "event_type": "intrusion",
+            "camera_id": "cam_01",
+            "track_id": "t_012",
+            "confidence": 0.75,
+            "event_ts_ms": 1717000000000,
+            "bbox": {"x": 10, "y": 10, "width": 50, "height": 50},
+            "bbox_source": "smoke_injected",
+        }
+
+        result = generate_annotated_snapshot(
+            "ev-012", raw_path, payload, ann_dir, bbox_trusted=False,
+        )
+
+        assert result["bbox_overlay_status"] == "skipped_untrusted_bbox"
+
+
+# ===========================================================================
 # generate_annotated_snapshot — polygon overlay (unchanged logic)
 # ===========================================================================
 
@@ -394,10 +472,57 @@ def test_process_pending_annotations_generates():
                 },
             ]
 
-            with patch("app.worker._metadata_has_detections", return_value=False):
-                updated = _process_pending_annotations(mock_conn, ann_dir)
+            updated = _process_pending_annotations(mock_conn, ann_dir)
 
     assert updated >= 1
+
+
+def test_process_pending_annotations_with_trusted_bbox_source():
+    """When payload.bbox_source=savant_detection, bbox is trusted."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+
+    payload = {
+        "event_type": "intrusion",
+        "camera_id": "cam_01",
+        "track_id": "t_010",
+        "confidence": 0.92,
+        "event_ts_ms": 1717000000000,
+        "bbox": {"x": 100, "y": 50, "width": 200, "height": 150},
+        "bbox_source": "savant_detection",
+    }
+    mock_cursor.fetchall.return_value = [
+        ("ev-trusted", "/media/snapshots/ev-trusted.jpg", payload, "/media/clip/video.mov"),
+    ]
+    mock_cursor.rowcount = 1
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_path = os.path.join(tmpdir, "raw.jpg")
+        _make_test_jpeg(raw_path)
+        ann_dir = os.path.join(tmpdir, "annotated")
+
+        with patch("app.worker._annotation_needed") as mock_needed:
+            mock_needed.return_value = [
+                {
+                    "event_id": "ev-trusted",
+                    "snapshot_path": raw_path,
+                    "payload": payload,
+                    "clip_path": None,
+                },
+            ]
+
+            updated = _process_pending_annotations(mock_conn, ann_dir)
+
+    assert updated >= 1
+    # Verify bbox_overlay_status was written as ready
+    calls = mock_cursor.execute.call_args_list
+    found = False
+    for call_args in calls:
+        sql = call_args[0][0]
+        if "bbox_overlay_status" in sql and "ready" in str(call_args[0][1]):
+            found = True
+    assert found, "bbox_overlay_status should be 'ready' for trusted bbox_source"
 
 
 def test_process_pending_annotations_idempotent_existing_file():

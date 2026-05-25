@@ -649,8 +649,8 @@ def _process_pending_annotations(
         payload = ev["payload"] or {}
         clip_path = ev.get("clip_path")
 
-        # Determine bbox trust from detection metadata
-        bbox_trusted = _metadata_has_detections(clip_path)
+        # Determine bbox trust from payload marker (set by Savant event export)
+        bbox_trusted = payload.get("bbox_source") == "savant_detection"
 
         # Idempotency: if annotated file already exists, promote to ready
         expected_path = os.path.join(annotated_output_dir, f"{event_id}.jpg")
