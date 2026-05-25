@@ -43,10 +43,12 @@ class IntrusionRule(BehaviorRule):
             start_ts_ms=first_inside_ts,
             end_ts_ms=now_ms,
             confidence=last_obs.confidence,
-            severity="medium",
+            severity=self.config.severity,
             zone=self.zone.name,
             rule_name=self.config.name,
             description=f"Track {track.track_id} intruded zone '{self.zone.name}'",
+            snapshot_required=self.config.snapshot_required,
+            clip_required=self.config.clip_required,
         )
 
     def _continuous_inside(self, track: TrackState):

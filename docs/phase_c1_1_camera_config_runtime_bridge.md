@@ -196,6 +196,17 @@ To unlock that, C1.2 must:
 C1.1 deliberately does NOT do any of that. The bridge file and the
 loader are inert in production until C1.2 connects them.
 
+**Status update (2026-05-25, C1.2 landed)**: C1.2 has implemented all
+three bullets above using the official Savant adapter ↔ module
+separation. Source lifecycle is now the responsibility of
+`scripts/runtime/camera_source_controller.py`, not the compose file —
+source adapters are spawned per source via `docker run` against a
+stable container name (`video-analytics-source-{source_id}`). The
+module reloads `cameras.generated.yml` only on `docker compose
+restart savant-security`; mid-pipeline hot-reload is not in scope for
+C1.2. See `docs/phase_c1_2_official_adapter_runtime.md` for the full
+implementation notes.
+
 ## 7. Out of scope (explicit non-goals)
 
 - Face / SCRFD / ArcFace configuration.

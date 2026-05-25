@@ -1,0 +1,233 @@
+# Phase C1.2 — Official adapter / module runtime
+#
+# Topology:
+#   external source adapter (started/stopped by camera_source_controller)
+#     -> ZMQ DEALER → savant-security ROUTER bind (5555)
+#       -> YOLO26-pose / nvtracker / BehaviorRulesPyFunc
+#         -> Redis security.events
+#           -> event-worker -> PostgreSQL
+#         -> ZMQ sink pub+bind (5556)
+#           -> metadata-sink → NDJSON
+#           -> video-file-sink → video.mov + metadata.json
+#             -> evidence-worker → snapshot / annotated_snapshot / clip
+#         -> api (serves events + media URLs)
+#
+# Source adapters are NOT defined inline. The Savant module waits on
+# the router socket; controller spawns gstreamer adapter containers as
+# needed (see scripts/runtime/camera_source_controller.py).
+#
+# Does NOT modify modules/savant_phase3h_zmq or its compose. Both
+# stacks can be brought up independently — the network names differ
+# (c1-official-adapter_default vs phase3h-zmq_default) and the
+# container names use distinct prefixes.
+
+name: c1-official-adapter
+
+services:
+  # ====================================================================
+  # Backend infrastructure
+  # ====================================================================
+
+  redis:
+    image: redis:7-alpine
+    container_name: c1-official-redis
+    ports:
+      - "6385:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: c1-official-postgres
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5438:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ====================================================================
+  # Savant module — official zeromq_source_bin input + GPU inference
+  # Uses modules/savant_security (R1.1 entrypoint + C1.1 loader).
+  # ====================================================================
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: c1-official-savant
+    entrypoint:
+      [
+        "bash", "-c",
+        "pip install -q redis pyyaml && exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5555
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5556
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.generated.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "${SAVANT_EVENT_MEDIA_REQUIRED:-false}"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    ports:
+      # Expose 5555 so controller-spawned adapter containers on the same
+      # host network can connect via savant-security:5555.
+      - "5555:5555"
+      - "5556:5556"
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # ====================================================================
+  # Event Worker — consumes security.events, writes to PostgreSQL
+  # ====================================================================
+
+  event-worker:
+    build:
+      context: ../services/event-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-event-worker:latest
+    container_name: c1-official-event-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      RECORD_REQUEST_STREAM: security.record_requests
+      RECORDING_ENABLED: "false"
+      CONSUMER_GROUP: event-workers-c1-official
+      CONSUMER_NAME: event-worker-c1-official-1
+      POLL_TIMEOUT_MS: "2000"
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ====================================================================
+  # Metadata Sink — consumes Savant ZMQ sink metadata, writes NDJSON
+  # ====================================================================
+
+  metadata-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: c1-official-metadata-sink
+    entrypoint:
+      [
+        "python", "-m", "adapters.python.sinks.metadata_json",
+      ]
+    environment:
+      ZMQ_ENDPOINT: sub+connect:tcp://savant-security:5556
+      FILENAME_PATTERN: /media/c1-official-metadata/%source_id%-metadata.ndjson
+      SKIP_FRAMES_WITHOUT_OBJECTS: "false"
+      CHUNK_SIZE: "0"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    depends_on:
+      - savant-security
+    restart: unless-stopped
+
+  # ====================================================================
+  # Video File Sink — consumes Savant ZMQ sink frames+metadata
+  # ====================================================================
+
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: c1-official-video-file-sink
+    entrypoint:
+      [
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      ZMQ_ENDPOINT: sub+connect:tcp://savant-security:5556
+      DIR_LOCATION: /media/c1-official-savant-output/%source_id%/%src_filename%/
+      CHUNK_SIZE: "0"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    depends_on:
+      - savant-security
+    restart: unless-stopped
+
+  # ====================================================================
+  # API — serves events and media files
+  # ====================================================================
+
+  api:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-api:latest
+    container_name: c1-official-api
+    ports:
+      - "8004:8000"
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      REDIS_URL: redis://redis:6379/0
+      ALERT_STREAM: security.alerts
+      MEDIA_ROOT: /media
+    volumes:
+      - /data/video-analytics/media:/media:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ====================================================================
+  # Evidence Worker — one-shot, generates snapshot/annotated/clip.
+  # Output mounted at /media/evidence/events/{event_id}/ (unchanged
+  # from C1 / E1 / phase3h-zmq).
+  # ====================================================================
+
+  evidence-worker:
+    build:
+      context: ../services/evidence-worker
+      dockerfile: Dockerfile
+    image: c1-official-evidence-worker:latest
+    container_name: c1-official-evidence-worker
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVIDENCE_EVENTS_DIR: /media/evidence/events
+      VIDEO_INPUT_DIR: /media/c1-official-savant-output
+      PRE_SECONDS: "3"
+      POST_SECONDS: "3"
+      FPS: "30"
+      EVIDENCE_MAX_EVENTS: "5"
+      ANNOTATED_CLIP_CRF: "18"
+      ANNOTATED_CLIP_PRESET: "veryfast"
+      ANNOTATED_CLIP_BBOX_WIDTH: "3"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    depends_on:
+      postgres: { condition: service_healthy }

@@ -20,6 +20,9 @@ class RuleConfig:
     enabled: bool = True
     min_inside_ms: int = 1000
     cooldown_s: int = 30
+    severity: str = "medium"
+    snapshot_required: bool = True
+    clip_required: bool = True
 
 
 @dataclass
