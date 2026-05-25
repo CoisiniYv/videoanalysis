@@ -10,6 +10,8 @@
 #         -> YOLO26-pose / nvtracker / behavior_event_export_probe
 #           -> Redis security.events
 #             -> event-worker -> PostgreSQL
+#           -> ZMQ sink (pub+bind:tcp)
+#             -> metadata-sink (metadata_json.py) -> NDJSON
 #
 # Does NOT include: replay-service, clip-worker, media-worker, video-file-sink.
 # Phase 3B smoke tests are unaffected (separate compose project).
@@ -90,7 +92,7 @@ services:
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5555
-      ZMQ_SINK_ENDPOINT: pub+connect:ipc:///tmp/sink.ipc
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5556
       SOURCE_ID: phase3h
       MODEL_PATH: /models
       DOWNLOAD_PATH: /downloads
@@ -142,4 +144,28 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ====================================================================
+  # Metadata Sink — consumes Savant ZMQ sink metadata, writes NDJSON
+  # ====================================================================
+
+  metadata-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: phase3h-zmq-metadata-sink
+    entrypoint:
+      [
+        "python",
+        "-m",
+        "adapters.python.sinks.metadata_json",
+      ]
+    environment:
+      ZMQ_ENDPOINT: sub+connect:tcp://savant-zmq:5556
+      FILENAME_PATTERN: /media/phase3h-metadata/%source_id%-metadata.ndjson
+      SKIP_FRAMES_WITHOUT_OBJECTS: "false"
+      CHUNK_SIZE: "0"
+    volumes:
+      - ../media/phase3h-metadata:/media/phase3h-metadata:rw
+    depends_on:
+      - savant-zmq
     restart: unless-stopped
