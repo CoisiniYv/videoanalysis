@@ -10,12 +10,14 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db import get_conn
+from app.routers.cameras import router as cameras_router
 from app.routers.events import router as events_router
 from app.routers.ws_alerts import router as ws_alerts_router
 
 app = FastAPI(title="Video Analytics API", version="1.0.0")
 
 app.include_router(events_router)
+app.include_router(cameras_router)
 app.include_router(ws_alerts_router)
 
 # Mount /media for serving clip/snapshot files
