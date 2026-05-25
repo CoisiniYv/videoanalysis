@@ -150,12 +150,38 @@ The critical difference: Phase 3H.2 produces video and metadata from the **same 
 3. **Bbox/Snapshot Alignment**: When Replay is re-integrated into this topology, both Savant detection and Replay storage receive the same ZMQ frames — natural alignment without timestamp mapping.
 4. **Downstream Integration**: The video.mov + metadata.json output is directly consumable by clip-worker and media-worker for snapshot/clip generation with accurate bbox overlay.
 
-## 8. Limitations (POC Scope)
+## 8. WARNING: Continuous Sink Output
 
-- No Replay Service in this compose — frames are continuously written to a single growing video.mov (no clip segmentation).
-- No on-demand clip extraction — continuous recording only.
-- GPU NVENC encoder adds ~5-10% GPU utilization (acceptable for single-stream POC).
-- No clip-worker or media-worker integration yet.
+**The video-file-sink in this POC writes continuous, unbounded output.** While containers are running:
+
+- `video.mov` grows without limit (every frame encoded by NVENC and muxed).
+- `metadata.json` grows without limit (one NDJSON line per frame).
+- `phase3h%-metadata.ndjson` (metadata-sink) grows without limit.
+
+**This is NOT event-triggered clip generation.** There is no chunk policy, no Replay job control, and no media retention limit. This is acceptable only for short-lived POC verification.
+
+**The Phase 3H.2 compose stack MUST be stopped after verification:**
+
+```bash
+docker compose -f infra/docker-compose.phase3h-zmq.yml down
+```
+
+| Metric | Final size at stop |
+|---|---|
+| video.mov | 428 MB |
+| metadata.json | 357 MB |
+| metadata NDJSON | 846 MB |
+| evidence_frame.jpg | 296 KB |
+
+**Production requires:**
+
+- Event-triggered clip extraction (not continuous recording).
+- Chunk policy (max frames, max duration, or max size per clip).
+- Replay Service for keyframe storage and on-demand job control.
+- Media retention limits (per-camera quotas, TTL).
+- Cooldown / severity policy for snapshot and clip generation.
+
+Do NOT run this compose stack unattended for extended periods.
 
 ## 9. Next Steps
 

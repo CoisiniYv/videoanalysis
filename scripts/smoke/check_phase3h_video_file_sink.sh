@@ -5,6 +5,13 @@
 # PREREQ:
 #   docker compose -f infra/docker-compose.phase3h-zmq.yml up -d
 #
+# IMPORTANT: This compose writes CONTINUOUS, UNBOUNDED output.
+# video.mov, metadata.json, and metadata NDJSON grow without limit.
+# This is POC-only — NOT production clip generation.
+#
+# After verification, stop the stack:
+#   docker compose -f infra/docker-compose.phase3h-zmq.yml down
+#
 # Verifies video-file-sink consumes Savant ZMQ sink frames+metadata,
 # produces video.mov + metadata.json with real objects.
 # ---------------------------------------------------------------------------
