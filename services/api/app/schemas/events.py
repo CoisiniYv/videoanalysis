@@ -57,9 +57,11 @@ class EventResponse(BaseModel):
     snapshot_path: Optional[str] = None
     annotated_snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
+    annotated_clip_path: Optional[str] = None
     snapshot_url: Optional[str] = None
     annotated_snapshot_url: Optional[str] = None
     clip_url: Optional[str] = None
+    annotated_clip_url: Optional[str] = None
     recording_strategy: str = "reserved"
     media_status: str = "not_implemented"
     media: Dict[str, Any] = Field(default_factory=dict)
@@ -83,6 +85,10 @@ class EventResponse(BaseModel):
             row.get("annotated_snapshot_path")
             or media.get("annotated_snapshot_path")
         )
+        annotated_clip_path = (
+            row.get("annotated_clip_path")
+            or media.get("annotated_clip_path")
+        )
 
         def _media_url(path: str | None) -> str | None:
             if not path:
@@ -94,6 +100,7 @@ class EventResponse(BaseModel):
                 return f"{media_base_url}{p}"
             return f"{media_base_url}/{p}"
 
+        annotated_clip_url = _media_url(annotated_clip_path)
         clip_url = _media_url(clip_path)
         snapshot_url = _media_url(snapshot_path)
         annotated_snapshot_url = _media_url(annotated_snapshot_path)
@@ -117,9 +124,11 @@ class EventResponse(BaseModel):
             snapshot_path=snapshot_path,
             annotated_snapshot_path=annotated_snapshot_path,
             clip_path=clip_path,
+            annotated_clip_path=annotated_clip_path,
             snapshot_url=snapshot_url,
             annotated_snapshot_url=annotated_snapshot_url,
             clip_url=clip_url,
+            annotated_clip_url=annotated_clip_url,
             recording_strategy=row.get("recording_strategy", "reserved"),
             media_status=row.get("media_status", "not_implemented"),
             media=media,

@@ -16,6 +16,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.phase3h-zmq.yml}"
 API_BASE="${API_BASE:-http://localhost:8001}"
 PG_CONTAINER="${PG_CONTAINER:-phase3h-zmq-postgres}"
+export PG_CONTAINER
 
 PASS=0
 FAIL=0
@@ -23,10 +24,11 @@ FAIL=0
 ok() { echo "OK  [$((++PASS))] $1"; }
 fail() { echo "FAIL [$((++FAIL))] $1"; }
 
-# Convert container path (/media/evidence/...) to host path
+# Convert container path (/media/...) to host path (/data/video-analytics/media/...)
+MEDIA_HOST_ROOT="${MEDIA_ROOT:-/data/video-analytics/media}"
 container_to_host() {
   local path="$1"
-  echo "${path#/media/}"  # strip /media/ prefix
+  echo "${MEDIA_HOST_ROOT}${path#/media}"  # replace /media prefix with host root
 }
 
 echo "=== Phase E1 Alert Evidence MVP Smoke Test ==="
@@ -42,7 +44,7 @@ fi
 # ── Database checks ───────────────────────────────────────────────────
 
 # 2. At least 1 intrusion event exists
-INTRUSION_COUNT=$(newgrp docker <<'DOCKER_EOF'
+INTRUSION_COUNT=$(newgrp docker <<DOCKER_EOF
 docker exec "$PG_CONTAINER" psql -U video -d video_analytics -tAc \
   "SELECT COUNT(*) FROM events WHERE event_type = 'intrusion'" 2>/dev/null || echo 0
 DOCKER_EOF
@@ -54,7 +56,7 @@ else
 fi
 
 # Get the most recent intrusion event that has evidence
-EVENT_JSON=$(newgrp docker <<'DOCKER_EOF'
+EVENT_JSON=$(newgrp docker <<DOCKER_EOF
 docker exec "$PG_CONTAINER" psql -U video -d video_analytics -tAc \
   "SELECT row_to_json(e) FROM (
      SELECT id, source_event_id, event_type, track_id, source_id,
@@ -80,10 +82,10 @@ SNAPSHOT_PATH_DB=$(echo "$EVENT_JSON" | python3 -c "import sys,json; d=json.load
 CLIP_PATH_DB=$(echo "$EVENT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('clip_path',''))" 2>/dev/null || echo "")
 ANNOTATED_PATH_DB=$(echo "$EVENT_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('annotated_snapshot_path',''))" 2>/dev/null || echo "")
 
-# Convert to host paths (strip /media/ prefix to get relative path from project root)
-SNAPSHOT_HOST="${PROJECT_DIR}/$(container_to_host "$SNAPSHOT_PATH_DB")"
-CLIP_HOST="${PROJECT_DIR}/$(container_to_host "$CLIP_PATH_DB")"
-ANNOTATED_HOST="${PROJECT_DIR}/$(container_to_host "$ANNOTATED_PATH_DB")"
+# Convert to host paths (container /media → host /data/video-analytics/media)
+SNAPSHOT_HOST="$(container_to_host "$SNAPSHOT_PATH_DB")"
+CLIP_HOST="$(container_to_host "$CLIP_PATH_DB")"
+ANNOTATED_HOST="$(container_to_host "$ANNOTATED_PATH_DB")"
 
 # 3. Event has non-null snapshot_path
 if [ -n "$SNAPSHOT_PATH_DB" ]; then
@@ -202,6 +204,97 @@ else
   fail "annotated snapshot missing, cannot check bbox pixels"
 fi
 
+# ── Annotated clip checks (E1.1b) ────────────────────────────────
+
+ANNOTATED_CLIP_URL=""
+ANNOTATED_CLIP_PATH_DB=""
+ANNOTATED_CLIP_HOST=""
+
+# Fetch annotated_clip_url from API
+ANNOTATED_CLIP_URL=$(echo "$API_EVENT" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+data = d.get('data', d)
+print(data.get('annotated_clip_url', ''))
+" 2>/dev/null || echo "")
+
+# Get annotated_clip_path from DB
+export EVENT_ID
+ANNOTATED_CLIP_PATH_DB=$(newgrp docker <<DOCKER_EOF
+docker exec "$PG_CONTAINER" psql -U video -d video_analytics -tAc \
+  "SELECT payload->'media'->>'annotated_clip_path' FROM events WHERE id = '$EVENT_ID'" 2>/dev/null || echo ""
+DOCKER_EOF
+)
+
+ANNOTATED_CLIP_HOST="$(container_to_host "$ANNOTATED_CLIP_PATH_DB")"
+
+# 14. API returns annotated_clip_url
+if [ -n "$ANNOTATED_CLIP_URL" ]; then
+  ok "API returns annotated_clip_url ($ANNOTATED_CLIP_URL)"
+else
+  fail "API missing annotated_clip_url"
+fi
+
+# 15. annotated_clip_url HTTP 200
+FULL_ANNOTATED_CLIP_URL="${API_BASE}${ANNOTATED_CLIP_URL}"
+HTTP_ANNOTATED_CLIP=$(curl -s -o /dev/null -w "%{http_code}" "$FULL_ANNOTATED_CLIP_URL" 2>/dev/null || echo "000")
+if [ "$HTTP_ANNOTATED_CLIP" = "200" ]; then
+  ok "annotated_clip_url HTTP 200 ($FULL_ANNOTATED_CLIP_URL)"
+else
+  fail "annotated_clip_url HTTP $HTTP_ANNOTATED_CLIP ($FULL_ANNOTATED_CLIP_URL)"
+fi
+
+# 16. annotated clip file exists on disk
+if [ -n "$ANNOTATED_CLIP_HOST" ] && [ -f "$ANNOTATED_CLIP_HOST" ]; then
+  ok "annotated clip file exists on disk ($ANNOTATED_CLIP_HOST)"
+else
+  fail "annotated clip file not found: $ANNOTATED_CLIP_HOST"
+fi
+
+# 17. annotated clip size > 100KB
+if [ -f "$ANNOTATED_CLIP_HOST" ]; then
+  CLIP_SIZE=$(stat -c%s "$ANNOTATED_CLIP_HOST" 2>/dev/null || echo "0")
+  if [ "$CLIP_SIZE" -gt 102400 ] 2>/dev/null; then
+    ok "annotated clip size > 100KB (size=$CLIP_SIZE bytes)"
+  else
+    fail "annotated clip size <= 100KB (size=$CLIP_SIZE bytes)"
+  fi
+fi
+
+# 18. annotated clip frames have red bbox pixels
+if [ -f "$ANNOTATED_CLIP_HOST" ]; then
+  # Extract 3 frames from the clip and check for red pixels
+  RED_FRAMES=0
+  for seek_s in 0.5 2.0 4.0; do
+    TMP_FRAME="/tmp/e1_smoke_annotated_clip_frame_$$.jpg"
+    ffmpeg -y -nostdin -loglevel error -ss "$seek_s" -i "$ANNOTATED_CLIP_HOST" -vframes 1 "$TMP_FRAME" 2>/dev/null
+    if [ -f "$TMP_FRAME" ]; then
+      RED=$(python3 -c "
+from PIL import Image
+img = Image.open('$TMP_FRAME').convert('RGB')
+pixels = img.load()
+w, h = img.size
+count = 0
+for y in range(0, h, 3):
+    for x in range(0, w, 3):
+        r, g, b = pixels[x, y]
+        if r > 200 and g < 50 and b < 50:
+            count += 1
+print(count)
+" 2>/dev/null || echo "0")
+      if [ "$RED" -gt 0 ] 2>/dev/null; then
+        RED_FRAMES=$((RED_FRAMES + 1))
+      fi
+      rm -f "$TMP_FRAME"
+    fi
+  done
+  if [ "$RED_FRAMES" -gt 0 ] 2>/dev/null; then
+    ok "annotated clip has red bbox pixels in $RED_FRAMES/3 sampled frames"
+  else
+    fail "annotated clip has NO red bbox pixels in sampled frames"
+  fi
+fi
+
 # ── Summary output ────────────────────────────────────────────────────
 
 echo ""
@@ -212,11 +305,13 @@ echo "  selected frame_num:  $FRAME_NUM"
 echo "  snapshot_url:        ${API_BASE}${SNAPSHOT_URL}"
 echo "  annotated_snapshot_url: ${API_BASE}${ANNOTATED_URL}"
 echo "  clip_url:            ${API_BASE}${CLIP_URL}"
+echo "  annotated_clip_url:  ${API_BASE}${ANNOTATED_CLIP_URL}"
 echo "=========================================="
 echo "MANUAL CHECK: Open the URLs above. Verify:"
 echo "  - snapshot shows the scene"
 echo "  - annotated snapshot has red bbox rectangles on people"
 echo "  - clip plays correctly for ~6 seconds"
+echo "  - annotated clip has red bbox overlay on every frame"
 echo ""
 
 echo "=== Results: $PASS passed, $FAIL failed ==="

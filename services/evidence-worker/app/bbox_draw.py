@@ -77,6 +77,43 @@ def _draw_label_block(
         y += line_heights[i]
 
 
+def draw_bboxes_on_image(
+    img: Image.Image,
+    objects: List[Dict[str, Any]],
+    event_id: str = "unknown",
+    event_type: str = "intrusion",
+    track_id: str = "0",
+    frame_num: int = 0,
+) -> int:
+    """Draw person bboxes onto an in-memory PIL Image. Returns count drawn."""
+    draw = ImageDraw.Draw(img)
+    drawn = 0
+    for obj in objects:
+        bbox = obj.get("bbox")
+        if not bbox or not isinstance(bbox, dict):
+            continue
+        xc = float(bbox.get("xc", 0))
+        yc = float(bbox.get("yc", 0))
+        w = float(bbox.get("width", 0))
+        h = float(bbox.get("height", 0))
+        if w <= 0 or h <= 0:
+            continue
+        x = xc - w / 2.0
+        y = yc - h / 2.0
+        draw.rectangle([x, y, x + w, y + h], outline=BBOX_COLOR, width=BBOX_WIDTH)
+        drawn += 1
+
+    _draw_label_block(
+        draw,
+        event_id=event_id,
+        event_type=event_type,
+        track_id=track_id,
+        object_count=drawn,
+        frame_num=frame_num,
+    )
+    return drawn
+
+
 def draw_bboxes_on_frame(
     input_path: str,
     objects: List[Dict[str, Any]],
@@ -86,7 +123,7 @@ def draw_bboxes_on_frame(
     track_id: str = "0",
     frame_num: int = 0,
 ) -> bool:
-    """Draw all person bounding boxes from Savant metadata onto a snapshot.
+    """Draw all person bounding boxes from Savant metadata onto a snapshot file.
 
     Converts center-based (xc, yc, width, height) to top-left for drawing.
     Draws a label block in the top-left corner.
@@ -101,34 +138,10 @@ def draw_bboxes_on_frame(
         logger.exception("failed to open snapshot %s", input_path)
         return False
 
-    draw = ImageDraw.Draw(img)
-
-    drawn = 0
-    for obj in objects:
-        bbox = obj.get("bbox")
-        if not bbox or not isinstance(bbox, dict):
-            continue
-
-        xc = float(bbox.get("xc", 0))
-        yc = float(bbox.get("yc", 0))
-        w = float(bbox.get("width", 0))
-        h = float(bbox.get("height", 0))
-
-        if w <= 0 or h <= 0:
-            continue
-
-        x = xc - w / 2.0
-        y = yc - h / 2.0
-        draw.rectangle([x, y, x + w, y + h], outline=BBOX_COLOR, width=BBOX_WIDTH)
-        drawn += 1
-
-    _draw_label_block(
-        draw,
-        event_id=event_id,
-        event_type=event_type,
-        track_id=track_id,
-        object_count=drawn,
-        frame_num=frame_num,
+    drawn = draw_bboxes_on_image(
+        img, objects,
+        event_id=event_id, event_type=event_type,
+        track_id=track_id, frame_num=frame_num,
     )
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

@@ -31,6 +31,7 @@ from app.evidence import (
     extract_clip,
 )
 from app.bbox_draw import draw_bboxes_on_frame
+from app.clip_annotator import extract_annotated_clip
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +88,7 @@ def process_event(event: dict, cfg, conn: psycopg.Connection) -> dict | None:
     snapshot_path = os.path.join(event_dir, "snapshot.jpg")
     annotated_path = os.path.join(event_dir, "annotated_snapshot.jpg")
     clip_path = os.path.join(event_dir, "clip_raw.mp4")
+    annotated_clip_path = os.path.join(event_dir, "clip_annotated.mp4")
     metadata_out = os.path.join(event_dir, "evidence_metadata.json")
 
     # 3. Extract snapshot
@@ -101,13 +103,23 @@ def process_event(event: dict, cfg, conn: psycopg.Connection) -> dict | None:
     ):
         return None
 
-    # 5. Extract clip
+    # 5. Extract raw clip
     if not extract_clip(
         video_path, frame_num, cfg.pre_seconds, cfg.post_seconds,
         cfg.fps, clip_path,
     ):
         logger.warning("clip extraction failed, continuing without clip")
         clip_path = ""
+
+    # 5b. Generate annotated clip (per-frame bbox overlay)
+    if not extract_annotated_clip(
+        video_path, metadata_path, frame_num,
+        cfg.pre_seconds, cfg.post_seconds, cfg.fps,
+        annotated_clip_path,
+        event_id=event_id, event_type=event_type, track_id=track_id,
+    ):
+        logger.warning("annotated clip generation failed, continuing without it")
+        annotated_clip_path = ""
 
     # 6. Write evidence metadata
     try:
@@ -128,7 +140,7 @@ def process_event(event: dict, cfg, conn: psycopg.Connection) -> dict | None:
     # 7. Write back to PostgreSQL
     update_event_evidence(
         conn, event_id, snapshot_path, annotated_path,
-        clip_path, frame_num, track_id,
+        clip_path, frame_num, track_id, annotated_clip_path,
     )
 
     return {
@@ -138,6 +150,7 @@ def process_event(event: dict, cfg, conn: psycopg.Connection) -> dict | None:
         "snapshot_path": snapshot_path,
         "annotated_snapshot_path": annotated_path,
         "clip_path": clip_path,
+        "annotated_clip_path": annotated_clip_path,
         "event_dir": event_dir,
     }
 
@@ -176,6 +189,7 @@ def main() -> None:
         print(f"    snapshot.jpg       {r['snapshot_path']}")
         print(f"    annotated_snapshot.jpg {r['annotated_snapshot_path']}")
         print(f"    clip_raw.mp4       {r['clip_path']}")
+        print(f"    clip_annotated.mp4 {r['annotated_clip_path']}")
         print("-" * 60)
     print(f"Processed: {len(results)}/{len(events)} events")
     print("=" * 60)

@@ -41,43 +41,34 @@ def update_event_evidence(
     clip_path: str,
     frame_num: int,
     track_id: str,
+    annotated_clip_path: str = "",
 ) -> bool:
     """Write evidence paths and status to the event row.
 
     snapshot_path and clip_path go to top-level columns.
-    annotated_snapshot_path and status fields go to payload.media JSONB.
+    annotated_snapshot_path, annotated_clip_path, and status fields
+    go to payload.media JSONB.
     """
+    jsonb_sets = (
+        "jsonb_set(" * 8
+        + "COALESCE(payload, '{}'::jsonb)"
+        + ", '{media,annotated_snapshot_path}', %(annotated_path)s::jsonb)"
+        + ", '{media,snapshot_status}', '\"ready\"'::jsonb)"
+        + ", '{media,clip_status}', '\"ready\"'::jsonb)"
+        + ", '{media,annotated_snapshot_status}', '\"ready\"'::jsonb)"
+        + ", '{media,annotated_clip_path}', %(annotated_clip)s::jsonb)"
+        + ", '{media,annotated_clip_status}', '\"ready\"'::jsonb)"
+        + ", '{media,evidence_frame_num}', %(frame_num)s::jsonb)"
+        + ", '{media,evidence_track_id}', %(track_id)s::jsonb)"
+    )
+
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             UPDATE events
             SET snapshot_path = %(snapshot_path)s,
                 clip_path = %(clip_path)s,
-                payload = jsonb_set(
-                    jsonb_set(
-                        jsonb_set(
-                            jsonb_set(
-                                jsonb_set(
-                                    jsonb_set(
-                                        COALESCE(payload, '{}'::jsonb),
-                                        '{media,annotated_snapshot_path}',
-                                        %(annotated_path)s::jsonb
-                                    ),
-                                    '{media,snapshot_status}',
-                                    '"ready"'::jsonb
-                                ),
-                                '{media,clip_status}',
-                                '"ready"'::jsonb
-                            ),
-                            '{media,annotated_snapshot_status}',
-                            '"ready"'::jsonb
-                        ),
-                        '{media,evidence_frame_num}',
-                        %(frame_num)s::jsonb
-                    ),
-                    '{media,evidence_track_id}',
-                    %(track_id)s::jsonb
-                ),
+                payload = {jsonb_sets},
                 updated_at = now()
             WHERE id = %(event_id)s::uuid
             """,
@@ -85,6 +76,7 @@ def update_event_evidence(
                 "snapshot_path": snapshot_path,
                 "clip_path": clip_path,
                 "annotated_path": json.dumps(annotated_snapshot_path),
+                "annotated_clip": json.dumps(annotated_clip_path) if annotated_clip_path else json.dumps(None),
                 "frame_num": json.dumps(frame_num),
                 "track_id": json.dumps(int(track_id) if track_id else 0),
                 "event_id": event_id,
