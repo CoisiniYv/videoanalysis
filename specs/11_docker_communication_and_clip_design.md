@@ -1273,7 +1273,79 @@ prometheus: 9090
 
 ---
 
-# 23. 最终总结
+# 23. 生产 Single-Ingestion 约束与当前 Phase 3F0 临时拓扑
+
+本节是 Phase 3F0 诊断后新增的架构边界文档，后续任何涉及视频拓扑的实现必须遵守。
+
+## 23.1 当前错误拓扑（Phase 3B compose 实际状态）
+
+```
+testVideo/test.mp4
+  -> ffmpeg-source -> RTSP -> Savant (uridecodebin)
+  -> source-adapter(video_loop.sh) -> ZMQ -> Replay Service
+```
+
+问题：
+- 两个独立文件循环，不同步。
+- Savant 的 bbox 来自循环 A 的帧，Replay clip/snapshot 来自循环 B 的帧。
+- bbox 绘制位置正确但帧内容不匹配 — 视觉上看起来"bbox 不准"，实际是**帧内容不对**。
+
+## 23.2 临时改良拓扑（Phase 3F0.3a 提议，未实施）
+
+```
+test.mp4 -> ffmpeg-source -> RTSP server
+       -> Savant (uridecodebin)
+       -> source-adapter(rtsp.sh) -> Replay Service
+```
+
+- 将 source-adapter 从 `video_loop.sh`（读文件）改为 `rtsp.sh`（消费同一 RTSP）。
+- 消除双文件独立循环，Savant 和 source-adapter 都消费同一个 RTSP 流。
+- **仍然是双消费者**：只能用于 MVP 验证，不能声称帧级对齐。
+- **该拓扑仍然有双消费者问题，只能用于 MVP 验证。**
+
+## 23.3 生产目标拓扑（Single-Ingestion）
+
+```
+RTSP camera -> Savant Source Adapter -> Replay Service -> Savant Module
+                                                       -> video-file-sink
+```
+
+- 每路摄像头只接入一次（single-ingestion）。
+- Adapter 是唯一入口，Savant 和 Replay 消费同一条帧流。
+- 详见 `specs/01_architecture.md` Section 8 和 `docs/production_ingestion_topology_policy.md`。
+
+## 23.4 关键架构事实
+
+| 事实 | 来源 | 影响 |
+|---|---|---|
+| video-file-sink metadata.objects=[] 在当前 Replay-bypass-Savant 架构下是预期现象 | Phase 3F0 诊断 | bbox 不能从 metadata.json 获取 |
+| 真实 bbox 当前来自 Redis event payload | `behavior_event_export_probe.py` | bbox 由 Savant 写入，与 replay metadata 无关 |
+| 当前 `from_ns`/`to_ns` 被显式丢弃，keyframe lookup 为 unbounded | `replay_client.py:68-72` | 无法按 event_ts_ms 精确定位 keyframe |
+| `frame_uuid` / `keyframe_uuid` 硬编码为 `None` | `behavior_event_export_probe.py:242-243` | 无法做帧级精确对齐 |
+| Savant 当前使用 `uridecodebin` 直读 RTSP，偏离官方 adapter-driven 模式 | `module.yml` | 需工程化回归官方 ZMQ source 模式 |
+
+## 23.5 对齐条件
+
+如果需要生产级 bbox/snapshot 精确对齐，必须满足：
+
+1. **Single-ingestion 拓扑** — Savant 和 Replay 消费同一条帧流。
+2. **Timestamp-domain mapping** — Savant NTP/PTS ↔ Replay pipeline-relative 时间戳映射。
+3. **帧级标识** — `frame_uuid` / `keyframe_uuid` / `frame_num` / `pts` 等字段在 event payload 中正确填充。
+
+不能只依赖 `payload.bbox`（坐标正确但帧内容可能不对）。
+
+## 23.6 禁止拓扑
+
+```
+禁止：同一路摄像头 -> Savant (独立 RTSP 拉流)
+     同一路摄像头 -> Replay (独立 RTSP 拉流)
+```
+
+这是"双路拉流"的变体，无论使用的是 RTSP 还是文件循环，都禁止作为生产方案。
+
+---
+
+# 24. 最终总结
 
 MVP 阶段：
 

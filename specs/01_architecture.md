@@ -299,6 +299,8 @@ payload.media.recording_strategy = reserved
 
 # 8. Replay 报警录像目标架构
 
+## 8.1 生产目标拓扑
+
 后续启用报警录像时，建议采用以下链路：
 
 ```text
@@ -321,4 +323,67 @@ RTSP Source Adapter
       - 回写 events.clip_path / snapshot_path / payload.media
 ```
 
-事件必须至少保留 `source_id` 和 `event_ts_ms`。如果能从 Savant metadata 中取得 `frame_uuid` 或 `keyframe_uuid`，应一并写入事件 payload，以便 Replay 精确定位。
+事件必须至少保留 `source_id` 和 `event_ts_ms`。如果能从 Savant metadata 中取得 `frame_uuid` 或 `keyframe_uuid`，应一并写入 event payload，以便 Replay 精确定位。
+
+## 8.2 Adapter-Driven Ingestion 原则
+
+官方 Savant adapter 的思路是通过 adapter / ZeroMQ 和 module 通信：
+
+- Adapter 是**独立容器**，负责 RTSP/文件/队列的输入。
+- Module 通过 ZeroMQ / Savant protocol 接收 adapter 推送的帧和 metadata。
+- Adapter 可以传递视频帧、帧级 metadata、对象和对象 attributes。
+- Savant 默认 pipeline source 是 `zeromq_source_bin` / `ZMQ_SRC_ENDPOINT`，而不是 `uridecodebin`。
+- Replay Service 作为 upstream/downstream 之间的中间单元，保留最近若干秒到 RocksDB，并通过 REST API 创建 restream job。
+
+当前项目长期目标应回归 **adapter-driven ingestion**，而不是 Savant module 自己独立拉一路 RTSP、Replay 另拉一路 RTSP。
+
+## 8.3 当前阶段已知问题（Phase 3F0 诊断发现）
+
+当前 `infra/docker-compose.phase3b.yml` 使用的拓扑存在严重架构偏差：
+
+```text
+当前实际拓扑（错误）：
+  testVideo/test.mp4 -> ffmpeg-source -> RTSP -> Savant (uridecodebin)
+  testVideo/test.mp4 -> source-adapter -> ZMQ -> Replay Service
+```
+
+问题：
+1. Savant 读 RTSP、Replay 读 source-adapter 的独立文件循环，导致 bbox 和 snapshot **不在同一帧 / 同一轮循环**。
+2. Savant module 使用 `uridecodebin` 直接读 RTSP，偏离了官方 adapter-driven 模式。
+3. Replay metadata.objects 始终为空（Replay 绕过 Savant，预期行为）。
+4. 真实 bbox 来自 Redis event payload，不来自 replay metadata.json。
+5. `frame_uuid` / `keyframe_uuid` 均为 `None`，无法做帧级精确对齐。
+
+**详见 `docs/phase3f0_2_diagnosis_report.md` 和 `docs/phase3f0_3_topology_review.md`。**
+
+## 8.4 临时改良方案（Phase 3F0.3a 提议，仅用于验证）
+
+```text
+test.mp4 -> ffmpeg-source -> RTSP server
+       -> Savant (uridecodebin)
+       -> source-adapter(rtsp.sh) -> Replay Service
+```
+
+该方案将 source-adapter 从 `video_loop.sh`（独立读文件）改为 `rtsp.sh`（消费同一 RTSP），消除双文件独立循环问题。
+
+**重要限制：**
+- 这是**临时改良方案，不是最终生产方案**。
+- 仍然有双消费者问题（Savant + source-adapter 分别消费同一 RTSP），只能减少错位，不能保证帧级对齐。
+- RTSP 消费者独立连接，连接时间差异可能造成亚秒级帧不同步。
+
+## 8.5 未来生产方案评估
+
+最终仍需要评估以下 single-ingestion 方案（见 `docs/phase3f0_3_topology_review.md` 方案 A）：
+
+```text
+方案 A（理想）：source-adapter -> Replay -> Savant
+  - Savant 和 Replay 使用同一条帧流
+  - 需要 Savant 支持 ZMQ source（当前不支持，需自研）
+  - 匹配 specs/01_architecture.md 的目标架构
+
+方案 B（改良）：source-adapter / bridge adapter tee 到 Replay 和 Savant
+  - 单一 adapter 同时输出给 Replay 和 Savant
+  - 需要 adapter 支持 tee/multicast 或中间 bridge
+```
+
+在 single-ingestion 或 timestamp-domain mapping 完成之前，bbox overlay 不应作为生产视觉验收通过。
