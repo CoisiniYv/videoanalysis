@@ -245,6 +245,9 @@ services:
       POST_SECONDS: "3"
       FPS: "30"
       EVIDENCE_MAX_EVENTS: "5"
+      ANNOTATED_CLIP_CRF: "18"
+      ANNOTATED_CLIP_PRESET: "veryfast"
+      ANNOTATED_CLIP_BBOX_WIDTH: "3"
     volumes:
       - /data/video-analytics/media:/media:rw
     depends_on:

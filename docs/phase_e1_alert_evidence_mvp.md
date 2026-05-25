@@ -162,7 +162,37 @@ bash scripts/smoke/check_phase_e1_evidence.sh
 docker compose -f infra/docker-compose.phase3h-zmq.yml down
 ```
 
-## 8. Current Limitations
+## 8. Phase E1.1c — Annotated Clip Encoding Quality Fix
+
+**Date:** 2026-05-25
+
+The initial annotated clip (E1.1b) used `libx264 -preset ultrafast -crf 23` which produced visible blocking/macroblock artifacts in browser playback. The raw clip (`clip_raw.mp4`) was visually clean because it was generated via `-c copy` (no re-encode) from the original `video.mov`.
+
+E1.1c fixes the annotated clip encoding:
+
+| Parameter | E1.1b (old) | E1.1c (fixed) |
+|---|---|---|
+| codec | libx264 | libx264 |
+| preset | ultrafast | veryfast (configurable) |
+| crf | 23 | 18 (configurable) |
+| pix_fmt output | yuv420p | yuv420p |
+| movflags | (none) | +faststart |
+| profile/level | (auto) | high / 4.1 |
+| pipe input | `-i -` | `-i pipe:0` (explicit) |
+| short read handling | silent break | warning log + stop |
+| label overlay | 4-line block | 1-line compact for clip frames |
+| bbox width | fixed 3 | configurable (default 3) |
+
+**Root cause:** `preset ultrafast` is designed for speed, not quality — it disables most H.264 coding tools. Combined with CRF 23, it produced severe blocking, especially on frames with bbox overlay (sharp edges stress the encoder).
+
+**Raw clip remains unchanged** — `extract_clip()` uses `-c copy` (stream copy, no re-encode) so `clip_raw.mp4` has always been visually clean.
+
+**Config env vars** (in compose):
+- `ANNOTATED_CLIP_CRF=18`
+- `ANNOTATED_CLIP_PRESET=veryfast`
+- `ANNOTATED_CLIP_BBOX_WIDTH=3`
+
+## 9. Current Limitations
 
 1. **Event-to-frame matching is approximate**: Uses track_id scanning, not frame_num/timestamp mapping. The evidence frame may not be the exact frame where the intrusion rule fired.
 2. **Continuous sink output**: video.mov and metadata.json grow without limit while the pipeline runs. The pipeline MUST be stopped before running evidence-worker.
@@ -172,7 +202,7 @@ docker compose -f infra/docker-compose.phase3h-zmq.yml down
 6. **No cooldown/severity policy**: All intrusion events are processed (up to EVIDENCE_MAX_EVENTS).
 7. **No frame_uuid / keyframe_uuid in events**: These fields remain NULL in the event payload (known limitation per CLAUDE.md Section 9.6).
 
-## 9. Production Migration Path
+## 10. Production Migration Path
 
 Phase E1 is explicitly a dev-path POC. Production will migrate to:
 
@@ -198,7 +228,7 @@ Key differences from Phase E1:
 | Bbox source | metadata.json objects | Real-time Savant detection payload |
 | Cooldown/severity | None | Configurable per event type |
 
-## 10. Smoke Test
+## 11. Smoke Test
 
 ```bash
 bash scripts/smoke/check_phase_e1_evidence.sh
@@ -206,7 +236,7 @@ bash scripts/smoke/check_phase_e1_evidence.sh
 
 13 checks covering: compose config, database state, file existence, API URLs, HTTP responses, and bbox pixel verification.
 
-## 11. Related Documents
+## 12. Related Documents
 
 | Document | Content |
 |---|---|

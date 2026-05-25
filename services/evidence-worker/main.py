@@ -117,6 +117,9 @@ def process_event(event: dict, cfg, conn: psycopg.Connection) -> dict | None:
         cfg.pre_seconds, cfg.post_seconds, cfg.fps,
         annotated_clip_path,
         event_id=event_id, event_type=event_type, track_id=track_id,
+        crf=cfg.annotated_clip_crf,
+        preset=cfg.annotated_clip_preset,
+        bbox_width=cfg.annotated_clip_bbox_width,
     ):
         logger.warning("annotated clip generation failed, continuing without it")
         annotated_clip_path = ""
@@ -182,17 +185,27 @@ def main() -> None:
     print("Phase E1 Evidence Generation Summary")
     print("=" * 60)
     for r in results:
+        raw_size = os.path.getsize(r['clip_path']) if r.get('clip_path') and os.path.isfile(r['clip_path']) else 0
+        ann_size = os.path.getsize(r['annotated_clip_path']) if r.get('annotated_clip_path') and os.path.isfile(r['annotated_clip_path']) else 0
         print(f"  event_id:            {r['event_id']}")
         print(f"  track_id:            {r['track_id']}")
         print(f"  selected frame_num:  {r['frame_num']}")
         print(f"  event_dir:           {r['event_dir']}")
         print(f"    snapshot.jpg       {r['snapshot_path']}")
         print(f"    annotated_snapshot.jpg {r['annotated_snapshot_path']}")
-        print(f"    clip_raw.mp4       {r['clip_path']}")
-        print(f"    clip_annotated.mp4 {r['annotated_clip_path']}")
+        print(f"    clip_raw.mp4       {r['clip_path']} ({raw_size/1024:.0f} KB)")
+        print(f"    clip_annotated.mp4 {r['annotated_clip_path']} ({ann_size/1024:.0f} KB)")
         print("-" * 60)
     print(f"Processed: {len(results)}/{len(events)} events")
     print("=" * 60)
+
+    if results:
+        logger.info(
+            "=== Please manually inspect clip_annotated.mp4 for visual artifacts ===\n"
+            "  crf=%d preset=%s bbox_width=%d",
+            cfg.annotated_clip_crf, cfg.annotated_clip_preset,
+            cfg.annotated_clip_bbox_width,
+        )
 
     if not results:
         logger.warning("No events were processed successfully")

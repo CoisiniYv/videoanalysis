@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 logger = logging.getLogger(__name__)
 
 BBOX_COLOR = (220, 30, 30)         # red outline
-BBOX_WIDTH = 3
-LABEL_BG = (20, 20, 20)            # dark background for text block
+BBOX_WIDTH_DEFAULT = 3
+LABEL_BG = (20, 20, 20, 180)      # semi-transparent dark background
 LABEL_TEXT = (255, 255, 255)       # white text
 LABEL_FONT_SIZE = 14
 HEADER_FONT_SIZE = 16
@@ -45,8 +45,22 @@ def _draw_label_block(
     track_id: str,
     object_count: int,
     frame_num: int,
+    compact: bool = False,
 ) -> None:
-    """Draw info label block in the top-left corner."""
+    """Draw info label block in the top-left corner.
+
+    When compact=True, a smaller single-line block is drawn (for video overlays).
+    """
+    if compact:
+        line = f"E:{event_id[:8]} T:{track_id} F:{frame_num} N:{object_count}"
+        font = _load_font(13)
+        bbox = draw.textbbox((0, 0), line, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        draw.rectangle([0, 0, tw + 10, th + 6], fill=LABEL_BG)
+        draw.text((5, 3), line, fill=LABEL_TEXT, font=font)
+        return
+
     ts_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     lines = [
@@ -84,6 +98,8 @@ def draw_bboxes_on_image(
     event_type: str = "intrusion",
     track_id: str = "0",
     frame_num: int = 0,
+    bbox_width: int = BBOX_WIDTH_DEFAULT,
+    compact: bool = False,
 ) -> int:
     """Draw person bboxes onto an in-memory PIL Image. Returns count drawn."""
     draw = ImageDraw.Draw(img)
@@ -100,7 +116,7 @@ def draw_bboxes_on_image(
             continue
         x = xc - w / 2.0
         y = yc - h / 2.0
-        draw.rectangle([x, y, x + w, y + h], outline=BBOX_COLOR, width=BBOX_WIDTH)
+        draw.rectangle([x, y, x + w, y + h], outline=BBOX_COLOR, width=bbox_width)
         drawn += 1
 
     _draw_label_block(
@@ -110,6 +126,7 @@ def draw_bboxes_on_image(
         track_id=track_id,
         object_count=drawn,
         frame_num=frame_num,
+        compact=compact,
     )
     return drawn
 

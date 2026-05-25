@@ -27,6 +27,9 @@ class Config:
     post_seconds: float = 3.0
     fps: float = 30.0
     evidence_max_events: int = 5
+    annotated_clip_crf: int = 18
+    annotated_clip_preset: str = "veryfast"
+    annotated_clip_bbox_width: int = 3
 
 
 def _normalize_events_dir(raw: str) -> str:
@@ -65,4 +68,7 @@ def load_config() -> Config:
         post_seconds=float(os.getenv("POST_SECONDS", "3")),
         fps=float(os.getenv("FPS", "30")),
         evidence_max_events=int(os.getenv("EVIDENCE_MAX_EVENTS", "5")),
+        annotated_clip_crf=int(os.getenv("ANNOTATED_CLIP_CRF", "18")),
+        annotated_clip_preset=os.getenv("ANNOTATED_CLIP_PRESET", "veryfast"),
+        annotated_clip_bbox_width=int(os.getenv("ANNOTATED_CLIP_BBOX_WIDTH", "3")),
     )

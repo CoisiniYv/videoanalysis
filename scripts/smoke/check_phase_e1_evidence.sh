@@ -295,6 +295,80 @@ print(count)
   fi
 fi
 
+# ── ffprobe checks for annotated clip (E1.1c) ──────────────────────────
+
+if [ -f "$ANNOTATED_CLIP_HOST" ]; then
+  PROBE_JSON=$(ffprobe -v quiet -print_format json \
+    -show_entries stream=codec_name,width,height,pix_fmt,duration,bit_rate \
+    -of json "$ANNOTATED_CLIP_HOST" 2>/dev/null || echo "{}")
+
+  PROBE_CODEC=$(echo "$PROBE_JSON" | python3 -c "
+import sys,json
+s=json.load(sys.stdin).get('streams',[{}])[0]
+print(s.get('codec_name',''))
+" 2>/dev/null || echo "")
+
+  PROBE_PIXFMT=$(echo "$PROBE_JSON" | python3 -c "
+import sys,json
+s=json.load(sys.stdin).get('streams',[{}])[0]
+print(s.get('pix_fmt',''))
+" 2>/dev/null || echo "")
+
+  PROBE_DUR=$(echo "$PROBE_JSON" | python3 -c "
+import sys,json
+s=json.load(sys.stdin).get('streams',[{}])[0]
+print(s.get('duration','0'))
+" 2>/dev/null || echo "0")
+
+  PROBE_W=$(echo "$PROBE_JSON" | python3 -c "
+import sys,json
+s=json.load(sys.stdin).get('streams',[{}])[0]
+print(s.get('width','0'))
+" 2>/dev/null || echo "0")
+
+  PROBE_H=$(echo "$PROBE_JSON" | python3 -c "
+import sys,json
+s=json.load(sys.stdin).get('streams',[{}])[0]
+print(s.get('height','0'))
+" 2>/dev/null || echo "0")
+
+  # 19. codec_name = h264
+  if [ "$PROBE_CODEC" = "h264" ]; then
+    ok "annotated clip codec = h264"
+  else
+    fail "annotated clip codec = $PROBE_CODEC (expected h264)"
+  fi
+
+  # 20. pix_fmt = yuv420p
+  if [ "$PROBE_PIXFMT" = "yuv420p" ]; then
+    ok "annotated clip pix_fmt = yuv420p"
+  else
+    fail "annotated clip pix_fmt = $PROBE_PIXFMT (expected yuv420p)"
+  fi
+
+  # 21. duration > 0
+  DUR_GT_ZERO=$(python3 -c "print(float($PROBE_DUR) > 0)" 2>/dev/null || echo "False")
+  if [ "$DUR_GT_ZERO" = "True" ]; then
+    ok "annotated clip duration > 0 (${PROBE_DUR}s)"
+  else
+    fail "annotated clip duration invalid: $PROBE_DUR"
+  fi
+
+  # 22. width > 0 and height > 0
+  if [ "$PROBE_W" -gt 0 ] 2>/dev/null && [ "$PROBE_H" -gt 0 ] 2>/dev/null; then
+    ok "annotated clip dimensions ${PROBE_W}x${PROBE_H}"
+  else
+    fail "annotated clip dimensions invalid: ${PROBE_W}x${PROBE_H}"
+  fi
+else
+  fail "annotated clip missing, cannot run ffprobe checks"
+  PROBE_CODEC=""
+  PROBE_PIXFMT=""
+  PROBE_DUR="0"
+  PROBE_W="0"
+  PROBE_H="0"
+fi
+
 # ── Summary output ────────────────────────────────────────────────────
 
 echo ""

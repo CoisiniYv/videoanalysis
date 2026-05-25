@@ -1,7 +1,13 @@
 """Annotated clip generation — render person bboxes onto every frame of a clip.
 
 Pipes raw RGB frames from ffmpeg through PIL bbox drawing into a second
-ffmpeg process that encodes the annotated stream to h264 mp4.
+ffmpeg process that encodes the annotated stream to high-quality h264 mp4.
+
+Phase E1.1c — encoding quality fix:
+    - libx264 with configurable crf/preset (default crf=18, preset=veryfast)
+    - Robust per-frame read: exact width*height*3 bytes per frame
+    - Short-read detection with warning, stops immediately (no partial frames)
+    - yuv420p + faststart + high profile for browser compatibility
 """
 
 from __future__ import annotations
@@ -19,6 +25,26 @@ from app.bbox_draw import draw_bboxes_on_image
 logger = logging.getLogger(__name__)
 
 
+def _ffprobe(path: str) -> Dict[str, Any] | None:
+    """Extract basic stream info via ffprobe. Returns dict or None on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_entries",
+                "stream=codec_name,width,height,pix_fmt,duration,bit_rate",
+                "-of", "json", path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return None
+        streams = json.loads(result.stdout).get("streams", [])
+        return streams[0] if streams else None
+    except Exception:
+        return None
+
+
 def extract_annotated_clip(
     video_path: str,
     metadata_path: str,
@@ -30,6 +56,9 @@ def extract_annotated_clip(
     event_id: str = "unknown",
     event_type: str = "intrusion",
     track_id: str = "0",
+    crf: int = 18,
+    preset: str = "veryfast",
+    bbox_width: int = 3,
 ) -> bool:
     """Generate an annotated clip with per-frame bbox overlay.
 
@@ -69,9 +98,9 @@ def extract_annotated_clip(
         return False
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    frame_size = width * height * 3
+    frame_size = width * height * 3  # RGB24 = 3 bytes per pixel
 
-    # Decode: raw RGB24 frames from video.mov
+    # ── Decode: raw RGB24 frames from video.mov ──────────────────────────
     extract = subprocess.Popen(
         [
             "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
@@ -84,16 +113,21 @@ def extract_annotated_clip(
         stdout=subprocess.PIPE,
     )
 
-    # Encode: raw RGB24 frames → h264 mp4
+    # ── Encode: raw RGB24 → h264 mp4 (high quality) ─────────────────────
     encode = subprocess.Popen(
         [
             "ffmpeg", "-y", "-nostdin", "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24",
             "-s", f"{width}x{height}",
             "-r", str(fps),
-            "-i", "-",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-i", "pipe:0",
+            "-c:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
             "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-profile:v", "high",
+            "-level", "4.1",
             output_path,
         ],
         stdin=subprocess.PIPE,
@@ -102,8 +136,16 @@ def extract_annotated_clip(
     drawn_frames = 0
     try:
         for fn in range(start_frame, end_frame + 1):
+            # Read exactly one full frame. If we get fewer bytes, the pipe
+            # ended prematurely — stop and warn instead of writing a partial
+            # frame that would corrupt the output.
             raw = extract.stdout.read(frame_size)
             if len(raw) < frame_size:
+                logger.warning(
+                    "short read at frame %d: got %d bytes, expected %d — "
+                    "decode pipe ended early, stopping",
+                    fn, len(raw), frame_size,
+                )
                 break
 
             img = Image.frombytes("RGB", (width, height), raw)
@@ -113,6 +155,7 @@ def extract_annotated_clip(
                     img, frame_objects[fn],
                     event_id=event_id, event_type=event_type,
                     track_id=track_id, frame_num=fn,
+                    bbox_width=bbox_width, compact=True,
                 )
                 drawn_frames += 1
 
@@ -129,9 +172,34 @@ def extract_annotated_clip(
         logger.error("annotated clip output missing or empty: %s", output_path)
         return False
 
+    size_mb = os.path.getsize(output_path) / (1024 * 1024)
     logger.info(
         "annotated clip saved: %d/%d frames drawn → %s (%.1f MB)",
-        drawn_frames, n_frames, output_path,
-        os.path.getsize(output_path) / (1024 * 1024),
+        drawn_frames, n_frames, output_path, size_mb,
     )
+
+    # ── Post-generation probe for quality verification ──────────────────
+    info = _ffprobe(output_path)
+    if info:
+        logger.info(
+            "annotated clip probe: codec=%s pix_fmt=%s %dx%d duration=%s",
+            info.get("codec_name", "?"),
+            info.get("pix_fmt", "?"),
+            info.get("width", "?"),
+            info.get("height", "?"),
+            info.get("duration", "?"),
+        )
+
+    # ── Manual inspection reminder ──────────────────────────────────────
+    logger.info(
+        "=== MANUAL CHECK: Please inspect clip_annotated.mp4 for visual "
+        "artifacts ===\n"
+        "  event_id:  %s\n"
+        "  path:      %s\n"
+        "  size:      %.2f MB\n"
+        "  crf:       %d\n"
+        "  preset:    %s",
+        event_id, output_path, size_mb, crf, preset,
+    )
+
     return True
