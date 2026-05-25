@@ -125,38 +125,47 @@ test.mp4 → ffmpeg-source → RTSP server
 ## 6. 未来实现路线
 
 ```
-Phase 3F0.3a: 同 RTSP 源临时改良
-  - source-adapter 改用 rtsp.sh
-  - Savant 和 source-adapter 消费同一 RTSP
-  - 目的：消除双文件独立循环
+Phase 3F0.3a-3F0.4 (已完成诊断，未实施):
+  - 同 RTSP 源临时改良
+  - Timestamp-Domain Mapping
   - 不声称帧级对齐
 
-Phase 3F0.3b: 禁用真实 bbox overlay（如需要）
-  - 如果 3F0.3a 后 bbox 对齐仍不足
-  - 只保留 label overlay
+Phase 3H / 3H.1 / 3H.2 (已完成 POC):
+  - Official ZeroMQ Source Ingestion
+  - Official Metadata Sink Output
+  - Official Video File Sink Output
+  - 单路 single-ingestion video + metadata 同帧流已验证
+  - Continuous sink 已冻结，media POC 不再扩展
 
-Phase 3F0.4: Timestamp-Domain Mapping
-  - 解码 UUIDv7 keyframe UUID 内嵌时间戳
-  - 存储 bbox_frame_num 到 event payload.media
-  - 建立 Savant frame_num ↔ Replay PTS 对应关系
-  - 取消 replay_client.py 中的 from_ns=None/to_ns=None
+R0 (当前):
+  - 项目现状盘点，路线校准，仓库卫生
 
-Phase 3H: Official Adapter / ZeroMQ Single-Ingestion Production Architecture
-  - Savant module 切换到 zeromq_source_bin / ZMQ_SRC_ENDPOINT
-  - 或自研 ZMQ→RTSP bridge adapter
-  - 实现 specs/01_architecture.md 的目标拓扑
-  - 所有事件验证 bbox/snapshot 对齐
+R1 (下一阶段):
+  - 主模块 / compose 收敛
+  - savant_security 成为唯一主模块
 
-Phase 4+: ROI / Rules
-  - 摄像头 ROI 配置
-  - 规则引擎完善
+B2 (行为规则补完):
+  - loitering
+  - crowd_gathering
+  - fall (初版)
 
-Phase 5+: Face Pipeline
-  - SCRFD_2.5G
-  - ArcFace
-  - pgvector
+C1 (配置系统):
+  - camera_zones / camera_rules API
+  - ROI 配置
+  - config 同步
+
+F1-F3 (人脸链路 — 重新排回近期主线):
+  - SCRFD_2.5G 人脸检测
+  - ArcFace embedding + pgvector
   - 重点人员布控 / 一键找人
+
+Phase 4+: 生产加固
+  - 60 路性能
+  - GPU 显存稳定
+  - Prometheus / Grafana
 ```
+
+注：Phase 3H ZMQ frame+metadata 流已作为未来生产拓扑技术依据保留，不再继续无限扩展 media POC。
 
 ## 7. 相关文档
 

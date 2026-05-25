@@ -183,10 +183,13 @@ docker compose -f infra/docker-compose.phase3h-zmq.yml down
 
 Do NOT run this compose stack unattended for extended periods.
 
-## 9. Next Steps
+## 9. Media POC Freeze
 
-Per `docs/production_ingestion_topology_policy.md`:
-1. Add Replay Service back, consuming the same ZMQ sink for keyframe storage.
-2. Implement on-demand clip extraction via Replay REST API.
-3. Add clip-worker and media-worker for end-to-end snapshot/clip generation.
-4. Verify bbox/snapshot frame-level alignment with automated diagnostic script.
+Phase 3H.2 is the **last media POC phase**. Per `docs/project_rebaseline_2026_05_25.md`, media POC expansion is frozen at this point. The Phase 3H ZMQ frame+metadata single-ingestion topology is preserved as architecture reference for future production design.
+
+**Next mainline priorities (no media):**
+1. Complete missing behavior rules (loitering, crowd_gathering, fall).
+2. Camera zones / rules configuration API.
+3. Face pipeline (SCRFD → ArcFace → pgvector → watchlist/live-search).
+
+Replay, clip-worker, media-worker, and video-file-sink integration will be revisited after the face pipeline is operational.
