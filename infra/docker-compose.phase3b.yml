@@ -28,6 +28,7 @@ services:
       - "5433:5432"
     volumes:
       - ../db/migrations:/docker-entrypoint-initdb.d:ro
+      - /data/video-analytics/postgres-phase3b:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
       interval: 5s
