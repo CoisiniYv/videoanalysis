@@ -60,14 +60,22 @@ class FaceDebugPyFunc(NvDsPyFuncPlugin):
                     bbox_str = f"bbox={bbox}"
 
             conf = getattr(obj, "confidence", 0.0)
-            landmarks = getattr(obj, "landmarks", None)
+
+            # --- landmarks: use Savant get_attr_meta API ---
             lm_str = ""
-            if landmarks is not None:
-                try:
-                    lm_list = list(landmarks) if hasattr(landmarks, "__iter__") else []
-                    lm_str = f"landmarks={len(lm_list)}pts"
-                except Exception:
-                    lm_str = "landmarks=present"
+            try:
+                attr = obj.get_attr_meta("yolov8_face", "landmarks")
+                if attr is not None:
+                    value = getattr(attr, "value", None)
+                    if value is not None:
+                        lm_list = list(value) if hasattr(value, "__iter__") else []
+                        lm_str = f"landmarks={len(lm_list)}pts value={lm_list[:6]}..."
+                    else:
+                        lm_str = "landmarks=attr_present_value_None"
+                else:
+                    lm_str = "landmarks=attr_None"
+            except Exception as e:
+                lm_str = f"landmarks=error:{e}"
 
             lines.append(
                 f"  face[{i}] conf={conf:.3f} {bbox_str} {lm_str}"

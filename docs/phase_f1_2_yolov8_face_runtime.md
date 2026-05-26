@@ -1,7 +1,7 @@
 # Phase F1.2 — YOLOv8-Face Detector Runtime Integration
 
 Date: 2026-05-26
-Status: code complete, static smoke pass, GPU runtime smoke pending
+Status: code complete, static smoke pass, GPU runtime smoke **PASS**
 
 ## 1. What Changed
 
@@ -96,18 +96,63 @@ The YOLOv8-Face ONNX has **static batch = 1**.  Key implications:
 
 ## 5. Smoke Result
 
-Static smoke: **PASS** (config syntax, model path, batch policy verified).
-GPU runtime smoke: **NOT RUN** (requires GPU + test video + `C1_TEST_SOURCE_URI`).
+Static smoke: **PASS** (14/14 — config syntax, model path, batch policy verified).
+GPU runtime smoke: **PASS** (face bbox + confidence + landmarks confirmed).
 
-To run GPU smoke:
-```bash
-C1_TEST_SOURCE_URI=<rtsp-or-file> bash scripts/smoke/check_f1_2_yolov8_face_runtime.sh
-# Then watch logs:
-docker logs c1-official-savant | grep '\[face_debug\]'
+### GPU Runtime Smoke Details
+
+- **Date/Time**: 2026-05-26 14:00–14:25 UTC+8
+- **Compose**: `infra/docker-compose.c1-official-adapter.yml`
+- **Input**: `testVideo/allface.mp4` via source adapter `c1_2_test`
+- **Container**: `c1-official-savant` — running, exit code 0
+
+### Evidence
+
+| Check | Result |
+|-------|--------|
+| savant-security started | YES |
+| YOLOv8-Face engine build | SUCCESS (~3 min, cached after first run) |
+| Official converter import | OK (`savant.converter.yolo_v8face.YoloV8faceConverter`) |
+| `[face_debug]` logs | YES — 105 lines |
+| Face count | 0, 1, 2, 3, 5 faces per frame |
+| Face bbox | `RBBox { xc, yc, width, height }` |
+| Face confidence | 0.69–0.85 |
+| Face landmarks | `landmarks=10pts` (5 × 2 coords) |
+| Container crash | NONE |
+| TensorRT errors | NONE |
+| Batch mismatch | NONE |
+| C1.2 behavior rules | Still running (frame 4380+) |
+
+### Key Log Lines
+
+```
+[face_debug] frame=31 source=c1_2_test pts=1280000000 faces=1
+  face[0] conf=0.825 bbox="RBBox { xc: 917.89, ...}" landmarks=10pts value=[846.75, 257.92, 942.14, 255.05, 881.06, 299.89]...
+[face_debug] frame=841 source=c1_2_test pts=33680000000 faces=5
+  face[0] conf=0.723 ... landmarks=10pts value=[...]
+  face[4] conf=0.815 ... landmarks=10pts value=[...]
 ```
 
-Expected output: `[face_debug] frame=N source=... pts=... faces=M` with
-bbox + landmarks values every ~30 frames.
+### Landmarks Access Fix
+
+Original `FaceDebugPyFunc` used `getattr(obj, "landmarks", None)` which always
+returned `None`.  The correct Savant API is:
+
+```python
+attr = obj.get_attr_meta("yolov8_face", "landmarks")
+value = attr.value  # list of 10 floats: [x1,y1,x2,y2,x3,y3,x4,y4,x5,y5]
+```
+
+Reference: `custom/adapters/person_pose_adapter.py:96` uses the same pattern
+for YOLO26-pose keypoints (`obj.get_attr_meta("yolo26_pose", "keypoints")`).
+
+### Issues Fixed During Smoke
+
+1. **Model symlink**: Absolute host symlink didn't resolve in container.
+   Fixed with relative symlink: `ln -sf yolov8_face/yolov8n-face.onnx`
+2. **Engine path mismatch**: TensorRT saved engine to resolved symlink path.
+   Fixed with container-internal symlink.
+3. **Landmarks API**: `getattr` → `get_attr_meta` (see above).
 
 ## 6. Known Risks
 
@@ -116,11 +161,35 @@ bbox + landmarks values every ~30 frames.
 | Static batch = 1 limits throughput | Re-export ONNX with dynamic batch before multi-camera perf test |
 | Full-frame face detector adds GPU load | Monitor GPU utilization; reduce face detection interval if needed |
 | Face-person association not yet implemented | F2+ phase; for now face and person objects are independent |
-| AdaFace not yet wired | F2 phase; module.yml placeholder prepared |
-| Official converter may differ from sample | First GPU run will confirm; fallback to custom converter if needed |
-| FaceDebugPyFunc is verbose at log_every_n_frames=30 | Tune interval per env var if needed |
+| AdaFace not yet wired | F2 phase |
+| Engine path symlink is inside container | Deployment concern: engine symlink must survive container recreation |
 
-## 7. Next Phase
+## 7. Output Video
+
+The `video-file-sink` service writes output to:
+
+```
+/data/video-analytics/media/c1-official-savant-output/c1_2_test%/test%/video.mov
+```
+
+**This file is NOT used as F1.2 acceptance evidence.** Checked timestamp:
+
+```
+2026-05-26 01:03:35 — from an earlier C1.2 run, NOT from this F1.2 smoke (14:00+)
+```
+
+The file is a stale artifact from a previous pipeline run. The current F1.2 smoke
+did not produce a new annotated video because the source adapter looped the test
+video before the `video-file-sink` could process the face-detector frames.
+
+F1.2 acceptance evidence is **docker logs only**:
+- `[face_debug]` lines with face count, bbox, confidence, landmarks
+- Engine build success logs
+- Container stability (no crash)
+
+Annotated video output validation is a **separate future task** — not part of F1.2.
+
+## 8. Next Phase
 
 **F2** — AdaFace in-pipeline embedding:
 - Wire `nvinfer@attribute_model` on face objects.
@@ -129,6 +198,12 @@ bbox + landmarks values every ~30 frames.
 - Emit `FaceObservationEvent` to Redis `security.face_observations`.
 
 Prerequisites for F2:
-1. F1.2 GPU runtime smoke passes (face objects + landmarks confirmed).
+1. F1.2 GPU runtime smoke passes — **DONE** (face objects + landmarks confirmed).
 2. AdaFace ONNX verified (F2.0 already complete).
-3. Fac person association design finalized.
+3. Face-person association design finalized.
+
+**F1.3 — Face-Person Association** can start:
+- Face objects are available in pipeline with bbox + confidence + landmarks.
+- Person objects are available via YOLO26-pose + nvtracker (with track_id).
+- Association logic can match face bbox to person bbox spatially.
+- No AdaFace dependency for basic spatial association.
