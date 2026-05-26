@@ -17,7 +17,8 @@ YOLO26-pose
   -> face_quality + per-track throttle
   -> adaface_preprocess_pyfunc         (5-point landmark alignment, 112x112)
   -> AdaFace                           (in-pipeline embedding, 输出 512 维)
-  -> redis_publisher_pyfunc            (写入 security.face_observations, 包含 embedding)
+  -> face_reid_gate_pyfunc             (quality gate + per-track throttle, F2.2)
+  -> face_observation_exporter_pyfunc  (写入 security.face_observations, 包含 embedding, F2.3)
 ```
 
 > 历史路线 `SCRFD_2.5G -> ArcFace` 已被 F1.1a 取代:
@@ -205,21 +206,31 @@ ArcFace 保留为未来 embedder swap 候选, 不在第一版实现:
 - ArcFace 切换是 1 个 converter + 1 个 nvinfer 配置 + 模型资产更新
   即可完成的事情, 但必须有 phase doc 推翻 F1.1a 并解释为什么换.
 
-### 2.7 redis_publisher_pyfunc
+### 2.7 face_reid_gate_pyfunc (F2.2)
+
+职责:
+
+- 评估人脸质量 (confidence, bbox size, landmarks, feature dim, L2 norm, NaN).
+- 每 camera+track 限流 (默认 1000ms 间隔).
+- 仅 `reid_allowed=true` 的 face 对象传递给下游.
+- 不写 Redis, 不访问数据库.
+
+### 2.8 face_observation_exporter_pyfunc (F2.3)
 
 职责:
 
 - 生成 `FaceObservationEventDraft` (含 embedding).
-- 写入 Redis Stream `security.face_observations`.
-- 写入 Redis Stream `security.events` (行为事件分支).
+- 写入 Redis Stream `security.face_observations` (仅 `reid_allowed=true`).
+- 不写 `security.events` (行为事件由 BehaviorRulesPyFunc 处理).
 - 不做复杂检索, 不访问 PostgreSQL, 不调用 FastAPI.
 
 Stream 体规则 (硬约束):
 
 - 包含: camera_id, source_id, track_id, timestamp_ms, person_bbox,
-  face_bbox, landmarks, quality, embedding, model_name,
-  model_version, snapshot_path / crop_path (路径引用).
-- **不包含** JPEG / PNG / RAW / face crop bytes.
+  face_bbox, landmarks, quality, embedding, embedding_model,
+  embedding_dim, reid_allowed, association_score, association_method.
+- **不包含** JPEG / PNG / RAW / face crop bytes / base64.
+- 幂等 key: `face:{source_id}:{track_id}:{timestamp_ms}[:{face_index}]`.
 
 复杂检索 / 业务逻辑由 face-worker 完成.
 
@@ -344,14 +355,24 @@ pipeline:
             module: custom.converters.adaface
             class_name: AdaFaceEmbeddingConverter
 
-    # ----- write metadata + embedding to Redis (no image bytes) -----
+    # ----- F2.2 quality gate + per-track throttle -----
     - element: pyfunc
-      module: custom.pyfuncs.redis_publisher
-      class_name: RedisPublisherPyFunc
+      module: custom.pyfuncs.face_reid_gate
+      class_name: FaceReidGatePyFunc
       kwargs:
-        face_observations_stream: security.face_observations
-        events_stream: security.events
-        face_min_quality: 0.65
+        log_every_n_frames: 30
+        face_reid_min_confidence: 0.6
+        face_reid_min_face_size: 40.0
+        face_reid_min_interval_ms: 1000
+        face_reid_norm_tolerance: 0.10
+
+    # ----- F2.3 write reid_allowed=true observations to Redis -----
+    - element: pyfunc
+      module: custom.pyfuncs.face_observation_exporter
+      class_name: FaceObservationExporterPyFunc
+      kwargs:
+        log_every_n_frames: 30
+        producer: savant_security
 ```
 
 ### 3.1 环境变量命名

@@ -83,6 +83,8 @@ services:
       POSE_BATCH_SIZE: "1"
       FACE_DETECTOR_BATCH_SIZE: "1"
       FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_OBSERVATION_STREAM: "security.face_observations"
+      FACE_OBSERVATION_EXPORT_ENABLED: "true"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis

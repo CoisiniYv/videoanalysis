@@ -173,6 +173,33 @@ ON face_observations(matched_person_id, captured_at DESC);
 - pgvector 检索假设 embedding 已经 L2 归一化, 写入前必须确认 (由
   Savant module 的 AdaFace converter 负责).
 
+### 8.2 F2.3 Redis → PostgreSQL 字段映射 (2026-05-27)
+
+F2.3 已将 face observation 写入 Redis Stream `security.face_observations`.
+face-worker 消费时的字段映射:
+
+| Redis JSON field | PostgreSQL column | Notes |
+|---|---|---|
+| `source_observation_id` | `source_observation_id` | 幂等 key, UNIQUE index |
+| `camera_id` | `camera_id` | FK → cameras |
+| `source_id` | `source_id` | |
+| `track_id` | `track_id` | TEXT |
+| `timestamp_ms` | `captured_at` | ms → timestamptz 转换 |
+| `face_bbox` | `face_bbox` | JSONB |
+| `person_bbox` | `person_bbox` | JSONB, 可能 null |
+| `landmarks` | `landmarks` | JSONB, 10 floats |
+| `quality` | `quality` | REAL |
+| `embedding` | `embedding` | vector(512) |
+| `embedding_model` | `model_name` | TEXT |
+| — | `model_version` | 从 embedding_model + model_file 推导 |
+| `snapshot_path` | `snapshot_path` | F2.3 为 null, 未来 phase 补 |
+| `payload` | `payload` | JSONB, F2.3 为空 dict |
+
+Redis-only 字段 (不入 PostgreSQL): `schema_version`, `producer`,
+`frame_num`, `face_confidence`, `detector_model`, `embedding_dim`,
+`embedding_norm`, `reid_allowed`, `reid_throttle_key`,
+`association_score`, `association_method`.
+
 ## 9. events
 
 ```sql

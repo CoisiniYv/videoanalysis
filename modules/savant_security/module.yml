@@ -197,6 +197,19 @@ pipeline:
         face_reid_norm_tolerance: ${oc.decode:${oc.env:FACE_REID_NORM_TOLERANCE, 0.10}}
 
     # ------------------------------------------------------------------
+    # FaceObservationExporterPyFunc — F2.3 Redis face observation producer.
+    # Exports reid_allowed=true face observations to Redis Stream
+    # security.face_observations. No image bytes. No pgvector/watchlist.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: face_observation_exporter
+      module: custom.pyfuncs.face_observation_exporter
+      class_name: FaceObservationExporterPyFunc
+      kwargs:
+        log_every_n_frames: 30
+        producer: savant_security
+
+    # ------------------------------------------------------------------
     # FaceEmbeddingDebugPyFunc — F2.1 embedding smoke visibility probe.
     # Logs feature dim, raw L2 norm, person_track_id, landmarks.
     # Does NOT emit face observations to Redis.

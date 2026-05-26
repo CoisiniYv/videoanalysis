@@ -138,3 +138,10 @@ All checks pass.
 - face-worker consumes from Redis, stores in PostgreSQL + pgvector.
 - pgvector cosine similarity search.
 - watchlist_hit / live_search_hit events.
+
+## F2.3 Downstream Consumer
+
+**F2.3** (completed 2026-05-27) consumes `reid_allowed=true` faces from this
+gate and exports them to Redis Stream `security.face_observations`. The
+`FaceObservationExporterPyFunc` sits immediately after `FaceReidGatePyFunc`
+in the pipeline. See `docs/phase_f2_3_face_observation_redis.md`.

@@ -48,11 +48,21 @@ class FaceObservationEventDraft:
     source_id: str = ""
     track_id: int = 0
     timestamp_ms: int = 0
+    frame_num: Optional[int] = None
     person_bbox: Optional[List[float]] = None
     face_bbox: Optional[List[float]] = None
-    landmarks: Optional[List[List[float]]] = None
+    landmarks: Optional[List[float]] = None
+    face_confidence: float = 0.0
     quality: float = 0.0
-    model_name: str = ""
+    detector_model: str = "yolov8_face"
+    embedding_model: str = "adaface"
+    embedding_dim: int = 0
+    embedding: Optional[List[float]] = None
+    embedding_norm: float = 0.0
+    reid_allowed: bool = False
+    reid_throttle_key: str = ""
+    association_score: float = 0.0
+    association_method: str = ""
     model_version: Optional[str] = None
     snapshot_path: Optional[str] = None
     crop_path: Optional[str] = None
@@ -68,11 +78,21 @@ class FaceObservationEventDraft:
             "source_id": self.source_id,
             "track_id": str(self.track_id) if self.track_id > 0 else None,
             "timestamp_ms": self.timestamp_ms,
+            "frame_num": self.frame_num,
             "person_bbox": self.person_bbox,
             "face_bbox": self.face_bbox,
             "landmarks": self.landmarks,
+            "face_confidence": self.face_confidence,
             "quality": self.quality,
-            "model_name": self.model_name,
+            "detector_model": self.detector_model,
+            "embedding_model": self.embedding_model,
+            "embedding_dim": self.embedding_dim,
+            "embedding": self.embedding,
+            "embedding_norm": self.embedding_norm,
+            "reid_allowed": self.reid_allowed,
+            "reid_throttle_key": self.reid_throttle_key,
+            "association_score": self.association_score,
+            "association_method": self.association_method,
             "model_version": self.model_version,
             "snapshot_path": self.snapshot_path,
             "crop_path": self.crop_path,
