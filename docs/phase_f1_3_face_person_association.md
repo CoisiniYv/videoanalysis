@@ -173,3 +173,9 @@ face[1] conf=0.783 bbox="RBBox { xc: 860.8, yc: 278.3, ... }" landmarks=10pts va
 - Face alignment preprocessing (GPU-side).
 - L2-normalize AdaFace `feature` output.
 - Emit `FaceObservationEvent` to Redis `security.face_observations`.
+
+**F2.1 update (2026-05-26):** F2.1 now consumes associated face
+objects from this phase. AdaFace `nvinfer@attribute_model` runs after
+`FacePersonAssociatorPyFunc`, and `person_track_id` is preserved
+through the embedding stage. `FaceEmbeddingDebugPyFunc` confirms
+embedded faces carry the associated `person_track_id`.
