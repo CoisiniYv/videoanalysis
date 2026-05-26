@@ -6,18 +6,32 @@ Savant module 是实时视频分析的核心。它将 RTSP 视频帧转化为结
 
 注意：按照 Savant 官方架构，RTSP 接入、文件落盘、Replay 重推等能力应优先由 source / sink / bridge adapter 和 Replay Service 承担，module 只保留实时推理与轻量 metadata 处理职责。
 
-主 pipeline：
+主 pipeline (锁定于 Phase F1.1a, 2026-05-26):
 
 ```text
 YOLO26-pose
   -> nvtracker
   -> behavior_rules_pyfunc
-  -> face_roi_selector_pyfunc
-  -> SCRFD_2.5G
-  -> ArcFace
-  -> face_intelligence_pyfunc
-  -> event_exporter
+  -> YOLOv8-Face                       (PRIMARY, FULL-FRAME, NOT secondary-on-ROI)
+  -> face_roi_selector_pyfunc          (重定义: face-person association, 不裁剪 / 不触发推理)
+  -> face_quality + per-track throttle
+  -> adaface_preprocess_pyfunc         (5-point landmark alignment, 112x112)
+  -> AdaFace                           (in-pipeline embedding, 输出 512 维)
+  -> redis_publisher_pyfunc            (写入 security.face_observations, 包含 embedding)
 ```
+
+> 历史路线 `SCRFD_2.5G -> ArcFace` 已被 F1.1a 取代:
+>
+> - 第一版 detector 改为 **YOLOv8-Face full-frame primary**.
+> - 第一版 embedder 改为 **AdaFace, 仍在 Savant module 内**.
+> - SCRFD_2.5G 保留为 future detector candidate (可在 §2.5b 描述).
+> - ArcFace 保留为 future embedding alternative (可在 §2.6 描述).
+> - **不允许** 在任何后续 spec 中描述 "per-person ROI crop ->
+>   YOLOv8-Face" 或 "YOLOv8-Face as secondary nvinfer on person ROI"
+>   的链路. 60 路 / 2× T4 部署目标下, YOLOv8-Face 必须是单次全帧
+>   primary 推理.
+>
+> 详见 `docs/phase_f1_1a_in_pipeline_face_architecture_lock.md`.
 
 ## 2. Pipeline 元素说明
 
@@ -86,55 +100,134 @@ NvDCF_accuracy
 
 ### 2.4 FaceRoiSelectorPyFunc
 
-职责：
+> **F1.1a 起的职责重定义**: 这个 PyFunc 不再为 secondary 人脸 detector
+> 准备 ROI 截图. 在 YOLOv8-Face 已经作为 primary full-frame detector
+> 直接输出 face object 之后, 它的工作变成 **face-person
+> association** + 节流: 不裁剪图像, 不触发额外推理.
+>
+> 如后续阶段确认命名歧义明显, 可在 F1.2 之后将文件 / 类名重命名为
+> `FacePersonAssociatorPyFunc`. F1.1a 不做重命名.
 
-- 根据 person bbox 和关键点估计 head ROI。
-- 控制每个 track 的人脸尝试频率。
-- 过滤太小、太远、质量明显不够的人。
-
-策略：
+输入:
 
 ```text
-每个 track 每 1000ms 最多尝试一次 face detection
-person 高度小于 min_person_height 时不尝试
-已经成功识别的 track 在 cooldown 内不重复提取 ArcFace
+persons:   [(track_id, person_bbox, keypoints), ...]   来自 YOLO26-pose + nvtracker
+faces:     [(face_bbox, landmarks, confidence), ...]   来自 YOLOv8-Face
 ```
 
-### 2.5 SCRFD_2.5G
+输出:
 
-类型：secondary detector。
+```text
+associated_faces:
+  (track_id_or_None, face_bbox, landmarks, confidence, quality_inputs, ...)
+```
 
-输入：head/person ROI。
+职责:
 
-职责：
+- 根据 person bbox 与关键点估计 head ROI (复用 F0
+  `estimate_head_roi_from_person`).
+- 计算每个 face bbox 与每个 person head ROI 的 IoU.
+- 贪心匹配: 每个 face 取 IoU 最高的 person (高于 `min_iou` 阈值),
+  并把该 person 的 `track_id` 继承给 face.
+- 匹配不到 person 的 face, `track_id = None`, 仍然向下游传递 (后续
+  仍可被 AdaFace 嵌入并入库, 但没有人体轨迹关联).
+- 控制每个 track 的人脸尝试频率 (默认 1 Hz).
+- 过滤明显过小 / 过远 / 质量不足的人脸 (具体在 face_quality 阶段
+  做细判).
 
-- 检测人脸 bbox。
-- 输出 face landmarks。
-- 输出 face confidence。
+非职责:
 
-输出进入 face quality filter。
+- **不做图像裁剪**.
+- **不触发额外推理** (例如不调用 secondary nvinfer).
+- 不与 PostgreSQL 或 FastAPI 通信.
 
-### 2.6 ArcFace
+策略:
 
-类型：secondary classifier / attribute model / embedding model。
+```text
+每个 track 每 1000ms 最多产出一次 AdaFace embedding
+person 高度小于 min_person_height 时跳过
+已成功识别的 track 在 cooldown 内不重复 embedding
+```
 
-实现提示：ArcFace 输出 embedding，本质上应作为 face object 的 attribute 写入 metadata。可以先用 `nvinfer@classifier` 验证，最终以 converter 能否稳定输出 embedding attribute 为准。
+### 2.5 YOLOv8-Face
 
-输入：经过对齐的人脸 crop。
+类型: **primary detector, full-frame**.
 
-输出：512 维或模型指定维度 embedding。
+输入: 整帧图像 (与 YOLO26-pose 并列的 primary nvinfer).
 
-### 2.7 FaceIntelligencePyFunc
+输出:
 
-职责：
+- face bbox (xyxy).
+- 5 个 face landmarks (eyes, nose, mouth corners).
+- face confidence.
 
-- 生成 FaceObservation。
-- 将人脸 observation 事件推送到 Redis Streams。
-- 可选执行轻量阈值判断。
+不要把 YOLOv8-Face 设计成 person ROI 上的 secondary detector. 第一
+版 YOLOv8-Face 是全帧 primary, 与 YOLO26-pose 并列, 共享 nvinfer
+batch 机制.
 
-复杂检索建议交给 face-worker。
+### 2.5b SCRFD_2.5G (future detector candidate)
+
+SCRFD_2.5G 保留为未来 detector swap 候选, 不在第一版实现:
+
+- 第一版 detector 已选 YOLOv8-Face full-frame.
+- SCRFD 切换需重新评估 ONNX 输出张量形状, 实现 multi-FPN-scale
+  anchor decode, 并通过新的 phase doc 推翻 F1.1a 才能落地.
+
+### 2.6 AdaFace
+
+类型: **in-pipeline embedding model**, 由 Savant module 推理, 不在
+face-worker 或独立服务中运行.
+
+实现提示: AdaFace 输出 embedding, 作为 face object 的 attribute 写入
+metadata. 与 YOLOv8-Face 一样使用 TensorRT engine.
+
+输入: 经过对齐的人脸 crop, 112×112.
+
+输出: 模型固定维度 embedding (默认 512 维).
+
+预处理注意事项 (必须在模型资产清单审核期间确认, 不允许猜测):
+
+- 5-point landmark alignment 使用 YOLOv8-Face 输出的 5 个 landmarks.
+- crop 尺寸固定为 112×112.
+- 颜色通道顺序 (BGR vs RGB) 必须与实际模型导出一致.
+- 像素归一化 (mean / std / 0-1 / -1..1) 必须与实际模型导出一致.
+- 输出 embedding 的 L2 normalization 策略必须在模型资产审核中确认:
+  - 若模型已内置 L2 归一化, converter 不再重复.
+  - 若模型未归一化, converter 必须在写入 metadata 之前归一化.
+- pgvector 假设 embedding 已归一化 (使用 cosine 距离). 不一致会导致
+  watchlist / live_search 分数偏差, 必须用单元测试锁定.
+
+### 2.6b ArcFace (future embedding alternative)
+
+ArcFace 保留为未来 embedder swap 候选, 不在第一版实现:
+
+- 第一版 embedder 已选 AdaFace in-pipeline.
+- ArcFace 切换是 1 个 converter + 1 个 nvinfer 配置 + 模型资产更新
+  即可完成的事情, 但必须有 phase doc 推翻 F1.1a 并解释为什么换.
+
+### 2.7 redis_publisher_pyfunc
+
+职责:
+
+- 生成 `FaceObservationEventDraft` (含 embedding).
+- 写入 Redis Stream `security.face_observations`.
+- 写入 Redis Stream `security.events` (行为事件分支).
+- 不做复杂检索, 不访问 PostgreSQL, 不调用 FastAPI.
+
+Stream 体规则 (硬约束):
+
+- 包含: camera_id, source_id, track_id, timestamp_ms, person_bbox,
+  face_bbox, landmarks, quality, embedding, model_name,
+  model_version, snapshot_path / crop_path (路径引用).
+- **不包含** JPEG / PNG / RAW / face crop bytes.
+
+复杂检索 / 业务逻辑由 face-worker 完成.
 
 ## 3. module.yml 骨架
+
+> 下方为 F1.1a 锁定后的 **示意骨架**, 不是当前 runtime 文件. 真实的
+> module.yml 由后续 F1.1b / F2 实现阶段维护. 这里只用来对齐每个
+> element 的角色与位置.
 
 ```yaml
 name: security_video_analytics
@@ -159,6 +252,7 @@ parameters:
 
 pipeline:
   elements:
+    # ----- primary: person + keypoints -----
     - element: nvinfer@detector
       name: yolo26_pose
       model:
@@ -196,28 +290,22 @@ pipeline:
       kwargs:
         camera_config_path: /opt/savant/src/module/config/cameras.yml
 
-    - element: pyfunc
-      module: custom.pyfuncs.face_roi_selector
-      class_name: FaceRoiSelectorPyFunc
-      kwargs:
-        min_person_height: 80
-        face_attempt_interval_ms: 1000
-
+    # ----- primary (full-frame): YOLOv8-Face -----
+    # NOT a secondary nvinfer on person ROI — full-frame primary, F1.1a lock.
     - element: nvinfer@detector
-      name: scrfd_face
+      name: yolov8_face
       model:
         format: onnx
-        model_file: scrfd_2.5g.onnx
-        batch_size: ${oc.decode:${oc.env:FACE_BATCH_SIZE, 16}}
+        model_file: yolov8_face.onnx
+        batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 8}}
         precision: fp16
         input:
-          object: yolo26_pose.person
-          shape: [3, 320, 320]
+          shape: [3, 640, 640]
         output:
           layer_names: [output]
           converter:
-            module: custom.converters.scrfd
-            class_name: ScrfdConverter
+            module: custom.converters.yolov8_face
+            class_name: Yolov8FaceConverter
             kwargs:
               confidence_threshold: 0.5
               nms_iou_threshold: 0.4
@@ -230,31 +318,53 @@ pipeline:
                   min_width: 20
                   min_height: 20
 
+    # ----- face <-> person association (no inference, no crop) -----
+    - element: pyfunc
+      module: custom.pyfuncs.face_roi_selector
+      class_name: FaceRoiSelectorPyFunc   # role redefined per F1.1a
+      kwargs:
+        min_person_height: 80
+        face_attempt_interval_ms: 1000
+        min_iou: 0.3
+
+    # ----- AdaFace embedding, in-pipeline -----
     - element: nvinfer@classifier
-      name: arcface
+      name: adaface
       model:
         format: onnx
-        model_file: arcface.onnx
-        batch_size: ${oc.decode:${oc.env:ARCFACE_BATCH_SIZE, 16}}
+        model_file: adaface.onnx
+        batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
         precision: fp16
         input:
-          object: scrfd_face.face
+          object: yolov8_face.face
           shape: [3, 112, 112]
         output:
           layer_names: [embedding]
           converter:
-            module: custom.converters.arcface
-            class_name: ArcFaceEmbeddingConverter
+            module: custom.converters.adaface
+            class_name: AdaFaceEmbeddingConverter
 
+    # ----- write metadata + embedding to Redis (no image bytes) -----
     - element: pyfunc
-      module: custom.pyfuncs.face_intelligence
-      class_name: FaceIntelligencePyFunc
+      module: custom.pyfuncs.redis_publisher
+      class_name: RedisPublisherPyFunc
       kwargs:
-        event_stream: security.events
+        face_observations_stream: security.face_observations
+        events_stream: security.events
         face_min_quality: 0.65
-        watchlist_threshold: 0.75
-        live_search_threshold: 0.75
 ```
+
+### 3.1 环境变量命名
+
+新命名 (F1.1a 起):
+
+```text
+FACE_DETECTOR_BATCH_SIZE        # 替代旧 FACE_BATCH_SIZE (YOLOv8-Face)
+FACE_EMBEDDING_BATCH_SIZE       # 替代旧 ARCFACE_BATCH_SIZE (AdaFace)
+```
+
+兼容性: 旧 `FACE_BATCH_SIZE` / `ARCFACE_BATCH_SIZE` 在 F1.1b 实现阶
+段保留为别名读取, 文档说明后续会移除. 新代码必须使用新名字.
 
 ## 4. Converter 要求
 
@@ -270,34 +380,49 @@ pipeline:
 
 不得假设 batch 恒为 1。
 
-### 4.2 ScrfdConverter
+### 4.2 Yolov8FaceConverter
 
 必须完成：
 
-- 解析 SCRFD_2.5G 输出。
-- 输出 face bbox。
-- 输出 landmarks。
-- 支持 NMS。
-- 坐标必须正确映射到父 ROI 或原图坐标。
+- 解析 YOLOv8-Face ONNX 输出 (单输出张量, 每行 `[x, y, w, h, conf,
+  kp1_x, kp1_y, kp2_x, kp2_y, kp3_x, kp3_y, kp4_x, kp4_y, kp5_x,
+  kp5_y]` 或等价 21 列布局, 以实际导出为准).
+- 输出 face bbox.
+- 输出 5 个 landmarks.
+- 支持 batch 输出.
+- 支持 NMS.
+- 坐标必须在原始全帧坐标系中 (不是 ROI crop 坐标).
 
-### 4.3 ArcFaceEmbeddingConverter
+不得假设 batch 恒为 1.
+
+### 4.3 AdaFaceEmbeddingConverter
 
 必须完成：
 
-- 读取 embedding tensor。
-- 做 L2 normalization，如果模型输出未归一化。
-- 输出统一 FaceEmbedding metadata。
+- 读取 embedding tensor.
+- 按模型导出确认是否需要 L2 normalization, 不一致时 converter 内做
+  归一化, 与 §2.6 预处理要求保持一致.
+- 输出统一 FaceEmbedding metadata, 写入 face object 的 attribute.
+
+### 4.4 (future) ScrfdConverter
+
+保留为未来 detector swap 实现, 不在第一版完成. 模型资产清单中 SCRFD
+条目保留为 future candidate.
+
+### 4.5 (future) ArcFaceEmbeddingConverter
+
+保留为未来 embedder swap 实现. 与 §2.6b 一致.
 
 ## 5. 批处理策略
 
-默认：
+默认 (F1.1a 命名):
 
 ```text
-YOLO26-pose batch_size: 8
-SCRFD_2.5G batch_size: 16
-ArcFace batch_size: 16
-max_same_source_frames: 1
-batched_push_timeout: 40000
+YOLO26-pose batch_size:       8     (POSE_BATCH_SIZE)
+YOLOv8-Face batch_size:       8     (FACE_DETECTOR_BATCH_SIZE)
+AdaFace batch_size:           16    (FACE_EMBEDDING_BATCH_SIZE)
+max_same_source_frames:       1
+batched_push_timeout:         40000 us
 ```
 
 调优时测试：
@@ -373,15 +498,36 @@ Savant 输出到 Redis Streams 的消息必须至少包含：
 
 ## 8. Smoke Test 验收
 
-Savant pipeline smoke test 必须验证：
+Savant pipeline smoke test 按 F1 / F2 / F3 分阶段验收 (F1.1a 锁定):
 
-1. module 可启动。
-2. YOLO26-pose engine 可加载。
-3. SCRFD engine 可加载。
-4. ArcFace engine 可加载。
-5. 测试视频可输出 person metadata。
-6. 可输出至少一个行为事件。
-7. 可输出至少一个 face_observation。
+**F1 (YOLOv8-Face + face-person association):**
+
+1. module 可启动.
+2. YOLO26-pose engine 可加载.
+3. YOLOv8-Face engine 可加载.
+4. 测试视频可输出 person metadata.
+5. 测试视频可输出 face bbox + 5 landmarks.
+6. face-person association 能为多数 face 继承 person 的 track_id
+   (允许个别 face 因匹配不到 person 而 track_id=None).
+7. face quality 字段存在并合理 (0.0 - 1.0).
+8. 行为事件链路 (intrusion) 未受人脸链路影响.
+
+**F2 (AdaFace embedding):**
+
+9. AdaFace engine 可加载.
+10. `security.face_observations` 携带 512 维 (或模型导出维度) embedding.
+11. embedding L2 归一化状态符合 converter 设计 (有 / 无 normalization
+    的策略明确, 与 pgvector 假设一致).
+12. embedding metadata 不含图片 bytes.
+
+**F3 (face-worker, 不在 Savant 内, 但顺带列出):**
+
+13. face_observations 表可幂等入库.
+14. pgvector 检索可触发 watchlist_hit / live_search_hit.
+15. hit 事件回写 `security.events`.
+
+不要把 F2 / F3 验收混入 F1 smoke. F1 smoke 不需要 embedding 也不需要
+pgvector.
 
 ---
 

@@ -10,13 +10,35 @@
   -> Savant Replay Service，可选，后续用于短时缓存和重推
   -> Savant Module GPU0 / GPU1
   -> YOLO26-pose + nvtracker + behavior rules
-  -> SCRFD_2.5G + ArcFace + face intelligence
+  -> YOLOv8-Face (full-frame primary) + face-person association
+  -> face quality + per-track throttle
+  -> AdaFace (in-pipeline embedding)
   -> Redis Streams
   -> event-worker / clip-worker / face-worker / media-worker
   -> PostgreSQL + pgvector
   -> FastAPI
   -> Web dashboard / alarm screen / live search UI
 ```
+
+> 架构锁定 (Phase F1.1a, 2026-05-26):
+>
+> - 第一版人脸 detector 为 **YOLOv8-Face full-frame primary**, 不是
+>   per-person ROI secondary detector.
+> - 第一版人脸 embedder 为 **AdaFace, 仍在 Savant module 内推理**, 不
+>   是 face-worker 跑实时 embedding, 也不是独立 Python/Triton 服务.
+> - **Redis 是 GPU 推理与 CPU 业务逻辑之间的唯一边界.** AdaFace 输出
+>   embedding 之后才写入 Redis. Redis 不传图片 bytes, 不传 face crop
+>   bytes.
+> - face-worker 是纯 CPU 业务 worker, 不跑 GPU embedding.
+> - SCRFD_2.5G 保留为 future detector candidate. ArcFace 保留为
+>   future embedding alternative.
+> - HNSWLIB 和 Qdrant 不进入 MVP. PostgreSQL + pgvector 是第一版唯
+>   一向量后端.
+> - Savant module chaining (例如 detection module 与 embedding
+>   module 通过 ZMQ 串联) 仅作为未来 scaling 选项, 不是第一版实现
+>   目标.
+>
+> 详见 `docs/phase_f1_1a_in_pipeline_face_architecture_lock.md`.
 
 ## 2. 组件职责
 
@@ -47,17 +69,22 @@ Savant 是实时视频 AI 主干。每张 T4 GPU 建议运行一个 Savant modul
 - 调用 YOLO26-pose TensorRT engine。
 - 调用 DeepStream nvtracker。
 - 执行轻量行为规则 PyFunc。
-- 执行人脸 ROI 选择。
-- 调用 SCRFD_2.5G 和 ArcFace。
-- 生成结构化事件消息。
-- 将事件写入 Redis Streams。
+- 调用 YOLOv8-Face full-frame primary detector (输出 face bbox + 5 个 landmark)。
+- 执行 face-person association (基于 IoU 与 head ROI 几何关系将 face 关联到 person, 继承 track_id)。
+- 执行 face quality 过滤与 per-track throttle (默认每 track 最多 1 Hz)。
+- 执行 AdaFace 预处理与对齐 (5-point landmark alignment, 112×112)。
+- 调用 AdaFace TensorRT engine 产出 512 维 embedding。
+- 将带 embedding 的人脸 observation 写入 Redis Streams `security.face_observations`。
+- 将行为事件写入 Redis Streams `security.events`。
 
 非职责：
 
 - 不直接长期存储业务数据。
-- 不做复杂向量检索和业务查询。
+- 不做复杂向量检索和业务查询 (pgvector 检索在 face-worker 内完成)。
 - 不做报警大屏逻辑。
 - 不同步保存大文件。
+- 不通过 Redis 发送图片 bytes / face crop bytes / JPEG / PNG / 原始帧。
+- 不访问 PostgreSQL, 不调用 FastAPI。
 
 ### 2.2 Redis Streams
 
@@ -109,16 +136,26 @@ Replay 阶段：
 
 #### face-worker
 
-第一版可以可选。如果 ArcFace 在 Savant 内完成，face-worker 主要负责：
+face-worker 是纯 CPU 业务 worker, 不跑实时 GPU embedding。
 
-- face_observation 入库。
-- pgvector 检索。
-- watchlist 告警生成。
-- live_search 命中生成。
+- 消费 `security.face_observations` (内含 AdaFace 已产出的 512 维 embedding)。
+- 幂等写入 `face_observations` (基于 `source_observation_id`)。
+- 调用 pgvector 在 `person_gallery_embeddings` 上做 cosine 相似度检索, 触发 watchlist_hit。
+- 调用 pgvector 与活跃 `live_search_jobs` 比对, 触发 live_search_hit。
+- 将 hit 事件写回 `security.events` 供 event-worker / 大屏消费。
+
+非职责：
+
+- 不跑 AdaFace。
+- 不依赖 GPU。
+- 不维护 TensorRT engine 缓存。
+- 不直接接收图片 bytes (Redis 不传图片)。
 
 ### 2.4 PostgreSQL + pgvector
 
-PostgreSQL 是权威业务数据库。pgvector 是第一版向量检索方案。
+PostgreSQL 是权威业务数据库。pgvector 是第一版向量检索方案, 且经
+F1.1a 架构锁定后是 **MVP 唯一向量后端** —— HNSWLIB 和 Qdrant 不进入
+MVP, 通过 `FaceVectorStore` 接口保留后期切换可能, 但不在第一版实现.
 
 存储：
 
@@ -196,20 +233,31 @@ RTSP frame
 ### 3.2 人脸事件流
 
 ```text
-person track
-  -> head/person ROI
-  -> SCRFD_2.5G face detection
-  -> face quality filter
-  -> ArcFace embedding
-  -> face_observation event
-  -> Redis Streams
+RTSP frame
+  -> YOLO26-pose person bbox + keypoints + track_id
+  -> YOLOv8-Face full-frame primary detector
+  -> face-person association (IoU on head ROI, 继承 person track_id)
+  -> face quality filter + per-track throttle
+  -> AdaFace 5-point landmark alignment + 112x112 preprocess
+  -> AdaFace embedding (512 维)
+  -> security.face_observations  (metadata + embedding, NO image bytes)
   -> face-worker
-  -> pgvector search
+  -> pgvector gallery / live-search 检索
   -> watchlist_hit / live_search_hit / face_observed
-  -> PostgreSQL
+  -> security.events
+  -> event-worker -> PostgreSQL events
   -> FastAPI WebSocket
   -> alarm screen
 ```
+
+Redis 边界规则:
+
+- Savant module 在 AdaFace 出 embedding 之后才把记录写入
+  `security.face_observations`.
+- Stream 体仅承载 `(camera_id, source_id, track_id, timestamp_ms,
+  person_bbox, face_bbox, landmarks, quality, embedding,
+  model_name, model_version, snapshot_path/crop_path 路径引用)`.
+- Stream 绝不承载 JPEG / PNG / RAW / face crop bytes.
 
 ### 3.3 一键找人流
 
@@ -254,8 +302,11 @@ savant-module-gpu1: cameras 31-60
 2. Redis Streams 的消息必须具备幂等键，例如 `event_id` 或 `source_event_id`。
 3. worker 必须允许重试。
 4. PostgreSQL 是权威数据源。
-5. pgvector 仅是第一版向量实现，必须通过 VectorStore 接口封装。
+5. pgvector 是第一版向量实现 (HNSWLIB / Qdrant 不进入 MVP), 必须通过 VectorStore 接口封装以保留未来切换能力。
 6. 所有告警必须可审计、可确认、可标记误报。
+7. Redis 是 GPU 推理与 CPU 业务逻辑之间的唯一边界, 不传图片 bytes。
+8. face-worker 是 CPU 业务 worker, 不跑 GPU embedding。
+9. Savant module chaining (两个 module 通过 ZMQ 串联) 仅作为后续 scaling 选项, 第一版采用单 Savant module 内完成检测 + embedding 的拓扑。
 
 ---
 

@@ -158,6 +158,21 @@ CREATE INDEX face_observations_person_time_idx
 ON face_observations(matched_person_id, captured_at DESC);
 ```
 
+### 8.1 字段约定 (F1.1a 锁定)
+
+- `embedding vector(512)` 适配第一版 AdaFace 输出 (默认 512 维).
+  若实际 AdaFace 导出维度不同, F2 启动前需要更新此处, 并相应更新
+  `person_gallery_embeddings.embedding` 维度.
+- `model_name` 第一版固定为 `'adaface'`. 如果未来切换到 ArcFace 或
+  其他 backbone, 更新该字段并通过 phase doc 推翻 F1.1a.
+- `model_version` 必须存储 (例如 `adaface_ir101_webface4m`), 用于后
+  续兼容性判断和故障排查.
+- 推荐使用 `source_observation_id` 作为幂等键 (详见 §17 的
+  `ALTER TABLE`). face-worker 在消费 Redis 时按这个键去重, 避免重试
+  导致重复入库.
+- pgvector 检索假设 embedding 已经 L2 归一化, 写入前必须确认 (由
+  Savant module 的 AdaFace converter 负责).
+
 ## 9. events
 
 ```sql

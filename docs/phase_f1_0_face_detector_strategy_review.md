@@ -13,6 +13,56 @@ and compare the SCRFD route against Savant's own face sample family
 
 ---
 
+## 0. User final decision (2026-05-26) — supersedes parts of this doc
+
+After this review the user chose a sharper variant of Option A than
+the recommendation in §6. The final architecture is recorded
+authoritatively in
+[`docs/phase_f1_1a_in_pipeline_face_architecture_lock.md`](phase_f1_1a_in_pipeline_face_architecture_lock.md).
+Key locked decisions:
+
+| Decision | Value |
+|---|---|
+| F1 detector | **YOLOv8-Face, full-frame primary nvinfer** (NOT secondary on per-person ROI) |
+| F2 embedder | **AdaFace inside the Savant module** (NOT in a downstream face-worker, NOT in a Triton sidecar) |
+| Redis boundary | **After AdaFace embedding** — `security.face_observations` carries metadata + 512-d embedding only, never frames or crops |
+| face-worker scope | **CPU only**: consume observations → PG insert → pgvector search → emit watchlist_hit / live_search_hit. No GPU, no model files. |
+| Vector store | **PostgreSQL + pgvector**, locked for the MVP. **HNSWLIB rejected. Qdrant rejected.** |
+| `FaceRoiSelectorPyFunc` role | **Re-purposed to face↔person association** (IoU on head ROI), no cropping, no inference trigger. Rename to `FacePersonAssociatorPyFunc` deferred to F1.2+. |
+| SCRFD_2.5G | **Future detector candidate**, not first-version target |
+| ArcFace | **Future embedding alternative**, not first-version target |
+| Module chaining via ZMQ | **Future optimization** if a single Savant module proves too heavy. NOT the first implementation target. |
+
+The following text in this document predates that decision and is
+**superseded** to the extent it implied otherwise — most notably:
+
+- §9 "If we *do* switch to YOLOv8-Face — F1.1 / F1.2 / F1.3 split"
+  proposed embedding in face-worker. **That is wrong now.** F1.1a
+  moves embedding into Savant; face-worker is CPU only.
+- §6 recommended YOLOv8-Face "with SCRFD held as a deliberate F1.4
+  swap option". The recommendation stands; the SCRFD swap remains a
+  future option, but the F1.4 numbering is informal.
+- §8 lists SCRFD-phase breakdown (F1.1a/b, F1.2, F1.3). That route
+  is not the chosen path; it stays only as a contingency description
+  in case SCRFD is later revisited.
+
+### F1 / F2 / F3 phase boundaries (locked by F1.1a)
+
+| Phase | Scope |
+|---|---|
+| F1.1 | YOLOv8-Face full-frame primary + face↔person association + face quality; no embedding yet |
+| F1.2 | Association refinement, per-track AdaFace throttle verification, optional PyFunc rename |
+| F2   | AdaFace preprocessing + inference inside Savant; embedding written to `security.face_observations` |
+| F3   | face-worker (CPU): consume observations → PostgreSQL insert → pgvector → watchlist_hit / live_search_hit |
+
+For all binding details — pipeline diagram, Redis-boundary rule,
+NVDEC TODO list, and the explicit Superseded-Plans section — read
+`docs/phase_f1_1a_in_pipeline_face_architecture_lock.md`. **That is
+the authoritative doc going forward.** This file is preserved as the
+*reasoning trail* that led to the decision.
+
+---
+
 ## 1. Current face-related assets in the repo
 
 Audited via grep over `services/api`, `modules/savant_security`,

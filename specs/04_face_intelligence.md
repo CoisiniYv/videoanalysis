@@ -8,16 +8,36 @@
 2. 轨迹追踪。
 3. 一键找人。
 
-底层统一流程：
+底层统一流程 (锁定于 Phase F1.1a, 2026-05-26):
 
 ```text
-person/head ROI
-  -> SCRFD_2.5G
+全帧
+  -> YOLO26-pose 输出 person + keypoints + track_id
+  -> YOLOv8-Face full-frame primary detector (输出 face + 5 landmarks)
+  -> face-person association (复用 FaceRoiSelectorPyFunc, IoU on head ROI)
   -> face quality filter
-  -> ArcFace embedding
-  -> PostgreSQL + pgvector
+  -> AdaFace 5-point landmark alignment + 112x112 preprocess
+  -> AdaFace 嵌入 (in-pipeline, Savant module 内)
+  -> security.face_observations  (metadata + embedding, NO image bytes)
+  -> face-worker (CPU 业务) -> PostgreSQL + pgvector
+  -> watchlist / live_search / observation 存储
   -> business policy
 ```
+
+> **历史 SCRFD_2.5G 第一版路线已替换**:
+> 旧版描述将 SCRFD_2.5G 当作 secondary detector 跑在 person/head ROI
+> 上, ArcFace 当作第一版 embedder. 这两条都被 Phase F1.1a 取代:
+>
+> - SCRFD_2.5G 保留为 future detector candidate (见 §15).
+> - ArcFace 保留为 future embedding alternative (见 §15).
+> - 第一版 detector 为 YOLOv8-Face full-frame primary.
+> - 第一版 embedder 为 AdaFace, 仍在 Savant module 内.
+> - 第一版 vector store 为 PostgreSQL + pgvector (HNSWLIB / Qdrant
+>   不进入 MVP).
+> - 重点人员布控 / 轨迹追踪 / 一键找人三个业务仍**复用同一条统一
+>   Face Intelligence Pipeline**, 不会拆成三套独立链路.
+>
+> 详见 `docs/phase_f1_1a_in_pipeline_face_architecture_lock.md`.
 
 ## 2. 设计原则
 
@@ -32,25 +52,48 @@ person/head ROI
 
 ```text
 YOLO26-pose person detection
-  -> track_id
-  -> head ROI estimation
-  -> SCRFD_2.5G face detection
+  -> track_id (nvtracker)
+  -> YOLOv8-Face full-frame primary detection
+  -> face-person association (FaceRoiSelectorPyFunc, F1.1a 起的新职责)
   -> landmark and bbox validation
   -> face quality score
-  -> ArcFace embedding
-  -> FaceObservation
-  -> gallery search / live search / observation storage
+  -> AdaFace embedding (in-pipeline)
+  -> FaceObservation (含 embedding) 写入 Redis security.face_observations
+  -> face-worker (CPU): 入库 + pgvector 检索 + watchlist / live_search 判断
 ```
 
-## 4. Head ROI 选择
+Pipeline 责任分界 (F1.1a 锁定):
 
-优先级：
+- **Savant module**: detector + association + quality + AdaFace
+  embedding + Redis publish. 不访问 PostgreSQL / FastAPI / pgvector.
+- **face-worker**: CPU only. 消费带 embedding 的 observation, 入库,
+  跑 pgvector 检索, 产出 watchlist_hit / live_search_hit.
 
-1. 如果 nose、eyes、ears 可信，基于关键点估计 head ROI。
-2. 如果关键点不可信，基于 person bbox 上半部分估计 head ROI。
-3. 如果 person 太小或遮挡严重，不做人脸检测。
+## 4. Face-person association (FaceRoiSelectorPyFunc, F1.1a 重定义)
 
-默认过滤：
+YOLOv8-Face 是 full-frame primary detector, 它独立输出 face bbox 与
+5 个 landmarks; 不需要也不应该从 person ROI 截图后再跑 secondary
+inference. 因此 `FaceRoiSelectorPyFunc` 从 F1.1a 起的职责变成 face-
+person association:
+
+1. 接收 YOLO26-pose 输出的 person object (含 track_id, keypoints).
+2. 接收 YOLOv8-Face 输出的 face object (含 face bbox, landmarks).
+3. 基于 head ROI (复用 F0 `estimate_head_roi_from_person` 估计的头部
+   区域) 与 face bbox 计算 IoU.
+4. 贪心匹配: 每个 face 取 IoU 最高的 person, 并把 person 的
+   `track_id` 继承到 face object.
+5. 匹配不到 person 的 face, `track_id = None`, 仍然向下游传递.
+
+约束:
+
+- 不做图像裁剪.
+- 不触发额外推理.
+- 不调用数据库.
+- 不调用 FastAPI.
+- 每个 track 默认 1 Hz throttle, 已成功识别的 track 在 cooldown 内
+  不重复 embedding.
+
+默认过滤:
 
 ```text
 person_height >= 80 px
@@ -58,22 +101,30 @@ face_attempt_interval_ms >= 1000
 同一 track 已成功识别后 cooldown
 ```
 
-## 5. SCRFD_2.5G 输出
+如后续命名歧义明显, 可在 F1.2 之后将该 PyFunc 重命名为
+`FacePersonAssociatorPyFunc`. F1.1a 不做重命名.
 
-统一结构：
+## 5. YOLOv8-Face 输出
+
+统一结构 (与历史 SCRFD_2.5G 输出兼容):
 
 ```python
 class FaceDetection:
     source_id: str
     camera_id: str
-    track_id: str | None
+    track_id: str | None       # 来自 face-person association, 可能为 None
     timestamp_ms: int
-    face_bbox: BBox
-    landmarks: list[Point] | None
+    face_bbox: BBox            # 全帧坐标
+    landmarks: list[Point]     # 5 个 (eyes, nose, mouth corners)
     confidence: float
     person_bbox: BBox | None
     face_quality: float | None
+    model_name: str            # "yolov8_face" 或后续替换的 detector 名
+    model_version: str | None
 ```
+
+`FaceDetection` 数据模型本身与 detector 无关, 由 F0 引入. SCRFD 切换
+时只需更换 `model_name` / `model_version` 即可保持下游消费者不变.
 
 ## 6. Face Quality Filter
 
@@ -97,12 +148,15 @@ landmarks 完整
 quality = weighted(face_confidence, face_size, landmark_score)
 ```
 
-## 7. ArcFace Embedding
+## 7. AdaFace Embedding (in-pipeline)
 
-ArcFace 输入：
+AdaFace 在 Savant module 内推理. 不在 face-worker, 也不在外部
+Triton 服务.
+
+AdaFace 输入：
 
 ```text
-aligned face crop, 112x112
+aligned face crop, 112x112  (基于 YOLOv8-Face 输出的 5 landmarks 对齐)
 ```
 
 输出：
@@ -112,15 +166,28 @@ class FaceEmbedding:
     face_observation_id: str
     embedding: list[float]
     dimension: int
-    model_name: str
+    model_name: str            # "adaface"
     quality: float
 ```
 
 要求：
 
-- embedding 应 L2 normalize。
-- 存入 PostgreSQL 的向量维度必须与 pgvector 定义一致。
-- 模型版本必须存储，方便后期升级和兼容。
+- embedding 应 L2 normalize. 若模型已内置 normalize, converter 不重复;
+  若未内置, converter 必须归一化.
+- 颜色通道顺序 / 像素归一化策略必须与导出的 AdaFace ONNX 一致, 由模
+  型资产清单 (`docs/model_assets_manifest.md`) 在 F2 启动前确认.
+- 存入 PostgreSQL 的向量维度必须与 pgvector `vector(N)` 定义一致.
+- 模型版本必须存储 (`model_name` + `model_version`), 方便后期升级和
+  兼容.
+
+### 7.b ArcFace (future embedding alternative)
+
+ArcFace 保留为未来替换 AdaFace 的候选, 不在第一版实现. 替换路径:
+
+1. 准备 ArcFace ONNX + 资产清单条目.
+2. 实现 `custom.converters.arcface.ArcFaceEmbeddingConverter`.
+3. 更新 module.yml 中 `nvinfer@classifier` 的 model 配置.
+4. 发布 phase doc 推翻 F1.1a (说明为什么换).
 
 ## 8. FaceObservation
 
@@ -266,9 +333,10 @@ class FaceVectorStore:
     def search_live_target(self, job_id, embedding): ...
 ```
 
-第一版实现：`PgVectorFaceVectorStore`。
+第一版实现：`PgVectorFaceVectorStore` (PostgreSQL + pgvector).
 
-后期可实现：`QdrantFaceVectorStore`。
+**MVP 不实现** `HnswlibFaceVectorStore`, **MVP 不实现**
+`QdrantFaceVectorStore`. 接口保留是为了未来切换, 不是因为现在要切换.
 
 ## 13. 阈值建议
 
@@ -301,3 +369,18 @@ watchlist_alert_cooldown_s: 60
 - 停用人员。
 - 删除 gallery embedding。
 - 清理过期 face_observations。
+
+## 15. Future alternatives (deferred)
+
+下列方案在 F1.1a 阶段被锁定为 **未来候选**, 不进入第一版:
+
+| 候选 | 用途 | 触发条件 |
+|---|---|---|
+| SCRFD_2.5G | future detector swap | 真实场景需要更高的小脸召回率, 且能解决 InsightFace 权重商用授权 |
+| ArcFace | future embedding swap | 业务需要切换 backbone, 或 AdaFace 在现场指标不佳 |
+| HNSWLIB | future in-process index | pgvector 在实际规模下检索延迟无法接受 |
+| Qdrant | future external vector DB | 规模超出 pgvector 合理范围, 或与外部生态集成需要 |
+| Savant module chaining via ZMQ | scaling option | 单 module 在双 T4 上 GPU 饱和, 检测 + 嵌入需拆模块运行 |
+
+任何切换必须由一份新的 phase doc 推翻 F1.1a, 在 spec 中默默回退视为
+违规.
