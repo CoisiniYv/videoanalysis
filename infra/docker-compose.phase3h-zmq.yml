@@ -1,3 +1,6 @@
+# LEGACY / PHASE POC — do not use for mainline runtime
+# See docs/compose_inventory.md for the current main runtime.
+
 # Phase 3H — Official ZeroMQ Adapter Ingestion POC
 #
 # Verifies Savant module can use the official zeromq_source_bin (default)

@@ -1,3 +1,6 @@
+# LEGACY / PHASE POC — do not use for mainline runtime
+# See docs/compose_inventory.md for the current main runtime.
+
 name: phase3a
 
 services:
