@@ -160,7 +160,7 @@ for YOLO26-pose keypoints (`obj.get_attr_meta("yolo26_pose", "keypoints")`).
 |------|------------|
 | Static batch = 1 limits throughput | Re-export ONNX with dynamic batch before multi-camera perf test |
 | Full-frame face detector adds GPU load | Monitor GPU utilization; reduce face detection interval if needed |
-| Face-person association not yet implemented | F2+ phase; for now face and person objects are independent |
+| ~~Face-person association not yet implemented~~ | **DONE** — F1.3 complete, see `docs/phase_f1_3_face_person_association.md` |
 | AdaFace not yet wired | F2 phase |
 | Engine path symlink is inside container | Deployment concern: engine symlink must survive container recreation |
 
@@ -202,8 +202,8 @@ Prerequisites for F2:
 2. AdaFace ONNX verified (F2.0 already complete).
 3. Face-person association design finalized.
 
-**F1.3 — Face-Person Association** can start:
-- Face objects are available in pipeline with bbox + confidence + landmarks.
-- Person objects are available via YOLO26-pose + nvtracker (with track_id).
-- Association logic can match face bbox to person bbox spatially.
-- No AdaFace dependency for basic spatial association.
+**F1.3 — Face-Person Association** — **DONE**:
+- Face objects linked to person tracks via spatial association.
+- `person_track_id`, `association_score`, `association_method` attached to face metadata.
+- 22 unit tests pass, 18 static checks pass, GPU runtime smoke pass.
+- See `docs/phase_f1_3_face_person_association.md` for details.

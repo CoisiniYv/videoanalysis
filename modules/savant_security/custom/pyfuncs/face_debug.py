@@ -77,8 +77,22 @@ class FaceDebugPyFunc(NvDsPyFuncPlugin):
             except Exception as e:
                 lm_str = f"landmarks=error:{e}"
 
+            # --- association metadata from FacePersonAssociatorPyFunc ---
+            assoc_str = ""
+            try:
+                ptid_attr = obj.get_attr_meta("face_person_associator", "person_track_id")
+                if ptid_attr is not None:
+                    ptid = getattr(ptid_attr, "value", None)
+                    score_attr = obj.get_attr_meta("face_person_associator", "association_score")
+                    score = getattr(score_attr, "value", 0.0) if score_attr else 0.0
+                    method_attr = obj.get_attr_meta("face_person_associator", "association_method")
+                    method = getattr(method_attr, "value", "") if method_attr else ""
+                    assoc_str = f" person_tid={ptid} assoc_score={score:.2f} method={method}"
+            except Exception:
+                pass
+
             lines.append(
-                f"  face[{i}] conf={conf:.3f} {bbox_str} {lm_str}"
+                f"  face[{i}] conf={conf:.3f} {bbox_str} {lm_str}{assoc_str}"
             )
 
         print("\n".join(lines), flush=True)

@@ -136,6 +136,19 @@ pipeline:
             - name: landmarks
 
     # ------------------------------------------------------------------
+    # FacePersonAssociatorPyFunc — F1.3 face-person association.
+    # Links YOLOv8-Face detections to YOLO26-pose person tracks.
+    # Attaches person_track_id / association_score to face objects.
+    # Does NOT emit face observations to Redis.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: face_person_associator
+      module: custom.pyfuncs.face_person_associator
+      class_name: FacePersonAssociatorPyFunc
+      kwargs:
+        log_every_n_frames: 30
+
+    # ------------------------------------------------------------------
     # FaceDebugPyFunc — F1.2 smoke visibility probe.
     # Logs face object count + first few bbox/landmark values.
     # Does NOT emit face observations to Redis.
