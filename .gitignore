@@ -20,8 +20,12 @@ media/
 infra/generated/
 modules/savant_security/config/cameras.generated.yml
 
-# Test output files (NOT committed)
-testVideo/test_output_pose.mp4
+# Local operator test videos and generated outputs (NOT committed)
+# For small curated test fixtures, use harness/scenarios/ instead.
+testVideo/*.mp4
+testVideo/*.avi
+testVideo/*.mov
+testVideo/*.mkv
 
 # Model files (NOT committed) — see docs/model_assets_manifest.md.
 # Engines are machine/GPU-specific; weights / ONNX must be sourced
