@@ -78,20 +78,54 @@ path is the authoritative source.
 
 ### AdaFace (embedder — F2)
 
-- Purpose: face embedding extraction (112×112 aligned crop input).
-- Expected path: `/data/video-analytics/models/adaface.onnx`
-- Status: pending — model must be sourced and placed by the operator
-  before F2 runtime smoke.
-- Input shape: TODO (typical: `1x3x112x112`; verify BGR vs RGB and
-  pixel normalization).
-- Output shape: TODO (typical: `1x512` embedding; verify dimension and
-  whether L2 normalization is built-in).
-- Source: TODO — user to confirm (e.g., `mk-minchul/AdaFace`,
-  `adaface_ir101_webface4m` variant).
-- License: TODO — confirm commercial use clearance before F2 build.
+- Purpose: face embedding extraction (112×112 aligned face crop input).
+- **Actual file on the deployment server (verified Phase F2.0, 2026-05-26):**
+  `/data/video-analytics/models/adaface/adaface_ir50_webface4m.onnx`
+  (166.7 MB).
+- Status: **present and inspected**.
+- Producer: PyTorch 1.13.1
+- IR version: 7
+- Opset: ai.onnx v14
+- Graph: `torch_jit`, 156 nodes, 238 initializers.
+- Input tensor:
+  - name: `input`
+  - dtype: FLOAT
+  - shape: `[batch_size, 3, 112, 112]` (NCHW, **dynamic batch**)
+- Output tensors:
+  - name: `feature`, dtype: FLOAT, shape: `[batch_size, 512]`
+    — 512-d embedding, **NOT L2-normalized** (raw feature vector).
+    Converter MUST L2-normalize this output before emission.
+  - name: `norm`, dtype: FLOAT, shape: `[batch_size, 1]`
+    — per-sample scalar (likely feature norm before any built-in
+    scaling). For MVP, discard or log for debugging.
+- Dynamic axes: batch dimension only (`batch_size`). Spatial dims
+  (3, 112, 112) and output dim (512) are static.
+- Preprocessing (from official Savant face_reid sample):
+  - Input: 112×112 aligned face crop (GPU alignment via
+    `savant.input_preproc.align_face.AlignFacePreprocessingObjectImageGPU`).
+  - Color format: **BGR**.
+  - Normalization: mean/std per official sample preprocessing config
+    — exact values pending confirmation from sample's
+    `module.yml` preprocessing stanza. Savant's `nvinfer@classifier`
+    object-preprocessing handles this inside the pipeline.
+- Postprocessing (converter responsibility in F2):
+  - Extract `feature` output (index 0).
+  - L2-normalize: `feature = feature / np.linalg.norm(feature, axis=-1, keepdims=True)`.
+  - Embedding dimension: **512**.
+- Source: `adaface_ir50_webface4m` — IR50 backbone pretrained on
+  WebFace4M. Official sample uses the same backbone variant.
+  TODO — user to confirm exact upstream source / commit and license.
+- License: **TODO — pending user confirmation.** Provisional from
+  official Savant sample's asset list is the public
+  `adaface_ir50_webface4m_90fb74c.zip`; user should verify commercial
+  use clearance before building the TensorRT engine.
+- TensorRT engine: **not generated in F2.0**. F2.1 builds the engine
+  via Savant's auto-engine-build path.
+- Git policy: `.gitignore` covers `*.onnx`; the file is never
+  committed.
 - Pipeline role: **in-pipeline embedding**. Runs inside the Savant
-  module as `nvinfer@classifier` keyed on YOLOv8-Face's face object.
-  Does NOT run in face-worker. Does NOT run in an external
+  module as `nvinfer@attribute_model` keyed on YOLOv8-Face's face
+  object. Does NOT run in face-worker. Does NOT run in an external
   Triton/Python service.
 - Phase required: **F2**.
 
