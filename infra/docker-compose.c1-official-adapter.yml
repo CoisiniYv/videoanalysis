@@ -81,6 +81,7 @@ services:
       BATCH_SIZE: "1"
       MAX_PARALLEL_STREAMS: "1"
       POSE_BATCH_SIZE: "1"
+      FACE_DETECTOR_BATCH_SIZE: "1"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis

@@ -12,22 +12,16 @@ manually.
 
 ## Face Intelligence Pipeline (first version, F1 / F2)
 
-### YOLOv8-Face (detector — F1)
+### YOLOv8-Face (detector — F1.2 runtime)
 
 - Purpose: full-frame face detection with 5-point landmarks.
-- Expected manifest path: `/data/video-analytics/models/yolov8_face.onnx`
-- **Actual file on the deployment server (verified Phase F1.1b, 2026-05-26):**
-  `/data/video-analytics/models/yolov8_face/yolov8n-face.onnx`
-  (12.1 MB; md5 also matches the repo-local copy at
-  `yolomodel/yolov8n-face.onnx` which is gitignored.)
-- **Path mismatch resolution required** — pick one before F1.1c:
-  - Option A: rename / symlink the deployment file to the manifest
-    path (`mv yolov8_face/yolov8n-face.onnx yolov8_face.onnx` or `ln
-    -s yolov8_face/yolov8n-face.onnx yolov8_face.onnx`).
-  - Option B: update this manifest + the future `module.yml` /
-    `module_assets_check.sh` to read from
-    `yolov8_face/yolov8n-face.onnx`.
-- Status: **present and inspected**.
+- Runtime path (inside container): `/models/yolov8_face.onnx`
+- Runtime path (host): `/data/video-analytics/models/yolov8_face.onnx`
+  → symlink to `yolov8_face/yolov8n-face.onnx` (created F1.2,
+  2026-05-26).
+- **Actual ONNX file:** `/data/video-analytics/models/yolov8_face/yolov8n-face.onnx`
+  (12.1 MB).
+- Status: **present, inspected, runtime-wired (F1.2)**.
 - Producer: PyTorch 2.2.2
 - IR version: 7
 - Opset: ai.onnx v12
@@ -40,21 +34,21 @@ manually.
   - name: `output0`
   - dtype: FLOAT
   - shape: `[1, 20, 8400]` (NCN, **fully static**)
-- Output layout (interpretation, to be confirmed by F1.1c converter
-  unit tests with synthetic input):
+- Output layout:
   - `output0[0, 0:4, n]` — bbox `[cx, cy, w, h]` (YOLOv8 cxcywh convention)
   - `output0[0, 4, n]` — face confidence (single class)
   - `output0[0, 5:20, n]` — 5 landmarks × (x, y, score) = 15 values
   - N = 8400 = 80² + 40² + 20² (strides {8, 16, 32} at 640×640)
 - Landmark support: **confirmed** (15 channels = 5 × 3 layout).
-- NMS in graph: **no** (no `NonMaxSuppression` node in op-kind
-  histogram — Conv 73, Mul 66, Sigmoid 65, Concat 19, Reshape 13,
-  Add 9, Split 8, Slice 4, MaxPool 3, Resize 2). Converter MUST
-  apply NMS itself.
-- Dynamic axes: **none**. Batch is static at 1. F1.1c TensorRT engine
-  will be built with `min/opt/max = 1`; if 60-camera throughput needs
-  batching, the ONNX must be re-exported with dynamic batch first
-  (own phase, not F1.1b's scope).
+- NMS in graph: **no**. Official converter
+  `savant.converter.yolo_v8face.YoloV8faceConverter` handles NMS +
+  landmark extraction at runtime.
+- Dynamic axes: **none**. Batch is static at 1 — **F1.2 enforces
+  `FACE_DETECTOR_BATCH_SIZE=1` everywhere** (module.yml default,
+  compose env, static tests). TensorRT engine is built with
+  `min/opt/max = 1`. If multi-camera performance requires larger
+  detector batch, the ONNX must be re-exported with dynamic batch first
+  (dedicated phase, not F1.2).
 - Source: filename `yolov8n-face` is consistent with the
   `derronqi/yolov8-face` Apache-2.0 nano variant. **TODO — user to
   confirm the exact upstream commit and re-confirm license.**
@@ -62,11 +56,11 @@ manually.
   is Apache-2.0 (compatible with commercial use).
 - Pipeline role: **PRIMARY** (full-frame), NOT secondary-on-person-ROI
   per F1.1a lock.
-- TensorRT engine: **not generated in F1.1b**. F1.1c builds the
+- TensorRT engine: **not generated in F1.2**. First run builds the
   engine via Savant's auto-engine-build path.
-- Git policy: `.gitignore` covers `*.onnx`; the file is never
-  committed (verified post-Phase F1.1a chore commit `d583e67`).
-- Phase required: **F1**.
+- Git policy: `.gitignore` covers `*.onnx`; the file and symlink are
+  never committed.
+- Phase integrated: **F1.2**.
 
 ### F0 placeholder paths (NOT the real face detector — historical)
 
