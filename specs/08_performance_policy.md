@@ -47,6 +47,7 @@ AdaFace:        每个 track 每 1 秒最多尝试一次 (per-track throttle, �
 YOLO26-pose                batch_size = 8     POSE_BATCH_SIZE
 YOLOv8-Face                batch_size = 8     FACE_DETECTOR_BATCH_SIZE
 AdaFace                    batch_size = 16    FACE_EMBEDDING_BATCH_SIZE
+ReID throttle              per camera+track   FACE_REID_MIN_INTERVAL_MS (1000ms default)
 max_same_source_frames     = 1
 batched_push_timeout       = 40000 us
 ```

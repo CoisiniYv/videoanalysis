@@ -138,6 +138,13 @@ This means:
 - Features can be used directly for cosine similarity (which equals
   dot product for unit vectors) in pgvector.
 
+## Key Finding: TensorToVectorConverter L2 Normalization
+
+Runtime observation (F2.1, 2026-05-26) shows `raw_l2_norm=1.0`
+consistently. `TensorToVectorConverter` applies L2 normalization
+internally. No custom converter or post-processing normalization
+needed.
+
 ## Known Risks
 
 | Risk | Mitigation |

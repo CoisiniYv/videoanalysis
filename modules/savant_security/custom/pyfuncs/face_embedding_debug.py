@@ -1,6 +1,7 @@
 """FaceEmbeddingDebugPyFunc — F2.1 AdaFace embedding smoke visibility probe.
 
-Logs AdaFace feature dim, raw L2 norm, person_track_id, landmarks.
+Logs AdaFace feature dim, raw L2 norm, person_track_id, landmarks,
+and F2.2 reid gate metadata (reid_allowed, skip_reason, quality_score).
 Does NOT:
 - write to Redis security.face_observations
 - normalize features
@@ -136,5 +137,30 @@ class FaceEmbeddingDebugPyFunc(NvDsPyFuncPlugin):
         except Exception:
             pass
         parts.append(f"landmarks={lm_count}")
+
+        # F2.2 reid gate metadata
+        try:
+            allowed_attr = obj.get_attr_meta("face_reid_gate", "reid_allowed")
+            if allowed_attr is not None:
+                allowed = getattr(allowed_attr, "value", None)
+                parts.append(f"reid_allowed={allowed}")
+                reason_attr = obj.get_attr_meta(
+                    "face_reid_gate", "reid_skip_reason",
+                )
+                reason = (
+                    getattr(reason_attr, "value", "")
+                    if reason_attr
+                    else ""
+                )
+                if reason and reason != "ok":
+                    parts.append(f"skip={reason}")
+                score_attr = obj.get_attr_meta(
+                    "face_reid_gate", "reid_quality_score",
+                )
+                if score_attr is not None:
+                    score = getattr(score_attr, "value", 0.0)
+                    parts.append(f"quality={float(score):.2f}")
+        except Exception:
+            pass
 
         print(" ".join(parts), flush=True)

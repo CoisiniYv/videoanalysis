@@ -148,6 +148,33 @@ landmarks 完整
 quality = weighted(face_confidence, face_size, landmark_score)
 ```
 
+### 6.b ReID Quality Gate (F2.2)
+
+在 embedding 写入 Redis 之前，必须经过质量门控：
+
+```text
+YOLOv8-Face -> FacePersonAssociator -> AdaFace -> FaceReidGate -> Redis (future)
+```
+
+门控规则：
+
+1. 必须有 person_track_id
+2. face confidence >= 0.6
+3. face bbox min width/height >= 40px
+4. landmarks = 5 points
+5. feature dim = 512
+6. embedding L2 norm ~= 1.0 (tolerance ±0.10)
+7. 无 NaN feature values
+
+节流策略：每个 camera_id + person_track_id 最少间隔 1000ms。
+
+配置环境变量：
+
+- `FACE_REID_MIN_CONFIDENCE` (default 0.6)
+- `FACE_REID_MIN_FACE_SIZE` (default 40)
+- `FACE_REID_MIN_INTERVAL_MS` (default 1000)
+- `FACE_REID_NORM_TOLERANCE` (default 0.10)
+
 ## 7. AdaFace Embedding (in-pipeline)
 
 AdaFace 在 Savant module 内推理. 不在 face-worker, 也不在外部

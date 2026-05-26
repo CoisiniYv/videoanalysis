@@ -106,6 +106,9 @@ path is the authoritative source.
   - Extract `feature` output (index 0).
   - L2-normalize: `feature = feature / np.linalg.norm(feature, axis=-1, keepdims=True)`.
   - Embedding dimension: **512**.
+  - **Runtime update (F2.1):** `TensorToVectorConverter` applies L2
+    normalization internally — raw_l2_norm=1.0 observed. No custom
+    normalization needed.
 - Source: `adaface_ir50_webface4m` — IR50 backbone pretrained on
   WebFace4M. Official sample uses the same backbone variant.
   TODO — user to confirm exact upstream source / commit and license.

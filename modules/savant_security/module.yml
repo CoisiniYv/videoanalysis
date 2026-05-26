@@ -180,6 +180,23 @@ pipeline:
             - name: feature
 
     # ------------------------------------------------------------------
+    # FaceReidGatePyFunc — F2.2 quality gate + per-track throttle.
+    # Evaluates face quality and embedding eligibility for ReID.
+    # Attaches reid_allowed / reid_skip_reason / reid_quality_score.
+    # Does NOT emit face observations to Redis.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: face_reid_gate
+      module: custom.pyfuncs.face_reid_gate
+      class_name: FaceReidGatePyFunc
+      kwargs:
+        log_every_n_frames: 30
+        face_reid_min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.6}}
+        face_reid_min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
+        face_reid_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
+        face_reid_norm_tolerance: ${oc.decode:${oc.env:FACE_REID_NORM_TOLERANCE, 0.10}}
+
+    # ------------------------------------------------------------------
     # FaceEmbeddingDebugPyFunc — F2.1 embedding smoke visibility probe.
     # Logs feature dim, raw L2 norm, person_track_id, landmarks.
     # Does NOT emit face observations to Redis.
