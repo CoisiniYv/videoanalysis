@@ -376,7 +376,14 @@ class FaceVectorStore:
 **F3.2 已实现**: `FaceVectorStore.search_similar_faces()` — 精确 cosine
 distance (`<=>`) 搜索，支持 `top_k` / `min_similarity` / `camera_scope` /
 `include_embedding`。代码位于 `services/face-worker/app/vector_store.py`。
-`add_gallery_embedding` / `search_gallery` / `search_live_target` 留待 F4/F5。
+
+**F3.4 已实现**: `FaceVectorStore.search_gallery()` — 精确 cosine distance 搜索
+`person_gallery_embeddings`，支持 `top_k` / `min_similarity` / `person_ids` /
+`include_embedding`。自动排除 inactive person 和 inactive gallery embedding。
+gallery embedding 的增删改由 `GalleryRepository` (`services/face-worker/app/gallery_repository.py`)
+负责。
+
+`add_observation_embedding` / `search_live_target` 留待 F4/F5。
 
 **MVP 不实现** `HnswlibFaceVectorStore`, **MVP 不实现**
 `QdrantFaceVectorStore`. 接口保留是为了未来切换, 不是因为现在要切换.

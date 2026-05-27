@@ -1,7 +1,7 @@
-"""FaceVectorStore — pgvector similarity search over face_observations.
+"""FaceVectorStore — pgvector similarity search over face_observations and gallery.
 
-F3.2: exact cosine distance search harness. No ANN index, no gallery,
-no watchlist/live_search hit logic.
+F3.2: exact cosine distance search harness over face_observations.
+F3.4: gallery search over person_gallery_embeddings.
 
 Similarity metric:
   similarity = 1 - cosine_distance  (via pgvector ``<=>`` operator)
@@ -26,6 +26,38 @@ _MIN_NORM = 0.90
 _MAX_NORM = 1.10
 _MIN_TOP_K = 1
 _MAX_TOP_K = 100
+_MIN_SIMILARITY = 0.0
+_MAX_SIMILARITY = 1.0
+
+# Gallery search SELECT (no embedding vector by default).
+_GALLERY_METADATA_SELECT = """
+SELECT
+    pge.id,
+    pge.person_id,
+    p.name AS person_name,
+    pge.source_type,
+    pge.embedding_model,
+    pge.is_primary,
+    pge.quality,
+    1 - (pge.embedding <=> %(query_embedding)s) AS similarity,
+    pge.embedding <=> %(query_embedding)s AS distance,
+    pge.created_at
+"""
+
+_GALLERY_EMBEDDING_SELECT = """
+SELECT
+    pge.id,
+    pge.person_id,
+    p.name AS person_name,
+    pge.source_type,
+    pge.embedding_model,
+    pge.is_primary,
+    pge.quality,
+    pge.embedding,
+    1 - (pge.embedding <=> %(query_embedding)s) AS similarity,
+    pge.embedding <=> %(query_embedding)s AS distance,
+    pge.created_at
+"""
 
 # SELECT returning metadata only (no embedding vector).
 _METADATA_SELECT = """
@@ -211,3 +243,84 @@ ORDER BY embedding <=> %(query_embedding)s
 LIMIT %(top_k)s"""
 
         return sql, params
+
+    def search_gallery(
+        self,
+        embedding: list[float],
+        *,
+        top_k: int = 10,
+        min_similarity: float | None = None,
+        person_ids: list[int] | None = None,
+        include_embedding: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return topK most similar gallery embeddings for *embedding*.
+
+        Searches ``person_gallery_embeddings`` joined with ``persons``.
+
+        Args:
+            embedding: 512-d L2-normalized query vector (AdaFace).
+            top_k: Number of results (clamped to [1, 100]).
+            min_similarity: Optional cosine similarity threshold [0.0, 1.0].
+            person_ids: Optional list of person_ids to restrict search.
+            include_embedding: If True, include the 512-d embedding in results.
+
+        Returns:
+            List of dicts ordered by descending similarity.
+        """
+        query_vector = _validate_query_embedding(embedding)
+
+        original = top_k
+        top_k = max(_MIN_TOP_K, min(top_k, _MAX_TOP_K))
+        if original != top_k:
+            logger.warning("top_k clamped from %s to %s", original, top_k)
+
+        if min_similarity is not None:
+            if not (_MIN_SIMILARITY <= min_similarity <= _MAX_SIMILARITY):
+                raise ValueError(
+                    f"min_similarity={min_similarity} outside "
+                    f"[{_MIN_SIMILARITY}, {_MAX_SIMILARITY}]"
+                )
+
+        if person_ids is not None and len(person_ids) == 0:
+            return []
+
+        select = (
+            _GALLERY_EMBEDDING_SELECT if include_embedding
+            else _GALLERY_METADATA_SELECT
+        )
+        where_parts = [
+            "p.is_active = true",
+            "pge.is_active = true",
+            "pge.embedding IS NOT NULL",
+        ]
+        params: dict[str, Any] = {}
+
+        if min_similarity is not None:
+            where_parts.append(
+                "1 - (pge.embedding <=> %(query_embedding)s) >= %(min_similarity)s"
+            )
+            params["min_similarity"] = min_similarity
+
+        if person_ids is not None:
+            where_parts.append(
+                "pge.person_id = ANY(%(person_ids)s::bigint[])"
+            )
+            params["person_ids"] = person_ids
+
+        where_clause = "\n    AND ".join(where_parts)
+
+        sql = f"""{select}
+FROM person_gallery_embeddings pge
+JOIN persons p ON p.id = pge.person_id
+WHERE {where_clause}
+ORDER BY pge.embedding <=> %(query_embedding)s
+LIMIT %(top_k)s"""
+
+        params["query_embedding"] = Vector(query_vector)
+        params["top_k"] = top_k
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        return list(rows)

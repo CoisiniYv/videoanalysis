@@ -84,7 +84,7 @@ CREATE INDEX camera_rules_camera_type_idx ON camera_rules(camera_id, rule_type);
 CREATE TABLE persons (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    external_id TEXT,
+    external_person_id TEXT,
     description TEXT,
     is_active BOOLEAN NOT NULL DEFAULT true,
     created_by TEXT,
@@ -94,37 +94,45 @@ CREATE TABLE persons (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE UNIQUE INDEX persons_external_person_id_idx
+    ON persons(external_person_id) WHERE external_person_id IS NOT NULL;
 CREATE INDEX persons_name_trgm_idx ON persons USING gin (name gin_trgm_ops);
-CREATE INDEX persons_external_id_idx ON persons(external_id);
 CREATE INDEX persons_active_idx ON persons(is_active);
 ```
 
-`persons` 只表示“已登记人员”，不用于临时上传查历史。
+`persons` 只表示”已登记人员”，不用于临时上传查历史。
+
+字段约定：
+
+- `external_person_id` — 外部系统人员标识（如工号、badge ID）。部分唯一索引
+  (`WHERE external_person_id IS NOT NULL`)，允许多行为 null 但不允许重复非 null 值。
+- CLI enrollment (`enroll_gallery.py`) 支持 `--external-person-id`，如果已存在则复用。
 
 ## 7. person_gallery_embeddings
 
 ```sql
 CREATE TABLE person_gallery_embeddings (
-    id                  BIGSERIAL PRIMARY KEY,
-    person_id           BIGINT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
-    source_type         TEXT NOT NULL DEFAULT 'manual_upload',
-    source_image_path   TEXT,
-    embedding_model     TEXT NOT NULL DEFAULT 'adaface',
-    model_version       TEXT,
-    embedding_dim       INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512),
-    embedding           vector(512) NOT NULL,
-    embedding_norm      DOUBLE PRECISION NOT NULL,
-    quality             DOUBLE PRECISION,
-    face_bbox           JSONB,
-    landmarks           JSONB,
-    is_primary          BOOLEAN NOT NULL DEFAULT false,
-    is_active           BOOLEAN NOT NULL DEFAULT true,
-    payload             JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                      BIGSERIAL PRIMARY KEY,
+    person_id               BIGINT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    source_type             TEXT NOT NULL DEFAULT 'manual_upload',
+    source_image_path       TEXT,
+    source_observation_id   TEXT REFERENCES face_observations(source_observation_id) ON DELETE SET NULL,
+    embedding_model         TEXT NOT NULL DEFAULT 'adaface',
+    model_version           TEXT,
+    embedding_dim           INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512),
+    embedding               vector(512) NOT NULL,
+    embedding_norm          DOUBLE PRECISION NOT NULL,
+    quality                 DOUBLE PRECISION,
+    face_bbox               JSONB,
+    landmarks               JSONB,
+    is_primary              BOOLEAN NOT NULL DEFAULT false,
+    is_active               BOOLEAN NOT NULL DEFAULT true,
+    payload                 JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX person_gallery_person_idx
+CREATE INDEX person_gallery_person_active_idx
 ON person_gallery_embeddings(person_id, is_active);
 
 CREATE UNIQUE INDEX person_gallery_one_primary_idx
@@ -135,6 +143,8 @@ WHERE is_primary = true AND is_active = true;
 字段约定：
 
 - 只存长期登记向量；临时上传 query embedding 严禁入表
+- `source_observation_id` — 来源溯源。当 gallery embedding 从 `face_observations` 注册时，
+  FK 到 `face_observations(source_observation_id)`，ON DELETE SET NULL。
 - `embedding_model` / `model_version` 必须与 observation 检索向量空间兼容
 - 一个人允许多条 active gallery embeddings
 - F3.3 先锁定表设计，不在 spec 中要求 ANN/HNSW 索引立刻存在
@@ -284,6 +294,7 @@ CREATE TABLE match_results (
     camera_scope                JSONB,
 
     matched_observation_id      UUID NOT NULL REFERENCES face_observations(id) ON DELETE CASCADE,
+    matched_source_observation_id TEXT REFERENCES face_observations(source_observation_id) ON DELETE SET NULL,
     matched_camera_id           TEXT NOT NULL,
     matched_source_id           TEXT NOT NULL,
     matched_track_id            TEXT NOT NULL,
