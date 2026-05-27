@@ -118,87 +118,112 @@ CREATE INDEX person_gallery_person_idx
 ON person_gallery_embeddings(person_id, is_active);
 ```
 
-## 8. face_observations
+## 8. face_observations (F3.1 final)
 
 ```sql
 CREATE TABLE face_observations (
-    id BIGSERIAL PRIMARY KEY,
-    camera_id TEXT REFERENCES cameras(id),
-    source_id TEXT,
-    track_id TEXT,
-    captured_at TIMESTAMPTZ NOT NULL,
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_observation_id   TEXT NOT NULL UNIQUE,          -- 幂等 key
+    camera_id               TEXT NOT NULL,
+    source_id               TEXT NOT NULL,
+    track_id                TEXT NOT NULL,
+    timestamp_ms            BIGINT NOT NULL,               -- 视频/source timeline, 非 wall-clock
+    captured_at             TIMESTAMPTZ,                   -- 可选的 wall-clock 时间
+    frame_num               INTEGER,
 
-    face_bbox JSONB,
-    person_bbox JSONB,
-    landmarks JSONB,
+    person_bbox             JSONB,                         -- nullable (非 person 场景)
+    face_bbox               JSONB NOT NULL,
+    landmarks               JSONB NOT NULL,                -- 10 floats
 
-    quality REAL,
-    embedding vector(512),
-    model_name TEXT,
-    model_version TEXT,
+    face_confidence         DOUBLE PRECISION NOT NULL,
+    quality                 DOUBLE PRECISION NOT NULL,
+    detector_model          TEXT NOT NULL DEFAULT 'yolov8_face',
+    embedding_model         TEXT NOT NULL DEFAULT 'adaface',
+    model_version           TEXT,                          -- e.g. adaface_ir101_webface4m
 
-    matched_person_id BIGINT REFERENCES persons(id),
-    match_score REAL,
+    embedding_dim           INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512),
+    embedding               vector(512) NOT NULL,          -- L2 normalized
+    embedding_norm          DOUBLE PRECISION NOT NULL,
 
-    snapshot_path TEXT,
-    event_id BIGINT,
-    payload JSONB DEFAULT '{}'::jsonb,
+    reid_throttle_key       TEXT NOT NULL DEFAULT '',
+    association_score       DOUBLE PRECISION,
+    association_method      TEXT,
 
-    created_at TIMESTAMPTZ DEFAULT now()
+    camera_config_resolved  BOOLEAN NOT NULL DEFAULT false,
+    snapshot_path           TEXT,
+    crop_path               TEXT,
+
+    payload                 JSONB NOT NULL DEFAULT '{}'::jsonb,   -- 不含 embedding
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX face_observations_embedding_hnsw_idx
-ON face_observations
-USING hnsw (embedding vector_cosine_ops);
-
-CREATE INDEX face_observations_camera_time_idx
-ON face_observations(camera_id, captured_at DESC);
-
-CREATE INDEX face_observations_person_time_idx
-ON face_observations(matched_person_id, captured_at DESC);
+-- btree indexes only (approximate vector index deferred to F3.2+)
+CREATE INDEX idx_face_obs_source_observation_id ON face_observations(source_observation_id);
+CREATE INDEX idx_face_obs_camera_id ON face_observations(camera_id);
+CREATE INDEX idx_face_obs_source_id ON face_observations(source_id);
+CREATE INDEX idx_face_obs_track_id ON face_observations(track_id);
+CREATE INDEX idx_face_obs_timestamp_ms ON face_observations(timestamp_ms);
 ```
 
-### 8.1 字段约定 (F1.1a 锁定)
+### 8.1 字段约定 (F3.1 锁定)
 
-- `embedding vector(512)` 适配第一版 AdaFace 输出 (默认 512 维).
-  若实际 AdaFace 导出维度不同, F2 启动前需要更新此处, 并相应更新
-  `person_gallery_embeddings.embedding` 维度.
-- `model_name` 第一版固定为 `'adaface'`. 如果未来切换到 ArcFace 或
-  其他 backbone, 更新该字段并通过 phase doc 推翻 F1.1a.
-- `model_version` 必须存储 (例如 `adaface_ir101_webface4m`), 用于后
-  续兼容性判断和故障排查.
-- 推荐使用 `source_observation_id` 作为幂等键 (详见 §17 的
-  `ALTER TABLE`). face-worker 在消费 Redis 时按这个键去重, 避免重试
-  导致重复入库.
-- pgvector 检索假设 embedding 已经 L2 归一化, 写入前必须确认 (由
-  Savant module 的 AdaFace converter 负责).
+- `source_observation_id TEXT NOT NULL UNIQUE` — 幂等键。face-worker 用
+  `ON CONFLICT DO NOTHING` 按此字段去重。
+- `embedding vector(512) NOT NULL` — F3.1 要求 embedding 必须存在。
+  若缺失或不合法 (维度错、norm 超范围)，worker 拒绝插入且不 ACK，
+  留在 pending 中暴露问题。
+- `embedding_dim INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512)` —
+  与 vector(512) 配套，DB 层预防维度漂移。
+- `embedding_norm DOUBLE PRECISION NOT NULL` — worker 验证范围 [0.90, 1.10]。
+- `face_bbox JSONB NOT NULL`, `landmarks JSONB NOT NULL` — 人脸检测输出，
+  以 JSONB 存储，避免 PostgreSQL 原生数组的维度刚性。
+- `person_bbox JSONB` — 关联的 person bbox，可为 null。
+- `captured_at TIMESTAMPTZ` — 可选的 wall-clock 时间。当前
+  `timestamp_ms` 是视频/source timeline，不一定是 wall-clock。
+  不要错误转换为 observed_at，除非有真实 wall-clock 来源。
+- `model_name` 不再独立存在 → 拆为 `detector_model` + `embedding_model`
+  + `model_version`。`detector_model` = `yolov8_face`,
+  `embedding_model` = `adaface`。
+- `matched_person_id`, `match_score` 不在 F3.1 表中；这些属于
+  watchlist/live_search 命中表 (F4/F5)。
+- `snapshot_path`, `crop_path` — F3.1 为 null，后续 phase 补齐。
+- `payload JSONB` 不包含 embedding 向量 (避免 ~8KB 重复存储)。
+- 无 HNSW / IVFFlat / ANN 索引 — F3.1 是纯持久化，不检索。
+- 无 FK 到 cameras/persons — MVP 阶段保持松耦合。
 
-### 8.2 F2.3 Redis → PostgreSQL 字段映射 (2026-05-27)
+### 8.2 F3.1 Redis → PostgreSQL 字段映射
 
-F2.3 已将 face observation 写入 Redis Stream `security.face_observations`.
-face-worker 消费时的字段映射:
+F2.4 Redis Stream `security.face_observations` → face-worker → DB:
 
 | Redis JSON field | PostgreSQL column | Notes |
 |---|---|---|
-| `source_observation_id` | `source_observation_id` | 幂等 key, UNIQUE index |
-| `camera_id` | `camera_id` | FK → cameras |
-| `source_id` | `source_id` | |
-| `track_id` | `track_id` | TEXT |
-| `timestamp_ms` | `captured_at` | ms → timestamptz 转换 |
-| `face_bbox` | `face_bbox` | JSONB |
-| `person_bbox` | `person_bbox` | JSONB, 可能 null |
-| `landmarks` | `landmarks` | JSONB, 10 floats |
-| `quality` | `quality` | REAL |
-| `embedding` | `embedding` | vector(512) |
-| `embedding_model` | `model_name` | TEXT |
-| — | `model_version` | 从 embedding_model + model_file 推导 |
-| `snapshot_path` | `snapshot_path` | F2.3 为 null, 未来 phase 补 |
-| `payload` | `payload` | JSONB, F2.3 为空 dict |
+| `source_observation_id` | `source_observation_id` | 幂等 key, UNIQUE |
+| `camera_id` | `camera_id` | TEXT, NOT NULL |
+| `source_id` | `source_id` | TEXT, NOT NULL |
+| `track_id` | `track_id` | TEXT, NOT NULL |
+| `timestamp_ms` | `timestamp_ms` | BIGINT, source timeline |
+| — | `captured_at` | TIMESTAMPTZ, 暂无来源, null |
+| `frame_num` | `frame_num` | INTEGER |
+| `person_bbox` | `person_bbox` | JSONB, nullable |
+| `face_bbox` | `face_bbox` | JSONB, NOT NULL |
+| `landmarks` | `landmarks` | JSONB, NOT NULL |
+| `face_confidence` | `face_confidence` | DOUBLE PRECISION |
+| `quality` | `quality` | DOUBLE PRECISION |
+| `detector_model` | `detector_model` | TEXT, "yolov8_face" |
+| `embedding_model` | `embedding_model` | TEXT, "adaface" |
+| `model_version` | `model_version` | TEXT, nullable (Redis 已有) |
+| `embedding_dim` | `embedding_dim` | INTEGER CHECK=512 |
+| `embedding` | `embedding` | vector(512) NOT NULL |
+| `embedding_norm` | `embedding_norm` | DOUBLE PRECISION, [0.90,1.10] |
+| `reid_throttle_key` | `reid_throttle_key` | TEXT |
+| `association_score` | `association_score` | DOUBLE PRECISION |
+| `association_method` | `association_method` | TEXT |
+| `snapshot_path` | `snapshot_path` | TEXT, nullable |
+| `crop_path` | `crop_path` | TEXT, nullable |
+| `payload` | `payload` | JSONB, 不含 embedding |
 
 Redis-only 字段 (不入 PostgreSQL): `schema_version`, `producer`,
-`frame_num`, `face_confidence`, `detector_model`, `embedding_dim`,
-`embedding_norm`, `reid_allowed`, `reid_throttle_key`,
-`association_score`, `association_method`.
+`message_type`, `reid_allowed`。
 
 ## 9. events
 
@@ -429,18 +454,9 @@ clip_status: not_required / not_implemented / pending / ready / failed
 recording_strategy: none / reserved / savant_replay / external_nvr_replay / post_event_rtsp_demo / custom_in_pipeline_ring_buffer
 ```
 
-建议后续为 `face_observations` 增加幂等字段：
-
-```sql
-ALTER TABLE face_observations
-ADD COLUMN source_observation_id TEXT;
-
-CREATE UNIQUE INDEX face_observations_source_observation_uidx
-ON face_observations(source_observation_id)
-WHERE source_observation_id IS NOT NULL;
-```
-
-这样 face-worker 重试时不会重复插入同一条人脸 observation。
+`source_observation_id TEXT NOT NULL UNIQUE` 已在 F3.1 schema 中实现 (见 §8)。
+face-worker 使用 `ON CONFLICT (source_observation_id) DO NOTHING` 实现幂等，
+重试时不会重复插入同一条人脸 observation。无需额外 ALTER TABLE。
 
 
 ## 18. Replay 录像请求表，后续阶段

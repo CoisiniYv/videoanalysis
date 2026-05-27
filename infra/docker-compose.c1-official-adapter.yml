@@ -140,6 +140,31 @@ services:
     restart: unless-stopped
 
   # ====================================================================
+  # Face Worker — consumes security.face_observations, writes to PostgreSQL
+  # ====================================================================
+
+  face-worker:
+    build:
+      context: ../services/face-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-face-worker:latest
+    container_name: c1-official-face-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      FACE_OBSERVATION_STREAM: security.face_observations
+      FACE_OBSERVATION_CONSUMER_START_ID: "0"
+      CONSUMER_GROUP: face-workers-c1-official
+      CONSUMER_NAME: face-worker-c1-official-1
+      POLL_TIMEOUT_MS: "2000"
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ====================================================================
   # Metadata Sink — consumes Savant ZMQ sink metadata, writes NDJSON
   # ====================================================================
 
