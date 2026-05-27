@@ -394,6 +394,20 @@ gallery_match 语义：
 - 幂等键：`UNIQUE(search_request_id, query_gallery_embedding_id)`
 - 不产生 `watchlist_hit` / `live_search_hit` / `security.events`
 
+**F3.6 implements a read-side trajectory query harness**:
+读取 `match_results` 中 `search_mode = 'registered_person_history'` 的行，
+输出已注册人员的历史出现轨迹。
+代码位于 `services/face-worker/query_trajectory.py` 和
+`services/face-worker/app/trajectory_repository.py`。
+trajectory query 语义：
+- 读取 `match_results`（`search_mode = 'registered_person_history'`）
+- `matched_observation_id IS NOT NULL`（排除 gallery_match 行）
+- JOIN `persons` 获取 `person_name` / `external_person_id`
+- LEFT JOIN `face_observations` 获取 `snapshot_path` / `crop_path` fallback
+- 支持时间范围、camera_id、min_similarity、limit 过滤
+- 只读，不写入任何表
+- `registered_person_history` 的生产者 remains future work
+
 `add_observation_embedding` / `search_live_target` 留待 F4/F5。
 
 **MVP 不实现** `HnswlibFaceVectorStore`, **MVP 不实现**

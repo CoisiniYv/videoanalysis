@@ -344,7 +344,7 @@ ON match_results(query_observation_id);
 
 ```text
 gallery_match                  (F3.5 已实现)
-registered_person_history      (未来)
+registered_person_history      (F3.6 读侧 harness — 生产者 remains future work)
 temporary_face_history         (未来)
 ```
 
@@ -366,6 +366,27 @@ temporary_face_history         (未来)
 | matched_observation_id | NULL |
 | matched_camera_id / source_id / track_id | NULL |
 | 幂等键 | UNIQUE(search_request_id, query_gallery_embedding_id) |
+
+### registered_person_history 字段语义 (F3.6)
+
+| 字段 | registered_person_history 值 |
+|---|---|
+| query_person_id | 已注册人员的 person_id |
+| query_gallery_embedding_id | 使用的 gallery embedding id |
+| query_observation_id | NULL（查询侧不是 observation） |
+| query_source_observation_id | NULL |
+| matched_observation_id | 匹配到的历史 face_observation UUID |
+| matched_source_observation_id | 匹配到的 face_observation 的 source_observation_id |
+| matched_camera_id | 匹配到的 observation 的 camera_id |
+| matched_source_id / track_id | 匹配到的 observation 的 source_id / track_id |
+| matched_timestamp_ms | 匹配到的 observation 的 timestamp_ms |
+| 幂等键 | UNIQUE(search_request_id, matched_observation_id) |
+
+说明：
+- F3.6 是**读侧 harness**，只查询不写入
+- `registered_person_history` 的生产者是未来工作
+- 生产者将使用已注册 person 的 gallery embedding 在 `face_observations` 中搜索历史
+- 结果写入 `match_results` 时使用 `matched_observation_id` 作为幂等键
 
 ### 9.1 `nvr_reference`
 

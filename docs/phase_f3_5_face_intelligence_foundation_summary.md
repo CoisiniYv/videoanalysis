@@ -26,6 +26,7 @@
 | F3.3 | gallery retention / match policy 设计文档 | `d6ba91e` |
 | F3.4 | gallery schema (persons, person_gallery_embeddings, match_results) + enrollment CLI | `36f8ded`, `30df736` |
 | F3.5 | gallery match harness (observation → gallery search → match_results) | `0e65bc4` |
+| F3.6 | registered person trajectory query harness (读侧) | (in progress — pending review) |
 
 ### Migration 文件
 
@@ -117,7 +118,7 @@ TTL: expires_at
 | security.events 输出 | 未实现 | match 结果未写入 security.events 表 |
 | REST API | 未实现 | enrollment / match / query 均为 CLI |
 | retention deletion | 未实现 | 过期 match_results / face_observations 清理 |
-| trajectory query | 未实现 | 按 person 查询历史出现轨迹 |
+| trajectory query | F3.6 读侧 harness（pending review） | 按 person 查询历史出现轨迹；registered_person_history 生产者 remains future work |
 | NVR reference | 仅结构设计 | nvr_reference JSONB 字段存在但未接真实 NVR |
 | ANN 索引 | 未实现 | pgvector 精确搜索，无 HNSW/IVFFlat |
 | watchlist_rules | 未实现 | 布控规则配置表 |
