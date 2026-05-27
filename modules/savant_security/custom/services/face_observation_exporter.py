@@ -11,9 +11,38 @@ from __future__ import annotations
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Dict, Optional
 
 from custom.models.face_events import FaceObservationEventDraft
+
+
+class ExportThrottleMap:
+    """In-memory per-track throttle for export rate limiting.
+
+    Defensive safety net — primary throttle is in ReIDThrottleMap.
+    Tracks the last exported timestamp_ms for each throttle_key.
+    """
+
+    def __init__(self, min_interval_ms: int = 1000):
+        self._min_interval_ms = max(min_interval_ms, 0)
+        self._last_exported: Dict[str, int] = {}
+
+    def is_allowed(self, throttle_key: str, timestamp_ms: int) -> bool:
+        """Check if this throttle_key is allowed at timestamp_ms."""
+        if self._min_interval_ms <= 0:
+            return True
+        last = self._last_exported.get(throttle_key)
+        if last is None:
+            return True
+        return (timestamp_ms - last) >= self._min_interval_ms
+
+    def record(self, throttle_key: str, timestamp_ms: int) -> None:
+        """Record that this throttle_key was exported at timestamp_ms."""
+        self._last_exported[throttle_key] = timestamp_ms
+
+    def clear(self) -> None:
+        """Reset all throttle state."""
+        self._last_exported.clear()
 
 
 class FaceObservationExporter(ABC):

@@ -18,6 +18,7 @@ from custom.models.face_events import (
 )
 from custom.services.face_observation_exporter import (
     DryRunFaceObservationExporter,
+    ExportThrottleMap,
     FaceObservationExporter,
     create_face_observation_exporter,
 )
@@ -196,3 +197,108 @@ class TestEmbeddingContent:
     def test_embedding_model_default(self):
         obs = _make_observation()
         assert obs.embedding_model == "adaface"
+
+
+class TestExportThrottleMap:
+    """F2.3b — defensive export throttle tests."""
+
+    def test_first_observation_exports(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        assert throttle.is_allowed("cam1:42", 1000) is True
+
+    def test_same_key_at_plus_40ms_blocked(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam1:42", 1040) is False
+
+    def test_same_key_at_plus_999ms_blocked(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam1:42", 1999) is False
+
+    def test_same_key_at_plus_1000ms_exports(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam1:42", 2000) is True
+
+    def test_different_track_exports_independently(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam1:99", 1000) is True
+
+    def test_different_source_exports_independently(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam2:42", 1000) is True
+
+    def test_zero_interval_allows_all(self):
+        throttle = ExportThrottleMap(min_interval_ms=0)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam1:42", 1001) is True
+
+    def test_clear_resets_throttle(self):
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        assert throttle.is_allowed("cam1:42", 1500) is False
+        throttle.clear()
+        assert throttle.is_allowed("cam1:42", 1500) is True
+
+    def test_rapid_sequence_all_throttled(self):
+        """Simulate 30fps frames — only first should pass."""
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        key = "cam1:42"
+        exported_times = []
+        for frame_ts in range(0, 10000, 33):  # ~30fps
+            if throttle.is_allowed(key, frame_ts):
+                throttle.record(key, frame_ts)
+                exported_times.append(frame_ts)
+        # Should export at 0, 1000, 2000, ... ≈ 10 exports in 10s
+        assert len(exported_times) <= 11
+        assert len(exported_times) >= 9
+        # Verify all gaps >= 1000ms
+        for a, b in zip(exported_times, exported_times[1:]):
+            assert (b - a) >= 1000
+
+    def test_multiple_tracks_independent(self):
+        """Multiple tracks at same timestamps export independently."""
+        throttle = ExportThrottleMap(min_interval_ms=1000)
+        throttle.record("cam1:42", 1000)
+        throttle.record("cam1:99", 1000)
+        assert throttle.is_allowed("cam1:42", 1500) is False
+        assert throttle.is_allowed("cam1:99", 1500) is False
+        assert throttle.is_allowed("cam1:42", 2000) is True
+        assert throttle.is_allowed("cam1:99", 2000) is True
+
+
+class TestNoImageBytesGuarantee:
+    """F2.3b — confirm no image bytes in any output."""
+
+    def test_to_dict_no_image_fields(self):
+        obs = _make_observation()
+        d = obs.to_dict()
+        s = json.dumps(d)
+        for forbidden in [
+            "image_bytes", "frame_bytes", "crop_bytes",
+            "base64", "jpeg", "png_bytes",
+        ]:
+            assert forbidden not in s, f"Forbidden field in output: {forbidden}"
+
+    def test_to_json_no_image_fields(self):
+        obs = _make_observation()
+        j = obs.to_json()
+        for forbidden in ["image_bytes", "base64", "crop_bytes"]:
+            assert forbidden not in j
+
+
+class TestIdempotencyKeyDeterministic:
+    """F2.3b — confirm idempotency key stability."""
+
+    def test_key_deterministic_across_calls(self):
+        key1 = build_face_source_observation_id("cam1", 42, 1000)
+        key2 = build_face_source_observation_id("cam1", 42, 1000)
+        key3 = build_face_source_observation_id("cam1", 42, 1000)
+        assert key1 == key2 == key3
+
+    def test_key_format_face_prefix(self):
+        key = build_face_source_observation_id("cam1", 42, 1000)
+        assert key.startswith("face:")

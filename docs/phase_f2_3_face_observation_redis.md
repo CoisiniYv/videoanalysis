@@ -134,6 +134,37 @@ included, and both are null in this phase.
 }
 ```
 
+## F2.3b — Throttle Enforcement Fix (2026-05-27)
+
+### Problem
+
+Manual Redis inspection showed same `track_id` entries spaced only 40ms apart,
+violating the `FACE_REID_MIN_INTERVAL_MS=1000` throttle policy.
+
+### Root Cause
+
+`FaceReidGatePyFunc` uses raw `frame_meta.pts` as timestamp for the throttle
+map. When PTS is in milliseconds (Savant default for some sources), the gate
+throttle sees values like `43043960` as a single timestamp — the delta between
+consecutive frames (40) always passes the 1000ms check. The exporter converts
+`pts / 1_000_000` to get real milliseconds, but had no throttle of its own.
+
+### Fix
+
+- Added `ExportThrottleMap` to `face_observation_exporter.py` service.
+- `FaceObservationExporterPyFunc` now has a defensive per-track throttle using
+  the exporter's own millisecond timestamp (`pts / 1_000_000`).
+- Gate verdict is now required — missing `reid_allowed` metadata skips export
+  with reason `missing_gate_verdict`.
+- `reid_skip_reason` must be absent or `"ok"` — non-ok values skip export.
+- `export_min_interval_ms` parameter defaults to 1000, configurable via
+  `FACE_REID_MIN_INTERVAL_MS` env var (shared with gate).
+
+### Clarification
+
+- `landmarks` = 10 floats (5 points x 2 coordinates) — normal.
+- `embedding` = 512 floats — the long field in Redis, not landmarks.
+
 ## Known Limitations
 
 | Limitation | Impact |

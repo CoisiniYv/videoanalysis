@@ -208,6 +208,7 @@ pipeline:
       kwargs:
         log_every_n_frames: 30
         producer: savant_security
+        export_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
 
     # ------------------------------------------------------------------
     # FaceEmbeddingDebugPyFunc — F2.1 embedding smoke visibility probe.

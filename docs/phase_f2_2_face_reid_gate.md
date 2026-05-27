@@ -145,3 +145,8 @@ All checks pass.
 gate and exports them to Redis Stream `security.face_observations`. The
 `FaceObservationExporterPyFunc` sits immediately after `FaceReidGatePyFunc`
 in the pipeline. See `docs/phase_f2_3_face_observation_redis.md`.
+
+**F2.3b** (2026-05-27) — exporter now treats gate verdict as **required**:
+faces without `reid_allowed` metadata are skipped (`missing_gate_verdict`),
+and the exporter has its own defensive `ExportThrottleMap` using millisecond
+timestamps. This guards against PTS-unit mismatches in the gate throttle.

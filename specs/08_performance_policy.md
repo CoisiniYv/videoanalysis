@@ -257,7 +257,24 @@ pgvector search p95 <= 300ms，具体取决于数据量
 7. 使用 INT8, 前提是精度可接受.
 8. 增加 GPU 或拆分服务器 (可选地启用 Savant module chaining via ZMQ).
 
-## 10.1 Redis 消息体边界 (F1.1a 锁定)
+## 10.1 Redis export throttle enforcement (F2.3b 锁定)
+
+Redis export 必须独立执行 per-track throttle, 不能仅依赖 gate 日志.
+
+要求:
+
+- `FaceObservationExporterPyFunc` 内置 `ExportThrottleMap`.
+- 同一 `reid_throttle_key` 的两次导出间隔 >= `FACE_REID_MIN_INTERVAL_MS`.
+- 默认 1000ms, 通过 `export_min_interval_ms` 参数配置.
+- 与 `FaceReidGatePyFunc` 的 gate throttle 双重执行, 互为安全网.
+- Gate 未打 verdict 的 face 不得导出 (skip reason: `missing_gate_verdict`).
+- `reid_skip_reason` 非 "ok" 的 face 不得导出.
+
+原因: Savant PTS 单位不一致可能导致 gate throttle 的 raw PTS 比较失
+效. Exporter 使用 `pts / 1_000_000` 转换为毫秒, 确保 throttle 在正确
+的时间域执行.
+
+## 10.2 Redis 消息体边界 (F1.1a 锁定)
 
 Redis stream `security.face_observations` 的单条消息允许:
 
@@ -278,7 +295,7 @@ Redis stream `security.face_observations` 的单条消息允许:
 道 (例如另一个 stream 或文件系统路径引用), 不得占用
 `security.face_observations`.
 
-## 10.2 NVDEC 容量 TODO (F1.2 runtime smoke 前必须回答)
+## 10.3 NVDEC 容量 TODO (F1.2 runtime smoke 前必须回答)
 
 下游推理 FPS 降到 3-5 不等于 RTSP 解码 FPS 也下降. 摄像头仍按其编
 码 / 帧率推流, NVDEC 解码压力照旧. 必须在 F1.2 runtime smoke 之前
