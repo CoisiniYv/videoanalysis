@@ -83,7 +83,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
     def process_frame(self, buffer: Any, frame_meta: Any):
         self._frame_count += 1
         source_id = str(getattr(frame_meta, "source_id", "")) or "?"
-        camera_id, _camera_resolved = self._resolve_camera_id(source_id)
+        camera_id, camera_resolved = self._resolve_camera_id(source_id)
         frame_num = getattr(frame_meta, "frame_num", None)
         pts = getattr(frame_meta, "pts", 0) or 0
         timestamp_ms = normalize_pts_to_ms(pts) if pts else self._frame_count
@@ -137,7 +137,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
                 continue
 
             obs = self._build_observation(
-                obj, source_id, camera_id, frame_num, timestamp_ms, i,
+                obj, source_id, camera_id, camera_resolved, frame_num, timestamp_ms, i,
                 track_id, feature, throttle_key,
             )
             if obs is None:
@@ -294,6 +294,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         obj,
         source_id: str,
         camera_id: str,
+        camera_resolved: bool,
         frame_num: Optional[int],
         timestamp_ms: int,
         face_index: int,
@@ -345,6 +346,9 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             association_score=self._read_association_score(obj),
             association_method=self._read_association_method(obj),
         )
+
+        # Annotate with camera resolution metadata
+        obs.payload["camera_config_resolved"] = camera_resolved
 
         # Log concise summary for first few exports
         if self._export_count < 5:

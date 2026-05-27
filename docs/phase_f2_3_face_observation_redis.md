@@ -211,6 +211,45 @@ provides a single conversion used by both gate and exporter. Heuristic:
 - `pts < 10_000_000` → already milliseconds → passthrough
 - `pts < 0` / `None` / `0` → returns `0`
 
+### Runtime Verification (2026-05-27)
+
+| Check | Result |
+|-------|--------|
+| Unit tests | 114/114 pass |
+| Static smoke | 30/30 pass |
+| Container restart | healthy, no errors |
+| XLEN after 35s | 62 |
+| Throttle checker | PASS — 79 entries, 16 keys, 0 violations, min_delta=1000ms |
+| Contract checker | PASS — 79 entries, 16 keys, 0 schema violations, 0 throttle violations, 0 one-to-one violations |
+| camera_config_resolved | 79/79 TRUE |
+| camera_id ≠ source_id | 79/79 entries |
+| camera_id sample | `cam_c1_2` (resolved) vs `c1_2_test` (source_id) |
+| timestamp_ms | int, monotonic per key, min delta 1000ms |
+| reid_throttle_key | 3-part format: `cam_c1_2:c1_2_test:<track_id>` |
+| one-to-one violations | 0 |
+| Image bytes in payload | 0 |
+
+### Sample Redis Entry (F2.4 hardened)
+
+```json
+{
+  "camera_id": "cam_c1_2",
+  "source_id": "c1_2_test",
+  "reid_throttle_key": "cam_c1_2:c1_2_test:107",
+  "timestamp_ms": 59600,
+  "track_id": "107",
+  "embedding_dim": 512,
+  "embedding": [512 floats],
+  "landmarks": [10 floats],
+  "face_bbox": [4 floats],
+  "payload": {"camera_config_resolved": true}
+}
+```
+
+### Verdict
+
+All F2.4 contract checks pass in runtime. **F3.1 face-worker can start next.**
+
 ## Known Limitations
 
 | Limitation | Impact |
@@ -231,6 +270,8 @@ provides a single conversion used by both gate and exporter. Heuristic:
 - `infra/docker-compose.c1-official-adapter.yml` — added env vars
 - `harness/tests/test_face_observation_exporter.py` — new
 - `scripts/smoke/check_f2_3_face_observation_redis_runtime.sh` — new
+- `scripts/smoke/check_f2_3b_face_observation_throttle_runtime.py` — new
+- `scripts/smoke/check_f2_4_face_observation_contract_runtime.py` — new
 - `docs/phase_f2_3_face_observation_redis.md` — new
 
 ## Next Phase Recommendation
