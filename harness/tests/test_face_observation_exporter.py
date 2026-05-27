@@ -290,6 +290,86 @@ class TestNoImageBytesGuarantee:
             assert forbidden not in j
 
 
+class TestFromDraft:
+    """F2.4 — from_draft() schema consistency."""
+
+    def test_from_draft_all_fields_present(self):
+        obs = _make_observation()
+        draft = FaceObservationEventDraft.from_draft(obs, producer="test")
+        d = draft.to_dict()
+        for key in [
+            "source_observation_id", "camera_id", "source_id",
+            "track_id", "timestamp_ms", "face_bbox", "landmarks",
+            "face_confidence", "quality", "detector_model",
+            "embedding_model", "embedding_dim", "embedding",
+            "reid_allowed", "association_score", "association_method",
+        ]:
+            assert key in d, f"Missing field after from_draft: {key}"
+
+    def test_from_draft_detector_model(self):
+        obs = _make_observation(detector_model="yolov8_face")
+        draft = FaceObservationEventDraft.from_draft(obs)
+        assert draft.detector_model == "yolov8_face"
+
+    def test_from_draft_embedding_model(self):
+        obs = _make_observation(embedding_model="adaface")
+        draft = FaceObservationEventDraft.from_draft(obs)
+        assert draft.embedding_model == "adaface"
+
+    def test_from_draft_embedding_dim_512(self):
+        obs = _make_observation(embedding_dim=512)
+        draft = FaceObservationEventDraft.from_draft(obs)
+        assert draft.embedding_dim == 512
+
+    def test_from_draft_embedding_list(self):
+        feature = [0.01 * i for i in range(512)]
+        obs = _make_observation(feature=feature, embedding_dim=512)
+        draft = FaceObservationEventDraft.from_draft(obs)
+        assert draft.embedding == feature
+        assert len(draft.embedding) == 512
+
+    def test_from_draft_face_confidence(self):
+        obs = _make_observation(face_confidence=0.92)
+        draft = FaceObservationEventDraft.from_draft(obs)
+        assert draft.face_confidence == 0.92
+
+    def test_from_draft_no_model_name_legacy(self):
+        obs = _make_observation()
+        draft = FaceObservationEventDraft.from_draft(obs)
+        assert not hasattr(draft, "model_name")
+
+    def test_from_draft_json_serializable(self):
+        obs = _make_observation()
+        draft = FaceObservationEventDraft.from_draft(obs, producer="test")
+        j = draft.to_json()
+        parsed = json.loads(j)
+        assert parsed["source_observation_id"] == obs.source_observation_id
+
+
+class TestCameraIdMapping:
+    """F2.4 — camera_id and source_id are distinct fields."""
+
+    def test_camera_id_distinct_from_source_id(self):
+        obs = _make_observation(
+            camera_id="cam_001",
+            source_id="phase3h",
+            source_observation_id="face:phase3h:42:1000",
+        )
+        d = obs.to_dict()
+        assert d["camera_id"] == "cam_001"
+        assert d["source_id"] == "phase3h"
+        assert d["camera_id"] != d["source_id"]
+
+    def test_camera_id_can_equal_source_id_as_fallback(self):
+        obs = _make_observation(
+            camera_id="cam1",
+            source_id="cam1",
+        )
+        d = obs.to_dict()
+        assert d["camera_id"] == "cam1"
+        assert d["source_id"] == "cam1"
+
+
 class TestIdempotencyKeyDeterministic:
     """F2.3b — confirm idempotency key stability."""
 

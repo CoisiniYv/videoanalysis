@@ -28,6 +28,7 @@ class ReIDGateInput:
     feature_dim: int = 0
     embedding_norm: float = 0.0
     camera_id: str = ""
+    source_id: str = ""
     timestamp_ms: int = 0
     association_method: str = ""
 
@@ -80,7 +81,7 @@ def evaluate_reid_gate(
     min_size = cfg.get("face_reid_min_face_size", _DEFAULT_MIN_FACE_SIZE)
     norm_tol = cfg.get("face_reid_norm_tolerance", _DEFAULT_NORM_TOLERANCE)
 
-    throttle_key = f"{inp.camera_id}:{inp.person_track_id}"
+    throttle_key = f"{inp.camera_id}:{inp.source_id}:{inp.person_track_id}"
 
     # Rule 1: person_track_id required
     if not inp.has_track_id or inp.person_track_id <= 0:

@@ -191,6 +191,7 @@ pipeline:
       class_name: FaceReidGatePyFunc
       kwargs:
         log_every_n_frames: 30
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
         face_reid_min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.6}}
         face_reid_min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
         face_reid_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
@@ -208,6 +209,7 @@ pipeline:
       kwargs:
         log_every_n_frames: 30
         producer: savant_security
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
         export_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
 
     # ------------------------------------------------------------------

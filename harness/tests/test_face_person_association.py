@@ -206,6 +206,55 @@ class TestScoreRange:
         assert result[0].score >= 0.5
 
 
+class TestOneToOneGreedy:
+    """F2.4 — one-to-one greedy: each person assigned at most one face."""
+
+    def test_two_faces_one_person_only_best_associated(self):
+        """Two faces inside same person — only best-scoring face associated."""
+        face_a = _face(xc=500, yc=200, w=80, h=100, idx=0)
+        face_b = _face(xc=500, yc=600, w=60, h=80, idx=1)
+        person = _person(xc=500, yc=400, w=200, h=500, tid=1, idx=0)
+        result = associate_faces_to_persons([face_a, face_b], [person])
+        assert len(result) == 1
+        # face_a is in upper body → higher score
+        assert result[0].face_index == 0
+        assert result[0].person_track_id == 1
+
+    def test_two_persons_two_faces_one_to_one(self):
+        """Each person gets at most one face."""
+        face_a = _face(xc=300, yc=200, w=80, h=100, idx=0)
+        face_b = _face(xc=700, yc=200, w=80, h=100, idx=1)
+        person_a = _person(xc=300, yc=400, w=150, h=400, tid=10, idx=0)
+        person_b = _person(xc=700, yc=400, w=150, h=400, tid=20, idx=1)
+        result = associate_faces_to_persons(
+            [face_a, face_b], [person_a, person_b],
+        )
+        assert len(result) == 2
+        tids = {a.person_track_id for a in result}
+        assert tids == {10, 20}
+
+    def test_ambiguous_candidates_highest_score_wins(self):
+        """Two faces competing for one person — highest score wins."""
+        face_best = _face(xc=500, yc=200, w=80, h=100, conf=0.9, idx=0)
+        face_worse = _face(xc=500, yc=400, w=80, h=100, conf=0.7, idx=1)
+        person = _person(xc=500, yc=400, w=200, h=500, tid=1, idx=0)
+        # Both faces inside person, but face_best is in upper body
+        result = associate_faces_to_persons(
+            [face_best, face_worse], [person],
+        )
+        assert len(result) == 1
+        assert result[0].face_index == 0
+
+    def test_unassigned_face_remains_unassociated(self):
+        """Face outside all persons stays unassociated (not in results)."""
+        face_in = _face(xc=500, yc=200, w=80, h=100, idx=0)
+        face_out = _face(xc=100, yc=100, w=80, h=100, idx=1)
+        person = _person(xc=500, yc=400, w=200, h=500, tid=1, idx=0)
+        result = associate_faces_to_persons([face_in, face_out], [person])
+        assert len(result) == 1
+        assert result[0].face_index == 0
+
+
 class TestLargeFaceReject:
     """Face bbox much larger than person bbox -> rejected or low score."""
 

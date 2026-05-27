@@ -181,6 +181,36 @@ consecutive frames (40) always passes the 1000ms check. The exporter converts
 - Verification script: `scripts/smoke/check_f2_3b_face_observation_throttle_runtime.py`
 - Conclusion: face-worker persistence can start next.
 
+## F2.4 — Contract Hardening (2026-05-27)
+
+### Changes
+
+| Problem | Fix |
+|---|---|
+| camera_id = source_id everywhere | Gate and exporter resolve business camera_id via `CameraConfigBundle.get_by_source_id()` |
+| from_draft() missing fields | Now copies all F2.3 fields (face_confidence, detector_model, embedding_model, embedding_dim, embedding, embedding_norm, reid_allowed, etc.) |
+| Unattributed faces (no person_track_id) entering stream | Explicit skip: `missing_person_track_id` when track_id <= 0 |
+| Face-person association not one-to-one | Greedy one-to-one: each face ≤ 1 person, each person ≤ 1 face per frame |
+| PTS unit mismatch between gate and exporter | `normalize_pts_to_ms()` unified helper (heuristic: >= 10^9 → ns, >= 10^7 → µs, < 10^7 → ms) |
+| Throttle key inconsistency | 3-part key: `{camera_id}:{source_id}:{person_track_id}` (was 2-part `{source_id}:{track_id}`) |
+
+### Unattributed Face Policy (MVP)
+
+Faces without `person_track_id` (unassociated) MUST NOT be exported to
+`security.face_observations` in MVP. This is a final decision. Future
+phases may revisit for standalone face detection use cases, but any
+change requires explicit spec amendment.
+
+### Timestamp Normalization
+
+`normalize_pts_to_ms()` in `modules/savant_security/custom/services/time_utils.py`
+provides a single conversion used by both gate and exporter. Heuristic:
+
+- `pts >= 1_000_000_000` → nanoseconds → `pts // 1_000_000`
+- `pts >= 10_000_000` → microseconds → `pts // 1_000`
+- `pts < 10_000_000` → already milliseconds → passthrough
+- `pts < 0` / `None` / `0` → returns `0`
+
 ## Known Limitations
 
 | Limitation | Impact |
@@ -190,6 +220,7 @@ consecutive frames (40) always passes the 1000ms check. The exporter converts
 | Throttle in-memory only | Resets on container restart |
 | No retry/dead-letter | Dropped on Redis error |
 | Embedding ~2KB per entry | Stream grows quickly |
+| Runtime `pip install -q redis pyyaml` in pyfunc | Deployment hazard — tracked as tech debt, not fixed in this phase |
 
 ## Files Changed
 

@@ -12,7 +12,8 @@ Does NOT:
 from __future__ import annotations
 
 import math
-from typing import Any
+import os
+from typing import Any, Optional
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
@@ -21,6 +22,7 @@ from custom.services.face_reid_gate import (
     ReIDThrottleMap,
     evaluate_reid_gate,
 )
+from custom.services.time_utils import normalize_pts_to_ms
 
 
 class FaceReidGatePyFunc(NvDsPyFuncPlugin):
@@ -33,6 +35,7 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         face_reid_min_face_size: float = 40.0,
         face_reid_min_interval_ms: int = 1000,
         face_reid_norm_tolerance: float = 0.10,
+        cameras_config_path: str = "",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -46,10 +49,34 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         self._throttle = ReIDThrottleMap(
             min_interval_ms=int(face_reid_min_interval_ms),
         )
+        self._camera_bundle = self._load_camera_bundle(cameras_config_path)
+
+    @staticmethod
+    def _load_camera_bundle(config_path: str):
+        if not config_path:
+            return None
+        from custom.services.camera_config import load_camera_config
+
+        try:
+            return load_camera_config(config_path)
+        except Exception:
+            return None
+
+    def _resolve_camera_id(self, source_id: str) -> tuple:
+        """Resolve business camera_id from source_id.
+
+        Returns (camera_id, resolved: bool).
+        """
+        if self._camera_bundle is not None:
+            entry = self._camera_bundle.get_by_source_id(source_id)
+            if entry is not None:
+                return entry.camera_id, True
+        return source_id, False
 
     def process_frame(self, buffer: Any, frame_meta: Any):
         self._frame_count += 1
         source_id = str(getattr(frame_meta, "source_id", "")) or "?"
+        camera_id, _camera_resolved = self._resolve_camera_id(source_id)
         objects = list(frame_meta.objects)
         face_objects = [o for o in objects if getattr(o, "label", "") == "face"]
 
@@ -57,7 +84,7 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         skipped_count = 0
 
         for i, obj in enumerate(face_objects):
-            inp = self._extract_input(obj, source_id, frame_meta)
+            inp = self._extract_input(obj, source_id, camera_id, frame_meta)
             result = evaluate_reid_gate(inp, self._config)
 
             # Throttle check (only if gate passed)
@@ -82,14 +109,17 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
 
         if self._frame_count % self._log_interval == 1:
             self._log_gate_results(
-                face_objects, source_id, allowed_count, skipped_count,
+                face_objects, source_id, camera_id, allowed_count, skipped_count,
             )
 
-    def _extract_input(self, obj, source_id: str, frame_meta: Any) -> ReIDGateInput:
+    def _extract_input(
+        self, obj, source_id: str, camera_id: str, frame_meta: Any,
+    ) -> ReIDGateInput:
         """Extract ReIDGateInput from a Savant face object."""
         inp = ReIDGateInput()
-        inp.camera_id = source_id
-        inp.timestamp_ms = getattr(frame_meta, "pts", 0) or 0
+        inp.camera_id = camera_id
+        inp.source_id = source_id
+        inp.timestamp_ms = normalize_pts_to_ms(getattr(frame_meta, "pts", 0))
 
         # Face bbox and confidence
         bbox = getattr(obj, "bbox", None)
@@ -168,12 +198,13 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
             pass
 
     def _log_gate_results(
-        self, face_objects, source_id, allowed_count, skipped_count,
+        self, face_objects, source_id, camera_id, allowed_count, skipped_count,
     ):
         """Log gate results for smoke verification."""
         n = len(face_objects)
         print(
             f"[face_reid_gate] frame={self._frame_count} source={source_id} "
+            f"camera={camera_id} "
             f"faces={n} allowed={allowed_count} skipped={skipped_count}",
             flush=True,
         )

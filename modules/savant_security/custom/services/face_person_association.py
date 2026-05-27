@@ -138,11 +138,18 @@ def associate_faces_to_persons(
     persons: List[PersonInput],
     config: Optional[AssociationConfig] = None,
 ) -> List[FacePersonAssociation]:
-    """Associate each face to the best-matching person.
+    """Associate faces to persons with one-to-one greedy matching.
 
-    For each face, finds the person whose bbox best contains the face center,
-    preferring upper-body placement.  Returns one association per face that
-    passes the minimum score threshold.
+    Scores every eligible face-person pair, then sorts by score descending
+    and greedily assigns — each face assigned at most once, each person
+    assigned at most once.  Unassigned faces remain unassociated.
+
+    Algorithm:
+        1. Compute score for every (face, person) pair that passes the
+           center-inside and track_id checks.
+        2. Sort candidates by score descending.
+        3. Greedily assign: skip if face or person already taken.
+        4. Return the assigned associations.
     """
     if config is None:
         config = AssociationConfig()
@@ -150,13 +157,10 @@ def associate_faces_to_persons(
     if not faces or not persons:
         return []
 
-    results: List[FacePersonAssociation] = []
+    # Step 1: score all eligible pairs
+    candidates: list = []  # (score, face, person, method)
 
     for face in faces:
-        best_score = config.min_score
-        best_person: Optional[PersonInput] = None
-        best_method = "none"
-
         face_cx = face.bbox.xc
         face_cy = face.bbox.yc
 
@@ -164,12 +168,10 @@ def associate_faces_to_persons(
             if config.require_track_id and not person.has_track_id:
                 continue
 
-            # Check center inside person bbox
             if config.center_inside_required:
                 if not person.bbox.contains_point(face_cx, face_cy):
                     continue
 
-            # Score components
             upper = _point_in_upper_body(face_cx, face_cy, person.bbox)
             contain = _containment_score(face.bbox, person.bbox)
             size = _size_ratio_score(face.bbox, person.bbox)
@@ -182,24 +184,39 @@ def associate_faces_to_persons(
             )
             score = min(score, 1.0)
 
-            if score > best_score:
-                best_score = score
-                best_person = person
-                if upper > 0.5:
-                    best_method = "center_inside_upper_body"
-                else:
-                    best_method = "center_inside"
-
-        if best_person is not None:
-            results.append(
-                FacePersonAssociation(
-                    face_index=face.index,
-                    person_index=best_person.index,
-                    person_track_id=best_person.track_id,
-                    score=round(best_score, 4),
-                    method=best_method,
-                    person_bbox=best_person.bbox,
+            if score > config.min_score:
+                method = (
+                    "center_inside_upper_body" if upper > 0.5
+                    else "center_inside"
                 )
+                candidates.append((score, face, person, method))
+
+    # Step 2: sort by score descending
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    # Step 3: greedy assignment
+    assigned_faces: set = set()
+    assigned_persons: set = set()
+    results: List[FacePersonAssociation] = []
+
+    for score, face, person, method in candidates:
+        if face.index in assigned_faces:
+            continue
+        if person.index in assigned_persons:
+            continue
+
+        assigned_faces.add(face.index)
+        assigned_persons.add(person.index)
+
+        results.append(
+            FacePersonAssociation(
+                face_index=face.index,
+                person_index=person.index,
+                person_track_id=person.track_id,
+                score=round(score, 4),
+                method=method,
+                person_bbox=person.bbox,
             )
+        )
 
     return results

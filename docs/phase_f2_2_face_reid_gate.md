@@ -37,7 +37,10 @@ observations:
 FACE_REID_MIN_INTERVAL_MS = 1000 (default)
 ```
 
-Key format: `{source_id}:{person_track_id}`
+Key format: `{camera_id}:{source_id}:{person_track_id}`
+
+Camera_id is resolved via `CameraConfigBundle.get_by_source_id(source_id)`,
+falling back to source_id when no mapping exists.
 
 Throttle is evaluated only after all quality gates pass.
 
@@ -150,3 +153,14 @@ in the pipeline. See `docs/phase_f2_3_face_observation_redis.md`.
 faces without `reid_allowed` metadata are skipped (`missing_gate_verdict`),
 and the exporter has its own defensive `ExportThrottleMap` using millisecond
 timestamps. This guards against PTS-unit mismatches in the gate throttle.
+
+## F2.4 Contract Hardening (2026-05-27)
+
+- **Throttle key** changed from 2-part `{source_id}:{track_id}` to 3-part
+  `{camera_id}:{source_id}:{person_track_id}`.
+- **Camera ID** resolved via `CameraConfigBundle.get_by_source_id()` instead
+  of defaulting to source_id.
+- **Timestamp** now uses `normalize_pts_to_ms()` instead of raw
+  `frame_meta.pts`.  The gate and exporter share the same helper so
+  throttle decisions are consistent.
+- **ReIDGateInput** gained `source_id` field distinct from `camera_id`.

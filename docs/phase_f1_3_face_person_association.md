@@ -49,8 +49,9 @@ associate_faces_to_persons(faces, persons, config) -> List[FacePersonAssociation
 **Algorithm:**
 1. Face center must fall inside person bbox (hard requirement).
 2. Score = base_score(0.2) + upper_body_bonus(0.3) + containment_bonus(0.3) + size_ratio_bonus(0.2).
-3. One-to-one greedy matching: highest score wins, no face reuse.
-4. Track ID inheritance: if face matches exactly one person, inherits its track_id.
+3. Score all eligible (face, person) pairs, sort by score descending.
+4. One-to-one greedy matching: each face assigned at most once, each person assigned at most once. Unassigned faces remain unassociated.
+5. Track ID inheritance: assigned face inherits the matched person's track_id.
 
 ### Savant PyFunc adapter
 

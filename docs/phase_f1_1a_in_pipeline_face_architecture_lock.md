@@ -199,8 +199,14 @@ Association policy (to be finalised in F1.1b runtime work):
 2. Greedy match: each face takes the highest-IoU person above
    `min_iou`; ties broken by closer face centre to head-ROI centre.
 3. A face that matches no person gets `track_id = None` and propagates
-   downstream as an "unattributed face" (still embedded by AdaFace and
-   stored, but without person-track correlation).
+   downstream as an "unattributed face".
+
+   **F2.4 update (2026-05-27):** This policy is superseded.  Unattributed
+   faces (no `person_track_id`) MUST NOT enter `security.face_observations`
+   in MVP.  The exporter explicitly skips them with reason
+   `missing_person_track_id`.  If standalone face detection is needed in a
+   future phase, a separate stream and policy gate must be designed; silent
+   reintroduction via spec changes alone is not acceptable.
 
 The PyFunc does NOT crop pixels and does NOT trigger inference. Pure
 geometric reasoning over already-produced object metadata.

@@ -27,6 +27,7 @@ from custom.services.face_observation_exporter import (
     FaceObservationExporter,
     create_face_observation_exporter,
 )
+from custom.services.time_utils import normalize_pts_to_ms
 
 _DEFAULT_EXPORT_MIN_INTERVAL_MS = 1000
 
@@ -42,6 +43,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         log_every_n_frames: int = 30,
         producer: str = "savant-security",
         export_min_interval_ms: int = _DEFAULT_EXPORT_MIN_INTERVAL_MS,
+        cameras_config_path: str = "",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -54,13 +56,37 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         self._export_throttle = ExportThrottleMap(
             min_interval_ms=int(export_min_interval_ms),
         )
+        self._camera_bundle = self._load_camera_bundle(cameras_config_path)
+
+    @staticmethod
+    def _load_camera_bundle(config_path: str):
+        if not config_path:
+            return None
+        from custom.services.camera_config import load_camera_config
+
+        try:
+            return load_camera_config(config_path)
+        except Exception:
+            return None
+
+    def _resolve_camera_id(self, source_id: str) -> tuple:
+        """Resolve business camera_id from source_id.
+
+        Returns (camera_id, resolved: bool).
+        """
+        if self._camera_bundle is not None:
+            entry = self._camera_bundle.get_by_source_id(source_id)
+            if entry is not None:
+                return entry.camera_id, True
+        return source_id, False
 
     def process_frame(self, buffer: Any, frame_meta: Any):
         self._frame_count += 1
         source_id = str(getattr(frame_meta, "source_id", "")) or "?"
+        camera_id, _camera_resolved = self._resolve_camera_id(source_id)
         frame_num = getattr(frame_meta, "frame_num", None)
         pts = getattr(frame_meta, "pts", 0) or 0
-        timestamp_ms = int(pts / 1_000_000) if pts else self._frame_count
+        timestamp_ms = normalize_pts_to_ms(pts) if pts else self._frame_count
 
         objects = list(frame_meta.objects)
         face_objects = [o for o in objects if getattr(o, "label", "") == "face"]
@@ -91,6 +117,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             track_id = self._read_person_track_id(obj)
             if track_id <= 0:
                 skipped += 1
+                self._log_skip("missing_person_track_id", "", timestamp_ms)
                 continue
 
             # Require embedding
@@ -102,7 +129,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             # Defensive throttle check
             throttle_key = self._read_gate_str(obj, "reid_throttle_key")
             if not throttle_key:
-                throttle_key = f"{source_id}:{track_id}"
+                throttle_key = f"{camera_id}:{source_id}:{track_id}"
 
             if not self._export_throttle.is_allowed(throttle_key, timestamp_ms):
                 skipped += 1
@@ -110,7 +137,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
                 continue
 
             obs = self._build_observation(
-                obj, source_id, frame_num, timestamp_ms, i,
+                obj, source_id, camera_id, frame_num, timestamp_ms, i,
                 track_id, feature, throttle_key,
             )
             if obs is None:
@@ -130,6 +157,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             )
             print(
                 f"[face_obs_export] frame={self._frame_count} source={source_id} "
+                f"camera={camera_id} "
                 f"exported={exported} skipped={skipped} "
                 f"total_exported={self._export_count} "
                 f"stream={stream_name}",
@@ -265,6 +293,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         self,
         obj,
         source_id: str,
+        camera_id: str,
         frame_num: Optional[int],
         timestamp_ms: int,
         face_index: int,
@@ -296,7 +325,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         obs = FaceObservationEventDraft(
             source_observation_id=source_observation_id,
             producer=self._producer,
-            camera_id=source_id,
+            camera_id=camera_id,
             source_id=source_id,
             track_id=track_id,
             timestamp_ms=timestamp_ms,
