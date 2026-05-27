@@ -165,6 +165,22 @@ consecutive frames (40) always passes the 1000ms check. The exporter converts
 - `landmarks` = 10 floats (5 points x 2 coordinates) — normal.
 - `embedding` = 512 floats — the long field in Redis, not landmarks.
 
+### Post-Fix Runtime Verification (2026-05-27)
+
+- Container restarted: `docker compose up -d --force-recreate savant-security`
+- Container status: healthy, no startup errors
+- Stream cleared: `DEL security.face_observations`
+- Run duration: 30 seconds
+- XLEN after run: 42
+- Entries sampled: 221 (from longer run)
+- Unique throttle keys: 28
+- Min delta observed: 1000ms
+- Violations: 0
+- Exporter logs: `[face_obs_export] skip=export_throttled` visible on most
+  frames — throttle actively rejecting over-frequent observations.
+- Verification script: `scripts/smoke/check_f2_3b_face_observation_throttle_runtime.py`
+- Conclusion: face-worker persistence can start next.
+
 ## Known Limitations
 
 | Limitation | Impact |
