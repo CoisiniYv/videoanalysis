@@ -84,15 +84,31 @@ check "face_events.py model" "test -f $REPO_ROOT/modules/savant_security/custom/
 check "test_face_observation_exporter.py" "test -f $REPO_ROOT/harness/tests/test_face_observation_exporter.py"
 
 echo ""
+echo "--- F2.3 Static: throttle enforcement (F2.3b) ---"
+
+check "ExportThrottleMap in service" "grep -q 'class ExportThrottleMap' $REPO_ROOT/modules/savant_security/custom/services/face_observation_exporter.py"
+check "export_min_interval_ms param" "grep -q 'export_min_interval_ms' $REPO_ROOT/modules/savant_security/custom/pyfuncs/face_observation_exporter.py"
+check "export_throttle used" "grep -q '_export_throttle' $REPO_ROOT/modules/savant_security/custom/pyfuncs/face_observation_exporter.py"
+check "missing_gate_verdict check" "grep -q 'missing_gate_verdict' $REPO_ROOT/modules/savant_security/custom/pyfuncs/face_observation_exporter.py"
+check "has_gate_verdict method" "grep -q '_has_gate_verdict' $REPO_ROOT/modules/savant_security/custom/pyfuncs/face_observation_exporter.py"
+check "export_throttled skip reason" "grep -q 'export_throttled' $REPO_ROOT/modules/savant_security/custom/pyfuncs/face_observation_exporter.py"
+check "FACE_REID_MIN_INTERVAL_MS in module.yml" "grep -q 'FACE_REID_MIN_INTERVAL_MS' $MODULE_YML"
+
+echo ""
 echo "--- F2.3 Runtime smoke ---"
 
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'c1-official-savant'; then
     check "importable in container" "docker exec c1-official-savant python -c 'from custom.pyfuncs.face_observation_exporter import FaceObservationExporterPyFunc'"
     check "service importable" "docker exec c1-official-savant python -c 'from custom.services.face_observation_exporter import create_face_observation_exporter'"
+    check "ExportThrottleMap importable" "docker exec c1-official-savant python -c 'from custom.services.face_observation_exporter import ExportThrottleMap'"
     echo ""
     echo "  NOTE: Full GPU+Redis runtime smoke requires compose restart."
     echo "  Run: docker compose -f $COMPOSE_FILE up -d --force-recreate savant-security"
-    echo "  Then check Redis: docker exec c1-official-redis XLEN security.face_observations"
+    echo ""
+    echo "  Throttle verification (after restart):"
+    echo "    docker exec c1-official-redis redis-cli XLEN security.face_observations"
+    echo "    # Wait 30s, then check min delta per track:"
+    echo "    docker exec c1-official-redis redis-cli XREVRANGE security.face_observations + - COUNT 100"
 else
     echo "  c1-official-savant not running — runtime checks skipped"
 fi
