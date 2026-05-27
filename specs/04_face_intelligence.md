@@ -42,11 +42,11 @@
 ## 2. 设计原则
 
 1. 不把重点人员布控、轨迹追踪、一键找人写成三套算法。
-2. 清晰人脸才进入 ArcFace。
+2. 清晰人脸才进入 embedding 流程。
 3. 同一 track 在 cooldown 内不重复提取 embedding。
 4. PostgreSQL + pgvector 是第一版向量库。
 5. 通过 FaceVectorStore 接口封装 pgvector，后期可切换 Qdrant。
-6. 命中结果必须有阈值、质量分、截图、摄像头、时间和审计信息。
+6. 命中结果必须有阈值、质量分、截图、摄像头、时间、NVR 引用和审计信息。
 
 ## 3. Face Intelligence Pipeline
 
@@ -128,7 +128,7 @@ class FaceDetection:
 
 ## 6. Face Quality Filter
 
-只有满足质量条件的人脸进入 ArcFace。
+只有满足质量条件的人脸进入 embedding 流程。
 
 建议条件：
 
@@ -232,11 +232,15 @@ class FaceObservation:
     landmarks: list[Point] | None
     quality: float
     embedding: list[float]
-    matched_person_id: str | None
-    match_score: float | None
     snapshot_path: str | None
-    event_id: str | None
+    crop_path: str | None
+    nvr_reference: dict | None
 ```
+
+说明：
+
+- `FaceObservation` 是事实源记录，不直接保存 `matched_person_id` / `match_score`。
+- 搜索命中结果属于派生数据，应进入独立的 `match_results` 表。
 
 ## 9. 重点人员布控
 
@@ -244,7 +248,7 @@ class FaceObservation:
 
 ```text
 管理员注册人员照片
-  -> 提取 ArcFace embedding
+  -> 提取 AdaFace embedding
   -> 存 person_gallery_embeddings
   -> 创建 watchlist_rule
   -> 实时 FaceObservation 与 gallery 比对
@@ -299,55 +303,62 @@ class FaceObservation:
 
 ## 11. 一键找人
 
-### 11.1 流程
+F3.3 先锁定历史查询，不讨论实时告警或实时追踪事件。
+
+### 11.1 模式 A: 已登记人员轨迹查询
 
 ```text
-用户输入人名
-  -> FastAPI 查 persons
-  -> 创建 live_search_job
-  -> 实时 FaceObservation 与目标 embedding 比对
-  -> 命中
-  -> live_search_hit
-  -> 大屏提示当前摄像头
+用户选择已登记 person
+  -> 读取 person_gallery_embeddings
+  -> 在 face_observations 中检索历史相似记录
+  -> 结果写入 match_results
+  -> 返回时间/摄像头/track/NVR 引用
 ```
 
-### 11.2 live_search_job
+约束：
 
-```python
-class LiveSearchJob:
-    id: str
-    person_id: str
-    status: str
-    threshold: float
-    camera_scope: list[str] | None
-    created_by: str
-    created_at: datetime
-    expires_at: datetime
-    last_hit_at: datetime | None
+- query 来源于 `persons` + `person_gallery_embeddings`
+- 不产生新长期向量
+- 不创建 `live_search_job`
+
+### 11.2 模式 B: 临时上传人脸查历史
+
+```text
+用户临时上传一张人脸
+  -> 提取临时 query embedding
+  -> 在 face_observations 中检索历史相似记录
+  -> 结果写入 match_results
+  -> 返回时间/摄像头/track/NVR 引用
 ```
 
-### 11.3 事件
+约束：
 
-```json
-{
-  "event_type": "live_search_hit",
-  "job_id": "job_123",
-  "person_id": "p_001",
-  "person_name": "张三",
-  "camera_id": "cam_018",
-  "location": "东门入口",
-  "track_id": "t_391",
-  "match_score": 0.85,
-  "snapshot_path": "/data/events/..."
-}
-```
+- 不创建 `person`
+- 不写 `person_gallery_embeddings`
+- 上传原图和 query embedding 不长期保存
 
-### 11.4 约束
+### 11.3 `match_results`
 
-- job 必须有 expires_at。
-- job 可手动停止。
-- job 命中后可继续监控或自动结束，由配置决定。
-- 命中必须有 cooldown。
+`match_results` 是“一次历史搜索”的短期派生结果表，不是事实源表。
+
+每条记录至少包含：
+
+- `search_request_id`
+- `search_mode`
+- `query_person_id` 或临时查询上下文
+- `matched_observation_id`
+- `similarity`
+- `rank`
+- `snapshot_path`
+- `nvr_reference`
+- `expires_at`
+
+### 11.4 与 F4/F5 的边界
+
+- F3.3 只定义历史查询结果，不实现 `watchlist_hit`
+- F3.3 只定义历史查询结果，不实现 `live_search_hit`
+- 如未来需要实时模式，可在 F4/F5 另行引入 `watchlist_rules` /
+  `live_search_jobs`
 
 ## 12. VectorStore 接口
 
@@ -384,6 +395,33 @@ watchlist_alert_cooldown_s: 60
 
 最终阈值必须通过现场数据校准。
 
+## 13.b 向量保留策略 (F3.3)
+
+长期保存：
+
+- `person_gallery_embeddings.embedding`
+- `person_gallery_embeddings.embedding_norm`
+
+短期保存：
+
+- `face_observations.embedding`
+- `face_observations.embedding_norm`
+
+默认策略：
+
+```text
+person_gallery_embeddings: 长期保存，人工管理
+face_observations embedding: 默认保留 30 天可检索
+face_observations row metadata: 默认保留到 180 天
+临时上传 query embedding: 请求结束即删除，或 TTL <= 24h
+```
+
+规则：
+
+- observation 命中过搜索后，不立即删除其 embedding
+- observation row 保留可长于 observation embedding 保留
+- 临时上传图与临时 query embedding 不进入长期表
+
 ## 14. 审计与合规
 
 必须记录：
@@ -401,6 +439,8 @@ watchlist_alert_cooldown_s: 60
 - 停用人员。
 - 删除 gallery embedding。
 - 清理过期 face_observations。
+- 清理过期 `match_results`。
+- 清理临时上传图和临时 query embedding。
 
 ## 15. Future alternatives (deferred)
 

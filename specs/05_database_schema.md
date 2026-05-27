@@ -86,39 +86,60 @@ CREATE TABLE persons (
     name TEXT NOT NULL,
     external_id TEXT,
     description TEXT,
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now()
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_by TEXT,
+    updated_by TEXT,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX persons_name_trgm_idx ON persons USING gin (name gin_trgm_ops);
 CREATE INDEX persons_external_id_idx ON persons(external_id);
+CREATE INDEX persons_active_idx ON persons(is_active);
 ```
+
+`persons` 只表示“已登记人员”，不用于临时上传查历史。
 
 ## 7. person_gallery_embeddings
 
 ```sql
 CREATE TABLE person_gallery_embeddings (
-    id BIGSERIAL PRIMARY KEY,
-    person_id BIGINT REFERENCES persons(id) ON DELETE CASCADE,
-    embedding vector(512) NOT NULL,
-    image_path TEXT,
-    quality REAL,
-    model_name TEXT,
-    model_version TEXT,
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMPTZ DEFAULT now()
+    id                  BIGSERIAL PRIMARY KEY,
+    person_id           BIGINT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    source_type         TEXT NOT NULL DEFAULT 'manual_upload',
+    source_image_path   TEXT,
+    embedding_model     TEXT NOT NULL DEFAULT 'adaface',
+    model_version       TEXT,
+    embedding_dim       INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512),
+    embedding           vector(512) NOT NULL,
+    embedding_norm      DOUBLE PRECISION NOT NULL,
+    quality             DOUBLE PRECISION,
+    face_bbox           JSONB,
+    landmarks           JSONB,
+    is_primary          BOOLEAN NOT NULL DEFAULT false,
+    is_active           BOOLEAN NOT NULL DEFAULT true,
+    payload             JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE INDEX person_gallery_embedding_hnsw_idx
-ON person_gallery_embeddings
-USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX person_gallery_person_idx
 ON person_gallery_embeddings(person_id, is_active);
+
+CREATE UNIQUE INDEX person_gallery_one_primary_idx
+ON person_gallery_embeddings(person_id)
+WHERE is_primary = true AND is_active = true;
 ```
 
-## 8. face_observations (F3.1 final)
+字段约定：
+
+- 只存长期登记向量；临时上传 query embedding 严禁入表
+- `embedding_model` / `model_version` 必须与 observation 检索向量空间兼容
+- 一个人允许多条 active gallery embeddings
+- F3.3 先锁定表设计，不在 spec 中要求 ANN/HNSW 索引立刻存在
+
+## 8. face_observations (F3.1 current write contract, F3.3 target retention state)
 
 ```sql
 CREATE TABLE face_observations (
@@ -142,8 +163,8 @@ CREATE TABLE face_observations (
     model_version           TEXT,                          -- e.g. adaface_ir101_webface4m
 
     embedding_dim           INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512),
-    embedding               vector(512) NOT NULL,          -- L2 normalized
-    embedding_norm          DOUBLE PRECISION NOT NULL,
+    embedding               vector(512),                   -- F3.1 为 NOT NULL; F3.3 retention 目标允许后续置空
+    embedding_norm          DOUBLE PRECISION,
 
     reid_throttle_key       TEXT NOT NULL DEFAULT '',
     association_score       DOUBLE PRECISION,
@@ -152,6 +173,7 @@ CREATE TABLE face_observations (
     camera_config_resolved  BOOLEAN NOT NULL DEFAULT false,
     snapshot_path           TEXT,
     crop_path               TEXT,
+    nvr_reference           JSONB,
 
     payload                 JSONB NOT NULL DEFAULT '{}'::jsonb,   -- 不含 embedding
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -169,12 +191,12 @@ CREATE INDEX idx_face_obs_timestamp_ms ON face_observations(timestamp_ms);
 
 - `source_observation_id TEXT NOT NULL UNIQUE` — 幂等键。face-worker 用
   `ON CONFLICT DO NOTHING` 按此字段去重。
-- `embedding vector(512) NOT NULL` — F3.1 要求 embedding 必须存在。
-  若缺失或不合法 (维度错、norm 超范围)，worker 拒绝插入且不 ACK，
-  留在 pending 中暴露问题。
+- `embedding vector(512)` — F3.1 当前实现要求写入时 embedding 必须存在。
+  F3.3 retention 设计要求未来允许定期置空，因此 schema 目标态必须允许 null。
 - `embedding_dim INTEGER NOT NULL DEFAULT 512 CHECK (embedding_dim = 512)` —
   与 vector(512) 配套，DB 层预防维度漂移。
-- `embedding_norm DOUBLE PRECISION NOT NULL` — worker 验证范围 [0.90, 1.10]。
+- `embedding_norm DOUBLE PRECISION` — 写入时 worker 仍验证范围 [0.90, 1.10]；
+  retention 置空后允许为 null。
 - `face_bbox JSONB NOT NULL`, `landmarks JSONB NOT NULL` — 人脸检测输出，
   以 JSONB 存储，避免 PostgreSQL 原生数组的维度刚性。
 - `person_bbox JSONB` — 关联的 person bbox，可为 null。
@@ -187,6 +209,7 @@ CREATE INDEX idx_face_obs_timestamp_ms ON face_observations(timestamp_ms);
 - `matched_person_id`, `match_score` 不在 F3.1 表中；这些属于
   watchlist/live_search 命中表 (F4/F5)。
 - `snapshot_path`, `crop_path` — F3.1 为 null，后续 phase 补齐。
+- `nvr_reference JSONB` — F3.3 预留回放定位信息，结构见 §9.1。
 - `payload JSONB` 不包含 embedding 向量 (避免 ~8KB 重复存储)。
 - 无 HNSW / IVFFlat / ANN 索引 — F3.1 是纯持久化，不检索。
   F3.2 增加精确 cosine distance (`<=>`) 搜索，仍无 ANN 索引（deferred to F3.3）。
@@ -225,12 +248,121 @@ F2.4 Redis Stream `security.face_observations` → face-worker → DB:
 | `association_method` | `association_method` | TEXT |
 | `snapshot_path` | `snapshot_path` | TEXT, nullable |
 | `crop_path` | `crop_path` | TEXT, nullable |
+| `nvr_reference` | `nvr_reference` | JSONB, nullable |
 | `payload` | `payload` | JSONB, 不含 embedding |
 
 Redis-only 字段 (不入 PostgreSQL): `schema_version`, `producer`,
 `message_type`, `reid_allowed`。
 
-## 9. events
+### 8.3 F3.3 retention 目标
+
+最终策略不是“整行和向量一起删”，而是分两层：
+
+- `face_observations` 元数据行可保留更久
+- `embedding` / `embedding_norm` 可先按 TTL 置空
+
+因此：
+
+- 写路径仍要求 observation 初次入库时 embedding 完整
+- retention 路径允许后续把 observation embedding 置空
+- 查询路径必须使用 `WHERE embedding IS NOT NULL`
+
+## 9. match_results
+
+```sql
+CREATE TABLE match_results (
+    id                          BIGSERIAL PRIMARY KEY,
+    search_request_id           UUID NOT NULL,
+    search_mode                 TEXT NOT NULL,
+
+    query_person_id             BIGINT REFERENCES persons(id) ON DELETE SET NULL,
+    query_gallery_embedding_id  BIGINT REFERENCES person_gallery_embeddings(id) ON DELETE SET NULL,
+    query_embedding_model       TEXT NOT NULL DEFAULT 'adaface',
+    similarity_threshold        DOUBLE PRECISION,
+    time_from                   TIMESTAMPTZ,
+    time_to                     TIMESTAMPTZ,
+    camera_scope                JSONB,
+
+    matched_observation_id      UUID NOT NULL REFERENCES face_observations(id) ON DELETE CASCADE,
+    matched_camera_id           TEXT NOT NULL,
+    matched_source_id           TEXT NOT NULL,
+    matched_track_id            TEXT NOT NULL,
+    matched_captured_at         TIMESTAMPTZ,
+    matched_timestamp_ms        BIGINT,
+
+    rank                        INTEGER NOT NULL,
+    similarity                  DOUBLE PRECISION NOT NULL,
+    face_confidence             DOUBLE PRECISION,
+    quality                     DOUBLE PRECISION,
+    snapshot_path               TEXT,
+    crop_path                   TEXT,
+    nvr_reference               JSONB,
+
+    expires_at                  TIMESTAMPTZ NOT NULL,
+    payload                     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE(search_request_id, matched_observation_id)
+);
+
+CREATE INDEX match_results_request_idx
+ON match_results(search_request_id, rank);
+
+CREATE INDEX match_results_query_person_idx
+ON match_results(query_person_id, created_at DESC);
+
+CREATE INDEX match_results_observation_idx
+ON match_results(matched_observation_id);
+
+CREATE INDEX match_results_expires_idx
+ON match_results(expires_at);
+```
+
+字段约定：
+
+- `search_mode` 只允许：
+
+```text
+registered_person_history
+temporary_face_history
+```
+
+- `match_results` 是短期派生结果，不是事实源表
+- 不存 query embedding
+- 不存临时上传原图
+- `temporary_face_history` 模式下，`query_person_id` /
+  `query_gallery_embedding_id` 允许为 null
+- 通过 `expires_at` 驱动 TTL 清理
+
+### 9.1 `nvr_reference`
+
+`face_observations.nvr_reference` 与 `match_results.nvr_reference` 建议共用同一结构：
+
+```json
+{
+  "recording_strategy": "external_nvr_replay",
+  "provider": "hikvision",
+  "site_id": "campus_a",
+  "device_id": "nvr_01",
+  "channel_id": "ch_12",
+  "stream_id": "main",
+  "captured_at": "2026-05-27T10:15:23Z",
+  "pre_seconds": 10,
+  "post_seconds": 10,
+  "playback_uri": null,
+  "recording_id": null,
+  "opaque_ref": null,
+  "vendor_payload": {}
+}
+```
+
+说明：
+
+- `captured_at` 是 wall-clock anchor
+- `opaque_ref` 支持厂商私有 token / file id
+- `vendor_payload` 允许扩展而不污染公共字段
+
+## 10. events
 
 ```sql
 CREATE TABLE events (
@@ -282,7 +414,7 @@ false_positive
 resolved
 ```
 
-## 10. tracks
+## 11. tracks
 
 ```sql
 CREATE TABLE tracks (
@@ -308,7 +440,7 @@ CREATE INDEX tracks_camera_track_idx ON tracks(camera_id, track_id);
 CREATE INDEX tracks_person_idx ON tracks(matched_person_id);
 ```
 
-## 11. watchlist_rules
+## 12. watchlist_rules
 
 ```sql
 CREATE TABLE watchlist_rules (
@@ -326,7 +458,7 @@ CREATE TABLE watchlist_rules (
 CREATE INDEX watchlist_rules_person_idx ON watchlist_rules(person_id, enabled);
 ```
 
-## 12. live_search_jobs
+## 13. live_search_jobs
 
 ```sql
 CREATE TABLE live_search_jobs (
@@ -346,7 +478,7 @@ CREATE INDEX live_search_jobs_active_idx
 ON live_search_jobs(status, expires_at);
 ```
 
-## 13. audit_logs
+## 14. audit_logs
 
 ```sql
 CREATE TABLE audit_logs (
@@ -363,7 +495,7 @@ CREATE INDEX audit_logs_entity_idx ON audit_logs(entity_type, entity_id);
 CREATE INDEX audit_logs_time_idx ON audit_logs(created_at DESC);
 ```
 
-## 14. snapshots 和 clips
+## 15. snapshots 和 clips
 
 第一版可以只在 events / face_observations 中保存路径。
 
@@ -382,9 +514,9 @@ CREATE TABLE media_assets (
 );
 ```
 
-## 15. pgvector 查询示例
+## 16. pgvector 查询示例
 
-### 15.1 查询重点人员库
+### 16.1 查询重点人员库
 
 ```sql
 SELECT
@@ -400,7 +532,7 @@ ORDER BY g.embedding <=> :query_embedding
 LIMIT 5;
 ```
 
-### 15.2 查询历史出现记录
+### 16.2 查询历史出现记录
 
 ```sql
 SELECT
@@ -411,27 +543,40 @@ SELECT
     snapshot_path,
     1 - (embedding <=> :query_embedding) AS similarity
 FROM face_observations
-WHERE captured_at BETWEEN :start_time AND :end_time
+WHERE embedding IS NOT NULL
+  AND captured_at BETWEEN :start_time AND :end_time
   AND quality >= :min_quality
 ORDER BY embedding <=> :query_embedding
 LIMIT 50;
 ```
 
-## 16. 数据保留策略
+## 17. 数据保留策略
 
-建议：
+F3.3 最终建议：
 
 ```text
 events: 按项目要求保留，默认 180 天
-face_observations: 默认 30 到 180 天，视合规要求
+person_gallery_embeddings: 长期保存，人工管理
+face_observations embedding: 默认保留 30 天，之后允许置空
+face_observations metadata row: 默认保留到 180 天，视合规要求
+match_results(registered_person_history): 默认 7 天
+match_results(temporary_face_history): 默认 24 小时
+temporary uploaded query image / query embedding: 请求结束即删，或 TTL <= 24h
 snapshots/clips: 默认 30 到 90 天
 watchlist/persons: 人工管理，不自动删除
 audit_logs: 至少 1 年
 ```
 
+规则：
+
+- observation 命中搜索后，不立即删除其 embedding
+- 命中与否不影响 observation embedding TTL
+- 只允许 retention job 统一做置空/删除
+- 临时上传查询对象不得进入长期表
+
 ---
 
-# 17. MVP 媒体状态与幂等补充
+# 18. MVP 媒体状态与幂等补充
 
 MVP 阶段保留 `events.snapshot_path` 和 `events.clip_path` 字段，但允许为空。
 
@@ -464,7 +609,7 @@ face-worker 使用 `ON CONFLICT (source_observation_id) DO NOTHING` 实现幂等
 重试时不会重复插入同一条人脸 observation。无需额外 ALTER TABLE。
 
 
-## 18. Replay 录像请求表，后续阶段
+## 19. Replay 录像请求表，后续阶段
 
 MVP 阶段可以只使用 Redis Stream `security.record_requests`，不必建表。后续如果需要可追踪、可重试、可审计的录像任务，建议增加：
 
