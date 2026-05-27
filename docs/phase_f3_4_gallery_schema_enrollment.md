@@ -95,28 +95,29 @@ Test file: `harness/tests/test_gallery_enrollment.py`
 | Class | Type | Count | Coverage |
 |---|---|---|---|
 | `TestGalleryEmbeddingValidation` | unit | 13 | Embedding validation (length, norm, types) |
+| `TestEnrollCliArgs` | unit | 6 | CLI argparse mutually exclusive selector |
 | `TestPersonRepositoryUnit` | unit (mocked) | 9 | PersonRepository CRUD (incl. external_person_id) |
 | `TestGalleryRepositoryUnit` | unit (mocked) | 8 | GalleryRepository CRUD |
 | `TestSearchGalleryParams` | unit (mocked) | 8 | search_gallery parameter handling + active filter |
 | `TestSearchGalleryResult` | unit (mocked) | 4 | search_gallery result shape |
 | `TestGalleryIntegration` | integration | 18 | Real PostgreSQL end-to-end (incl. provenance, deactivation) |
 
-Total: **60 tests** (42 unit + 18 integration)
-
-Run commands:
+Total: **66 tests** (48 unit + 18 integration)
 
 ```bash
-# Unit tests only
-pytest harness/tests/test_gallery_enrollment.py -v -k "not Integration"
+# Without DATABASE_URL: 48 passed, 18 integration tests skipped
+pytest -q harness/tests/test_gallery_enrollment.py
 
-# Integration tests (requires DATABASE_URL)
+# With DATABASE_URL: 66 passed
 DATABASE_URL="postgresql://video:video@localhost:5438/video_analytics" \
-  pytest harness/tests/test_gallery_enrollment.py -v -k "Integration"
-
-# All F3.4 tests
-DATABASE_URL="postgresql://video:video@localhost:5438/video_analytics" \
-  pytest harness/tests/test_gallery_enrollment.py -v
+  pytest -q harness/tests/test_gallery_enrollment.py
 ```
+
+### Known Notes
+
+- F3.4's own integration tests (18 tests in `TestGalleryIntegration`) pass and leave zero test rows in the database.
+- The broader cross-suite run (gallery + face_vector_store + face_worker: 164 total) depends on DATABASE_URL connectivity. In environments where face_vector_store integration tests cannot connect, they are skipped; this does not affect F3.4 correctness.
+- F3.4 does not depend on face_vector_store integration tests passing in every external harness environment.
 
 ## 4. What F3.4 Does NOT Implement
 
