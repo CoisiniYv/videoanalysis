@@ -189,6 +189,11 @@ CREATE INDEX idx_face_obs_timestamp_ms ON face_observations(timestamp_ms);
 - `snapshot_path`, `crop_path` — F3.1 为 null，后续 phase 补齐。
 - `payload JSONB` 不包含 embedding 向量 (避免 ~8KB 重复存储)。
 - 无 HNSW / IVFFlat / ANN 索引 — F3.1 是纯持久化，不检索。
+  F3.2 增加精确 cosine distance (`<=>`) 搜索，仍无 ANN 索引（deferred to F3.3）。
+- `FaceVectorStore.search_similar_faces()` (F3.2) 提供只读相似搜索，
+  位于 `services/face-worker/app/vector_store.py`。
+  支持 `top_k` / `min_similarity` / `camera_scope` / `include_embedding`。
+  默认不返回 512-d embedding。
 - 无 FK 到 cameras/persons — MVP 阶段保持松耦合。
 
 ### 8.2 F3.1 Redis → PostgreSQL 字段映射

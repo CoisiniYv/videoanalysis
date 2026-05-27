@@ -362,6 +362,11 @@ class FaceVectorStore:
 
 第一版实现：`PgVectorFaceVectorStore` (PostgreSQL + pgvector).
 
+**F3.2 已实现**: `FaceVectorStore.search_similar_faces()` — 精确 cosine
+distance (`<=>`) 搜索，支持 `top_k` / `min_similarity` / `camera_scope` /
+`include_embedding`。代码位于 `services/face-worker/app/vector_store.py`。
+`add_gallery_embedding` / `search_gallery` / `search_live_target` 留待 F4/F5。
+
 **MVP 不实现** `HnswlibFaceVectorStore`, **MVP 不实现**
 `QdrantFaceVectorStore`. 接口保留是为了未来切换, 不是因为现在要切换.
 
