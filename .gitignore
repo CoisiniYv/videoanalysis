@@ -19,6 +19,7 @@ media/
 # Runtime-generated config artifacts written by scripts/config/* (NOT committed)
 infra/generated/
 modules/savant_security/config/cameras.generated.yml
+modules/savant_phase1d/
 
 # Local operator test videos and generated outputs (NOT committed)
 # For small curated test fixtures, use harness/scenarios/ instead.
