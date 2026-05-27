@@ -288,16 +288,19 @@ CREATE TABLE match_results (
     query_person_id             BIGINT REFERENCES persons(id) ON DELETE SET NULL,
     query_gallery_embedding_id  BIGINT REFERENCES person_gallery_embeddings(id) ON DELETE SET NULL,
     query_embedding_model       TEXT NOT NULL DEFAULT 'adaface',
+    -- F3.5: query observation columns (gallery_match uses these)
+    query_observation_id        UUID REFERENCES face_observations(id) ON DELETE SET NULL,
+    query_source_observation_id TEXT REFERENCES face_observations(source_observation_id) ON DELETE SET NULL,
     similarity_threshold        DOUBLE PRECISION,
     time_from                   TIMESTAMPTZ,
     time_to                     TIMESTAMPTZ,
     camera_scope                JSONB,
 
-    matched_observation_id      UUID NOT NULL REFERENCES face_observations(id) ON DELETE CASCADE,
+    matched_observation_id      UUID REFERENCES face_observations(id) ON DELETE CASCADE,  -- NULL for gallery_match
     matched_source_observation_id TEXT REFERENCES face_observations(source_observation_id) ON DELETE SET NULL,
-    matched_camera_id           TEXT NOT NULL,
-    matched_source_id           TEXT NOT NULL,
-    matched_track_id            TEXT NOT NULL,
+    matched_camera_id           TEXT,    -- NULL for gallery_match
+    matched_source_id           TEXT,    -- NULL for gallery_match
+    matched_track_id            TEXT,    -- NULL for gallery_match
     matched_captured_at         TIMESTAMPTZ,
     matched_timestamp_ms        BIGINT,
 
@@ -313,7 +316,9 @@ CREATE TABLE match_results (
     payload                     JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE(search_request_id, matched_observation_id)
+    UNIQUE(search_request_id, matched_observation_id),
+    -- F3.5: gallery_match idempotency key
+    UNIQUE(search_request_id, query_gallery_embedding_id)
 );
 
 CREATE INDEX match_results_request_idx
@@ -327,6 +332,10 @@ ON match_results(matched_observation_id);
 
 CREATE INDEX match_results_expires_idx
 ON match_results(expires_at);
+
+-- F3.5: index on query observation
+CREATE INDEX match_results_query_observation_idx
+ON match_results(query_observation_id);
 ```
 
 字段约定：
@@ -334,8 +343,9 @@ ON match_results(expires_at);
 - `search_mode` 只允许：
 
 ```text
-registered_person_history
-temporary_face_history
+gallery_match                  (F3.5 已实现)
+registered_person_history      (未来)
+temporary_face_history         (未来)
 ```
 
 - `match_results` 是短期派生结果，不是事实源表
@@ -344,6 +354,18 @@ temporary_face_history
 - `temporary_face_history` 模式下，`query_person_id` /
   `query_gallery_embedding_id` 允许为 null
 - 通过 `expires_at` 驱动 TTL 清理
+
+### gallery_match 字段语义 (F3.5)
+
+| 字段 | gallery_match 值 |
+|---|---|
+| query_observation_id | 输入 face_observation 的 UUID |
+| query_source_observation_id | 输入 face_observation 的 source_observation_id |
+| query_person_id | 匹配到的 gallery 所属 person_id |
+| query_gallery_embedding_id | 匹配到的 gallery embedding id |
+| matched_observation_id | NULL |
+| matched_camera_id / source_id / track_id | NULL |
+| 幂等键 | UNIQUE(search_request_id, query_gallery_embedding_id) |
 
 ### 9.1 `nvr_reference`
 

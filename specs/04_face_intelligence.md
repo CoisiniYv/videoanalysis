@@ -383,6 +383,17 @@ distance (`<=>`) 搜索，支持 `top_k` / `min_similarity` / `camera_scope` /
 gallery embedding 的增删改由 `GalleryRepository` (`services/face-worker/app/gallery_repository.py`)
 负责。
 
+**F3.5 已实现**: Gallery Match Harness — 给定一个 `face_observation`，加载其
+embedding，在 `person_gallery_embeddings` 中搜索 topK，结果写入 `match_results`。
+代码位于 `services/face-worker/match_gallery.py` 和
+`services/face-worker/app/match_repository.py`。
+gallery_match 语义：
+- `query_observation_id` / `query_source_observation_id`：输入的 face_observation
+- `query_gallery_embedding_id`：匹配到的 gallery embedding
+- `matched_observation_id`：NULL（无历史观测目标）
+- 幂等键：`UNIQUE(search_request_id, query_gallery_embedding_id)`
+- 不产生 `watchlist_hit` / `live_search_hit` / `security.events`
+
 `add_observation_embedding` / `search_live_target` 留待 F4/F5。
 
 **MVP 不实现** `HnswlibFaceVectorStore`, **MVP 不实现**
