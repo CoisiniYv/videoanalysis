@@ -15,7 +15,7 @@ external submitted local image
 
 This phase is specifically for external submitted image registration into `person_gallery_embeddings`.
 
-## F4.2 vs F4.2b
+## F4.2 vs F4.2b vs F4.2c
 
 **F4.2 (skeleton)** — completed:
 - CLI, service, validation, storage, DB write path
@@ -30,6 +30,15 @@ This phase is specifically for external submitted image registration into `perso
 - Provider info output (CUDA/CPU)
 - Image type validation (reject video files)
 - Default uses `OfflineFaceEmbedder` when onnxruntime is available
+
+**F4.2c (hardening)** — current:
+- Repeated `external_person_id` registrations reuse the existing `persons.id`.
+- JSON/text output includes `person_reused`.
+- Repeated `--is-primary` registrations replace the active primary gallery.
+- Non-primary registrations can coexist with existing active gallery embeddings.
+- Video inputs are rejected before DB writes.
+- Missing ONNX model paths return `MODEL_FILE_NOT_FOUND` without traceback.
+- Low-quality or too-small detections fail before person/gallery writes.
 
 ## Explicit Scope
 
@@ -64,6 +73,7 @@ external submitted image -> gallery enrollment
 ```
 
 F4.3 will cover external video clip recognition, not this phase.
+F4.2c still does not implement external video clip recognition.
 
 ## Current State
 
@@ -194,6 +204,16 @@ On successful registration, the flow:
 9. validates `embedding_dim = 512`
 10. validates embedding norm near `1.0`
 
+For repeated `external_person_id`, the existing person is reused and
+the output reports `person_reused=true`.
+
+For `--is-primary`, the newly inserted gallery row becomes the only
+active primary embedding for that person. Existing active primary rows
+remain active but are demoted to `is_primary=false`.
+
+For non-primary registration, existing active primary rows are not
+modified. Multiple active non-primary gallery embeddings are allowed.
+
 It does not write:
 
 - `face_observations`
@@ -218,6 +238,20 @@ F4.2b adds real external image -> AdaFace embedding:
 **Key behaviors:**
 1. Default uses `OfflineFaceEmbedder` when onnxruntime is available
 2. Falls back to `NotImplementedRealImageEmbedder` if onnxruntime not installed
+
+## F4.2c Hardening Summary
+
+F4.2c adds behavior coverage and small registration semantics fixes:
+
+- duplicate `external_person_id` reuse
+- primary replacement for repeated `--is-primary`
+- non-primary multi-gallery coexistence
+- video input rejection with no DB write
+- missing ONNX model path error mapping
+- low-quality failure with no DB write
+
+This is still external image registration only. External video clip
+recognition remains F4.3.
 3. Rejects video file types (.mp4, .mov, .avi, etc.)
 4. Outputs provider info (CUDA/CPU)
 5. Validates embedding dim=512, norm in [0.90, 1.10]

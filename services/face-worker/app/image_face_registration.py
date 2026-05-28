@@ -50,6 +50,7 @@ ERROR_FACE_TOO_SMALL = "FACE_TOO_SMALL"
 ERROR_LANDMARKS_MISSING = "LANDMARKS_MISSING"
 ERROR_QUALITY_TOO_LOW = "QUALITY_TOO_LOW"
 ERROR_REAL_EMBEDDING_UNAVAILABLE = "REAL_IMAGE_EMBEDDING_UNAVAILABLE"
+ERROR_MODEL_FILE_NOT_FOUND = "MODEL_FILE_NOT_FOUND"
 ERROR_EMBEDDING_DIM_INVALID = "EMBEDDING_DIM_INVALID"
 ERROR_EMBEDDING_NORM_INVALID = "EMBEDDING_NORM_INVALID"
 ERROR_DATABASE_URL_MISSING = "DATABASE_URL_MISSING"
@@ -110,9 +111,11 @@ class RegistrationResult:
     error_code: str | None = None
     error_message: str | None = None
     person_id: int | None = None
+    person_reused: bool = False
     external_person_id: str | None = None
     name: str | None = None
     gallery_embedding_id: int | None = None
+    is_primary: bool = False
     face_bbox: list[float] | None = None
     landmarks: list[list[float]] | None = None
     quality: float | None = None
@@ -225,6 +228,13 @@ def _registration_error_from_value_error(exc: ValueError) -> RegistrationError:
     return RegistrationError(mapping.get(prefix, ERROR_IMAGE_READ_FAILED), message)
 
 
+def _registration_error_from_file_not_found(exc: FileNotFoundError) -> RegistrationError:
+    message = str(exc)
+    if "ONNX model not found" in message:
+        return RegistrationError(ERROR_MODEL_FILE_NOT_FOUND, message)
+    return RegistrationError(ERROR_IMAGE_READ_FAILED, message)
+
+
 def _connect(database_url: str) -> psycopg.Connection:
     try:
         conn = psycopg.connect(database_url, autocommit=True)
@@ -240,7 +250,7 @@ def _connect(database_url: str) -> psycopg.Connection:
 def _resolve_person(
     repo: PersonRepository,
     request: RegistrationRequest,
-) -> tuple[int, str | None, str | None]:
+) -> tuple[int, str | None, str | None, bool]:
     if request.person_id is not None:
         person = repo.get_by_id(request.person_id)
         if person is None:
@@ -256,7 +266,12 @@ def _resolve_person(
                 ERROR_EXTERNAL_PERSON_ID_CONFLICT,
                 "person_id and external_person_id refer to different persons",
             )
-        return int(person["id"]), person.get("external_person_id"), person.get("name")
+        return (
+            int(person["id"]),
+            person.get("external_person_id"),
+            person.get("name"),
+            True,
+        )
 
     if request.external_person_id is not None:
         person = repo.get_by_external_person_id(request.external_person_id)
@@ -265,6 +280,7 @@ def _resolve_person(
                 int(person["id"]),
                 person.get("external_person_id"),
                 person.get("name"),
+                True,
             )
         person_name = request.name or request.external_person_id
         person_id = repo.create_person(
@@ -275,7 +291,7 @@ def _resolve_person(
             updated_by=request.created_by,
             payload={"registration_mode": MODE_EXTERNAL_IMAGE},
         )
-        return person_id, request.external_person_id, person_name
+        return person_id, request.external_person_id, person_name, False
 
     if request.name is None:
         raise RegistrationError(
@@ -289,7 +305,38 @@ def _resolve_person(
         updated_by=request.created_by,
         payload={"registration_mode": MODE_EXTERNAL_IMAGE},
     )
-    return person_id, None, request.name
+    return person_id, None, request.name, False
+
+
+def _promote_gallery_primary(
+    conn: psycopg.Connection,
+    *,
+    person_id: int,
+    gallery_id: int,
+) -> None:
+    """Make gallery_id the only active primary embedding for person_id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE person_gallery_embeddings
+            SET is_primary = false, updated_at = now()
+            WHERE person_id = %(person_id)s
+              AND id <> %(gallery_id)s
+              AND is_primary = true
+              AND is_active = true
+            """,
+            {"person_id": person_id, "gallery_id": gallery_id},
+        )
+        cur.execute(
+            """
+            UPDATE person_gallery_embeddings
+            SET is_primary = true, updated_at = now()
+            WHERE id = %(gallery_id)s
+              AND person_id = %(person_id)s
+              AND is_active = true
+            """,
+            {"person_id": person_id, "gallery_id": gallery_id},
+        )
 
 
 def _ensure_candidate_valid(
@@ -378,11 +425,17 @@ class OfflineFaceEmbedderAdapter:
 
     @property
     def detector_providers(self) -> list[str]:
-        return self._embedder.detector_providers
+        try:
+            return self._embedder.detector_providers
+        except FileNotFoundError as exc:
+            raise _registration_error_from_file_not_found(exc) from exc
 
     @property
     def embedder_providers(self) -> list[str]:
-        return self._embedder.embedder_providers
+        try:
+            return self._embedder.embedder_providers
+        except FileNotFoundError as exc:
+            raise _registration_error_from_file_not_found(exc) from exc
 
 
 def _resolve_default_embedder(
@@ -470,11 +523,10 @@ def register_external_image(
     )
 
     # Capture provider info if available
-    if isinstance(active_embedder, OfflineFaceEmbedderAdapter):
-        result.detector_providers = active_embedder.detector_providers
-        result.embedder_providers = active_embedder.embedder_providers
-
     try:
+        if isinstance(active_embedder, OfflineFaceEmbedderAdapter):
+            result.detector_providers = active_embedder.detector_providers
+            result.embedder_providers = active_embedder.embedder_providers
         candidates = active_embedder.extract(image_path)
         candidate = _select_candidate(
             candidates,
@@ -486,11 +538,18 @@ def register_external_image(
         result.error_code = exc.error_code
         result.error_message = exc.message
         return result
+    except FileNotFoundError as exc:
+        reg_error = _registration_error_from_file_not_found(exc)
+        result.error_code = reg_error.error_code
+        result.error_message = reg_error.message
+        return result
 
     try:
         person_repo = PersonRepository(conn)
         gallery_repo = GalleryRepository(conn)
-        person_id, external_person_id, person_name = _resolve_person(person_repo, request)
+        person_id, external_person_id, person_name, person_reused = _resolve_person(
+            person_repo, request
+        )
         crop_path = save_registered_crop(
             image_path,
             storage.registered_crop_path,
@@ -514,9 +573,15 @@ def register_external_image(
                 quality=candidate.quality,
                 face_bbox=candidate.face_bbox,
                 landmarks=candidate.landmarks,
-                is_primary=request.is_primary,
+                is_primary=False,
                 payload=payload,
             )
+            if request.is_primary:
+                _promote_gallery_primary(
+                    conn,
+                    person_id=person_id,
+                    gallery_id=gallery_id,
+                )
         except ValueError as exc:
             message = str(exc)
             error_code = (
@@ -537,9 +602,11 @@ def register_external_image(
         emb_norm = _norm(candidate.embedding)
         result.status = STATUS_REGISTERED
         result.person_id = person_id
+        result.person_reused = person_reused
         result.external_person_id = external_person_id
         result.name = person_name
         result.gallery_embedding_id = gallery_id
+        result.is_primary = request.is_primary
         result.face_bbox = candidate.face_bbox
         result.landmarks = candidate.landmarks
         result.quality = candidate.quality
