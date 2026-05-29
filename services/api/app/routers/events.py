@@ -11,7 +11,13 @@ from fastapi.responses import JSONResponse
 from app.db import get_conn
 from app.repositories.audit_logs import AuditLogRepository
 from app.repositories.events import EventRepository
-from app.schemas.events import EventListResponse, EventResponse, StatusUpdateRequest
+from app.schemas.events import (
+    EventEvidenceResponse,
+    EventListResponse,
+    EventResponse,
+    EvidenceTaskResponse,
+    StatusUpdateRequest,
+)
 
 router = APIRouter(prefix="/api/v1/events", tags=["events"])
 
@@ -136,6 +142,32 @@ def events_get(
         )
 
     return _ok(EventResponse.from_db_row(row).model_dump(), request_id)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/events/{event_id}/evidence
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{event_id}/evidence")
+def events_get_evidence(
+    event_id: str,
+    repo: EventRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    row = repo.get_by_id_or_sid(event_id)
+    if row is None:
+        return JSONResponse(
+            status_code=404,
+            content=_err(f"event not found: {event_id}", request_id),
+        )
+
+    tasks = repo.list_evidence_tasks(event_id)
+    payload = EventEvidenceResponse(
+        event=EventResponse.from_db_row(row),
+        evidence_tasks=[EvidenceTaskResponse.from_db_row(t) for t in tasks],
+    )
+    return _ok(payload.model_dump(), request_id)
 
 
 # ---------------------------------------------------------------------------

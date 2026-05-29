@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Dict, Optional
 
 import psycopg
@@ -17,8 +18,12 @@ INSERT INTO events (
     source_id,
     track_id,
     person_id,
+    algorithm_type,
+    algorithm_version,
     severity,
     confidence,
+    start_ts_ms,
+    end_ts_ms,
     start_ts,
     end_ts,
     event_ts_ms,
@@ -26,6 +31,9 @@ INSERT INTO events (
     keyframe_uuid,
     snapshot_path,
     clip_path,
+    snapshot_required,
+    clip_required,
+    evidence_policy,
     recording_strategy,
     media_status,
     status,
@@ -37,8 +45,12 @@ INSERT INTO events (
     %(source_id)s,
     %(track_id)s,
     %(person_id)s,
+    %(algorithm_type)s,
+    %(algorithm_version)s,
     %(severity)s,
     %(confidence)s,
+    %(start_ts_ms)s,
+    %(end_ts_ms)s,
     to_timestamp(%(start_ts_ms)s::double precision / 1000.0),
     to_timestamp(%(end_ts_ms)s::double precision / 1000.0),
     %(event_ts_ms)s,
@@ -46,6 +58,9 @@ INSERT INTO events (
     %(keyframe_uuid)s,
     %(snapshot_path)s,
     %(clip_path)s,
+    %(snapshot_required)s,
+    %(clip_required)s,
+    %(evidence_policy)s::jsonb,
     %(recording_strategy)s,
     %(media_status)s,
     %(status)s,
@@ -84,15 +99,22 @@ class EventRepository:
             "source_id": event.get("source_id", ""),
             "track_id": str(event.get("track_id", "")),
             "person_id": event.get("person_id") or None,
+            "algorithm_type": event.get("algorithm_type") or event.get("event_type", ""),
+            "algorithm_version": event.get("algorithm_version"),
             "severity": event.get("severity", "medium"),
             "confidence": float(event.get("confidence", 0.0)),
             "start_ts_ms": int(event.get("start_ts_ms", 0)),
-            "end_ts_ms": int(event.get("end_ts_ms", 0)),
+            "end_ts_ms": int(event.get("end_ts_ms") or event.get("start_ts_ms", 0)),
             "event_ts_ms": int(event.get("event_ts_ms", 0)),
             "frame_uuid": event.get("frame_uuid"),
             "keyframe_uuid": event.get("keyframe_uuid"),
             "snapshot_path": media.get("snapshot_path"),
             "clip_path": media.get("clip_path"),
+            "snapshot_required": bool(event.get("snapshot_required", False)),
+            "clip_required": bool(event.get("clip_required", False)),
+            "evidence_policy": json.dumps(
+                event.get("evidence_policy", {}), ensure_ascii=False
+            ),
             "recording_strategy": media.get("recording_strategy", "reserved"),
             "media_status": media.get("snapshot_status", "not_implemented"),
             "status": "new",
@@ -103,6 +125,58 @@ class EventRepository:
             cur.execute(_INSERT_SQL, params)
             row = cur.fetchone()
             return str(row["id"]) if row else None
+
+    def create_evidence_task(
+        self,
+        event: Dict[str, Any],
+        event_id: str,
+    ) -> str | None:
+        """Create one idempotent evidence task for an event."""
+        task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"evidence:{event_id}"))
+        policy = event.get("evidence_policy") or {}
+        if not isinstance(policy, dict):
+            policy = {}
+
+        params = {
+            "task_id": task_id,
+            "event_id": event_id,
+            "source_event_id": event.get("source_event_id", ""),
+            "camera_id": event.get("camera_id", ""),
+            "source_id": event.get("source_id", ""),
+            "event_type": event.get("event_type", ""),
+            "event_ts_ms": int(
+                event.get("event_ts_ms") or event.get("start_ts_ms", 0)
+            ),
+            "task_type": "snapshot_clip",
+            "snapshot_required": bool(event.get("snapshot_required", False)),
+            "clip_required": bool(event.get("clip_required", False)),
+            "pre_seconds": int(policy.get("pre_seconds", 5)),
+            "post_seconds": int(policy.get("post_seconds", 10)),
+            "status": "pending",
+        }
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                INSERT INTO evidence_tasks (
+                    task_id, event_id, source_event_id, camera_id, source_id,
+                    event_type, event_ts_ms, task_type,
+                    snapshot_required, clip_required,
+                    pre_seconds, post_seconds, status
+                ) VALUES (
+                    %(task_id)s, %(event_id)s::uuid, %(source_event_id)s,
+                    %(camera_id)s, %(source_id)s, %(event_type)s,
+                    %(event_ts_ms)s, %(task_type)s,
+                    %(snapshot_required)s, %(clip_required)s,
+                    %(pre_seconds)s, %(post_seconds)s, %(status)s
+                )
+                ON CONFLICT (task_id) DO NOTHING
+                RETURNING task_id
+                """,
+                params,
+            )
+            row = cur.fetchone()
+            return str(row["task_id"]) if row else None
 
     def count_by_source_event_id(self, source_event_id: str) -> int:
         """Return the number of rows with the given *source_event_id*."""
@@ -154,11 +228,13 @@ class EventRepository:
                         '{media,replay_job_id}',
                         %(replay_job_id)s::jsonb
                     ),
+                    media_status = %(status_text)s,
                     updated_at = now()
                 WHERE id = %(event_id)s::uuid
                 """,
                 {
                     "status": json.dumps(status),
+                    "status_text": status,
                     "replay_job_id": json.dumps(replay_job_id),
                     "event_id": event_id,
                 },

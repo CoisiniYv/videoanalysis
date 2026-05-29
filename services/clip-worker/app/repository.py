@@ -24,6 +24,7 @@ SET payload = jsonb_set(
         '{media,replay_job_id}',
         %(replay_job_id)s::jsonb
     ),
+    media_status = %(status_text)s,
     updated_at = now()
 WHERE id = %(event_id)s::uuid
 """
@@ -56,6 +57,7 @@ def update_clip_status(
                 _SET_CLIP_STATUS_SQL,
                 {
                     "status": json.dumps(status),
+                    "status_text": status,
                     "replay_job_id": json.dumps(replay_job_id),
                     "event_id": event_id,
                 },

@@ -109,6 +109,7 @@ class RedisStreamEventExporter(EventExporter):
             "type": "security_event",
             "source_event_id": event_dict.get("source_event_id", ""),
             "event_type": event_dict.get("event_type", ""),
+            "algorithm_type": event_dict.get("algorithm_type", ""),
             "camera_id": event_dict.get("camera_id", ""),
             "track_id": str(event_dict.get("track_id", "")),
             "start_ts_ms": str(event_dict.get("start_ts_ms", "")),

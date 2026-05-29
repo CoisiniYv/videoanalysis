@@ -144,6 +144,63 @@ GET /api/v1/cameras/{camera_id}/config
 
 返回需可导出为 Savant `cameras.yml`。
 
+### 4.4 R3 算法 registry
+
+```http
+GET /api/v1/algorithms
+GET /api/v1/algorithms/{algorithm_type}
+```
+
+第一版算法清单：
+
+```text
+intrusion
+loitering
+crowd_gathering
+running
+chasing
+fall
+wall_climb
+face_intelligence
+```
+
+`face_intelligence` 统一支撑 watchlist_hit、trajectory / appearances 查询和
+live_search，不拆成三套独立算法。
+
+### 4.5 R3 摄像头算法规则
+
+```http
+POST /api/v1/cameras/{camera_id}/algorithm-rules
+GET /api/v1/cameras/{camera_id}/algorithm-rules
+PUT /api/v1/cameras/{camera_id}/algorithm-rules/{rule_id}
+POST /api/v1/cameras/{camera_id}/algorithm-rules/{rule_id}/enable
+POST /api/v1/cameras/{camera_id}/algorithm-rules/{rule_id}/disable
+```
+
+请求：
+
+```json
+{
+  "algorithm_type": "intrusion",
+  "enabled": true,
+  "zone_id": "perimeter",
+  "line_id": null,
+  "config": {
+    "min_inside_ms": 1000,
+    "cooldown_s": 30
+  },
+  "evidence_policy": {
+    "snapshot_required": true,
+    "clip_required": true,
+    "pre_seconds": 5,
+    "post_seconds": 10
+  }
+}
+```
+
+`algorithm_type` 必须来自 registry；`zone_id` / `line_id` 必须属于该
+camera；`evidence_policy` 对所有算法使用统一 schema。
+
 ## 5. 事件 API
 
 ### 5.1 最近事件
@@ -172,6 +229,16 @@ POST /api/v1/events/{event_id}/confirm
 POST /api/v1/events/{event_id}/false-positive
 POST /api/v1/events/{event_id}/resolve
 ```
+
+### 5.5 事件证据
+
+```http
+GET /api/v1/events/{event_id}/evidence
+```
+
+返回事件详情和关联 `evidence_tasks`。事件详情必须包含 `snapshot_url`,
+`clip_url`, `media_status`, `payload`, `algorithm_type`, `snapshot_required`,
+and `clip_required`.
 
 请求：
 

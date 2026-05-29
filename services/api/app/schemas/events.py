@@ -46,8 +46,12 @@ class EventResponse(BaseModel):
     source_id: str = ""
     track_id: str = ""
     person_id: Optional[int] = None
+    algorithm_type: str = ""
+    algorithm_version: Optional[str] = None
     severity: str = "medium"
     confidence: float = 0.0
+    start_ts_ms: int = 0
+    end_ts_ms: Optional[int] = None
     start_ts: Optional[str] = None
     end_ts: Optional[str] = None
     event_ts_ms: int = 0
@@ -64,6 +68,9 @@ class EventResponse(BaseModel):
     annotated_clip_url: Optional[str] = None
     recording_strategy: str = "reserved"
     media_status: str = "not_implemented"
+    snapshot_required: bool = False
+    clip_required: bool = False
+    evidence_policy: Dict[str, Any] = Field(default_factory=dict)
     media: Dict[str, Any] = Field(default_factory=dict)
     payload: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None
@@ -113,8 +120,12 @@ class EventResponse(BaseModel):
             source_id=row.get("source_id", ""),
             track_id=str(row.get("track_id", "")),
             person_id=row.get("person_id"),
+            algorithm_type=row.get("algorithm_type", ""),
+            algorithm_version=row.get("algorithm_version"),
             severity=row.get("severity", "medium"),
             confidence=float(row.get("confidence", 0.0)),
+            start_ts_ms=int(row.get("start_ts_ms", 0) or 0),
+            end_ts_ms=row.get("end_ts_ms"),
             start_ts=_iso(row.get("start_ts")),
             end_ts=_iso(row.get("end_ts")),
             event_ts_ms=int(row.get("event_ts_ms", 0)),
@@ -131,6 +142,9 @@ class EventResponse(BaseModel):
             annotated_clip_url=annotated_clip_url,
             recording_strategy=row.get("recording_strategy", "reserved"),
             media_status=row.get("media_status", "not_implemented"),
+            snapshot_required=bool(row.get("snapshot_required", False)),
+            clip_required=bool(row.get("clip_required", False)),
+            evidence_policy=row.get("evidence_policy") or payload.get("evidence_policy", {}),
             media=media,
             payload=payload,
             created_at=_iso(row.get("created_at")),
@@ -148,3 +162,52 @@ class EventListResponse(BaseModel):
 class StatusUpdateRequest(BaseModel):
     operator: str = ""
     comment: str = ""
+
+
+class EvidenceTaskResponse(BaseModel):
+    task_id: str
+    event_id: str
+    source_event_id: str
+    camera_id: str = ""
+    source_id: str = ""
+    event_type: str = ""
+    event_ts_ms: int = 0
+    task_type: str = "snapshot_clip"
+    snapshot_required: bool = False
+    clip_required: bool = False
+    pre_seconds: int = 5
+    post_seconds: int = 10
+    status: str = "pending"
+    snapshot_path: Optional[str] = None
+    clip_path: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @classmethod
+    def from_db_row(cls, row: dict) -> "EvidenceTaskResponse":
+        return cls(
+            task_id=str(row.get("task_id", "")),
+            event_id=str(row.get("event_id", "")),
+            source_event_id=row.get("source_event_id", ""),
+            camera_id=row.get("camera_id", ""),
+            source_id=row.get("source_id", ""),
+            event_type=row.get("event_type", ""),
+            event_ts_ms=int(row.get("event_ts_ms", 0) or 0),
+            task_type=row.get("task_type", "snapshot_clip"),
+            snapshot_required=bool(row.get("snapshot_required", False)),
+            clip_required=bool(row.get("clip_required", False)),
+            pre_seconds=int(row.get("pre_seconds", 5) or 5),
+            post_seconds=int(row.get("post_seconds", 10) or 10),
+            status=row.get("status", "pending"),
+            snapshot_path=row.get("snapshot_path"),
+            clip_path=row.get("clip_path"),
+            error_message=row.get("error_message"),
+            created_at=_iso(row.get("created_at")),
+            updated_at=_iso(row.get("updated_at")),
+        )
+
+
+class EventEvidenceResponse(BaseModel):
+    event: EventResponse
+    evidence_tasks: List[EvidenceTaskResponse] = Field(default_factory=list)

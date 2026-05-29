@@ -321,6 +321,16 @@ def build_export_doc(
                 "enabled": bool(r.get("enabled", True)),
                 **cfg,
             }
+            if r.get("zone_id"):
+                rules_dict[r["rule_type"]]["zone_id"] = r["zone_id"]
+            if r.get("line_id"):
+                rules_dict[r["rule_type"]]["line_id"] = r["line_id"]
+            evidence_policy = r.get("evidence_policy") or {}
+            if isinstance(evidence_policy, str):
+                import json
+                evidence_policy = json.loads(evidence_policy)
+            if evidence_policy:
+                rules_dict[r["rule_type"]]["evidence_policy"] = evidence_policy
 
         cam_doc: Dict[str, Any] = {
             "enabled": bool(cam.get("enabled", True)),

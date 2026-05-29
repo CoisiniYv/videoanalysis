@@ -136,6 +136,32 @@ class EventRepository:
         return row
 
     # ------------------------------------------------------------------
+    # evidence tasks
+    # ------------------------------------------------------------------
+
+    def list_evidence_tasks(self, event_id: str) -> List[Dict[str, Any]]:
+        row = self.get_by_id_or_sid(event_id)
+        if row is None:
+            return []
+
+        query = """
+            SELECT *
+            FROM evidence_tasks
+            WHERE event_id = %(event_id)s
+               OR source_event_id = %(source_event_id)s
+            ORDER BY created_at DESC
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                query,
+                {
+                    "event_id": str(row["id"]),
+                    "source_event_id": row["source_event_id"],
+                },
+            )
+            return cur.fetchall()
+
+    # ------------------------------------------------------------------
     # status update with transition validation
     # ------------------------------------------------------------------
 

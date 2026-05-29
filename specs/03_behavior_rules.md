@@ -109,18 +109,25 @@ class TrackState:
 ```python
 class SecurityEvent:
     event_type: str
+    source_event_id: str
     source_id: str
     camera_id: str
     track_id: str | None
-    person_id: str | None
+    person_id: int | None
+    algorithm_type: str
+    algorithm_version: str | None
     start_ts_ms: int
     end_ts_ms: int | None
     confidence: float
     severity: str
     snapshot_required: bool
     clip_required: bool
+    evidence_policy: dict
     payload: dict
 ```
+
+R3 locks this as the common event contract for all behavior algorithms and face
+intelligence events. Algorithm-specific values must be placed in `payload`.
 
 ## 3. 通用规则机制
 

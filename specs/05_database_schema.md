@@ -70,7 +70,10 @@ CREATE TABLE camera_rules (
     camera_id TEXT REFERENCES cameras(id) ON DELETE CASCADE,
     rule_type TEXT NOT NULL,
     enabled BOOLEAN DEFAULT true,
+    zone_id TEXT,
+    line_id TEXT,
     config JSONB NOT NULL,
+    evidence_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -316,9 +319,7 @@ CREATE TABLE match_results (
     payload                     JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE(search_request_id, matched_observation_id),
-    -- F3.5: gallery_match idempotency key
-    UNIQUE(search_request_id, query_gallery_embedding_id)
+    UNIQUE(search_request_id, matched_observation_id)
 );
 
 CREATE INDEX match_results_request_idx
@@ -336,6 +337,12 @@ ON match_results(expires_at);
 -- F3.5: index on query observation
 CREATE INDEX match_results_query_observation_idx
 ON match_results(query_observation_id);
+
+-- F4.1: gallery_match idempotency must not block registered_person_history.
+CREATE UNIQUE INDEX match_results_gallery_match_request_embedding_uidx
+ON match_results(search_request_id, query_gallery_embedding_id)
+WHERE search_mode = 'gallery_match'
+  AND query_gallery_embedding_id IS NOT NULL;
 ```
 
 字段约定：
@@ -365,7 +372,7 @@ temporary_face_history         (未来)
 | query_gallery_embedding_id | 匹配到的 gallery embedding id |
 | matched_observation_id | NULL |
 | matched_camera_id / source_id / track_id | NULL |
-| 幂等键 | UNIQUE(search_request_id, query_gallery_embedding_id) |
+| 幂等键 | partial unique index on `(search_request_id, query_gallery_embedding_id)` where `search_mode='gallery_match'` |
 
 ### registered_person_history 字段语义 (F3.6)
 
@@ -420,7 +427,7 @@ temporary_face_history         (未来)
 
 ```sql
 CREATE TABLE events (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_event_id TEXT UNIQUE,
 
     event_type TEXT NOT NULL,
@@ -428,15 +435,22 @@ CREATE TABLE events (
     source_id TEXT,
     track_id TEXT,
     person_id BIGINT REFERENCES persons(id),
+    algorithm_type TEXT NOT NULL DEFAULT '',
+    algorithm_version TEXT,
 
     severity TEXT,
     confidence REAL,
+    start_ts_ms BIGINT,
+    end_ts_ms BIGINT,
 
     start_ts TIMESTAMPTZ,
     end_ts TIMESTAMPTZ,
 
+    snapshot_required BOOLEAN NOT NULL DEFAULT false,
+    clip_required BOOLEAN NOT NULL DEFAULT false,
     snapshot_path TEXT,
     clip_path TEXT,
+    evidence_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     status TEXT DEFAULT 'new',
     payload JSONB DEFAULT '{}'::jsonb,
@@ -466,6 +480,34 @@ acknowledged
 confirmed
 false_positive
 resolved
+```
+
+R3 requires all algorithms to write this shared `events` contract and use
+`source_event_id` for idempotency.
+
+## 10.1 evidence_tasks
+
+```sql
+CREATE TABLE evidence_tasks (
+    task_id TEXT PRIMARY KEY,
+    event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    source_event_id TEXT NOT NULL,
+    camera_id TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT '',
+    event_ts_ms BIGINT NOT NULL DEFAULT 0,
+    task_type TEXT NOT NULL DEFAULT 'snapshot_clip',
+    snapshot_required BOOLEAN NOT NULL DEFAULT false,
+    clip_required BOOLEAN NOT NULL DEFAULT false,
+    pre_seconds INTEGER NOT NULL DEFAULT 5,
+    post_seconds INTEGER NOT NULL DEFAULT 10,
+    status TEXT NOT NULL DEFAULT 'pending',
+    snapshot_path TEXT,
+    clip_path TEXT,
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
 ```
 
 ## 11. tracks

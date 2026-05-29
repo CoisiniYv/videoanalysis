@@ -94,6 +94,20 @@ def _handle_event(
                 source_event_id,
             )
 
+    if newly_inserted and event_id and _requires_evidence(event):
+        if hasattr(repo, "create_evidence_task"):
+            try:
+                repo.create_evidence_task(event, event_id)
+            except Exception:
+                logger.exception(
+                    "evidence_task creation failed for source_event_id=%s",
+                    source_event_id,
+                )
+        else:
+            logger.debug(
+                "evidence_task skipped: repository has no create_evidence_task"
+            )
+
     # Record request — idempotent: check DB clip_status before publishing
     if record_publisher is not None:
         clip_required = event.get("clip_required", False)
@@ -151,6 +165,22 @@ def _handle_event(
         )
 
     return newly_inserted, event_id
+
+
+def _requires_evidence(event: dict) -> bool:
+    policy = event.get("evidence_policy") or {}
+    policy_snapshot = (
+        policy.get("snapshot_required", False) if isinstance(policy, dict) else False
+    )
+    policy_clip = (
+        policy.get("clip_required", False) if isinstance(policy, dict) else False
+    )
+    return bool(
+        event.get("snapshot_required", False)
+        or event.get("clip_required", False)
+        or policy_snapshot
+        or policy_clip
+    )
 
 
 def _process_batch(
