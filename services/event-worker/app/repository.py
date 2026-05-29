@@ -91,6 +91,19 @@ _R3_1A_NOT_IMPLEMENTED_REASON = (
     "snapshot/clip/metadata generation is not implemented in this deployment."
 )
 
+_R3_1B_NOT_IMPLEMENTED_REASON = (
+    "R3.1B face match evidence MVP created the evidence task, but production "
+    "snapshot/raw_clip/metadata generation is not implemented in this deployment."
+)
+
+
+def _not_implemented_reason(event: Dict[str, Any]) -> str:
+    if event.get("algorithm_type") == "face_intelligence" or event.get(
+        "event_type"
+    ) in ("watchlist_hit", "live_search_hit"):
+        return _R3_1B_NOT_IMPLEMENTED_REASON
+    return _R3_1A_NOT_IMPLEMENTED_REASON
+
 
 class EventRepository:
     """Idempotent event store backed by PostgreSQL."""
@@ -105,6 +118,7 @@ class EventRepository:
         ``source_event_id`` was skipped.
         """
         media = event.get("payload", {}).get("media", {})
+        reason = _not_implemented_reason(event)
         params = {
             "source_event_id": event.get("source_event_id", ""),
             "event_type": event.get("event_type", ""),
@@ -155,6 +169,7 @@ class EventRepository:
         policy = event.get("evidence_policy") or {}
         if not isinstance(policy, dict):
             policy = {}
+        reason = _not_implemented_reason(event)
 
         params = {
             "task_id": task_id,
@@ -172,7 +187,7 @@ class EventRepository:
             "pre_seconds": int(policy.get("pre_seconds", 5)),
             "post_seconds": int(policy.get("post_seconds", 10)),
             "status": "not_implemented",
-            "error_message": _R3_1A_NOT_IMPLEMENTED_REASON,
+            "error_message": reason,
         }
 
         with self._conn.cursor(row_factory=dict_row) as cur:
@@ -203,7 +218,7 @@ class EventRepository:
         self.set_evidence_status(
             event_id=event_id,
             status="not_implemented",
-            error_message=_R3_1A_NOT_IMPLEMENTED_REASON,
+            error_message=reason,
         )
         return task_id_out
 
@@ -233,11 +248,11 @@ class EventRepository:
                             'media',
                             COALESCE(payload->'media', '{}'::jsonb)
                             || jsonb_build_object(
-                                'snapshot_status', %(status)s,
-                                'clip_status', %(status)s,
-                                'metadata_status', %(status)s,
-                                'metadata_path', %(metadata_path)s,
-                                'error_message', %(error_message)s
+                                'snapshot_status', %(status)s::text,
+                                'clip_status', %(status)s::text,
+                                'metadata_status', %(status)s::text,
+                                'metadata_path', %(metadata_path)s::text,
+                                'error_message', %(error_message)s::text
                             )
                         ),
                     updated_at = now()
