@@ -28,6 +28,7 @@ watchlist_hit / live_search_hit
 trajectory / appearances API
 production snapshot extraction
 production clip extraction
+annotated video generation
 performance testing
 ```
 
@@ -105,6 +106,21 @@ Target structure:
 R3.1A does not write this file yet. The API and database schema expose
 `metadata_path`, but it remains `null` while media generation is
 `not_implemented`.
+
+## Media Policy
+
+R3.1A keeps real media generation disabled, but it fixes the production policy
+for later implementation:
+
+1. `raw_clip.mp4` is the canonical evidence video when `clip_required=true`.
+2. `annotated_clip.mp4` is optional/on-demand only for debug, report export, or
+   an explicit operator request.
+3. The default production path must not generate two video files per event.
+4. Overlay data should be stored in `metadata.json`; frontend clients should
+   render dynamic overlays from that metadata while playing `raw_clip.mp4`.
+5. `snapshot.jpg` may be a lightweight annotated still image.
+6. Annotated video generation is deferred until after a performance baseline or
+   a report/export phase.
 
 ## API
 

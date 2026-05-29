@@ -81,3 +81,14 @@ def test_docs_declare_r3_1a_scope_limits() -> None:
     assert "does not run performance" in doc
     assert "does not change the Savant pipeline" in doc
     assert "not_implemented" in doc
+
+
+def test_docs_declare_r3_1a_media_policy() -> None:
+    doc = _read("docs/r3_1a_behavior_event_evidence_mvp.md")
+    assert "raw_clip.mp4" in doc
+    assert "canonical evidence video" in doc
+    assert "annotated_clip.mp4" in doc
+    assert "optional/on-demand" in doc
+    assert "must not generate two video files per event" in doc
+    assert "render dynamic overlays" in doc
+    assert "Annotated video generation is deferred" in doc

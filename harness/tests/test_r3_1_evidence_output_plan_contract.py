@@ -53,3 +53,33 @@ def test_docs_state_scope_limits() -> None:
     assert "does not implement concrete algorithm logic" in joined
     assert "does not run performance tests" in joined
     assert "does not change the Savant pipeline" in joined
+
+
+def test_docs_define_raw_clip_as_canonical_media_policy() -> None:
+    joined = "\n".join(_text(path) for path in (ARCH, PERF, PLAN))
+    assert "raw_clip.mp4" in joined
+    assert "canonical" in joined
+
+
+def test_docs_declare_annotated_clip_on_demand_only() -> None:
+    joined = "\n".join(_text(path) for path in (ARCH, PERF, PLAN))
+    assert "annotated_clip.mp4" in joined
+    assert "optional/on-demand" in joined
+
+
+def test_docs_reject_default_dual_video_output() -> None:
+    joined = "\n".join(_text(path) for path in (ARCH, PERF, PLAN))
+    assert "must not generate two video files per event" in joined
+    assert "must not create default dual video output" in joined
+
+
+def test_docs_use_frontend_dynamic_overlay_from_metadata() -> None:
+    joined = "\n".join(_text(path) for path in (ARCH, PERF, PLAN))
+    assert "metadata.json" in joined
+    assert "dynamic overlays" in joined
+
+
+def test_docs_defer_annotated_video_generation() -> None:
+    joined = "\n".join(_text(path) for path in (ARCH, PERF, PLAN))
+    assert "Annotated video generation is deferred" in joined
+    assert "performance baseline" in joined

@@ -85,6 +85,21 @@ Snapshot-first / clip-later strategy:
    pending, with detail in `payload.media`.
 4. If clip fails, the event remains queryable with snapshot and error details.
 
+Production video evidence uses `raw_clip.mp4` as the canonical clip. The clip
+worker should prefer copy/remux from the source or replay buffer where possible
+and should not default to re-encoding.
+
+The default production path must not generate both raw and annotated video
+files for every event. `annotated_clip.mp4` is optional/on-demand only for
+debug, report export, or an explicit operator action. Frontend clients should
+render dynamic overlays from `metadata.json` while playing `raw_clip.mp4`.
+Annotated video generation is deferred until after a performance baseline or a
+dedicated report/export phase because decode + draw + re-encode is not suitable
+as the dual T4 / 60 streams default path.
+
+`snapshot.jpg` may include lightweight annotations because it is a single-frame
+asset and can be prioritized ahead of clip generation.
+
 ## Media Worker Concurrency Limits
 
 Media workers need explicit limits:
