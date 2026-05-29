@@ -130,7 +130,7 @@ Behavior:
 
 - `file://` URIs route to the gstreamer adapter's `video_loop.sh` and
   the `file://` prefix is stripped so `LOCATION` is a plain path.
-- `rtsp://` / `rtsps://` URIs route to `rtsp_source.sh`.
+- `rtsp://` / `rtsps://` URIs route to `rtsp.sh`.
 - Disabled sources cannot be started.
 - Unknown `source_id` returns a clear non-zero exit code.
 - Docker failures surface as non-zero exit codes — there is no silent

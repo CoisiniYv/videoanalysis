@@ -151,12 +151,12 @@ def _adapter_entrypoint_for(uri: str) -> str:
 
     The savant-adapters-gstreamer image ships several entrypoints; we
     pick the simplest that handles each common scheme. RTSP uses
-    rtsp_source.sh, file:// (and local mp4 paths handed through as
+    rtsp.sh, file:// (and local mp4 paths handed through as
     ``LOCATION``) use video_loop.sh.
     """
     scheme = _uri_scheme(uri)
     if scheme in ("rtsp", "rtsps"):
-        return "/opt/savant/adapters/gst/sources/rtsp_source.sh"
+        return "/opt/savant/adapters/gst/sources/rtsp.sh"
     return "/opt/savant/adapters/gst/sources/video_loop.sh"
 
 
@@ -181,18 +181,23 @@ def docker_run_command(
     extra_volumes: Optional[List[str]] = None,
 ) -> List[str]:
     """Construct ``docker run -d ...`` for *spec*."""
+    location = _adapter_location_for(spec.uri)
     cmd: List[str] = [
         "docker", "run", "-d",
         "--name", spec.container_name,
         "--restart", "unless-stopped",
         "--network", network,
         "-e", f"SOURCE_ID={spec.source_id}",
-        "-e", f"LOCATION={_adapter_location_for(spec.uri)}",
+        "-e", f"LOCATION={location}",
         "-e", f"ZMQ_ENDPOINT={spec.zmq_endpoint}",
         "-e", "SYNC_OUTPUT=true",
         "-e", "DOWNLOAD_PATH=/tmp/video-loop-cache",
         "--entrypoint", _adapter_entrypoint_for(spec.uri),
     ]
+    if _uri_scheme(spec.uri) in ("rtsp", "rtsps"):
+        cmd[cmd.index("--entrypoint"):cmd.index("--entrypoint")] = [
+            "-e", f"RTSP_URI={location}",
+        ]
     for vol in extra_volumes or []:
         cmd.extend(["-v", vol])
     cmd.append(image)

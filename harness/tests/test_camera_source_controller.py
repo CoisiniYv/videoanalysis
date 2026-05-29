@@ -144,9 +144,10 @@ def test_start_builds_docker_run(script_mod, sources_path):
     env_dict = dict(s.split("=", 1) for s in env_pairs)
     assert env_dict["SOURCE_ID"] == "phase3h"
     assert env_dict["LOCATION"] == "rtsp://example.local/stream"
+    assert env_dict["RTSP_URI"] == "rtsp://example.local/stream"
     assert env_dict["ZMQ_ENDPOINT"] == "dealer+connect:tcp://savant-security:5555"
-    # rtsp scheme → rtsp_source.sh entrypoint.
-    assert "/opt/savant/adapters/gst/sources/rtsp_source.sh" in cmd
+    # rtsp scheme -> rtsp.sh entrypoint.
+    assert "/opt/savant/adapters/gst/sources/rtsp.sh" in cmd
 
 
 # ===========================================================================
