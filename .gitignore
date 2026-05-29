@@ -12,35 +12,37 @@ build/
 debug/
 manual-inspection/
 temp/
+tmp/
 
 # Runtime media output (NOT committed)
 media/
+results/
 
 # Runtime-generated config artifacts written by scripts/config/* (NOT committed)
 infra/generated/
 modules/savant_security/config/cameras.generated.yml
 modules/savant_phase1d/
 
-# Local operator test videos and generated outputs (NOT committed)
+# Local media / model assets (NOT committed)
 # For small curated test fixtures, use harness/scenarios/ instead.
+face/
+testVideo/
 testVideo/*.mp4
 testVideo/*.avi
 testVideo/*.mov
 testVideo/*.mkv
-
-# Model files (NOT committed) — see docs/model_assets_manifest.md.
-# Engines are machine/GPU-specific; weights / ONNX must be sourced
-# manually per the manifest, never committed.
+yolomodel/
+yolo26n-pose.pt
 *.pt
 *.pth
 *.ckpt
 *.onnx
 *.engine
-yolomodel/
 
 # Binaries (NOT committed)
 redis-cli
 
 # Python
+.pypytest_cache/
 .pytest_cache/
 *.log
