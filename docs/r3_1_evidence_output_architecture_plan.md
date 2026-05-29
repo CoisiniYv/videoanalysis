@@ -1,0 +1,308 @@
+# R3.1 Evidence Output Architecture Plan
+
+Status: planning only. This document does not implement concrete algorithm
+logic, media generation code, trajectory API, or performance testing.
+
+R3.1 defines one evidence trunk for behavior alerts and face intelligence
+alerts, while keeping trajectory / appearances as a query output rather than a
+normal alarm event.
+
+## Output Classes
+
+The three output classes are: behavior event evidence, face match evidence,
+and trajectory / appearances output.
+
+### 1. Behavior event evidence
+
+Source:
+
+```text
+YOLO26-pose
+  -> nvtracker
+  -> behavior_rules
+  -> SecurityEvent
+```
+
+Covered algorithm families:
+
+```text
+intrusion
+loitering
+crowd_gathering
+running
+chasing
+fall
+wall_climb
+```
+
+R3.1A starts with `intrusion`, because the current mainline can already emit
+intrusion events from YOLO26-pose, nvtracker, ROI, and behavior rules.
+
+Target flow:
+
+```text
+intrusion event
+  -> events
+  -> evidence_tasks
+  -> snapshot.jpg
+  -> clip.mp4
+  -> metadata.json
+  -> events.snapshot_path / events.clip_path / events.media_status
+  -> GET /api/v1/events/{event_id}/evidence
+```
+
+### 2. Face match evidence
+
+Source:
+
+```text
+YOLOv8-Face full-frame primary
+  -> AdaFace
+  -> face_observations
+  -> gallery / live_search match
+  -> watchlist_hit or live_search_hit
+  -> SecurityEvent
+```
+
+Covered event types:
+
+```text
+watchlist_hit
+live_search_hit
+```
+
+Target flow:
+
+```text
+face match event
+  -> matched person payload
+  -> events
+  -> evidence_tasks
+  -> snapshot.jpg with face bbox / person name / similarity
+  -> clip.mp4
+  -> metadata.json
+  -> events.snapshot_path / events.clip_path / events.media_status
+  -> GET /api/v1/events/{event_id}/evidence
+```
+
+This does not change the face detector. YOLOv8-Face remains a full-frame
+primary detector, and face intelligence consumes AdaFace observations already
+stored by the face-worker.
+
+### 3. Trajectory / appearances output
+
+Source:
+
+```text
+face_observations
+  -> person_gallery_embeddings
+  -> person_id / camera_id / timestamp / track_id
+```
+
+Trajectory / appearances are not equivalent to alarm events. They are read-side
+query products used to answer where a person appeared, in which camera order,
+and with which representative face observations. They should not create one
+alarm event per appearance.
+
+Target output:
+
+```text
+person_id
+  -> appearances timeline
+  -> camera path
+  -> best snapshots
+  -> optional clip references
+```
+
+Only `watchlist_hit` and `live_search_hit` must enter the alarm evidence chain.
+Plain trajectory queries may reuse snapshots or clips if they already exist,
+but should not force media generation for every historical observation.
+
+## Unified Flow
+
+```text
+Savant behavior rules / face-worker hit producer
+  -> SecurityEvent
+  -> Redis security.events
+  -> event-worker
+  -> idempotent upsert into PostgreSQL events by source_event_id
+  -> EvidenceTask if snapshot_required or clip_required
+  -> Redis security.clip_tasks or media-worker queue
+  -> clip-worker / media-worker
+  -> /data/video-analytics/media/events/YYYY/MM/DD/<event_id>/
+       snapshot.jpg
+       clip.mp4
+       metadata.json
+  -> update events.snapshot_path
+  -> update events.clip_path
+  -> update events.media_status
+  -> GET /api/v1/events/{event_id}/evidence
+```
+
+`SecurityEvent -> EvidenceTask -> Media output -> API` is the only event
+evidence path. Algorithms may add private fields under `payload`, but they must
+not invent separate event or evidence formats.
+
+## Output Path
+
+Default storage root:
+
+```text
+/data/video-analytics/media/events/YYYY/MM/DD/<event_id>/
+```
+
+Files:
+
+```text
+snapshot.jpg
+clip.mp4
+metadata.json
+```
+
+`metadata.json` should include at least:
+
+```json
+{
+  "event_id": "uuid-or-int",
+  "source_event_id": "savant_security:cam:track:intrusion:ts",
+  "camera_id": "cam_001",
+  "source_id": "source_001",
+  "event_type": "intrusion",
+  "event_ts_ms": 1780000000000,
+  "snapshot_required": true,
+  "clip_required": true,
+  "storage_fallback_used": false,
+  "payload": {}
+}
+```
+
+If `/data/video-analytics/media` is not writable, fallback to `./tmp` is allowed
+only for development and smoke tests. The event/evidence metadata must record:
+
+```text
+storage_fallback_used=true
+storage_fallback_reason=<reason>
+```
+
+No evidence output may be written back into the repo working directory
+silently.
+
+## media_status State Machine
+
+R3.1 uses one event-level `media_status` state machine:
+
+```text
+not_implemented
+  -> pending
+  -> processing
+  -> ready
+  -> failed
+```
+
+Rules:
+
+1. `not_implemented`: event was stored, but production evidence generation is
+   not enabled or not implemented for this path.
+2. `pending`: an `evidence_task` exists and is waiting for a worker.
+3. `processing`: a media worker has claimed the task.
+4. `ready`: required outputs were produced and event paths were updated.
+5. `failed`: media generation failed after retry policy, with `error_message`.
+
+Snapshot and clip may also have per-asset status in `payload.media`, but the
+event-level `media_status` is the operator-facing summary.
+
+## Service Boundaries
+
+### Savant
+
+Savant only emits metadata:
+
+```text
+SecurityEvent
+FaceObservation
+track_id / bbox / keypoints / face bbox / landmarks / embeddings metadata
+```
+
+Savant must not:
+
+1. write large media files,
+2. run slow PostgreSQL or pgvector queries,
+3. call FastAPI directly,
+4. block inference on snapshot or clip generation.
+
+This keeps the GPU mainline dedicated to inference and tracking.
+
+### event-worker
+
+Responsibilities:
+
+1. consume `security.events`;
+2. parse one unified `SecurityEvent`;
+3. upsert `events` idempotently by `source_event_id`;
+4. create `evidence_tasks` when evidence is required;
+5. publish async media work without blocking Redis event consumption;
+6. record queue/publish failures without dropping the event.
+
+### clip-worker / media-worker
+
+Responsibilities:
+
+1. claim pending evidence tasks;
+2. produce snapshot first when possible;
+3. produce clip asynchronously or mark clip `not_implemented` / `failed`;
+4. write stable paths under the media root;
+5. write `metadata.json`;
+6. update `events` and `evidence_tasks`.
+
+R3.1 may keep clip generation as a stub or Replay/NVR fallback, but the schema
+and task lifecycle must remain stable.
+
+### face-worker
+
+Responsibilities:
+
+1. consume and store `face_observations`;
+2. run face intelligence matching outside Savant;
+3. emit `watchlist_hit` / `live_search_hit` as `SecurityEvent` when configured;
+4. include matched person, gallery embedding, similarity, bbox, and observation
+   references in `payload`.
+
+The face-worker should not write production evidence media directly. It should
+emit hit events and let the shared evidence chain handle media.
+
+### API
+
+Responsibilities:
+
+1. expose events and evidence status;
+2. expose algorithm registry and algorithm rules;
+3. expose trajectory / appearances output as query APIs in a later phase;
+4. serve media files from the configured media root.
+
+## MVP vs Future
+
+### MVP
+
+1. Behavior event evidence for `intrusion`.
+2. Idempotent `evidence_tasks` creation.
+3. API evidence query returning event plus task status.
+4. Stable media path computation.
+5. `metadata.json` for completed or stubbed evidence.
+6. Face hit events as `SecurityEvent` after the face match producer exists.
+7. Trajectory read output based on `face_observations` and `match_results`.
+
+### Future
+
+1. Full Replay/NVR clip extraction.
+2. Annotated snapshots and annotated clips.
+3. Watchlist rule management and live search session management.
+4. Best-shot selection across multiple face observations.
+5. Production retention and cleanup policy.
+6. Load testing after the event/evidence trunk is stable.
+
+## Scope Guard
+
+R3.1 planning does not implement concrete algorithm logic. It does not perform
+performance testing. It does not modify `modules/savant_security/module.yml`,
+the Redis producer, YOLO26-pose, YOLOv8-Face, AdaFace, or the dual-primary
+Savant pipeline.
