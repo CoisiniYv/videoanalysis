@@ -3,6 +3,9 @@
 Date: 2026-05-25
 Status: **ACTIVE** — 所有涉及媒体文件输出的实现必须遵守本文档。
 
+R2 update: F4.3 debug recognition outputs are allowed under the same
+`MEDIA_ROOT`, but they are not production event evidence.
+
 ---
 
 ## 1. 目的
@@ -59,6 +62,46 @@ volumes:
 ```
 
 仅用于 Phase 3H.1 NDJSON 输出缓存。生产环境不使用此路径。
+
+### 2.5 F4.3 Debug Recognition Evidence
+
+F4.3B debug recognition smoke writes post-run evidence packages under:
+
+```
+/data/video-analytics/media/f4_3b_recognition_evidence/
+```
+
+Example run layout:
+
+```
+/data/video-analytics/media/f4_3b_recognition_evidence/
+  run_YYYYMMDD_HHMMSS_<source_id>/
+    snapshots/
+    clips/
+    summary.json
+    hits.csv
+    top_candidates.html
+    run.log
+```
+
+This is debug evidence only:
+
+1. Snapshots and videos are post-run exports, not realtime event evidence.
+2. `annotated_hits.mp4` is a debug clip, not a production per-event clip.
+3. F4.3B does not implement `watchlist_hit` or `live_search_hit`.
+4. F4.3B does not define the production media lifecycle.
+
+Other development/test output directories currently seen under `MEDIA_ROOT`
+include:
+
+```
+/data/video-analytics/media/snapshots/
+/data/video-analytics/media/clips/
+/data/video-analytics/media/replay-sink-output/
+```
+
+They are allowed as development or legacy artifacts only when documented by
+the corresponding smoke or POC.
 
 ---
 
@@ -125,6 +168,17 @@ API 通过 FastAPI StaticFiles 挂载 `/media` → `MEDIA_ROOT` 提供服务。
 1. Phase 3H `video-file-sink` 和 `metadata-sink` 写入 `/media/phase3h-savant-output/` 和 `/media/phase3h-metadata/` 作为临时 POC 缓存。
 2. `/data/video-analytics/media/replay-sink-output/` 和 `/data/video-analytics/media/snapshots/` 中的历史文件保留（不删除）。
 3. repo 下 `media/evidence/` 中的旧 E1 平铺目录保留（不删除）。
+4. F4.3B debug recognition smoke may write to `/data/video-analytics/media/f4_3b_recognition_evidence/`.
+5. If `/data/video-analytics/media` does not exist or is not writable, test
+   scripts may fall back to `./tmp/...`, but they must print:
+
+```text
+storage_fallback_used=true
+storage_fallback_reason=...
+```
+
+The fallback must be explicit. Scripts must not silently write large artifacts
+into the repo working directory.
 
 ---
 
@@ -134,6 +188,8 @@ API 通过 FastAPI StaticFiles 挂载 `/media` → `MEDIA_ROOT` 提供服务。
 2. **旧容器必须停止**。Phase 3B 的 continuous sink 容器不得运行。
 3. **只有 Phase E1.1a 以后的新代码才写入规范目录**。
 4. 历史目录可在后续阶段通过专门的清理脚本处理。
+5. `face/`, `testVideo/`, `manual-inspection/`, `tmp/`, and `/data/video-analytics/media`
+   outputs must not be committed to git.
 
 ---
 
