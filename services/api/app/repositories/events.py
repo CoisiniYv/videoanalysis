@@ -149,7 +149,7 @@ class EventRepository:
             FROM evidence_tasks
             WHERE event_id = %(event_id)s
                OR source_event_id = %(source_event_id)s
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, task_id DESC
         """
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(

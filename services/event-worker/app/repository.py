@@ -78,6 +78,19 @@ _COUNT_BY_SID_SQL = """
 SELECT COUNT(*) FROM events WHERE source_event_id = %s
 """
 
+EVIDENCE_TASK_STATUSES = (
+    "pending",
+    "processing",
+    "ready",
+    "failed",
+    "not_implemented",
+)
+
+_R3_1A_NOT_IMPLEMENTED_REASON = (
+    "R3.1A behavior evidence MVP created the evidence task, but production "
+    "snapshot/clip/metadata generation is not implemented in this deployment."
+)
+
 
 class EventRepository:
     """Idempotent event store backed by PostgreSQL."""
@@ -131,7 +144,13 @@ class EventRepository:
         event: Dict[str, Any],
         event_id: str,
     ) -> str | None:
-        """Create one idempotent evidence task for an event."""
+        """Create one idempotent evidence task for an event.
+
+        R3.1A records the task and marks media generation as
+        ``not_implemented`` unless a later media worker claims and updates it.
+        This keeps event ingestion idempotent and explicit: missing media is a
+        known lifecycle state, not an empty or ambiguous row.
+        """
         task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"evidence:{event_id}"))
         policy = event.get("evidence_policy") or {}
         if not isinstance(policy, dict):
@@ -152,7 +171,8 @@ class EventRepository:
             "clip_required": bool(event.get("clip_required", False)),
             "pre_seconds": int(policy.get("pre_seconds", 5)),
             "post_seconds": int(policy.get("post_seconds", 10)),
-            "status": "pending",
+            "status": "not_implemented",
+            "error_message": _R3_1A_NOT_IMPLEMENTED_REASON,
         }
 
         with self._conn.cursor(row_factory=dict_row) as cur:
@@ -162,21 +182,77 @@ class EventRepository:
                     task_id, event_id, source_event_id, camera_id, source_id,
                     event_type, event_ts_ms, task_type,
                     snapshot_required, clip_required,
-                    pre_seconds, post_seconds, status
+                    pre_seconds, post_seconds, status, error_message
                 ) VALUES (
                     %(task_id)s, %(event_id)s::uuid, %(source_event_id)s,
                     %(camera_id)s, %(source_id)s, %(event_type)s,
                     %(event_ts_ms)s, %(task_type)s,
                     %(snapshot_required)s, %(clip_required)s,
-                    %(pre_seconds)s, %(post_seconds)s, %(status)s
+                    %(pre_seconds)s, %(post_seconds)s, %(status)s,
+                    %(error_message)s
                 )
-                ON CONFLICT (task_id) DO NOTHING
+                ON CONFLICT (task_id) DO UPDATE SET
+                    updated_at = evidence_tasks.updated_at
                 RETURNING task_id
                 """,
                 params,
             )
             row = cur.fetchone()
-            return str(row["task_id"]) if row else None
+            task_id_out = str(row["task_id"]) if row else None
+
+        self.set_evidence_status(
+            event_id=event_id,
+            status="not_implemented",
+            error_message=_R3_1A_NOT_IMPLEMENTED_REASON,
+        )
+        return task_id_out
+
+    def set_evidence_status(
+        self,
+        *,
+        event_id: str,
+        status: str,
+        error_message: str = "",
+        snapshot_path: str | None = None,
+        clip_path: str | None = None,
+        metadata_path: str | None = None,
+    ) -> bool:
+        """Update event-level media status and media payload fields."""
+        if status not in EVIDENCE_TASK_STATUSES:
+            raise ValueError(f"unsupported evidence status: {status}")
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET snapshot_path = COALESCE(%(snapshot_path)s, snapshot_path),
+                    clip_path = COALESCE(%(clip_path)s, clip_path),
+                    media_status = %(status)s,
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'snapshot_status', %(status)s,
+                                'clip_status', %(status)s,
+                                'metadata_status', %(status)s,
+                                'metadata_path', %(metadata_path)s,
+                                'error_message', %(error_message)s
+                            )
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "status": status,
+                    "error_message": error_message,
+                    "snapshot_path": snapshot_path,
+                    "clip_path": clip_path,
+                    "metadata_path": metadata_path,
+                },
+            )
+            return cur.rowcount is not None and cur.rowcount > 0
 
     def count_by_source_event_id(self, source_event_id: str) -> int:
         """Return the number of rows with the given *source_event_id*."""

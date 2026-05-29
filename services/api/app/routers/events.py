@@ -162,10 +162,12 @@ def events_get_evidence(
             content=_err(f"event not found: {event_id}", request_id),
         )
 
+    event = EventResponse.from_db_row(row)
     tasks = repo.list_evidence_tasks(event_id)
-    payload = EventEvidenceResponse(
-        event=EventResponse.from_db_row(row),
-        evidence_tasks=[EvidenceTaskResponse.from_db_row(t) for t in tasks],
+    evidence_tasks = [EvidenceTaskResponse.from_db_row(t) for t in tasks]
+    payload = EventEvidenceResponse.from_event_and_tasks(
+        event=event,
+        evidence_tasks=evidence_tasks,
     )
     return _ok(payload.model_dump(), request_id)
 

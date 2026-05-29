@@ -187,6 +187,7 @@ class EvidenceTask(BaseModel):
     status: str = "pending"
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
+    metadata_path: Optional[str] = None
     error_message: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

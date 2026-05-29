@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 shutdown_requested = False
 
+R3_1A_BEHAVIOR_EVIDENCE_EVENT_TYPES = {"intrusion"}
+R3_1A_DEFAULT_EVIDENCE_POLICY = {
+    "snapshot_required": True,
+    "clip_required": True,
+    "pre_seconds": 5,
+    "post_seconds": 10,
+}
+
 
 def request_shutdown(signum: int, _frame: object) -> None:
     global shutdown_requested
@@ -71,6 +79,7 @@ def _handle_event(
     Record request is published only when clip_status is unset (idempotent).
     Failures in alert/record publishing do not block ACK.
     """
+    _apply_default_evidence_policy(event)
     event_id = None
     try:
         event_id = repo.insert_event(event)
@@ -181,6 +190,44 @@ def _requires_evidence(event: dict) -> bool:
         or policy_snapshot
         or policy_clip
     )
+
+
+def _apply_default_evidence_policy(event: dict) -> None:
+    """Enable the R3.1A intrusion evidence MVP for legacy behavior events."""
+    event_type = event.get("event_type", "")
+    if event_type not in R3_1A_BEHAVIOR_EVIDENCE_EVENT_TYPES:
+        return
+
+    if _requires_evidence(event):
+        return
+
+    event["snapshot_required"] = True
+    event["clip_required"] = True
+
+    policy = event.get("evidence_policy")
+    if not isinstance(policy, dict):
+        policy = {}
+    event["evidence_policy"] = {**R3_1A_DEFAULT_EVIDENCE_POLICY, **policy}
+
+    payload = event.setdefault("payload", {})
+    if not isinstance(payload, dict):
+        payload = {}
+        event["payload"] = payload
+    media = payload.setdefault("media", {})
+    if not isinstance(media, dict):
+        media = {}
+        payload["media"] = media
+    media.setdefault("snapshot_status", "not_implemented")
+    media.setdefault("clip_status", "not_implemented")
+    media.setdefault("recording_strategy", "reserved")
+    media["snapshot_required"] = True
+    media["clip_required"] = True
+    media.setdefault("pre_seconds", R3_1A_DEFAULT_EVIDENCE_POLICY["pre_seconds"])
+    media.setdefault("post_seconds", R3_1A_DEFAULT_EVIDENCE_POLICY["post_seconds"])
+    media.setdefault("source_id", event.get("source_id", ""))
+    media.setdefault("event_ts_ms", event.get("event_ts_ms", 0))
+    media.setdefault("frame_uuid", event.get("frame_uuid"))
+    media.setdefault("keyframe_uuid", event.get("keyframe_uuid"))
 
 
 def _process_batch(

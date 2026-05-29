@@ -27,6 +27,8 @@ def _safe_media(payload: dict | None) -> dict:
     fallback = {
         "snapshot_status": "not_implemented",
         "clip_status": "not_implemented",
+        "metadata_status": "not_implemented",
+        "metadata_path": None,
         "recording_strategy": "reserved",
         "replay_job_id": None,
         "sink_output_path": None,
@@ -62,10 +64,12 @@ class EventResponse(BaseModel):
     annotated_snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
     annotated_clip_path: Optional[str] = None
+    metadata_path: Optional[str] = None
     snapshot_url: Optional[str] = None
     annotated_snapshot_url: Optional[str] = None
     clip_url: Optional[str] = None
     annotated_clip_url: Optional[str] = None
+    metadata_url: Optional[str] = None
     recording_strategy: str = "reserved"
     media_status: str = "not_implemented"
     snapshot_required: bool = False
@@ -96,6 +100,7 @@ class EventResponse(BaseModel):
             row.get("annotated_clip_path")
             or media.get("annotated_clip_path")
         )
+        metadata_path = row.get("metadata_path") or media.get("metadata_path")
 
         def _media_url(path: str | None) -> str | None:
             if not path:
@@ -111,6 +116,7 @@ class EventResponse(BaseModel):
         clip_url = _media_url(clip_path)
         snapshot_url = _media_url(snapshot_path)
         annotated_snapshot_url = _media_url(annotated_snapshot_path)
+        metadata_url = _media_url(metadata_path)
 
         return cls(
             id=str(row.get("id", "")),
@@ -136,10 +142,12 @@ class EventResponse(BaseModel):
             annotated_snapshot_path=annotated_snapshot_path,
             clip_path=clip_path,
             annotated_clip_path=annotated_clip_path,
+            metadata_path=metadata_path,
             snapshot_url=snapshot_url,
             annotated_snapshot_url=annotated_snapshot_url,
             clip_url=clip_url,
             annotated_clip_url=annotated_clip_url,
+            metadata_url=metadata_url,
             recording_strategy=row.get("recording_strategy", "reserved"),
             media_status=row.get("media_status", "not_implemented"),
             snapshot_required=bool(row.get("snapshot_required", False)),
@@ -180,6 +188,14 @@ class EvidenceTaskResponse(BaseModel):
     status: str = "pending"
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
+    metadata_path: Optional[str] = None
+    output_root: Optional[str] = None
+    storage_fallback_used: bool = False
+    storage_fallback_reason: Optional[str] = None
+    retry_count: int = 0
+    max_retries: int = 3
+    claimed_by: Optional[str] = None
+    claimed_at: Optional[str] = None
     error_message: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -202,6 +218,14 @@ class EvidenceTaskResponse(BaseModel):
             status=row.get("status", "pending"),
             snapshot_path=row.get("snapshot_path"),
             clip_path=row.get("clip_path"),
+            metadata_path=row.get("metadata_path"),
+            output_root=row.get("output_root"),
+            storage_fallback_used=bool(row.get("storage_fallback_used", False)),
+            storage_fallback_reason=row.get("storage_fallback_reason"),
+            retry_count=int(row.get("retry_count", 0) or 0),
+            max_retries=int(row.get("max_retries", 3) or 3),
+            claimed_by=row.get("claimed_by"),
+            claimed_at=_iso(row.get("claimed_at")),
             error_message=row.get("error_message"),
             created_at=_iso(row.get("created_at")),
             updated_at=_iso(row.get("updated_at")),
@@ -209,5 +233,55 @@ class EvidenceTaskResponse(BaseModel):
 
 
 class EventEvidenceResponse(BaseModel):
+    event_id: str
+    source_event_id: str
+    event_type: str
+    media_status: str = "not_implemented"
+    snapshot_path: Optional[str] = None
+    clip_path: Optional[str] = None
+    metadata_path: Optional[str] = None
+    snapshot_url: Optional[str] = None
+    clip_url: Optional[str] = None
+    metadata_url: Optional[str] = None
+    error_message: Optional[str] = None
     event: EventResponse
     evidence_tasks: List[EvidenceTaskResponse] = Field(default_factory=list)
+
+    @classmethod
+    def from_event_and_tasks(
+        cls,
+        event: EventResponse,
+        evidence_tasks: List[EvidenceTaskResponse],
+    ) -> "EventEvidenceResponse":
+        first_task = evidence_tasks[0] if evidence_tasks else None
+        metadata_path = event.metadata_path or (
+            first_task.metadata_path if first_task else None
+        )
+        metadata_url = event.metadata_url
+        if metadata_path and not metadata_url:
+            path = str(metadata_path)
+            if path.startswith("/media/"):
+                metadata_url = path
+            elif path.startswith("/"):
+                metadata_url = f"/media{path}"
+            else:
+                metadata_url = f"/media/{path}"
+        error_message = event.media.get("error_message") if event.media else None
+        if not error_message and first_task:
+            error_message = first_task.error_message
+
+        return cls(
+            event_id=event.id,
+            source_event_id=event.source_event_id,
+            event_type=event.event_type,
+            media_status=event.media_status,
+            snapshot_path=event.snapshot_path,
+            clip_path=event.clip_path,
+            metadata_path=metadata_path,
+            snapshot_url=event.snapshot_url,
+            clip_url=event.clip_url,
+            metadata_url=metadata_url,
+            error_message=error_message,
+            event=event,
+            evidence_tasks=evidence_tasks,
+        )

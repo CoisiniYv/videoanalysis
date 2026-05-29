@@ -19,7 +19,13 @@ if EW_DIR not in sys.path:
 from app.config import Config, load_config
 from app.redis_consumer import RedisStreamConsumer
 from app.repository import EventRepository
-from app.worker import _parse_event, _handle_event, _process_batch
+from app.worker import (
+    _apply_default_evidence_policy,
+    _handle_event,
+    _parse_event,
+    _process_batch,
+    _requires_evidence,
+)
 
 
 # ===========================================================================
@@ -353,6 +359,27 @@ def test_media_fields_preserved():
     assert media["snapshot_status"] == "not_implemented"
     assert media["clip_status"] == "not_implemented"
     assert media["recording_strategy"] == "reserved"
+
+
+def test_r3_1a_intrusion_defaults_require_evidence():
+    event = _build_security_event_dict(
+        snapshot_required=False,
+        clip_required=False,
+        evidence_policy={},
+    )
+    assert _requires_evidence(event) is False
+
+    _apply_default_evidence_policy(event)
+
+    assert event["snapshot_required"] is True
+    assert event["clip_required"] is True
+    assert event["evidence_policy"]["snapshot_required"] is True
+    assert event["evidence_policy"]["clip_required"] is True
+    assert event["evidence_policy"]["pre_seconds"] == 5
+    assert event["evidence_policy"]["post_seconds"] == 10
+    assert event["payload"]["media"]["snapshot_required"] is True
+    assert event["payload"]["media"]["clip_required"] is True
+    assert _requires_evidence(event) is True
 
 
 # ===========================================================================
