@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== V1.3 Frame-Aligned Visual Rendering Smoke ==="
+echo "=== V1.4 Actual Frame Image Source Proof Smoke ==="
 echo "scope=debug_mvp_frame_aligned_visual_output"
 echo "no_production_clip_worker=YES"
 echo "no_production_media_worker=YES"
@@ -17,6 +17,7 @@ DATABASE_URL="${DATABASE_URL:-postgresql://video:video@localhost:5438/video_anal
 PG_CONTAINER="${PG_CONTAINER:-c1-official-postgres}"
 SOURCE_MP4="${V1_SOURCE_MP4:-/home/user/video-analytics/testVideo/1080movie.mp4}"
 CAMERA_CONFIG="${V1_CAMERA_CONFIG:-modules/savant_security/config/cameras.generated.yml}"
+EXPLICIT_INDEX_ROOT="${V1_EXPLICIT_FRAME_UUID_INDEX_ROOT:-/data/video-analytics/media/debug/explicit_frame_uuid_index}"
 mkdir -p "${WORK_DIR}" "${OUTPUT_ROOT}"
 
 psql_value() {
@@ -59,22 +60,33 @@ from pathlib import Path
 metadata = json.loads(Path(sys.argv[1]).read_text())
 ann = metadata["annotations"]
 diag = metadata["diagnosis"]
-media = metadata["media"]
 failures = []
-if diag.get("frame_alignment_status") != "matched":
-    failures.append(f"frame_alignment_status={diag.get('frame_alignment_status')}")
-if ann.get("person_bbox_status") != "generated":
-    failures.append("person bbox missing")
-if ann.get("roi_status") != "generated":
-    failures.append("ROI missing")
-if not media.get("annotated_snapshot_path") or not Path(media["annotated_snapshot_path"]).exists():
-    failures.append("annotated snapshot missing")
+if diag.get("frame_alignment_status") == "matched":
+    if diag.get("image_frame_uuid_proof_source") not in {
+        "runtime_frame_dump_sidecar",
+        "frame_uuid_trace_exact_hit",
+        "explicit_frame_uuid_index",
+    }:
+        failures.append(f"untrusted proof_source={diag.get('image_frame_uuid_proof_source')}")
+    source_extraction = diag.get("source_extraction") or {}
+    if source_extraction and source_extraction.get("actual_frame_index") in (None, 0):
+        failures.append("source extraction first frame or unknown")
+    if ann.get("person_bbox_status") != "generated":
+        failures.append("person bbox missing")
+    if ann.get("roi_status") != "generated":
+        failures.append("ROI missing")
+else:
+    if diag.get("bbox_drawn") is True:
+        failures.append("bbox drawn while frame proof blocked")
 if failures:
     raise SystemExit("FAIL: " + "; ".join(failures))
-print("BEHAVIOR_VISUAL_PASS")
+print("V1.4 BEHAVIOR_FRAME_PROOF_PASS" if diag.get("frame_alignment_status") == "matched" else "V1.4 FRAME_PROOF_BLOCKED")
 print(f"behavior_record_frame_uuid={diag.get('record_frame_uuid')}")
 print(f"behavior_image_frame_uuid={diag.get('image_frame_uuid')}")
-print(f"behavior_person_bbox_xyxy={diag.get('person_bbox_xyxy')}")
+print(f"behavior_image_proof_source={diag.get('image_frame_uuid_proof_source')}")
+print(f"behavior_image_sha256={diag.get('image_sha256')}")
+print(f"behavior_is_first_frame={diag.get('is_first_frame')}")
+print(f"behavior_bbox_drawn={diag.get('bbox_drawn')}")
 print(f"behavior_roi_status={ann.get('roi_status')}")
 PY
 }
@@ -89,23 +101,58 @@ from pathlib import Path
 metadata = json.loads(Path(sys.argv[1]).read_text())
 ann = metadata["annotations"]
 diag = metadata["diagnosis"]
-media = metadata["media"]
 if diag.get("frame_alignment_status") == "matched":
     failures = []
+    if diag.get("image_frame_uuid_proof_source") not in {
+        "runtime_frame_dump_sidecar",
+        "frame_uuid_trace_exact_hit",
+        "explicit_frame_uuid_index",
+    }:
+        failures.append(f"untrusted proof_source={diag.get('image_frame_uuid_proof_source')}")
+    source_extraction = diag.get("source_extraction") or {}
+    if source_extraction and source_extraction.get("actual_frame_index") in (None, 0):
+        failures.append("source extraction first frame or unknown")
     if ann.get("face_bbox_status") != "generated":
         failures.append("face bbox missing")
-    if not media.get("annotated_snapshot_path") or not Path(media["annotated_snapshot_path"]).exists():
-        failures.append("annotated snapshot missing")
     if failures:
         raise SystemExit("FAIL: " + "; ".join(failures))
-    print("FACE_VISUAL_PASS")
+    print("V1.4 FACE_FRAME_PROOF_PASS")
     print(f"face_record_frame_uuid={diag.get('record_frame_uuid')}")
     print(f"face_image_frame_uuid={diag.get('image_frame_uuid')}")
-    print(f"face_bbox_xyxy={diag.get('face_bbox_xyxy')}")
+    print(f"face_image_proof_source={diag.get('image_frame_uuid_proof_source')}")
+    print(f"face_image_sha256={diag.get('image_sha256')}")
+    print(f"face_is_first_frame={diag.get('is_first_frame')}")
+    print(f"face_bbox_drawn={diag.get('bbox_drawn')}")
 else:
-    print("FACE_VISUAL_BLOCKED")
+    if diag.get("bbox_drawn") is True:
+        raise SystemExit("FAIL: face bbox drawn while frame proof blocked")
+    print("V1.4 FRAME_PROOF_BLOCKED")
     print(f"face_record_frame_uuid={diag.get('record_frame_uuid')}")
     print(f"face_blocking_reason={diag.get('blocking_reason')}")
+PY
+}
+
+validate_cross_result_reuse() {
+  local behavior_diag="$1"
+  local face_diag="$2"
+  python3 - "$behavior_diag" "$face_diag" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+behavior = json.loads(Path(sys.argv[1]).read_text()) if Path(sys.argv[1]).exists() else {}
+face = json.loads(Path(sys.argv[2]).read_text()) if Path(sys.argv[2]).exists() else {}
+same_sha = bool(behavior.get("image_sha256") and behavior.get("image_sha256") == face.get("image_sha256"))
+different_frames = bool(
+    behavior.get("record_frame_uuid")
+    and face.get("record_frame_uuid")
+    and behavior.get("record_frame_uuid") != face.get("record_frame_uuid")
+)
+if same_sha and different_frames:
+    print("V1.4 IMAGE_REUSE_FAILED")
+    print("reason=different_records_reused_same_image")
+    raise SystemExit(1)
+print(f"same_image_reused={str(same_sha).lower()}")
 PY
 }
 
@@ -128,7 +175,7 @@ JSON
 Status: unavailable.
 
 No frame-anchored `watchlist_hit`, `live_search_hit`, or `gallery_match`
-record is available for V1.3. A plain `face_observation` is not gallery
+record is available for V1.4. A plain `face_observation` is not gallery
 recognition and must not be presented as recognition output.
 EOF
 }
@@ -136,27 +183,50 @@ EOF
 write_top_index() {
   local root="$1"
   local behavior_status face_status gallery_available
+  local behavior_proof face_proof behavior_sha face_sha behavior_first face_first
   behavior_status="$(metadata_field "${root}/behavior_intrusion/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || true)"
   face_status="$(metadata_field "${root}/face_observation/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || true)"
+  behavior_proof="$(metadata_field "${root}/behavior_intrusion/metadata.json" diagnosis.image_frame_uuid_proof_source 2>/dev/null || true)"
+  face_proof="$(metadata_field "${root}/face_observation/metadata.json" diagnosis.image_frame_uuid_proof_source 2>/dev/null || true)"
+  behavior_sha="$(metadata_field "${root}/behavior_intrusion/metadata.json" diagnosis.image_sha256 2>/dev/null || true)"
+  face_sha="$(metadata_field "${root}/face_observation/metadata.json" diagnosis.image_sha256 2>/dev/null || true)"
+  behavior_first="$(metadata_field "${root}/behavior_intrusion/metadata.json" diagnosis.is_first_frame 2>/dev/null || true)"
+  face_first="$(metadata_field "${root}/face_observation/metadata.json" diagnosis.is_first_frame 2>/dev/null || true)"
   gallery_available="false"
-  cat >"${root}/README.md" <<'EOF'
-# V1.3 Visual Result Latest
+  cat >"${root}/README.md" <<EOF
+# V1.4 Visual Result Latest
 
-This is debug/MVP visual output, not production evidence. V1.3 only draws boxes
-when the image is frame_uuid-aligned with the record. Manual review is required
-before accepting visual correctness.
+This is debug/MVP visual output, not production evidence. V1.4 only accepts
+boxes when the image has independent proof that it is the record frame UUID.
+If proof is blocked, no boxes are accepted.
+
+- Behavior frame proof: ${behavior_status}
+- Behavior image proof source: ${behavior_proof}
+- Behavior image sha256: ${behavior_sha}
+- Behavior is first frame: ${behavior_first}
+- Face frame proof: ${face_status}
+- Face image proof source: ${face_proof}
+- Face image sha256: ${face_sha}
+- Face is first frame: ${face_first}
+- Gallery recognition available: ${gallery_available}
 EOF
   cat >"${root}/index.html" <<EOF
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>V1.3 Visual Result Latest</title></head>
+<head><meta charset="utf-8"><title>V1.4 Visual Result Latest</title></head>
 <body>
-<h1>V1.3 Visual Result Latest</h1>
+<h1>V1.4 Visual Result Latest</h1>
 <p>Debug/MVP visual output, not production evidence.</p>
-<p>Manual review required before accepting visual correctness.</p>
+<p>Blocked frame proof means boxes are not accepted.</p>
 <ul>
-  <li>behavior_intrusion frame_alignment_status: <strong>${behavior_status}</strong></li>
-  <li>face_observation frame_alignment_status: <strong>${face_status}</strong></li>
+  <li>Behavior frame proof: <strong>${behavior_status}</strong></li>
+  <li>Behavior image proof source: <strong>${behavior_proof}</strong></li>
+  <li>Behavior image sha256: <code>${behavior_sha}</code></li>
+  <li>Behavior is first frame: <strong>${behavior_first}</strong></li>
+  <li>Face frame proof: <strong>${face_status}</strong></li>
+  <li>Face image proof source: <strong>${face_proof}</strong></li>
+  <li>Face image sha256: <code>${face_sha}</code></li>
+  <li>Face is first frame: <strong>${face_first}</strong></li>
   <li>gallery recognition available: <strong>${gallery_available}</strong></li>
 </ul>
 <h2>Behavior Intrusion</h2>
@@ -206,6 +276,7 @@ python3 scripts/debug/generate_visual_result.py \
   --person-bbox-format xywh \
   --source-mp4 "${SOURCE_MP4}" \
   --frame-trace-root "${TRACE_ROOT}" \
+  --explicit-frame-uuid-index-root "${EXPLICIT_INDEX_ROOT}" \
   | tee "${WORK_DIR}/behavior_generate.log"
 
 BEHAVIOR_METADATA="${OUTPUT_ROOT}/behavior_intrusion/metadata.json"
@@ -235,15 +306,49 @@ LIMIT 1;
 if [[ -z "${FACE_ROW}" ]]; then
   mkdir -p "${OUTPUT_ROOT}/face_observation"
   cat >"${OUTPUT_ROOT}/face_observation/diagnosis.json" <<'JSON'
-{"frame_alignment_status":"blocked","blocking_reason":"no_face_observation_with_face_bbox"}
+{
+  "bbox_drawn": false,
+  "blocking_reason": "no_face_observation_with_face_bbox",
+  "frame_alignment_status": "blocked",
+  "frame_proof_status": "blocked",
+  "image_frame_uuid_proof_source": "unknown",
+  "image_sha256": null,
+  "is_first_frame": "unknown",
+  "recognition_semantics_status": "face_observation_only_not_gallery_match",
+  "visual_correctness_status": "blocked"
+}
 JSON
-  echo "FACE_VISUAL_BLOCKED"
+  cat >"${OUTPUT_ROOT}/face_observation/metadata.json" <<'JSON'
+{
+  "annotations": {
+    "face_bbox_status": "missing_required",
+    "frame_alignment_status": "blocked"
+  },
+  "diagnosis": {
+    "bbox_drawn": false,
+    "blocking_reason": "no_face_observation_with_face_bbox",
+    "frame_alignment_status": "blocked",
+    "frame_proof_status": "blocked",
+    "image_frame_uuid_proof_source": "unknown",
+    "image_sha256": null,
+    "is_first_frame": "unknown",
+    "recognition_semantics_status": "face_observation_only_not_gallery_match",
+    "visual_correctness_status": "blocked"
+  },
+  "media": {
+    "annotated_snapshot_path": null,
+    "snapshot_annotation_status": "blocked"
+  }
+}
+JSON
+  echo "V1.4 FRAME_PROOF_BLOCKED"
 else
   printf "%s" "${FACE_ROW}" >"${FACE_JSON}"
   python3 scripts/debug/generate_visual_result.py \
     --event-json "${FACE_JSON}" \
     --source-mp4 "${SOURCE_MP4}" \
     --frame-trace-root "${TRACE_ROOT}" \
+    --explicit-frame-uuid-index-root "${EXPLICIT_INDEX_ROOT}" \
     --output-root "${OUTPUT_ROOT}" \
     --run-id face_observation \
     --result-type face_observation \
@@ -254,6 +359,9 @@ else
 fi
 
 write_gallery_unavailable "${OUTPUT_ROOT}"
+validate_cross_result_reuse \
+  "${OUTPUT_ROOT}/behavior_intrusion/diagnosis.json" \
+  "${OUTPUT_ROOT}/face_observation/diagnosis.json"
 write_top_index "${OUTPUT_ROOT}"
 
 echo "GALLERY_RECOGNITION_UNAVAILABLE"
@@ -261,9 +369,11 @@ echo "gallery_reason=no_frame_anchored_watchlist_hit_or_gallery_match"
 echo "manual_index=${OUTPUT_ROOT}/index.html"
 echo "manual_readme=${OUTPUT_ROOT}/README.md"
 
+BEHAVIOR_STATUS="$(metadata_field "${OUTPUT_ROOT}/behavior_intrusion/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || echo blocked)"
 FACE_STATUS="$(metadata_field "${OUTPUT_ROOT}/face_observation/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || echo blocked)"
-if [[ "${FACE_STATUS}" == "matched" ]]; then
-  echo "V1.3 PASS: behavior visual pass; face visual pass; gallery recognition unavailable"
+if [[ "${BEHAVIOR_STATUS}" == "matched" && "${FACE_STATUS}" == "matched" ]]; then
+  echo "V1.4 BEHAVIOR_FRAME_PROOF_PASS"
+  echo "V1.4 FACE_FRAME_PROOF_PASS"
 else
-  echo "V1.3 PARTIAL PASS: behavior visual pass; face visual blocked due to no frame-aligned image; gallery recognition unavailable"
+  echo "V1.4 FRAME_PROOF_BLOCKED"
 fi

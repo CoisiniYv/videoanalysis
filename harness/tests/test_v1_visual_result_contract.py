@@ -52,7 +52,10 @@ def run_renderer(
     face_bbox_format: str = "cxcywh",
     source_frame_uuid: str | None = None,
     frame_trace_root: Path | None = None,
+    explicit_frame_uuid_index_root: Path | None = None,
     source_mp4: Path | None = None,
+    source_frame: str | None = None,
+    source_clip: str | None = None,
 ) -> dict:
     module = load_visual_module()
     frame, clip = write_test_media(tmp_path)
@@ -63,12 +66,15 @@ def run_renderer(
         event_json=str(event_json),
         a2a_summary_json=None,
         database_url=None,
-        source_frame=str(frame),
+        source_frame=str(source_frame or frame),
         source_frame_uuid=source_frame_uuid,
-        source_clip=str(clip),
+        source_clip=str(source_clip or clip),
         source_mp4=str(source_mp4 or (tmp_path / "missing.mp4")),
         frame_trace_root=str(frame_trace_root or (tmp_path / "missing_trace")),
         runtime_frame_dump_root=str(tmp_path / "runtime_frame_dump"),
+        explicit_frame_uuid_index_root=str(
+            explicit_frame_uuid_index_root or (tmp_path / "missing_explicit_index")
+        ),
         output_root=str(output_root or (tmp_path / "visual_results")),
         run_id="test_run",
         mode="both",
@@ -87,7 +93,30 @@ def frame_uuid_for(event: dict) -> str | None:
 
 
 def run_renderer_matched(tmp_path: Path, event: dict, **kwargs) -> dict:
-    return run_renderer(tmp_path, event, source_frame_uuid=frame_uuid_for(event), **kwargs)
+    frame, _clip = write_test_media(tmp_path)
+    frame_uuid = frame_uuid_for(event)
+    source_id = event.get("source_id") or event.get("payload", {}).get("media", {}).get("source_id") or ""
+    index_root = tmp_path / "explicit_index"
+    index_dir = index_root / source_id
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / f"{frame_uuid}.json").write_text(
+        json.dumps(
+            {
+                "frame_uuid": frame_uuid,
+                "source_id": source_id,
+                "image_path": str(frame),
+                "proof_source": "unit_test_explicit_index",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return run_renderer(
+        tmp_path,
+        event,
+        source_frame=str(frame),
+        explicit_frame_uuid_index_root=index_root,
+        **kwargs,
+    )
 
 
 def test_metadata_schema_required_fields(tmp_path):
@@ -339,22 +368,25 @@ def test_missing_frame_uuid_image_blocks_visual_rendering(tmp_path):
     assert "frame_uuid-aligned image is required" in metadata["required_annotation_failures"]
 
 
-def test_frame_uuid_mismatch_does_not_draw_bbox(tmp_path):
+def test_image_frame_uuid_copied_from_record_without_proof_source_blocks(tmp_path):
     metadata = run_renderer(
         tmp_path,
         {
-            "event_id": "event-mismatch",
+            "event_id": "event-self-proof",
             "event_type": "intrusion",
             "frame_uuid": "record-frame",
+            "_image_frame_uuid": "record-frame",
             "payload": {
                 "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
                 "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
             },
         },
         result_type="behavior_intrusion",
-        source_frame_uuid="other-frame",
+        source_frame_uuid="record-frame",
     )
     assert metadata["diagnosis"]["frame_alignment_status"] == "blocked"
+    assert metadata["diagnosis"]["image_frame_uuid_proof_source"] == "unknown"
+    assert metadata["diagnosis"]["blocking_reason"] == "source_frame_without_independent_frame_uuid_proof"
     assert metadata["media"]["annotated_snapshot_path"] is None
 
 
@@ -374,8 +406,10 @@ def test_behavior_bbox_only_drawn_when_frame_alignment_matched(tmp_path):
         result_type="behavior_intrusion",
     )
     assert metadata["diagnosis"]["frame_alignment_status"] == "matched"
+    assert metadata["diagnosis"]["image_frame_uuid_proof_source"] == "explicit_frame_uuid_index"
     assert metadata["annotations"]["person_bbox_status"] == "generated"
     assert metadata["media"]["annotated_snapshot_path"]
+    assert metadata["diagnosis"]["bbox_drawn"] is True
 
 
 def test_face_bbox_only_drawn_when_frame_alignment_matched(tmp_path):
@@ -403,6 +437,7 @@ def test_face_bbox_only_drawn_when_frame_alignment_matched(tmp_path):
         face_bbox_format="cxcywh",
     )
     assert matched["diagnosis"]["frame_alignment_status"] == "matched"
+    assert matched["diagnosis"]["image_frame_uuid_proof_source"] == "explicit_frame_uuid_index"
     assert matched["annotations"]["face_bbox_status"] == "generated"
 
 
@@ -424,6 +459,100 @@ def test_face_observation_marked_not_gallery_recognition(tmp_path):
         metadata["diagnosis"]["recognition_semantics_status"]
         == "face_observation_only_not_gallery_match"
     )
+    assert metadata["diagnosis"]["is_gallery_recognition"] is False
+
+
+def test_different_frame_uuid_same_image_sha256_is_image_reuse_failure():
+    module = load_visual_module()
+    behavior = {
+        "record_frame_uuid": "behavior-frame",
+        "image_sha256": "same-sha",
+    }
+    face = {
+        "record_frame_uuid": "face-frame",
+        "image_sha256": "same-sha",
+    }
+    result = module.evaluate_cross_result_image_reuse(behavior, face)
+    assert result["visual_resolver_status"] == "failed"
+    assert result["reason"] == "different_records_reused_same_image"
+
+
+def test_source_extraction_actual_frame_index_zero_blocks(tmp_path):
+    module = load_visual_module()
+    source_mp4 = tmp_path / "source.mp4"
+    _frame, clip = write_test_media(tmp_path)
+    source_mp4.write_bytes(clip.read_bytes())
+    trace_root = tmp_path / "trace"
+    trace_dir = trace_root / "source-1"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "trace.jsonl").write_text(
+        json.dumps(
+            {
+                "source_id": "source-1",
+                "frame_uuid": "frame-zero",
+                "source_frame_index": 0,
+                "frame_num": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "event_id": "event-zero",
+            "event_type": "intrusion",
+            "source_id": "source-1",
+            "frame_uuid": "frame-zero",
+            "payload": {
+                "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            },
+        },
+        result_type="behavior_intrusion",
+        frame_trace_root=trace_root,
+        source_mp4=source_mp4,
+    )
+    assert metadata["diagnosis"]["frame_alignment_status"] == "blocked"
+    assert (
+        metadata["diagnosis"]["blocking_reason"]
+        == "source_extraction_returned_first_frame_or_unknown"
+    )
+    assert metadata["diagnosis"]["source_extraction"]["actual_frame_index"] == 0
+    assert metadata["media"]["annotated_snapshot_path"] is None
+
+
+def test_bbox_not_drawn_when_frame_proof_blocked(tmp_path):
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "event_id": "event-blocked-box",
+            "event_type": "intrusion",
+            "frame_uuid": "blocked-frame",
+            "payload": {
+                "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            },
+        },
+        result_type="behavior_intrusion",
+    )
+    assert metadata["diagnosis"]["frame_proof_status"] == "blocked"
+    assert metadata["diagnosis"]["bbox_drawn"] is False
+    assert metadata["media"]["snapshot_annotation_status"] == "blocked"
+
+
+def test_matched_requires_trusted_proof_source(tmp_path):
+    module = load_visual_module()
+    frame, _clip = write_test_media(tmp_path)
+    resolved = module.ResolvedImage(
+        frame,
+        width=320,
+        height=240,
+        frame_uuid="frame-1",
+        resolution_status="matched",
+        proof_source="unknown",
+    )
+    assert resolved.matched is False
 
 
 def test_diagnosis_contains_raw_parsed_image_size_fields(tmp_path):
@@ -464,6 +593,8 @@ def test_smoke_and_docs_exist_and_document_boundaries():
     smoke = SMOKE.read_text(encoding="utf-8")
     assert "behavior_intrusion" in smoke
     assert "face_observation" in smoke
-    assert "BEHAVIOR_VISUAL_PASS" in smoke
-    assert "FACE_VISUAL_BLOCKED" in smoke
+    assert "V1.4 BEHAVIOR_FRAME_PROOF_PASS" in smoke
+    assert "V1.4 FACE_FRAME_PROOF_PASS" in smoke
+    assert "V1.4 FRAME_PROOF_BLOCKED" in smoke
+    assert "V1.4 IMAGE_REUSE_FAILED" in smoke
     assert "GALLERY_RECOGNITION_UNAVAILABLE" in smoke
