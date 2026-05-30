@@ -108,6 +108,9 @@ class EventResponse(BaseModel):
             p = str(path)
             if p.startswith(f"{media_base_url}/"):
                 return p
+            host_media_root = "/data/video-analytics/media"
+            if p.startswith(f"{host_media_root}/"):
+                return f"{media_base_url}{p[len(host_media_root):]}"
             if p.startswith("/"):
                 return f"{media_base_url}{p}"
             return f"{media_base_url}/{p}"
@@ -237,6 +240,9 @@ class EventEvidenceResponse(BaseModel):
     source_event_id: str
     event_type: str
     media_status: str = "not_implemented"
+    snapshot_status: str = "not_implemented"
+    clip_status: str = "not_implemented"
+    metadata_status: str = "not_implemented"
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
     metadata_path: Optional[str] = None
@@ -275,6 +281,9 @@ class EventEvidenceResponse(BaseModel):
             source_event_id=event.source_event_id,
             event_type=event.event_type,
             media_status=event.media_status,
+            snapshot_status=event.media.get("snapshot_status", "not_implemented"),
+            clip_status=event.media.get("clip_status", "not_implemented"),
+            metadata_status=event.media.get("metadata_status", "not_implemented"),
             snapshot_path=event.snapshot_path,
             clip_path=event.clip_path,
             metadata_path=metadata_path,

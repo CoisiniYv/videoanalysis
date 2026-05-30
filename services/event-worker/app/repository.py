@@ -82,6 +82,7 @@ EVIDENCE_TASK_STATUSES = (
     "pending",
     "processing",
     "ready",
+    "partial",
     "failed",
     "not_implemented",
 )

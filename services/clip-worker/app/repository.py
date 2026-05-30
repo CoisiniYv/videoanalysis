@@ -71,3 +71,95 @@ def update_clip_status(
     except Exception:
         logger.exception("update_clip_status failed event_id=%s status=%s", event_id, status)
         return False
+
+
+def update_evidence_media_result(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    task_id: str | None,
+    media_status: str,
+    snapshot_status: str,
+    metadata_status: str,
+    clip_status: str,
+    snapshot_path: str | None,
+    metadata_path: str,
+    output_root: str,
+    storage_fallback_used: bool = False,
+    storage_fallback_reason: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """Update events and evidence_tasks after R3.2A metadata/snapshot output."""
+    if not event_id:
+        return False
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET snapshot_path = COALESCE(%(snapshot_path)s, snapshot_path),
+                    media_status = %(media_status)s,
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'snapshot_status', %(snapshot_status)s::text,
+                                'metadata_status', %(metadata_status)s::text,
+                                'clip_status', %(clip_status)s::text,
+                                'snapshot_path', %(snapshot_path)s::text,
+                                'metadata_path', %(metadata_path)s::text,
+                                'raw_clip_path', NULL,
+                                'annotated_clip_path', NULL,
+                                'error_message', %(error_message)s::text
+                            )
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "media_status": media_status,
+                    "snapshot_status": snapshot_status,
+                    "metadata_status": metadata_status,
+                    "clip_status": clip_status,
+                    "snapshot_path": snapshot_path,
+                    "metadata_path": metadata_path,
+                    "error_message": error_message,
+                },
+            )
+            event_updated = cur.rowcount is not None and cur.rowcount > 0
+
+            if task_id:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = %(media_status)s,
+                        snapshot_path = COALESCE(%(snapshot_path)s, snapshot_path),
+                        metadata_path = %(metadata_path)s,
+                        output_root = %(output_root)s,
+                        storage_fallback_used = %(storage_fallback_used)s,
+                        storage_fallback_reason = %(storage_fallback_reason)s,
+                        error_message = %(error_message)s,
+                        updated_at = now()
+                    WHERE task_id = %(task_id)s
+                    """,
+                    {
+                        "task_id": task_id,
+                        "media_status": media_status,
+                        "snapshot_path": snapshot_path,
+                        "metadata_path": metadata_path,
+                        "output_root": output_root,
+                        "storage_fallback_used": storage_fallback_used,
+                        "storage_fallback_reason": storage_fallback_reason,
+                        "error_message": error_message,
+                    },
+                )
+            return event_updated
+    except Exception:
+        logger.exception(
+            "update_evidence_media_result failed event_id=%s status=%s",
+            event_id,
+            media_status,
+        )
+        return False
