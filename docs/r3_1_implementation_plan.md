@@ -258,6 +258,117 @@ AdaFace embedding path
 person-crop face detector strategy
 ```
 
+## R3.1C - Media Retention and Debug Sink Policy
+
+### Goal
+
+Define bounded media retention before real snapshot and clip generation:
+
+```text
+controlled evidence output
+  -> debug sink boundary
+  -> retention limits
+  -> storage backpressure
+  -> later cleanup worker implementation
+```
+
+R3.1C does not implement cleanup worker code, snapshot generation, clip
+generation, a Savant pipeline change, or a performance test.
+
+### Files To Modify
+
+```text
+docs/media_output_directory_policy.md
+docs/r3_1_performance_design.md
+docs/r3_1_evidence_output_architecture_plan.md
+docs/r3_1_implementation_plan.md
+docs/operator_event_evidence_flow.md
+```
+
+### Files To Add
+
+```text
+docs/r3_1c_media_retention_and_debug_sink_policy.md
+harness/tests/test_r3_1c_media_retention_policy_contract.py
+```
+
+### Retention Defaults
+
+```text
+retention_days = 7
+max_total_gb = 500
+max_camera_gb = 50
+min_free_disk_percent = 15
+delete_oldest_first = true
+```
+
+Cleanup deletes debug sink output first, then expired evidence media. Cleanup
+must never delete DB rows; it should mark media as `media_expired` or
+`media_deleted`.
+
+### Debug Sink Policy
+
+`video-file-sink` and `metadata-sink` are debug/development sinks. They are not
+production evidence, are not returned by the evidence API, and must not be
+enabled as long-running production defaults without retention.
+
+### DB Migration
+
+No migration in this policy-only phase. A later cleanup worker phase may add
+explicit media retention audit fields if the existing `media_status` and
+payload metadata are insufficient.
+
+### API Changes
+
+No API behavior change in this policy-only phase. Existing evidence API
+responses should remain stable and may later expose `media_expired`,
+`media_deleted`, or `storage_limited` statuses.
+
+### Worker Changes
+
+No worker behavior change in this policy-only phase. Later work can implement a
+cleanup worker or scheduled cleanup task outside the Savant inference path.
+
+### Contract Tests
+
+Static tests verify the policy names debug sinks, retention defaults,
+canonical `raw_clip.mp4`, optional/on-demand `annotated_clip.mp4`, no default
+dual video output, storage backpressure, and the no Savant pipeline change /
+no performance test scope.
+
+### Smoke Tests
+
+No runtime smoke is required. This is documentation and contract only.
+
+### Acceptance Commands
+
+```bash
+python3 -m pytest harness/tests/test_r3_1c_media_retention_policy_contract.py -q
+python3 -m pytest \
+  harness/tests/test_r3_1_evidence_output_plan_contract.py \
+  harness/tests/test_r3_1a_behavior_event_evidence_contract.py \
+  harness/tests/test_r3_1b_face_match_evidence_contract.py \
+  -q
+git diff --check
+```
+
+### Boundaries
+
+Do not modify:
+
+```text
+modules/savant_security/module.yml
+Redis producer
+snapshot or clip generation code
+compose runtime behavior
+```
+
+Do not run performance tests.
+
+### Independent Commit
+
+Yes. R3.1C is independently committable after review.
+
 ### Independent Commit
 
 Yes. R3.1B should be independently committable after R3.1A.

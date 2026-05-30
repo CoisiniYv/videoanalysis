@@ -75,6 +75,17 @@ defer clip
 mark clip failed or not_implemented after retry policy
 ```
 
+Storage backpressure adds a bounded-media rule:
+
+```text
+keep event
+create evidence_task when required
+snapshot-first / clip-later
+skip or delay clip when storage is limited
+do not generate annotated video
+mark media_status as failed, skipped, storage_limited, media_expired, or media_deleted
+```
+
 ## Snapshot First / Clip Later
 
 Snapshot-first / clip-later strategy:
@@ -130,6 +141,12 @@ Required metrics before performance testing:
 9. retry count distribution.
 10. face-worker pgvector search latency.
 11. API query latency.
+12. media_dir_total_gb.
+13. debug_sink_total_gb.
+14. evidence_total_gb.
+15. media_cleanup_deleted_bytes.
+16. media_cleanup_failures.
+17. storage_limited_count.
 
 Latency categories must be separable:
 
@@ -175,6 +192,35 @@ When storage root is unavailable:
 2. development fallback to `./tmp` only when explicit;
 3. record `storage_fallback_used=true`;
 4. do not silently write large outputs into the repo.
+
+## Media Retention and Debug Sink Limits
+
+`video-file-sink` and `metadata-sink` are debug/development sinks, not
+production evidence. They must not be left running in production without
+retention limits because they can continuously write video or NDJSON metadata
+under the shared media mount.
+
+Production evidence is limited to controlled event directories:
+
+```text
+/data/video-analytics/media/events/YYYY/MM/DD/<event_id>/
+```
+
+Recommended retention defaults:
+
+```text
+retention_days = 7
+max_total_gb = 500
+max_camera_gb = 50
+min_free_disk_percent = 15
+delete_oldest_first = true
+```
+
+Cleanup should delete debug sink output first, then expired evidence media.
+Cleanup must never delete DB rows such as `events`, `face_observations`, or
+`match_results`; it should mark media as `media_expired` or `media_deleted`.
+The cleanup path must be isolated from Savant inference and must not run inside
+the GPU pipeline.
 
 ## Performance Test Preconditions
 

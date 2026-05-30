@@ -208,6 +208,38 @@ storage_fallback_reason=<reason>
 No evidence output may be written back into the repo working directory
 silently.
 
+## Media Retention and Debug Sink Policy
+
+`video-file-sink` and `metadata-sink` are debug/development sinks. They are not
+production evidence, do not enter the evidence API, and should not be enabled
+as long-running production defaults.
+
+Debug sink output must be isolated from controlled event evidence. Controlled
+production evidence remains:
+
+```text
+/data/video-analytics/media/events/YYYY/MM/DD/<event_id>/
+```
+
+Retention defaults before production media generation:
+
+```text
+retention_days = 7
+max_total_gb = 500
+max_camera_gb = 50
+min_free_disk_percent = 15
+delete_oldest_first = true
+```
+
+Cleanup deletes debug sink output first, then expired evidence media. Cleanup
+must never delete DB rows such as `events`, `face_observations`, or
+`match_results`; it should mark media as `media_expired` or `media_deleted` and
+preserve audit metadata.
+
+When storage is limited, event ingestion continues, evidence tasks may be
+created, snapshot-first / clip-later applies, clips may be skipped or delayed,
+and `media_status` may be `failed`, `skipped`, or `storage_limited`.
+
 ## media_status State Machine
 
 R3.1 uses one event-level `media_status` state machine:
@@ -318,7 +350,7 @@ Responsibilities:
 2. Annotated snapshots and optional/on-demand annotated clips.
 3. Watchlist rule management and live search session management.
 4. Best-shot selection across multiple face observations.
-5. Production retention and cleanup policy.
+5. Production retention cleanup worker implementation.
 6. Load testing after the event/evidence trunk is stable.
 7. Annotated video generation after the performance baseline or report/export
    phase, not as default event evidence.
