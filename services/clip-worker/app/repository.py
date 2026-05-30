@@ -85,6 +85,7 @@ def update_evidence_media_result(
     snapshot_path: str | None,
     metadata_path: str,
     output_root: str,
+    clip_path: str | None = None,
     storage_fallback_used: bool = False,
     storage_fallback_reason: str | None = None,
     error_message: str | None = None,
@@ -98,6 +99,7 @@ def update_evidence_media_result(
                 """
                 UPDATE events
                 SET snapshot_path = COALESCE(%(snapshot_path)s, snapshot_path),
+                    clip_path = COALESCE(%(clip_path)s, clip_path),
                     media_status = %(media_status)s,
                     payload = COALESCE(payload, '{}'::jsonb)
                         || jsonb_build_object(
@@ -108,9 +110,11 @@ def update_evidence_media_result(
                                 'metadata_status', %(metadata_status)s::text,
                                 'clip_status', %(clip_status)s::text,
                                 'snapshot_path', %(snapshot_path)s::text,
+                                'clip_path', %(clip_path)s::text,
                                 'metadata_path', %(metadata_path)s::text,
-                                'raw_clip_path', NULL,
+                                'raw_clip_path', %(clip_path)s::text,
                                 'annotated_clip_path', NULL,
+                                'clip_error_message', %(clip_error_message)s::text,
                                 'error_message', %(error_message)s::text
                             )
                         ),
@@ -124,7 +128,11 @@ def update_evidence_media_result(
                     "metadata_status": metadata_status,
                     "clip_status": clip_status,
                     "snapshot_path": snapshot_path,
+                    "clip_path": clip_path,
                     "metadata_path": metadata_path,
+                    "clip_error_message": error_message
+                    if clip_status in ("failed", "not_implemented")
+                    else None,
                     "error_message": error_message,
                 },
             )
@@ -136,6 +144,7 @@ def update_evidence_media_result(
                     UPDATE evidence_tasks
                     SET status = %(media_status)s,
                         snapshot_path = COALESCE(%(snapshot_path)s, snapshot_path),
+                        clip_path = COALESCE(%(clip_path)s, clip_path),
                         metadata_path = %(metadata_path)s,
                         output_root = %(output_root)s,
                         storage_fallback_used = %(storage_fallback_used)s,
@@ -148,6 +157,7 @@ def update_evidence_media_result(
                         "task_id": task_id,
                         "media_status": media_status,
                         "snapshot_path": snapshot_path,
+                        "clip_path": clip_path,
                         "metadata_path": metadata_path,
                         "output_root": output_root,
                         "storage_fallback_used": storage_fallback_used,

@@ -11,6 +11,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.evidence_metadata_writer import build_metadata, write_metadata_file
+from app.evidence_raw_clip_writer import process_raw_clip
 from app.evidence_snapshot_writer import build_overlay, write_snapshot_jpg
 from app.repository import update_evidence_media_result
 
@@ -28,6 +29,7 @@ class EvidenceMediaResult:
     clip_status: str
     output_root: str
     snapshot_path: str | None
+    raw_clip_path: str | None
     metadata_path: str
     error_message: str | None
 
@@ -99,8 +101,9 @@ def process_event_evidence(
     rtsp_url: str | None = None,
     media_root: str = DEFAULT_MEDIA_ROOT,
     capture_backend: str = "opencv",
+    raw_mp4_path: str | None = None,
 ) -> EvidenceMediaResult:
-    """Generate metadata.json and best-effort snapshot.jpg for one event."""
+    """Generate metadata.json, best-effort snapshot.jpg, and optional raw_clip.mp4."""
     event, task = load_event_and_task(conn, event_id)
     if event is None:
         raise ValueError(f"event not found: {event_id}")
@@ -123,8 +126,26 @@ def process_event_evidence(
 
     snapshot_status = snapshot["snapshot_status"]
     metadata_status = "ready"
-    media_status = "ready" if snapshot_status == "ready" else "partial"
-    error_message = snapshot.get("error_message")
+
+    raw_clip = process_raw_clip(
+        event=event,
+        task=task,
+        output_root=output_root,
+        raw_mp4_path=raw_mp4_path,
+    )
+    clip_status = raw_clip["clip_status"]
+
+    ready_parts = snapshot_status == "ready" and clip_status == "ready"
+    media_status = "ready" if ready_parts else "partial"
+    error_messages = [
+        msg
+        for msg in (
+            snapshot.get("error_message"),
+            raw_clip.get("clip_error_message"),
+        )
+        if msg
+    ]
+    error_message = "; ".join(error_messages) if error_messages else None
     if fallback_used:
         snapshot["capture"]["storage_fallback_used"] = True
         snapshot["capture"]["storage_fallback_reason"] = fallback_reason
@@ -133,10 +154,13 @@ def process_event_evidence(
         event=event,
         media_status=media_status,
         snapshot_status=snapshot_status,
+        clip_status=clip_status,
         metadata_status=metadata_status,
         snapshot_path=snapshot.get("snapshot_path"),
+        raw_clip_path=raw_clip.get("raw_clip_path"),
         metadata_path=metadata_path,
         capture=snapshot["capture"],
+        clip=raw_clip,
         overlay=overlay,
     )
     write_metadata_file(metadata_path, metadata)
@@ -149,8 +173,9 @@ def process_event_evidence(
         media_status=media_status,
         snapshot_status=snapshot_status,
         metadata_status=metadata_status,
-        clip_status="not_implemented",
+        clip_status=clip_status,
         snapshot_path=snapshot.get("snapshot_path"),
+        clip_path=raw_clip.get("raw_clip_path"),
         metadata_path=metadata_path,
         output_root=output_root,
         storage_fallback_used=fallback_used,
@@ -164,9 +189,10 @@ def process_event_evidence(
         media_status=media_status,
         snapshot_status=snapshot_status,
         metadata_status=metadata_status,
-        clip_status="not_implemented",
+        clip_status=clip_status,
         output_root=output_root,
         snapshot_path=snapshot.get("snapshot_path"),
+        raw_clip_path=raw_clip.get("raw_clip_path"),
         metadata_path=metadata_path,
         error_message=error_message,
     )

@@ -70,7 +70,7 @@ def test_worker_service_supports_partial_media_status() -> None:
     service = _text(MEDIA_SERVICE)
     repo = _text(ROOT / "services" / "event-worker" / "app" / "repository.py")
     assert '"partial"' in repo
-    assert 'media_status = "ready" if snapshot_status == "ready" else "partial"' in service
+    assert 'media_status = "ready" if ready_parts else "partial"' in service
     assert "metadata_status = \"ready\"" in service
 
 
@@ -80,7 +80,7 @@ def test_code_does_not_generate_annotated_clip_by_default() -> None:
     )
     assert "annotated_clip.mp4" not in joined
     assert "\"annotated_clip_path\": None" in _text(METADATA_WRITER)
-    assert "raw_clip.mp4" not in joined
+    assert "raw_clip.mp4" not in _text(SNAPSHOT_WRITER)
 
 
 def test_output_path_uses_data_media_events() -> None:

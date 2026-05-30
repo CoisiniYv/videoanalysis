@@ -245,10 +245,15 @@ class EventEvidenceResponse(BaseModel):
     metadata_status: str = "not_implemented"
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
+    raw_clip_path: Optional[str] = None
+    annotated_clip_path: Optional[str] = None
     metadata_path: Optional[str] = None
     snapshot_url: Optional[str] = None
     clip_url: Optional[str] = None
+    raw_clip_url: Optional[str] = None
+    annotated_clip_url: Optional[str] = None
     metadata_url: Optional[str] = None
+    clip_error_message: Optional[str] = None
     error_message: Optional[str] = None
     event: EventResponse
     evidence_tasks: List[EvidenceTaskResponse] = Field(default_factory=list)
@@ -275,6 +280,9 @@ class EventEvidenceResponse(BaseModel):
         error_message = event.media.get("error_message") if event.media else None
         if not error_message and first_task:
             error_message = first_task.error_message
+        clip_error_message = event.media.get("clip_error_message") if event.media else None
+        raw_clip_path = event.media.get("raw_clip_path") if event.media else None
+        annotated_clip_path = event.media.get("annotated_clip_path") if event.media else None
 
         return cls(
             event_id=event.id,
@@ -286,10 +294,15 @@ class EventEvidenceResponse(BaseModel):
             metadata_status=event.media.get("metadata_status", "not_implemented"),
             snapshot_path=event.snapshot_path,
             clip_path=event.clip_path,
+            raw_clip_path=raw_clip_path,
+            annotated_clip_path=annotated_clip_path,
             metadata_path=metadata_path,
             snapshot_url=event.snapshot_url,
             clip_url=event.clip_url,
+            raw_clip_url=event.clip_url if raw_clip_path == event.clip_path else None,
+            annotated_clip_url=event.annotated_clip_url,
             metadata_url=metadata_url,
+            clip_error_message=clip_error_message,
             error_message=error_message,
             event=event,
             evidence_tasks=evidence_tasks,

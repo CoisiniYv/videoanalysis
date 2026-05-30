@@ -24,13 +24,16 @@ def build_metadata(
     event: dict[str, Any],
     media_status: str,
     snapshot_status: str,
+    clip_status: str,
     metadata_status: str,
     snapshot_path: str | None,
+    raw_clip_path: str | None,
     metadata_path: str,
     capture: dict[str, Any],
+    clip: dict[str, Any] | None,
     overlay: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the R3.2A metadata.json object."""
+    """Build the R3.2A/R3.2B metadata.json object."""
     payload = event.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -53,14 +56,16 @@ def build_metadata(
         "evidence": {
             "media_status": media_status,
             "snapshot_status": snapshot_status,
-            "clip_status": "not_implemented",
+            "clip_status": clip_status,
             "metadata_status": metadata_status,
             "snapshot_path": snapshot_path,
-            "raw_clip_path": None,
+            "raw_clip_path": raw_clip_path,
             "annotated_clip_path": None,
             "metadata_path": metadata_path,
+            "clip_error_message": (clip or {}).get("clip_error_message"),
         },
         "capture": _jsonable(capture),
+        "clip": _jsonable(clip or {}),
         "overlay": _jsonable(overlay),
         "payload": _jsonable(payload),
     }

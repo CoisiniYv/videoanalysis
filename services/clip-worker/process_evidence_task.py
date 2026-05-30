@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Process one R3.2A evidence task into metadata.json and snapshot.jpg."""
+"""Process one evidence task into metadata.json, snapshot.jpg, and optional raw clip."""
 
 from __future__ import annotations
 
@@ -32,6 +32,11 @@ def main() -> int:
         choices=("opencv", "gstreamer", "ffmpeg_fallback"),
     )
     parser.add_argument(
+        "--raw-mp4",
+        default=os.getenv("R3_2B_RAW_MP4", ""),
+        help="Explicit debug/smoke raw MP4 fallback source; not production default.",
+    )
+    parser.add_argument(
         "--database-url",
         default=os.getenv(
             "DATABASE_URL",
@@ -47,6 +52,7 @@ def main() -> int:
             rtsp_url=args.rtsp_url or None,
             media_root=args.media_root,
             capture_backend=args.capture_backend,
+            raw_mp4_path=args.raw_mp4 or None,
         )
     print(json.dumps(result.__dict__, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
