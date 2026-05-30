@@ -27,6 +27,7 @@ from custom.services.face_observation_exporter import (
     FaceObservationExporter,
     create_face_observation_exporter,
 )
+from custom.services.frame_uuid_probe import extract_frame_anchor_metadata
 from custom.services.time_utils import normalize_pts_to_ms
 
 _DEFAULT_EXPORT_MIN_INTERVAL_MS = 1000
@@ -87,6 +88,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         frame_num = getattr(frame_meta, "frame_num", None)
         pts = getattr(frame_meta, "pts", 0) or 0
         timestamp_ms = normalize_pts_to_ms(pts) if pts else self._frame_count
+        frame_anchor = extract_frame_anchor_metadata(frame_meta)
 
         objects = list(frame_meta.objects)
         face_objects = [o for o in objects if getattr(o, "label", "") == "face"]
@@ -138,7 +140,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
 
             obs = self._build_observation(
                 obj, source_id, camera_id, camera_resolved, frame_num, timestamp_ms, i,
-                track_id, feature, throttle_key,
+                track_id, feature, throttle_key, frame_anchor,
             )
             if obs is None:
                 skipped += 1
@@ -301,6 +303,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         track_id: int,
         feature: List[float],
         throttle_key: str,
+        frame_anchor: Optional[dict] = None,
     ) -> Optional[FaceObservationEventDraft]:
         """Build a FaceObservationEventDraft from a Savant face object."""
         landmarks = self._read_landmarks(obj)
@@ -349,6 +352,25 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
 
         # Annotate with camera resolution metadata
         obs.payload["camera_config_resolved"] = camera_resolved
+        anchor = dict(frame_anchor or {})
+        media = obs.payload.setdefault("media", {})
+        if not isinstance(media, dict):
+            media = {}
+            obs.payload["media"] = media
+        for key in (
+            "frame_uuid",
+            "keyframe_uuid",
+            "previous_keyframe_uuid",
+            "frame_pts",
+            "frame_dts",
+            "duration",
+            "frame_num",
+            "ntp_timestamp",
+            "time_base",
+            "source_id",
+            "metadata_source",
+        ):
+            media[key] = anchor.get(key)
 
         # Log concise summary for first few exports
         if self._export_count < 5:

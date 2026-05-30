@@ -88,7 +88,7 @@ def fetch_face_observations(
             SELECT id, source_observation_id, camera_id, source_id, track_id,
                    timestamp_ms, face_bbox, landmarks, face_confidence, quality,
                    person_bbox, snapshot_path, crop_path, embedding,
-                   embedding_model, embedding_dim, embedding_norm
+                   embedding_model, embedding_dim, embedding_norm, payload
             FROM face_observations
             WHERE source_id = %(source_id)s
               AND embedding IS NOT NULL
@@ -110,6 +110,14 @@ def observation_to_embedding(observation: dict[str, Any]) -> list[float]:
     return [float(x) for x in embedding]
 
 
+def _observation_media(observation: dict[str, Any]) -> dict[str, Any]:
+    payload = observation.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    media = payload.get("media")
+    return media if isinstance(media, dict) else {}
+
+
 def build_watchlist_hit_event(
     *,
     observation: dict[str, Any],
@@ -127,6 +135,10 @@ def build_watchlist_hit_event(
     landmarks = _jsonable(observation.get("landmarks"))
     person_name = gallery_match.get("person_name") or ""
     label = f"{person_name} {similarity:.2f}".strip()
+    source_media = _observation_media(observation)
+    frame_uuid = source_media.get("frame_uuid")
+    keyframe_uuid = source_media.get("keyframe_uuid")
+    previous_keyframe_uuid = source_media.get("previous_keyframe_uuid")
 
     payload = {
         "matched_person": {
@@ -169,6 +181,16 @@ def build_watchlist_hit_event(
             "recording_strategy": "reserved",
             "pre_seconds": DEFAULT_EVIDENCE_POLICY["pre_seconds"],
             "post_seconds": DEFAULT_EVIDENCE_POLICY["post_seconds"],
+            "frame_uuid": frame_uuid,
+            "keyframe_uuid": keyframe_uuid,
+            "previous_keyframe_uuid": previous_keyframe_uuid,
+            "frame_pts": source_media.get("frame_pts"),
+            "frame_dts": source_media.get("frame_dts"),
+            "duration": source_media.get("duration"),
+            "frame_num": source_media.get("frame_num"),
+            "ntp_timestamp": source_media.get("ntp_timestamp"),
+            "time_base": source_media.get("time_base"),
+            "metadata_source": source_media.get("metadata_source"),
             "error_message": R3_1B_NOT_IMPLEMENTED_REASON,
         },
     }
@@ -189,8 +211,8 @@ def build_watchlist_hit_event(
         "end_ts_ms": timestamp_ms,
         "event_ts_ms": timestamp_ms,
         "frame_id": 0,
-        "frame_uuid": None,
-        "keyframe_uuid": None,
+        "frame_uuid": frame_uuid,
+        "keyframe_uuid": keyframe_uuid,
         "confidence": similarity,
         "severity": severity,
         "zone": "",

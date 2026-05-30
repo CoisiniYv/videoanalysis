@@ -90,6 +90,9 @@ services:
       EVENT_EXPORTER: redis
       CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.generated.yml
       SAVANT_EVENT_MEDIA_REQUIRED: "${SAVANT_EVENT_MEDIA_REQUIRED:-false}"
+      R3_3A0_FRAME_UUID_PROBE_ENABLED: "${R3_3A0_FRAME_UUID_PROBE_ENABLED:-false}"
+      R3_3A0_PROBE_MAX_FRAMES: "${R3_3A0_PROBE_MAX_FRAMES:-20}"
+      R3_3A0_PROBE_OUTPUT_ROOT: "${R3_3A0_PROBE_OUTPUT_ROOT:-/data/video-analytics/media/debug/r3_3a0_frame_uuid_probe}"
       OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
     ports:
       # Expose 5555 so controller-spawned adapter containers on the same
@@ -100,6 +103,7 @@ services:
       - ../modules/savant_security:/opt/savant/src/module:rw
       - /data/video-analytics/models:/models:rw
       - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/media:/data/video-analytics/media:rw
       - ../testVideo:/testVideo:ro
     deploy:
       resources:

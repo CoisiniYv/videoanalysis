@@ -37,6 +37,10 @@ from custom.models.tracks import TrackState
 from custom.services.camera_config import load_camera_config
 from custom.services.cooldown import CooldownTracker
 from custom.services.event_exporter import EventExporter, create_event_exporter
+from custom.services.frame_uuid_probe import (
+    FrameUuidRuntimeProbe,
+    extract_frame_anchor_metadata,
+)
 from custom.services.rule_runtime import SourceRuntime, build_per_source_runtime
 
 
@@ -75,6 +79,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             track_timeout_s=track_timeout_s,
         )
         self._unknown_source_warned: Set[str] = set()
+        self._frame_uuid_probe = FrameUuidRuntimeProbe()
 
         print(
             f"stage=savant_security_behavior_rules_init "
@@ -132,6 +137,16 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             frame_meta, camera_id=runtime.camera_id
         )
         observations = result.observations
+        timestamp_ms_used_by_event = (
+            max((obs.timestamp_ms for obs in observations), default=None)
+            if observations
+            else None
+        )
+        self._frame_uuid_probe.probe(
+            frame_meta,
+            timestamp_ms_used_by_event=timestamp_ms_used_by_event,
+            notes="BehaviorRulesPyFunc event-decision frame_meta runtime object",
+        )
         runtime.store.update(observations)
 
         events_exported = 0
@@ -173,13 +188,14 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
     ) -> None:
         frame_id = int(getattr(frame_meta, "frame_num", 0))
         event_ts_ms = track.last_seen_ms or int(time.time() * 1000)
+        frame_anchor = extract_frame_anchor_metadata(frame_meta)
 
         event.producer = self.producer
         event.gpu_id = self.gpu_id
         event.frame_id = frame_id
         event.event_ts_ms = event_ts_ms
-        event.frame_uuid = None
-        event.keyframe_uuid = None
+        event.frame_uuid = frame_anchor.get("frame_uuid")
+        event.keyframe_uuid = frame_anchor.get("keyframe_uuid")
         event.camera_id = runtime.camera_id
 
         inside_ms = max(event.end_ts_ms - event.start_ts_ms, 0)
@@ -206,8 +222,16 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 "post_seconds": 5,
                 "source_id": event.source_id,
                 "event_ts_ms": event_ts_ms,
-                "frame_uuid": None,
-                "keyframe_uuid": None,
+                "frame_uuid": frame_anchor.get("frame_uuid"),
+                "keyframe_uuid": frame_anchor.get("keyframe_uuid"),
+                "previous_keyframe_uuid": frame_anchor.get("previous_keyframe_uuid"),
+                "frame_pts": frame_anchor.get("frame_pts"),
+                "frame_dts": frame_anchor.get("frame_dts"),
+                "duration": frame_anchor.get("duration"),
+                "frame_num": frame_anchor.get("frame_num"),
+                "ntp_timestamp": frame_anchor.get("ntp_timestamp"),
+                "time_base": frame_anchor.get("time_base"),
+                "metadata_source": frame_anchor.get("metadata_source"),
             },
         }
 
