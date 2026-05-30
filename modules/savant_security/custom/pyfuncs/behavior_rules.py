@@ -37,7 +37,7 @@ from custom.models.tracks import TrackState
 from custom.services.camera_config import load_camera_config
 from custom.services.cooldown import CooldownTracker
 from custom.services.event_exporter import EventExporter, create_event_exporter
-from custom.services.frame_uuid_probe import (
+from custom.services.frame_anchor_metadata import (
     FrameUuidRuntimeProbe,
     extract_frame_anchor_metadata,
 )

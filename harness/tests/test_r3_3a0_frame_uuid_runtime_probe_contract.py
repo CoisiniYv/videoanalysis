@@ -15,7 +15,7 @@ PROBE = (
     / "savant_security"
     / "custom"
     / "services"
-    / "frame_uuid_probe.py"
+    / "frame_anchor_metadata.py"
 )
 BEHAVIOR_RULES = (
     ROOT
@@ -88,7 +88,7 @@ def test_compose_passes_probe_environment_without_module_pipeline_change() -> No
 
 
 def test_probe_schema_with_fake_frame_meta(tmp_path: Path) -> None:
-    spec = importlib.util.spec_from_file_location("frame_uuid_probe", PROBE)
+    spec = importlib.util.spec_from_file_location("frame_anchor_metadata", PROBE)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -135,7 +135,7 @@ def test_probe_schema_with_fake_frame_meta(tmp_path: Path) -> None:
 
 
 def test_probe_default_disabled(monkeypatch) -> None:
-    spec = importlib.util.spec_from_file_location("frame_uuid_probe_disabled", PROBE)
+    spec = importlib.util.spec_from_file_location("frame_anchor_metadata_disabled", PROBE)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

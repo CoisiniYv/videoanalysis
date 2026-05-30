@@ -27,7 +27,7 @@ from custom.services.face_observation_exporter import (
     FaceObservationExporter,
     create_face_observation_exporter,
 )
-from custom.services.frame_uuid_probe import extract_frame_anchor_metadata
+from custom.services.frame_anchor_metadata import extract_frame_anchor_metadata
 from custom.services.time_utils import normalize_pts_to_ms
 
 _DEFAULT_EXPORT_MIN_INTERVAL_MS = 1000

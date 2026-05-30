@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SAVANT_ROOT = ROOT / "modules" / "savant_security"
 FACE_WORKER_ROOT = ROOT / "services" / "face-worker"
-HELPER = SAVANT_ROOT / "custom" / "services" / "frame_uuid_probe.py"
+HELPER = SAVANT_ROOT / "custom" / "services" / "frame_anchor_metadata.py"
 BEHAVIOR_RULES = SAVANT_ROOT / "custom" / "pyfuncs" / "behavior_rules.py"
 FACE_EXPORTER = SAVANT_ROOT / "custom" / "pyfuncs" / "face_observation_exporter.py"
 FACE_REPOSITORY = FACE_WORKER_ROOT / "app" / "repository.py"
@@ -20,7 +20,7 @@ DOC = ROOT / "docs" / "r3_3a1_unified_frame_anchor_propagation.md"
 
 
 def _load_helper():
-    spec = importlib.util.spec_from_file_location("r3_3a1_frame_uuid_probe", HELPER)
+    spec = importlib.util.spec_from_file_location("r3_3a1_frame_anchor_metadata", HELPER)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
