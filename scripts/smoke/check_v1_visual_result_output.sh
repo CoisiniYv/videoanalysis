@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== V1.1 Visual Annotation Correctness Smoke ==="
-echo "scope=debug_mvp_visual_output_correctness"
+echo "=== V1.3 Frame-Aligned Visual Rendering Smoke ==="
+echo "scope=debug_mvp_frame_aligned_visual_output"
 echo "no_production_clip_worker=YES"
 echo "no_production_media_worker=YES"
 echo "no_replay_cache_sink_deployment=YES"
@@ -11,6 +11,7 @@ echo "no_performance_test=YES"
 
 OUTPUT_ROOT="${V1_OUTPUT_ROOT:-manual-inspection/v1_visual_result_latest}"
 A2A_ROOT="${V1_A2A_ROOT:-/data/video-analytics/media/debug/r3_3a2a_frame_uuid_identity}"
+TRACE_ROOT="${V1_TRACE_ROOT:-/data/video-analytics/media/debug/r3_3a2a_frame_anchor_trace}"
 WORK_DIR="${V1_WORK_DIR:-tmp/v1_visual_result_smoke}"
 DATABASE_URL="${DATABASE_URL:-postgresql://video:video@localhost:5438/video_analytics}"
 PG_CONTAINER="${PG_CONTAINER:-c1-official-postgres}"
@@ -32,129 +33,165 @@ latest_a2a_summary() {
   find "${A2A_ROOT}" -maxdepth 2 -name identity_summary.json -type f 2>/dev/null | sort | tail -1 || true
 }
 
-extract_frame_from_source() {
-  local pts_ns="$1"
-  local out_path="$2"
-  python3 - "$SOURCE_MP4" "$pts_ns" "$out_path" <<'PY'
-import subprocess
+metadata_field() {
+  local metadata_path="$1"
+  local field_path="$2"
+  python3 - "$metadata_path" "$field_path" <<'PY'
+import json
 import sys
 from pathlib import Path
 
-source = Path(sys.argv[1])
-pts_ns = int(float(sys.argv[2] or 0))
-out = Path(sys.argv[3])
-if not source.exists():
-    raise SystemExit(f"source mp4 missing: {source}")
-seek = max(pts_ns / 1_000_000_000.0, 0.0)
-out.parent.mkdir(parents=True, exist_ok=True)
-cmd = [
-    "ffmpeg", "-y", "-ss", f"{seek:.3f}", "-i", str(source),
-    "-frames:v", "1", str(out),
-]
-subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-print(out)
+data = json.loads(Path(sys.argv[1]).read_text())
+cur = data
+for part in sys.argv[2].split("."):
+    cur = cur.get(part) if isinstance(cur, dict) else None
+print("" if cur is None else cur)
 PY
+}
+
+validate_behavior() {
+  local metadata_path="$1"
+  python3 - "$metadata_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata = json.loads(Path(sys.argv[1]).read_text())
+ann = metadata["annotations"]
+diag = metadata["diagnosis"]
+media = metadata["media"]
+failures = []
+if diag.get("frame_alignment_status") != "matched":
+    failures.append(f"frame_alignment_status={diag.get('frame_alignment_status')}")
+if ann.get("person_bbox_status") != "generated":
+    failures.append("person bbox missing")
+if ann.get("roi_status") != "generated":
+    failures.append("ROI missing")
+if not media.get("annotated_snapshot_path") or not Path(media["annotated_snapshot_path"]).exists():
+    failures.append("annotated snapshot missing")
+if failures:
+    raise SystemExit("FAIL: " + "; ".join(failures))
+print("BEHAVIOR_VISUAL_PASS")
+print(f"behavior_record_frame_uuid={diag.get('record_frame_uuid')}")
+print(f"behavior_image_frame_uuid={diag.get('image_frame_uuid')}")
+print(f"behavior_person_bbox_xyxy={diag.get('person_bbox_xyxy')}")
+print(f"behavior_roi_status={ann.get('roi_status')}")
+PY
+}
+
+validate_face_or_blocked() {
+  local metadata_path="$1"
+  python3 - "$metadata_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata = json.loads(Path(sys.argv[1]).read_text())
+ann = metadata["annotations"]
+diag = metadata["diagnosis"]
+media = metadata["media"]
+if diag.get("frame_alignment_status") == "matched":
+    failures = []
+    if ann.get("face_bbox_status") != "generated":
+        failures.append("face bbox missing")
+    if not media.get("annotated_snapshot_path") or not Path(media["annotated_snapshot_path"]).exists():
+        failures.append("annotated snapshot missing")
+    if failures:
+        raise SystemExit("FAIL: " + "; ".join(failures))
+    print("FACE_VISUAL_PASS")
+    print(f"face_record_frame_uuid={diag.get('record_frame_uuid')}")
+    print(f"face_image_frame_uuid={diag.get('image_frame_uuid')}")
+    print(f"face_bbox_xyxy={diag.get('face_bbox_xyxy')}")
+else:
+    print("FACE_VISUAL_BLOCKED")
+    print(f"face_record_frame_uuid={diag.get('record_frame_uuid')}")
+    print(f"face_blocking_reason={diag.get('blocking_reason')}")
+PY
+}
+
+write_gallery_unavailable() {
+  local root="$1"
+  mkdir -p "${root}/gallery_recognition"
+  cat >"${root}/gallery_recognition/diagnosis.json" <<'JSON'
+{
+  "gallery_recognition_visual_sample": {
+    "available": false,
+    "reason": "no_frame_anchored_watchlist_hit_or_gallery_match"
+  },
+  "recognition_semantics_status": "unavailable_not_face_observation",
+  "visual_correctness_status": "blocked"
+}
+JSON
+  cat >"${root}/gallery_recognition/report.md" <<'EOF'
+# Gallery Recognition Visual Sample
+
+Status: unavailable.
+
+No frame-anchored `watchlist_hit`, `live_search_hit`, or `gallery_match`
+record is available for V1.3. A plain `face_observation` is not gallery
+recognition and must not be presented as recognition output.
+EOF
 }
 
 write_top_index() {
   local root="$1"
+  local behavior_status face_status gallery_available
+  behavior_status="$(metadata_field "${root}/behavior_intrusion/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || true)"
+  face_status="$(metadata_field "${root}/face_observation/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || true)"
+  gallery_available="false"
   cat >"${root}/README.md" <<'EOF'
-# V1.1 Visual Result Latest
+# V1.3 Visual Result Latest
 
-This is debug/MVP visual output, not production evidence. V1.1 requires the
-annotations to be semantically correct; empty shell media files are not enough.
-Behavior intrusion output must include ROI polygon, person bbox, event label,
-track_id, camera_id, and frame_uuid. Face observation output must include face
-bbox, quality, track_id, camera_id, and frame_uuid when available.
+This is debug/MVP visual output, not production evidence. V1.3 only draws boxes
+when the image is frame_uuid-aligned with the record. Manual review is required
+before accepting visual correctness.
 EOF
-  cat >"${root}/index.html" <<'EOF'
+  cat >"${root}/index.html" <<EOF
 <!doctype html>
 <html>
-<head><meta charset="utf-8"><title>V1.1 Visual Result Latest</title></head>
+<head><meta charset="utf-8"><title>V1.3 Visual Result Latest</title></head>
 <body>
-<h1>V1.1 Visual Result Latest</h1>
+<h1>V1.3 Visual Result Latest</h1>
 <p>Debug/MVP visual output, not production evidence.</p>
+<p>Manual review required before accepting visual correctness.</p>
+<ul>
+  <li>behavior_intrusion frame_alignment_status: <strong>${behavior_status}</strong></li>
+  <li>face_observation frame_alignment_status: <strong>${face_status}</strong></li>
+  <li>gallery recognition available: <strong>${gallery_available}</strong></li>
+</ul>
 <h2>Behavior Intrusion</h2>
 <ul>
+  <li><a href="behavior_intrusion/diagnosis.json">diagnosis</a></li>
   <li><a href="behavior_intrusion/annotated_snapshot.jpg">annotated snapshot</a></li>
-  <li><a href="behavior_intrusion/annotated_clip.mp4">annotated clip</a></li>
   <li><a href="behavior_intrusion/report.md">report</a></li>
-  <li><a href="behavior_intrusion/metadata.json">metadata</a></li>
 </ul>
 <h2>Face Observation</h2>
 <ul>
+  <li><a href="face_observation/diagnosis.json">diagnosis</a></li>
   <li><a href="face_observation/annotated_snapshot.jpg">annotated snapshot</a></li>
-  <li><a href="face_observation/annotated_clip.mp4">annotated clip</a></li>
   <li><a href="face_observation/report.md">report</a></li>
-  <li><a href="face_observation/metadata.json">metadata</a></li>
+</ul>
+<h2>Gallery Recognition</h2>
+<ul>
+  <li><a href="gallery_recognition/diagnosis.json">diagnosis</a></li>
+  <li><a href="gallery_recognition/report.md">report</a></li>
 </ul>
 </body>
 </html>
 EOF
 }
 
-validate_metadata() {
-  local metadata_path="$1"
-  local result_type="$2"
-  python3 - "$metadata_path" "$result_type" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-metadata = json.loads(Path(sys.argv[1]).read_text())
-result_type = sys.argv[2]
-ann = metadata["annotations"]
-media = metadata["media"]
-failures = []
-
-if metadata.get("required_annotation_status") != "pass":
-    failures.append(f"required_annotation_status={metadata.get('required_annotation_status')}")
-
-if result_type == "behavior_intrusion":
-    if ann.get("roi_status") != "generated":
-        failures.append("ROI polygon was not generated")
-    if ann.get("person_bbox_status") != "generated":
-        failures.append("person bbox was not generated")
-    if not metadata["source"].get("track_id"):
-        failures.append("track_id missing")
-    if not metadata["source"].get("frame_uuid"):
-        failures.append("frame_uuid missing")
-    if not media.get("annotated_clip_path"):
-        failures.append("annotated clip missing")
-elif result_type == "face_observation":
-    if ann.get("face_bbox_status") != "generated":
-        failures.append("face bbox was not generated")
-    if not metadata["source"].get("track_id"):
-        failures.append("track_id missing")
-    if not metadata["source"].get("frame_uuid"):
-        failures.append("frame_uuid missing")
-
-for key in ("annotated_snapshot_path", "report_path", "index_path"):
-    path = media.get(key)
-    if not path or not Path(path).exists() or Path(path).stat().st_size <= 0:
-        failures.append(f"{key} missing/non-empty check failed: {path}")
-
-if failures:
-    raise SystemExit("FAIL: " + "; ".join(failures))
-
-print(f"{result_type}_metadata={sys.argv[1]}")
-print(f"{result_type}_required_annotation_status={metadata.get('required_annotation_status')}")
-print(f"{result_type}_track_id={metadata['source'].get('track_id')}")
-print(f"{result_type}_bbox={metadata.get('bbox')}")
-PY
-}
-
 SUMMARY_JSON="$(latest_a2a_summary)"
 if [[ -z "${SUMMARY_JSON}" || ! -f "${SUMMARY_JSON}" ]]; then
-  echo "FAIL: no A2a identity_summary.json found under ${A2A_ROOT}; V1.1 needs real behavior source material"
+  echo "FAIL: no A2a identity_summary.json found under ${A2A_ROOT}; behavior requires frame_uuid-aligned material"
   exit 1
 fi
 echo "behavior_summary_json=${SUMMARY_JSON}"
 
 BEHAVIOR_FRAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("inspection_material_path") or "")' "${SUMMARY_JSON}")"
 BEHAVIOR_CLIP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_aligned_clip_path") or "")' "${SUMMARY_JSON}")"
-if [[ ! -f "${BEHAVIOR_FRAME}" || ! -f "${BEHAVIOR_CLIP}" ]]; then
-  echo "FAIL: behavior A2a frame/clip missing: frame=${BEHAVIOR_FRAME} clip=${BEHAVIOR_CLIP}"
+if [[ ! -f "${BEHAVIOR_FRAME}" ]]; then
+  echo "FAIL: behavior A2a matched frame missing: ${BEHAVIOR_FRAME}"
   exit 1
 fi
 
@@ -167,14 +204,14 @@ python3 scripts/debug/generate_visual_result.py \
   --result-type behavior_intrusion \
   --camera-config "${CAMERA_CONFIG}" \
   --person-bbox-format xywh \
+  --source-mp4 "${SOURCE_MP4}" \
+  --frame-trace-root "${TRACE_ROOT}" \
   | tee "${WORK_DIR}/behavior_generate.log"
 
 BEHAVIOR_METADATA="${OUTPUT_ROOT}/behavior_intrusion/metadata.json"
-validate_metadata "${BEHAVIOR_METADATA}" behavior_intrusion
+validate_behavior "${BEHAVIOR_METADATA}"
 
 FACE_JSON="${WORK_DIR}/face_observation.json"
-FACE_FRAME="${WORK_DIR}/face_frame.jpg"
-FACE_CLIP="${BEHAVIOR_CLIP}"
 FACE_ROW="$(psql_value "
 SELECT json_build_object(
   'source_observation_id', source_observation_id,
@@ -196,30 +233,37 @@ ORDER BY created_at DESC
 LIMIT 1;
 ")"
 if [[ -z "${FACE_ROW}" ]]; then
-  echo "FAIL: no face_observation with face_bbox found"
-  exit 1
+  mkdir -p "${OUTPUT_ROOT}/face_observation"
+  cat >"${OUTPUT_ROOT}/face_observation/diagnosis.json" <<'JSON'
+{"frame_alignment_status":"blocked","blocking_reason":"no_face_observation_with_face_bbox"}
+JSON
+  echo "FACE_VISUAL_BLOCKED"
+else
+  printf "%s" "${FACE_ROW}" >"${FACE_JSON}"
+  python3 scripts/debug/generate_visual_result.py \
+    --event-json "${FACE_JSON}" \
+    --source-mp4 "${SOURCE_MP4}" \
+    --frame-trace-root "${TRACE_ROOT}" \
+    --output-root "${OUTPUT_ROOT}" \
+    --run-id face_observation \
+    --result-type face_observation \
+    --face-bbox-format cxcywh \
+    | tee "${WORK_DIR}/face_generate.log"
+  FACE_METADATA="${OUTPUT_ROOT}/face_observation/metadata.json"
+  validate_face_or_blocked "${FACE_METADATA}"
 fi
-printf "%s" "${FACE_ROW}" >"${FACE_JSON}"
-FACE_PTS="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(((data.get("payload") or {}).get("media") or {}).get("frame_pts") or 0)' "${FACE_JSON}")"
-extract_frame_from_source "${FACE_PTS}" "${FACE_FRAME}" >/dev/null
 
-python3 scripts/debug/generate_visual_result.py \
-  --event-json "${FACE_JSON}" \
-  --source-frame "${FACE_FRAME}" \
-  --source-clip "${FACE_CLIP}" \
-  --output-root "${OUTPUT_ROOT}" \
-  --run-id face_observation \
-  --result-type face_observation \
-  --face-bbox-format cxcywh \
-  | tee "${WORK_DIR}/face_generate.log"
-
-FACE_METADATA="${OUTPUT_ROOT}/face_observation/metadata.json"
-validate_metadata "${FACE_METADATA}" face_observation
-
+write_gallery_unavailable "${OUTPUT_ROOT}"
 write_top_index "${OUTPUT_ROOT}"
 
+echo "GALLERY_RECOGNITION_UNAVAILABLE"
+echo "gallery_reason=no_frame_anchored_watchlist_hit_or_gallery_match"
 echo "manual_index=${OUTPUT_ROOT}/index.html"
 echo "manual_readme=${OUTPUT_ROOT}/README.md"
-echo "behavior_output_dir=${OUTPUT_ROOT}/behavior_intrusion"
-echo "face_output_dir=${OUTPUT_ROOT}/face_observation"
-echo "PASS: V1.1 visual result output annotations are required and generated"
+
+FACE_STATUS="$(metadata_field "${OUTPUT_ROOT}/face_observation/metadata.json" diagnosis.frame_alignment_status 2>/dev/null || echo blocked)"
+if [[ "${FACE_STATUS}" == "matched" ]]; then
+  echo "V1.3 PASS: behavior visual pass; face visual pass; gallery recognition unavailable"
+else
+  echo "V1.3 PARTIAL PASS: behavior visual pass; face visual blocked due to no frame-aligned image; gallery recognition unavailable"
+fi

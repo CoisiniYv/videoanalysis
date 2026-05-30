@@ -61,6 +61,36 @@ class BBoxParseResult:
         self.reason = reason
 
 
+class ResolvedImage:
+    def __init__(
+        self,
+        path: Path | None,
+        width: int = 0,
+        height: int = 0,
+        source_id: str | None = None,
+        frame_uuid: str | None = None,
+        resolution_status: str = "blocked",
+        evidence_source: str | None = None,
+        blocking_reason: str | None = None,
+        extraction_method: str | None = None,
+        trace_record: dict[str, Any] | None = None,
+    ) -> None:
+        self.path = path
+        self.width = width
+        self.height = height
+        self.source_id = source_id
+        self.frame_uuid = frame_uuid
+        self.resolution_status = resolution_status
+        self.evidence_source = evidence_source
+        self.blocking_reason = blocking_reason
+        self.extraction_method = extraction_method
+        self.trace_record = trace_record or {}
+
+    @property
+    def matched(self) -> bool:
+        return self.resolution_status == "matched" and self.path is not None
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -139,12 +169,201 @@ def normalize_input_record(data: dict[str, Any]) -> dict[str, Any]:
             event.setdefault("_source_clip", data["source_aligned_clip_path"])
         if "matched_trace_record" in data:
             event.setdefault("_matched_trace_record", data["matched_trace_record"])
+        event.setdefault("_a2a_summary", data)
         return event
 
     if isinstance(data.get("data"), dict):
         return deepcopy(data["data"])
 
     return deepcopy(data)
+
+
+def _read_image_size(path: Path | None) -> tuple[int, int]:
+    if cv2 is None or path is None or not path.exists():
+        return 0, 0
+    image = cv2.imread(str(path))
+    if image is None:
+        return 0, 0
+    height, width = image.shape[:2]
+    return int(width), int(height)
+
+
+def _iter_json_files(root: Path, filename: str) -> list[Path]:
+    if not root.exists():
+        return []
+    return sorted(path for path in root.rglob(filename) if path.is_file())
+
+
+def _find_trace_record(trace_root: Path, source_id: str, frame_uuid: str) -> tuple[dict[str, Any] | None, str | None]:
+    candidates = []
+    if source_id:
+        candidates.append(trace_root / source_id / "trace.jsonl")
+    candidates.extend(path for path in trace_root.rglob("trace.jsonl") if path not in candidates)
+    matches: list[dict[str, Any]] = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    if record.get("frame_uuid") == frame_uuid:
+                        record = dict(record)
+                        record["_trace_path"] = str(path)
+                        matches.append(record)
+        except Exception:
+            continue
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, f"frame_uuid matched multiple trace records: {len(matches)}"
+    return None, "frame_uuid not found in trace"
+
+
+def _extract_frame_from_source(
+    source_mp4: Path,
+    trace_record: dict[str, Any],
+    output_path: Path,
+) -> tuple[Path | None, str | None]:
+    if cv2 is None:
+        return None, "OpenCV is unavailable"
+    if not source_mp4.exists():
+        return None, f"source_mp4 missing: {source_mp4}"
+    cap = cv2.VideoCapture(str(source_mp4))
+    if not cap.isOpened():
+        return None, f"failed to open source_mp4: {source_mp4}"
+    ok = False
+    frame = None
+    frame_index = trace_record.get("source_frame_index")
+    if frame_index is None:
+        frame_index = trace_record.get("approximate_frame_index")
+    try:
+        if frame_index is not None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+            ok, frame = cap.read()
+        if not ok:
+            frame_pts = trace_record.get("frame_pts")
+            if frame_pts is not None:
+                cap.set(cv2.CAP_PROP_POS_MSEC, float(frame_pts) / 1_000_000.0)
+                ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        return None, "failed to extract frame from source by trace"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(output_path), frame):
+        return None, f"failed to write extracted frame: {output_path}"
+    return output_path, None
+
+
+def resolve_image_for_record(
+    record: dict[str, Any],
+    source: dict[str, Any],
+    output_dir: Path,
+    args: argparse.Namespace,
+) -> ResolvedImage:
+    """Resolve an image that is explicitly aligned to ``record.frame_uuid``."""
+    record_frame_uuid = source.get("frame_uuid")
+    source_id = source.get("source_id") or ""
+    if not record_frame_uuid:
+        return ResolvedImage(
+            None,
+            source_id=source_id,
+            frame_uuid=None,
+            resolution_status="blocked",
+            blocking_reason="record_frame_uuid_missing",
+        )
+
+    # Explicit source-frame can only be used with an explicit matching sidecar
+    # from A2a summary or caller-provided image frame uuid.
+    explicit_frame_uuid = args.source_frame_uuid or record.get("_image_frame_uuid")
+    source_frame = Path(args.source_frame or record.get("_source_frame", ""))
+    if source_frame and source_frame.exists() and explicit_frame_uuid == record_frame_uuid:
+        width, height = _read_image_size(source_frame)
+        return ResolvedImage(
+            source_frame,
+            width=width,
+            height=height,
+            source_id=source_id,
+            frame_uuid=explicit_frame_uuid,
+            resolution_status="matched",
+            evidence_source="explicit_source_frame_uuid",
+        )
+
+    summary = record.get("_a2a_summary") if isinstance(record.get("_a2a_summary"), dict) else {}
+    summary_event = summary.get("event") if isinstance(summary.get("event"), dict) else {}
+    if (
+        source_frame
+        and source_frame.exists()
+        and summary_event.get("frame_uuid") == record_frame_uuid
+        and summary.get("inspection_material_path") == str(source_frame)
+    ):
+        width, height = _read_image_size(source_frame)
+        return ResolvedImage(
+            source_frame,
+            width=width,
+            height=height,
+            source_id=source_id,
+            frame_uuid=record_frame_uuid,
+            resolution_status="matched",
+            evidence_source="a2a_identity_summary",
+            trace_record=summary.get("matched_trace_record") or {},
+        )
+
+    runtime_dump = Path(args.runtime_frame_dump_root) / source_id / f"{record_frame_uuid}.jpg"
+    if runtime_dump.exists():
+        width, height = _read_image_size(runtime_dump)
+        return ResolvedImage(
+            runtime_dump,
+            width=width,
+            height=height,
+            source_id=source_id,
+            frame_uuid=record_frame_uuid,
+            resolution_status="matched",
+            evidence_source="runtime_frame_dump",
+        )
+
+    trace_record, trace_error = _find_trace_record(
+        Path(args.frame_trace_root), source_id, record_frame_uuid
+    )
+    if trace_record is not None:
+        extracted_path = output_dir / "resolved_frame.jpg"
+        frame_path, extract_error = _extract_frame_from_source(
+            Path(args.source_mp4), trace_record, extracted_path
+        )
+        if frame_path is not None:
+            width, height = _read_image_size(frame_path)
+            return ResolvedImage(
+                frame_path,
+                width=width,
+                height=height,
+                source_id=source_id,
+                frame_uuid=record_frame_uuid,
+                resolution_status="matched",
+                evidence_source="frame_uuid_trace_source_extraction",
+                extraction_method="frame_uuid_trace_source_extraction",
+                trace_record=trace_record,
+            )
+        return ResolvedImage(
+            None,
+            source_id=source_id,
+            frame_uuid=None,
+            resolution_status="blocked",
+            evidence_source="frame_uuid_trace_source_extraction",
+            blocking_reason=extract_error,
+            trace_record=trace_record,
+        )
+
+    return ResolvedImage(
+        None,
+        source_id=source_id,
+        frame_uuid=None,
+        resolution_status="blocked",
+        blocking_reason=trace_error or "no_frame_uuid_aligned_image",
+    )
 
 
 def load_event_by_id(event_id: str, database_url: str | None = None) -> dict[str, Any]:
@@ -671,6 +890,8 @@ def _required_annotation_failures(
     source: dict[str, Any],
 ) -> list[str]:
     failures: list[str] = []
+    if statuses.get("frame_alignment_status") != "matched":
+        failures.append("frame_uuid-aligned image is required")
     if result_type == "behavior_intrusion":
         if statuses.get("roi_status") != "generated":
             failures.append("intrusion ROI polygon is required")
@@ -787,6 +1008,7 @@ def build_metadata(
     paths: dict[str, str | None],
     annotation_statuses: dict[str, str],
     bbox_metadata: dict[str, Any],
+    diagnosis: dict[str, Any],
     limitations: list[str],
 ) -> dict[str, Any]:
     required_failures = _required_annotation_failures(result_type, annotation_statuses, source)
@@ -826,8 +1048,10 @@ def build_metadata(
             "label_status": annotation_statuses.get("label_status", "generated"),
             "landmarks_status": annotation_statuses.get("landmarks_status", "unavailable"),
             "roi_source": annotation_statuses.get("roi_source"),
+            "frame_alignment_status": annotation_statuses.get("frame_alignment_status", "blocked"),
         },
         "bbox": bbox_metadata,
+        "diagnosis": diagnosis,
         "limitations": limitations,
     }
 
@@ -855,6 +1079,7 @@ def write_report(metadata: dict[str, Any], output_path: Path) -> None:
         f"- track_id_source: `{source.get('track_id_source') or ''}`",
         f"- result_type: `{metadata.get('result_type') or ''}`",
         f"- required_annotation_status: `{metadata.get('required_annotation_status') or ''}`",
+        f"- frame_alignment_status: `{metadata.get('diagnosis', {}).get('frame_alignment_status') or ''}`",
         "",
         "## Output",
         "",
@@ -873,6 +1098,13 @@ def write_report(metadata: dict[str, Any], output_path: Path) -> None:
         f"- labels: `{annotations.get('label_status')}`",
         f"- snapshot: `{media.get('snapshot_annotation_status')}`",
         f"- clip: `{media.get('clip_annotation_status')}`",
+        "",
+        "## Diagnosis",
+        "",
+        f"- record_frame_uuid: `{metadata.get('diagnosis', {}).get('record_frame_uuid') or ''}`",
+        f"- image_frame_uuid: `{metadata.get('diagnosis', {}).get('image_frame_uuid') or ''}`",
+        f"- blocking_reason: `{metadata.get('diagnosis', {}).get('blocking_reason') or ''}`",
+        f"- visual_correctness_status: `{metadata.get('diagnosis', {}).get('visual_correctness_status') or ''}`",
         "",
         "## Limitations",
         "",
@@ -900,6 +1132,7 @@ def write_output_index(metadata: dict[str, Any], output_path: Path) -> None:
         ("annotated snapshot", "annotated_snapshot_path"),
         ("raw clip", "raw_clip_path"),
         ("annotated clip", "annotated_clip_path"),
+        ("diagnosis", "diagnosis_path"),
         ("metadata", "metadata_path"),
         ("report", "report_path"),
     ):
@@ -914,6 +1147,7 @@ def write_output_index(metadata: dict[str, Any], output_path: Path) -> None:
 <h1>{title}</h1>
 <p>Debug/MVP visual output. Not production evidence.</p>
 <p>Required annotation status: <strong>{metadata.get('required_annotation_status')}</strong></p>
+<p>Frame alignment status: <strong>{metadata.get('diagnosis', {}).get('frame_alignment_status')}</strong></p>
 <ul>
 {body}
 </ul>
@@ -937,12 +1171,20 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
     output_root, fallback, fallback_reason = _prepare_output_root(Path(args.output_root))
     run_id = _make_run_id(source, args.run_id)
     output_dir = output_root / run_id
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result_type = determine_result_type(event, source, args.result_type)
-    source_frame = Path(args.source_frame or event.get("_source_frame", ""))
-    source_clip = Path(args.source_clip or event.get("_source_clip", ""))
-    image_width, image_height = get_media_dimensions(source_frame, source_clip)
+    source_clip_value = args.source_clip or event.get("_source_clip")
+    source_clip = Path(source_clip_value) if source_clip_value else None
+    resolved_image = resolve_image_for_record(event, source, output_dir, args)
+    image_width, image_height = resolved_image.width, resolved_image.height
+    if (image_width <= 0 or image_height <= 0) and source_clip and source_clip.exists():
+        try:
+            image_width, image_height = get_media_dimensions(Path(""), source_clip)
+        except Exception:
+            image_width, image_height = 0, 0
     person_bbox_value = extract_person_bbox_value(event)
     face_bbox_value = extract_face_bbox_value(event)
     person_bbox_result = parse_bbox_to_xyxy(
@@ -994,6 +1236,7 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
         "label_status": "generated",
         "landmarks_status": "generated" if landmarks else "unavailable",
         "roi_source": roi_source,
+        "frame_alignment_status": resolved_image.resolution_status,
     }
     if result_type == "behavior_intrusion" and roi_polygon is None:
         statuses["roi_status"] = "missing_required"
@@ -1002,10 +1245,10 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
     if result_type == "face_observation" and face_bbox_result.xyxy is None:
         statuses["face_bbox_status"] = "missing_required"
 
-    if source_frame and source_frame.exists():
+    if resolved_image.matched:
         raw_snapshot = output_dir / "raw_snapshot.jpg"
         annotated_snapshot = output_dir / "annotated_snapshot.jpg"
-        paths["raw_snapshot_path"] = _copy_if_present(source_frame, raw_snapshot)
+        paths["raw_snapshot_path"] = _copy_if_present(resolved_image.path, raw_snapshot)
         snap_statuses = _annotate_snapshot(
             raw_snapshot, annotated_snapshot, source, person_bbox_result.xyxy,
             face_bbox_result.xyxy, roi_polygon, landmarks
@@ -1020,9 +1263,13 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
         statuses["snapshot_annotation_status"] = "generated"
         paths["annotated_snapshot_path"] = str(annotated_snapshot)
     else:
-        limitations.append("source frame unavailable; snapshot output was not generated")
+        statuses["snapshot_annotation_status"] = "blocked"
+        limitations.append(
+            f"frame_uuid-aligned image unavailable; snapshot annotation blocked: "
+            f"{resolved_image.blocking_reason or resolved_image.resolution_status}"
+        )
 
-    if source_clip and source_clip.exists():
+    if source_clip and source_clip.exists() and resolved_image.matched:
         raw_clip = output_dir / "raw_clip.mp4"
         annotated_clip = output_dir / "annotated_clip.mp4"
         frames_dir = output_dir / "annotated_frames"
@@ -1040,7 +1287,11 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
         elif clip_status == "frames_only":
             paths["annotated_frames_dir"] = str(frames_dir)
     else:
-        limitations.append("source clip unavailable; clip output was not generated")
+        if not resolved_image.matched:
+            statuses["clip_annotation_status"] = "blocked"
+            limitations.append("clip annotation blocked because frame-aligned snapshot image is unavailable")
+        else:
+            limitations.append("source clip unavailable; clip output was not generated")
 
     bbox_metadata = {
         "image_width": image_width,
@@ -1055,6 +1306,49 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
         "face_bbox_normalized": face_bbox_result.normalized,
         "face_bbox_clamped": face_bbox_result.clamped,
         "face_bbox_reason": face_bbox_result.reason,
+        "person_bbox_raw": person_bbox_value,
+        "person_bbox_source_field": "bbox/person_bbox" if person_bbox_value is not None else None,
+        "face_bbox_raw": face_bbox_value,
+        "face_bbox_source_field": "face_bbox" if face_bbox_value is not None else None,
+    }
+    image_frame_uuid = resolved_image.frame_uuid
+    record_frame_uuid = source.get("frame_uuid")
+    frame_alignment_status = resolved_image.resolution_status
+    if image_frame_uuid and record_frame_uuid and image_frame_uuid != record_frame_uuid:
+        frame_alignment_status = "mismatched"
+        statuses["frame_alignment_status"] = "mismatched"
+    diagnosis = {
+        "result_type": result_type,
+        "is_gallery_recognition": False,
+        "record_frame_uuid": record_frame_uuid,
+        "image_frame_uuid": image_frame_uuid,
+        "frame_alignment_status": frame_alignment_status,
+        "image_size": [image_width, image_height],
+        "resolution_status": resolved_image.resolution_status,
+        "evidence_source": resolved_image.evidence_source,
+        "extraction_method": resolved_image.extraction_method,
+        "blocking_reason": resolved_image.blocking_reason,
+        "source_id": source.get("source_id"),
+        "person_bbox_raw": person_bbox_value,
+        "person_bbox_format": person_bbox_result.bbox_format,
+        "person_bbox_xyxy": list(person_bbox_result.xyxy) if person_bbox_result.xyxy else None,
+        "face_bbox_raw": face_bbox_value,
+        "face_bbox_format": face_bbox_result.bbox_format,
+        "face_bbox_xyxy": list(face_bbox_result.xyxy) if face_bbox_result.xyxy else None,
+        "landmarks_raw": landmarks,
+        "landmarks_status": statuses.get("landmarks_status"),
+        "roi_source": roi_source,
+        "roi_points": roi_polygon,
+        "bbox_coordinate_space": "normalized" if (
+            person_bbox_result.normalized or face_bbox_result.normalized
+        ) else "pixel" if (person_bbox_value is not None or face_bbox_value is not None) else "unknown",
+        "visual_correctness_status": "requires_manual_review" if frame_alignment_status == "matched" else "blocked",
+        "recognition_semantics_status": (
+            "face_observation_only_not_gallery_match"
+            if result_type == "face_observation"
+            else "not_applicable"
+        ),
+        "trace_record": resolved_image.trace_record,
     }
     metadata = build_metadata(
         run_id=run_id,
@@ -1066,6 +1360,7 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
         paths=paths,
         annotation_statuses=statuses,
         bbox_metadata=bbox_metadata,
+        diagnosis=diagnosis,
         limitations=limitations,
     )
     metadata_path = output_dir / "metadata.json"
@@ -1074,7 +1369,10 @@ def generate_visual_result(args: argparse.Namespace) -> dict[str, Any]:
     metadata["media"]["metadata_path"] = str(metadata_path)
     metadata["media"]["report_path"] = str(report_path)
     metadata["media"]["index_path"] = str(index_path)
+    diagnosis_path = output_dir / "diagnosis.json"
+    metadata["media"]["diagnosis_path"] = str(diagnosis_path)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    diagnosis_path.write_text(json.dumps(diagnosis, indent=2, sort_keys=True), encoding="utf-8")
     write_report(metadata, report_path)
     write_output_index(metadata, index_path)
     return metadata
@@ -1088,7 +1386,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     source.add_argument("--a2a-summary-json", help="Path to R3.3A2a identity_summary.json")
     parser.add_argument("--database-url", help="PostgreSQL URL for --event-id")
     parser.add_argument("--source-frame", help="Path to matched/source frame image")
+    parser.add_argument("--source-frame-uuid", help="Frame UUID sidecar for --source-frame")
     parser.add_argument("--source-clip", help="Path to source-aligned clip")
+    parser.add_argument("--source-mp4", default="/home/user/video-analytics/testVideo/1080movie.mp4")
+    parser.add_argument(
+        "--frame-trace-root",
+        default="/data/video-analytics/media/debug/r3_3a2a_frame_anchor_trace",
+    )
+    parser.add_argument(
+        "--runtime-frame-dump-root",
+        default="/data/video-analytics/media/debug/runtime_frame_dump",
+    )
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--run-id", help="Stable output directory name")
     parser.add_argument("--mode", choices=("snapshot", "clip", "both"), default="both")
@@ -1129,12 +1437,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"metadata_json={media['metadata_path']}")
     print(f"report_md={media['report_path']}")
     print(f"index_html={media.get('index_path')}")
+    print(f"diagnosis_json={media.get('diagnosis_path')}")
     print(f"raw_snapshot={media.get('raw_snapshot_path') or ''}")
     print(f"annotated_snapshot={media.get('annotated_snapshot_path') or ''}")
     print(f"raw_clip={media.get('raw_clip_path') or ''}")
     print(f"annotated_clip={media.get('annotated_clip_path') or ''}")
     print(f"clip_annotation_status={media.get('clip_annotation_status')}")
     print(f"required_annotation_status={metadata.get('required_annotation_status')}")
+    print(f"frame_alignment_status={metadata.get('diagnosis', {}).get('frame_alignment_status')}")
     print(f"fallback_output_root={media.get('fallback_output_root')}")
     return 0
 

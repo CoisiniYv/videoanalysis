@@ -50,6 +50,9 @@ def run_renderer(
     camera_config: str = "",
     person_bbox_format: str = "auto",
     face_bbox_format: str = "cxcywh",
+    source_frame_uuid: str | None = None,
+    frame_trace_root: Path | None = None,
+    source_mp4: Path | None = None,
 ) -> dict:
     module = load_visual_module()
     frame, clip = write_test_media(tmp_path)
@@ -61,7 +64,11 @@ def run_renderer(
         a2a_summary_json=None,
         database_url=None,
         source_frame=str(frame),
+        source_frame_uuid=source_frame_uuid,
         source_clip=str(clip),
+        source_mp4=str(source_mp4 or (tmp_path / "missing.mp4")),
+        frame_trace_root=str(frame_trace_root or (tmp_path / "missing_trace")),
+        runtime_frame_dump_root=str(tmp_path / "runtime_frame_dump"),
         output_root=str(output_root or (tmp_path / "visual_results")),
         run_id="test_run",
         mode="both",
@@ -73,8 +80,18 @@ def run_renderer(
     return module.generate_visual_result(args)
 
 
+def frame_uuid_for(event: dict) -> str | None:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+    return event.get("frame_uuid") or media.get("frame_uuid")
+
+
+def run_renderer_matched(tmp_path: Path, event: dict, **kwargs) -> dict:
+    return run_renderer(tmp_path, event, source_frame_uuid=frame_uuid_for(event), **kwargs)
+
+
 def test_metadata_schema_required_fields(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-1",
@@ -106,7 +123,7 @@ def test_metadata_schema_required_fields(tmp_path):
 
 
 def test_missing_bbox_does_not_crash_and_records_limitation(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-no-bbox",
@@ -114,6 +131,7 @@ def test_missing_bbox_does_not_crash_and_records_limitation(tmp_path):
             "camera_id": "cam-1",
             "source_id": "source-1",
             "event_ts_ms": 123,
+            "frame_uuid": "frame-no-bbox",
         },
     )
     assert metadata["annotations"]["person_bbox_status"] == "missing_required"
@@ -123,11 +141,12 @@ def test_missing_bbox_does_not_crash_and_records_limitation(tmp_path):
 
 
 def test_person_bbox_sets_generated_status(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-person",
             "event_type": "intrusion",
+            "frame_uuid": "frame-person",
             "payload": {"bbox": {"x": 100, "y": 20, "width": 90, "height": 180}},
         },
     )
@@ -135,11 +154,12 @@ def test_person_bbox_sets_generated_status(tmp_path):
 
 
 def test_roi_polygon_sets_generated_status(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-roi",
             "event_type": "intrusion",
+            "frame_uuid": "frame-roi",
             "payload": {
                 "bbox": {"x": 100, "y": 20, "width": 90, "height": 180},
                 "roi_polygon": [[10, 10], [300, 10], [300, 230], [10, 230]],
@@ -150,11 +170,12 @@ def test_roi_polygon_sets_generated_status(tmp_path):
 
 
 def test_source_extraction_limitation_and_not_production_label(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-limit",
             "event_type": "intrusion",
+            "frame_uuid": "frame-limit",
             "payload": {"bbox": {"x": 100, "y": 20, "width": 90, "height": 180}},
         },
     )
@@ -182,7 +203,7 @@ def test_output_root_refuses_source_tree_dirs(tmp_path):
 
 
 def test_face_bbox_list_is_supported(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "source_observation_id": "face:source:7:123",
@@ -203,7 +224,7 @@ def test_face_bbox_list_is_supported(tmp_path):
 
 
 def test_track_id_falls_back_from_source_event_id(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-track-fallback",
@@ -226,7 +247,7 @@ def test_track_id_falls_back_from_source_event_id(tmp_path):
 
 
 def test_intrusion_missing_roi_is_required_failure(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "event_id": "event-no-roi",
@@ -280,7 +301,7 @@ def test_bbox_out_of_bounds_clamps_and_records_status():
 
 
 def test_face_observation_cxcywh_conversion(tmp_path):
-    metadata = run_renderer(
+    metadata = run_renderer_matched(
         tmp_path,
         {
             "source_observation_id": "face:source:7:123",
@@ -296,6 +317,135 @@ def test_face_observation_cxcywh_conversion(tmp_path):
     assert metadata["bbox"]["face_bbox_format"] == "cxcywh"
     assert metadata["bbox"]["face_bbox_xyxy"] == [130, 80, 190, 160]
     assert metadata["required_annotation_status"] == "pass"
+
+
+def test_missing_frame_uuid_image_blocks_visual_rendering(tmp_path):
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "event_id": "event-blocked",
+            "event_type": "intrusion",
+            "frame_uuid": "frame-blocked",
+            "payload": {
+                "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            },
+        },
+        result_type="behavior_intrusion",
+    )
+    assert metadata["diagnosis"]["frame_alignment_status"] == "blocked"
+    assert metadata["media"]["snapshot_annotation_status"] == "blocked"
+    assert metadata["media"]["annotated_snapshot_path"] is None
+    assert "frame_uuid-aligned image is required" in metadata["required_annotation_failures"]
+
+
+def test_frame_uuid_mismatch_does_not_draw_bbox(tmp_path):
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "event_id": "event-mismatch",
+            "event_type": "intrusion",
+            "frame_uuid": "record-frame",
+            "payload": {
+                "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            },
+        },
+        result_type="behavior_intrusion",
+        source_frame_uuid="other-frame",
+    )
+    assert metadata["diagnosis"]["frame_alignment_status"] == "blocked"
+    assert metadata["media"]["annotated_snapshot_path"] is None
+
+
+def test_behavior_bbox_only_drawn_when_frame_alignment_matched(tmp_path):
+    event = {
+        "event_id": "event-matched",
+        "event_type": "intrusion",
+        "frame_uuid": "matched-frame",
+        "payload": {
+            "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+            "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+        },
+    }
+    metadata = run_renderer_matched(
+        tmp_path,
+        event,
+        result_type="behavior_intrusion",
+    )
+    assert metadata["diagnosis"]["frame_alignment_status"] == "matched"
+    assert metadata["annotations"]["person_bbox_status"] == "generated"
+    assert metadata["media"]["annotated_snapshot_path"]
+
+
+def test_face_bbox_only_drawn_when_frame_alignment_matched(tmp_path):
+    event = {
+        "source_observation_id": "face:source:7:123",
+        "message_type": "face_observation",
+        "track_id": "7",
+        "timestamp_ms": 123,
+        "face_bbox": [160, 120, 60, 80],
+        "payload": {"media": {"frame_uuid": "face-frame"}},
+    }
+    blocked = run_renderer(
+        tmp_path,
+        event,
+        result_type="face_observation",
+        face_bbox_format="cxcywh",
+    )
+    assert blocked["diagnosis"]["frame_alignment_status"] == "blocked"
+    assert blocked["media"]["annotated_snapshot_path"] is None
+
+    matched = run_renderer_matched(
+        tmp_path,
+        event,
+        result_type="face_observation",
+        face_bbox_format="cxcywh",
+    )
+    assert matched["diagnosis"]["frame_alignment_status"] == "matched"
+    assert matched["annotations"]["face_bbox_status"] == "generated"
+
+
+def test_face_observation_marked_not_gallery_recognition(tmp_path):
+    metadata = run_renderer_matched(
+        tmp_path,
+        {
+            "source_observation_id": "face:source:7:123",
+            "message_type": "face_observation",
+            "track_id": "7",
+            "timestamp_ms": 123,
+            "face_bbox": [160, 120, 60, 80],
+            "payload": {"media": {"frame_uuid": "face-frame"}},
+        },
+        result_type="face_observation",
+    )
+    assert metadata["diagnosis"]["is_gallery_recognition"] is False
+    assert (
+        metadata["diagnosis"]["recognition_semantics_status"]
+        == "face_observation_only_not_gallery_match"
+    )
+
+
+def test_diagnosis_contains_raw_parsed_image_size_fields(tmp_path):
+    metadata = run_renderer_matched(
+        tmp_path,
+        {
+            "event_id": "event-diagnosis",
+            "event_type": "intrusion",
+            "frame_uuid": "frame-diagnosis",
+            "payload": {
+                "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            },
+        },
+        result_type="behavior_intrusion",
+    )
+    diagnosis = metadata["diagnosis"]
+    assert diagnosis["person_bbox_raw"] == {"x": 10, "y": 20, "width": 30, "height": 40}
+    assert diagnosis["person_bbox_format"] == "xywh"
+    assert diagnosis["person_bbox_xyxy"] == [10, 20, 40, 60]
+    assert diagnosis["image_size"] == [320, 240]
+    assert metadata["bbox"]["person_bbox_source_field"] == "bbox/person_bbox"
 
 
 def test_smoke_and_docs_exist_and_document_boundaries():
@@ -314,4 +464,6 @@ def test_smoke_and_docs_exist_and_document_boundaries():
     smoke = SMOKE.read_text(encoding="utf-8")
     assert "behavior_intrusion" in smoke
     assert "face_observation" in smoke
-    assert "required_annotation_status" in smoke
+    assert "BEHAVIOR_VISUAL_PASS" in smoke
+    assert "FACE_VISUAL_BLOCKED" in smoke
+    assert "GALLERY_RECOGNITION_UNAVAILABLE" in smoke
