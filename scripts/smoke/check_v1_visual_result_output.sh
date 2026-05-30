@@ -1,175 +1,225 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== V1 Visual Result Output Smoke ==="
-echo "scope=debug_mvp_visual_output"
+echo "=== V1.1 Visual Annotation Correctness Smoke ==="
+echo "scope=debug_mvp_visual_output_correctness"
 echo "no_production_clip_worker=YES"
 echo "no_production_media_worker=YES"
 echo "no_replay_cache_sink_deployment=YES"
 echo "no_db_migration=YES"
 echo "no_performance_test=YES"
 
-OUTPUT_ROOT="${V1_OUTPUT_ROOT:-/data/video-analytics/media/debug/visual_results}"
+OUTPUT_ROOT="${V1_OUTPUT_ROOT:-manual-inspection/v1_visual_result_latest}"
 A2A_ROOT="${V1_A2A_ROOT:-/data/video-analytics/media/debug/r3_3a2a_frame_uuid_identity}"
-RUN_ID="${V1_RUN_ID:-v1_smoke_$(date +%s)}"
 WORK_DIR="${V1_WORK_DIR:-tmp/v1_visual_result_smoke}"
-SUMMARY_JSON="${V1_A2A_SUMMARY_JSON:-}"
-SOURCE_FRAME="${V1_SOURCE_FRAME:-}"
-SOURCE_CLIP="${V1_SOURCE_CLIP:-}"
-EVENT_JSON=""
-MOCK_INPUT="false"
+DATABASE_URL="${DATABASE_URL:-postgresql://video:video@localhost:5438/video_analytics}"
+PG_CONTAINER="${PG_CONTAINER:-c1-official-postgres}"
+SOURCE_MP4="${V1_SOURCE_MP4:-/home/user/video-analytics/testVideo/1080movie.mp4}"
+CAMERA_CONFIG="${V1_CAMERA_CONFIG:-modules/savant_security/config/cameras.generated.yml}"
+mkdir -p "${WORK_DIR}" "${OUTPUT_ROOT}"
 
-if [[ -z "${SUMMARY_JSON}" && -d "${A2A_ROOT}" ]]; then
-  SUMMARY_JSON="$(find "${A2A_ROOT}" -maxdepth 2 -name identity_summary.json -type f | sort | tail -1 || true)"
-fi
-
-if [[ -n "${SUMMARY_JSON}" && -f "${SUMMARY_JSON}" ]]; then
-  echo "input=real_a2a_summary"
-  echo "summary_json=${SUMMARY_JSON}"
-  if [[ -z "${SOURCE_FRAME}" ]]; then
-    SOURCE_FRAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("inspection_material_path") or "")' "${SUMMARY_JSON}")"
+psql_value() {
+  local sql="$1"
+  if command -v psql >/dev/null 2>&1; then
+    psql "${DATABASE_URL}" -t -A -v ON_ERROR_STOP=1 -c "${sql}"
+  else
+    docker exec "${PG_CONTAINER}" psql -U video -d video_analytics \
+      -t -A -v ON_ERROR_STOP=1 -c "${sql}"
   fi
-  if [[ -z "${SOURCE_CLIP}" ]]; then
-    SOURCE_CLIP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_aligned_clip_path") or "")' "${SUMMARY_JSON}")"
-  fi
-else
-  echo "input=mock_event_json"
-  MOCK_INPUT="true"
-  mkdir -p "${WORK_DIR}"
-  EVENT_JSON="${WORK_DIR}/event.json"
-  SOURCE_FRAME="${WORK_DIR}/frame.jpg"
-  SOURCE_CLIP="${WORK_DIR}/clip.mp4"
-  export EVENT_JSON SOURCE_FRAME SOURCE_CLIP
-  python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-import cv2
-import numpy as np
-
-event_path = Path(os.environ["EVENT_JSON"])
-frame_path = Path(os.environ["SOURCE_FRAME"])
-clip_path = Path(os.environ["SOURCE_CLIP"])
-
-image = np.zeros((240, 320, 3), dtype=np.uint8)
-image[:] = (28, 40, 52)
-cv2.rectangle(image, (120, 35), (215, 220), (70, 160, 240), -1)
-cv2.imwrite(str(frame_path), image)
-
-writer = cv2.VideoWriter(str(clip_path), cv2.VideoWriter_fourcc(*"mp4v"), 12.0, (320, 240))
-if not writer.isOpened():
-    raise SystemExit("failed to create mock clip")
-for _ in range(12):
-    writer.write(image)
-writer.release()
-
-event = {
-    "event_id": "v1-smoke-event",
-    "source_event_id": "v1:smoke:intrusion:123",
-    "event_type": "intrusion",
-    "camera_id": "cam_v1_smoke",
-    "source_id": "source_v1_smoke",
-    "track_id": "42",
-    "event_ts_ms": 123456789,
-    "frame_uuid": "v1-smoke-frame-uuid",
-    "keyframe_uuid": None,
-    "previous_keyframe_uuid": None,
-    "payload": {
-        "bbox": {"x": 120, "y": 35, "width": 95, "height": 185},
-        "roi_polygon": [[10, 10], [310, 10], [310, 230], [10, 230]],
-        "media": {
-            "frame_uuid": "v1-smoke-frame-uuid",
-            "event_ts_ms": 123456789
-        }
-    }
 }
-event_path.write_text(json.dumps(event), encoding="utf-8")
-PY
-fi
 
-if [[ ! -f "${SOURCE_FRAME}" ]]; then
-  echo "FAIL: source frame missing: ${SOURCE_FRAME}"
-  exit 1
-fi
+latest_a2a_summary() {
+  find "${A2A_ROOT}" -maxdepth 2 -name identity_summary.json -type f 2>/dev/null | sort | tail -1 || true
+}
 
-CMD=(
-  python3 scripts/debug/generate_visual_result.py
-  --source-frame "${SOURCE_FRAME}"
-  --source-clip "${SOURCE_CLIP}"
-  --output-root "${OUTPUT_ROOT}"
-  --run-id "${RUN_ID}"
-)
-
-if [[ -n "${SUMMARY_JSON}" && -f "${SUMMARY_JSON}" ]]; then
-  CMD+=(--a2a-summary-json "${SUMMARY_JSON}")
-else
-  CMD+=(--event-json "${EVENT_JSON}")
-fi
-
-LOG_PATH="${WORK_DIR}/generate_visual_result.log"
-mkdir -p "${WORK_DIR}"
-"${CMD[@]}" | tee "${LOG_PATH}"
-
-METADATA_JSON="$(python3 -c 'import pathlib,sys
-for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
-    if line.startswith("metadata_json="):
-        print(line.split("=", 1)[1])
-        break
-' "${LOG_PATH}")"
-
-if [[ -z "${METADATA_JSON}" || ! -f "${METADATA_JSON}" ]]; then
-  echo "FAIL: metadata.json not found"
-  exit 1
-fi
-
-export METADATA_JSON MOCK_INPUT
-python3 - <<'PY'
-import json
-import os
+extract_frame_from_source() {
+  local pts_ns="$1"
+  local out_path="$2"
+  python3 - "$SOURCE_MP4" "$pts_ns" "$out_path" <<'PY'
+import subprocess
+import sys
 from pathlib import Path
 
-metadata_path = Path(os.environ["METADATA_JSON"])
-metadata = json.loads(metadata_path.read_text())
-media = metadata["media"]
-limitations = "\n".join(metadata.get("limitations", []))
-
-required = [
-    media.get("report_path"),
-    media.get("raw_snapshot_path"),
-    media.get("annotated_snapshot_path"),
+source = Path(sys.argv[1])
+pts_ns = int(float(sys.argv[2] or 0))
+out = Path(sys.argv[3])
+if not source.exists():
+    raise SystemExit(f"source mp4 missing: {source}")
+seek = max(pts_ns / 1_000_000_000.0, 0.0)
+out.parent.mkdir(parents=True, exist_ok=True)
+cmd = [
+    "ffmpeg", "-y", "-ss", f"{seek:.3f}", "-i", str(source),
+    "-frames:v", "1", str(out),
 ]
-for path in required:
-    if not path or not Path(path).exists() or Path(path).stat().st_size <= 0:
-        raise SystemExit(f"FAIL: expected non-empty output missing: {path}")
-
-clip_path = media.get("annotated_clip_path")
-frames_dir = media.get("annotated_frames_dir")
-if clip_path:
-    if not Path(clip_path).exists() or Path(clip_path).stat().st_size <= 0:
-        raise SystemExit(f"FAIL: annotated clip missing/non-empty check failed: {clip_path}")
-elif frames_dir:
-    frames = sorted(Path(frames_dir).glob("*.jpg"))
-    if not frames:
-        raise SystemExit(f"FAIL: annotated_frames empty: {frames_dir}")
-else:
-    raise SystemExit("FAIL: neither annotated_clip.mp4 nor annotated_frames was generated")
-
-if "not production evidence" not in limitations:
-    raise SystemExit("FAIL: not production evidence limitation missing")
-if "source extraction only; not Replay evidence" not in limitations:
-    raise SystemExit("FAIL: source extraction / not Replay limitation missing")
-if metadata.get("visual_result_type") == "production_evidence":
-    raise SystemExit("FAIL: metadata claims production evidence")
-
-print(f"metadata_json={metadata_path}")
-print(f"report_md={media.get('report_path')}")
-print(f"raw_snapshot={media.get('raw_snapshot_path')}")
-print(f"annotated_snapshot={media.get('annotated_snapshot_path')}")
-print(f"raw_clip={media.get('raw_clip_path')}")
-print(f"annotated_clip={clip_path or ''}")
-print(f"annotated_frames={frames_dir or ''}")
-print(f"mock_input={os.environ['MOCK_INPUT']}")
+subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(out)
 PY
+}
 
-echo "PASS: V1 visual result output generated"
+write_top_index() {
+  local root="$1"
+  cat >"${root}/README.md" <<'EOF'
+# V1.1 Visual Result Latest
+
+This is debug/MVP visual output, not production evidence. V1.1 requires the
+annotations to be semantically correct; empty shell media files are not enough.
+Behavior intrusion output must include ROI polygon, person bbox, event label,
+track_id, camera_id, and frame_uuid. Face observation output must include face
+bbox, quality, track_id, camera_id, and frame_uuid when available.
+EOF
+  cat >"${root}/index.html" <<'EOF'
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>V1.1 Visual Result Latest</title></head>
+<body>
+<h1>V1.1 Visual Result Latest</h1>
+<p>Debug/MVP visual output, not production evidence.</p>
+<h2>Behavior Intrusion</h2>
+<ul>
+  <li><a href="behavior_intrusion/annotated_snapshot.jpg">annotated snapshot</a></li>
+  <li><a href="behavior_intrusion/annotated_clip.mp4">annotated clip</a></li>
+  <li><a href="behavior_intrusion/report.md">report</a></li>
+  <li><a href="behavior_intrusion/metadata.json">metadata</a></li>
+</ul>
+<h2>Face Observation</h2>
+<ul>
+  <li><a href="face_observation/annotated_snapshot.jpg">annotated snapshot</a></li>
+  <li><a href="face_observation/annotated_clip.mp4">annotated clip</a></li>
+  <li><a href="face_observation/report.md">report</a></li>
+  <li><a href="face_observation/metadata.json">metadata</a></li>
+</ul>
+</body>
+</html>
+EOF
+}
+
+validate_metadata() {
+  local metadata_path="$1"
+  local result_type="$2"
+  python3 - "$metadata_path" "$result_type" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+metadata = json.loads(Path(sys.argv[1]).read_text())
+result_type = sys.argv[2]
+ann = metadata["annotations"]
+media = metadata["media"]
+failures = []
+
+if metadata.get("required_annotation_status") != "pass":
+    failures.append(f"required_annotation_status={metadata.get('required_annotation_status')}")
+
+if result_type == "behavior_intrusion":
+    if ann.get("roi_status") != "generated":
+        failures.append("ROI polygon was not generated")
+    if ann.get("person_bbox_status") != "generated":
+        failures.append("person bbox was not generated")
+    if not metadata["source"].get("track_id"):
+        failures.append("track_id missing")
+    if not metadata["source"].get("frame_uuid"):
+        failures.append("frame_uuid missing")
+    if not media.get("annotated_clip_path"):
+        failures.append("annotated clip missing")
+elif result_type == "face_observation":
+    if ann.get("face_bbox_status") != "generated":
+        failures.append("face bbox was not generated")
+    if not metadata["source"].get("track_id"):
+        failures.append("track_id missing")
+    if not metadata["source"].get("frame_uuid"):
+        failures.append("frame_uuid missing")
+
+for key in ("annotated_snapshot_path", "report_path", "index_path"):
+    path = media.get(key)
+    if not path or not Path(path).exists() or Path(path).stat().st_size <= 0:
+        failures.append(f"{key} missing/non-empty check failed: {path}")
+
+if failures:
+    raise SystemExit("FAIL: " + "; ".join(failures))
+
+print(f"{result_type}_metadata={sys.argv[1]}")
+print(f"{result_type}_required_annotation_status={metadata.get('required_annotation_status')}")
+print(f"{result_type}_track_id={metadata['source'].get('track_id')}")
+print(f"{result_type}_bbox={metadata.get('bbox')}")
+PY
+}
+
+SUMMARY_JSON="$(latest_a2a_summary)"
+if [[ -z "${SUMMARY_JSON}" || ! -f "${SUMMARY_JSON}" ]]; then
+  echo "FAIL: no A2a identity_summary.json found under ${A2A_ROOT}; V1.1 needs real behavior source material"
+  exit 1
+fi
+echo "behavior_summary_json=${SUMMARY_JSON}"
+
+BEHAVIOR_FRAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("inspection_material_path") or "")' "${SUMMARY_JSON}")"
+BEHAVIOR_CLIP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_aligned_clip_path") or "")' "${SUMMARY_JSON}")"
+if [[ ! -f "${BEHAVIOR_FRAME}" || ! -f "${BEHAVIOR_CLIP}" ]]; then
+  echo "FAIL: behavior A2a frame/clip missing: frame=${BEHAVIOR_FRAME} clip=${BEHAVIOR_CLIP}"
+  exit 1
+fi
+
+python3 scripts/debug/generate_visual_result.py \
+  --a2a-summary-json "${SUMMARY_JSON}" \
+  --source-frame "${BEHAVIOR_FRAME}" \
+  --source-clip "${BEHAVIOR_CLIP}" \
+  --output-root "${OUTPUT_ROOT}" \
+  --run-id behavior_intrusion \
+  --result-type behavior_intrusion \
+  --camera-config "${CAMERA_CONFIG}" \
+  --person-bbox-format xywh \
+  | tee "${WORK_DIR}/behavior_generate.log"
+
+BEHAVIOR_METADATA="${OUTPUT_ROOT}/behavior_intrusion/metadata.json"
+validate_metadata "${BEHAVIOR_METADATA}" behavior_intrusion
+
+FACE_JSON="${WORK_DIR}/face_observation.json"
+FACE_FRAME="${WORK_DIR}/face_frame.jpg"
+FACE_CLIP="${BEHAVIOR_CLIP}"
+FACE_ROW="$(psql_value "
+SELECT json_build_object(
+  'source_observation_id', source_observation_id,
+  'message_type', 'face_observation',
+  'camera_id', camera_id,
+  'source_id', source_id,
+  'track_id', track_id,
+  'timestamp_ms', timestamp_ms,
+  'frame_num', frame_num,
+  'face_bbox', face_bbox,
+  'person_bbox', person_bbox,
+  'landmarks', landmarks,
+  'quality', quality,
+  'payload', payload
+)::text
+FROM face_observations
+WHERE face_bbox IS NOT NULL
+ORDER BY created_at DESC
+LIMIT 1;
+")"
+if [[ -z "${FACE_ROW}" ]]; then
+  echo "FAIL: no face_observation with face_bbox found"
+  exit 1
+fi
+printf "%s" "${FACE_ROW}" >"${FACE_JSON}"
+FACE_PTS="$(python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); print(((data.get("payload") or {}).get("media") or {}).get("frame_pts") or 0)' "${FACE_JSON}")"
+extract_frame_from_source "${FACE_PTS}" "${FACE_FRAME}" >/dev/null
+
+python3 scripts/debug/generate_visual_result.py \
+  --event-json "${FACE_JSON}" \
+  --source-frame "${FACE_FRAME}" \
+  --source-clip "${FACE_CLIP}" \
+  --output-root "${OUTPUT_ROOT}" \
+  --run-id face_observation \
+  --result-type face_observation \
+  --face-bbox-format cxcywh \
+  | tee "${WORK_DIR}/face_generate.log"
+
+FACE_METADATA="${OUTPUT_ROOT}/face_observation/metadata.json"
+validate_metadata "${FACE_METADATA}" face_observation
+
+write_top_index "${OUTPUT_ROOT}"
+
+echo "manual_index=${OUTPUT_ROOT}/index.html"
+echo "manual_readme=${OUTPUT_ROOT}/README.md"
+echo "behavior_output_dir=${OUTPUT_ROOT}/behavior_intrusion"
+echo "face_output_dir=${OUTPUT_ROOT}/face_observation"
+echo "PASS: V1.1 visual result output annotations are required and generated"

@@ -42,7 +42,15 @@ def write_test_media(tmp_path: Path) -> tuple[Path, Path]:
     return frame, clip
 
 
-def run_renderer(tmp_path: Path, event: dict, output_root: Path | None = None) -> dict:
+def run_renderer(
+    tmp_path: Path,
+    event: dict,
+    output_root: Path | None = None,
+    result_type: str = "auto",
+    camera_config: str = "",
+    person_bbox_format: str = "auto",
+    face_bbox_format: str = "cxcywh",
+) -> dict:
     module = load_visual_module()
     frame, clip = write_test_media(tmp_path)
     event_json = tmp_path / "event.json"
@@ -57,6 +65,10 @@ def run_renderer(tmp_path: Path, event: dict, output_root: Path | None = None) -
         output_root=str(output_root or (tmp_path / "visual_results")),
         run_id="test_run",
         mode="both",
+        result_type=result_type,
+        camera_config=camera_config,
+        person_bbox_format=person_bbox_format,
+        face_bbox_format=face_bbox_format,
     )
     return module.generate_visual_result(args)
 
@@ -81,12 +93,14 @@ def test_metadata_schema_required_fields(tmp_path):
     assert metadata["schema_version"] == "1.0"
     assert metadata["phase"] == "V1"
     assert metadata["visual_result_type"] == "debug_mvp"
+    assert metadata["result_type"] == "behavior_intrusion"
     assert metadata["debug_only"] is True
     assert metadata["not_production_evidence"] is True
     assert metadata["source"]["event_id"] == "event-1"
     assert metadata["source"]["frame_uuid"] == "frame-uuid"
     assert Path(metadata["media"]["metadata_path"]).exists()
     assert Path(metadata["media"]["report_path"]).exists()
+    assert Path(metadata["media"]["index_path"]).exists()
     assert Path(metadata["media"]["raw_snapshot_path"]).exists()
     assert Path(metadata["media"]["annotated_snapshot_path"]).exists()
 
@@ -102,7 +116,8 @@ def test_missing_bbox_does_not_crash_and_records_limitation(tmp_path):
             "event_ts_ms": 123,
         },
     )
-    assert metadata["annotations"]["person_bbox_status"] == "unavailable"
+    assert metadata["annotations"]["person_bbox_status"] == "missing_required"
+    assert metadata["required_annotation_status"] == "fail"
     assert any("person bbox unavailable" in item for item in metadata["limitations"])
     assert metadata["media"]["snapshot_annotation_status"] == "generated"
 
@@ -184,6 +199,103 @@ def test_face_bbox_list_is_supported(tmp_path):
     assert metadata["annotations"]["face_bbox_status"] == "generated"
     assert metadata["source"]["event_ts_ms"] == 123
     assert metadata["source"]["frame_uuid"] == "face-frame"
+    assert metadata["bbox"]["face_bbox_xyxy"] == [130, 80, 190, 160]
+
+
+def test_track_id_falls_back_from_source_event_id(tmp_path):
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "event_id": "event-track-fallback",
+            "source_event_id": "savant_security:cam-1:19:intrusion:123",
+            "event_type": "intrusion",
+            "camera_id": "cam-1",
+            "source_id": "source-1",
+            "track_id": None,
+            "frame_uuid": "frame-1",
+            "payload": {
+                "bbox": {"x": 10, "y": 20, "width": 30, "height": 40},
+                "roi_polygon": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            },
+        },
+        result_type="behavior_intrusion",
+    )
+    assert metadata["source"]["track_id"] == "19"
+    assert metadata["source"]["track_id_source"] == "source_event_id_fallback"
+    assert any("track_id recovered" in item for item in metadata["limitations"])
+
+
+def test_intrusion_missing_roi_is_required_failure(tmp_path):
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "event_id": "event-no-roi",
+            "source_event_id": "savant_security:cam-1:3:intrusion:123",
+            "event_type": "intrusion",
+            "camera_id": "cam-1",
+            "source_id": "source-1",
+            "frame_uuid": "frame-1",
+            "payload": {"bbox": {"x": 10, "y": 20, "width": 30, "height": 40}},
+        },
+        result_type="behavior_intrusion",
+    )
+    assert metadata["annotations"]["roi_status"] == "missing_required"
+    assert metadata["required_annotation_status"] == "fail"
+    assert "intrusion ROI polygon is required" in metadata["required_annotation_failures"]
+
+
+def test_bbox_xywh_to_xyxy():
+    module = load_visual_module()
+    result = module.parse_bbox_to_xyxy({"x": 10, "y": 20, "width": 30, "height": 40}, 320, 240, "xywh")
+    assert result.xyxy == (10, 20, 40, 60)
+    assert result.bbox_format == "xywh"
+
+
+def test_bbox_xyxy_to_xyxy():
+    module = load_visual_module()
+    result = module.parse_bbox_to_xyxy([10, 20, 40, 60], 320, 240, "xyxy")
+    assert result.xyxy == (10, 20, 40, 60)
+    assert result.bbox_format == "xyxy"
+
+
+def test_bbox_cxcywh_to_xyxy():
+    module = load_visual_module()
+    result = module.parse_bbox_to_xyxy([100, 80, 40, 20], 320, 240, "cxcywh")
+    assert result.xyxy == (80, 70, 120, 90)
+    assert result.bbox_format == "cxcywh"
+
+
+def test_bbox_normalized_xywh_to_pixel_xyxy():
+    module = load_visual_module()
+    result = module.parse_bbox_to_xyxy([0.25, 0.25, 0.5, 0.5], 320, 240, "xywh")
+    assert result.xyxy == (80, 60, 240, 180)
+    assert result.normalized is True
+
+
+def test_bbox_out_of_bounds_clamps_and_records_status():
+    module = load_visual_module()
+    result = module.parse_bbox_to_xyxy([-10, -20, 400, 300], 320, 240, "xyxy")
+    assert result.xyxy == (0, 0, 319, 239)
+    assert result.clamped is True
+
+
+def test_face_observation_cxcywh_conversion(tmp_path):
+    metadata = run_renderer(
+        tmp_path,
+        {
+            "source_observation_id": "face:source:7:123",
+            "message_type": "face_observation",
+            "track_id": "7",
+            "timestamp_ms": 123,
+            "face_bbox": [160, 120, 60, 80],
+            "payload": {"media": {"frame_uuid": "face-frame"}},
+        },
+        result_type="face_observation",
+        face_bbox_format="cxcywh",
+    )
+    assert metadata["bbox"]["face_bbox_format"] == "cxcywh"
+    assert metadata["bbox"]["face_bbox_xyxy"] == [130, 80, 190, 160]
+    assert metadata["required_annotation_status"] == "pass"
 
 
 def test_smoke_and_docs_exist_and_document_boundaries():
@@ -199,3 +311,7 @@ def test_smoke_and_docs_exist_and_document_boundaries():
     assert "raw_clip.mp4" in doc
     assert "annotated_clip.mp4" in doc
     assert "metadata.json" in doc
+    smoke = SMOKE.read_text(encoding="utf-8")
+    assert "behavior_intrusion" in smoke
+    assert "face_observation" in smoke
+    assert "required_annotation_status" in smoke
