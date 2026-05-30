@@ -93,6 +93,9 @@ services:
       R3_3A0_FRAME_UUID_PROBE_ENABLED: "${R3_3A0_FRAME_UUID_PROBE_ENABLED:-false}"
       R3_3A0_PROBE_MAX_FRAMES: "${R3_3A0_PROBE_MAX_FRAMES:-20}"
       R3_3A0_PROBE_OUTPUT_ROOT: "${R3_3A0_PROBE_OUTPUT_ROOT:-/data/video-analytics/media/debug/r3_3a0_frame_uuid_probe}"
+      R3_3A2A_FRAME_ANCHOR_TRACE_ENABLED: "${R3_3A2A_FRAME_ANCHOR_TRACE_ENABLED:-false}"
+      R3_3A2A_TRACE_MAX_FRAMES: "${R3_3A2A_TRACE_MAX_FRAMES:-300}"
+      R3_3A2A_TRACE_OUTPUT_ROOT: "${R3_3A2A_TRACE_OUTPUT_ROOT:-/data/video-analytics/media/debug/r3_3a2a_frame_anchor_trace}"
       OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
     ports:
       # Expose 5555 so controller-spawned adapter containers on the same

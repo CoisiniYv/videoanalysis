@@ -17,6 +17,8 @@ from typing import Any
 TRUTHY = {"1", "true", "yes", "on"}
 DEFAULT_OUTPUT_ROOT = "/data/video-analytics/media/debug/r3_3a0_frame_uuid_probe"
 DEFAULT_MAX_FRAMES = 20
+DEFAULT_TRACE_OUTPUT_ROOT = "/data/video-analytics/media/debug/r3_3a2a_frame_anchor_trace"
+DEFAULT_TRACE_MAX_FRAMES = 300
 
 PROBED_ATTRS = (
     "uuid",
@@ -245,6 +247,136 @@ def extract_frame_anchor_metadata(frame_meta: Any) -> dict[str, Any]:
         return anchor
 
     return anchor
+
+
+def build_frame_anchor_trace_record(
+    frame_meta: Any,
+    *,
+    timestamp_ms_used_by_event: int | None = None,
+    notes: str = "",
+) -> dict[str, Any]:
+    """Build a compact per-frame anchor trace record.
+
+    This is debug-only support for R3.3A2a source-frame identity checks. It
+    records the same production-safe anchor fields that events carry, plus the
+    event timestamp candidate used by behavior rules. It does not inspect image
+    pixels and does not change event semantics.
+    """
+    anchor = extract_frame_anchor_metadata(frame_meta)
+    frame_num = anchor.get("frame_num")
+    return {
+        "source_id": anchor.get("source_id")
+        or _to_optional_str(_safe_raw_attr(frame_meta, "source_id")),
+        "frame_uuid": anchor.get("frame_uuid"),
+        "keyframe_uuid": anchor.get("keyframe_uuid"),
+        "previous_keyframe_uuid": anchor.get("previous_keyframe_uuid"),
+        "frame_pts": anchor.get("frame_pts"),
+        "frame_dts": anchor.get("frame_dts"),
+        "duration": anchor.get("duration"),
+        "frame_num": frame_num,
+        "ntp_timestamp": anchor.get("ntp_timestamp"),
+        "time_base": anchor.get("time_base"),
+        "metadata_source": anchor.get("metadata_source"),
+        "source_frame_index": frame_num,
+        "approximate_frame_index": frame_num,
+        "timestamp_ms_used_by_event": timestamp_ms_used_by_event,
+        "notes": notes,
+    }
+
+
+def find_unique_frame_anchor_trace_match(
+    records: list[dict[str, Any]],
+    frame_uuid: str,
+) -> dict[str, Any]:
+    """Return the unique trace record for ``frame_uuid`` or raise ValueError."""
+    if not frame_uuid:
+        raise ValueError("frame_uuid is required")
+    matches = [record for record in records if record.get("frame_uuid") == frame_uuid]
+    if not matches:
+        raise ValueError(f"frame_uuid not found in trace: {frame_uuid}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"frame_uuid matched multiple trace records: {frame_uuid} count={len(matches)}"
+        )
+    return matches[0]
+
+
+class FrameAnchorTraceWriter:
+    """Environment-gated JSONL writer for R3.3A2a frame identity checks."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool | None = None,
+        output_root: str | None = None,
+        max_frames: int | None = None,
+    ) -> None:
+        self.enabled = (
+            env_flag("R3_3A2A_FRAME_ANCHOR_TRACE_ENABLED")
+            if enabled is None
+            else bool(enabled)
+        )
+        self.output_root = Path(
+            output_root
+            or os.getenv("R3_3A2A_TRACE_OUTPUT_ROOT")
+            or DEFAULT_TRACE_OUTPUT_ROOT
+        )
+        self.max_frames = int(
+            max_frames
+            if max_frames is not None
+            else os.getenv("R3_3A2A_TRACE_MAX_FRAMES", str(DEFAULT_TRACE_MAX_FRAMES))
+        )
+        self._counts: dict[str, int] = {}
+
+    def should_trace(self, source_id: str) -> bool:
+        if not self.enabled:
+            return False
+        if self.max_frames <= 0:
+            return True
+        return self._counts.get(source_id, 0) < self.max_frames
+
+    def write(
+        self,
+        frame_meta: Any,
+        *,
+        timestamp_ms_used_by_event: int | None = None,
+        notes: str = "",
+    ) -> dict[str, Any] | None:
+        record = build_frame_anchor_trace_record(
+            frame_meta,
+            timestamp_ms_used_by_event=timestamp_ms_used_by_event,
+            notes=notes,
+        )
+        source_id = str(record.get("source_id") or "unknown")
+        if not self.should_trace(source_id):
+            return None
+
+        self._counts[source_id] = self._counts.get(source_id, 0) + 1
+        try:
+            source_dir = self.output_root / _safe_source_id(source_id)
+            source_dir.mkdir(parents=True, exist_ok=True)
+            path = source_dir / "trace.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+                fh.write("\n")
+            record["trace_output_path"] = str(path)
+        except Exception as exc:
+            record["trace_write_error"] = (
+                f"{type(exc).__name__}: {_safe_str(exc, limit=240)}"
+            )
+
+        if self._counts[source_id] <= 3:
+            print(
+                "stage=r3_3a2a_frame_anchor_trace "
+                f"source_id={source_id} "
+                f"frame_num={record.get('frame_num')} "
+                f"frame_uuid={record.get('frame_uuid')} "
+                f"keyframe_uuid={record.get('keyframe_uuid')} "
+                f"output={record.get('trace_output_path', '')} "
+                f"write_error={record.get('trace_write_error', '')}",
+                flush=True,
+            )
+        return record
 
 
 def _public_dir(obj: Any) -> list[str]:

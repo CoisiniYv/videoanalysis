@@ -38,6 +38,7 @@ from custom.services.camera_config import load_camera_config
 from custom.services.cooldown import CooldownTracker
 from custom.services.event_exporter import EventExporter, create_event_exporter
 from custom.services.frame_anchor_metadata import (
+    FrameAnchorTraceWriter,
     FrameUuidRuntimeProbe,
     extract_frame_anchor_metadata,
 )
@@ -80,6 +81,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         )
         self._unknown_source_warned: Set[str] = set()
         self._frame_uuid_probe = FrameUuidRuntimeProbe()
+        self._frame_anchor_trace = FrameAnchorTraceWriter()
 
         print(
             f"stage=savant_security_behavior_rules_init "
@@ -146,6 +148,11 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             frame_meta,
             timestamp_ms_used_by_event=timestamp_ms_used_by_event,
             notes="BehaviorRulesPyFunc event-decision frame_meta runtime object",
+        )
+        self._frame_anchor_trace.write(
+            frame_meta,
+            timestamp_ms_used_by_event=timestamp_ms_used_by_event,
+            notes="BehaviorRulesPyFunc source-frame identity trace",
         )
         runtime.store.update(observations)
 
