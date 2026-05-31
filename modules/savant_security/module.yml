@@ -225,6 +225,21 @@ pipeline:
         log_every_n_frames: 30
 
     # ------------------------------------------------------------------
+    # SameFrameDetectionDebugPyFunc — C1F.1c same-frame pose + face summary.
+    # Reads person + face metadata from same frame, writes JSONL summary.
+    # Environment gate: C1F1_SAME_FRAME_DEBUG_ENABLED=1
+    # Does NOT emit events, images, or annotated clips.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: same_frame_detection_debug
+      module: custom.pyfuncs.same_frame_detection_debug
+      class_name: SameFrameDetectionDebugPyFunc
+      kwargs:
+        output_dir: /data/video-analytics/artifacts/c1f1
+        output_file: same_frame_pose_face_summary.jsonl
+        max_frames: 0
+
+    # ------------------------------------------------------------------
     # FaceDebugPyFunc — F1.2 smoke visibility probe.
     # Logs face object count + first few bbox/landmark values.
     # Does NOT emit face observations to Redis.
