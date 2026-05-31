@@ -31,6 +31,41 @@ DECODE_ERROR_MARKERS = (
 
 DEFAULT_MEDIA_HOST_ROOT = Path("/data/video-analytics/media")
 
+DEFAULT_LOG_CONTAINERS = {
+    "source_adapter": "c1-official-source-adapter",
+    "replay_service": "c1-official-replay-service",
+    "video_file_sink": "c1-official-video-file-sink",
+    "clip_worker": "c1-official-clip-worker",
+    "media_worker": "c1-official-media-worker",
+}
+
+LOG_KEYWORDS = (
+    "drop",
+    "dropped",
+    "queue",
+    "buffer",
+    "hwm",
+    "late",
+    "timeout",
+    "gap",
+    "dts",
+    "pts",
+    "decode",
+    "warning",
+    "error",
+    "reconnect",
+    "rtsp",
+    "tcp",
+    "udp",
+    "packet",
+    "frame",
+    "received",
+    "stored",
+    "forwarded",
+    "sending",
+    "adding",
+)
+
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
@@ -242,6 +277,82 @@ def _run(args: list[str], timeout: int = 120) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+def _inspect_container_env(docker: str, container: str) -> dict[str, str]:
+    code, stdout, _stderr = _run(
+        [docker, "inspect", container],
+        timeout=20,
+    )
+    if code != 0:
+        return {}
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, list) or not data:
+        return {}
+    env_items = ((data[0].get("Config") or {}).get("Env") or [])
+    result: dict[str, str] = {}
+    for item in env_items:
+        if not isinstance(item, str) or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        result[key] = value
+    return result
+
+
+def _inspect_container_command(docker: str, container: str) -> dict[str, Any]:
+    code, stdout, _stderr = _run(
+        [docker, "inspect", container],
+        timeout=20,
+    )
+    if code != 0:
+        return {}
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, list) or not data:
+        return {}
+    config = data[0].get("Config") or {}
+    return {
+        "entrypoint": config.get("Entrypoint") or [],
+        "cmd": config.get("Cmd") or [],
+        "image": config.get("Image") or "",
+    }
+
+
+def _keyword_log_summary(
+    docker: str,
+    container: str,
+    *,
+    since: str,
+    sample_limit: int,
+) -> dict[str, Any]:
+    code, stdout, stderr = _run(
+        [docker, "logs", "--since", since, container],
+        timeout=30,
+    )
+    if code != 0:
+        return {
+            "available": False,
+            "error": stderr.strip() or f"docker logs exited with status {code}",
+            "keyword_count": 0,
+            "samples": [],
+        }
+    lines = [line.strip() for line in (stdout + "\n" + stderr).splitlines() if line.strip()]
+    matched = [
+        line
+        for line in lines
+        if any(keyword in line.lower() for keyword in LOG_KEYWORDS)
+    ]
+    return {
+        "available": True,
+        "error": "",
+        "keyword_count": len(matched),
+        "samples": matched[:sample_limit],
+    }
+
+
 def _ffprobe_frames(raw_clip: Path) -> tuple[list[dict[str, Any]], str]:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
@@ -383,7 +494,14 @@ def _print_value(key: str, value: Any) -> None:
     print(f"{key}={rendered}")
 
 
-def diagnose(evidence_dir: Path, sample_limit: int) -> int:
+def diagnose(
+    evidence_dir: Path,
+    sample_limit: int,
+    *,
+    include_docker_logs: bool = False,
+    docker: str = "docker",
+    log_since: str = "30m",
+) -> int:
     metadata_path = evidence_dir / "metadata.json"
     metadata = _load_json(metadata_path)
     sink_metadata_path = _find_sink_metadata(evidence_dir, metadata)
@@ -461,7 +579,7 @@ def diagnose(evidence_dir: Path, sample_limit: int) -> int:
 
     metadata_info = _metadata_summary(metadata)
 
-    print("C1E.3 Replay Clip Continuity Diagnosis")
+    print("C1E Replay Clip Continuity Diagnosis")
     _print_value("evidence_dir", evidence_dir)
     _print_value("metadata_json", metadata_path if metadata_path.is_file() else "")
     _print_value("sink_metadata_json", sink_metadata_path if sink_metadata_path.is_file() else "")
@@ -498,6 +616,28 @@ def diagnose(evidence_dir: Path, sample_limit: int) -> int:
     _print_value("sink_metadata_frame_num_jump_samples", sink_frame_jumps[:sample_limit])
     _print_value("raw_clip_gap_aligns_with_sink_metadata_gap", alignment)
     _print_value("diagnosis", diagnosis)
+
+    if include_docker_logs:
+        for label, container in DEFAULT_LOG_CONTAINERS.items():
+            env = _inspect_container_env(docker, container)
+            command = _inspect_container_command(docker, container)
+            summary = _keyword_log_summary(
+                docker,
+                container,
+                since=log_since,
+                sample_limit=sample_limit,
+            )
+            _print_value(f"log_{label}_container", container)
+            _print_value(f"log_{label}_command", command)
+            if label == "source_adapter":
+                _print_value("source_adapter_env_RTSP_TRANSPORT", env.get("RTSP_TRANSPORT"))
+                _print_value("source_adapter_env_RTSP_URI", env.get("RTSP_URI"))
+                _print_value("source_adapter_env_LOCATION", env.get("LOCATION"))
+                _print_value("source_adapter_env_ZMQ_ENDPOINT", env.get("ZMQ_ENDPOINT"))
+            _print_value(f"log_{label}_available", summary["available"])
+            _print_value(f"log_{label}_keyword_count", summary["keyword_count"])
+            _print_value(f"log_{label}_samples", summary["samples"])
+            _print_value(f"log_{label}_error", summary["error"])
     return 0 if raw_clip is not None and metadata_path.is_file() else 1
 
 
@@ -505,13 +645,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", required=True, type=Path)
     parser.add_argument("--sample-limit", type=int, default=10)
+    parser.add_argument(
+        "--include-docker-logs",
+        action="store_true",
+        help="Also summarize keyword-matched logs from the C1 official containers.",
+    )
+    parser.add_argument("--docker", default="docker")
+    parser.add_argument("--log-since", default="30m")
     args = parser.parse_args()
 
     evidence_dir = args.evidence_dir.resolve()
     if not evidence_dir.is_dir():
         print(f"evidence_dir_not_found={evidence_dir}", file=sys.stderr)
         return 1
-    return diagnose(evidence_dir, max(args.sample_limit, 1))
+    return diagnose(
+        evidence_dir,
+        max(args.sample_limit, 1),
+        include_docker_logs=args.include_docker_logs,
+        docker=args.docker,
+        log_since=args.log_since,
+    )
 
 
 if __name__ == "__main__":

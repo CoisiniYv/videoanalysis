@@ -12,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DOC = ROOT / "docs" / "c1e_replay_evidence_integration.md"
+C1E4_DOC = ROOT / "docs" / "c1e_4_rtsp_transport_and_replay_continuity_isolation.md"
 C1E_COMPOSE = ROOT / "infra" / "docker-compose.c1-official-replay-dev.yml"
 C1_ADAPTER_COMPOSE = ROOT / "infra" / "docker-compose.c1-official-adapter.yml"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.p1c_rtsp_inline.json"
@@ -41,6 +42,7 @@ def _compose(path: Path) -> dict:
 
 def test_c1e_files_exist() -> None:
     assert DOC.exists()
+    assert C1E4_DOC.exists()
     assert C1E_COMPOSE.exists()
     assert C1_ADAPTER_COMPOSE.exists()
     assert REPLAY_CONFIG.exists()
@@ -101,6 +103,7 @@ def test_c1e_fixed_rtsp_and_no_file_source() -> None:
     media_env = compose["services"]["media-worker"]["environment"]
     assert source_env["RTSP_URI"] == FIXED_RTSP
     assert source_env["LOCATION"] == FIXED_RTSP
+    assert source_env["RTSP_TRANSPORT"] == "${C1E_RTSP_TRANSPORT:-tcp}"
     assert source_env["BUFFER_LEN"] == "2000"
     assert media_env["EVIDENCE_INPUT_TYPE"] == "rtsp"
     assert media_env["EVIDENCE_INPUT_URI"] == FIXED_RTSP
@@ -153,6 +156,42 @@ def test_c1e_clip_worker_replay_job_env() -> None:
     assert clip_env["ALLOW_UNBOUNDED_KEYFRAME_FALLBACK"] == "false"
 
 
+def test_c1e4_rtsp_transport_config_contract() -> None:
+    compose = _compose(C1E_COMPOSE)
+    services = compose["services"]
+    source_env = services["source-adapter"]["environment"]
+    media_env = services["media-worker"]["environment"]
+
+    assert source_env["RTSP_URI"] == FIXED_RTSP
+    assert source_env["LOCATION"] == FIXED_RTSP
+    assert source_env["RTSP_TRANSPORT"] == "${C1E_RTSP_TRANSPORT:-tcp}"
+    assert media_env["EVIDENCE_SOURCE_EXTRACTION_FALLBACK"] == "false"
+    assert media_env["EVIDENCE_SECOND_RTSP_PULL"] == "false"
+
+    assert {"rtsp-server", "ffmpeg-source", "metadata-sink", "evidence-worker"}.isdisjoint(
+        set(services)
+    )
+    assert services["source-adapter"]["entrypoint"] == [
+        "/opt/savant/adapters/gst/sources/rtsp.sh"
+    ]
+
+
+def test_c1e4_docs_define_non_golden_source_and_smoke_layers() -> None:
+    doc = _text(C1E4_DOC)
+    for expected in (
+        "actual_transport=tcp",
+        "not a decode-clean golden source",
+        "direct FFmpeg pulls",
+        "PASS_WITH_SOURCE_CORRUPTION",
+        "clip_status=generated_corrupt",
+        "C1E_STRICT_DECODE_CLEAN=1",
+        "No second RTSP path",
+        "No source extraction",
+        "No production `annotated_clip`",
+    ):
+        assert expected in doc
+
+
 def test_c1e_worker_bind_mounts_and_official_drift_fix() -> None:
     c1e = _compose(C1E_COMPOSE)
     adapter = _compose(C1_ADAPTER_COMPOSE)
@@ -191,6 +230,7 @@ def test_c1e_smoke_runtime_discipline_and_outputs() -> None:
         'DOCKER="sudo docker"',
         'COMPOSE="sudo docker compose"',
         'C1E_ALLOW_BUILD="${C1E_ALLOW_BUILD:-0}"',
+        'C1E_STRICT_DECODE_CLEAN="${C1E_STRICT_DECODE_CLEAN:-0}"',
         'if [[ "$C1E_ALLOW_BUILD" == "1" ]]',
         "up -d --no-build --force-recreate",
         "up -d --build --force-recreate",
@@ -210,15 +250,22 @@ def test_c1e_smoke_runtime_discipline_and_outputs() -> None:
         "event_annotation_bbox_conversion=",
         "duration_probe_status=",
         "clip_validation.ok=",
+        "clip_validation.present=",
+        "clip_validation.source_corruption_detected=",
         "clip_validation.decode_error_count=",
+        "PASS_WITH_SOURCE_CORRUPTION",
+        "C1E_STRICT_DECODE_CLEAN=",
+        "source_adapter_rtsp_transport=",
         "metadata_raw_clip_duration=",
         "keyframe_lookup_used=",
         "roi_overlay_generated=",
         "roi_lookup_status=",
         "annotated_clip=no",
+        "evidence_chain_result=",
         "source_to_replay_to_savant_single_path=yes",
     ):
         assert expected in smoke
+    assert "metadata clip_validation reports decode-clean clip" not in smoke
     assert "docker pull" not in smoke
 
 

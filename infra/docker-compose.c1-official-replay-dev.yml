@@ -120,7 +120,7 @@ services:
       SOURCE_ID: c1e_rtsp_replay
       RTSP_URI: rtsp://10.37.57.112:8554/live/1080movie
       LOCATION: rtsp://10.37.57.112:8554/live/1080movie
-      RTSP_TRANSPORT: tcp
+      RTSP_TRANSPORT: ${C1E_RTSP_TRANSPORT:-tcp}
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       SYNC_OUTPUT: "true"
       BUFFER_LEN: "2000"

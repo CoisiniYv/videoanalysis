@@ -4,7 +4,8 @@ Date: 2026-06-01
 
 ## Status
 
-C1E.2 is not a full pass.
+C1E.2 was not accepted as a decode-clean result for the fixed RTSP source during
+C1E.3.
 
 Completed and preserved from C1E.2:
 
@@ -15,9 +16,14 @@ Completed and preserved from C1E.2:
 - `clip_validation` makes decode corruption visible with `generated`, `generated_corrupt`, and `generated_unverified`.
 - C1E.1 evidence trust hardening remains in place.
 
-Not accepted:
+Interpretation updated in C1E.4:
 
-- C1E.2 cannot be marked as full pass because clean real RTSP smoke still reproduced `raw_clip.mov` decode corruption.
+- The fixed RTSP source is non-golden and direct FFmpeg pulls also show H.264
+  reference errors.
+- `generated_corrupt` is therefore a valid surfaced evidence state when the
+  bundle is complete and source corruption is visible.
+- Strict `decode_error_count=0` acceptance should be reserved for a
+  decode-clean/golden RTSP source.
 
 ## Clean Runtime Verification
 

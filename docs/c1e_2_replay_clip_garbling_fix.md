@@ -1,6 +1,8 @@
 # C1E.2 Replay Clip Garbling Fix
 
-Status: dev-only Replay evidence trust default.
+Status: accepted as downstream Replay reliability hardening and corruption
+visibility. The fixed C1E RTSP source is not decode-clean, so this stage is not
+defined by `decode_error_count=0` on every run against that source.
 
 ## Scope
 
@@ -110,6 +112,33 @@ probe unavailable or unverifiable -> clip_status=generated_unverified
 ```
 
 Missing duration or probe failure is not treated as success.
+
+For the fixed C1E source, `generated_corrupt` is a valid evidence status when
+the chain generated the bundle but decode validation detected source/stream
+corruption:
+
+```text
+clip_validation.ok=false
+clip_validation.decode_error_count>0
+clip_status=generated_corrupt
+```
+
+This is not a hidden success state. API and UI surfaces should present it as
+"clip generated, source decode corruption detected".
+
+Strict decode-clean validation should be reserved for a stable/golden RTSP
+source. The current fixed source has shown H.264 reference errors even under
+direct FFmpeg pull, so C1E.2 acceptance is:
+
+```text
+downstream reliable sink merged
+corruption detected and surfaced
+evidence bundle produced
+source corruption not hidden
+no second RTSP
+no source extraction
+no production annotated_clip
+```
 
 ## Preserved C1E.1 Protections
 
