@@ -134,11 +134,15 @@ Required TTL field:
 storage.rocksdb.data_expiration_ttl
 ```
 
-Expected value:
+Expected C1E.2 dev/evidence trust value:
 
 ```json
-{"secs": 60, "nanos": 0}
+{"secs": 300, "nanos": 0}
 ```
+
+`compaction_period` is `{"secs": 120, "nanos": 0}`. This is not a 60-stream
+production capacity conclusion; production sizing still needs a Replay TTL,
+bitrate, NVMe capacity, and write-amplification review.
 
 The smoke prints and validates:
 
@@ -218,7 +222,11 @@ stop_condition
 stop_condition_mode
 raw_clip_path
 event_annotation_path
-clip_status=generated
+raw_clip_duration
+expected_duration_seconds
+duration_probe_status
+clip_validation
+clip_status=generated | generated_corrupt | generated_unverified
 limitations
 ```
 

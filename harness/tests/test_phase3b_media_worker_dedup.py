@@ -12,7 +12,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 MW_DIR = str(Path(__file__).resolve().parents[2] / "services" / "media-worker")
+for name in list(sys.modules):
+    if name == "app" or name.startswith("app."):
+        del sys.modules[name]
 if MW_DIR not in sys.path:
+    sys.path.insert(0, MW_DIR)
+else:
+    sys.path.remove(MW_DIR)
     sys.path.insert(0, MW_DIR)
 
 from app.worker import (

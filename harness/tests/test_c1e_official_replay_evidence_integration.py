@@ -80,8 +80,8 @@ def test_c1e_source_path_is_source_to_replay_to_savant() -> None:
     assert replay["in_stream"]["url"] == "router+bind:tcp://0.0.0.0:5555"
     assert replay["out_stream"]["url"] == "dealer+connect:tcp://savant-security:5557"
     assert savant_env["ZMQ_SRC_ENDPOINT"] == "router+bind:tcp://0.0.0.0:5557"
-    assert sink_env["ZMQ_ENDPOINT"] == "sub+bind:tcp://0.0.0.0:6666"
-    assert clip_env["REPLAY_JOB_SINK_URL"] == "pub+connect:tcp://video-file-sink:6666"
+    assert sink_env["ZMQ_ENDPOINT"] == "router+bind:tcp://0.0.0.0:6666"
+    assert clip_env["REPLAY_JOB_SINK_URL"] == "dealer+connect:tcp://video-file-sink:6666"
 
 
 def test_c1e_fixed_rtsp_and_no_file_source() -> None:
@@ -101,6 +101,7 @@ def test_c1e_fixed_rtsp_and_no_file_source() -> None:
     media_env = compose["services"]["media-worker"]["environment"]
     assert source_env["RTSP_URI"] == FIXED_RTSP
     assert source_env["LOCATION"] == FIXED_RTSP
+    assert source_env["BUFFER_LEN"] == "2000"
     assert media_env["EVIDENCE_INPUT_TYPE"] == "rtsp"
     assert media_env["EVIDENCE_INPUT_URI"] == FIXED_RTSP
     assert media_env["EVIDENCE_LOCAL_FILE_USED"] == "false"
@@ -123,7 +124,8 @@ def test_c1e_camera_config_matches_source_and_clip_policy() -> None:
 def test_c1e_replay_ttl_exists() -> None:
     replay = json.loads(_text(REPLAY_CONFIG))
     ttl = replay["storage"]["rocksdb"]["data_expiration_ttl"]
-    assert ttl == {"secs": 60, "nanos": 0}
+    assert ttl == {"secs": 300, "nanos": 0}
+    assert replay["storage"]["rocksdb"]["compaction_period"] == {"secs": 120, "nanos": 0}
 
 
 def test_c1e_event_worker_recording_env() -> None:
@@ -143,7 +145,8 @@ def test_c1e_clip_worker_replay_job_env() -> None:
     compose = _compose(C1E_COMPOSE)
     clip_env = compose["services"]["clip-worker"]["environment"]
     assert clip_env["REPLAY_API_URL"] == "http://replay-service:8080"
-    assert clip_env["REPLAY_JOB_SINK_URL"] == "pub+connect:tcp://video-file-sink:6666"
+    assert clip_env["REPLAY_JOB_SINK_URL"] == "dealer+connect:tcp://video-file-sink:6666"
+    assert clip_env["REPLAY_FPS"] == "30"
     assert clip_env["CLIP_WORKER_MAX_JOBS_PER_RUN"] == "1"
     assert clip_env["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "1"
     assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
@@ -206,6 +209,8 @@ def test_c1e_smoke_runtime_discipline_and_outputs() -> None:
         "business_metadata_generated=",
         "event_annotation_bbox_conversion=",
         "duration_probe_status=",
+        "clip_validation.ok=",
+        "clip_validation.decode_error_count=",
         "metadata_raw_clip_duration=",
         "keyframe_lookup_used=",
         "roi_overlay_generated=",
@@ -243,12 +248,14 @@ def test_c1e_replay_job_uses_ts_delta_sec_when_supported() -> None:
         keyframe_uuid="kf-123",
         pre_seconds=5,
         post_seconds=5,
-        sink_endpoint="pub+connect:tcp://video-file-sink:6666",
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
         labels={"event_id": "ev-123"},
         stop_condition_mode="ts_delta_sec",
     )
-    assert payload["offset"]["seconds"] == 5
+    assert payload["offset"]["seconds"] == 5.0
     assert payload["stop_condition"]["ts_delta_sec"]["max_delta_sec"] == 10
+    assert payload["sink"]["options"]["send_timeout"] == {"secs": 5, "nanos": 0}
+    assert payload["configuration"]["min_duration"] == {"secs": 0, "nanos": 33333333}
     assert payload["configuration"]["stored_stream_id"] == "c1e_rtsp_replay"
     assert "ev-123" in payload["configuration"]["resulting_stream_id"]
 
@@ -262,7 +269,7 @@ def test_c1e_frame_count_fallback_requires_reason() -> None:
         keyframe_uuid="kf-123",
         pre_seconds=5,
         post_seconds=5,
-        sink_endpoint="pub+connect:tcp://video-file-sink:6666",
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
         labels={"event_id": "ev-123"},
         stop_condition_mode="frame_count",
         fallback_reason="configured_frame_count_fallback",
@@ -305,7 +312,20 @@ def test_c1e_event_annotation_converts_bbox_object_xywh_to_xyxy() -> None:
 
 def test_c1e_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     _activate_service_path(MW_DIR)
-    from app.worker import _finalize_p1_evidence_bundle
+    from app import worker
+
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 10.05)
+    monkeypatch.setattr(
+        worker,
+        "_probe_clip_decode",
+        lambda _path: {
+            "decode_error_count": 0,
+            "decode_error_sample": [],
+            "decode_ok": True,
+            "probe_tool": "/usr/bin/ffmpeg",
+            "probe_error": "",
+        },
+    )
 
     monkeypatch.setenv("EVIDENCE_PHASE", "C1E-RTSP")
     monkeypatch.setenv("EVIDENCE_RUN_ID", "run-c1e")
@@ -359,7 +379,7 @@ def test_c1e_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     )
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    bundle = _finalize_p1_evidence_bundle(
+    bundle = worker._finalize_p1_evidence_bundle(
         mock_conn,
         event_id=event_id,
         meta_dir=str(sink_dir),
@@ -381,6 +401,8 @@ def test_c1e_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     assert business["media"]["sink_metadata_path"].endswith("sink_metadata.json")
     assert "raw_clip_duration" in business["media"]
     assert "duration_probe_status" in business["media"]
+    assert business["media"]["clip_validation"]["ok"] is True
+    assert business["status"]["clip_status"] == "generated"
     assert "single-event evidence POC" in business["limitations"]
     assert "not incident coalescing" in business["limitations"]
     assert "not continuous recording" in business["limitations"]

@@ -437,7 +437,7 @@ check 8 "source adapter targets replay-service in_stream" "$([[ "$SOURCE_OUTPUT"
 check 9 "replay out_stream targets savant-security" "$([[ "$REPLAY_OUT_STREAM" == "dealer+connect:tcp://savant-security:5557" ]] && echo pass || echo fail)"
 check 10 "savant input binds replay out_stream port" "$([[ "$SAVANT_INPUT" == "router+bind:tcp://0.0.0.0:5557" ]] && echo pass || echo fail)"
 check 11 "source adapter uses RTSP source and no local file" "$([[ "$SOURCE_RTSP" == "$RTSP_URL" && "$SOURCE_LOCATION" == "$RTSP_URL" ]] && echo pass || echo fail)"
-check 12 "clip-worker Replay job sink targets video-file-sink" "$([[ "$CLIP_SINK_URL" == "pub+connect:tcp://video-file-sink:6666" && "$SINK_ENDPOINT" == "sub+bind:tcp://0.0.0.0:6666" ]] && echo pass || echo fail)"
+check 12 "clip-worker Replay job sink targets video-file-sink with reliable sockets" "$([[ "$CLIP_SINK_URL" == "dealer+connect:tcp://video-file-sink:6666" && "$SINK_ENDPOINT" == "router+bind:tcp://0.0.0.0:6666" ]] && echo pass || echo fail)"
 check 13 "P1 raw clip finalizer enabled" "$([[ "$P1_FINALIZER" == "true" ]] && echo pass || echo fail)"
 check 14 "camera rule requests clip only" "$([[ "$RULE_CLIP_REQUIRED" == "True" && "$RULE_SNAPSHOT_REQUIRED" == "False" ]] && echo pass || echo fail)"
 [[ "$FAIL_COUNT" -gt 0 ]] && blocked "topology_or_contract_mismatch"
@@ -544,7 +544,7 @@ elif [[ "$REPLAY_TTL_OK" != "yes" ]]; then
 fi
 
 echo -e "${BLUE}Waiting for RTSP -> Replay -> Savant -> event-worker -> clip-worker -> media-worker...${NC}"
-EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status'='generated' ORDER BY updated_at DESC LIMIT 1;")"
+EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status' IN ('generated','generated_corrupt','generated_unverified') ORDER BY updated_at DESC LIMIT 1;")"
 SOURCE_EVENT_ID=""
 REPLAY_JOB_ID=""
 CLIP_PATH=""
@@ -555,7 +555,7 @@ EVENT_ANNOTATION_PATH=""
 RAW_CLIP=""
 if [[ -z "$EVENT_ID" ]]; then
   for _ in $(seq 1 "$WAIT_SECONDS"); do
-    EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status'='generated' ORDER BY updated_at DESC LIMIT 1;")"
+    EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status' IN ('generated','generated_corrupt','generated_unverified') ORDER BY updated_at DESC LIMIT 1;")"
     [[ -n "$EVENT_ID" ]] && break
     sleep 1
   done

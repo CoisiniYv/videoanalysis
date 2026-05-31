@@ -117,12 +117,13 @@ class ReplayClient:
         self,
         source_id: str,
         keyframe_uuid: str,
-        pre_seconds: int,
-        post_seconds: int,
+        pre_seconds: float,
+        post_seconds: float,
         sink_endpoint: str,
         labels: Optional[Dict[str, str]] = None,
         stop_condition_mode: str = "frame_count",
         fallback_reason: str | None = None,
+        fps: int = 30,
     ) -> Optional[str]:
         """PUT /api/v1/job — create a re-streaming job.
 
@@ -146,6 +147,7 @@ class ReplayClient:
             labels=labels,
             stop_condition_mode=stop_condition_mode,
             fallback_reason=fallback_reason,
+            fps=fps,
         )
         self.last_job_request = payload
 
@@ -170,6 +172,7 @@ class ReplayClient:
                     labels=labels,
                     stop_condition_mode="frame_count",
                     fallback_reason="replay_api_rejected_ts_delta_sec",
+                    fps=fps,
                 )
                 self.last_job_request = fallback_payload
                 try:
@@ -208,51 +211,81 @@ class ReplayClient:
             return None
 
 
+def _effective_fps(fps: int) -> int:
+    return fps if fps > 0 else 30
+
+
+def _frame_duration_nanos(fps: int) -> int:
+    """Nanoseconds per frame for real-time Replay pacing."""
+    return int(1_000_000_000 // _effective_fps(fps))
+
+
+RELIABLE_SINK_OPTIONS: Dict[str, Any] = {
+    "send_timeout": {"secs": 5, "nanos": 0},
+    "send_retries": 5,
+    "receive_timeout": {"secs": 5, "nanos": 0},
+    "receive_retries": 5,
+    "send_hwm": 10000,
+    "receive_hwm": 10000,
+    "inflight_ops": 100,
+}
+
+
 def build_job_payload(
     *,
     source_id: str,
     keyframe_uuid: str,
-    pre_seconds: int,
-    post_seconds: int,
+    pre_seconds: float,
+    post_seconds: float,
     sink_endpoint: str,
     labels: Optional[Dict[str, str]] = None,
     stop_condition_mode: str = "frame_count",
     fallback_reason: str | None = None,
+    fps: int = 30,
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
-    total_frames = (pre_seconds + post_seconds) * 30  # assume 30fps
+    effective_fps = _effective_fps(fps)
+    frame_duration_nanos = _frame_duration_nanos(effective_fps)
+    expected_seconds = float(pre_seconds) + float(post_seconds)
+    total_frames = int(round(expected_seconds * effective_fps))
     stop_condition: Dict[str, Any]
     if stop_condition_mode == "ts_delta_sec":
         stop_condition = {
             "ts_delta_sec": {
-                "max_delta_sec": pre_seconds + post_seconds,
+                "max_delta_sec": expected_seconds,
             }
         }
     else:
         stop_condition = {"frame_count": total_frames}
     payload = {
-        "sink": {"url": sink_endpoint},
+        "sink": {
+            "url": sink_endpoint,
+            "options": RELIABLE_SINK_OPTIONS.copy(),
+        },
         "configuration": {
             "ts_sync": True,
             "skip_intermediary_eos": False,
             "send_eos": True,
             "stop_on_incorrect_ts": False,
-            "ts_discrepancy_fix_duration": {"secs": 0, "nanos": 33333333},
-            "min_duration": {"secs": 0, "nanos": 10000000},
-            "max_duration": {"secs": 0, "nanos": 103333333},
+            "ts_discrepancy_fix_duration": {
+                "secs": 0,
+                "nanos": frame_duration_nanos,
+            },
+            "min_duration": {"secs": 0, "nanos": frame_duration_nanos},
+            "max_duration": {"secs": 0, "nanos": frame_duration_nanos},
             "stored_stream_id": source_id,
             "resulting_stream_id": f"replay-event-{event_id}",
             "routing_labels": "bypass",
             "max_idle_duration": {"secs": 10, "nanos": 0},
-            "max_delivery_duration": {"secs": 10, "nanos": 0},
+            "max_delivery_duration": {"secs": 30, "nanos": 0},
             "send_metadata_only": False,
             "labels": labels or {},
         },
         "stop_condition": stop_condition,
         "anchor_keyframe": keyframe_uuid,
         "anchor_wait_duration": {"secs": 1, "nanos": 0},
-        "offset": {"seconds": pre_seconds},
+        "offset": {"seconds": float(pre_seconds)},
         "attributes": [],
     }
     if fallback_reason is not None:

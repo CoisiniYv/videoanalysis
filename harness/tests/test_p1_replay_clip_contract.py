@@ -93,18 +93,34 @@ def test_clip_worker_prefers_previous_keyframe_uuid() -> None:
         keyframe_uuid="prev-keyframe-uuid",
         pre_seconds=5,
         post_seconds=10,
-        sink_endpoint="pub+connect:tcp://video-file-sink:6666",
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
         labels={"event_id": "11111111-1111-4111-8111-111111111111"},
     )
     assert payload["anchor_keyframe"] == "prev-keyframe-uuid"
-    assert payload["offset"]["seconds"] == 5
+    assert payload["offset"]["seconds"] == 5.0
     assert payload["stop_condition"]["frame_count"] == 450
+    assert payload["sink"]["options"]["receive_hwm"] == 10000
     assert payload["configuration"]["labels"]["event_id"].startswith("11111111")
 
 
-def test_event_annotation_schema_and_no_annotated_clip(tmp_path: Path) -> None:
+def test_event_annotation_schema_and_no_annotated_clip(
+    monkeypatch, tmp_path: Path
+) -> None:
     _activate_service_path(MW_DIR)
-    from app.worker import _finalize_p1_evidence_bundle
+    from app import worker
+
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(
+        worker,
+        "_probe_clip_decode",
+        lambda _path: {
+            "decode_error_count": 0,
+            "decode_error_sample": [],
+            "decode_ok": True,
+            "probe_tool": "/usr/bin/ffmpeg",
+            "probe_error": "",
+        },
+    )
 
     event_id = "11111111-1111-4111-8111-111111111111"
     sink_dir = tmp_path / "sink"
@@ -132,7 +148,7 @@ def test_event_annotation_schema_and_no_annotated_clip(tmp_path: Path) -> None:
     )
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    bundle = _finalize_p1_evidence_bundle(
+    bundle = worker._finalize_p1_evidence_bundle(
         mock_conn,
         event_id=event_id,
         meta_dir=str(sink_dir),
@@ -152,9 +168,22 @@ def test_event_annotation_schema_and_no_annotated_clip(tmp_path: Path) -> None:
     assert not (evidence_dir / "annotated_clip.mp4").exists()
 
 
-def test_media_worker_generated_status_contract(tmp_path: Path) -> None:
+def test_media_worker_generated_status_contract(monkeypatch, tmp_path: Path) -> None:
     _activate_service_path(MW_DIR)
-    from app.worker import _process_sink_output
+    from app import worker
+
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 5.0)
+    monkeypatch.setattr(
+        worker,
+        "_probe_clip_decode",
+        lambda _path: {
+            "decode_error_count": 0,
+            "decode_error_sample": [],
+            "decode_ok": True,
+            "probe_tool": "/usr/bin/ffmpeg",
+            "probe_error": "",
+        },
+    )
 
     event_id = "11111111-1111-4111-8111-111111111111"
     sink_dir = tmp_path / "replay-sink-output" / f"replay-event-{event_id}-00000000"
@@ -183,7 +212,7 @@ def test_media_worker_generated_status_contract(tmp_path: Path) -> None:
     mock_cursor.rowcount = 1
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    updated = _process_sink_output(
+    updated = worker._process_sink_output(
         mock_conn,
         str(tmp_path / "replay-sink-output"),
         set(),

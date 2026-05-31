@@ -122,6 +122,7 @@ services:
       RTSP_TRANSPORT: tcp
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       SYNC_OUTPUT: "true"
+      BUFFER_LEN: "2000"
       FFMPEG_TIMEOUT_MS: "20000"
     depends_on:
       - replay-service
@@ -137,7 +138,7 @@ services:
       ]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
-      ZMQ_ENDPOINT: sub+bind:tcp://0.0.0.0:6666
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
       DIR_LOCATION: ${P1C_RTSP_SINK_DIR_LOCATION:-/media/replay-sink-output/p1c-rtsp/%source_id%/%src_filename%/}
       CHUNK_SIZE: "0"
     volumes:
@@ -189,7 +190,7 @@ services:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
       RECORD_REQUEST_STREAM: security.record_requests
       REPLAY_API_URL: http://replay-service:8080
-      REPLAY_JOB_SINK_URL: pub+connect:tcp://video-file-sink:6666
+      REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
       CONSUMER_GROUP: clip-workers-p1c-rtsp
       CONSUMER_NAME: clip-worker-p1c-rtsp-1
       POLL_TIMEOUT_MS: "5000"
@@ -200,6 +201,7 @@ services:
       CLIP_WORKER_MAX_CONCURRENT_JOBS: "1"
       CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "30"
       REPLAY_STOP_CONDITION_MODE: ts_delta_sec
+      REPLAY_FPS: "30"
     volumes:
       - ../services/clip-worker:/app:rw
     depends_on:

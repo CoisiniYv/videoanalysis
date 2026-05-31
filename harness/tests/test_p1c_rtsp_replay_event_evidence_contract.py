@@ -73,9 +73,10 @@ def test_p1c_compose_scopes_single_rtsp_path_only() -> None:
     assert source_env["RTSP_URI"] == "rtsp://10.37.57.112:8554/live/1080movie"
     assert source_env["LOCATION"] == "rtsp://10.37.57.112:8554/live/1080movie"
     assert source_env["ZMQ_ENDPOINT"] == "dealer+connect:tcp://replay-service:5555"
+    assert source_env["BUFFER_LEN"] == "2000"
     assert savant_env["ZMQ_SRC_ENDPOINT"] == "router+bind:tcp://0.0.0.0:5557"
     assert savant_env["SOURCE_ID"] == "p1c_rtsp_replay"
-    assert sink_env["ZMQ_ENDPOINT"] == "sub+bind:tcp://0.0.0.0:6666"
+    assert sink_env["ZMQ_ENDPOINT"] == "router+bind:tcp://0.0.0.0:6666"
     assert event_env["RECORDING_ENABLED"] == "true"
     assert event_env["RECORDING_EVENT_TYPES"] == "intrusion"
     assert event_env["RECORDING_SOURCE_ID"] == "p1c_rtsp_replay"
@@ -83,11 +84,12 @@ def test_p1c_compose_scopes_single_rtsp_path_only() -> None:
     assert event_env["RECORDING_COOLDOWN_SECONDS"] == "30"
     assert event_env["DEFAULT_REPLAY_SOURCE_ID"] == "p1c_rtsp_replay"
     assert clip_env["REPLAY_API_URL"] == "http://replay-service:8080"
-    assert clip_env["REPLAY_JOB_SINK_URL"] == "pub+connect:tcp://video-file-sink:6666"
+    assert clip_env["REPLAY_JOB_SINK_URL"] == "dealer+connect:tcp://video-file-sink:6666"
     assert clip_env["CLIP_WORKER_MAX_JOBS_PER_RUN"] == "1"
     assert clip_env["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "1"
     assert clip_env["CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS"] == "30"
     assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
+    assert clip_env["REPLAY_FPS"] == "30"
     assert "../services/event-worker:/app:rw" in compose["services"]["event-worker"]["volumes"]
     assert "../services/clip-worker:/app:rw" in compose["services"]["clip-worker"]["volumes"]
     assert "../services/media-worker:/app:rw" in compose["services"]["media-worker"]["volumes"]
@@ -231,11 +233,12 @@ def test_p1c_replay_job_uses_ts_delta_sec_when_supported() -> None:
         keyframe_uuid="kf-123",
         pre_seconds=5,
         post_seconds=5,
-        sink_endpoint="pub+connect:tcp://video-file-sink:6666",
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
         labels={"event_id": "ev-123"},
         stop_condition_mode="ts_delta_sec",
     )
     assert payload["stop_condition"]["ts_delta_sec"]["max_delta_sec"] == 10
+    assert payload["sink"]["options"]["inflight_ops"] == 100
 
 
 def test_p1c_replay_job_frame_count_fallback_declares_reason() -> None:
@@ -247,7 +250,7 @@ def test_p1c_replay_job_frame_count_fallback_declares_reason() -> None:
         keyframe_uuid="kf-123",
         pre_seconds=5,
         post_seconds=5,
-        sink_endpoint="pub+connect:tcp://video-file-sink:6666",
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
         labels={"event_id": "ev-123"},
         stop_condition_mode="frame_count",
         fallback_reason="configured_frame_count_fallback",
@@ -294,7 +297,20 @@ def test_p1c_event_annotation_converts_bbox_object_xywh_to_xyxy() -> None:
 
 def test_p1c_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     _activate_service_path(MW_DIR)
-    from app.worker import _finalize_p1_evidence_bundle
+    from app import worker
+
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 10.05)
+    monkeypatch.setattr(
+        worker,
+        "_probe_clip_decode",
+        lambda _path: {
+            "decode_error_count": 0,
+            "decode_error_sample": [],
+            "decode_ok": True,
+            "probe_tool": "/usr/bin/ffmpeg",
+            "probe_error": "",
+        },
+    )
 
     monkeypatch.setenv("EVIDENCE_PHASE", "P1c-RTSP")
     monkeypatch.setenv("EVIDENCE_RUN_ID", "run-123")
@@ -348,7 +364,7 @@ def test_p1c_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     )
     mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-    bundle = _finalize_p1_evidence_bundle(
+    bundle = worker._finalize_p1_evidence_bundle(
         mock_conn,
         event_id=event_id,
         meta_dir=str(sink_dir),
@@ -366,6 +382,8 @@ def test_p1c_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     assert business["input"]["local_file_used"] is False
     assert business["replay"]["stop_condition_mode"] == "ts_delta_sec"
     assert business["media"]["sink_metadata_path"].endswith("sink_metadata.json")
+    assert business["media"]["clip_validation"]["ok"] is True
+    assert business["status"]["clip_status"] == "generated"
     assert "single-event evidence POC" in business["limitations"]
     assert "not incident coalescing" in business["limitations"]
     assert "not continuous recording" in business["limitations"]

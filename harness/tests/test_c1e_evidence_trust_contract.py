@@ -62,6 +62,17 @@ def test_business_metadata_duration_schema_not_hardcoded(monkeypatch, tmp_path: 
     from app import worker
 
     monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 10.05)
+    monkeypatch.setattr(
+        worker,
+        "_probe_clip_decode",
+        lambda _path: {
+            "decode_error_count": 0,
+            "decode_error_sample": [],
+            "decode_ok": True,
+            "probe_tool": "/usr/bin/ffmpeg",
+            "probe_error": "",
+        },
+    )
     event_context = {
         "event_id": "ev-1",
         "source_event_id": "source-1",
@@ -100,6 +111,8 @@ def test_business_metadata_duration_schema_not_hardcoded(monkeypatch, tmp_path: 
     assert metadata["media"]["raw_clip_duration"] == 10.05
     assert metadata["media"]["raw_clip_duration"] > 0
     assert metadata["media"]["duration_probe_status"] == "ok"
+    assert metadata["media"]["clip_validation"]["ok"] is True
+    assert metadata["status"]["clip_status"] == "generated"
 
 
 def test_duration_probe_failure_is_null_not_zero(monkeypatch, tmp_path: Path) -> None:
@@ -290,6 +303,8 @@ def test_c1e_smoke_contains_trust_checks() -> None:
     for expected in (
         "metadata_raw_clip_duration=",
         "duration_probe_status=",
+        "clip_validation.ok=",
+        "clip_validation.decode_error_count=",
         "duration_range_check=",
         "keyframe_lookup_used=",
         "roi_overlay_generated=",

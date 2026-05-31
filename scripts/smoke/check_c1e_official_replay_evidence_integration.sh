@@ -433,6 +433,7 @@ print(json.dumps({
     "clip_replay_api": clip.get("REPLAY_API_URL"),
     "clip_sink_url": clip.get("REPLAY_JOB_SINK_URL"),
     "clip_stop_condition_mode": clip.get("REPLAY_STOP_CONDITION_MODE"),
+    "clip_replay_fps": clip.get("REPLAY_FPS"),
     "clip_unbounded_keyframe_fallback": clip.get("ALLOW_UNBOUNDED_KEYFRAME_FALLBACK"),
     "media_evidence_dir": media.get("EVIDENCE_OUTPUT_DIR"),
     "media_phase": media.get("EVIDENCE_PHASE"),
@@ -445,6 +446,7 @@ SOURCE_OUTPUT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sou
 SAVANT_INPUT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["savant_input"])' "$RUNTIME_JSON")"
 SINK_ENDPOINT="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["sink_endpoint"])' "$RUNTIME_JSON")"
 CLIP_SINK_URL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["clip_sink_url"])' "$RUNTIME_JSON")"
+CLIP_REPLAY_FPS="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["clip_replay_fps"])' "$RUNTIME_JSON")"
 RECORDING_ENABLED="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["recording_enabled"])' "$RUNTIME_JSON")"
 RECORDING_EVENT_TYPES="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["recording_event_types"])' "$RUNTIME_JSON")"
 RECORDING_SOURCE_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["recording_source_id"])' "$RUNTIME_JSON")"
@@ -496,7 +498,7 @@ RULE_SNAPSHOT_REQUIRED="$(python3 -c 'import json,sys; print(json.loads(sys.argv
 check 9 "source adapter targets replay-service only" "$([[ "$SOURCE_OUTPUT" == "dealer+connect:tcp://replay-service:5555" ]] && echo pass || echo fail)"
 check 10 "Replay out_stream targets savant-security" "$([[ "$REPLAY_TO_SAVANT" == "dealer+connect:tcp://savant-security:5557" ]] && echo pass || echo fail)"
 check 11 "savant input binds Replay output port" "$([[ "$SAVANT_INPUT" == "router+bind:tcp://0.0.0.0:5557" ]] && echo pass || echo fail)"
-check 12 "clip-worker job sink targets video-file-sink" "$([[ "$CLIP_SINK_URL" == "pub+connect:tcp://video-file-sink:6666" && "$SINK_ENDPOINT" == "sub+bind:tcp://0.0.0.0:6666" ]] && echo pass || echo fail)"
+check 12 "clip-worker job sink targets video-file-sink with reliable sockets" "$([[ "$CLIP_SINK_URL" == "dealer+connect:tcp://video-file-sink:6666" && "$SINK_ENDPOINT" == "router+bind:tcp://0.0.0.0:6666" && "$CLIP_REPLAY_FPS" == "30" ]] && echo pass || echo fail)"
 check 13 "recording gate is configured for one C1E intrusion request" "$([[ "$RECORDING_ENABLED" == "true" && "$RECORDING_EVENT_TYPES" == "intrusion" && "$RECORDING_SOURCE_ID" == "$SOURCE_ID" && "$RECORDING_MAX_REQUESTS" == "1" && "$RECORDING_COOLDOWN" == "30" && "$RECORDING_PRE" == "5" && "$RECORDING_POST" == "5" ]] && echo pass || echo fail)"
 check 14 "clip-worker prefers ts_delta_sec and disables unbounded keyframe fallback" "$([[ "$CLIP_STOP_MODE" == "ts_delta_sec" && "$CLIP_UNBOUNDED_FALLBACK" == "false" ]] && echo pass || echo fail)"
 check 15 "media-worker C1E raw finalizer and ROI config lookup configured" "$([[ "$MEDIA_PHASE" == "C1E-RTSP" && "$MEDIA_FINALIZER" == "true" && "$MEDIA_INPUT_URI" == "$RTSP_URL" && "$MEDIA_CAMERAS_CONFIG" == "/opt/savant/src/module/config/cameras.c1e_replay.yml" ]] && echo pass || echo fail)"
@@ -594,10 +596,10 @@ REPLAY_CODE="$(curl_silent -o /dev/null -w "%{http_code}" "${REPLAY_API}/api/v1/
 check 19 "Replay /api/v1/status responds" "$([[ "$REPLAY_CODE" == "200" ]] && echo pass || echo fail)"
 
 echo -e "${BLUE}Waiting for C1E event -> record_request -> Replay job -> evidence bundle...${NC}"
-EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status'='generated' ORDER BY updated_at DESC LIMIT 1;")"
+EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status' IN ('generated','generated_corrupt','generated_unverified') ORDER BY updated_at DESC LIMIT 1;")"
 if [[ -z "$EVENT_ID" ]]; then
   for _ in $(seq 1 "$WAIT_SECONDS"); do
-    EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status'='generated' ORDER BY updated_at DESC LIMIT 1;")"
+    EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status' IN ('generated','generated_corrupt','generated_unverified') ORDER BY updated_at DESC LIMIT 1;")"
     [[ -n "$EVENT_ID" ]] && break
     sleep 1
   done
@@ -696,6 +698,36 @@ try:
 except json.JSONDecodeError:
     data = {}
 print(((data.get("sink") or {}).get("url")) or "")
+PY
+)"
+REPLAY_SINK_OPTIONS="$(python3 - "$REPLAY_JOB_REQUEST" <<'PY'
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1] or "{}")
+except json.JSONDecodeError:
+    data = {}
+print(json.dumps(((data.get("sink") or {}).get("options")) or {}, sort_keys=True))
+PY
+)"
+REPLAY_MIN_DURATION="$(python3 - "$REPLAY_JOB_REQUEST" <<'PY'
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1] or "{}")
+except json.JSONDecodeError:
+    data = {}
+print(json.dumps(((data.get("configuration") or {}).get("min_duration")) or {}, sort_keys=True))
+PY
+)"
+REPLAY_MAX_DURATION="$(python3 - "$REPLAY_JOB_REQUEST" <<'PY'
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1] or "{}")
+except json.JSONDecodeError:
+    data = {}
+print(json.dumps(((data.get("configuration") or {}).get("max_duration")) or {}, sort_keys=True))
 PY
 )"
 STORED_STREAM_ID="$(python3 - "$REPLAY_JOB_REQUEST" <<'PY'
@@ -843,6 +875,38 @@ PY
 )"
 METADATA_RAW_CLIP_DURATION="$(python3 -c 'import json,sys; value=json.loads(sys.argv[1])["duration"]; print("" if value is None else value)' "$METADATA_DURATION_JSON")"
 DURATION_PROBE_STATUS="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["status"])' "$METADATA_DURATION_JSON")"
+METADATA_VALIDATION_JSON="$(python3 - "$HOST_METADATA_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    data = {}
+media = data.get("media") or {}
+status = data.get("status") or {}
+validation = media.get("clip_validation") or {}
+print(json.dumps({
+    "expected_duration_seconds": media.get("expected_duration_seconds"),
+    "clip_status": status.get("clip_status", ""),
+    "ok": validation.get("ok"),
+    "decode_error_count": validation.get("decode_error_count"),
+    "decode_error_sample": validation.get("decode_error_sample") or [],
+    "duration_ok": validation.get("duration_ok"),
+    "probe_tool": validation.get("probe_tool") or "",
+    "probe_error": validation.get("probe_error") or "",
+}, sort_keys=True))
+PY
+)"
+EXPECTED_DURATION_SECONDS="$(python3 -c 'import json,sys; value=json.loads(sys.argv[1])["expected_duration_seconds"]; print("" if value is None else value)' "$METADATA_VALIDATION_JSON")"
+METADATA_CLIP_STATUS="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["clip_status"])' "$METADATA_VALIDATION_JSON")"
+CLIP_VALIDATION_OK="$(python3 -c 'import json,sys; value=json.loads(sys.argv[1])["ok"]; print("true" if value is True else "false" if value is False else "")' "$METADATA_VALIDATION_JSON")"
+CLIP_VALIDATION_DECODE_ERROR_COUNT="$(python3 -c 'import json,sys; value=json.loads(sys.argv[1])["decode_error_count"]; print("" if value is None else value)' "$METADATA_VALIDATION_JSON")"
+CLIP_VALIDATION_DURATION_OK="$(python3 -c 'import json,sys; value=json.loads(sys.argv[1])["duration_ok"]; print("true" if value is True else "false" if value is False else "")' "$METADATA_VALIDATION_JSON")"
+CLIP_VALIDATION_PROBE_TOOL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["probe_tool"])' "$METADATA_VALIDATION_JSON")"
+CLIP_VALIDATION_PROBE_ERROR="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["probe_error"])' "$METADATA_VALIDATION_JSON")"
+CLIP_VALIDATION_DECODE_ERROR_SAMPLE="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["decode_error_sample"]))' "$METADATA_VALIDATION_JSON")"
 DURATION_RANGE_CHECK="$(python3 - "$METADATA_RAW_CLIP_DURATION" <<'PY'
 import sys
 try:
@@ -875,6 +939,8 @@ required_limitations = {
 media = data.get("media") or {}
 event = data.get("event") or {}
 replay = data.get("replay") or {}
+status = data.get("status") or {}
+validation = media.get("clip_validation") or {}
 ok = (
     data.get("schema_version") == "1.0"
     and data.get("phase") == "C1E-RTSP"
@@ -891,7 +957,13 @@ ok = (
     and media.get("raw_clip_path")
     and isinstance(media.get("raw_clip_duration"), (int, float))
     and media.get("raw_clip_duration") > 0
+    and isinstance(media.get("expected_duration_seconds"), (int, float))
     and media.get("duration_probe_status") == "ok"
+    and validation.get("ok") is True
+    and validation.get("decode_error_count") == 0
+    and validation.get("duration_ok") is True
+    and bool(validation.get("probe_tool"))
+    and status.get("clip_status") == "generated"
     and required_limitations.issubset(limitations)
 )
 print("yes" if ok else "no")
@@ -974,17 +1046,18 @@ check 28 "events.clip_path points to raw_clip" "$([[ "$CLIP_PATH" == "$RAW_CLIP"
 check 29 "raw_clip file exists and non-empty" "$([[ -n "$RAW_CLIP" && "${RAW_CLIP_SIZE:-0}" -gt 0 ]] && echo pass || echo fail)"
 check 30 "raw clip is ffprobe-readable" "$([[ -n "$VIDEO_FORMAT" && "$DURATION_OK" == "yes" ]] && echo pass || echo fail)"
 check 31 "metadata raw_clip_duration is non-zero and in expected range" "$([[ "$DURATION_PROBE_STATUS" == "ok" && "$DURATION_RANGE_CHECK" == "yes" ]] && echo pass || echo fail)"
-check 32 "metadata.json contains business metadata" "$([[ "$BUSINESS_METADATA_OK" == "yes" ]] && echo pass || echo fail)"
-check 33 "sink_metadata.json is preserved" "$([[ "$SINK_METADATA_PRESERVED" == "yes" ]] && echo pass || echo fail)"
-check 34 "event_annotation.json exists and bbox conversion is correct" "$([[ "$ANNOTATION_BBOX_CONVERSION" == "yes" ]] && echo pass || echo fail)"
-check 35 "event_annotation includes configured ROI overlay or explicit lookup status" "$([[ "$ROI_OVERLAY_GENERATED" == "yes" || "$ROI_LOOKUP_STATUS" == "not_found" ]] && echo pass || echo fail)"
-check 36 "no annotated_clip generated" "$($DOCKER exec "$MEDIA_WORKER_CONTAINER" sh -c "test ! -e '${EVIDENCE_DIR}/annotated_clip.mp4' && test ! -e '${EVIDENCE_DIR}/annotated_clip.mov' && test ! -e '${EVIDENCE_DIR}/annotated_clip.webm'" && echo pass || echo fail)"
-check 37 "Replay job uses event-provided keyframe anchor" "$([[ "$NORMAL_ANCHOR_SOURCE" == "previous_keyframe_uuid" || "$NORMAL_ANCHOR_SOURCE" == "keyframe_uuid" ]] && echo pass || echo fail)"
-check 38 "keyframe fallback not used in normal C1E path" "$([[ "$KEYFRAME_LOOKUP_USED" == "no" ]] && echo pass || echo fail)"
-check 39 "Replay stop_condition uses ts_delta_sec or declared fallback" "$([[ "$STOP_CONDITION_MODE" == "ts_delta_sec" || ( "$STOP_CONDITION_MODE" == "frame_count_fallback" && -n "$FALLBACK_REASON" ) ]] && echo pass || echo fail)"
-check 40 "Replay stored stream id matches source id" "$([[ "$STORED_STREAM_ID" == "$SOURCE_ID" ]] && echo pass || echo fail)"
-check 41 "Replay resulting stream id contains event id" "$([[ -n "$RESULTING_STREAM_ID" && -n "$EVENT_ID" && "$RESULTING_STREAM_ID" == *"$EVENT_ID"* ]] && echo pass || echo fail)"
-check 42 "Replay sink url points to video-file-sink" "$([[ "$REPLAY_SINK_URL" == "pub+connect:tcp://video-file-sink:6666" ]] && echo pass || echo fail)"
+check 32 "metadata clip_validation reports decode-clean clip" "$([[ "$CLIP_VALIDATION_OK" == "true" && "${CLIP_VALIDATION_DECODE_ERROR_COUNT:-}" == "0" && "$CLIP_VALIDATION_DURATION_OK" == "true" && -n "$CLIP_VALIDATION_PROBE_TOOL" && "$METADATA_CLIP_STATUS" == "generated" ]] && echo pass || echo fail)"
+check 33 "metadata.json contains business metadata" "$([[ "$BUSINESS_METADATA_OK" == "yes" ]] && echo pass || echo fail)"
+check 34 "sink_metadata.json is preserved" "$([[ "$SINK_METADATA_PRESERVED" == "yes" ]] && echo pass || echo fail)"
+check 35 "event_annotation.json exists and bbox conversion is correct" "$([[ "$ANNOTATION_BBOX_CONVERSION" == "yes" ]] && echo pass || echo fail)"
+check 36 "event_annotation includes configured ROI overlay or explicit lookup status" "$([[ "$ROI_OVERLAY_GENERATED" == "yes" || "$ROI_LOOKUP_STATUS" == "not_found" ]] && echo pass || echo fail)"
+check 37 "no annotated_clip generated" "$($DOCKER exec "$MEDIA_WORKER_CONTAINER" sh -c "test ! -e '${EVIDENCE_DIR}/annotated_clip.mp4' && test ! -e '${EVIDENCE_DIR}/annotated_clip.mov' && test ! -e '${EVIDENCE_DIR}/annotated_clip.webm'" && echo pass || echo fail)"
+check 38 "Replay job uses event-provided keyframe anchor" "$([[ "$NORMAL_ANCHOR_SOURCE" == "previous_keyframe_uuid" || "$NORMAL_ANCHOR_SOURCE" == "keyframe_uuid" ]] && echo pass || echo fail)"
+check 39 "keyframe fallback not used in normal C1E path" "$([[ "$KEYFRAME_LOOKUP_USED" == "no" ]] && echo pass || echo fail)"
+check 40 "Replay stop_condition uses ts_delta_sec or declared fallback" "$([[ "$STOP_CONDITION_MODE" == "ts_delta_sec" || ( "$STOP_CONDITION_MODE" == "frame_count_fallback" && -n "$FALLBACK_REASON" ) ]] && echo pass || echo fail)"
+check 41 "Replay stored stream id matches source id" "$([[ "$STORED_STREAM_ID" == "$SOURCE_ID" ]] && echo pass || echo fail)"
+check 42 "Replay resulting stream id contains event id" "$([[ -n "$RESULTING_STREAM_ID" && -n "$EVENT_ID" && "$RESULTING_STREAM_ID" == *"$EVENT_ID"* ]] && echo pass || echo fail)"
+check 43 "Replay sink url points to video-file-sink with reliable socket" "$([[ "$REPLAY_SINK_URL" == "dealer+connect:tcp://video-file-sink:6666" ]] && echo pass || echo fail)"
 
 echo -e "${BLUE}Stopping source adapter after first evidence bundle...${NC}"
 $DOCKER stop "$SOURCE_CONTAINER" >/dev/null 2>&1 || true
@@ -1005,9 +1078,9 @@ fi
 if [[ "$POST_STOP_SINK_COUNT" -gt "$max_evidence_bundles" && "$POST_STOP_SINK_COUNT" -gt "$POST_STOP_EVIDENCE_COUNT" ]]; then
   EXTRA_CLIPS_DETECTED=$((POST_STOP_SINK_COUNT - max_evidence_bundles))
 fi
-check 43 "source adapter stopped after smoke" "$([[ "$SOURCE_STOPPED_AFTER_SMOKE" == "yes" ]] && echo pass || echo fail)"
-check 44 "single-event evidence counts are controlled" "$([[ "$POST_STOP_RECORD_REQUEST_COUNT" -eq "$max_record_requests" && "$POST_STOP_REPLAY_JOB_COUNT" -eq "$max_replay_jobs" && "$POST_STOP_EVIDENCE_COUNT" -eq "$max_evidence_bundles" && "$POST_STOP_SINK_COUNT" -eq 1 && "$EXTRA_CLIPS_DETECTED" -eq 0 ]] && echo pass || echo fail)"
-check 45 "extra clips detected is zero" "$([[ "$EXTRA_CLIPS_DETECTED" -eq 0 ]] && echo pass || echo fail)"
+check 44 "source adapter stopped after smoke" "$([[ "$SOURCE_STOPPED_AFTER_SMOKE" == "yes" ]] && echo pass || echo fail)"
+check 45 "single-event evidence counts are controlled" "$([[ "$POST_STOP_RECORD_REQUEST_COUNT" -eq "$max_record_requests" && "$POST_STOP_REPLAY_JOB_COUNT" -eq "$max_replay_jobs" && "$POST_STOP_EVIDENCE_COUNT" -eq "$max_evidence_bundles" && "$POST_STOP_SINK_COUNT" -eq 1 && "$EXTRA_CLIPS_DETECTED" -eq 0 ]] && echo pass || echo fail)"
+check 46 "extra clips detected is zero" "$([[ "$EXTRA_CLIPS_DETECTED" -eq 0 ]] && echo pass || echo fail)"
 
 echo ""
 echo "docker_access=${DOCKER_ACCESS}"
@@ -1078,7 +1151,12 @@ echo "fallback_reason=${FALLBACK_REASON}"
 echo "normal_anchor_source=${NORMAL_ANCHOR_SOURCE}"
 echo "keyframe_lookup_used=${KEYFRAME_LOOKUP_USED}"
 echo "unbounded_keyframe_fallback_default=${CLIP_UNBOUNDED_FALLBACK}"
+echo "video_file_sink_socket_config=${SINK_ENDPOINT}"
 echo "sink_url=${REPLAY_SINK_URL}"
+echo "sink_options=${REPLAY_SINK_OPTIONS}"
+echo "replay_min_duration=${REPLAY_MIN_DURATION}"
+echo "replay_max_duration=${REPLAY_MAX_DURATION}"
+echo "replay_job_payload=${REPLAY_JOB_REQUEST}"
 echo "stored_stream_id=${STORED_STREAM_ID}"
 echo "resulting_stream_id=${RESULTING_STREAM_ID}"
 echo "events.clip_path=${CLIP_PATH}"
@@ -1094,8 +1172,16 @@ echo "host_raw_clip=${HOST_RAW_CLIP}"
 echo "raw_clip_size=${RAW_CLIP_SIZE}"
 echo "raw_clip_duration=${VIDEO_DURATION}"
 echo "metadata_raw_clip_duration=${METADATA_RAW_CLIP_DURATION}"
+echo "expected_duration_seconds=${EXPECTED_DURATION_SECONDS}"
 echo "duration_probe_status=${DURATION_PROBE_STATUS}"
 echo "duration_range_check=${DURATION_RANGE_CHECK}"
+echo "clip_validation.ok=${CLIP_VALIDATION_OK}"
+echo "clip_validation.decode_error_count=${CLIP_VALIDATION_DECODE_ERROR_COUNT}"
+echo "clip_validation.decode_error_sample=${CLIP_VALIDATION_DECODE_ERROR_SAMPLE}"
+echo "clip_validation.duration_ok=${CLIP_VALIDATION_DURATION_OK}"
+echo "clip_validation.probe_tool=${CLIP_VALIDATION_PROBE_TOOL}"
+echo "clip_validation.probe_error=${CLIP_VALIDATION_PROBE_ERROR}"
+echo "metadata_clip_status=${METADATA_CLIP_STATUS}"
 echo "business_metadata_generated=${BUSINESS_METADATA_OK}"
 echo "sink_metadata_preserved=${SINK_METADATA_PRESERVED}"
 echo "event_annotation_bbox_conversion=${ANNOTATION_BBOX_CONVERSION}"

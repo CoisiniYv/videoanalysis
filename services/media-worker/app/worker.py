@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -85,8 +86,6 @@ def _find_video_file(meta_dir: str) -> str | None:
     return None
 
 
-import re
-
 _UUID_RE = re.compile(
     r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 )
@@ -151,7 +150,12 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
                 (event_id,),
             )
             row = cur.fetchone()
-            return row is not None and row[0] in ("ready", "generated")
+            return row is not None and row[0] in (
+                "ready",
+                "generated",
+                "generated_corrupt",
+                "generated_unverified",
+            )
     except Exception:
         return False
 
@@ -629,6 +633,141 @@ def _probe_video_duration_seconds(path: str) -> float | None:
     return _probe_duration_with_imageio_ffmpeg(path)
 
 
+_DECODE_ERROR_MARKERS = (
+    "corrupt",
+    "concealing",
+    "decode_slice",
+    "error while decoding",
+    "invalid data",
+    "missing reference",
+    "non-existing",
+    "no frame",
+)
+
+
+def _ffmpeg_exe() -> str | None:
+    """Resolve an ffmpeg binary for whole-clip decode validation."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        logger.warning("ffmpeg not found for raw clip decode validation")
+        return None
+
+
+def _stderr_sample(stderr: str, limit: int = 5) -> list[str]:
+    return [line.strip() for line in stderr.splitlines() if line.strip()][:limit]
+
+
+def _probe_clip_decode(path: str) -> dict:
+    """Decode the whole clip once and count decoder-error lines."""
+    result = {
+        "decode_error_count": 0,
+        "decode_error_sample": [],
+        "decode_ok": None,
+        "probe_tool": None,
+        "probe_error": "",
+    }
+    if not Path(path).is_file():
+        result["probe_error"] = "clip file not found"
+        return result
+
+    ffmpeg = _ffmpeg_exe()
+    if not ffmpeg:
+        result["probe_error"] = "ffmpeg unavailable"
+        return result
+    result["probe_tool"] = ffmpeg
+
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-i", path, "-f", "null", "-"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        logger.warning("clip decode validation failed path=%s error=%s", path, exc)
+        result["probe_error"] = str(exc)
+        return result
+
+    stderr = proc.stderr or ""
+    error_lines = [
+        line.strip()
+        for line in stderr.splitlines()
+        if any(marker in line.lower() for marker in _DECODE_ERROR_MARKERS)
+    ]
+    if proc.returncode != 0 and not error_lines:
+        error_lines = _stderr_sample(stderr)
+    result["decode_error_count"] = len(error_lines)
+    result["decode_error_sample"] = error_lines[:5]
+    result["decode_ok"] = proc.returncode == 0 and not error_lines
+    if proc.returncode != 0 and not result["probe_error"]:
+        result["probe_error"] = f"ffmpeg exited with status {proc.returncode}"
+    return result
+
+
+def _duration_spec_seconds(spec: object) -> float | None:
+    if not isinstance(spec, dict):
+        return None
+    secs = _to_float(spec.get("secs"))
+    nanos = _to_float(spec.get("nanos"))
+    if secs is None and nanos is None:
+        return None
+    return float(secs or 0.0) + float(nanos or 0.0) / 1_000_000_000.0
+
+
+def _expected_clip_seconds(
+    stop_condition: dict,
+    configuration: dict,
+    offset_seconds: object,
+) -> float:
+    """Best-effort expected raw clip duration from the Replay job request."""
+    if isinstance(stop_condition, dict):
+        ts_delta = stop_condition.get("ts_delta_sec")
+        if isinstance(ts_delta, dict):
+            max_delta = _to_float(ts_delta.get("max_delta_sec"))
+            if max_delta is not None and max_delta > 0:
+                return max_delta
+
+        frame_count = _to_float(stop_condition.get("frame_count"))
+        min_duration = (
+            configuration.get("min_duration")
+            if isinstance(configuration, dict)
+            else None
+        )
+        frame_duration = _duration_spec_seconds(min_duration)
+        if frame_count is not None and frame_count > 0:
+            if frame_duration is not None and frame_duration > 0:
+                return frame_count * frame_duration
+            return frame_count / 30.0
+
+    offset = _to_float(offset_seconds)
+    return float(offset or 0.0)
+
+
+def _duration_ok(actual: float | None, expected: float) -> bool:
+    if actual is None or actual <= 0:
+        return False
+    if expected <= 0:
+        return actual > 0
+    return actual >= expected * 0.8 and actual <= expected * 1.5
+
+
+def _clip_status_from_validation(clip_validation: dict) -> str:
+    if clip_validation.get("decode_error_count", 0) > 0:
+        return "generated_corrupt"
+    if clip_validation.get("ok") is True:
+        return "generated"
+    if clip_validation.get("ok") is False:
+        return "generated_corrupt"
+    return "generated_unverified"
+
+
 def _stop_condition_mode(stop_condition: dict) -> str:
     if "ts_delta_sec" in stop_condition:
         return "ts_delta_sec"
@@ -662,6 +801,26 @@ def _build_business_metadata(
         raw_clip_size = 0
     raw_clip_duration = _probe_video_duration_seconds(raw_clip_path)
     duration_probe_status = "ok" if raw_clip_duration is not None else "failed"
+    expected_duration_seconds = _expected_clip_seconds(
+        stop_condition,
+        configuration,
+        offset.get("seconds", 0),
+    )
+    decode_probe = _probe_clip_decode(raw_clip_path)
+    duration_ok = _duration_ok(raw_clip_duration, expected_duration_seconds)
+    if decode_probe.get("decode_ok") is None or raw_clip_duration is None:
+        validation_ok = None
+    else:
+        validation_ok = bool(decode_probe.get("decode_ok")) and duration_ok
+    clip_validation = {
+        "ok": validation_ok,
+        "decode_error_count": decode_probe.get("decode_error_count", 0),
+        "decode_error_sample": decode_probe.get("decode_error_sample", []),
+        "duration_ok": duration_ok,
+        "probe_tool": decode_probe.get("probe_tool"),
+        "probe_error": decode_probe.get("probe_error", ""),
+    }
+    clip_status = _clip_status_from_validation(clip_validation)
 
     return {
         "schema_version": "1.0",
@@ -709,10 +868,12 @@ def _build_business_metadata(
             "event_annotation_path": event_annotation_path,
             "raw_clip_size": raw_clip_size,
             "raw_clip_duration": raw_clip_duration,
+            "expected_duration_seconds": round(expected_duration_seconds, 3),
             "duration_probe_status": duration_probe_status,
+            "clip_validation": clip_validation,
         },
         "status": {
-            "clip_status": "generated",
+            "clip_status": clip_status,
         },
         "limitations": [
             "single-event evidence POC",
@@ -789,6 +950,9 @@ def _finalize_p1_evidence_bundle(
         "sink_metadata": str(sink_metadata_out),
         "event_annotation": str(annotation_out),
         "sink_output_path": meta_dir,
+        "clip_status": business_metadata.get("status", {}).get(
+            "clip_status", "generated_unverified"
+        ),
     }
 
 
@@ -869,7 +1033,7 @@ def _process_sink_output(
                 evidence_output_dir=evidence_output_dir,
             )
             clip_path = bundle["raw_clip"]
-            clip_status = "generated"
+            clip_status = bundle.get("clip_status", "generated_unverified")
         else:
             clip_path = video_file
             clip_status = "ready"

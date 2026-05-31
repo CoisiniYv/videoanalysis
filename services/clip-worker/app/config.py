@@ -23,6 +23,7 @@ class Config:
     max_concurrent_jobs: int
     per_camera_cooldown_seconds: int
     replay_stop_condition_mode: str
+    replay_fps: int
     allow_unbounded_keyframe_fallback: bool
 
 
@@ -34,7 +35,8 @@ def load_config() -> Config:
         ),
         replay_api_url=os.getenv("REPLAY_API_URL", "http://replay-service:8080"),
         replay_job_sink_url=os.getenv(
-            "REPLAY_JOB_SINK_URL", "pub+connect:tcp://video-file-sink:6666"
+            "REPLAY_JOB_SINK_URL",
+            "dealer+connect:tcp://video-file-sink:6666",
         ),
         database_url=os.getenv(
             "DATABASE_URL",
@@ -56,6 +58,7 @@ def load_config() -> Config:
         replay_stop_condition_mode=os.getenv(
             "REPLAY_STOP_CONDITION_MODE", "frame_count"
         ),
+        replay_fps=int(os.getenv("REPLAY_FPS", "30")),
         allow_unbounded_keyframe_fallback=os.getenv(
             "ALLOW_UNBOUNDED_KEYFRAME_FALLBACK", "false"
         ).strip().lower() in ("1", "true", "yes"),

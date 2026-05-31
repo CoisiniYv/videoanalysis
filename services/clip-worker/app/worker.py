@@ -86,12 +86,13 @@ def run_worker(
     logger.info(
         "clip-worker started stream=%s group=%s replay=%s "
         "max_jobs_per_run=%s max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
-        "stop_condition_mode=%s allow_unbounded_keyframe_fallback=%s",
+        "stop_condition_mode=%s replay_fps=%s allow_unbounded_keyframe_fallback=%s",
         stream, group, cfg.replay_api_url,
         cfg.max_jobs_per_run,
         cfg.max_concurrent_jobs,
         cfg.per_camera_cooldown_seconds,
         cfg.replay_stop_condition_mode,
+        cfg.replay_fps,
         cfg.allow_unbounded_keyframe_fallback,
     )
 
@@ -297,6 +298,7 @@ def run_worker(
                         labels={"event_id": event_id},
                         stop_condition_mode=stop_condition_mode,
                         fallback_reason=fallback_reason,
+                        fps=cfg.replay_fps,
                     )
 
                     if job_id:

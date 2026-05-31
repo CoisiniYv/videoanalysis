@@ -7,12 +7,12 @@
     "job_writer_cache_ttl": {"secs": 60, "nanos": 0},
     "job_eviction_ttl": {"secs": 60, "nanos": 0},
     "default_job_sink_options": {
-      "send_timeout": {"secs": 1, "nanos": 0},
-      "send_retries": 3,
-      "receive_timeout": {"secs": 1, "nanos": 0},
-      "receive_retries": 3,
-      "send_hwm": 1000,
-      "receive_hwm": 100,
+      "send_timeout": {"secs": 5, "nanos": 0},
+      "send_retries": 5,
+      "receive_timeout": {"secs": 5, "nanos": 0},
+      "receive_retries": 5,
+      "send_hwm": 10000,
+      "receive_hwm": 10000,
       "inflight_ops": 100
     }
   },
@@ -41,8 +41,8 @@
   "storage": {
     "rocksdb": {
       "path": "/opt/rocksdb",
-      "data_expiration_ttl": {"secs": 60, "nanos": 0},
-      "compaction_period": {"secs": 60, "nanos": 0}
+      "data_expiration_ttl": {"secs": 300, "nanos": 0},
+      "compaction_period": {"secs": 120, "nanos": 0}
     }
   }
 }

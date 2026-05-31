@@ -9,9 +9,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 CW_DIR = str(Path(__file__).resolve().parents[2] / "services" / "clip-worker")
-if CW_DIR not in sys.path:
-    sys.path.insert(0, CW_DIR)
+for name in list(sys.modules):
+    if name == "app" or name.startswith("app."):
+        del sys.modules[name]
+if CW_DIR in sys.path:
+    sys.path.remove(CW_DIR)
+sys.path.insert(0, CW_DIR)
 
+from app import replay_client as replay_client_module
 from app.replay_client import ReplayClient
 from app.repository import update_clip_status
 
@@ -22,21 +27,25 @@ from app.repository import update_clip_status
 
 
 def test_replay_client_find_keyframe_returns_none_on_error():
-    with patch("app.replay_client.httpx.post", side_effect=Exception("network error")):
+    with patch.object(
+        replay_client_module.httpx, "post", side_effect=Exception("network error")
+    ):
         client = ReplayClient("http://replay:8080")
         result = client.find_keyframe("source_1", ts_ms=5000)
         assert result is None
 
 
 def test_replay_client_create_job_returns_none_on_error():
-    with patch("app.replay_client.httpx.put", side_effect=Exception("timeout")):
+    with patch.object(
+        replay_client_module.httpx, "put", side_effect=Exception("timeout")
+    ):
         client = ReplayClient("http://replay:8080")
         result = client.create_job(
             source_id="source_1",
             keyframe_uuid="kf-abc",
             pre_seconds=5,
             post_seconds=5,
-            sink_endpoint="pub+connect:tcp://sink:6666",
+            sink_endpoint="dealer+connect:tcp://sink:6666",
             labels={"event_id": "ev-001"},
         )
         assert result is None
@@ -45,7 +54,7 @@ def test_replay_client_create_job_returns_none_on_error():
 def test_replay_client_find_keyframe_404_no_crash():
     mock_resp = MagicMock()
     mock_resp.status_code = 404
-    with patch("app.replay_client.httpx.post", return_value=mock_resp):
+    with patch.object(replay_client_module.httpx, "post", return_value=mock_resp):
         client = ReplayClient("http://replay:8080")
         result = client.find_keyframe("source_1")
         assert result is None
