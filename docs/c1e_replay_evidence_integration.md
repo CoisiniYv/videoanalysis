@@ -1,6 +1,59 @@
 # C1E Replay Evidence Integration
 
-Status: dev-only integration.
+Status: **C1E.4 ACCEPTED** — 2026-06-01
+
+## Final Phase Conclusions
+
+### C1E.2 — Downstream Reliability + Clip Validation
+
+**Accepted under revised evidence-chain semantics.**
+
+- Replay job → Video File Sink upgraded from PUB/SUB to reliable DEALER/ROUTER sockets.
+- Per-job sink options: 5s send/receive timeouts, 5 retries, 10000 HWM, 100 inflight ops.
+- `clip_validation` added: decode probe produces `decode_error_count`, `duration_ok`, `probe_tool`.
+- Status mapping: `generated` / `generated_corrupt` / `generated_unverified`.
+- `generated_corrupt` is a valid surfaced evidence state, not a hidden success.
+- C1E.1 trust hardening preserved (bounded keyframe fallback, ffprobe duration, ROI annotation).
+
+### C1E.3 — Upstream Continuity Diagnosis
+
+**Diagnosed: fixed RTSP source is non-golden.**
+
+- Clean-runtime smoke was intermittent: 2/3 runs produced `generated_corrupt` with `decode_error_count=2`.
+- Failed samples had DTS/PTS gaps in `sink_metadata.json` aligned with `raw_clip.mov` gaps.
+- Diagnosis: `upstream_gap` — discontinuity exists before final evidence copy.
+- Old RocksDB cache or stale containers are not the sole cause.
+- C1E.3 did not prove whether the first loss is in RTSP source, source-adapter ingest, Replay storage, or Replay job output.
+
+### C1E.4 — RTSP Transport + Smoke Layering
+
+**Confirmed: source-adapter uses TCP; layered smoke accepts `generated_corrupt`.**
+
+- Source adapter runtime transport verified: `RTSP_TRANSPORT=tcp`.
+- Independent FFmpeg pulls of `rtsp://10.37.57.112:8554/live/1080movie` confirmed H.264 reference errors from the stream itself:
+  - `co located POCs unavailable`
+  - `reference picture missing during reorder`
+  - `Missing reference picture`
+  - `mmco: unref short failure`
+- Stream profile: H.264 High Profile Level 4.1, 1920×1080, 23.976 fps, B-frames=2.
+- TCP 60s test: 1401 frames, ~23.35 fps, ~2.6% frame loss.
+- Therefore `decode_error_count=0` is NOT the acceptance gate for this source.
+- Smoke layering updated:
+  - Default: `PASS` / `PASS_WITH_SOURCE_CORRUPTION` / `PASS_WITH_UNVERIFIED_CLIP`
+  - Strict decode-clean: opt-in via `C1E_STRICT_DECODE_CLEAN=1` (golden source only)
+- `PASS_WITH_SOURCE_CORRUPTION` means: evidence bundle generated, corruption detected, status explicit (`generated_corrupt`), not pretending clean.
+
+### Summary
+
+```text
+C1E.2  downstream reliability + clip validation         PASS (revised evidence-chain semantics)
+C1E.3  upstream continuity diagnosis                    PASS (non-golden source identified)
+C1E.4  non-golden RTSP handling / smoke layering        PASS
+```
+
+What this means: the Replay evidence chain is trustworthy. If the source stream has compressed-frame corruption, the system generates the evidence bundle and marks it `generated_corrupt` — it does not pretend `generated`.
+
+What this does NOT mean: the fixed RTSP source is decode-clean. It is not. Do not chase `decode_error_count=0` on this source.
 
 ## Scope
 

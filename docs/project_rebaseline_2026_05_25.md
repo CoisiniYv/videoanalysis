@@ -48,6 +48,22 @@ This document captures the ground truth of what has been built, what is missing,
 
 **IMPORTANT**: Phase 3A-3E uses a **Replay bypass topology** (dual independent file loops). This is NOT the current production mainline. It is a historical validation chain preserved for reference.
 
+### C1E: Official Replay Evidence Integration (2026-06-01)
+
+| Capability | Status | Evidence |
+|---|---|---|
+| C1E.1 evidence trust hardening | DONE | docs/c1e_1_evidence_trust_hardening.md |
+| C1E.2 downstream reliability (DEALER/ROUTER sink) | DONE | docs/c1e_2_replay_clip_garbling_fix.md |
+| C1E.2 clip validation (generated/generated_corrupt/generated_unverified) | DONE | clip_validation in metadata |
+| C1E.3 upstream continuity diagnosis | DONE | docs/c1e_3_replay_upstream_continuity_diagnosis.md |
+| C1E.4 RTSP transport verification (TCP) | DONE | source-adapter runtime env |
+| C1E.4 layered smoke (PASS_WITH_SOURCE_CORRUPTION) | DONE | docs/c1e_4_rtsp_transport_and_replay_continuity_isolation.md |
+| C1E.4 strict decode-clean opt-in | DONE | C1E_STRICT_DECODE_CLEAN=1 |
+| C1E evidence bundle (raw_clip + metadata + annotation) | DONE | /data/video-analytics/media/evidence/3521b3b5-... |
+| C1E dev compose | DONE | infra/docker-compose.c1-official-replay-dev.yml |
+
+**Key conclusion**: The fixed RTSP source (`rtsp://10.37.57.112:8554/live/1080movie`) is NOT decode-clean. FFmpeg direct pulls show H.264 reference errors. `generated_corrupt` is a valid surfaced evidence state. Strict `decode_error_count=0` is reserved for golden sources only.
+
 ### Phase 3F0: Real Savant Bbox Verification
 
 | Capability | Status | Evidence |
@@ -151,7 +167,7 @@ Replay, clip-worker, media-worker, snapshot, and annotated snapshot were all val
 | uridecodebin deviation | Phase 3B Savant uses uridecodebin for RTSP — official path is zeromq_source_bin |
 | Phase 3H ZMQ topology | Proved in POC, needs convergence into main module |
 | Replay config sync | Replay config and compose env must be manually kept in sync |
-| frame_uuid / keyframe_uuid | Still None — not yet populated for production alignment |
+| frame_uuid / keyframe_uuid | C1E/P1c populated via savant_rs; production all-camera deployment pending |
 | Runtime pip install | Savant container runs `pip install redis` on startup |
 | source_id / camera_id mapping | Hardcoded in cameras.yml, not production-grade |
 
@@ -215,11 +231,12 @@ Phase 4+: Production Hardening
 
 ### Frozen (not expanding further at this time)
 
-- Replay Service media pipeline
-- clip-worker / media-worker
+- Replay Service media pipeline (C1E evidence chain accepted)
+- clip-worker / media-worker (evidence finalizer stable)
 - annotated snapshot / bbox overlay
 - video-file-sink continuous output
 - Official ZMQ metadata/video adapters (POC complete)
+- C1E non-golden RTSP source decode-clean chasing (opt-in only via C1E_STRICT_DECODE_CLEAN)
 
 Phase 3H ZMQ topology is preserved as architecture reference for future production single-ingestion design.
 
