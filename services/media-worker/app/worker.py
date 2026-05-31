@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import time
@@ -140,7 +141,7 @@ def _extract_event_id(meta: dict) -> str | None:
 
 
 def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
-    """Check if an event already has clip_status='ready'."""
+    """Check if an event already has a final clip_status."""
     try:
         with pg_conn.cursor() as cur:
             cur.execute(
@@ -148,13 +149,113 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
                 (event_id,),
             )
             row = cur.fetchone()
-            return row is not None and row[0] == "ready"
+            return row is not None and row[0] in ("ready", "generated")
     except Exception:
         return False
 
 
+def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
+    """Build the first P1 event-frame annotation document from the event row."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT event_type, camera_id, source_id, track_id, event_ts_ms,
+                   frame_uuid, payload, confidence
+            FROM events
+            WHERE id = %s::uuid
+            """,
+            (event_id,),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise ValueError(f"event not found: {event_id}")
+
+    payload = row[6] or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+
+    overlays = []
+    bbox = payload.get("bbox") or payload.get("person_bbox")
+    if isinstance(media, dict):
+        bbox = bbox or media.get("bbox") or media.get("person_bbox")
+    if bbox:
+        overlays.append({
+            "type": "person_bbox",
+            "bbox_format": "xyxy",
+            "bbox": bbox,
+            "confidence": row[7],
+        })
+
+    roi = payload.get("roi_polygon") or payload.get("zone_polygon")
+    zone_id = payload.get("zone_id") or payload.get("zone")
+    if roi:
+        overlays.append({
+            "type": "roi_polygon",
+            "zone_id": zone_id,
+            "points": roi,
+        })
+
+    return {
+        "schema_version": "1.0",
+        "annotation_type": "event_frame",
+        "event": {
+            "event_id": event_id,
+            "event_type": row[0],
+            "camera_id": row[1],
+            "source_id": row[2],
+            "track_id": row[3],
+            "event_ts_ms": row[4],
+            "frame_uuid": row[5],
+        },
+        "overlays": overlays,
+    }
+
+
+def _finalize_p1_evidence_bundle(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    meta_dir: str,
+    video_file: str,
+    metadata_file: str,
+    evidence_output_dir: str,
+) -> dict:
+    """Copy Replay sink output into the P1 raw evidence bundle."""
+    evidence_dir = Path(evidence_output_dir) / event_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_clip = evidence_dir / f"raw_clip{Path(video_file).suffix}"
+    metadata_out = evidence_dir / "metadata.json"
+    annotation_out = evidence_dir / "event_annotation.json"
+
+    if not raw_clip.exists():
+        shutil.copy2(video_file, raw_clip)
+    if not metadata_out.exists():
+        shutil.copy2(metadata_file, metadata_out)
+
+    annotation = _load_event_annotation(pg_conn, event_id)
+    with open(annotation_out, "w") as f:
+        json.dump(annotation, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    return {
+        "evidence_dir": str(evidence_dir),
+        "raw_clip": str(raw_clip),
+        "metadata": str(metadata_out),
+        "event_annotation": str(annotation_out),
+        "sink_output_path": meta_dir,
+    }
+
+
 def _process_sink_output(
-    pg_conn: psycopg.Connection, sink_dir: str, processed_dirs: set[str]
+    pg_conn: psycopg.Connection,
+    sink_dir: str,
+    processed_dirs: set[str],
+    *,
+    evidence_output_dir: str | None = None,
+    p1_raw_clip_finalizer_enabled: bool = False,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
@@ -187,7 +288,25 @@ def _process_sink_output(
         if not video_file:
             continue  # not ready yet
 
-        clip_path = video_file
+        metadata_file = str(Path(meta_dir) / "metadata.json")
+        bundle = None
+        if p1_raw_clip_finalizer_enabled:
+            if not evidence_output_dir:
+                logger.error("p1_finalizer enabled but no evidence_output_dir")
+                continue
+            bundle = _finalize_p1_evidence_bundle(
+                pg_conn,
+                event_id=event_id,
+                meta_dir=meta_dir,
+                video_file=video_file,
+                metadata_file=metadata_file,
+                evidence_output_dir=evidence_output_dir,
+            )
+            clip_path = bundle["raw_clip"]
+            clip_status = "generated"
+        else:
+            clip_path = video_file
+            clip_status = "ready"
         replay_job_id = meta.get("job_id", "") or meta.get("new_job", "") or ""
         sink_path = meta_dir
 
@@ -204,7 +323,7 @@ def _process_sink_output(
                                         jsonb_set(
                                             COALESCE(payload, '{}'::jsonb),
                                             '{media,clip_status}',
-                                            '"ready"'
+                                            %(clip_status)s::jsonb
                                         ),
                                         '{media,recording_strategy}',
                                         '"savant_replay"'
@@ -220,6 +339,7 @@ def _process_sink_output(
                         """,
                         {
                             "clip_path": clip_path,
+                            "clip_status": json.dumps(clip_status),
                             "replay_job_id": json.dumps(replay_job_id),
                             "sink_path": json.dumps(sink_path),
                             "event_id": event_id,
@@ -235,7 +355,7 @@ def _process_sink_output(
                                     jsonb_set(
                                         COALESCE(payload, '{}'::jsonb),
                                         '{media,clip_status}',
-                                        '"ready"'
+                                        %(clip_status)s::jsonb
                                     ),
                                     '{media,recording_strategy}',
                                     '"savant_replay"'
@@ -248,8 +368,36 @@ def _process_sink_output(
                         """,
                         {
                             "clip_path": clip_path,
+                            "clip_status": json.dumps(clip_status),
                             "sink_path": json.dumps(sink_path),
                             "event_id": event_id,
+                        },
+                    )
+                if bundle:
+                    cur.execute(
+                        """
+                        UPDATE events
+                        SET payload = jsonb_set(
+                                jsonb_set(
+                                    jsonb_set(
+                                        COALESCE(payload, '{}'::jsonb),
+                                        '{media,evidence_dir}',
+                                        %(evidence_dir)s::jsonb
+                                    ),
+                                    '{media,metadata_path}',
+                                    %(metadata_path)s::jsonb
+                                ),
+                                '{media,event_annotation_path}',
+                                %(annotation_path)s::jsonb
+                            ),
+                            updated_at = now()
+                        WHERE id = %(event_id)s::uuid
+                        """,
+                        {
+                            "event_id": event_id,
+                            "evidence_dir": json.dumps(bundle["evidence_dir"]),
+                            "metadata_path": json.dumps(bundle["metadata"]),
+                            "annotation_path": json.dumps(bundle["event_annotation"]),
                         },
                     )
                 if cur.rowcount and cur.rowcount > 0:
@@ -704,11 +852,13 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
-        "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s poll_interval=%ds "
-        "default_pre_seconds=%.1f",
+        "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
+        "p1_finalizer=%s poll_interval=%ds default_pre_seconds=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
+        cfg.evidence_output_dir,
+        cfg.p1_raw_clip_finalizer_enabled,
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
     )
@@ -718,7 +868,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     while not shutdown_requested:
         try:
             clip_updates = _process_sink_output(
-                pg_conn, cfg.sink_output_dir, processed_dirs
+                pg_conn,
+                cfg.sink_output_dir,
+                processed_dirs,
+                evidence_output_dir=cfg.evidence_output_dir,
+                p1_raw_clip_finalizer_enabled=cfg.p1_raw_clip_finalizer_enabled,
             )
             if clip_updates:
                 logger.info("media_worker: clip updated %d events", clip_updates)

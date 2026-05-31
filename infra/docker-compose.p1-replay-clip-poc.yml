@@ -1,0 +1,236 @@
+# Phase P1 — single-stream Replay raw clip evidence POC only.
+#
+# POC only: this is not a production compose and must not be used as the
+# long-running mainline runtime.
+#
+# Intended topology:
+#   testVideo/test.mp4
+#     -> source-adapter
+#     -> replay-service
+#     -> savant-security
+#     -> Redis security.events
+#     -> event-worker -> security.record_requests
+#     -> clip-worker -> Replay REST job
+#     -> video-file-sink
+#     -> media-worker P1 raw finalizer
+#     -> /media/evidence/{event_id}/raw_clip.*
+#
+# Current blocker:
+#   modules/savant_replay/config.json has out_stream=null. Until a supported
+#   Replay pass-through out_stream is configured, this compose is blocked for
+#   the source-adapter -> replay-service -> savant-security inline hop. Do not
+#   replace this with a second RTSP/source pull or source extraction fallback.
+
+name: p1-replay-clip-poc
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: p1-replay-clip-redis
+    ports:
+      - "6386:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: p1-replay-clip-postgres
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5439:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+      - /data/video-analytics/postgres-p1-replay-clip:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../services/api
+      dockerfile: Dockerfile
+    image: p1-replay-clip-api:latest
+    container_name: p1-replay-clip-api
+    ports:
+      - "8005:8000"
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      REDIS_URL: redis://redis:6379/0
+      ALERT_STREAM: security.alerts
+      MEDIA_ROOT: /media
+    volumes:
+      - /data/video-analytics/media:/media:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  event-worker:
+    build:
+      context: ../services/event-worker
+      dockerfile: Dockerfile
+    image: p1-replay-clip-event-worker:latest
+    container_name: p1-replay-clip-event-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      RECORD_REQUEST_STREAM: security.record_requests
+      RECORDING_ENABLED: "true"
+      DEFAULT_REPLAY_SOURCE_ID: p1_single_stream
+      CONSUMER_GROUP: event-workers-p1
+      CONSUMER_NAME: event-worker-p1-1
+      POLL_TIMEOUT_MS: "2000"
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  clip-worker:
+    build:
+      context: ../services/clip-worker
+      dockerfile: Dockerfile
+    image: p1-replay-clip-clip-worker:latest
+    container_name: p1-replay-clip-clip-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      RECORD_REQUEST_STREAM: security.record_requests
+      REPLAY_API_URL: http://replay-service:8080
+      REPLAY_JOB_SINK_URL: pub+connect:tcp://video-file-sink:6666
+      CONSUMER_GROUP: clip-workers-p1
+      CONSUMER_NAME: clip-worker-p1-1
+      POLL_TIMEOUT_MS: "5000"
+      DEFAULT_PRE_SECONDS: "5"
+      DEFAULT_POST_SECONDS: "10"
+      KEYFRAME_LOOKUP_WINDOW_S: "10"
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      replay-service: { condition: service_started }
+    restart: unless-stopped
+
+  media-worker:
+    build:
+      context: ../services/media-worker
+      dockerfile: Dockerfile
+    image: p1-replay-clip-media-worker:latest
+    container_name: p1-replay-clip-media-worker
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      SINK_OUTPUT_DIR: /media/replay-sink-output
+      EVIDENCE_OUTPUT_DIR: /media/evidence
+      P1_RAW_CLIP_FINALIZER_ENABLED: "true"
+      MEDIA_POLL_INTERVAL_S: "5"
+      DEFAULT_PRE_SECONDS: "5"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  replay-service:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: p1-replay-clip-replay-service
+    ports:
+      - "8082:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.json:/opt/etc/config.json:ro
+      - /data/video-analytics/media:/media:rw
+    restart: unless-stopped
+
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: p1-replay-clip-video-file-sink
+    entrypoint:
+      [
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: sub+bind:tcp://0.0.0.0:6666
+      DIR_LOCATION: /media/replay-sink-output/p1/%source_id-%chunk_idx
+      SINK_CONTAINER: mkv
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    restart: unless-stopped
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: p1-replay-clip-savant-security
+    entrypoint:
+      [
+        "bash", "-c",
+        "pip install -q redis pyyaml && exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      SOURCE_ID: p1_single_stream
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      FACE_DETECTOR_BATCH_SIZE: "1"
+      FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_OBSERVATION_EXPORT_ENABLED: "false"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.generated.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "true"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/media:/data/video-analytics/media:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+    restart: unless-stopped
+    profiles:
+      - gpu
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: p1-replay-clip-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/video_loop.sh",
+      ]
+    environment:
+      SOURCE_ID: p1_single_stream
+      LOCATION: /testVideo/test.mp4
+      ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      DOWNLOAD_PATH: /tmp/video-loop-cache
+      SYNC_OUTPUT: "true"
+    volumes:
+      - ../testVideo:/testVideo:ro
+    depends_on:
+      - replay-service
+    restart: unless-stopped

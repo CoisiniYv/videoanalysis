@@ -81,6 +81,8 @@ class RecordRequestPublisher:
         source_event_id = event.get("source_event_id", "")
         request_id = str(uuid.uuid4())
         source_id = _resolve_source_id(event, self._default_replay_source_id)
+        payload = event.get("payload") or {}
+        media = payload.get("media", {}) if isinstance(payload, dict) else {}
         evidence_policy = event.get("evidence_policy") or {}
         if not isinstance(evidence_policy, dict):
             evidence_policy = {}
@@ -102,6 +104,10 @@ class RecordRequestPublisher:
             "event_ts_ms": int(event.get("event_ts_ms", 0)),
             "frame_uuid": event.get("frame_uuid"),
             "keyframe_uuid": event.get("keyframe_uuid"),
+            "previous_keyframe_uuid": (
+                event.get("previous_keyframe_uuid")
+                or media.get("previous_keyframe_uuid")
+            ),
             "pre_seconds": int(evidence_policy.get("pre_seconds", DEFAULT_PRE_SECONDS)),
             "post_seconds": int(evidence_policy.get("post_seconds", DEFAULT_POST_SECONDS)),
             "strategy": "savant_replay",

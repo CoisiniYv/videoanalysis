@@ -21,6 +21,7 @@ class ReplayClient:
     def __init__(self, base_url: str, timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self.last_job_request: Dict[str, Any] | None = None
 
     def status(self) -> Optional[Dict[str, Any]]:
         """GET /api/v1/status"""
@@ -132,34 +133,18 @@ class ReplayClient:
         Returns:
             job_id string, or None on failure.
         """
-        event_id = labels.get("event_id", "unknown") if labels else "unknown"
-        total_frames = (pre_seconds + post_seconds) * 30  # assume 30fps
-        payload: Dict[str, Any] = {
-            "sink": {"url": sink_endpoint},
-            "configuration": {
-                "ts_sync": True,
-                "skip_intermediary_eos": False,
-                "send_eos": True,
-                "stop_on_incorrect_ts": False,
-                "ts_discrepancy_fix_duration": {"secs": 0, "nanos": 33333333},
-                "min_duration": {"secs": 0, "nanos": 10000000},
-                "max_duration": {"secs": 0, "nanos": 103333333},
-                "stored_stream_id": source_id,
-                "resulting_stream_id": f"replay-event-{event_id}",
-                "routing_labels": "bypass",
-                "max_idle_duration": {"secs": 10, "nanos": 0},
-                "max_delivery_duration": {"secs": 10, "nanos": 0},
-                "send_metadata_only": False,
-                "labels": labels or {},
-            },
-            "stop_condition": {"frame_count": total_frames},
-            "anchor_keyframe": keyframe_uuid,
-            "anchor_wait_duration": {"secs": 1, "nanos": 0},
-            "offset": {"seconds": pre_seconds},
-            "attributes": [],
-        }
+        payload = build_job_payload(
+            source_id=source_id,
+            keyframe_uuid=keyframe_uuid,
+            pre_seconds=pre_seconds,
+            post_seconds=post_seconds,
+            sink_endpoint=sink_endpoint,
+            labels=labels,
+        )
+        self.last_job_request = payload
 
         try:
+            logger.info("Replay job request payload=%s", payload)
             resp = httpx.put(
                 f"{self._base_url}/api/v1/job",
                 json=payload,
@@ -175,3 +160,41 @@ class ReplayClient:
                 keyframe_uuid,
             )
             return None
+
+
+def build_job_payload(
+    *,
+    source_id: str,
+    keyframe_uuid: str,
+    pre_seconds: int,
+    post_seconds: int,
+    sink_endpoint: str,
+    labels: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Build the Replay REST job request body used by clip-worker."""
+    event_id = labels.get("event_id", "unknown") if labels else "unknown"
+    total_frames = (pre_seconds + post_seconds) * 30  # assume 30fps
+    return {
+        "sink": {"url": sink_endpoint},
+        "configuration": {
+            "ts_sync": True,
+            "skip_intermediary_eos": False,
+            "send_eos": True,
+            "stop_on_incorrect_ts": False,
+            "ts_discrepancy_fix_duration": {"secs": 0, "nanos": 33333333},
+            "min_duration": {"secs": 0, "nanos": 10000000},
+            "max_duration": {"secs": 0, "nanos": 103333333},
+            "stored_stream_id": source_id,
+            "resulting_stream_id": f"replay-event-{event_id}",
+            "routing_labels": "bypass",
+            "max_idle_duration": {"secs": 10, "nanos": 0},
+            "max_delivery_duration": {"secs": 10, "nanos": 0},
+            "send_metadata_only": False,
+            "labels": labels or {},
+        },
+        "stop_condition": {"frame_count": total_frames},
+        "anchor_keyframe": keyframe_uuid,
+        "anchor_wait_duration": {"secs": 1, "nanos": 0},
+        "offset": {"seconds": pre_seconds},
+        "attributes": [],
+    }

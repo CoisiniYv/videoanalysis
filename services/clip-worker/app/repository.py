@@ -47,6 +47,7 @@ def update_clip_status(
     status: str,
     replay_job_id: str = "",
     error_message: str = "",
+    replay_job_request: dict | None = None,
 ) -> bool:
     """Set clip_status and optionally replay_job_id / error_message."""
     if not event_id:
@@ -66,6 +67,23 @@ def update_clip_status(
                 cur.execute(
                     _SET_CLIP_ERROR_SQL,
                     {"error": json.dumps(error_message), "event_id": event_id},
+                )
+            if replay_job_request is not None:
+                cur.execute(
+                    """
+                    UPDATE events
+                    SET payload = jsonb_set(
+                            COALESCE(payload, '{}'::jsonb),
+                            '{media,replay_job_request}',
+                            %(request)s::jsonb
+                        ),
+                        updated_at = now()
+                    WHERE id = %(event_id)s::uuid
+                    """,
+                    {
+                        "request": json.dumps(replay_job_request),
+                        "event_id": event_id,
+                    },
                 )
             return cur.rowcount is not None and cur.rowcount > 0
     except Exception:

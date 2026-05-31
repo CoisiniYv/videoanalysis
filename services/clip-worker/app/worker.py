@@ -89,7 +89,10 @@ def run_worker(
                     source_id = req.get("source_id", "")
                     source_event_id = req.get("source_event_id", "")
                     event_ts_ms = int(req.get("event_ts_ms", 0))
-                    keyframe_uuid = req.get("keyframe_uuid")
+                    keyframe_uuid = (
+                        req.get("previous_keyframe_uuid")
+                        or req.get("keyframe_uuid")
+                    )
 
                     # Find keyframe if not provided
                     if keyframe_uuid:
@@ -171,6 +174,7 @@ def run_worker(
                         update_clip_status(
                             pg_conn, event_id, "replay_job_created",
                             replay_job_id=job_id,
+                            replay_job_request=replay.last_job_request,
                         )
                     else:
                         logger.error(

@@ -12,6 +12,8 @@ class Config:
     sink_output_dir: str
     snapshot_output_dir: str
     annotated_output_dir: str
+    evidence_output_dir: str
+    p1_raw_clip_finalizer_enabled: bool
     poll_interval_s: int
     default_pre_seconds: float
 
@@ -31,6 +33,10 @@ def load_config() -> Config:
         annotated_output_dir=os.getenv(
             "ANNOTATED_OUTPUT_DIR", "/media/snapshots/annotated"
         ),
+        evidence_output_dir=os.getenv("EVIDENCE_OUTPUT_DIR", "/media/evidence"),
+        p1_raw_clip_finalizer_enabled=os.getenv(
+            "P1_RAW_CLIP_FINALIZER_ENABLED", "false"
+        ).lower() in ("1", "true", "yes"),
         poll_interval_s=int(os.getenv("MEDIA_POLL_INTERVAL_S", "10")),
         default_pre_seconds=float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
     )
