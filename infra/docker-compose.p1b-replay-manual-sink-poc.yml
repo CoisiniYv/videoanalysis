@@ -1,0 +1,41 @@
+# Phase P1b — Replay manual job to Video File Sink POC only.
+#
+# This compose adds only the on-demand Video File Sink used by a manual Replay
+# REST job. It joins the already verified P1a network:
+#
+#   source-adapter -> replay-service -> savant-security
+#                         |
+#                         `-> manual Replay job -> video-file-sink
+#
+# It intentionally does not define source-adapter, replay-service,
+# savant-security, redis, postgres, event-worker, clip-worker, media-worker,
+# metadata-sink, RTSP server, or frame-cut fallback.
+
+name: p1b-replay-manual-sink
+
+services:
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: p1b-replay-manual-video-file-sink
+    entrypoint:
+      [
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: sub+bind:tcp://0.0.0.0:6666
+      DIR_LOCATION: ${P1B_DIR_LOCATION:-/media/p1b-replay-manual-sink/%source_id%/%src_filename%/}
+      CHUNK_SIZE: "0"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    networks:
+      p1a-replay-inline:
+        aliases:
+          - video-file-sink
+          - p1b-video-file-sink
+    restart: unless-stopped
+
+networks:
+  p1a-replay-inline:
+    external: true
+    name: p1a-replay-inline_default
