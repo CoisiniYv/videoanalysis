@@ -7,8 +7,34 @@ import logging
 import os
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
+
+
+def _path_segment_matches_source_id(segment: str, source_id: str) -> bool:
+    decoded = unquote(segment)
+    candidates = {
+        decoded,
+        decoded.strip("%"),
+        decoded.rstrip("%"),
+        segment,
+        segment.strip("%"),
+        segment.rstrip("%"),
+    }
+    return source_id in candidates or decoded.startswith(f"{source_id}%")
+
+
+def _metadata_path_matches_source_id(
+    metadata_path: str,
+    video_dir: str,
+    source_id: str,
+) -> bool:
+    relative = os.path.relpath(metadata_path, video_dir)
+    return any(
+        _path_segment_matches_source_id(segment, source_id)
+        for segment in relative.split(os.sep)
+    )
 
 
 def find_metadata_file(video_dir: str, source_id: str) -> str | None:
@@ -19,16 +45,20 @@ def find_metadata_file(video_dir: str, source_id: str) -> str | None:
     """
     if not os.path.isdir(video_dir):
         return None
-    for entry in os.listdir(video_dir):
+    for entry in sorted(os.listdir(video_dir)):
         entry_path = os.path.join(video_dir, entry)
         if not os.path.isdir(entry_path):
             continue
-        for sub_entry in os.listdir(entry_path):
+        for sub_entry in sorted(os.listdir(entry_path)):
             sub_path = os.path.join(entry_path, sub_entry)
             if not os.path.isdir(sub_path):
                 continue
             candidate = os.path.join(sub_path, "metadata.json")
-            if os.path.isfile(candidate):
+            if os.path.isfile(candidate) and _metadata_path_matches_source_id(
+                candidate,
+                video_dir,
+                source_id,
+            ):
                 return candidate
     return None
 

@@ -19,6 +19,7 @@ from app.repository import update_clip_status
 logger = logging.getLogger(__name__)
 
 shutdown_requested = False
+MISSING_KEYFRAME_ERROR = "missing_keyframe_uuid_and_anchored_lookup_unavailable"
 
 
 def _request_identity(req: dict) -> str:
@@ -27,6 +28,16 @@ def _request_identity(req: dict) -> str:
 
 def _event_id_from_request(req: dict) -> str:
     return str(req.get("event_id", ""))
+
+
+def _keyframe_from_request(req: dict) -> tuple[str | None, str]:
+    previous_keyframe_uuid = req.get("previous_keyframe_uuid")
+    if previous_keyframe_uuid:
+        return str(previous_keyframe_uuid), "previous_keyframe_uuid"
+    keyframe_uuid = req.get("keyframe_uuid")
+    if keyframe_uuid:
+        return str(keyframe_uuid), "keyframe_uuid"
+    return None, MISSING_KEYFRAME_ERROR
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -75,12 +86,13 @@ def run_worker(
     logger.info(
         "clip-worker started stream=%s group=%s replay=%s "
         "max_jobs_per_run=%s max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
-        "stop_condition_mode=%s",
+        "stop_condition_mode=%s allow_unbounded_keyframe_fallback=%s",
         stream, group, cfg.replay_api_url,
         cfg.max_jobs_per_run,
         cfg.max_concurrent_jobs,
         cfg.per_camera_cooldown_seconds,
         cfg.replay_stop_condition_mode,
+        cfg.allow_unbounded_keyframe_fallback,
     )
 
     total_processed = 0
@@ -119,10 +131,7 @@ def run_worker(
                     source_event_id = req.get("source_event_id", "")
                     event_ts_ms = int(req.get("event_ts_ms", 0))
                     camera_id = req.get("camera_id", "")
-                    keyframe_uuid = (
-                        req.get("previous_keyframe_uuid")
-                        or req.get("keyframe_uuid")
-                    )
+                    keyframe_uuid, keyframe_source = _keyframe_from_request(req)
 
                     if (
                         cfg.max_jobs_per_run > 0
@@ -194,10 +203,32 @@ def run_worker(
                     if keyframe_uuid:
                         logger.info(
                             "keyframe_provided_directly request_id=%s "
-                            "keyframe_uuid=%s event_id=%s",
-                            req.get("request_id"), keyframe_uuid, event_id,
+                            "keyframe_uuid=%s keyframe_source=%s event_id=%s",
+                            req.get("request_id"), keyframe_uuid, keyframe_source,
+                            event_id,
                         )
                     else:
+                        if not cfg.allow_unbounded_keyframe_fallback:
+                            logger.warning(
+                                "clip_worker_blocked %s request_id=%s "
+                                "source_event_id=%s source_id=%s event_ts_ms=%s",
+                                MISSING_KEYFRAME_ERROR,
+                                req.get("request_id"),
+                                source_event_id,
+                                source_id,
+                                event_ts_ms,
+                            )
+                            update_clip_status(
+                                pg_conn,
+                                event_id,
+                                "failed",
+                                error_message=MISSING_KEYFRAME_ERROR,
+                            )
+                            seen_requests.add(request_id)
+                            redis_client.xack(stream, group, msg_id)
+                            total_processed += 1
+                            continue
+
                         if not source_id:
                             update_clip_status(
                                 pg_conn, event_id, "failed",

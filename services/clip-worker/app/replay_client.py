@@ -46,7 +46,7 @@ class ReplayClient:
 
         When *ts_ms* > 0 the lookup is anchored to the event timestamp:
         ``from`` = event_time - window_s, ``to`` = event_time + window_s.
-        When *ts_ms* is 0 the lookup is unbounded (``from``/``to`` = null).
+        When *ts_ms* is 0 the lookup is unbounded (``from``/``to`` omitted).
 
         Args:
             source_id: Replay source identifier.
@@ -66,11 +66,13 @@ class ReplayClient:
                 "window_s=%s from_ns=%s to_ns=%s",
                 source_id, ts_ms, window_s, from_ns, to_ns,
             )
-            # NOTE: from_ns/to_ns are epoch nanoseconds; Replay DB uses
-            # pipeline-relative timestamps. Unbounded search (omit from/to)
-            # until timestamp-domain mapping is established.
-            from_ns = None
-            to_ns = None
+        else:
+            logger.warning(
+                "keyframe_lookup_unbounded source_id=%s ts_ms=%s; this must be "
+                "explicitly enabled by the caller",
+                source_id,
+                ts_ms,
+            )
 
         body: Dict[str, Any] = {"source_id": source_id, "limit": 1}
         if from_ns is not None:

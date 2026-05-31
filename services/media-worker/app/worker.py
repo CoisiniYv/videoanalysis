@@ -7,8 +7,10 @@ import logging
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import time
+from ast import literal_eval
 from pathlib import Path
 
 import psycopg
@@ -161,6 +163,96 @@ def _to_float(value: object) -> float | None:
         return None
 
 
+def _parse_simple_camera_yaml(path: str) -> dict:
+    """Parse the limited camera YAML shape used by POC/dev configs.
+
+    This fallback keeps media-worker independent from PyYAML in no-build
+    dev images. It intentionally supports only the camera/zones/points fields
+    needed for ROI annotation lookup.
+    """
+    cameras: dict[str, dict] = {}
+    current_camera: str | None = None
+    current_zone: str | None = None
+    in_zones = False
+    in_points = False
+
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = raw_line.strip()
+
+        if indent == 2 and stripped.endswith(":"):
+            current_camera = stripped[:-1]
+            cameras[current_camera] = {"zones": {}}
+            current_zone = None
+            in_zones = False
+            in_points = False
+            continue
+
+        if current_camera is None:
+            continue
+
+        camera = cameras[current_camera]
+        if indent == 4:
+            current_zone = None
+            in_points = False
+            if stripped == "zones:":
+                in_zones = True
+                continue
+            in_zones = False
+            if stripped.startswith("source_id:"):
+                camera["source_id"] = stripped.split(":", 1)[1].strip()
+            continue
+
+        if in_zones and indent == 6 and stripped.endswith(":"):
+            current_zone = stripped[:-1]
+            camera.setdefault("zones", {})[current_zone] = {}
+            in_points = False
+            continue
+
+        if not in_zones or current_zone is None:
+            continue
+
+        zone = camera.setdefault("zones", {})[current_zone]
+        if indent == 8:
+            if stripped == "points:":
+                in_points = True
+                zone.setdefault("points", [])
+            elif stripped.startswith("type:"):
+                zone["type"] = stripped.split(":", 1)[1].strip()
+            continue
+
+        if in_points and indent >= 10 and stripped.startswith("- "):
+            try:
+                point = literal_eval(stripped[2:].strip())
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(point, (list, tuple)) and len(point) == 2:
+                zone.setdefault("points", []).append([float(point[0]), float(point[1])])
+
+    return {"cameras": cameras}
+
+
+def _load_camera_config(path: str | None) -> dict:
+    if not path:
+        return {}
+    config_path = Path(path)
+    if not config_path.is_file():
+        logger.warning("camera config not found for ROI lookup: %s", path)
+        return {}
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except ImportError:
+        return _parse_simple_camera_yaml(str(config_path))
+    except Exception:
+        logger.exception("failed to load camera config for ROI lookup: %s", path)
+        return {}
+
+
 def _event_context_from_row(event_id: str, row: tuple) -> dict:
     payload = row[6] if len(row) > 6 else {}
     if isinstance(payload, str):
@@ -185,6 +277,45 @@ def _event_context_from_row(event_id: str, row: tuple) -> dict:
         "keyframe_uuid": row[9] if len(row) > 9 else payload.get("keyframe_uuid", ""),
         "previous_keyframe_uuid": media.get("previous_keyframe_uuid", ""),
     }
+
+
+def _lookup_roi_from_camera_config(
+    *,
+    camera_id: str,
+    source_id: str,
+    zone_id: str,
+    cameras_config_path: str | None,
+) -> tuple[list | None, str]:
+    if not cameras_config_path:
+        return None, "not_configured"
+    config = _load_camera_config(cameras_config_path)
+    cameras = config.get("cameras", {}) if isinstance(config, dict) else {}
+    if not isinstance(cameras, dict):
+        return None, "not_found"
+
+    camera = cameras.get(camera_id)
+    if not isinstance(camera, dict):
+        for candidate in cameras.values():
+            if (
+                isinstance(candidate, dict)
+                and source_id
+                and candidate.get("source_id") == source_id
+            ):
+                camera = candidate
+                break
+    if not isinstance(camera, dict):
+        return None, "not_found"
+
+    zones = camera.get("zones", {})
+    if not isinstance(zones, dict):
+        return None, "not_found"
+    zone = zones.get(zone_id) if zone_id else None
+    if not isinstance(zone, dict):
+        return None, "not_found"
+    points = zone.get("points")
+    if isinstance(points, list) and points:
+        return points, "found"
+    return None, "not_found"
 
 
 def _load_event_context(pg_conn: psycopg.Connection, event_id: str) -> dict:
@@ -287,7 +418,11 @@ def _normalise_person_bbox(
     return None
 
 
-def _event_annotation_from_context(context: dict) -> dict:
+def _event_annotation_from_context(
+    context: dict,
+    *,
+    cameras_config_path: str | None = None,
+) -> dict:
     """Build the P1 event-frame annotation document from event context."""
     payload = context["payload"]
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -321,13 +456,39 @@ def _event_annotation_from_context(context: dict) -> dict:
     else:
         missing.append("person_bbox")
 
-    roi = payload.get("roi_polygon") or payload.get("zone_polygon")
-    zone_id = payload.get("zone_id") or payload.get("zone")
+    roi = payload.get("roi_polygon")
+    roi_source = "event.payload.roi_polygon"
+    if roi is None:
+        roi = payload.get("zone_polygon")
+        roi_source = "event.payload.zone_polygon"
+    if roi is None:
+        roi = media.get("roi_polygon")
+        roi_source = "event.payload.media.roi_polygon"
+    if roi is None:
+        roi = media.get("zone_polygon")
+        roi_source = "event.payload.media.zone_polygon"
+    zone_id = (
+        payload.get("zone_id")
+        or payload.get("zone")
+        or media.get("zone_id")
+        or media.get("zone")
+    )
+    roi_lookup_status = "payload" if roi else "not_found"
+    if roi is None:
+        roi, roi_lookup_status = _lookup_roi_from_camera_config(
+            camera_id=str(context.get("camera_id", "")),
+            source_id=str(context.get("source_id", "")),
+            zone_id=str(zone_id or ""),
+            cameras_config_path=cameras_config_path,
+        )
+        if roi is not None:
+            roi_source = "camera_config"
     if roi:
         overlays.append({
             "type": "roi_polygon",
             "zone_id": zone_id,
             "points": roi,
+            "source": roi_source,
         })
     else:
         missing.append("roi_polygon")
@@ -337,6 +498,7 @@ def _event_annotation_from_context(context: dict) -> dict:
         "annotation_type": "event_frame",
         "annotation_status": "partial" if missing else "complete",
         "missing": missing,
+        "roi_lookup_status": roi_lookup_status,
         "event": {
             "event_id": context["event_id"],
             "source_event_id": context["source_event_id"],
@@ -355,7 +517,10 @@ def _event_annotation_from_context(context: dict) -> dict:
 
 def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
     """Build the P1 event-frame annotation document from the event row."""
-    return _event_annotation_from_context(_load_event_context(pg_conn, event_id))
+    return _event_annotation_from_context(
+        _load_event_context(pg_conn, event_id),
+        cameras_config_path=os.getenv("CAMERAS_CONFIG_PATH"),
+    )
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -377,6 +542,91 @@ def _load_sink_metadata_file(metadata_file: str) -> dict:
     except Exception:
         logger.exception("failed to load sink metadata file=%s", metadata_file)
         return {}
+
+
+def _probe_duration_with_imageio_ffmpeg(path: str) -> float | None:
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        result = subprocess.run(
+            [ffmpeg, "-i", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        match = re.search(
+            r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+            result.stderr or "",
+        )
+        if match:
+            hours = float(match.group(1))
+            minutes = float(match.group(2))
+            seconds = float(match.group(3))
+            duration_value = hours * 3600 + minutes * 60 + seconds
+            if duration_value > 0:
+                logger.warning(
+                    "ffprobe unavailable; duration probed via imageio_ffmpeg "
+                    "ffmpeg path=%s duration=%.6f",
+                    path,
+                    duration_value,
+                )
+                return duration_value
+
+        _frames, duration = imageio_ffmpeg.count_frames_and_secs(path)
+        duration_value = float(duration)
+        if duration_value > 0:
+            logger.warning(
+                "ffprobe unavailable; duration probed via imageio_ffmpeg frame "
+                "count path=%s duration=%.6f",
+                path,
+                duration_value,
+            )
+            return duration_value
+    except Exception:
+        logger.exception("imageio_ffmpeg duration fallback failed path=%s", path)
+    return None
+
+
+def _probe_video_duration_seconds(path: str) -> float | None:
+    """Return video duration in seconds using ffprobe when available."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "json",
+                    path,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout or "{}")
+                duration = _to_float((data.get("format") or {}).get("duration"))
+                if duration is not None and duration > 0:
+                    return duration
+            logger.warning(
+                "ffprobe duration probe failed path=%s returncode=%s stderr=%s",
+                path,
+                result.returncode,
+                result.stderr.strip(),
+            )
+        except Exception:
+            logger.exception("ffprobe duration probe failed path=%s", path)
+    else:
+        logger.warning("ffprobe not found for raw clip duration path=%s", path)
+
+    return _probe_duration_with_imageio_ffmpeg(path)
 
 
 def _stop_condition_mode(stop_condition: dict) -> str:
@@ -410,6 +660,8 @@ def _build_business_metadata(
         raw_clip_size = Path(raw_clip_path).stat().st_size
     except OSError:
         raw_clip_size = 0
+    raw_clip_duration = _probe_video_duration_seconds(raw_clip_path)
+    duration_probe_status = "ok" if raw_clip_duration is not None else "failed"
 
     return {
         "schema_version": "1.0",
@@ -456,7 +708,8 @@ def _build_business_metadata(
             "raw_clip_path": raw_clip_path,
             "event_annotation_path": event_annotation_path,
             "raw_clip_size": raw_clip_size,
-            "raw_clip_duration": 0,
+            "raw_clip_duration": raw_clip_duration,
+            "duration_probe_status": duration_probe_status,
         },
         "status": {
             "clip_status": "generated",
@@ -493,7 +746,10 @@ def _finalize_p1_evidence_bundle(
     shutil.copy2(metadata_file, sink_metadata_out)
 
     event_context = _load_event_context(pg_conn, event_id)
-    annotation = _event_annotation_from_context(event_context)
+    annotation = _event_annotation_from_context(
+        event_context,
+        cameras_config_path=os.getenv("CAMERAS_CONFIG_PATH"),
+    )
     with open(annotation_out, "w") as f:
         json.dump(annotation, f, ensure_ascii=False, indent=2)
         f.write("\n")

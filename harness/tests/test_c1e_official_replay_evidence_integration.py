@@ -147,6 +147,7 @@ def test_c1e_clip_worker_replay_job_env() -> None:
     assert clip_env["CLIP_WORKER_MAX_JOBS_PER_RUN"] == "1"
     assert clip_env["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "1"
     assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
+    assert clip_env["ALLOW_UNBOUNDED_KEYFRAME_FALLBACK"] == "false"
 
 
 def test_c1e_worker_bind_mounts_and_official_drift_fix() -> None:
@@ -164,6 +165,10 @@ def test_c1e_worker_bind_mounts_and_official_drift_fix() -> None:
     assert "../services/media-worker:/app:rw" in c1e["services"]["media-worker"][
         "volumes"
     ]
+    assert (
+        "../modules/savant_security/config:/opt/savant/src/module/config:ro"
+        in c1e["services"]["media-worker"]["volumes"]
+    )
     assert "../services/event-worker:/app:rw" in adapter["services"]["event-worker"][
         "volumes"
     ]
@@ -200,6 +205,11 @@ def test_c1e_smoke_runtime_discipline_and_outputs() -> None:
         "source_stopped_after_smoke=",
         "business_metadata_generated=",
         "event_annotation_bbox_conversion=",
+        "duration_probe_status=",
+        "metadata_raw_clip_duration=",
+        "keyframe_lookup_used=",
+        "roi_overlay_generated=",
+        "roi_lookup_status=",
         "annotated_clip=no",
         "source_to_replay_to_savant_single_path=yes",
     ):
@@ -369,6 +379,8 @@ def test_c1e_business_metadata_schema(monkeypatch, tmp_path: Path) -> None:
     assert business["event"]["source_id"] == "c1e_rtsp_replay"
     assert business["replay"]["stop_condition_mode"] == "ts_delta_sec"
     assert business["media"]["sink_metadata_path"].endswith("sink_metadata.json")
+    assert "raw_clip_duration" in business["media"]
+    assert "duration_probe_status" in business["media"]
     assert "single-event evidence POC" in business["limitations"]
     assert "not incident coalescing" in business["limitations"]
     assert "not continuous recording" in business["limitations"]

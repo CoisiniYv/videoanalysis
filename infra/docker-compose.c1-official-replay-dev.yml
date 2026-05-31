@@ -203,6 +203,7 @@ services:
       CLIP_WORKER_MAX_CONCURRENT_JOBS: "1"
       CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "30"
       REPLAY_STOP_CONDITION_MODE: ts_delta_sec
+      ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
     volumes:
       - ../services/clip-worker:/app:rw
     depends_on:
@@ -238,8 +239,10 @@ services:
       EVIDENCE_TEST_VIDEO_USED: "false"
       EVIDENCE_SOURCE_EXTRACTION_FALLBACK: "false"
       EVIDENCE_SECOND_RTSP_PULL: "false"
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.c1e_replay.yml
     volumes:
       - ../services/media-worker:/app:rw
+      - ../modules/savant_security/config:/opt/savant/src/module/config:ro
       - /data/video-analytics/media:/media:rw
     depends_on:
       postgres: { condition: service_healthy }
