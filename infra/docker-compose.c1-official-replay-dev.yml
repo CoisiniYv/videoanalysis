@@ -98,6 +98,7 @@ services:
       - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
       - /data/video-analytics/models:/models:rw
       - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
     deploy:
       resources:
         reservations:
