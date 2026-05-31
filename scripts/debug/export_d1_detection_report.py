@@ -25,7 +25,11 @@ from typing import Any, Iterable
 FIXED_RTSP_URI = "rtsp://10.37.57.112:8554/live/1080movie"
 DEFAULT_SOURCE_ID = "d1_rtsp_15min"
 DEFAULT_CAMERA_ID = "cam_d1_rtsp_15min"
-DEFAULT_OUTPUT_DIR = "manual-inspection/d1_15min_detection_latest"
+_DEFAULT_ARTIFACT_ROOT = "/data/video-analytics/artifacts"
+DEFAULT_OUTPUT_DIR = os.path.join(
+    os.environ.get("VIDEO_ANALYTICS_ARTIFACT_ROOT", _DEFAULT_ARTIFACT_ROOT),
+    "runs", "d1-rtsp-15min", "latest",
+)
 BEHAVIOR_EVENT_TYPES = {
     "intrusion",
     "loitering",

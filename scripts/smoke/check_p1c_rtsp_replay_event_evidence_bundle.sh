@@ -47,6 +47,15 @@ EVIDENCE_ROOT="/data/video-analytics/media/evidence"
 SINK_RUN_ROOT="/data/video-analytics/media/replay-sink-output/p1c-rtsp/${RUN_ID}"
 P1C_RTSP_SINK_ROOT="/media/replay-sink-output/p1c-rtsp/${RUN_ID}"
 P1C_RTSP_SINK_DIR_LOCATION="/media/replay-sink-output/p1c-rtsp/${RUN_ID}/%source_id%/%src_filename%/"
+
+# ── Artifact output policy (Phase H1) ────────────────────────────────────────
+ARTIFACT_ROOT="${VIDEO_ANALYTICS_ARTIFACT_ROOT:-/data/video-analytics/artifacts}"
+RUN_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_SHORT_UUID="$(head -c 3 /dev/urandom | xxd -p)"
+# Reuse RUN_ID if already set above
+P1C_ARTIFACT_RUN_ID="p1c-rtsp_${RUN_TIMESTAMP}_${RUN_SHORT_UUID}"
+P1C_ARTIFACT_RUN_DIR="${ARTIFACT_ROOT}/runs/p1c-rtsp/${P1C_ARTIFACT_RUN_ID}"
+MANIFEST_PATH="${P1C_ARTIFACT_RUN_DIR}/manifest.json"
 export P1C_RTSP_SINK_ROOT
 export P1C_RTSP_SINK_DIR_LOCATION
 export P1C_RTSP_RUN_ID
@@ -870,6 +879,81 @@ echo "ffprobe_status=$([[ -n "$VIDEO_FORMAT" && "$DURATION_OK" == "yes" ]] && ec
 echo "annotated_clip=no"
 echo "api_started=no"
 echo "production_compose_change=no"
+
+# ── Generate manifest.json (Phase H1) ────────────────────────────────────────
+mkdir -p "$P1C_ARTIFACT_RUN_DIR"
+GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+GIT_STATUS_CLEAN="$(git -C "$ROOT_DIR" diff --quiet 2>/dev/null && echo 'true' || echo 'false')"
+
+HOST_EVIDENCE_DIR=""
+HOST_METADATA_JSON=""
+HOST_EVENT_ANNOTATION=""
+HOST_SINK_METADATA=""
+HOST_RAW_CLIP_MANIFEST=""
+if [[ -n "$EVIDENCE_DIR" && "$EVIDENCE_DIR" != "NULL" ]]; then
+  HOST_EVIDENCE_DIR="$(host_media_path "$EVIDENCE_DIR")"
+  HOST_METADATA_JSON="$(host_media_path "${METADATA_PATH:-}")"
+  HOST_EVENT_ANNOTATION="$(host_media_path "${EVENT_ANNOTATION_PATH:-}")"
+  HOST_SINK_METADATA="${HOST_EVIDENCE_DIR}/sink_metadata.json"
+  HOST_RAW_CLIP_MANIFEST="${HOST_RAW_CLIP:-}"
+fi
+
+python3 - "$MANIFEST_PATH" "$P1C_ARTIFACT_RUN_ID" "$RUN_ID" "$RTSP_URL" "$SOURCE_ID" "$CAMERA_ID" \
+  "$DOCKER_ACCESS" "$BUILD_USED" "$GIT_COMMIT" "$GIT_STATUS_CLEAN" \
+  "$HOST_EVIDENCE_DIR" "$HOST_METADATA_JSON" "$HOST_EVENT_ANNOTATION" "$HOST_SINK_METADATA" "$HOST_RAW_CLIP_MANIFEST" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+(manifest_path, run_id, smoke_run_id, rtsp_url, source_id, camera_id,
+ docker_access, build_used, git_commit, git_status_clean,
+ evidence_dir, metadata_json, event_annotation, sink_metadata, raw_clip) = sys.argv[1:]
+
+manifest = {
+    "schema_version": "1.0",
+    "phase": "p1c-rtsp",
+    "run_id": run_id,
+    "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    "input": {
+        "input_type": "rtsp",
+        "input_uri": rtsp_url,
+        "source_id": source_id,
+        "camera_id": camera_id,
+    },
+    "runtime": {
+        "docker_access": docker_access,
+        "build_used": build_used == "yes",
+        "source_adapter_stopped_after_run": True,
+    },
+    "artifacts": {
+        "evidence_dir": evidence_dir or None,
+        "raw_clip": raw_clip or None,
+        "metadata_json": metadata_json or None,
+        "event_annotation_json": event_annotation or None,
+        "sink_metadata_json": sink_metadata or None,
+    },
+    "git": {
+        "commit": git_commit,
+        "status_clean": git_status_clean == "true",
+    },
+}
+Path(manifest_path).write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PYEOF
+
+# ── Update latest pointer (Phase H1) ────────────────────────────────────────
+LATEST_DIR="${ARTIFACT_ROOT}/latest"
+mkdir -p "$LATEST_DIR"
+LATEST_LINK="${LATEST_DIR}/p1c-rtsp"
+rm -f "$LATEST_LINK"
+ln -s "$P1C_ARTIFACT_RUN_DIR" "$LATEST_LINK"
+
+echo "artifact_root=${ARTIFACT_ROOT}"
+echo "run_id=${P1C_ARTIFACT_RUN_ID}"
+echo "run_dir=${P1C_ARTIFACT_RUN_DIR}"
+echo "manifest_path=${MANIFEST_PATH}"
 echo "validation=$([[ "$FAIL_COUNT" -eq 0 ]] && echo pass || echo fail)"
 echo "--- Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed ---"
 

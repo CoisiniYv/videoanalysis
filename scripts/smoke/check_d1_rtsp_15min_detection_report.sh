@@ -18,7 +18,6 @@ ROOT_DIR="${SMOKE_DIR}/../.."
 COMPOSE_FILE="${ROOT_DIR}/infra/docker-compose.d1-rtsp-15min-detection.yml"
 CAMERA_CONFIG="${ROOT_DIR}/modules/savant_security/config/cameras.d1_rtsp_15min.yml"
 EXPORTER="${ROOT_DIR}/scripts/debug/export_d1_detection_report.py"
-OUTPUT_DIR="${ROOT_DIR}/manual-inspection/d1_15min_detection_latest"
 REQUIRED_RTSP_URL="rtsp://10.37.57.112:8554/live/1080movie"
 INPUT_URI="${D1_INPUT_URI:-$REQUIRED_RTSP_URL}"
 SOURCE_ID="${D1_SOURCE_ID:-d1_rtsp_15min}"
@@ -26,6 +25,16 @@ CAMERA_ID="${D1_CAMERA_ID:-cam_d1_rtsp_15min}"
 DURATION_SECONDS="${D1_DURATION_SECONDS:-900}"
 D1_ALLOW_BUILD="${D1_ALLOW_BUILD:-0}"
 REDIS_URL="${D1_REDIS_URL:-redis://127.0.0.1:6392/0}"
+
+# ── Artifact output policy (Phase H1) ────────────────────────────────────────
+ARTIFACT_ROOT="${VIDEO_ANALYTICS_ARTIFACT_ROOT:-/data/video-analytics/artifacts}"
+RUN_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_SHORT_UUID="$(head -c 3 /dev/urandom | xxd -p)"
+RUN_ID="d1-rtsp-15min_${RUN_TIMESTAMP}_${RUN_SHORT_UUID}"
+RUN_DIR="${ARTIFACT_ROOT}/runs/d1-rtsp-15min/${RUN_ID}"
+OUTPUT_DIR="${RUN_DIR}"
+LATEST_DIR="${ARTIFACT_ROOT}/latest"
+MANIFEST_PATH="${RUN_DIR}/manifest.json"
 
 REDIS_CONTAINER="d1-rtsp-redis"
 REPLAY_CONTAINER="d1-rtsp-replay-service"
@@ -351,6 +360,55 @@ if [[ "$FAIL_COUNT" -gt 0 ]]; then
   fatal "d1_detection_report_validation_failed"
 fi
 
+# ── Generate manifest.json (Phase H1) ────────────────────────────────────────
+GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+GIT_STATUS_CLEAN="$(git -C "$ROOT_DIR" diff --quiet 2>/dev/null && echo 'true' || echo 'false')"
+
+python3 - "$MANIFEST_PATH" <<PYEOF
+import json
+from pathlib import Path
+
+manifest = {
+    "schema_version": "1.0",
+    "phase": "d1-rtsp-15min",
+    "run_id": "${RUN_ID}",
+    "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "input": {
+        "input_type": "rtsp",
+        "input_uri": "${INPUT_URI}",
+        "source_id": "${SOURCE_ID}",
+        "camera_id": "${CAMERA_ID}",
+    },
+    "runtime": {
+        "docker_access": "${DOCKER_ACCESS}",
+        "build_used": ${BUILD_USED} == "yes" and True or False,
+        "source_adapter_stopped_after_run": ${SOURCE_ADAPTER_STOPPED_AFTER_RUN} == "yes" and True or False,
+    },
+    "artifacts": {
+        "report_md": "${OUTPUT_DIR}/report.md",
+        "summary_json": "${OUTPUT_DIR}/summary.json",
+        "people_tracks_csv": "${OUTPUT_DIR}/people_tracks.csv",
+        "people_tracks_json": "${OUTPUT_DIR}/people_tracks.json",
+        "face_observations_csv": "${OUTPUT_DIR}/face_observations.csv",
+        "face_observations_json": "${OUTPUT_DIR}/face_observations.json",
+    },
+    "git": {
+        "commit": "${GIT_COMMIT}",
+        "status_clean": ${GIT_STATUS_CLEAN},
+    },
+}
+Path("${MANIFEST_PATH}").write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PYEOF
+
+# ── Update latest pointer (Phase H1) ────────────────────────────────────────
+mkdir -p "$LATEST_DIR"
+LATEST_LINK="${LATEST_DIR}/d1-rtsp-15min"
+rm -f "$LATEST_LINK"
+ln -s "$RUN_DIR" "$LATEST_LINK"
+
 echo ""
 echo "Result=PASS"
 echo "docker_access=${DOCKER_ACCESS}"
@@ -383,6 +441,10 @@ echo "face_observation_count=${FACE_OBSERVATION_COUNT}"
 echo "gallery_hit_count=${GALLERY_HIT_COUNT}"
 echo "watchlist_hit_count=${WATCHLIST_HIT_COUNT}"
 echo "live_search_hit_count=${LIVE_SEARCH_HIT_COUNT}"
+echo "artifact_root=${ARTIFACT_ROOT}"
+echo "run_id=${RUN_ID}"
+echo "run_dir=${RUN_DIR}"
+echo "manifest_path=${MANIFEST_PATH}"
 echo "report.md=${OUTPUT_DIR}/report.md"
 echo "summary.json=${OUTPUT_DIR}/summary.json"
 echo "people_tracks.csv=${OUTPUT_DIR}/people_tracks.csv"

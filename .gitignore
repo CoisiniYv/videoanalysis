@@ -9,14 +9,33 @@ build/
 .venv/
 
 # Debug and manual inspection artifacts (NOT committed)
-debug/
-manual-inspection/
-temp/
-tmp/
+/debug/
+/manual-inspection/
+/temp/
+/tmp/
+/oodd/
 
 # Runtime media output (NOT committed)
-media/
-results/
+/media/
+/results/
+/artifacts/
+
+# Runtime media files (NOT committed)
+*.mov
+*.mp4
+*.webm
+*.mkv
+*.avi
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+
+# Deployment packages (NOT committed)
+*.zip
+docker-deploy-package.zip
+docker-runtime-package.zip
 
 # Runtime-generated config artifacts written by scripts/config/* (NOT committed)
 infra/generated/
@@ -25,13 +44,13 @@ modules/savant_phase1d/
 
 # Local media / model assets (NOT committed)
 # For small curated test fixtures, use harness/scenarios/ instead.
-face/
-testVideo/
-testVideo/*.mp4
-testVideo/*.avi
-testVideo/*.mov
-testVideo/*.mkv
-yolomodel/
+/face/
+/testVideo/
+/testVideo/*.mp4
+/testVideo/*.avi
+/testVideo/*.mov
+/testVideo/*.mkv
+/yolomodel/
 yolo26n-pose.pt
 *.pt
 *.pth
@@ -40,7 +59,7 @@ yolo26n-pose.pt
 *.engine
 
 # Binaries (NOT committed)
-redis-cli
+/redis-cli
 
 # Python
 .pypytest_cache/
