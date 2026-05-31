@@ -170,6 +170,16 @@ On topology inability:
 - No media artifacts committed.
 - Existing feasibility files remain uncommitted and unchanged.
 
+## Runtime Test Policy
+
+P1 must follow `docs/runtime_test_policy.md`:
+
+- Code changes → restart container, not default rebuild.
+- Bind mount must be verified before runtime smoke.
+- P1b-RTSP / P1c-RTSP must use fixed RTSP: `rtsp://10.37.57.112:8554/live/1080movie`.
+- Replay must have TTL configured.
+- POC containers must use explicit names when C1 is also running.
+
 ## Manual Trigger Fallback
 
 Manual Replay REST invocation is allowed only for diagnosis and must be reported

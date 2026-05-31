@@ -72,3 +72,12 @@ manual Replay job -> video-file-sink
 - no annotated_clip
 - no production compose change
 - no media artifacts committed
+
+## Runtime Test Policy
+
+P1b-RTSP must follow `docs/runtime_test_policy.md`:
+
+- Fixed RTSP source: `rtsp://10.37.57.112:8554/live/1080movie`.
+- Code changes → restart container, not default rebuild.
+- Replay TTL must be configured.
+- POC containers must use explicit names when C1 is also running.
