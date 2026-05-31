@@ -7,6 +7,7 @@ import logging
 import signal
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import Dict
 
 import psycopg
@@ -14,7 +15,7 @@ from redis import Redis
 
 from app.alert_publisher import AlertPublisher
 from app.config import Config, load_config
-from app.record_request import RecordRequestPublisher
+from app.record_request import RecordRequestPublisher, _resolve_source_id
 from app.redis_consumer import RedisStreamConsumer
 from app.repository import EventRepository
 
@@ -29,6 +30,12 @@ R3_1A_DEFAULT_EVIDENCE_POLICY = {
     "pre_seconds": 5,
     "post_seconds": 10,
 }
+
+
+@dataclass
+class RecordingPolicyState:
+    published_requests: int = 0
+    last_recorded_at_ms: dict[str, int] = field(default_factory=dict)
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -71,6 +78,12 @@ def _handle_event(
     consumer: RedisStreamConsumer,
     alert_publisher: AlertPublisher | None = None,
     record_publisher: RecordRequestPublisher | None = None,
+    *,
+    recording_state: RecordingPolicyState | None = None,
+    recording_event_types: tuple[str, ...] = (),
+    recording_source_id: str = "",
+    recording_max_requests_per_run: int = 0,
+    recording_cooldown_seconds: int = 0,
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -126,21 +139,57 @@ def _handle_event(
             if isinstance(payload_media, dict)
             else False
         )
+        source_id = _resolve_source_id(event, "")
+        event_type = event.get("event_type", "")
         if clip_required or payload_clip:
-            existing_status = None
-            if event_id:
-                existing_status = repo.get_media_clip_status(source_event_id)
-            elif source_event_id:
-                existing_status = repo.get_media_clip_status(source_event_id)
+            existing_status = repo.get_media_clip_status(source_event_id)
+            allowed = True
+            skip_reason = ""
 
-            if existing_status and existing_status not in (
+            if recording_event_types and event_type not in recording_event_types:
+                allowed = False
+                skip_reason = "event_type_mismatch"
+            elif recording_source_id and source_id != recording_source_id:
+                allowed = False
+                skip_reason = "source_id_mismatch"
+            elif recording_state is not None:
+                if (
+                    recording_max_requests_per_run > 0
+                    and recording_state.published_requests
+                    >= recording_max_requests_per_run
+                ):
+                    allowed = False
+                    skip_reason = "max_requests_reached"
+                elif recording_cooldown_seconds > 0:
+                    last_recorded_at = recording_state.last_recorded_at_ms.get(source_id)
+                    event_ts_ms = int(event.get("event_ts_ms", 0))
+                    if (
+                        last_recorded_at is not None
+                        and event_ts_ms - last_recorded_at
+                        < recording_cooldown_seconds * 1000
+                    ):
+                        allowed = False
+                        skip_reason = "cooldown"
+
+            if allowed and source_event_id and record_publisher.has_request(
+                source_event_id, "savant_replay"
+            ):
+                allowed = False
+                skip_reason = "duplicate_record_request"
+            elif allowed and existing_status and existing_status not in (
                 "", "not_implemented", "not_required"
             ):
+                allowed = False
+                skip_reason = f"already_has_clip_status={existing_status}"
+
+            if not allowed:
                 logger.info(
-                    "record_request_skipped (already has clip_status=%s) "
-                    "source_event_id=%s",
-                    existing_status,
+                    "record_request_skipped source_event_id=%s source_id=%s "
+                    "event_type=%s reason=%s",
                     source_event_id,
+                    source_id,
+                    event_type,
+                    skip_reason,
                 )
             else:
                 logger.info(
@@ -155,8 +204,15 @@ def _handle_event(
                 )
                 try:
                     msg = record_publisher.publish(event, event_id=event_id or "")
-                    if msg and event_id:
-                        repo.set_clip_status(event_id, "pending")
+                    if msg:
+                        if event_id:
+                            repo.set_clip_status(event_id, "pending")
+                        if recording_state is not None:
+                            recording_state.published_requests += 1
+                            if source_id:
+                                recording_state.last_recorded_at_ms[source_id] = int(
+                                    event.get("event_ts_ms", 0)
+                                )
                 except Exception:
                     logger.exception(
                         "record_request publish failed for source_event_id=%s",
@@ -236,6 +292,12 @@ def _process_batch(
     consumer: RedisStreamConsumer,
     alert_publisher: AlertPublisher | None = None,
     record_publisher: RecordRequestPublisher | None = None,
+    *,
+    recording_state: RecordingPolicyState | None = None,
+    recording_event_types: tuple[str, ...] = (),
+    recording_source_id: str = "",
+    recording_max_requests_per_run: int = 0,
+    recording_cooldown_seconds: int = 0,
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -245,7 +307,19 @@ def _process_batch(
             consumer.ack(msg_id)
             continue
 
-        new, _ = _handle_event(event, msg_id, repo, consumer, alert_publisher, record_publisher)
+        new, _ = _handle_event(
+            event,
+            msg_id,
+            repo,
+            consumer,
+            alert_publisher,
+            record_publisher,
+            recording_state=recording_state,
+            recording_event_types=recording_event_types,
+            recording_source_id=recording_source_id,
+            recording_max_requests_per_run=recording_max_requests_per_run,
+            recording_cooldown_seconds=recording_cooldown_seconds,
+        )
         if new:
             inserted += 1
         else:
@@ -289,16 +363,23 @@ def run_worker(
         if cfg.recording_enabled
         else None
     )
+    recording_state = RecordingPolicyState()
 
     logger.info(
         "worker started stream=%s group=%s consumer=%s alert_stream=%s "
-        "recording_enabled=%s record_request_stream=%s",
+        "recording_enabled=%s record_request_stream=%s recording_event_types=%s "
+        "recording_source_id=%s recording_max_requests_per_run=%s "
+        "recording_cooldown_seconds=%s",
         cfg.event_stream,
         cfg.consumer_group,
         cfg.consumer_name,
         cfg.alert_stream,
         cfg.recording_enabled,
         cfg.record_request_stream,
+        cfg.recording_event_types,
+        cfg.recording_source_id,
+        cfg.recording_max_requests_per_run,
+        cfg.recording_cooldown_seconds,
     )
 
     total_inserted = 0
@@ -310,7 +391,18 @@ def run_worker(
             # 1. Process pending messages (recovery)
             pending = consumer.read_pending(count=cfg.batch_size)
             if pending:
-                ins, dup = _process_batch(pending, repo, consumer, alert_publisher, record_publisher)
+                ins, dup = _process_batch(
+                    pending,
+                    repo,
+                    consumer,
+                    alert_publisher,
+                    record_publisher,
+                    recording_state=recording_state,
+                    recording_event_types=cfg.recording_event_types,
+                    recording_source_id=cfg.recording_source_id,
+                    recording_max_requests_per_run=cfg.recording_max_requests_per_run,
+                    recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                )
                 total_inserted += ins
                 total_duplicates += dup
                 if ins or dup:
@@ -323,7 +415,18 @@ def run_worker(
                 count=cfg.batch_size, block_ms=cfg.poll_timeout_ms
             )
             if new_msgs:
-                ins, dup = _process_batch(new_msgs, repo, consumer, alert_publisher, record_publisher)
+                ins, dup = _process_batch(
+                    new_msgs,
+                    repo,
+                    consumer,
+                    alert_publisher,
+                    record_publisher,
+                    recording_state=recording_state,
+                    recording_event_types=cfg.recording_event_types,
+                    recording_source_id=cfg.recording_source_id,
+                    recording_max_requests_per_run=cfg.recording_max_requests_per_run,
+                    recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                )
                 total_inserted += ins
                 total_duplicates += dup
 

@@ -31,6 +31,7 @@ docker exec <savant_container> sha256sum /opt/savant/src/module/custom/pyfuncs/b
 | `services/event-worker/` | `/app` | event-worker (if bind-mounted) |
 | `services/face-worker/` | `/app` | face-worker (if bind-mounted) |
 | `services/clip-worker/` | `/app` | clip-worker (if bind-mounted) |
+| `services/media-worker/` | `/app` | media-worker (if bind-mounted) |
 
 ### 1.3 Smoke Output
 
@@ -38,6 +39,15 @@ docker exec <savant_container> sha256sum /opt/savant/src/module/custom/pyfuncs/b
 bind_mount_status: MOUNT_OK | MOUNT_NOT_ACTIVE
 rebuild_used: no
 pull_used: no
+services_restarted: <service list>
+worker_rebuild_required: no
+```
+
+If worker hash comparison fails:
+
+```text
+Result=BLOCKED
+Reason=worker_bind_mount_not_active
 ```
 
 ## 2. Restart-Not-Rebuild Default
@@ -91,6 +101,72 @@ docker compose up --build
 ```
 
 unless rebuild necessity is already proven.
+
+For P1c development smoke, the default is:
+
+```bash
+$COMPOSE -f <compose> up -d --no-build --force-recreate
+```
+
+`P1C_ALLOW_BUILD=1` is the only gate that permits:
+
+```bash
+$COMPOSE -f <compose> up -d --build --force-recreate
+```
+
+If a required worker image is missing and build is not explicitly allowed:
+
+```text
+Result=BLOCKED
+Reason=worker_image_missing_and_build_not_allowed
+Hint=rerun with P1C_ALLOW_BUILD=1 or enable worker bind mounts
+```
+
+## 2.4 Docker Daemon Access
+
+Every runtime smoke that uses Docker must define `detect_docker()` and set:
+
+```bash
+DOCKER="docker"
+COMPOSE="docker compose"
+```
+
+or, when ordinary Docker access fails but sudo Docker works:
+
+```bash
+DOCKER="sudo docker"
+COMPOSE="sudo docker compose"
+```
+
+`detect_docker()` must emit exactly one of:
+
+```text
+DOCKER_ACCESS_OK
+SUDO_DOCKER_REQUIRED
+DOCKER_ACCESS_BLOCKED
+```
+
+If both ordinary and sudo Docker are unavailable:
+
+```text
+Result=BLOCKED
+Reason=docker_daemon_unavailable
+```
+
+After `detect_docker()` runs, all Docker runtime commands must use `$DOCKER` or
+`$COMPOSE`. Bare `docker ps`, `docker compose`, `docker logs`, `docker exec`,
+`docker stop`, `docker rm`, and `docker run` are forbidden outside
+`detect_docker()`.
+
+Smoke reports must include:
+
+```text
+docker_access:
+docker_command_prefix:
+compose_command_prefix:
+sudo_used:
+actual_containers_started:
+```
 
 ## 3. Restart Policy by Component
 
@@ -214,7 +290,10 @@ REPLAY_ROCKSDB_PATH=/data/video-analytics/replay/rocksdb
 
 ```text
 replay_ttl_configured: yes/no
+replay_ttl_field: storage.rocksdb.data_expiration_ttl
 replay_ttl_seconds: 60
+ttl_requirement_seconds: <pre + post + scheduling_margin>
+replay_ttl_ok: yes/no
 replay_rocksdb_path: /opt/rocksdb (or configured path)
 ```
 
@@ -223,6 +302,13 @@ If TTL is not configured or cannot be proven:
 ```text
 Result = BLOCKED
 Reason = replay_ttl_not_configured
+```
+
+If TTL is shorter than the event window plus scheduling margin:
+
+```text
+Result = BLOCKED
+Reason = replay_ttl_too_short
 ```
 
 ### 5.4 Policy Statement
@@ -254,6 +340,47 @@ docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
 
 and verify only expected P1 containers are active, or unrelated C1 containers
 are explicitly noted as ignored.
+
+## 7. P1c Single-Event Evidence POC Scope
+
+P1c-RTSP is a single-event evidence POC. It proves event-triggered Replay raw
+clip generation and DB `clip_path` update.
+
+It is not:
+
+- continuous recording
+- incident coalescing
+- production multi-event merge policy
+
+P1c smoke must report and enforce:
+
+```text
+events_created:
+record_requests_created:
+replay_jobs_created:
+evidence_bundles_created:
+extra_clips_detected:
+```
+
+For P1c.2:
+
+```text
+record_requests_created == 1
+replay_jobs_created == 1
+evidence_bundles_created == 1
+extra_clips_detected == 0
+```
+
+If more than one evidence bundle is produced:
+
+```text
+Result = FAIL
+Reason = uncontrolled_clip_generation
+```
+
+P2 - Incident Window and Recording Coalescing is the phase for `merge_window`,
+`cooldown`, `incident_id`, `first_event_ts`, `last_event_ts`, one clip for many
+events, and `event_annotation.json` with `events[]`.
 
 ### 6.3 Explicit Container Names
 

@@ -154,13 +154,45 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
         return False
 
 
-def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
-    """Build the first P1 event-frame annotation document from the event row."""
+def _to_float(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _event_context_from_row(event_id: str, row: tuple) -> dict:
+    payload = row[6] if len(row) > 6 else {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        payload = {}
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    if not isinstance(media, dict):
+        media = {}
+
+    return {
+        "event_id": event_id,
+        "event_type": row[0] if len(row) > 0 else "",
+        "camera_id": row[1] if len(row) > 1 else "",
+        "source_id": row[2] if len(row) > 2 else "",
+        "track_id": row[3] if len(row) > 3 else "",
+        "event_ts_ms": row[4] if len(row) > 4 else 0,
+        "frame_uuid": row[5] if len(row) > 5 else "",
+        "payload": payload,
+        "confidence": row[7] if len(row) > 7 else 0.0,
+        "source_event_id": row[8] if len(row) > 8 else payload.get("source_event_id", ""),
+        "keyframe_uuid": row[9] if len(row) > 9 else payload.get("keyframe_uuid", ""),
+        "previous_keyframe_uuid": media.get("previous_keyframe_uuid", ""),
+    }
+
+
+def _load_event_context(pg_conn: psycopg.Connection, event_id: str) -> dict:
     with pg_conn.cursor() as cur:
         cur.execute(
             """
             SELECT event_type, camera_id, source_id, track_id, event_ts_ms,
-                   frame_uuid, payload, confidence
+                   frame_uuid, payload, confidence, source_event_id, keyframe_uuid
             FROM events
             WHERE id = %s::uuid
             """,
@@ -171,22 +203,123 @@ def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
     if not row:
         raise ValueError(f"event not found: {event_id}")
 
-    payload = row[6] or {}
-    if isinstance(payload, str):
-        payload = json.loads(payload)
+    return _event_context_from_row(event_id, row)
+
+
+def _normalise_person_bbox(
+    bbox: object,
+    *,
+    confidence: float,
+    source: str,
+    source_format: str | None = None,
+) -> dict | None:
+    if isinstance(bbox, dict):
+        if {"x", "y", "width", "height"}.issubset(bbox):
+            x = _to_float(bbox.get("x"))
+            y = _to_float(bbox.get("y"))
+            width = _to_float(bbox.get("width"))
+            height = _to_float(bbox.get("height"))
+            if None in (x, y, width, height):
+                return None
+            return {
+                "type": "person_bbox",
+                "bbox_format": "xyxy",
+                "bbox": [x, y, x + width, y + height],
+                "bbox_source_format": "xywh",
+                "bbox_raw": bbox,
+                "confidence": confidence,
+                "source": source,
+            }
+        if {"x1", "y1", "x2", "y2"}.issubset(bbox):
+            x1 = _to_float(bbox.get("x1"))
+            y1 = _to_float(bbox.get("y1"))
+            x2 = _to_float(bbox.get("x2"))
+            y2 = _to_float(bbox.get("y2"))
+            if None in (x1, y1, x2, y2):
+                return None
+            return {
+                "type": "person_bbox",
+                "bbox_format": "xyxy",
+                "bbox": [x1, y1, x2, y2],
+                "bbox_source_format": "xyxy",
+                "bbox_raw": bbox,
+                "confidence": confidence,
+                "source": source,
+            }
+        return None
+
+    if isinstance(bbox, list) and len(bbox) == 4:
+        values = [_to_float(item) for item in bbox]
+        if any(item is None for item in values):
+            return None
+        numbers = [float(item) for item in values if item is not None]
+        if source_format == "xywh":
+            x, y, width, height = numbers
+            return {
+                "type": "person_bbox",
+                "bbox_format": "xyxy",
+                "bbox": [x, y, x + width, y + height],
+                "bbox_source_format": "xywh",
+                "bbox_raw": bbox,
+                "confidence": confidence,
+                "source": source,
+            }
+        if source_format == "xyxy":
+            return {
+                "type": "person_bbox",
+                "bbox_format": "xyxy",
+                "bbox": numbers,
+                "bbox_source_format": "xyxy",
+                "bbox_raw": bbox,
+                "confidence": confidence,
+                "source": source,
+            }
+        return {
+            "type": "person_bbox",
+            "bbox_format": "unknown",
+            "bbox": numbers,
+            "bbox_source_format": "list_unknown",
+            "bbox_raw": bbox,
+            "confidence": confidence,
+            "source": source,
+        }
+
+    return None
+
+
+def _event_annotation_from_context(context: dict) -> dict:
+    """Build the P1 event-frame annotation document from event context."""
+    payload = context["payload"]
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    if not isinstance(media, dict):
+        media = {}
 
     overlays = []
+    missing = []
     bbox = payload.get("bbox") or payload.get("person_bbox")
-    if isinstance(media, dict):
-        bbox = bbox or media.get("bbox") or media.get("person_bbox")
-    if bbox:
-        overlays.append({
-            "type": "person_bbox",
-            "bbox_format": "xyxy",
-            "bbox": bbox,
-            "confidence": row[7],
-        })
+    bbox_source = "event.payload.bbox" if payload.get("bbox") else "event.payload.person_bbox"
+    if bbox is None:
+        bbox = media.get("bbox") or media.get("person_bbox")
+        bbox_source = "event.payload.media.bbox" if media.get("bbox") else "event.payload.media.person_bbox"
+    bbox_source_format = (
+        payload.get("bbox_format")
+        or payload.get("person_bbox_format")
+        or media.get("bbox_format")
+        or media.get("person_bbox_format")
+    )
+    if bbox is not None:
+        overlay = _normalise_person_bbox(
+            bbox,
+            confidence=float(context["confidence"] or 0.0),
+            source=bbox_source,
+            source_format=bbox_source_format,
+        )
+        if overlay:
+            overlays.append(overlay)
+        else:
+            missing.append("person_bbox")
+    else:
+        missing.append("person_bbox")
 
     roi = payload.get("roi_polygon") or payload.get("zone_polygon")
     zone_id = payload.get("zone_id") or payload.get("zone")
@@ -196,20 +329,144 @@ def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
             "zone_id": zone_id,
             "points": roi,
         })
+    else:
+        missing.append("roi_polygon")
 
     return {
         "schema_version": "1.0",
         "annotation_type": "event_frame",
+        "annotation_status": "partial" if missing else "complete",
+        "missing": missing,
         "event": {
-            "event_id": event_id,
-            "event_type": row[0],
-            "camera_id": row[1],
-            "source_id": row[2],
-            "track_id": row[3],
-            "event_ts_ms": row[4],
-            "frame_uuid": row[5],
+            "event_id": context["event_id"],
+            "source_event_id": context["source_event_id"],
+            "event_type": context["event_type"],
+            "camera_id": context["camera_id"],
+            "source_id": context["source_id"],
+            "track_id": context["track_id"],
+            "event_ts_ms": context["event_ts_ms"],
+            "frame_uuid": context["frame_uuid"],
+            "keyframe_uuid": context["keyframe_uuid"],
+            "previous_keyframe_uuid": context["previous_keyframe_uuid"],
         },
         "overlays": overlays,
+    }
+
+
+def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
+    """Build the P1 event-frame annotation document from the event row."""
+    return _event_annotation_from_context(_load_event_context(pg_conn, event_id))
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes")
+
+
+def _load_sink_metadata_file(metadata_file: str) -> dict:
+    path = Path(metadata_file)
+    data = _parse_ndjson(path)
+    if isinstance(data, dict):
+        return data
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.exception("failed to load sink metadata file=%s", metadata_file)
+        return {}
+
+
+def _stop_condition_mode(stop_condition: dict) -> str:
+    if "ts_delta_sec" in stop_condition:
+        return "ts_delta_sec"
+    if "frame_count" in stop_condition:
+        return "frame_count_fallback"
+    return "unknown"
+
+
+def _build_business_metadata(
+    *,
+    event_context: dict,
+    replay_job_id: str,
+    replay_job_request: dict,
+    sink_metadata_path: str,
+    sink_video_path: str,
+    sink_output_dir: str,
+    raw_clip_path: str,
+    event_annotation_path: str,
+) -> dict:
+    payload = event_context.get("payload", {})
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    if not isinstance(media, dict):
+        media = {}
+    stop_condition = replay_job_request.get("stop_condition") or {}
+    configuration = replay_job_request.get("configuration") or {}
+    offset = replay_job_request.get("offset") or {}
+    raw_clip_size = 0
+    try:
+        raw_clip_size = Path(raw_clip_path).stat().st_size
+    except OSError:
+        raw_clip_size = 0
+
+    return {
+        "schema_version": "1.0",
+        "phase": os.getenv("EVIDENCE_PHASE", "P1"),
+        "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
+        "evidence_type": "security_event_replay_clip",
+        "recording_strategy": "savant_replay",
+        "input": {
+            "input_type": os.getenv("EVIDENCE_INPUT_TYPE", ""),
+            "input_uri": os.getenv("EVIDENCE_INPUT_URI", ""),
+            "local_file_used": _env_bool("EVIDENCE_LOCAL_FILE_USED"),
+            "test_video_used": _env_bool("EVIDENCE_TEST_VIDEO_USED"),
+            "source_extraction_fallback": _env_bool(
+                "EVIDENCE_SOURCE_EXTRACTION_FALLBACK"
+            ),
+            "second_rtsp_pull": _env_bool("EVIDENCE_SECOND_RTSP_PULL"),
+        },
+        "event": {
+            "event_id": event_context.get("event_id", ""),
+            "source_event_id": event_context.get("source_event_id", ""),
+            "event_type": event_context.get("event_type", ""),
+            "camera_id": event_context.get("camera_id", ""),
+            "source_id": event_context.get("source_id", ""),
+            "track_id": event_context.get("track_id", ""),
+            "event_ts_ms": event_context.get("event_ts_ms", 0),
+            "frame_uuid": event_context.get("frame_uuid", ""),
+            "keyframe_uuid": event_context.get("keyframe_uuid", ""),
+            "previous_keyframe_uuid": event_context.get("previous_keyframe_uuid", ""),
+        },
+        "replay": {
+            "replay_job_id": replay_job_id,
+            "anchor_keyframe_uuid": replay_job_request.get("anchor_keyframe", ""),
+            "offset_seconds": offset.get("seconds", 0),
+            "stop_condition": stop_condition,
+            "stop_condition_mode": _stop_condition_mode(stop_condition),
+            "fallback_reason": replay_job_request.get("fallback_reason", ""),
+            "stored_stream_id": configuration.get("stored_stream_id", ""),
+            "resulting_stream_id": configuration.get("resulting_stream_id", ""),
+        },
+        "media": {
+            "sink_output_dir": sink_output_dir,
+            "sink_metadata_path": sink_metadata_path,
+            "sink_video_path": sink_video_path,
+            "raw_clip_path": raw_clip_path,
+            "event_annotation_path": event_annotation_path,
+            "raw_clip_size": raw_clip_size,
+            "raw_clip_duration": 0,
+        },
+        "status": {
+            "clip_status": "generated",
+        },
+        "limitations": [
+            "single-event evidence POC",
+            "not incident coalescing",
+            "not continuous recording",
+            "no annotated_clip generated",
+        ],
     }
 
 
@@ -228,22 +485,52 @@ def _finalize_p1_evidence_bundle(
 
     raw_clip = evidence_dir / f"raw_clip{Path(video_file).suffix}"
     metadata_out = evidence_dir / "metadata.json"
+    sink_metadata_out = evidence_dir / "sink_metadata.json"
     annotation_out = evidence_dir / "event_annotation.json"
 
     if not raw_clip.exists():
         shutil.copy2(video_file, raw_clip)
-    if not metadata_out.exists():
-        shutil.copy2(metadata_file, metadata_out)
+    shutil.copy2(metadata_file, sink_metadata_out)
 
-    annotation = _load_event_annotation(pg_conn, event_id)
+    event_context = _load_event_context(pg_conn, event_id)
+    annotation = _event_annotation_from_context(event_context)
     with open(annotation_out, "w") as f:
         json.dump(annotation, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    payload = event_context.get("payload", {})
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    if not isinstance(media, dict):
+        media = {}
+    sink_metadata = _load_sink_metadata_file(metadata_file)
+    replay_job_id = (
+        media.get("replay_job_id")
+        or sink_metadata.get("job_id")
+        or sink_metadata.get("new_job")
+        or ""
+    )
+    replay_job_request = media.get("replay_job_request") or {}
+    if not isinstance(replay_job_request, dict):
+        replay_job_request = {}
+    business_metadata = _build_business_metadata(
+        event_context=event_context,
+        replay_job_id=replay_job_id,
+        replay_job_request=replay_job_request,
+        sink_metadata_path=str(sink_metadata_out),
+        sink_video_path=video_file,
+        sink_output_dir=meta_dir,
+        raw_clip_path=str(raw_clip),
+        event_annotation_path=str(annotation_out),
+    )
+    with open(metadata_out, "w") as f:
+        json.dump(business_metadata, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
     return {
         "evidence_dir": str(evidence_dir),
         "raw_clip": str(raw_clip),
         "metadata": str(metadata_out),
+        "sink_metadata": str(sink_metadata_out),
         "event_annotation": str(annotation_out),
         "sink_output_path": meta_dir,
     }
@@ -403,15 +690,19 @@ def _process_sink_output(
                         SET payload = jsonb_set(
                                 jsonb_set(
                                     jsonb_set(
-                                        COALESCE(payload, '{}'::jsonb),
-                                        '{media,evidence_dir}',
-                                        %(evidence_dir)s::jsonb
+                                        jsonb_set(
+                                            COALESCE(payload, '{}'::jsonb),
+                                            '{media,evidence_dir}',
+                                            %(evidence_dir)s::jsonb
+                                        ),
+                                        '{media,metadata_path}',
+                                        %(metadata_path)s::jsonb
                                     ),
-                                    '{media,metadata_path}',
-                                    %(metadata_path)s::jsonb
+                                    '{media,event_annotation_path}',
+                                    %(annotation_path)s::jsonb
                                 ),
-                                '{media,event_annotation_path}',
-                                %(annotation_path)s::jsonb
+                                '{media,sink_metadata_path}',
+                                %(sink_metadata_path)s::jsonb
                             ),
                             updated_at = now()
                         WHERE id = %(event_id)s::uuid
@@ -421,6 +712,7 @@ def _process_sink_output(
                             "evidence_dir": json.dumps(bundle["evidence_dir"]),
                             "metadata_path": json.dumps(bundle["metadata"]),
                             "annotation_path": json.dumps(bundle["event_annotation"]),
+                            "sink_metadata_path": json.dumps(bundle["sink_metadata"]),
                         },
                     )
                 if cur.rowcount and cur.rowcount > 0:

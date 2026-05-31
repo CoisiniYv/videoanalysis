@@ -19,6 +19,10 @@ class Config:
     default_pre_seconds: int
     default_post_seconds: int
     keyframe_lookup_window_s: int
+    max_jobs_per_run: int
+    max_concurrent_jobs: int
+    per_camera_cooldown_seconds: int
+    replay_stop_condition_mode: str
 
 
 def load_config() -> Config:
@@ -41,4 +45,14 @@ def load_config() -> Config:
         default_pre_seconds=int(os.getenv("DEFAULT_PRE_SECONDS", "5")),
         default_post_seconds=int(os.getenv("DEFAULT_POST_SECONDS", "5")),
         keyframe_lookup_window_s=int(os.getenv("KEYFRAME_LOOKUP_WINDOW_S", "10")),
+        max_jobs_per_run=int(os.getenv("CLIP_WORKER_MAX_JOBS_PER_RUN", "0")),
+        max_concurrent_jobs=int(
+            os.getenv("CLIP_WORKER_MAX_CONCURRENT_JOBS", "0")
+        ),
+        per_camera_cooldown_seconds=int(
+            os.getenv("CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS", "0")
+        ),
+        replay_stop_condition_mode=os.getenv(
+            "REPLAY_STOP_CONDITION_MODE", "frame_count"
+        ),
     )

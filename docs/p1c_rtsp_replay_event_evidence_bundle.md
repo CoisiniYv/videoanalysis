@@ -1,6 +1,6 @@
 # P1c-RTSP Replay Event-triggered Evidence Bundle
 
-Status: POC only.
+Status: single-event evidence POC only.
 
 ## Goal
 
@@ -31,6 +31,10 @@ rtsp://10.37.57.112:8554/live/1080movie
 - no annotated_clip
 - no production compose change
 - no media artifacts committed
+
+P1c-RTSP is a single-event evidence POC. It proves event-triggered Replay raw
+clip generation and DB `clip_path` update. It is not continuous recording, not
+incident coalescing, and not a production multi-event merge policy.
 
 ## Runtime Test Policy
 
@@ -64,7 +68,8 @@ The evidence bundle lands under:
 Files:
 
 - `raw_clip.mov` or `raw_clip.webm` or `raw_clip.mp4`
-- `metadata.json`
+- `metadata.json` (business-level evidence metadata)
+- `sink_metadata.json` (raw Video File Sink metadata)
 - `event_annotation.json`
 
 `events.clip_path` must point to the raw clip file.
@@ -73,5 +78,30 @@ Files:
 
 - `event-worker` publishes `security.record_requests` from intrusion events.
 - `clip-worker` prefers `previous_keyframe_uuid`, then `keyframe_uuid`, then keyframe lookup.
+- Replay jobs prefer `stop_condition.ts_delta_sec`; `frame_count` is allowed
+  only as an explicit fallback with `fallback_reason`.
 - `media-worker` finalizes raw evidence only when `P1_RAW_CLIP_FINALIZER_ENABLED=true`.
 - P1c waits for replay sink files to settle before copying them into the evidence bundle.
+
+## Current Limits
+
+- `record_requests_created == 1`
+- `replay_jobs_created == 1`
+- `evidence_bundles_created == 1`
+- `extra_clips_detected == 0`
+- no `annotated_clip` is generated
+
+If more than one evidence bundle is produced in P1c.2, the smoke result is
+`FAIL` with `Reason = uncontrolled_clip_generation`.
+
+## Next Phase
+
+P2 - Incident Window and Recording Coalescing:
+
+- `merge_window`
+- `cooldown`
+- `incident_id`
+- `first_event_ts`
+- `last_event_ts`
+- one clip for many events
+- `event_annotation.json` with `events[]`

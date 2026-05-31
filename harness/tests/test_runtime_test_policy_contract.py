@@ -56,6 +56,8 @@ def test_policy_doc_contains_replay_ttl():
     content = _read_policy()
     assert "TTL" in content or "ttl" in content or "expiration" in content.lower(), \
         "Policy must document Replay TTL"
+    assert "storage.rocksdb.data_expiration_ttl" in content
+    assert "replay_ttl_too_short" in content
 
 
 def test_policy_doc_contains_poc_isolation():
@@ -246,6 +248,42 @@ def test_policy_doc_contains_detect_docker_pattern():
     content = _read_policy()
     assert "detect_docker" in content, \
         "Policy must include detect_docker() pattern"
+
+
+def test_policy_doc_contains_no_build_gate_and_p1c_single_event_scope():
+    content = _read_policy()
+    assert "P1C_ALLOW_BUILD=1" in content
+    assert "worker_image_missing_and_build_not_allowed" in content
+    assert "single-event evidence POC" in content
+    assert "uncontrolled_clip_generation" in content
+
+
+def test_p1c_smoke_uses_docker_prefixes_after_detection():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[3])
+    assert "DOCKER_ACCESS_OK" in content
+    assert "SUDO_DOCKER_REQUIRED" in content
+    assert "DOCKER_ACCESS_BLOCKED" in content
+    after_detection = content.split("\ndetect_docker\n", 1)[1]
+    for command in (
+        "docker ps",
+        "docker compose",
+        "docker exec",
+        "docker logs",
+        "docker stop",
+        "docker rm",
+        "docker run",
+    ):
+        assert command not in after_detection
+    assert "$DOCKER" in after_detection
+    assert "$COMPOSE" in after_detection
+
+
+def test_p1c_smoke_default_no_build_and_no_pull():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[3])
+    assert "up -d --no-build --force-recreate" in content
+    assert 'if [[ "$P1C_ALLOW_BUILD" == "1" ]]' in content
+    assert "up -d --build --force-recreate" in content
+    assert "docker pull" not in content
 
 
 # ── P1 docs ─────────────────────────────────────────────────────────────────

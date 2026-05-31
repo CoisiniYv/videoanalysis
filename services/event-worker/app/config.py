@@ -19,6 +19,15 @@ class Config:
     poll_timeout_ms: int
     batch_size: int
     default_replay_source_id: str
+    recording_event_types: tuple[str, ...]
+    recording_source_id: str
+    recording_max_requests_per_run: int
+    recording_cooldown_seconds: int
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "")
+    return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def load_config() -> Config:
@@ -40,4 +49,12 @@ def load_config() -> Config:
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
         batch_size=int(os.getenv("EVENT_BATCH_SIZE", "10")),
         default_replay_source_id=os.getenv("DEFAULT_REPLAY_SOURCE_ID", ""),
+        recording_event_types=_csv_env("RECORDING_EVENT_TYPES"),
+        recording_source_id=os.getenv("RECORDING_SOURCE_ID", ""),
+        recording_max_requests_per_run=int(
+            os.getenv("RECORDING_MAX_REQUESTS_PER_RUN", "0")
+        ),
+        recording_cooldown_seconds=int(
+            os.getenv("RECORDING_COOLDOWN_SECONDS", "0")
+        ),
     )

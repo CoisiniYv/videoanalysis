@@ -142,3 +142,27 @@ class RecordRequestPublisher:
                 source_event_id,
             )
             return None
+
+    def has_request(self, source_event_id: str, recording_strategy: str) -> bool:
+        """Return True when a record_request already exists for this event."""
+        try:
+            stream = self._client.xrange(self._stream, "-", "+")
+        except Exception:
+            logger.exception(
+                "record_request lookup failed for source_event_id=%s", source_event_id
+            )
+            return False
+        for _msg_id, fields in stream:
+            data_raw = fields.get(b"data")
+            if not data_raw:
+                continue
+            try:
+                data = json.loads(data_raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if (
+                data.get("source_event_id") == source_event_id
+                and data.get("strategy") == recording_strategy
+            ):
+                return True
+        return False

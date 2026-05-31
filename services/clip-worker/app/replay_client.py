@@ -119,6 +119,8 @@ class ReplayClient:
         post_seconds: int,
         sink_endpoint: str,
         labels: Optional[Dict[str, str]] = None,
+        stop_condition_mode: str = "frame_count",
+        fallback_reason: str | None = None,
     ) -> Optional[str]:
         """PUT /api/v1/job — create a re-streaming job.
 
@@ -140,6 +142,8 @@ class ReplayClient:
             post_seconds=post_seconds,
             sink_endpoint=sink_endpoint,
             labels=labels,
+            stop_condition_mode=stop_condition_mode,
+            fallback_reason=fallback_reason,
         )
         self.last_job_request = payload
 
@@ -153,6 +157,46 @@ class ReplayClient:
             resp.raise_for_status()
             data = resp.json()
             return data.get("new_job") or data.get("job_id") or data.get("id")
+        except httpx.HTTPStatusError:
+            if stop_condition_mode == "ts_delta_sec":
+                fallback_payload = build_job_payload(
+                    source_id=source_id,
+                    keyframe_uuid=keyframe_uuid,
+                    pre_seconds=pre_seconds,
+                    post_seconds=post_seconds,
+                    sink_endpoint=sink_endpoint,
+                    labels=labels,
+                    stop_condition_mode="frame_count",
+                    fallback_reason="replay_api_rejected_ts_delta_sec",
+                )
+                self.last_job_request = fallback_payload
+                try:
+                    logger.warning(
+                        "Replay API rejected ts_delta_sec; retrying with frame_count "
+                        "payload=%s",
+                        fallback_payload,
+                    )
+                    resp = httpx.put(
+                        f"{self._base_url}/api/v1/job",
+                        json=fallback_payload,
+                        timeout=self._timeout,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("new_job") or data.get("job_id") or data.get("id")
+                except Exception:
+                    logger.exception(
+                        "Replay frame_count fallback failed source_id=%s keyframe=%s",
+                        source_id,
+                        keyframe_uuid,
+                    )
+                    return None
+            logger.exception(
+                "Replay job creation failed source_id=%s keyframe=%s",
+                source_id,
+                keyframe_uuid,
+            )
+            return None
         except Exception:
             logger.exception(
                 "Replay job creation failed source_id=%s keyframe=%s",
@@ -170,11 +214,22 @@ def build_job_payload(
     post_seconds: int,
     sink_endpoint: str,
     labels: Optional[Dict[str, str]] = None,
+    stop_condition_mode: str = "frame_count",
+    fallback_reason: str | None = None,
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
     total_frames = (pre_seconds + post_seconds) * 30  # assume 30fps
-    return {
+    stop_condition: Dict[str, Any]
+    if stop_condition_mode == "ts_delta_sec":
+        stop_condition = {
+            "ts_delta_sec": {
+                "max_delta_sec": pre_seconds + post_seconds,
+            }
+        }
+    else:
+        stop_condition = {"frame_count": total_frames}
+    payload = {
         "sink": {"url": sink_endpoint},
         "configuration": {
             "ts_sync": True,
@@ -192,9 +247,12 @@ def build_job_payload(
             "send_metadata_only": False,
             "labels": labels or {},
         },
-        "stop_condition": {"frame_count": total_frames},
+        "stop_condition": stop_condition,
         "anchor_keyframe": keyframe_uuid,
         "anchor_wait_duration": {"secs": 1, "nanos": 0},
         "offset": {"seconds": pre_seconds},
         "attributes": [],
     }
+    if fallback_reason is not None:
+        payload["fallback_reason"] = fallback_reason
+    return payload

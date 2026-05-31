@@ -160,10 +160,17 @@ services:
       RECORD_REQUEST_STREAM: security.record_requests
       RECORDING_ENABLED: "true"
       RECORDING_STRATEGY: "savant_replay"
+      RECORDING_EVENT_TYPES: intrusion
+      RECORDING_SOURCE_ID: p1c_rtsp_replay
+      RECORDING_MAX_REQUESTS_PER_RUN: "1"
+      RECORDING_COOLDOWN_SECONDS: "30"
       DEFAULT_REPLAY_SOURCE_ID: p1c_rtsp_replay
       CONSUMER_GROUP: event-workers-p1c-rtsp
       CONSUMER_NAME: event-worker-p1c-rtsp-1
       POLL_TIMEOUT_MS: "2000"
+      EVENT_BATCH_SIZE: "1"
+    volumes:
+      - ../services/event-worker:/app:rw
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -189,6 +196,12 @@ services:
       DEFAULT_PRE_SECONDS: "5"
       DEFAULT_POST_SECONDS: "5"
       KEYFRAME_LOOKUP_WINDOW_S: "10"
+      CLIP_WORKER_MAX_JOBS_PER_RUN: "1"
+      CLIP_WORKER_MAX_CONCURRENT_JOBS: "1"
+      CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "30"
+      REPLAY_STOP_CONDITION_MODE: ts_delta_sec
+    volumes:
+      - ../services/clip-worker:/app:rw
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -206,7 +219,7 @@ services:
     container_name: p1c-rtsp-replay-media-worker
     environment:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
-      SINK_OUTPUT_DIR: /media/replay-sink-output/p1c-rtsp
+      SINK_OUTPUT_DIR: ${P1C_RTSP_SINK_ROOT:-/media/replay-sink-output/p1c-rtsp}
       SNAPSHOT_OUTPUT_DIR: /media/p1c-rtsp-snapshots
       ANNOTATED_OUTPUT_DIR: /media/p1c-rtsp-snapshots/annotated
       EVIDENCE_OUTPUT_DIR: /media/evidence
@@ -214,7 +227,16 @@ services:
       P1_SINK_STABILITY_CHECKS: "2"
       MEDIA_POLL_INTERVAL_S: "5"
       DEFAULT_PRE_SECONDS: "5"
+      EVIDENCE_PHASE: P1c-RTSP
+      EVIDENCE_RUN_ID: ${P1C_RTSP_RUN_ID:-}
+      EVIDENCE_INPUT_TYPE: rtsp
+      EVIDENCE_INPUT_URI: rtsp://10.37.57.112:8554/live/1080movie
+      EVIDENCE_LOCAL_FILE_USED: "false"
+      EVIDENCE_TEST_VIDEO_USED: "false"
+      EVIDENCE_SOURCE_EXTRACTION_FALLBACK: "false"
+      EVIDENCE_SECOND_RTSP_PULL: "false"
     volumes:
+      - ../services/media-worker:/app:rw
       - /data/video-analytics/media:/media:rw
     depends_on:
       postgres: { condition: service_healthy }

@@ -7,6 +7,7 @@ import logging
 import signal
 import sys
 import time
+from collections import defaultdict
 
 import psycopg
 from redis import Redis
@@ -18,6 +19,14 @@ from app.repository import update_clip_status
 logger = logging.getLogger(__name__)
 
 shutdown_requested = False
+
+
+def _request_identity(req: dict) -> str:
+    return f"{req.get('source_event_id', '')}:{req.get('strategy', '')}"
+
+
+def _event_id_from_request(req: dict) -> str:
+    return str(req.get("event_id", ""))
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -59,10 +68,19 @@ def run_worker(
     consumer = cfg.consumer_name
     _ensure_group(redis_client, stream, group)
     replay = ReplayClient(cfg.replay_api_url)
+    jobs_created = 0
+    last_job_by_camera: dict[str, int] = defaultdict(int)
+    seen_requests: set[str] = set()
 
     logger.info(
-        "clip-worker started stream=%s group=%s replay=%s",
+        "clip-worker started stream=%s group=%s replay=%s "
+        "max_jobs_per_run=%s max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
+        "stop_condition_mode=%s",
         stream, group, cfg.replay_api_url,
+        cfg.max_jobs_per_run,
+        cfg.max_concurrent_jobs,
+        cfg.per_camera_cooldown_seconds,
+        cfg.replay_stop_condition_mode,
     )
 
     total_processed = 0
@@ -85,14 +103,92 @@ def run_worker(
                         redis_client.xack(stream, group, msg_id)
                         continue
 
-                    event_id = req.get("event_id", "")
+                    request_id = _request_identity(req)
+                    if request_id in seen_requests:
+                        logger.info(
+                            "clip_worker_skipped duplicate request_id=%s event_id=%s",
+                            request_id,
+                            req.get("event_id", ""),
+                        )
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
+
+                    event_id = _event_id_from_request(req)
                     source_id = req.get("source_id", "")
                     source_event_id = req.get("source_event_id", "")
                     event_ts_ms = int(req.get("event_ts_ms", 0))
+                    camera_id = req.get("camera_id", "")
                     keyframe_uuid = (
                         req.get("previous_keyframe_uuid")
                         or req.get("keyframe_uuid")
                     )
+
+                    if (
+                        cfg.max_jobs_per_run > 0
+                        and jobs_created >= cfg.max_jobs_per_run
+                    ):
+                        logger.info(
+                            "clip_worker_skipped max_jobs_reached event_id=%s "
+                            "source_event_id=%s",
+                            event_id,
+                            source_event_id,
+                        )
+                        update_clip_status(
+                            pg_conn,
+                            event_id,
+                            "skipped_by_poc_limit",
+                            error_message="CLIP_WORKER_MAX_JOBS_PER_RUN reached",
+                        )
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
+
+                    if (
+                        cfg.max_concurrent_jobs > 0
+                        and jobs_created >= cfg.max_concurrent_jobs
+                    ):
+                        logger.info(
+                            "clip_worker_skipped max_concurrent_reached event_id=%s "
+                            "source_event_id=%s",
+                            event_id,
+                            source_event_id,
+                        )
+                        update_clip_status(
+                            pg_conn,
+                            event_id,
+                            "skipped_by_poc_limit",
+                            error_message="CLIP_WORKER_MAX_CONCURRENT_JOBS reached",
+                        )
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
+
+                    if (
+                        cfg.per_camera_cooldown_seconds > 0
+                        and camera_id
+                        and event_ts_ms - last_job_by_camera[camera_id]
+                        < cfg.per_camera_cooldown_seconds * 1000
+                    ):
+                        logger.info(
+                            "clip_worker_skipped cooldown event_id=%s source_event_id=%s "
+                            "camera_id=%s",
+                            event_id,
+                            source_event_id,
+                            camera_id,
+                        )
+                        update_clip_status(
+                            pg_conn,
+                            event_id,
+                            "skipped_by_poc_limit",
+                            error_message="CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS reached",
+                        )
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
 
                     # Find keyframe if not provided
                     if keyframe_uuid:
@@ -155,6 +251,12 @@ def run_worker(
                         continue
 
                     # Create replay job
+                    stop_condition_mode = cfg.replay_stop_condition_mode
+                    fallback_reason = None
+                    if stop_condition_mode != "ts_delta_sec":
+                        fallback_reason = (
+                            "configured_frame_count_fallback"
+                        )
                     job_id = replay.create_job(
                         source_id=source_id,
                         keyframe_uuid=keyframe_uuid,
@@ -162,6 +264,8 @@ def run_worker(
                         post_seconds=int(req.get("post_seconds", cfg.default_post_seconds)),
                         sink_endpoint=cfg.replay_job_sink_url,
                         labels={"event_id": event_id},
+                        stop_condition_mode=stop_condition_mode,
+                        fallback_reason=fallback_reason,
                     )
 
                     if job_id:
@@ -176,6 +280,10 @@ def run_worker(
                             replay_job_id=job_id,
                             replay_job_request=replay.last_job_request,
                         )
+                        jobs_created += 1
+                        seen_requests.add(request_id)
+                        if camera_id:
+                            last_job_by_camera[camera_id] = event_ts_ms
                     else:
                         logger.error(
                             "replay_job_creation_failed request_id=%s event_id=%s",
@@ -187,6 +295,7 @@ def run_worker(
                             error_message="Replay job creation returned None",
                         )
 
+                    seen_requests.add(request_id)
                     redis_client.xack(stream, group, msg_id)
                     total_processed += 1
 
