@@ -256,6 +256,8 @@ def _process_sink_output(
     *,
     evidence_output_dir: str | None = None,
     p1_raw_clip_finalizer_enabled: bool = False,
+    candidate_dirs: dict[str, tuple[int, int]] | None = None,
+    p1_sink_stability_checks: int = 2,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
@@ -287,6 +289,27 @@ def _process_sink_output(
         video_file = _find_video_file(meta_dir)
         if not video_file:
             continue  # not ready yet
+
+        if p1_raw_clip_finalizer_enabled and candidate_dirs is not None:
+            try:
+                current_size = Path(video_file).stat().st_size
+            except OSError:
+                continue
+            previous_size, stable_count = candidate_dirs.get(meta_dir, (-1, 0))
+            stable_count = stable_count + 1 if current_size == previous_size else 0
+            candidate_dirs[meta_dir] = (current_size, stable_count)
+            if stable_count < max(1, p1_sink_stability_checks):
+                logger.debug(
+                    "media_wait_for_stable_sink_output event_id=%s meta_dir=%s "
+                    "size=%s previous_size=%s stable_count=%s required=%s",
+                    event_id,
+                    meta_dir,
+                    current_size,
+                    previous_size,
+                    stable_count,
+                    p1_sink_stability_checks,
+                )
+                continue
 
         metadata_file = str(Path(meta_dir) / "metadata.json")
         bundle = None
@@ -853,17 +876,20 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
-        "p1_finalizer=%s poll_interval=%ds default_pre_seconds=%.1f",
+        "p1_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
+        "default_pre_seconds=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
         cfg.evidence_output_dir,
         cfg.p1_raw_clip_finalizer_enabled,
+        cfg.p1_sink_stability_checks,
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
     )
 
     processed_dirs: set[str] = set()
+    candidate_dirs: dict[str, tuple[int, int]] = {}
 
     while not shutdown_requested:
         try:
@@ -873,6 +899,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 processed_dirs,
                 evidence_output_dir=cfg.evidence_output_dir,
                 p1_raw_clip_finalizer_enabled=cfg.p1_raw_clip_finalizer_enabled,
+                candidate_dirs=candidate_dirs,
+                p1_sink_stability_checks=cfg.p1_sink_stability_checks,
             )
             if clip_updates:
                 logger.info("media_worker: clip updated %d events", clip_updates)

@@ -276,6 +276,12 @@ check 15 "old P1a/P1b replay POC containers are not running" pass
 
 echo -e "${BLUE}Resetting any prior P1c compose state before start...${NC}"
 docker compose -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
+docker run --rm \
+  -v /data/video-analytics/postgres-p1c-rtsp-replay:/p1c-postgres \
+  -v /data/video-analytics/replay-p1c-rtsp:/p1c-replay \
+  -v /data/video-analytics/media:/media \
+  alpine:3.20 \
+  sh -c "rm -rf /p1c-postgres/* /p1c-replay/* /media/replay-sink-output/p1c-rtsp" >/dev/null 2>&1 || true
 
 echo -e "${BLUE}Starting P1c RTSP replay evidence stack...${NC}"
 docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate \
@@ -298,7 +304,7 @@ REPLAY_CODE="$(curl_silent -o /dev/null -w "%{http_code}" "${REPLAY_API}/api/v1/
 check 17 "Replay /api/v1/status responds" "$([[ "$REPLAY_CODE" == "200" ]] && echo pass || echo fail)"
 
 echo -e "${BLUE}Waiting for RTSP -> Replay -> Savant -> event-worker -> clip-worker -> media-worker...${NC}"
-EVENT_ID=""
+EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status'='generated' ORDER BY updated_at DESC LIMIT 1;")"
 SOURCE_EVENT_ID=""
 REPLAY_JOB_ID=""
 CLIP_PATH=""
@@ -307,34 +313,35 @@ EVIDENCE_DIR=""
 METADATA_PATH=""
 EVENT_ANNOTATION_PATH=""
 RAW_CLIP=""
-for _ in $(seq 1 "$WAIT_SECONDS"); do
-  EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND camera_id='${CAMERA_ID}' AND event_type='intrusion' ORDER BY created_at DESC LIMIT 1;")"
-  if [[ -n "$EVENT_ID" ]]; then
-    SOURCE_EVENT_ID="$(_pg "SELECT source_event_id FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    REPLAY_JOB_ID="$(_pg "SELECT payload->'media'->>'replay_job_id' FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    CLIP_PATH="$(_pg "SELECT clip_path FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    CLIP_STATUS="$(_pg "SELECT payload->'media'->>'clip_status' FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    EVIDENCE_DIR="$(_pg "SELECT payload->'media'->>'evidence_dir' FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    METADATA_PATH="$(_pg "SELECT payload->'media'->>'metadata_path' FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    EVENT_ANNOTATION_PATH="$(_pg "SELECT payload->'media'->>'event_annotation_path' FROM events WHERE id='${EVENT_ID}'::uuid;")"
-    if [[ -n "$EVIDENCE_DIR" && "$EVIDENCE_DIR" != "NULL" ]]; then
-      RAW_CLIP="$(docker exec "$MEDIA_WORKER_CONTAINER" sh -c "find '$EVIDENCE_DIR' -maxdepth 1 -type f \\( -name 'raw_clip.mov' -o -name 'raw_clip.webm' -o -name 'raw_clip.mp4' \\) -size +0c 2>/dev/null | head -n 1" | tr -d '\r')"
-    fi
-    if [[ -n "$EVENT_ID" && -n "$REPLAY_JOB_ID" && "$REPLAY_JOB_ID" != "NULL" && "$CLIP_STATUS" == "generated" && -n "$RAW_CLIP" ]]; then
-      break
-    fi
-  fi
-  sleep 1
-done
+if [[ -z "$EVENT_ID" ]]; then
+  for _ in $(seq 1 "$WAIT_SECONDS"); do
+    EVENT_ID="$(_pg "SELECT id FROM events WHERE source_id='${SOURCE_ID}' AND payload->'media'->>'clip_status'='generated' ORDER BY updated_at DESC LIMIT 1;")"
+    [[ -n "$EVENT_ID" ]] && break
+    sleep 1
+  done
+fi
 
-REDIS_EVENT_RAW="$(_redis XREVRANGE security.events + - COUNT 100 | grep -F "$SOURCE_ID" || true)"
-RECORD_REQUEST_RAW="$(_redis XREVRANGE security.record_requests + - COUNT 100 | grep -F "$EVENT_ID" || true)"
-SOURCE_HAS_ID="$(docker logs "$SOURCE_CONTAINER" 2>&1 | grep -F "$SOURCE_ID" || true)"
-REPLAY_RX_LOG="$(docker logs "$REPLAY_CONTAINER" 2>&1 | grep -E 'Received message|Adding message|Sending message to ZeroMQ socket' || true)"
-SAVANT_HAS_ID="$(docker logs "$SAVANT_CONTAINER" 2>&1 | grep -F "$SOURCE_ID" || true)"
-EVENT_WORKER_LOG="$(docker logs "$EVENT_WORKER_CONTAINER" 2>&1 | grep -E 'record_request_published|inserted|record_request_check' || true)"
-CLIP_WORKER_LOG="$(docker logs "$CLIP_WORKER_CONTAINER" 2>&1 | grep -E 'replay_job_created|Replay job request|keyframe_provided_directly' || true)"
-MEDIA_WORKER_LOG="$(docker logs "$MEDIA_WORKER_CONTAINER" 2>&1 | grep -E 'media_event_updated|media_metadata_parsed|p1_finalizer=True' || true)"
+if [[ -n "$EVENT_ID" ]]; then
+  SOURCE_EVENT_ID="$(_pg "SELECT source_event_id FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  REPLAY_JOB_ID="$(_pg "SELECT payload->'media'->>'replay_job_id' FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  CLIP_PATH="$(_pg "SELECT clip_path FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  CLIP_STATUS="$(_pg "SELECT payload->'media'->>'clip_status' FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  EVIDENCE_DIR="$(_pg "SELECT payload->'media'->>'evidence_dir' FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  METADATA_PATH="$(_pg "SELECT payload->'media'->>'metadata_path' FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  EVENT_ANNOTATION_PATH="$(_pg "SELECT payload->'media'->>'event_annotation_path' FROM events WHERE id='${EVENT_ID}'::uuid;")"
+  if [[ -n "$EVIDENCE_DIR" && "$EVIDENCE_DIR" != "NULL" ]]; then
+    RAW_CLIP="$(docker exec "$MEDIA_WORKER_CONTAINER" sh -c "find '$EVIDENCE_DIR' -maxdepth 1 -type f \\( -name 'raw_clip.mov' -o -name 'raw_clip.webm' -o -name 'raw_clip.mp4' \\) -size +0c 2>/dev/null | head -n 1" | tr -d '\r')"
+  fi
+fi
+
+REDIS_EVENT_RAW="$(_redis XREVRANGE security.events + - COUNT 1000 | grep -F "$SOURCE_ID" || true)"
+RECORD_REQUEST_RAW="$(_redis XREVRANGE security.record_requests + - COUNT 1000 | grep -F "$EVENT_ID" || true)"
+SOURCE_HAS_ID="$(docker logs --since 30m "$SOURCE_CONTAINER" 2>&1 | grep -F "$SOURCE_ID" || true)"
+REPLAY_RX_LOG="$(docker logs --since 30m "$REPLAY_CONTAINER" 2>&1 | grep -E 'Received message|Adding message|Sending message to ZeroMQ socket' || true)"
+SAVANT_HAS_ID="$(docker logs --since 30m "$SAVANT_CONTAINER" 2>&1 | grep -F "$SOURCE_ID" || true)"
+EVENT_WORKER_LOG="$(docker logs --since 30m "$EVENT_WORKER_CONTAINER" 2>&1 | grep -E 'record_request_published|record_request_check' || true)"
+CLIP_WORKER_LOG="$(docker logs --since 30m "$CLIP_WORKER_CONTAINER" 2>&1 | grep -E 'replay_job_created|Replay job request|keyframe_provided_directly' || true)"
+MEDIA_WORKER_LOG="$(docker logs --since 30m "$MEDIA_WORKER_CONTAINER" 2>&1 | grep -E 'media_event_updated|media_metadata_parsed|p1_finalizer=True' || true)"
 
 check 19 "source adapter logs show RTSP source_id" "$([[ -n "$SOURCE_HAS_ID" ]] && echo pass || echo fail)"
 check 20 "Replay logs show source frames received and forwarded" "$([[ -n "$REPLAY_RX_LOG" ]] && echo pass || echo fail)"

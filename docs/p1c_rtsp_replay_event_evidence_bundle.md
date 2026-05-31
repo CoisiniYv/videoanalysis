@@ -74,3 +74,4 @@ Files:
 - `event-worker` publishes `security.record_requests` from intrusion events.
 - `clip-worker` prefers `previous_keyframe_uuid`, then `keyframe_uuid`, then keyframe lookup.
 - `media-worker` finalizes raw evidence only when `P1_RAW_CLIP_FINALIZER_ENABLED=true`.
+- P1c waits for replay sink files to settle before copying them into the evidence bundle.

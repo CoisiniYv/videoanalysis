@@ -14,6 +14,7 @@ class Config:
     annotated_output_dir: str
     evidence_output_dir: str
     p1_raw_clip_finalizer_enabled: bool
+    p1_sink_stability_checks: int
     poll_interval_s: int
     default_pre_seconds: float
 
@@ -37,6 +38,7 @@ def load_config() -> Config:
         p1_raw_clip_finalizer_enabled=os.getenv(
             "P1_RAW_CLIP_FINALIZER_ENABLED", "false"
         ).lower() in ("1", "true", "yes"),
+        p1_sink_stability_checks=int(os.getenv("P1_SINK_STABILITY_CHECKS", "2")),
         poll_interval_s=int(os.getenv("MEDIA_POLL_INTERVAL_S", "10")),
         default_pre_seconds=float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
     )
