@@ -141,6 +141,8 @@ services:
       CONSUMER_GROUP: event-workers-c1-official
       CONSUMER_NAME: event-worker-c1-official-1
       POLL_TIMEOUT_MS: "2000"
+    volumes:
+      - ../services/event-worker:/app:rw
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -166,6 +168,8 @@ services:
       CONSUMER_GROUP: face-workers-c1-official
       CONSUMER_NAME: face-worker-c1-official-1
       POLL_TIMEOUT_MS: "2000"
+    volumes:
+      - ../services/face-worker:/app:rw
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -234,6 +238,7 @@ services:
       ALERT_STREAM: security.alerts
       MEDIA_ROOT: /media
     volumes:
+      - ../services/api:/app:rw
       - /data/video-analytics/media:/media:ro
     depends_on:
       postgres: { condition: service_healthy }

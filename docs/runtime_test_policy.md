@@ -122,6 +122,21 @@ Reason=worker_image_missing_and_build_not_allowed
 Hint=rerun with P1C_ALLOW_BUILD=1 or enable worker bind mounts
 ```
 
+For C1E official replay dev smoke, the same no-build rule applies:
+
+```bash
+$COMPOSE -f infra/docker-compose.c1-official-replay-dev.yml up -d --no-build --force-recreate --pull never
+```
+
+`C1E_ALLOW_BUILD=1` is the only C1E gate that permits `--build`. If a required
+worker image is missing and build is not explicitly allowed:
+
+```text
+Result=BLOCKED
+Reason=worker_image_missing_and_build_not_allowed
+Hint=rerun with C1E_ALLOW_BUILD=1 or enable worker bind mounts
+```
+
 ## 2.4 Docker Daemon Access
 
 Every runtime smoke that uses Docker must define `detect_docker()` and set:
@@ -228,6 +243,16 @@ Environment variables:
 ```env
 P1_RTSP_URI=rtsp://10.37.57.112:8554/live/1080movie
 P1_INPUT_TYPE=rtsp
+```
+
+C1E official replay dev uses the same fixed RTSP input and must not fall back
+to a local file:
+
+```text
+C1E_INPUT_TYPE=rtsp
+C1E_INPUT_URI=rtsp://10.37.57.112:8554/live/1080movie
+C1E_SOURCE_ID=c1e_rtsp_replay
+C1E_CAMERA_ID=cam_c1e_rtsp_replay
 ```
 
 ### 4.2 Smoke Assertions

@@ -1,0 +1,247 @@
+# Phase C1E - official dev stack with event-triggered Replay evidence.
+#
+# Fixed input:
+#   rtsp://10.37.57.112:8554/live/1080movie
+#
+# Runtime topology:
+#   RTSP source
+#     -> source-adapter
+#     -> replay-service
+#     -> savant-security
+#     -> Redis security.events
+#     -> event-worker -> PostgreSQL events -> security.record_requests
+#     -> clip-worker -> Replay REST job
+#     -> video-file-sink
+#     -> media-worker P1 raw finalizer
+#     -> /media/evidence/{event_id}/raw_clip.*
+#
+# Dev-only compose. No production deployment, no second RTSP source, no
+# source extraction fallback, and no annotated_clip generation.
+
+name: c1-official-replay-dev
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: c1-official-redis
+    ports:
+      - "6385:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: c1-official-postgres
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5438:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+      - /data/video-analytics/postgres-c1-official-replay-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  replay-service:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: c1-official-replay-service
+    ports:
+      - "8088:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-debug,replaydb=trace}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.p1c_rtsp_inline.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-c1-official-replay-dev:/opt/rocksdb:rw
+    restart: unless-stopped
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: c1-official-savant
+    entrypoint:
+      [
+        "bash", "-c",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      SOURCE_ID: c1e_rtsp_replay
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      FACE_DETECTOR_BATCH_SIZE: "1"
+      FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_OBSERVATION_EXPORT_ENABLED: "false"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.c1e_replay.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: c1-official-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/rtsp.sh",
+      ]
+    environment:
+      SOURCE_ID: c1e_rtsp_replay
+      RTSP_URI: rtsp://10.37.57.112:8554/live/1080movie
+      LOCATION: rtsp://10.37.57.112:8554/live/1080movie
+      RTSP_TRANSPORT: tcp
+      ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      SYNC_OUTPUT: "true"
+      FFMPEG_TIMEOUT_MS: "20000"
+    depends_on:
+      - replay-service
+      - savant-security
+    restart: unless-stopped
+
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: c1-official-video-file-sink
+    entrypoint:
+      [
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: sub+bind:tcp://0.0.0.0:6666
+      DIR_LOCATION: ${C1E_SINK_DIR_LOCATION:-/media/replay-sink-output/c1e/%source_id%/%src_filename%/}
+      CHUNK_SIZE: "0"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    restart: unless-stopped
+
+  event-worker:
+    build:
+      context: ../services/event-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-event-worker:latest
+    container_name: c1-official-event-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      RECORD_REQUEST_STREAM: security.record_requests
+      RECORDING_ENABLED: "true"
+      RECORDING_STRATEGY: "savant_replay"
+      RECORDING_EVENT_TYPES: intrusion
+      RECORDING_SOURCE_ID: c1e_rtsp_replay
+      RECORDING_MAX_REQUESTS_PER_RUN: "1"
+      RECORDING_COOLDOWN_SECONDS: "30"
+      RECORDING_PRE_SECONDS: "5"
+      RECORDING_POST_SECONDS: "5"
+      DEFAULT_REPLAY_SOURCE_ID: c1e_rtsp_replay
+      CONSUMER_GROUP: event-workers-c1-official-replay
+      CONSUMER_NAME: event-worker-c1-official-replay-1
+      POLL_TIMEOUT_MS: "2000"
+      EVENT_BATCH_SIZE: "1"
+    volumes:
+      - ../services/event-worker:/app:rw
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  clip-worker:
+    build:
+      context: ../services/clip-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: p1c-rtsp-replay-clip-worker:latest
+    container_name: c1-official-clip-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      RECORD_REQUEST_STREAM: security.record_requests
+      REPLAY_API_URL: http://replay-service:8080
+      REPLAY_JOB_SINK_URL: pub+connect:tcp://video-file-sink:6666
+      CONSUMER_GROUP: clip-workers-c1-official-replay
+      CONSUMER_NAME: clip-worker-c1-official-replay-1
+      POLL_TIMEOUT_MS: "5000"
+      DEFAULT_PRE_SECONDS: "5"
+      DEFAULT_POST_SECONDS: "5"
+      KEYFRAME_LOOKUP_WINDOW_S: "10"
+      CLIP_WORKER_MAX_JOBS_PER_RUN: "1"
+      CLIP_WORKER_MAX_CONCURRENT_JOBS: "1"
+      CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "30"
+      REPLAY_STOP_CONDITION_MODE: ts_delta_sec
+    volumes:
+      - ../services/clip-worker:/app:rw
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      replay-service: { condition: service_started }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  media-worker:
+    build:
+      context: ../services/media-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: p1c-rtsp-replay-media-worker:latest
+    container_name: c1-official-media-worker
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      SINK_OUTPUT_DIR: ${C1E_SINK_ROOT:-/media/replay-sink-output/c1e}
+      SNAPSHOT_OUTPUT_DIR: /media/c1e-snapshots
+      ANNOTATED_OUTPUT_DIR: /media/c1e-snapshots/annotated
+      EVIDENCE_OUTPUT_DIR: /media/evidence
+      P1_RAW_CLIP_FINALIZER_ENABLED: "true"
+      P1_SINK_STABILITY_CHECKS: "2"
+      MEDIA_POLL_INTERVAL_S: "5"
+      DEFAULT_PRE_SECONDS: "5"
+      EVIDENCE_PHASE: C1E-RTSP
+      EVIDENCE_RUN_ID: ${C1E_RUN_ID:-}
+      EVIDENCE_INPUT_TYPE: rtsp
+      EVIDENCE_INPUT_URI: rtsp://10.37.57.112:8554/live/1080movie
+      EVIDENCE_LOCAL_FILE_USED: "false"
+      EVIDENCE_TEST_VIDEO_USED: "false"
+      EVIDENCE_SOURCE_EXTRACTION_FALLBACK: "false"
+      EVIDENCE_SECOND_RTSP_PULL: "false"
+    volumes:
+      - ../services/media-worker:/app:rw
+      - /data/video-analytics/media:/media:rw
+    depends_on:
+      postgres: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped

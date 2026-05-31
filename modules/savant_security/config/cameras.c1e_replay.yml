@@ -1,0 +1,24 @@
+cameras:
+  cam_c1e_rtsp_replay:
+    enabled: true
+    source_id: c1e_rtsp_replay
+    name: C1E Official Replay Evidence Dev
+    rtsp_url: rtsp://10.37.57.112:8554/live/1080movie
+    gpu_id: 0
+    zones:
+      c1e_rtsp_full_frame:
+        type: polygon
+        points:
+          - [0.0, 0.0]
+          - [1920.0, 0.0]
+          - [1920.0, 1080.0]
+          - [0.0, 1080.0]
+    rules:
+      intrusion:
+        enabled: true
+        zone: c1e_rtsp_full_frame
+        severity: medium
+        cooldown_s: 60
+        clip_required: true
+        min_inside_ms: 1
+        snapshot_required: false
