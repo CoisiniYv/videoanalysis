@@ -191,6 +191,63 @@ def test_p1c_smoke_no_second_rtsp():
         "P1c smoke must check no second RTSP pull"
 
 
+# ── Docker access detection in P1 smokes ────────────────────────────────────
+
+def test_p1b_rtsp_smoke_has_docker_access_detection():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[2])
+    assert "detect_docker" in content or "DOCKER_ACCESS" in content or \
+           "SUDO_DOCKER" in content, \
+        "P1b-RTSP smoke must detect Docker access"
+
+
+def test_p1c_smoke_has_docker_access_detection():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[3])
+    assert "detect_docker" in content or "DOCKER_ACCESS" in content or \
+           "SUDO_DOCKER" in content, \
+        "P1c smoke must detect Docker access"
+
+
+def test_p1b_rtsp_smoke_uses_docker_variable():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[2])
+    assert 'DOCKER=' in content or 'DOCKER="' in content or \
+           'COMPOSE=' in content or 'COMPOSE="' in content, \
+        "P1b-RTSP smoke must use DOCKER/COMPOSE variables"
+
+
+def test_p1c_smoke_uses_docker_variable():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[3])
+    assert 'DOCKER=' in content or 'DOCKER="' in content or \
+           'COMPOSE=' in content or 'COMPOSE="' in content, \
+        "P1c smoke must use DOCKER/COMPOSE variables"
+
+
+def test_p1c_smoke_blocks_on_no_docker():
+    content = _read_smoke(P1_SMOKE_SCRIPTS[3]).lower()
+    assert "blocked" in content and "docker" in content, \
+        "P1c smoke must BLOCKED when Docker unavailable"
+
+
+# ── Policy doc Docker access section ────────────────────────────────────────
+
+def test_policy_doc_contains_docker_access_section():
+    content = _read_policy()
+    assert "Docker Daemon Access" in content or "docker_daemon" in content or \
+           "DOCKER_ACCESS" in content, \
+        "Policy must contain Docker daemon access section"
+
+
+def test_policy_doc_contains_sudo_policy():
+    content = _read_policy()
+    assert "sudo" in content.lower(), \
+        "Policy must document sudo fallback"
+
+
+def test_policy_doc_contains_detect_docker_pattern():
+    content = _read_policy()
+    assert "detect_docker" in content, \
+        "Policy must include detect_docker() pattern"
+
+
 # ── P1 docs ─────────────────────────────────────────────────────────────────
 
 P1_DOCS = [

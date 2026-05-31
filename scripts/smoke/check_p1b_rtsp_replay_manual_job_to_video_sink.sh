@@ -70,8 +70,35 @@ fatal() {
   exit 1
 }
 
+# ── Docker access detection ──────────────────────────────────────────────────
+DOCKER=""
+COMPOSE=""
+DOCKER_ACCESS=""
+SUDO_USED="no"
+
+detect_docker() {
+  if docker ps >/dev/null 2>&1; then
+    DOCKER="docker"
+    COMPOSE="docker compose"
+    DOCKER_ACCESS="DOCKER_ACCESS_OK"
+    SUDO_USED="no"
+  elif sudo docker ps >/dev/null 2>&1; then
+    DOCKER="sudo docker"
+    COMPOSE="sudo docker compose"
+    DOCKER_ACCESS="SUDO_DOCKER_REQUIRED"
+    SUDO_USED="yes"
+  else
+    echo -e "${RED}[BLOCKED]${NC} Docker daemon unavailable"
+    DOCKER_ACCESS="DOCKER_ACCESS_BLOCKED"
+    exit 2
+  fi
+  echo -e "${BLUE}[docker]${NC} access=$DOCKER_ACCESS prefix=$DOCKER"
+}
+
+detect_docker
+
 container_status() {
-  docker inspect "$1" 2>/dev/null \
+  $DOCKER inspect "$1" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['State']['Status'])" 2>/dev/null \
     || echo "missing"
 }

@@ -286,9 +286,110 @@ savant_container: <explicit-name>
 video_file_sink_container: <explicit-name>
 ```
 
-## 7. Smoke Output Requirements
+## 7. Docker Daemon Access / Sudo Policy
 
-### 7.1 All P1 Smokes
+### 7.1 Pre-Smoke Docker Access Check
+
+All Docker runtime smoke must check Docker daemon access before proceeding:
+
+```bash
+docker ps >/tmp/docker_ps_check.out 2>/tmp/docker_ps_check.err
+```
+
+If that fails:
+
+```bash
+sudo docker ps >/tmp/sudo_docker_ps_check.out 2>/tmp/sudo_docker_ps_check.err
+```
+
+Output must be one of:
+
+```text
+DOCKER_ACCESS_OK
+SUDO_DOCKER_REQUIRED
+DOCKER_ACCESS_BLOCKED
+```
+
+### 7.2 Sudo Fallback
+
+If `docker ps` fails but `sudo docker ps` succeeds, all subsequent Docker
+commands must use sudo consistently:
+
+```bash
+DOCKER="sudo docker"
+COMPOSE="sudo docker compose"
+```
+
+Mixed usage is forbidden — the script must not use `sudo docker` in the first
+half and bare `docker` in the second half.
+
+### 7.3 Blocked State
+
+If both `docker` and `sudo docker` fail:
+
+```text
+Result = BLOCKED
+Reason = docker_daemon_unavailable
+```
+
+**No further execution allowed.** Specifically forbidden:
+
+- Mocking container states
+- Running only contract tests and claiming smoke PASS
+- Using local source extraction instead of Replay
+- Reusing old output directories as if from a new run
+
+### 7.4 Smoke Script Pattern
+
+All P1 smoke scripts must detect Docker access at startup:
+
+```bash
+detect_docker() {
+  if docker ps >/dev/null 2>&1; then
+    DOCKER="docker"
+    COMPOSE="docker compose"
+    DOCKER_ACCESS="DOCKER_ACCESS_OK"
+    SUDO_USED="no"
+  elif sudo docker ps >/dev/null 2>&1; then
+    DOCKER="sudo docker"
+    COMPOSE="sudo docker compose"
+    DOCKER_ACCESS="SUDO_DOCKER_REQUIRED"
+    SUDO_USED="yes"
+  else
+    echo "[BLOCKED] Docker daemon unavailable"
+    exit 2
+  fi
+}
+```
+
+All subsequent commands must use `$DOCKER` and `$COMPOSE`, not bare `docker`.
+
+### 7.5 Smoke Output
+
+```text
+docker_access: DOCKER_ACCESS_OK | SUDO_DOCKER_REQUIRED | DOCKER_ACCESS_BLOCKED
+docker_command_prefix: docker | sudo docker
+compose_command_prefix: docker compose | sudo docker compose
+sudo_used: yes/no
+actual_containers_started: yes/no
+```
+
+### 7.6 Explicit Acknowledgment
+
+When Codex / Claude Code needs to run P1 smoke, it must state:
+
+```text
+This smoke requires Docker daemon access.
+If direct docker access fails, I will use sudo docker / sudo docker compose.
+This will start POC containers, connect to RTSP, and write media outputs
+under /data/video-analytics/media.
+```
+
+Silent failure is forbidden.
+
+## 8. Smoke Output Requirements
+
+### 8.1 All P1 Smokes
 
 ```text
 input_type:
@@ -309,9 +410,14 @@ redis_container:
 replay_container:
 savant_container:
 video_file_sink_container:
+docker_access:
+docker_command_prefix:
+compose_command_prefix:
+sudo_used:
+actual_containers_started:
 ```
 
-### 7.2 P1b/P1c Video Output
+### 8.2 P1b/P1c Video Output
 
 ```text
 video_file:
@@ -321,7 +427,7 @@ ffprobe_status:
 metadata_json:
 ```
 
-### 7.3 P1c DB Output
+### 8.3 P1c DB Output
 
 ```text
 event_id:
@@ -332,7 +438,7 @@ payload.media.recording_strategy:
 payload.media.evidence_dir:
 ```
 
-## 8. P1 Phase Distinctions
+## 9. P1 Phase Distinctions
 
 | Phase | Input | Proves | Does Not Prove |
 |-------|-------|--------|----------------|
@@ -349,7 +455,7 @@ payload.media.evidence_dir:
 - Replay TTL must be explicitly configured in all P1 compose.
 - Code changes require restart, not default rebuild.
 
-## 9. Commit Rules
+## 10. Commit Rules
 
 ### 9.1 Forbidden
 
