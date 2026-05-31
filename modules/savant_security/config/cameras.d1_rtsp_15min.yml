@@ -1,0 +1,24 @@
+cameras:
+  cam_d1_rtsp_15min:
+    enabled: true
+    source_id: d1_rtsp_15min
+    name: D1 RTSP 15 Minute Detection
+    rtsp_url: rtsp://10.37.57.112:8554/live/1080movie
+    gpu_id: 0
+    zones:
+      d1_rtsp_full_frame:
+        type: polygon
+        points:
+          - [0.0, 0.0]
+          - [1920.0, 0.0]
+          - [1920.0, 1080.0]
+          - [0.0, 1080.0]
+    rules:
+      intrusion:
+        enabled: true
+        zone: d1_rtsp_full_frame
+        severity: medium
+        cooldown_s: 5
+        clip_required: false
+        min_inside_ms: 1
+        snapshot_required: false

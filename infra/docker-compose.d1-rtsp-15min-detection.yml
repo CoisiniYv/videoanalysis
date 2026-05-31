@@ -1,0 +1,116 @@
+# Phase D1 - 15-minute RTSP detection-only run.
+#
+# Fixed input:
+#   rtsp://10.37.57.112:8554/live/1080movie
+#
+# Runtime topology:
+#   RTSP source
+#     -> source-adapter
+#     -> replay-service
+#     -> savant-security
+#     -> Redis security.events / security.face_observations
+#
+# Detection/report only. No clip-worker, media-worker, video-file-sink,
+# source extraction fallback, local file source, or second RTSP pull.
+
+name: d1-rtsp-15min-detection
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: d1-rtsp-redis
+    ports:
+      - "6392:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  replay-service:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: d1-rtsp-replay-service
+    ports:
+      - "8091:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+      RECORDING_ENABLED: "false"
+      CLIP_WORKER_DISABLED: "true"
+      MEDIA_WORKER_DISABLED: "true"
+    volumes:
+      - ../modules/savant_replay/config.p1c_rtsp_inline.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-d1-rtsp-15min:/opt/rocksdb:rw
+    restart: unless-stopped
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: d1-rtsp-savant-security
+    entrypoint:
+      [
+        "bash", "-c",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      SOURCE_ID: d1_rtsp_15min
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      FACE_DETECTOR_BATCH_SIZE: "1"
+      FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_OBSERVATION_STREAM: security.face_observations
+      FACE_OBSERVATION_EXPORT_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.d1_rtsp_15min.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      RECORDING_ENABLED: "false"
+      CLIP_WORKER_DISABLED: "true"
+      MEDIA_WORKER_DISABLED: "true"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: d1-rtsp-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/rtsp.sh",
+      ]
+    environment:
+      SOURCE_ID: d1_rtsp_15min
+      RTSP_URI: rtsp://10.37.57.112:8554/live/1080movie
+      LOCATION: rtsp://10.37.57.112:8554/live/1080movie
+      RTSP_TRANSPORT: tcp
+      ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      SYNC_OUTPUT: "true"
+      FFMPEG_TIMEOUT_MS: "20000"
+      RECORDING_ENABLED: "false"
+      CLIP_WORKER_DISABLED: "true"
+      MEDIA_WORKER_DISABLED: "true"
+    depends_on:
+      - replay-service
+      - savant-security
+    restart: unless-stopped
