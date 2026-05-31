@@ -1,0 +1,103 @@
+# Phase P1a — Replay inline pass-through topology POC only.
+#
+# Single path under test:
+#   testVideo/test.mp4
+#     -> source-adapter
+#     -> replay-service
+#     -> savant-security
+#     -> Redis security.events
+#
+# This compose intentionally does not define postgres, event-worker,
+# clip-worker, media-worker, metadata-sink, video-file-sink, RTSP server, or
+# any source extraction fallback.
+
+name: p1a-replay-inline
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: p1a-replay-inline-redis
+    ports:
+      - "6387:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  replay-service:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: p1a-replay-inline-replay-service
+    ports:
+      - "8086:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-debug,replaydb=trace}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.p1a_inline.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-p1a-inline:/opt/rocksdb:rw
+    restart: unless-stopped
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: p1a-replay-inline-savant-security
+    entrypoint:
+      [
+        "bash", "-c",
+        "pip install -q redis pyyaml && exec python -m savant.entrypoint module.yml",
+      ]
+    working_dir: /opt/savant/src/module
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      SOURCE_ID: p1a_replay_inline
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      FACE_DETECTOR_BATCH_SIZE: "1"
+      FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_OBSERVATION_EXPORT_ENABLED: "false"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.p1a_inline.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - ../testVideo:/testVideo:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: p1a-replay-inline-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/video_loop.sh",
+      ]
+    environment:
+      SOURCE_ID: p1a_replay_inline
+      LOCATION: /testVideo/test.mp4
+      ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      DOWNLOAD_PATH: /tmp/video-loop-cache
+      SYNC_OUTPUT: "true"
+    volumes:
+      - ../testVideo:/testVideo:ro
+    depends_on:
+      - replay-service
+    restart: unless-stopped

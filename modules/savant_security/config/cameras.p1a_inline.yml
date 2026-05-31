@@ -1,0 +1,24 @@
+cameras:
+  cam_p1a_replay_inline:
+    enabled: true
+    source_id: p1a_replay_inline
+    name: P1a Replay Inline POC
+    rtsp_url: file:///testVideo/test.mp4
+    gpu_id: 0
+    zones:
+      p1a_full_frame:
+        type: polygon
+        points:
+          - [0.0, 0.0]
+          - [1920.0, 0.0]
+          - [1920.0, 1080.0]
+          - [0.0, 1080.0]
+    rules:
+      intrusion:
+        enabled: true
+        zone: p1a_full_frame
+        severity: medium
+        cooldown_s: 1
+        clip_required: false
+        min_inside_ms: 1
+        snapshot_required: false
