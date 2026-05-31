@@ -35,6 +35,7 @@ WAIT_SECONDS="${C1E_WAIT_SECONDS:-240}"
 RUN_ID="${C1E_RUN_ID:-$(date +%s%N)}"
 C1E_RUN_ID="$RUN_ID"
 C1E_ALLOW_BUILD="${C1E_ALLOW_BUILD:-0}"
+C1E_KEEP_STACK_ON_EXIT="${C1E_KEEP_STACK_ON_EXIT:-0}"
 PRE_SECONDS=5
 POST_SECONDS=5
 SCHEDULING_MARGIN_SECONDS=10
@@ -112,6 +113,10 @@ fatal() {
 
 cleanup() {
   if [[ "$COMPOSE_STARTED" == "yes" ]]; then
+    if [[ "$C1E_KEEP_STACK_ON_EXIT" == "1" ]]; then
+      echo "C1E_KEEP_STACK_ON_EXIT=1; leaving C1E stack running for diagnostics" >&2
+      return 0
+    fi
     $COMPOSE -f "$COMPOSE_FILE" stop source-adapter >/dev/null 2>&1 || true
     $COMPOSE -f "$COMPOSE_FILE" down --remove-orphans >/dev/null 2>&1 || true
   fi
