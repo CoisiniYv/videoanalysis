@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evidence Viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Evidence Viewer</h1>
+      <p>File-based raw clip and continuous annotation overlay</p>
+    </div>
+    <div class="status-row">
+      <span class="badge" id="healthStatus">health: loading</span>
+      <span class="badge" id="bundleCount">bundles: 0</span>
+      <span class="badge warning" id="clipWarning" hidden>warning</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel filters">
+        <h2>Filters</h2>
+        <label>event type <input id="filterEventType" type="text" placeholder="watchlist_hit"></label>
+        <label>source id <input id="filterSourceId" type="text" placeholder="c1e_rtsp_replay"></label>
+        <label>camera id <input id="filterCameraId" type="text"></label>
+        <label>person <input id="filterPerson" type="text" placeholder="Reese"></label>
+        <label>clip status <input id="filterClipStatus" type="text" placeholder="generated_corrupt"></label>
+        <label>event id <input id="filterEventId" type="text"></label>
+        <button id="refreshBundles" type="button">Refresh</button>
+      </section>
+
+      <section class="panel bundle-list-panel">
+        <h2>Bundles</h2>
+        <div id="bundleList" class="bundle-list"></div>
+      </section>
+    </aside>
+
+    <section class="viewer">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" controls preload="metadata"></video>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <section class="panel controls">
+        <h2>Overlay Controls</h2>
+        <label><input id="showMatched" type="checkbox" checked> show matched</label>
+        <label><input id="showUnknown" type="checkbox"> show unknown</label>
+        <label><input id="showLandmarks" type="checkbox" checked> show landmarks</label>
+        <label><input id="showLabels" type="checkbox" checked> show labels</label>
+        <label>hold ms <input id="holdMs" type="number" min="0" step="50" value="750"></label>
+        <label>time tolerance ms <input id="toleranceMs" type="number" min="0" step="25" value="150"></label>
+      </section>
+
+      <section class="details-grid">
+        <div class="panel">
+          <h2>Event</h2>
+          <dl>
+            <dt>event_id</dt><dd id="eventId">-</dd>
+            <dt>event_type</dt><dd id="eventType">-</dd>
+            <dt>source_id</dt><dd id="sourceId">-</dd>
+            <dt>camera_id</dt><dd id="cameraId">-</dd>
+            <dt>raw_clip_status</dt><dd id="rawClipStatus">-</dd>
+            <dt>clip_validation</dt><dd id="clipValidation">-</dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <h2>Annotation</h2>
+          <dl>
+            <dt>current time</dt><dd id="currentTime">0.000</dd>
+            <dt>target pts</dt><dd id="targetPts">-</dd>
+            <dt>matched pts</dt><dd id="matchedPts">-</dd>
+            <dt>alignment</dt><dd id="alignmentMode">-</dd>
+            <dt>active objects</dt><dd id="activeObjects">0</dd>
+            <dt>first video pts</dt><dd id="firstVideoPts">-</dd>
+            <dt>source size</dt><dd id="sourceSize">-</dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <h2>Summary</h2>
+          <dl>
+            <dt>annotation lines</dt><dd id="annotationLines">-</dd>
+            <dt>face objects</dt><dd id="faceObjects">-</dd>
+            <dt>matched objects</dt><dd id="matchedObjects">-</dd>
+            <dt>unknown objects</dt><dd id="unknownObjects">-</dd>
+            <dt>colors used</dt><dd id="colorsUsed">-</dd>
+          </dl>
+        </div>
+
+        <div class="panel warnings">
+          <h2>Warnings</h2>
+          <ul id="warningList"></ul>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

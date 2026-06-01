@@ -280,3 +280,22 @@ services:
       postgres: { condition: service_healthy }
       video-file-sink: { condition: service_started }
     restart: unless-stopped
+
+  evidence-viewer:
+    build:
+      context: ../services/evidence-viewer
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-evidence-viewer:latest
+    container_name: c1-official-evidence-viewer
+    environment:
+      EVIDENCE_ROOT: /evidence
+      EVIDENCE_VIEWER_HOST: 0.0.0.0
+      EVIDENCE_VIEWER_PORT: "8090"
+      EVIDENCE_VIEWER_MAX_BUNDLES: "200"
+    volumes:
+      - /data/video-analytics/media/evidence:/evidence:ro
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
