@@ -18,6 +18,7 @@ import psycopg
 
 from app.annotated_snapshot import generate_annotated_snapshot
 from app.config import Config, load_config
+from app.continuous_annotation import write_continuous_annotation_bundle
 from app.snapshot import generate_snapshot
 
 logger = logging.getLogger(__name__)
@@ -142,11 +143,17 @@ def _extract_event_id(meta: dict) -> str | None:
 
 
 def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
-    """Check if an event already has a final clip_status."""
+    """Check if an event already has final clip and annotation outputs."""
     try:
         with pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT payload->'media'->>'clip_status' FROM events WHERE id = %s::uuid",
+                """
+                SELECT payload->'media'->>'clip_status',
+                       payload->'media'->>'annotations_jsonl_path',
+                       payload->'media'->>'summary_json_path'
+                FROM events
+                WHERE id = %s::uuid
+                """,
                 (event_id,),
             )
             row = cur.fetchone()
@@ -155,7 +162,7 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
                 "generated",
                 "generated_corrupt",
                 "generated_unverified",
-            )
+            ) and bool(row[1]) and bool(row[2])
     except Exception:
         return False
 
@@ -279,6 +286,8 @@ def _event_context_from_row(event_id: str, row: tuple) -> dict:
         "confidence": row[7] if len(row) > 7 else 0.0,
         "source_event_id": row[8] if len(row) > 8 else payload.get("source_event_id", ""),
         "keyframe_uuid": row[9] if len(row) > 9 else payload.get("keyframe_uuid", ""),
+        "severity": row[10] if len(row) > 10 else "",
+        "evidence_policy": row[11] if len(row) > 11 else {},
         "previous_keyframe_uuid": media.get("previous_keyframe_uuid", ""),
     }
 
@@ -327,7 +336,8 @@ def _load_event_context(pg_conn: psycopg.Connection, event_id: str) -> dict:
         cur.execute(
             """
             SELECT event_type, camera_id, source_id, track_id, event_ts_ms,
-                   frame_uuid, payload, confidence, source_event_id, keyframe_uuid
+                   frame_uuid, payload, confidence, source_event_id, keyframe_uuid,
+                   severity, evidence_policy
             FROM events
             WHERE id = %s::uuid
             """,
@@ -786,6 +796,8 @@ def _build_business_metadata(
     sink_output_dir: str,
     raw_clip_path: str,
     event_annotation_path: str,
+    annotations_jsonl_path: str = "",
+    summary_json_path: str = "",
 ) -> dict:
     payload = event_context.get("payload", {})
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -865,12 +877,20 @@ def _build_business_metadata(
             "sink_metadata_path": sink_metadata_path,
             "sink_video_path": sink_video_path,
             "raw_clip_path": raw_clip_path,
+            "annotated_clip_path": None,
+            "annotated_clip_status": "not_generated",
             "event_annotation_path": event_annotation_path,
             "raw_clip_size": raw_clip_size,
             "raw_clip_duration": raw_clip_duration,
             "expected_duration_seconds": round(expected_duration_seconds, 3),
             "duration_probe_status": duration_probe_status,
             "clip_validation": clip_validation,
+        },
+        "annotations": {
+            "annotations_jsonl_path": annotations_jsonl_path,
+            "summary_json_path": summary_json_path,
+            "frontend_overlay_required": True,
+            "annotation_mode": "continuous_jsonl",
         },
         "status": {
             "clip_status": clip_status,
@@ -901,6 +921,8 @@ def _finalize_p1_evidence_bundle(
     metadata_out = evidence_dir / "metadata.json"
     sink_metadata_out = evidence_dir / "sink_metadata.json"
     annotation_out = evidence_dir / "event_annotation.json"
+    annotations_jsonl_out = evidence_dir / "annotations.jsonl"
+    summary_out = evidence_dir / "summary.json"
 
     if not raw_clip.exists():
         shutil.copy2(video_file, raw_clip)
@@ -914,6 +936,20 @@ def _finalize_p1_evidence_bundle(
     with open(annotation_out, "w") as f:
         json.dump(annotation, f, ensure_ascii=False, indent=2)
         f.write("\n")
+
+    annotation_summary = write_continuous_annotation_bundle(
+        pg_conn,
+        event_context,
+        annotations_path=str(annotations_jsonl_out),
+        summary_path=str(summary_out),
+    )
+    logger.info(
+        "continuous_annotations_written event_id=%s lines=%s faces=%s matched=%s",
+        event_id,
+        annotation_summary.get("annotation_lines", 0),
+        annotation_summary.get("face_objects", 0),
+        annotation_summary.get("matched_objects", 0),
+    )
 
     payload = event_context.get("payload", {})
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -938,6 +974,8 @@ def _finalize_p1_evidence_bundle(
         sink_output_dir=meta_dir,
         raw_clip_path=str(raw_clip),
         event_annotation_path=str(annotation_out),
+        annotations_jsonl_path=str(annotations_jsonl_out),
+        summary_json_path=str(summary_out),
     )
     with open(metadata_out, "w") as f:
         json.dump(business_metadata, f, ensure_ascii=False, indent=2)
@@ -949,6 +987,8 @@ def _finalize_p1_evidence_bundle(
         "metadata": str(metadata_out),
         "sink_metadata": str(sink_metadata_out),
         "event_annotation": str(annotation_out),
+        "annotations_jsonl": str(annotations_jsonl_out),
+        "summary": str(summary_out),
         "sink_output_path": meta_dir,
         "clip_status": business_metadata.get("status", {}).get(
             "clip_status", "generated_unverified"
@@ -1107,32 +1147,34 @@ def _process_sink_output(
                     cur.execute(
                         """
                         UPDATE events
-                        SET payload = jsonb_set(
-                                jsonb_set(
-                                    jsonb_set(
-                                        jsonb_set(
-                                            COALESCE(payload, '{}'::jsonb),
-                                            '{media,evidence_dir}',
-                                            %(evidence_dir)s::jsonb
-                                        ),
-                                        '{media,metadata_path}',
-                                        %(metadata_path)s::jsonb
-                                    ),
-                                    '{media,event_annotation_path}',
-                                    %(annotation_path)s::jsonb
+                        SET payload = COALESCE(payload, '{}'::jsonb)
+                                || jsonb_build_object(
+                                    'media',
+                                    COALESCE(payload->'media', '{}'::jsonb)
+                                    || jsonb_build_object(
+                                        'evidence_dir', %(evidence_dir)s::text,
+                                        'metadata_path', %(metadata_path)s::text,
+                                        'event_annotation_path', %(annotation_path)s::text,
+                                        'sink_metadata_path', %(sink_metadata_path)s::text,
+                                        'annotations_jsonl_path', %(annotations_path)s::text,
+                                        'summary_json_path', %(summary_path)s::text,
+                                        'raw_clip_path', %(raw_clip_path)s::text,
+                                        'annotated_clip_path', NULL,
+                                        'annotated_clip_status', 'not_generated'
+                                    )
                                 ),
-                                '{media,sink_metadata_path}',
-                                %(sink_metadata_path)s::jsonb
-                            ),
                             updated_at = now()
                         WHERE id = %(event_id)s::uuid
                         """,
                         {
                             "event_id": event_id,
-                            "evidence_dir": json.dumps(bundle["evidence_dir"]),
-                            "metadata_path": json.dumps(bundle["metadata"]),
-                            "annotation_path": json.dumps(bundle["event_annotation"]),
-                            "sink_metadata_path": json.dumps(bundle["sink_metadata"]),
+                            "evidence_dir": bundle["evidence_dir"],
+                            "metadata_path": bundle["metadata"],
+                            "annotation_path": bundle["event_annotation"],
+                            "sink_metadata_path": bundle["sink_metadata"],
+                            "annotations_path": bundle["annotations_jsonl"],
+                            "summary_path": bundle["summary"],
+                            "raw_clip_path": bundle["raw_clip"],
                         },
                     )
                 if cur.rowcount and cur.rowcount > 0:
