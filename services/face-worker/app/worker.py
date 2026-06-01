@@ -268,6 +268,13 @@ def run_worker(
                 total_duplicates += dup
                 total_skipped += skip
                 total_failed += fail
+                logger.info(
+                    "new batch: inserted=%d duplicates=%d skipped=%d failed=%d",
+                    ins,
+                    dup,
+                    skip,
+                    fail,
+                )
 
             # 3. Periodic summary
             now = time.monotonic()

@@ -28,11 +28,18 @@ def load_config() -> Config:
         face_observation_stream=os.getenv(
             "FACE_OBSERVATION_STREAM", "security.face_observations"
         ),
-        consumer_group=os.getenv("CONSUMER_GROUP", "face-workers"),
-        consumer_name=os.getenv("CONSUMER_NAME", "face-worker-1"),
+        consumer_group=os.getenv(
+            "FACE_WORKER_CONSUMER_GROUP",
+            os.getenv("CONSUMER_GROUP", "face-workers"),
+        ),
+        consumer_name=os.getenv(
+            "FACE_WORKER_CONSUMER_NAME",
+            os.getenv("CONSUMER_NAME", "face-worker-1"),
+        ),
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
         batch_size=int(os.getenv("BATCH_SIZE", "10")),
         consumer_start_id=os.getenv(
-            "FACE_OBSERVATION_CONSUMER_START_ID", "0"
+            "FACE_WORKER_CONSUMER_START_ID",
+            os.getenv("FACE_OBSERVATION_CONSUMER_START_ID", "0"),
         ),
     )

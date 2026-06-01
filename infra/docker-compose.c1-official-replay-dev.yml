@@ -184,6 +184,32 @@ services:
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  face-worker:
+    build:
+      context: ../services/face-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-face-worker:latest
+    container_name: c1-official-face-worker
+    environment:
+      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      REDIS_URL: redis://redis:6379/0
+      FACE_OBSERVATION_STREAM: security.face_observations
+      FACE_WORKER_CONSUMER_GROUP: face-worker
+      FACE_WORKER_CONSUMER_NAME: c1f3b-smoke
+      FACE_WORKER_CONSUMER_START_ID: "0"
+      FACE_WORKER_ENABLED: "true"
+      GALLERY_MATCH_ENABLED: "false"
+      BATCH_SIZE: "50"
+      POLL_TIMEOUT_MS: "2000"
+    volumes:
+      - ../services/face-worker:/app:rw
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
   clip-worker:
     build:
       context: ../services/clip-worker
