@@ -1,0 +1,169 @@
+# C1F.2c — AdaFace runtime validation module.
+#
+# Minimal chain: YOLO26-pose + tracker + YOLOv8-Face + association + AdaFace + debug.
+# No behavior_rules, no face_reid_gate, no face_observation_exporter, no Redis export.
+#
+# Purpose: verify AdaFace produces 512-d embeddings with valid norm on real face crops.
+# NOT a production module.
+
+name: savant_security
+
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
+  max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+  pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+  face_detector_batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
+  face_embedding_batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
+  face_confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
+  face_nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
+  face_min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
+  face_min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
+  max_same_source_frames: 1
+  queue_maxsize: 10
+
+pipeline:
+  source:
+    element: zeromq_source_bin
+    properties:
+      socket: ${oc.env:ZMQ_SRC_ENDPOINT}
+      source_id: ${oc.decode:${oc.env:SOURCE_ID, null}}
+      source_id_prefix: ${oc.decode:${oc.env:SOURCE_ID_PREFIX, null}}
+
+  elements:
+    # ------------------------------------------------------------------
+    # YOLO26-pose — person detection with 17 COCO keypoints.
+    # ------------------------------------------------------------------
+    - element: nvinfer@complex_model
+      name: yolo26_pose
+      properties:
+        interval: 0
+      model:
+        format: onnx
+        model_file: /models/yolo26_pose/yolo26_pose.onnx
+        batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+        precision: fp16
+        input:
+          shape: [3, 640, 640]
+          scale_factor: 0.003921569
+          offsets: [0.0, 0.0, 0.0]
+          color_format: rgb
+        output:
+          layer_names: [output0]
+          converter:
+            module: custom.converters.yolo26_pose
+            class_name: Yolo26PoseConverter
+            kwargs:
+              decoder_layout: post_nms_57
+              confidence_threshold: 0.01
+              keypoint_threshold: 0.01
+              force_nms: false
+          objects:
+            - class_id: 0
+              label: person
+              selector:
+                module: savant.selector.detector
+                class_name: BBoxSelector
+                kwargs:
+                  confidence_threshold: 0.01
+                  nms_iou_threshold: 0.9
+                  min_width: 1
+                  min_height: 1
+          attributes:
+            - name: keypoints
+
+    # ------------------------------------------------------------------
+    # nvtracker — assign track_id to each person.
+    # ------------------------------------------------------------------
+    - element: nvtracker
+      name: tracker
+      properties:
+        ll-lib-file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+        ll-config-file: /opt/savant/src/module/config/config_tracker_NvDCF_perf.yml
+
+    # ------------------------------------------------------------------
+    # YOLOv8-Face — full-frame face detector with 5-point landmarks.
+    # ------------------------------------------------------------------
+    - element: nvinfer@complex_model
+      name: yolov8_face
+      properties:
+        interval: 0
+      model:
+        format: onnx
+        model_file: /models/yolov8_face.onnx
+        batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
+        precision: fp16
+        input:
+          shape: [3, 640, 640]
+          scale_factor: 0.003921569
+          offsets: [0.0, 0.0, 0.0]
+          color_format: rgb
+        output:
+          layer_names: [output0]
+          converter:
+            module: savant.converter.yolo_v8face
+            class_name: YoloV8faceConverter
+            kwargs:
+              confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
+              nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
+          objects:
+            - class_id: 0
+              label: face
+              selector:
+                module: savant.selector.detector
+                class_name: MinMaxSizeBBoxSelector
+                kwargs:
+                  min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
+                  min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
+          attributes:
+            - name: landmarks
+
+    # ------------------------------------------------------------------
+    # FacePersonAssociatorPyFunc — face-person association.
+    # Required for AdaFace quality gate (person_track_id dependency).
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: face_person_associator
+      module: custom.pyfuncs.face_person_associator
+      class_name: FacePersonAssociatorPyFunc
+      kwargs:
+        log_every_n_frames: 30
+
+    # ------------------------------------------------------------------
+    # AdaFace — face embedding attribute model.
+    # Runs on aligned face crops from YOLOv8-Face detections.
+    # Outputs 512-d feature vector (NOT L2-normalized by default).
+    # ------------------------------------------------------------------
+    - element: nvinfer@attribute_model
+      name: adaface
+      model:
+        format: onnx
+        model_file: /models/adaface/adaface_ir50_webface4m.onnx
+        batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
+        precision: fp16
+        input:
+          object: yolov8_face.face
+          shape: [3, 112, 112]
+          offsets: [127.5, 127.5, 127.5]
+          scale_factor: 0.007843137254902
+          color_format: bgr
+          preprocess_object_image:
+            module: savant.input_preproc.align_face
+            class_name: AlignFacePreprocessingObjectImageGPU
+        output:
+          layer_names: [feature]
+          converter:
+            module: savant.converter
+            class_name: TensorToVectorConverter
+          attributes:
+            - name: feature
+
+    # ------------------------------------------------------------------
+    # AdaFace runtime debug — observes embedding metadata only.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: adaface_runtime_debug
+      module: custom.pyfuncs.adaface_runtime_debug
+      class_name: AdaFaceRuntimeDebugPyFunc
+      kwargs:
+        log_every_n_frames: 30
