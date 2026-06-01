@@ -180,27 +180,28 @@ class TestC1F2aDisclaimer:
 
 class TestForbiddenActions:
     def test_no_rtsp_face_observation_smoke(self):
-        """No real RTSP face observation smoke script should exist yet."""
+        """C1F.2 face observation smoke: only c1f2d allowed."""
         smoke_dir = REPO / "scripts" / "smoke"
         if not smoke_dir.exists():
             pytest.skip("smoke dir not found")
         for f in smoke_dir.iterdir():
             name = f.name.lower()
             if "face_observation" in name and "c1f2" in name:
-                pytest.fail(
-                    f"C1F.2 face observation smoke script exists prematurely: {f.name}"
+                # C1F.2d is the allowed face observation Redis smoke
+                assert "c1f2d" in name, (
+                    f"C1F.2 face observation smoke not c1f2d: {f.name}"
                 )
 
     def test_no_redis_exporter_smoke(self):
-        """No C1F.2 Redis exporter smoke should exist yet."""
+        """C1F.2 Redis face smoke: only c1f2d allowed."""
         smoke_dir = REPO / "scripts" / "smoke"
         if not smoke_dir.exists():
             pytest.skip("smoke dir not found")
         for f in smoke_dir.iterdir():
             name = f.name.lower()
             if "redis" in name and "face" in name and "c1f2" in name:
-                pytest.fail(
-                    f"C1F.2 Redis face smoke exists prematurely: {f.name}"
+                assert "c1f2d" in name, (
+                    f"C1F.2 Redis face smoke not c1f2d: {f.name}"
                 )
 
 

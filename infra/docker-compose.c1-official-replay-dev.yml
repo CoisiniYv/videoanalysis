@@ -71,7 +71,7 @@ services:
     entrypoint:
       [
         "bash", "-c",
-        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint module.yml",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
       ]
     working_dir: /opt/savant/src/module
     environment:
@@ -86,7 +86,9 @@ services:
       POSE_BATCH_SIZE: "1"
       FACE_DETECTOR_BATCH_SIZE: "1"
       FACE_EMBEDDING_BATCH_SIZE: "16"
-      FACE_OBSERVATION_EXPORT_ENABLED: "false"
+      FACE_OBSERVATION_EXPORT_ENABLED: "${FACE_OBSERVATION_EXPORT_ENABLED:-false}"
+      C1F1_SAME_FRAME_DEBUG_ENABLED: "${C1F1_SAME_FRAME_DEBUG_ENABLED:-1}"
+      SAVANT_MODULE_FILE: "${SAVANT_MODULE_FILE:-module.yml}"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis
@@ -125,6 +127,7 @@ services:
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       SYNC_OUTPUT: "true"
       BUFFER_LEN: "2000"
+      EOS_ON_START: "false"
       FFMPEG_TIMEOUT_MS: "20000"
     depends_on:
       - replay-service
