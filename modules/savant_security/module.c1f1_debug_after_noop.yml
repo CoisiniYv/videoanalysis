@@ -1,0 +1,108 @@
+name: savant_security
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
+  max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+  pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+  face_detector_batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
+  face_confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
+  face_nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
+  face_min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
+  face_min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
+  max_same_source_frames: 1
+  queue_maxsize: 10
+pipeline:
+  source:
+    element: zeromq_source_bin
+    properties:
+      socket: ${oc.env:ZMQ_SRC_ENDPOINT}
+      source_id: ${oc.decode:${oc.env:SOURCE_ID, null}}
+      source_id_prefix: ${oc.decode:${oc.env:SOURCE_ID_PREFIX, null}}
+  elements:
+    - element: nvinfer@complex_model
+      name: yolo26_pose
+      properties:
+        interval: 0
+      model:
+        format: onnx
+        model_file: /models/yolo26_pose/yolo26_pose.onnx
+        batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+        precision: fp16
+        input:
+          shape: [3, 640, 640]
+          scale_factor: 0.003921569
+          offsets: [0.0, 0.0, 0.0]
+          color_format: rgb
+        output:
+          layer_names: [output0]
+          converter:
+            module: custom.converters.yolo26_pose
+            class_name: Yolo26PoseConverter
+            kwargs:
+              decoder_layout: post_nms_57
+              confidence_threshold: 0.01
+              keypoint_threshold: 0.01
+              force_nms: false
+          objects:
+            - class_id: 0
+              label: person
+              selector:
+                module: savant.selector.detector
+                class_name: BBoxSelector
+                kwargs:
+                  confidence_threshold: 0.01
+                  nms_iou_threshold: 0.9
+                  min_width: 1
+                  min_height: 1
+          attributes:
+            - name: keypoints
+    - element: nvtracker
+      name: tracker
+      properties:
+        ll-lib-file: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+        ll-config-file: /opt/savant/src/module/config/config_tracker_NvDCF_perf.yml
+    - element: nvinfer@complex_model
+      name: yolov8_face
+      properties:
+        interval: 0
+      model:
+        format: onnx
+        model_file: /models/yolov8_face.onnx
+        batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
+        precision: fp16
+        input:
+          shape: [3, 640, 640]
+          scale_factor: 0.003921569
+          offsets: [0.0, 0.0, 0.0]
+          color_format: rgb
+        output:
+          layer_names: [output0]
+          converter:
+            module: savant.converter.yolo_v8face
+            class_name: YoloV8faceConverter
+            kwargs:
+              confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
+              nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
+          objects:
+            - class_id: 0
+              label: face
+              selector:
+                module: savant.selector.detector
+                class_name: MinMaxSizeBBoxSelector
+                kwargs:
+                  min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
+                  min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
+          attributes:
+            - name: landmarks
+    - element: pyfunc
+      name: noop_frame_counter
+      module: custom.pyfuncs.noop_frame_counter
+      class_name: NoOpFrameCounterPyFunc
+      kwargs:
+        log_every_n_frames: 30
+    - element: pyfunc
+      name: same_frame_detection_debug
+      module: custom.pyfuncs.same_frame_detection_debug
+      class_name: SameFrameDetectionDebugPyFunc
+      kwargs:
+        log_every_n_frames: 30

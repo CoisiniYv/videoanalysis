@@ -1,0 +1,27 @@
+# C1F.1d.4 — Minimal ZMQ source + no-op frame counter.
+# Tests whether zeromq_source_bin stays alive without any model inference.
+
+name: savant_security
+
+parameters:
+  log_level: ${oc.env:LOGLEVEL, INFO}
+  batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
+  max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+  max_same_source_frames: 1
+  queue_maxsize: 10
+
+pipeline:
+  source:
+    element: zeromq_source_bin
+    properties:
+      socket: ${oc.env:ZMQ_SRC_ENDPOINT}
+      source_id: ${oc.decode:${oc.env:SOURCE_ID, null}}
+      source_id_prefix: ${oc.decode:${oc.env:SOURCE_ID_PREFIX, null}}
+
+  elements:
+    - element: pyfunc
+      name: noop_frame_counter
+      module: custom.pyfuncs.noop_frame_counter
+      class_name: NoOpFrameCounterPyFunc
+      kwargs:
+        log_every_n_frames: 30
