@@ -13,6 +13,7 @@ from typing import Dict
 import psycopg
 from redis import Redis
 
+from app.alert_policy import AlertPolicyDecision, AlertPolicyService
 from app.alert_publisher import AlertPublisher
 from app.config import Config, load_config
 from app.record_request import RecordRequestPublisher, _resolve_source_id
@@ -79,6 +80,7 @@ def _handle_event(
     alert_publisher: AlertPublisher | None = None,
     record_publisher: RecordRequestPublisher | None = None,
     *,
+    alert_policy_service: AlertPolicyService | None = None,
     recording_state: RecordingPolicyState | None = None,
     recording_event_types: tuple[str, ...] = (),
     recording_source_id: str = "",
@@ -107,7 +109,29 @@ def _handle_event(
     newly_inserted = event_id is not None
     source_event_id = event.get("source_event_id", "")
 
-    if newly_inserted and alert_publisher is not None:
+    alert_policy_decision = AlertPolicyDecision("emit")
+    if newly_inserted and event_id and alert_policy_service is not None:
+        try:
+            alert_policy_decision = alert_policy_service.apply(event, event_id)
+        except Exception:
+            logger.exception(
+                "alert policy check failed for source_event_id=%s",
+                source_event_id,
+            )
+            alert_policy_decision = AlertPolicyDecision("emit")
+        if alert_policy_decision.suppressed:
+            logger.info(
+                "event_suppressed source_event_id=%s camera_id=%s reason=%s",
+                source_event_id,
+                event.get("camera_id", ""),
+                alert_policy_decision.reason,
+            )
+
+    if (
+        newly_inserted
+        and not alert_policy_decision.suppressed
+        and alert_publisher is not None
+    ):
         try:
             alert_publisher.publish(event, event_id=event_id)
         except Exception:
@@ -116,7 +140,12 @@ def _handle_event(
                 source_event_id,
             )
 
-    if newly_inserted and event_id and _requires_evidence(event):
+    if (
+        newly_inserted
+        and not alert_policy_decision.suppressed
+        and event_id
+        and _requires_evidence(event)
+    ):
         if hasattr(repo, "create_evidence_task"):
             try:
                 repo.create_evidence_task(event, event_id)
@@ -131,7 +160,7 @@ def _handle_event(
             )
 
     # Record request — idempotent: check DB clip_status before publishing
-    if record_publisher is not None:
+    if record_publisher is not None and not alert_policy_decision.suppressed:
         clip_required = event.get("clip_required", False)
         payload_media = (event.get("payload") or {}).get("media", {})
         payload_clip = (
@@ -293,6 +322,7 @@ def _process_batch(
     alert_publisher: AlertPublisher | None = None,
     record_publisher: RecordRequestPublisher | None = None,
     *,
+    alert_policy_service: AlertPolicyService | None = None,
     recording_state: RecordingPolicyState | None = None,
     recording_event_types: tuple[str, ...] = (),
     recording_source_id: str = "",
@@ -314,6 +344,7 @@ def _process_batch(
             consumer,
             alert_publisher,
             record_publisher,
+            alert_policy_service=alert_policy_service,
             recording_state=recording_state,
             recording_event_types=recording_event_types,
             recording_source_id=recording_source_id,
@@ -353,6 +384,7 @@ def run_worker(
     )
     consumer.ensure_group()
     repo = EventRepository(pg_conn)
+    alert_policy_service = AlertPolicyService(repo)
     alert_publisher = AlertPublisher(redis_client, cfg.alert_stream)
     record_publisher = (
         RecordRequestPublisher(
@@ -397,6 +429,7 @@ def run_worker(
                     consumer,
                     alert_publisher,
                     record_publisher,
+                    alert_policy_service=alert_policy_service,
                     recording_state=recording_state,
                     recording_event_types=cfg.recording_event_types,
                     recording_source_id=cfg.recording_source_id,
@@ -421,6 +454,7 @@ def run_worker(
                     consumer,
                     alert_publisher,
                     record_publisher,
+                    alert_policy_service=alert_policy_service,
                     recording_state=recording_state,
                     recording_event_types=cfg.recording_event_types,
                     recording_source_id=cfg.recording_source_id,

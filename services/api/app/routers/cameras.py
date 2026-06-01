@@ -17,11 +17,14 @@ from fastapi.responses import JSONResponse, Response
 from app.db import get_conn
 from app.repositories.cameras import CameraRepository
 from app.schemas.cameras import (
+    AlertPolicy,
     CameraConfigResponse,
     CameraCreate,
     CameraResponse,
+    CameraUpdate,
     RuleCreate,
     RuleResponse,
+    RuleUpdate,
     ZoneCreate,
     ZoneResponse,
     apply_intrusion_defaults,
@@ -69,6 +72,18 @@ def _err_response(status_code: int, message: str, request_id: str) -> JSONRespon
     )
 
 
+def _supports_kw(callable_obj: object, name: str) -> bool:
+    import inspect
+
+    try:
+        params = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return True
+    return name in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 # ---------------------------------------------------------------------------
 # /api/v1/cameras/config/export  (yaml)
 #
@@ -113,16 +128,26 @@ def cameras_create(
     if repo.get_camera(body.id) is not None:
         return _err_response(409, f"camera already exists: {body.id}", request_id)
     try:
-        row = repo.create_camera(
-            camera_id=body.id,
-            source_id=body.source_id,
-            name=body.name,
-            rtsp_url=body.rtsp_url,
-            site_id=body.site_id,
-            location=body.location,
-            gpu_id=body.gpu_id,
-            enabled=body.enabled,
-        )
+        kwargs = {
+            "camera_id": body.id,
+            "source_id": body.source_id,
+            "name": body.name,
+            "rtsp_url": body.rtsp_url,
+            "site_id": body.site_id,
+            "location": body.location,
+            "gpu_id": body.gpu_id,
+            "enabled": body.enabled,
+        }
+        if _supports_kw(repo.create_camera, "input_type"):
+            kwargs.update(
+                {
+                    "input_type": body.input_type,
+                    "rtsp_transport": body.rtsp_transport,
+                    "fps_policy": body.fps_policy,
+                    "alert_policy": body.alert_policy,
+                }
+            )
+        row = repo.create_camera(**kwargs)
     except psycopg.errors.UniqueViolation as exc:
         return _err_response(409, f"unique constraint violation: {exc}", request_id)
     return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
@@ -160,6 +185,55 @@ def cameras_get(
     return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
 
 
+@router.put("/{camera_id}")
+def cameras_update(
+    camera_id: str,
+    body: CameraUpdate,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if not hasattr(repo, "update_camera"):
+        return _err_response(501, "camera update is not supported by repository", request_id)
+    row = repo.update_camera(camera_id, **body.model_dump(exclude_unset=True))
+    return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
+
+
+def _set_camera_enabled(
+    camera_id: str,
+    enabled: bool,
+    repo: CameraRepository,
+    request_id: str,
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if hasattr(repo, "set_camera_enabled"):
+        row = repo.set_camera_enabled(camera_id, enabled)
+    else:
+        row = repo.get_camera(camera_id)
+        row["enabled"] = enabled
+    return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
+
+
+@router.post("/{camera_id}/enable")
+def cameras_enable(
+    camera_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    return _set_camera_enabled(camera_id, True, repo, request_id)
+
+
+@router.post("/{camera_id}/disable")
+def cameras_disable(
+    camera_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    return _set_camera_enabled(camera_id, False, repo, request_id)
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/cameras/{camera_id}/zones
 # ---------------------------------------------------------------------------
@@ -187,13 +261,22 @@ def cameras_create_zone(
         )
 
     try:
-        row = repo.create_zone(
-            camera_id=camera_id,
-            zone_name=body.zone_name,
-            zone_type=body.zone_type,
-            points=body.points,
-            payload=body.payload,
-        )
+        kwargs = {
+            "camera_id": camera_id,
+            "zone_name": body.zone_name,
+            "zone_type": body.zone_type,
+            "points": body.points,
+            "payload": body.payload,
+        }
+        if _supports_kw(repo.create_zone, "zone_id"):
+            kwargs.update(
+                {
+                    "zone_id": body.zone_id,
+                    "coordinate_space": body.coordinate_space,
+                    "enabled": body.enabled,
+                }
+            )
+        row = repo.create_zone(**kwargs)
     except psycopg.errors.UniqueViolation as exc:
         return _err_response(409, f"unique constraint violation: {exc}", request_id)
     return _ok(ZoneResponse.from_db_row(row).model_dump(), request_id)
@@ -219,6 +302,52 @@ def cameras_list_zones(
     )
 
 
+@router.put("/{camera_id}/zones/{zone_id}")
+def cameras_update_zone(
+    camera_id: str,
+    zone_id: str,
+    body: ZoneCreate,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    try:
+        body.validate_for_zone_type()
+    except ValueError as exc:
+        return _err_response(400, str(exc), request_id)
+    if not hasattr(repo, "update_zone"):
+        return _err_response(501, "zone update is not supported by repository", request_id)
+    row = repo.update_zone(
+        camera_id=camera_id,
+        zone_id=zone_id,
+        new_zone_id=body.zone_id,
+        zone_name=body.zone_name,
+        zone_type=body.zone_type,
+        coordinate_space=body.coordinate_space,
+        points=body.points,
+        enabled=body.enabled,
+        payload=body.payload,
+    )
+    if row is None:
+        return _err_response(404, f"zone not found: {zone_id}", request_id)
+    return _ok(ZoneResponse.from_db_row(row).model_dump(), request_id)
+
+
+@router.delete("/{camera_id}/zones/{zone_id}")
+def cameras_delete_zone(
+    camera_id: str,
+    zone_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if not hasattr(repo, "delete_zone") or not repo.delete_zone(camera_id, zone_id):
+        return _err_response(404, f"zone not found: {zone_id}", request_id)
+    return _ok({"deleted": True, "zone_id": zone_id}, request_id)
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/cameras/{camera_id}/rules
 # ---------------------------------------------------------------------------
@@ -234,12 +363,26 @@ def cameras_create_rule(
     if repo.get_camera(camera_id) is None:
         return _err_response(404, f"camera not found: {camera_id}", request_id)
 
-    # Reject duplicate (camera, rule_type) for C1-lite.
-    existing_types = {r["rule_type"] for r in repo.list_rules(camera_id)}
-    if body.rule_type in existing_types:
+    existing = repo.list_rules(camera_id)
+    existing_rule_ids = {str(r.get("rule_id") or r.get("id")) for r in existing}
+    existing_types = {r["rule_type"] for r in existing}
+    if body.rule_id in existing_rule_ids or (
+        body.algorithm_id not in (
+            "behavior.intrusion",
+            "behavior.loitering",
+            "behavior.crowd_gathering",
+            "behavior.fall",
+            "behavior.running",
+            "behavior.wall_climb_suspicious",
+            "face.observation",
+            "face.watchlist",
+            "face.live_search",
+        )
+        and body.rule_type in existing_types
+    ):
         return _err_response(
             409,
-            f"rule_type already exists for camera {camera_id!r}: {body.rule_type!r}",
+            f"rule already exists for camera {camera_id!r}: {body.rule_id!r}",
             request_id,
         )
 
@@ -251,12 +394,15 @@ def cameras_create_rule(
             return _err_response(400, err, request_id)
 
     try:
-        row = repo.create_rule(
-            camera_id=camera_id,
-            rule_type=body.rule_type,
-            enabled=body.enabled,
-            config=config,
-        )
+        kwargs = {
+            "camera_id": camera_id,
+            "rule_type": body.rule_type,
+            "enabled": body.enabled,
+            "config": config,
+        }
+        if _supports_kw(repo.create_rule, "rule_id"):
+            kwargs.update({"rule_id": body.rule_id, "algorithm_id": body.algorithm_id})
+        row = repo.create_rule(**kwargs)
     except psycopg.errors.UniqueViolation as exc:
         return _err_response(409, f"unique constraint violation: {exc}", request_id)
     return _ok(RuleResponse.from_db_row(row).model_dump(), request_id)
@@ -282,6 +428,144 @@ def cameras_list_rules(
     )
 
 
+@router.get("/{camera_id}/rules/{rule_id}")
+def cameras_get_rule(
+    camera_id: str,
+    rule_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if hasattr(repo, "get_rule"):
+        row = repo.get_rule(camera_id, rule_id)
+    else:
+        row = next(
+            (
+                r
+                for r in repo.list_rules(camera_id)
+                if str(r.get("id")) == rule_id
+                or str(r.get("rule_id", "")) == rule_id
+                or r.get("rule_type") == rule_id
+            ),
+            None,
+        )
+    if row is None:
+        return _err_response(404, f"rule not found: {rule_id}", request_id)
+    return _ok(RuleResponse.from_db_row(row).model_dump(), request_id)
+
+
+@router.put("/{camera_id}/rules/{rule_id}")
+def cameras_update_rule(
+    camera_id: str,
+    rule_id: str,
+    body: RuleUpdate,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if not hasattr(repo, "update_rule"):
+        return _err_response(501, "rule update is not supported by repository", request_id)
+
+    algorithm_id = body.algorithm_id
+    rule_type = body.rule_type or algorithm_id
+    row = repo.update_rule(
+        camera_id=camera_id,
+        rule_id=rule_id,
+        new_rule_id=body.rule_id,
+        algorithm_id=algorithm_id,
+        rule_type=rule_type,
+        enabled=body.enabled,
+        config=body.config,
+    )
+    if row is None:
+        return _err_response(404, f"rule not found: {rule_id}", request_id)
+    return _ok(RuleResponse.from_db_row(row).model_dump(), request_id)
+
+
+@router.delete("/{camera_id}/rules/{rule_id}")
+def cameras_delete_rule(
+    camera_id: str,
+    rule_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if not hasattr(repo, "delete_rule") or not repo.delete_rule(camera_id, rule_id):
+        return _err_response(404, f"rule not found: {rule_id}", request_id)
+    return _ok({"deleted": True, "rule_id": rule_id}, request_id)
+
+
+def _set_rule_enabled(
+    camera_id: str,
+    rule_id: str,
+    enabled: bool,
+    repo: CameraRepository,
+    request_id: str,
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if hasattr(repo, "set_rule_enabled"):
+        row = repo.set_rule_enabled(camera_id, rule_id, enabled)
+    else:
+        row = None
+    if row is None:
+        return _err_response(404, f"rule not found: {rule_id}", request_id)
+    return _ok(RuleResponse.from_db_row(row).model_dump(), request_id)
+
+
+@router.post("/{camera_id}/rules/{rule_id}/enable")
+def cameras_enable_rule(
+    camera_id: str,
+    rule_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    return _set_rule_enabled(camera_id, rule_id, True, repo, request_id)
+
+
+@router.post("/{camera_id}/rules/{rule_id}/disable")
+def cameras_disable_rule(
+    camera_id: str,
+    rule_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    return _set_rule_enabled(camera_id, rule_id, False, repo, request_id)
+
+
+@router.get("/{camera_id}/alert-policy")
+def cameras_get_alert_policy(
+    camera_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    row = repo.get_camera(camera_id)
+    if row is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    return _ok(row.get("alert_policy") or {}, request_id)
+
+
+@router.put("/{camera_id}/alert-policy")
+def cameras_put_alert_policy(
+    camera_id: str,
+    body: AlertPolicy,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    if repo.get_camera(camera_id) is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    policy = body.model_dump()
+    if hasattr(repo, "set_alert_policy"):
+        row = repo.set_alert_policy(camera_id, policy)
+    else:
+        row = repo.get_camera(camera_id)
+        row["alert_policy"] = policy
+    return _ok(CameraResponse.from_db_row(row).alert_policy, request_id)
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/cameras/{camera_id}/config
 # ---------------------------------------------------------------------------
@@ -304,5 +588,6 @@ def cameras_get_config(
         camera=CameraResponse.from_db_row(cam),
         zones=[ZoneResponse.from_db_row(z) for z in zones],
         rules=[RuleResponse.from_db_row(r) for r in rules],
+        alert_policy=cam.get("alert_policy") or {},
     )
     return _ok(payload.model_dump(), request_id)

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.db import get_conn
@@ -26,6 +27,19 @@ app.include_router(ws_alerts_router)
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/media")
 if os.path.isdir(MEDIA_ROOT):
     app.mount("/media", StaticFiles(directory=MEDIA_ROOT), name="media")
+
+OPERATOR_STATIC_DIR = Path(__file__).resolve().parent / "static" / "operator"
+if OPERATOR_STATIC_DIR.is_dir():
+    app.mount(
+        "/operator/static",
+        StaticFiles(directory=str(OPERATOR_STATIC_DIR)),
+        name="operator_static",
+    )
+
+
+@app.get("/operator", include_in_schema=False)
+def operator_page() -> FileResponse:
+    return FileResponse(OPERATOR_STATIC_DIR / "index.html")
 
 
 # ---------------------------------------------------------------------------

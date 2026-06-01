@@ -281,6 +281,93 @@ class EventRepository:
         """Return True if an event with *source_event_id* exists."""
         return self.count_by_source_event_id(source_event_id) > 0
 
+    def get_camera_alert_policy(self, camera_id: str) -> dict[str, Any]:
+        """Return cameras.alert_policy for *camera_id*, or {} when absent."""
+        if not camera_id:
+            return {}
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT alert_policy FROM cameras WHERE id = %s",
+                    (camera_id,),
+                )
+                row = cur.fetchone()
+        except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn):
+            return {}
+        if not row:
+            return {}
+        policy = row[0]
+        if isinstance(policy, str):
+            try:
+                return json.loads(policy)
+            except json.JSONDecodeError:
+                return {}
+        return policy if isinstance(policy, dict) else {}
+
+    def get_last_unsuppressed_alert_ts_ms(
+        self,
+        camera_id: str,
+        *,
+        exclude_source_event_id: str,
+        current_event_ts_ms: int,
+    ) -> int | None:
+        """Return the most recent non-suppressed event timestamp for a camera."""
+        if not camera_id:
+            return None
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event_ts_ms
+                FROM events
+                WHERE camera_id = %s
+                  AND source_event_id <> %s
+                  AND COALESCE(status, 'new') <> 'suppressed'
+                  AND (%s <= 0 OR event_ts_ms <= %s)
+                ORDER BY event_ts_ms DESC
+                LIMIT 1
+                """,
+                (
+                    camera_id,
+                    exclude_source_event_id,
+                    current_event_ts_ms,
+                    current_event_ts_ms,
+                ),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    def mark_event_suppressed(
+        self,
+        event_id: str,
+        *,
+        reason: str,
+        policy: dict[str, Any],
+        last_alert_ts_ms: int | None,
+    ) -> bool:
+        """Mark an already-inserted event as suppressed by alert policy."""
+        payload = {
+            "decision": "suppressed",
+            "reason": reason,
+            "policy": policy or {},
+            "last_alert_ts_ms": last_alert_ts_ms,
+        }
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET status = 'suppressed',
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'alert_policy',
+                            %(payload)s::jsonb
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {"event_id": event_id, "payload": json.dumps(payload)},
+            )
+            return cur.rowcount is not None and cur.rowcount > 0
+
     def get_media_clip_status(self, source_event_id: str) -> str | None:
         """Get payload->'media'->>'clip_status' for an event, or None."""
         with self._conn.cursor() as cur:

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Operator Configuration</title>
+    <link rel="stylesheet" href="/operator/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Camera Algorithm Configuration</h1>
+      <div id="status">Loading</div>
+    </header>
+    <main>
+      <section class="pane camera-list">
+        <div class="pane-title">
+          <h2>Cameras</h2>
+          <button id="new-camera">New</button>
+        </div>
+        <div id="cameras"></div>
+      </section>
+
+      <section class="pane camera-detail">
+        <div class="pane-title">
+          <h2>Camera</h2>
+          <div>
+            <button id="save-camera">Save</button>
+            <button id="enable-camera">Enable</button>
+            <button id="disable-camera">Disable</button>
+          </div>
+        </div>
+        <form id="camera-form">
+          <label>camera_id<input name="id" required /></label>
+          <label>name<input name="name" required /></label>
+          <label>source_id<input name="source_id" required /></label>
+          <label>rtsp_url<input name="rtsp_url" required /></label>
+          <label>site_id<input name="site_id" /></label>
+          <label>location<input name="location" /></label>
+          <label>gpu_id<input name="gpu_id" type="number" value="0" /></label>
+          <label>rtsp_transport<input name="rtsp_transport" value="tcp" /></label>
+          <label>global_alert_cooldown_s<input name="global_alert_cooldown_s" type="number" value="30" /></label>
+          <label class="inline"><input name="enabled" type="checkbox" checked /> enabled</label>
+        </form>
+
+        <div class="pane-title small">
+          <h2>Zones</h2>
+          <div>
+            <button id="add-zone">Add ROI</button>
+            <button id="save-zone">Save ROI</button>
+          </div>
+        </div>
+        <textarea id="zone-json" spellcheck="false"></textarea>
+        <div id="zones"></div>
+      </section>
+
+      <section class="pane rules">
+        <div class="pane-title">
+          <h2>Algorithm Rules</h2>
+          <button id="save-rule">Save Rule</button>
+        </div>
+        <div class="templates">
+          <button data-template="behavior.intrusion">添加周界入侵</button>
+          <button data-template="behavior.loitering">添加徘徊</button>
+          <button data-template="behavior.crowd_gathering">添加人群聚集</button>
+          <button data-template="behavior.fall">添加摔倒</button>
+          <button data-template="face.observation">添加人脸 observation</button>
+          <button data-template="face.watchlist">添加重点人员布控</button>
+          <button data-template="face.live_search">添加一键找人</button>
+        </div>
+        <textarea id="rule-json" spellcheck="false"></textarea>
+        <div id="rules"></div>
+      </section>
+    </main>
+    <script src="/operator/static/app.js"></script>
+  </body>
+</html>
