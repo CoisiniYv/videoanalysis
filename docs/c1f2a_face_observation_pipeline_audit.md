@@ -136,6 +136,11 @@ pipeline is correctly wired from YOLOv8-Face through AdaFace, face_reid_gate,
 and face_observation_exporter to Redis. The landmark contract is consistent.
 Image bytes are forbidden. Export is disabled by default.
 
+**IMPORTANT:** This is a config audit only. It does NOT mean AdaFace embedding,
+face_reid_gate, or face_observation_exporter have been runtime validated.
+See `docs/c1f2b_face_pipeline_runtime_reality_correction.md` for the
+runtime scope correction.
+
 ## 5. C1F.2-Specific Module
 
 A trimmed module `module.c1f2_face_observation.yml` is recommended for
