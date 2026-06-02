@@ -24,6 +24,10 @@ from app.snapshot import generate_snapshot
 logger = logging.getLogger(__name__)
 
 shutdown_requested = False
+DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC = 10.0
+ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
+BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
+BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -162,6 +166,8 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
                 "generated",
                 "generated_corrupt",
                 "generated_unverified",
+                BUNDLE_STATUS_DURATION_GUARD_FAILED,
+                BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
             ) and bool(row[1]) and bool(row[2])
     except Exception:
         return False
@@ -558,6 +564,63 @@ def _load_sink_metadata_file(metadata_file: str) -> dict:
         return {}
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _update_summary_with_bundle_validation(
+    summary_path: Path,
+    business_metadata: dict,
+) -> dict:
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(summary, dict):
+            summary = {}
+    except Exception:
+        logger.exception("failed to load annotation summary for validation merge")
+        summary = {}
+
+    media = business_metadata.get("media", {})
+    status = business_metadata.get("status", {})
+    clip_validation = (
+        media.get("clip_validation", {}) if isinstance(media, dict) else {}
+    )
+    if not isinstance(clip_validation, dict):
+        clip_validation = {}
+
+    summary.update(
+        {
+            "raw_clip_duration": media.get("raw_clip_duration"),
+            "expected_duration_seconds": media.get("expected_duration_seconds"),
+            "max_allowed_duration_seconds": clip_validation.get(
+                "max_allowed_duration_seconds"
+            ),
+            "duration_guard_status": clip_validation.get("duration_guard_status"),
+            "duration_guard_failed": bool(
+                clip_validation.get("duration_guard_failed")
+            ),
+            "duration_guard_reason": clip_validation.get("duration_guard_reason", ""),
+            "duration_guard_slack_seconds": clip_validation.get(
+                "duration_guard_slack_seconds"
+            ),
+            "clip_status": status.get("clip_status"),
+            "decode_error_count": clip_validation.get("decode_error_count", 0),
+            "decode_error_sample": clip_validation.get("decode_error_sample", []),
+        }
+    )
+    _atomic_write_json(summary_path, summary)
+    return summary
+
+
 def _probe_duration_with_imageio_ffmpeg(path: str) -> float | None:
     try:
         import imageio_ffmpeg  # type: ignore
@@ -760,15 +823,71 @@ def _expected_clip_seconds(
     return float(offset or 0.0)
 
 
-def _duration_ok(actual: float | None, expected: float) -> bool:
+def _evidence_duration_slack_seconds() -> float:
+    value = _to_float(os.getenv("EVIDENCE_MAX_DURATION_SLACK_SEC"))
+    if value is None:
+        return DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC
+    return max(0.0, value)
+
+
+def _duration_guard(
+    actual: float | None,
+    expected: float,
+    slack_seconds: float | None = None,
+) -> dict:
+    slack = (
+        _evidence_duration_slack_seconds()
+        if slack_seconds is None
+        else max(0.0, float(slack_seconds))
+    )
+    max_allowed = float(expected or 0.0) + slack if expected > 0 else None
+    if actual is None or actual <= 0:
+        return {
+            "duration_guard_status": "unavailable",
+            "duration_guard_failed": False,
+            "max_allowed_duration_seconds": max_allowed,
+            "duration_guard_reason": "raw_clip_duration_unavailable",
+            "duration_guard_slack_seconds": slack,
+        }
+    if expected <= 0 or max_allowed is None:
+        return {
+            "duration_guard_status": "not_applicable",
+            "duration_guard_failed": False,
+            "max_allowed_duration_seconds": max_allowed,
+            "duration_guard_reason": "expected_duration_unavailable",
+            "duration_guard_slack_seconds": slack,
+        }
+    failed = actual > max_allowed
+    return {
+        "duration_guard_status": "failed" if failed else "passed",
+        "duration_guard_failed": failed,
+        "max_allowed_duration_seconds": round(max_allowed, 3),
+        "duration_guard_reason": (
+            "raw_clip_duration_exceeds_expected_plus_slack" if failed else ""
+        ),
+        "duration_guard_slack_seconds": slack,
+    }
+
+
+def _duration_ok(
+    actual: float | None,
+    expected: float,
+    slack_seconds: float | None = None,
+) -> bool:
     if actual is None or actual <= 0:
         return False
     if expected <= 0:
         return actual > 0
-    return actual >= expected * 0.8 and actual <= expected * 1.5
+    guard = _duration_guard(actual, expected, slack_seconds)
+    lower_bound = max(0.0, expected * 0.8)
+    return actual >= lower_bound and not guard["duration_guard_failed"]
 
 
 def _clip_status_from_validation(clip_validation: dict) -> str:
+    if clip_validation.get("duration_guard_failed") is True:
+        return BUNDLE_STATUS_DURATION_GUARD_FAILED
+    if clip_validation.get("annotation_generation_failed") is True:
+        return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
     if clip_validation.get("decode_error_count", 0) > 0:
         return "generated_corrupt"
     if clip_validation.get("ok") is True:
@@ -798,6 +917,7 @@ def _build_business_metadata(
     event_annotation_path: str,
     annotations_jsonl_path: str = "",
     summary_json_path: str = "",
+    annotation_summary: dict | None = None,
 ) -> dict:
     payload = event_context.get("payload", {})
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -819,16 +939,32 @@ def _build_business_metadata(
         offset.get("seconds", 0),
     )
     decode_probe = _probe_clip_decode(raw_clip_path)
-    duration_ok = _duration_ok(raw_clip_duration, expected_duration_seconds)
+    duration_guard = _duration_guard(raw_clip_duration, expected_duration_seconds)
+    duration_ok = _duration_ok(
+        raw_clip_duration,
+        expected_duration_seconds,
+        duration_guard.get("duration_guard_slack_seconds"),
+    )
+    annotation_summary = annotation_summary or {}
+    annotation_generation_failed = (
+        annotation_summary.get("annotation_generation_failed") is True
+        or annotation_summary.get("annotation_status") == ANNOTATION_STATUS_UNAVAILABLE
+    )
     if decode_probe.get("decode_ok") is None or raw_clip_duration is None:
         validation_ok = None
     else:
-        validation_ok = bool(decode_probe.get("decode_ok")) and duration_ok
+        validation_ok = (
+            bool(decode_probe.get("decode_ok"))
+            and duration_ok
+            and not annotation_generation_failed
+        )
     clip_validation = {
         "ok": validation_ok,
         "decode_error_count": decode_probe.get("decode_error_count", 0),
         "decode_error_sample": decode_probe.get("decode_error_sample", []),
         "duration_ok": duration_ok,
+        **duration_guard,
+        "annotation_generation_failed": annotation_generation_failed,
         "probe_tool": decode_probe.get("probe_tool"),
         "probe_error": decode_probe.get("probe_error", ""),
     }
@@ -889,7 +1025,18 @@ def _build_business_metadata(
         "annotations": {
             "annotations_jsonl_path": annotations_jsonl_path,
             "summary_json_path": summary_json_path,
-            "frontend_overlay_required": True,
+            "annotation_status": annotation_summary.get("annotation_status"),
+            "annotation_lines": annotation_summary.get("annotation_lines"),
+            "annotation_empty_reason": annotation_summary.get(
+                "annotation_empty_reason"
+            ),
+            "annotation_unavailable_reason": annotation_summary.get(
+                "annotation_unavailable_reason"
+            ),
+            "overlay_available": bool(annotation_summary.get("overlay_available")),
+            "frontend_overlay_required": bool(
+                annotation_summary.get("frontend_overlay_required")
+            ),
             "annotation_mode": "continuous_jsonl",
         },
         "status": {
@@ -976,10 +1123,15 @@ def _finalize_p1_evidence_bundle(
         event_annotation_path=str(annotation_out),
         annotations_jsonl_path=str(annotations_jsonl_out),
         summary_json_path=str(summary_out),
+        annotation_summary=annotation_summary,
     )
-    with open(metadata_out, "w") as f:
-        json.dump(business_metadata, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    annotation_summary = _update_summary_with_bundle_validation(
+        summary_out,
+        business_metadata,
+    )
+    _atomic_write_json(metadata_out, business_metadata)
+    annotations_meta = business_metadata.get("annotations", {})
+    clip_validation = business_metadata.get("media", {}).get("clip_validation", {})
 
     return {
         "evidence_dir": str(evidence_dir),
@@ -992,6 +1144,21 @@ def _finalize_p1_evidence_bundle(
         "sink_output_path": meta_dir,
         "clip_status": business_metadata.get("status", {}).get(
             "clip_status", "generated_unverified"
+        ),
+        "annotation_status": annotations_meta.get("annotation_status"),
+        "annotation_lines": annotations_meta.get("annotation_lines"),
+        "annotation_empty_reason": annotations_meta.get("annotation_empty_reason"),
+        "annotation_unavailable_reason": annotations_meta.get(
+            "annotation_unavailable_reason"
+        ),
+        "overlay_available": annotations_meta.get("overlay_available"),
+        "frontend_overlay_required": annotations_meta.get(
+            "frontend_overlay_required"
+        ),
+        "duration_guard_status": clip_validation.get("duration_guard_status"),
+        "duration_guard_failed": clip_validation.get("duration_guard_failed"),
+        "max_allowed_duration_seconds": clip_validation.get(
+            "max_allowed_duration_seconds"
         ),
     }
 
@@ -1087,6 +1254,7 @@ def _process_sink_output(
                         """
                         UPDATE events
                         SET clip_path = %(clip_path)s,
+                            media_status = %(clip_status_text)s,
                             payload = jsonb_set(
                                 jsonb_set(
                                     jsonb_set(
@@ -1110,6 +1278,7 @@ def _process_sink_output(
                         {
                             "clip_path": clip_path,
                             "clip_status": json.dumps(clip_status),
+                            "clip_status_text": clip_status,
                             "replay_job_id": json.dumps(replay_job_id),
                             "sink_path": json.dumps(sink_path),
                             "event_id": event_id,
@@ -1120,6 +1289,7 @@ def _process_sink_output(
                         """
                         UPDATE events
                         SET clip_path = %(clip_path)s,
+                            media_status = %(clip_status_text)s,
                             payload = jsonb_set(
                                 jsonb_set(
                                     jsonb_set(
@@ -1139,6 +1309,7 @@ def _process_sink_output(
                         {
                             "clip_path": clip_path,
                             "clip_status": json.dumps(clip_status),
+                            "clip_status_text": clip_status,
                             "sink_path": json.dumps(sink_path),
                             "event_id": event_id,
                         },
@@ -1160,7 +1331,23 @@ def _process_sink_output(
                                         'summary_json_path', %(summary_path)s::text,
                                         'raw_clip_path', %(raw_clip_path)s::text,
                                         'annotated_clip_path', NULL,
-                                        'annotated_clip_status', 'not_generated'
+                                        'annotated_clip_status', 'not_generated',
+                                        'annotation_status', %(annotation_status)s::text,
+                                        'annotation_lines', %(annotation_lines)s::int,
+                                        'annotation_empty_reason',
+                                            %(annotation_empty_reason)s::text,
+                                        'annotation_unavailable_reason',
+                                            %(annotation_unavailable_reason)s::text,
+                                        'overlay_available',
+                                            %(overlay_available)s::boolean,
+                                        'frontend_overlay_required',
+                                            %(frontend_overlay_required)s::boolean,
+                                        'duration_guard_status',
+                                            %(duration_guard_status)s::text,
+                                        'duration_guard_failed',
+                                            %(duration_guard_failed)s::boolean,
+                                        'max_allowed_duration_seconds',
+                                            %(max_allowed_duration_seconds)s::float
                                     )
                                 ),
                             updated_at = now()
@@ -1175,6 +1362,29 @@ def _process_sink_output(
                             "annotations_path": bundle["annotations_jsonl"],
                             "summary_path": bundle["summary"],
                             "raw_clip_path": bundle["raw_clip"],
+                            "annotation_status": bundle.get("annotation_status"),
+                            "annotation_lines": int(bundle.get("annotation_lines") or 0),
+                            "annotation_empty_reason": bundle.get(
+                                "annotation_empty_reason"
+                            ),
+                            "annotation_unavailable_reason": bundle.get(
+                                "annotation_unavailable_reason"
+                            ),
+                            "overlay_available": bool(
+                                bundle.get("overlay_available")
+                            ),
+                            "frontend_overlay_required": bool(
+                                bundle.get("frontend_overlay_required")
+                            ),
+                            "duration_guard_status": bundle.get(
+                                "duration_guard_status"
+                            ),
+                            "duration_guard_failed": bool(
+                                bundle.get("duration_guard_failed")
+                            ),
+                            "max_allowed_duration_seconds": bundle.get(
+                                "max_allowed_duration_seconds"
+                            ),
                         },
                     )
                 if cur.rowcount and cur.rowcount > 0:
@@ -1631,7 +1841,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
         "p1_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
-        "default_pre_seconds=%.1f",
+        "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
@@ -1640,6 +1850,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.p1_sink_stability_checks,
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
+        cfg.evidence_max_duration_slack_sec,
     )
 
     processed_dirs: set[str] = set()

@@ -17,6 +17,7 @@ class Config:
     p1_sink_stability_checks: int
     poll_interval_s: int
     default_pre_seconds: float
+    evidence_max_duration_slack_sec: float
 
 
 def load_config() -> Config:
@@ -41,4 +42,7 @@ def load_config() -> Config:
         p1_sink_stability_checks=int(os.getenv("P1_SINK_STABILITY_CHECKS", "2")),
         poll_interval_s=int(os.getenv("MEDIA_POLL_INTERVAL_S", "10")),
         default_pre_seconds=float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
+        evidence_max_duration_slack_sec=float(
+            os.getenv("EVIDENCE_MAX_DURATION_SLACK_SEC", "10")
+        ),
     )

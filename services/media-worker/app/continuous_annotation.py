@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = "1.0"
 DEFAULT_PRE_SECONDS = 5.0
 DEFAULT_POST_SECONDS = 10.0
+ANNOTATION_STATUS_COMPLETE = "complete"
+ANNOTATION_STATUS_EMPTY = "empty"
+ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -461,6 +465,59 @@ def _summary(lines: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _empty_reason(*, observations_loaded: int, fallback_used: bool) -> str:
+    if observations_loaded == 0 and not fallback_used:
+        return "no_annotation_records_for_source_window"
+    return "annotation_records_missing_supported_overlay_objects"
+
+
+def _status_record(summary: dict[str, Any]) -> dict[str, Any]:
+    """Build a non-overlay JSONL status row for empty/unavailable bundles."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "annotation_status",
+        "annotation_status": summary.get("annotation_status"),
+        "annotation_empty_reason": summary.get("annotation_empty_reason"),
+        "annotation_unavailable_reason": summary.get("annotation_unavailable_reason"),
+        "overlay_available": False,
+        "frontend_overlay_required": False,
+        "event_id": summary.get("event_id", ""),
+        "event_type": summary.get("event_type", ""),
+        "source_id": summary.get("source_id", ""),
+        "camera_id": summary.get("camera_id", ""),
+        "clip_start_ts_ms": summary.get("clip_start_ts_ms"),
+        "clip_end_ts_ms": summary.get("clip_end_ts_ms"),
+        "objects": [],
+    }
+
+
+def _atomic_write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            for record in records:
+                fh.write(json.dumps(_jsonable(record), ensure_ascii=False))
+                fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            json.dump(_jsonable(data), fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def build_continuous_annotations(
     pg_conn: psycopg.Connection,
     event_context: dict[str, Any],
@@ -474,10 +531,13 @@ def build_continuous_annotations(
         start_ts_ms=start_ts_ms,
         end_ts_ms=end_ts_ms,
     )
+    observations_loaded = len(observations)
+    fallback_used = False
     if not observations:
         fallback = _fallback_event_observation(event_context)
         if fallback is not None:
             observations = [fallback]
+            fallback_used = True
 
     source_observation_ids = [
         str(row.get("source_observation_id"))
@@ -511,6 +571,9 @@ def build_continuous_annotations(
 
     lines = list(grouped.values())
     summary = _summary(lines)
+    annotation_status = (
+        ANNOTATION_STATUS_COMPLETE if lines else ANNOTATION_STATUS_EMPTY
+    )
     summary.update(
         {
             "clip_start_ts_ms": start_ts_ms,
@@ -520,11 +583,57 @@ def build_continuous_annotations(
             "source_id": source_id,
             "event_id": event_context.get("event_id", ""),
             "event_type": event_context.get("event_type", ""),
-            "frontend_overlay_required": True,
+            "camera_id": event_context.get("camera_id", ""),
+            "annotation_status": annotation_status,
+            "overlay_available": bool(lines),
+            "frontend_overlay_required": bool(lines),
             "annotation_mode": "continuous_jsonl",
+            "annotation_records_loaded": observations_loaded,
+            "annotation_records_used": len(observations),
         }
     )
+    if not lines:
+        summary["annotation_empty_reason"] = _empty_reason(
+            observations_loaded=observations_loaded,
+            fallback_used=fallback_used,
+        )
     return lines, summary
+
+
+def _unavailable_summary(
+    event_context: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    start_ts_ms, end_ts_ms, pre_seconds, post_seconds = _clip_window(event_context)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "annotation_lines": 0,
+        "face_objects": 0,
+        "matched_objects": 0,
+        "low_similarity_objects": 0,
+        "unknown_objects": 0,
+        "pose_unavailable_objects": 0,
+        "action_none_objects": 0,
+        "colors_used": [],
+        "embedding_leaked": False,
+        "image_bytes_leaked": False,
+        "clip_start_ts_ms": start_ts_ms,
+        "clip_end_ts_ms": end_ts_ms,
+        "pre_seconds": pre_seconds,
+        "post_seconds": post_seconds,
+        "source_id": event_context.get("source_id", ""),
+        "event_id": event_context.get("event_id", ""),
+        "event_type": event_context.get("event_type", ""),
+        "camera_id": event_context.get("camera_id", ""),
+        "annotation_status": ANNOTATION_STATUS_UNAVAILABLE,
+        "annotation_unavailable_reason": reason,
+        "annotation_generation_failed": True,
+        "overlay_available": False,
+        "frontend_overlay_required": False,
+        "annotation_mode": "continuous_jsonl",
+        "annotation_records_loaded": 0,
+        "annotation_records_used": 0,
+    }
 
 
 def write_continuous_annotation_bundle(
@@ -535,19 +644,26 @@ def write_continuous_annotation_bundle(
     summary_path: str,
 ) -> dict[str, Any]:
     """Write ``annotations.jsonl`` and ``summary.json`` for one evidence bundle."""
-    lines, summary = build_continuous_annotations(pg_conn, event_context)
     annotations_file = Path(annotations_path)
     summary_file = Path(summary_path)
     annotations_file.parent.mkdir(parents=True, exist_ok=True)
     summary_file.parent.mkdir(parents=True, exist_ok=True)
 
-    with annotations_file.open("w", encoding="utf-8") as fh:
-        for line in lines:
-            fh.write(json.dumps(_jsonable(line), ensure_ascii=False))
-            fh.write("\n")
+    try:
+        lines, summary = build_continuous_annotations(pg_conn, event_context)
+    except Exception as exc:
+        logger.exception(
+            "continuous annotation generation failed event_id=%s",
+            event_context.get("event_id", ""),
+        )
+        summary = _unavailable_summary(
+            event_context,
+            f"annotation_generation_failed:{exc.__class__.__name__}",
+        )
+        lines = []
 
-    with summary_file.open("w", encoding="utf-8") as fh:
-        json.dump(_jsonable(summary), fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
+    records = lines if lines else [_status_record(summary)]
+    _atomic_write_jsonl(annotations_file, records)
+    _atomic_write_json(summary_file, summary)
 
     return summary
