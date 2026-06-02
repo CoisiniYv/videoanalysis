@@ -183,6 +183,21 @@ assert rules_by_algorithm["face.watchlist"]["is_alert_rule"] is True
 assert rules_by_algorithm["behavior.intrusion"]["is_alert_rule"] is True
 assert operator_status == 200
 assert "Camera Algorithm Configuration" in operator_html
+assert "face.observation" in operator_html, "operator page missing face.observation template"
+assert "behavior.running" in operator_html, "operator page missing behavior.running template"
+assert "behavior.wall_climb_suspicious" in operator_html, "operator page missing behavior.wall_climb_suspicious template"
+assert "8090" not in operator_html, "operator page must not reference 8090"
+assert "global_alert_cooldown_s" in operator_html, "operator page missing global_alert_cooldown_s"
+
+# C1G.1b: verify app.js serves and contains real API endpoints
+app_js_req = Request(api_url + "/operator/static/app.js", method="GET")
+with urlopen(app_js_req, timeout=20) as resp:
+    app_js_status = resp.status
+    app_js_text = resp.read().decode("utf-8")
+assert app_js_status == 200
+assert "/api/v1/cameras" in app_js_text, "app.js missing /api/v1/cameras"
+assert "/zones" in app_js_text, "app.js missing /zones endpoint"
+assert "/rules" in app_js_text, "app.js missing /rules endpoint"
 
 summary = {
     "result": "PASS_C1G1_ALGORITHM_CONFIG_API_OPERATOR_PAGE",

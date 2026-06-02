@@ -9,17 +9,27 @@
   <body>
     <header>
       <h1>Camera Algorithm Configuration</h1>
-      <div id="status">Loading</div>
+      <div class="header-right">
+        <span id="api-url" class="api-url"></span>
+        <span id="status">Loading</span>
+      </div>
     </header>
+    <div id="error-box" class="message-box error-box" hidden></div>
+    <div id="success-box" class="message-box success-box" hidden></div>
     <main>
+      <!-- Left: Camera List -->
       <section class="pane camera-list">
         <div class="pane-title">
           <h2>Cameras</h2>
-          <button id="new-camera">New</button>
+          <div>
+            <button id="refresh-cameras">Refresh</button>
+            <button id="new-camera">New</button>
+          </div>
         </div>
         <div id="cameras"></div>
       </section>
 
+      <!-- Middle: Camera Editor -->
       <section class="pane camera-detail">
         <div class="pane-title">
           <h2>Camera</h2>
@@ -37,38 +47,77 @@
           <label>site_id<input name="site_id" /></label>
           <label>location<input name="location" /></label>
           <label>gpu_id<input name="gpu_id" type="number" value="0" /></label>
+          <label>input_type<input name="input_type" value="rtsp" /></label>
           <label>rtsp_transport<input name="rtsp_transport" value="tcp" /></label>
-          <label>global_alert_cooldown_s<input name="global_alert_cooldown_s" type="number" value="30" /></label>
           <label class="inline"><input name="enabled" type="checkbox" checked /> enabled</label>
         </form>
 
-        <div class="pane-title small">
-          <h2>Zones</h2>
-          <div>
-            <button id="add-zone">Add ROI</button>
-            <button id="save-zone">Save ROI</button>
-          </div>
+        <div class="sub-section">
+          <h3>FPS Policy</h3>
+          <form id="fps-form" class="inline-form">
+            <label>max_fps<input name="max_fps" value="8/1" /></label>
+            <label>min_fps<input name="min_fps" value="2/1" /></label>
+          </form>
         </div>
-        <textarea id="zone-json" spellcheck="false"></textarea>
-        <div id="zones"></div>
+
+        <div class="sub-section">
+          <h3>Alert Policy</h3>
+          <form id="alert-form" class="inline-form">
+            <label>global_alert_cooldown_s<input name="global_alert_cooldown_s" type="number" value="30" min="0" /></label>
+            <label class="inline"><input name="store_suppressed_events" type="checkbox" checked /> store_suppressed_events</label>
+            <label class="inline"><input name="suppress_record_request" type="checkbox" checked /> suppress_record_request</label>
+            <label class="inline"><input name="critical_bypass" type="checkbox" /> critical_bypass</label>
+          </form>
+        </div>
+
+        <!-- Full Config Viewer -->
+        <div class="sub-section">
+          <h3>Full Config</h3>
+          <textarea id="full-config" readonly spellcheck="false" placeholder="Select a camera to view full config"></textarea>
+        </div>
       </section>
 
+      <!-- Right: Zones & Rules -->
       <section class="pane rules">
-        <div class="pane-title">
-          <h2>Algorithm Rules</h2>
-          <button id="save-rule">Save Rule</button>
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="zones">Zones</button>
+          <button class="tab-btn" data-tab="rules">Rules</button>
         </div>
-        <div class="templates">
-          <button data-template="behavior.intrusion">添加周界入侵</button>
-          <button data-template="behavior.loitering">添加徘徊</button>
-          <button data-template="behavior.crowd_gathering">添加人群聚集</button>
-          <button data-template="behavior.fall">添加摔倒</button>
-          <button data-template="face.observation">添加人脸 observation</button>
-          <button data-template="face.watchlist">添加重点人员布控</button>
-          <button data-template="face.live_search">添加一键找人</button>
+
+        <!-- Zones Tab -->
+        <div id="tab-zones" class="tab-panel">
+          <div class="pane-title">
+            <h2>Zones</h2>
+            <div>
+              <button id="add-zone-polygon">Add Polygon</button>
+              <button id="add-zone-line">Add Line</button>
+              <button id="save-zone">Save Zone</button>
+            </div>
+          </div>
+          <textarea id="zone-json" spellcheck="false" placeholder="Zone JSON"></textarea>
+          <div id="zones"></div>
         </div>
-        <textarea id="rule-json" spellcheck="false"></textarea>
-        <div id="rules"></div>
+
+        <!-- Rules Tab -->
+        <div id="tab-rules" class="tab-panel" hidden>
+          <div class="pane-title">
+            <h2>Algorithm Rules</h2>
+            <button id="save-rule">Save Rule</button>
+          </div>
+          <div class="templates">
+            <button data-template="face.observation">+ Face Observation</button>
+            <button data-template="face.watchlist">+ Watchlist</button>
+            <button data-template="face.live_search">+ Live Search Config</button>
+            <button data-template="behavior.intrusion">+ Intrusion</button>
+            <button data-template="behavior.loitering">+ Loitering</button>
+            <button data-template="behavior.crowd_gathering">+ Crowd Gathering</button>
+            <button data-template="behavior.fall">+ Fall</button>
+            <button data-template="behavior.running">+ Running</button>
+            <button data-template="behavior.wall_climb_suspicious">+ Wall Climb</button>
+          </div>
+          <textarea id="rule-json" spellcheck="false" placeholder="Rule JSON"></textarea>
+          <div id="rules"></div>
+        </div>
       </section>
     </main>
     <script src="/operator/static/app.js"></script>
