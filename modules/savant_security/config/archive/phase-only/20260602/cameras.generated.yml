@@ -1,0 +1,55 @@
+cameras:
+  cam_v1_4_mount_refresh_1780153998:
+    enabled: true
+    source_id: v1_4_mount_refresh_1780153998
+    name: V1.4 Mount Refresh
+    rtsp_url: file:///testVideo/1080movie.mp4
+    gpu_id: 0
+    zones:
+      v1_4_full_frame:
+        type: polygon
+        points:
+        - - 96.0
+          - 54.0
+        - - 1824.0
+          - 54.0
+        - - 1824.0
+          - 1026.0
+        - - 96.0
+          - 1026.0
+    rules:
+      intrusion:
+        enabled: true
+        zone: v1_4_full_frame
+        severity: medium
+        cooldown_s: 1
+        clip_required: false
+        min_inside_ms: 1
+        snapshot_required: false
+  cam_v1_4_mount_refresh_1780154062:
+    enabled: true
+    source_id: v1_4_mount_refresh_1780154062
+    name: V1.4 Mount Refresh
+    rtsp_url: file:///testVideo/1080movie.mp4
+    gpu_id: 0
+    zones:
+      v1_4_full_frame:
+        type: polygon
+        points:
+        - - 96.0
+          - 54.0
+        - - 1824.0
+          - 54.0
+        - - 1824.0
+          - 1026.0
+        - - 96.0
+          - 1026.0
+    rules:
+      intrusion:
+        enabled: true
+        zone: v1_4_full_frame
+        severity: medium
+        cooldown_s: 1
+        clip_required: false
+        min_inside_ms: 1
+        snapshot_required: false
