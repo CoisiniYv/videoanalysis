@@ -21,4 +21,9 @@ cameras:
         cooldown_s: 60
         clip_required: true
         min_inside_ms: 1
+        min_person_confidence: 0.25
+        min_person_width: 20
+        min_person_height: 40
+        min_visible_keypoints: 0
+        max_bbox_area_ratio: 0.9
         snapshot_required: false

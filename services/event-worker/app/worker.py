@@ -18,7 +18,7 @@ from app.alert_publisher import AlertPublisher
 from app.config import Config, load_config
 from app.record_request import RecordRequestPublisher, _resolve_source_id
 from app.redis_consumer import RedisStreamConsumer
-from app.repository import EventRepository
+from app.repository import EventRepository, _evidence_task_initial_status
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +31,15 @@ R3_1A_DEFAULT_EVIDENCE_POLICY = {
     "pre_seconds": 5,
     "post_seconds": 10,
 }
+_MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
+_MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
 
 
 @dataclass
 class RecordingPolicyState:
     published_requests: int = 0
     last_recorded_at_ms: dict[str, int] = field(default_factory=dict)
+    last_recorded_event_type: dict[str, str] = field(default_factory=dict)
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -70,6 +73,94 @@ def _parse_event(fields: Dict[bytes, bytes]) -> dict | None:
             return None
 
     return event
+
+
+def _parse_person_observation(fields: Dict[bytes, bytes]) -> dict | None:
+    """Parse one accepted person bbox observation from Redis stream fields."""
+
+    data_raw = fields.get(b"data")
+    if not data_raw:
+        logger.warning("person observation stream entry missing data field, skipping")
+        return None
+    try:
+        observation = json.loads(data_raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("failed to parse person observation JSON: %s", exc)
+        return None
+
+    required = [
+        "source_observation_id",
+        "source_id",
+        "camera_id",
+        "timestamp_ms",
+        "person_bbox",
+    ]
+    for field_name in required:
+        if observation.get(field_name) in (None, ""):
+            logger.warning(
+                "person observation missing required field=%s, skipping",
+                field_name,
+            )
+            return None
+    if observation.get("gate_status") != "accepted":
+        logger.warning(
+            "person observation gate_status=%s is not accepted, skipping",
+            observation.get("gate_status"),
+        )
+        return None
+    bbox = observation.get("person_bbox")
+    if not isinstance(bbox, list) or len(bbox) < 4:
+        logger.warning("person observation person_bbox is not xyxy list, skipping")
+        return None
+    try:
+        observation["timestamp_ms"] = int(observation["timestamp_ms"])
+        observation["person_bbox"] = [float(value) for value in bbox[:4]]
+    except (TypeError, ValueError):
+        logger.warning("person observation numeric fields invalid, skipping")
+        return None
+    return observation
+
+
+def _get_evidence_task_status(
+    repo: EventRepository,
+    event: dict,
+    event_id: str,
+) -> str | None:
+    """Return the task status created for this event.
+
+    The real repository reads the persisted status. Tests and lightweight
+    repositories may not implement that lookup, so fall back to the same initial
+    status policy used by EventRepository.create_evidence_task().
+    """
+    if hasattr(repo, "get_evidence_task_status"):
+        try:
+            status = repo.get_evidence_task_status(event_id)
+        except Exception:
+            logger.exception("evidence_task status lookup failed event_id=%s", event_id)
+            status = None
+        if status:
+            return str(status)
+
+    status, _reason = _evidence_task_initial_status(event)
+    return status
+
+
+def _recording_gate_ts_ms(event: dict) -> int:
+    """Return a comparable timestamp for recording cooldown decisions.
+
+    Behavior events carry epoch millisecond timestamps. Some face observations
+    carry stream PTS-relative milliseconds; those are valid for frame identity
+    but not for wall-clock cooldown comparisons, so use current wall-clock for
+    the recording gate only.
+    """
+    now_ms = int(time.time() * 1000)
+    try:
+        ts_ms = int(event.get("event_ts_ms", 0) or 0)
+    except (TypeError, ValueError):
+        ts_ms = 0
+    if ts_ms < _MIN_EPOCH_MS or ts_ms > now_ms + _MAX_FUTURE_SKEW_MS:
+        return now_ms
+    return ts_ms
 
 
 def _handle_event(
@@ -140,6 +231,7 @@ def _handle_event(
                 source_event_id,
             )
 
+    evidence_task_status: str | None = None
     if (
         newly_inserted
         and not alert_policy_decision.suppressed
@@ -149,6 +241,7 @@ def _handle_event(
         if hasattr(repo, "create_evidence_task"):
             try:
                 repo.create_evidence_task(event, event_id)
+                evidence_task_status = _get_evidence_task_status(repo, event, event_id)
             except Exception:
                 logger.exception(
                     "evidence_task creation failed for source_event_id=%s",
@@ -174,10 +267,14 @@ def _handle_event(
             existing_status = repo.get_media_clip_status(source_event_id)
             allowed = True
             skip_reason = ""
+            recording_gate_ts_ms = _recording_gate_ts_ms(event)
 
             if recording_event_types and event_type not in recording_event_types:
                 allowed = False
                 skip_reason = "event_type_mismatch"
+            elif evidence_task_status != "pending":
+                allowed = False
+                skip_reason = f"evidence_task_status={evidence_task_status or 'missing'}"
             elif recording_source_id and source_id != recording_source_id:
                 allowed = False
                 skip_reason = "source_id_mismatch"
@@ -191,14 +288,27 @@ def _handle_event(
                     skip_reason = "max_requests_reached"
                 elif recording_cooldown_seconds > 0:
                     last_recorded_at = recording_state.last_recorded_at_ms.get(source_id)
-                    event_ts_ms = int(event.get("event_ts_ms", 0))
                     if (
                         last_recorded_at is not None
-                        and event_ts_ms - last_recorded_at
+                        and recording_gate_ts_ms - last_recorded_at
                         < recording_cooldown_seconds * 1000
                     ):
                         allowed = False
                         skip_reason = "cooldown"
+                    elif (
+                        event_type == "intrusion"
+                        and last_recorded_at is not None
+                        and recording_state.last_recorded_event_type.get(source_id)
+                        == "intrusion"
+                        and hasattr(repo, "has_event_type_since_ts_ms")
+                        and repo.has_event_type_since_ts_ms(
+                            source_id=source_id,
+                            event_type="watchlist_hit",
+                            since_ts_ms=last_recorded_at,
+                        )
+                    ):
+                        allowed = False
+                        skip_reason = "watchlist_priority_after_intrusion"
 
             if allowed and source_event_id and record_publisher.has_request(
                 source_event_id, "savant_replay"
@@ -239,8 +349,11 @@ def _handle_event(
                         if recording_state is not None:
                             recording_state.published_requests += 1
                             if source_id:
-                                recording_state.last_recorded_at_ms[source_id] = int(
-                                    event.get("event_ts_ms", 0)
+                                recording_state.last_recorded_at_ms[source_id] = (
+                                    recording_gate_ts_ms
+                                )
+                                recording_state.last_recorded_event_type[source_id] = (
+                                    event_type
                                 )
                 except Exception:
                     logger.exception(
@@ -358,6 +471,54 @@ def _process_batch(
     return inserted, duplicates
 
 
+def _handle_person_observation(
+    observation: dict,
+    msg_id: str,
+    repo: EventRepository,
+    consumer: RedisStreamConsumer,
+) -> str:
+    """Insert one person bbox observation and ACK on success/duplicate."""
+
+    try:
+        obs_id = repo.insert_person_bbox_observation(observation)
+    except Exception:
+        logger.exception(
+            "person observation db insert failed source_observation_id=%s msg_id=%s",
+            observation.get("source_observation_id"),
+            msg_id,
+        )
+        return "failed"
+
+    if not consumer.ack(msg_id):
+        logger.error("person observation ack failed msg_id=%s", msg_id)
+    return "inserted" if obs_id is not None else "duplicate"
+
+
+def _process_person_observation_batch(
+    messages: list[tuple[str, dict[bytes, bytes]]],
+    repo: EventRepository,
+    consumer: RedisStreamConsumer,
+) -> tuple[int, int, int, int]:
+    inserted = 0
+    duplicates = 0
+    skipped = 0
+    failed = 0
+    for msg_id, fields in messages:
+        observation = _parse_person_observation(fields)
+        if observation is None:
+            skipped += 1
+            consumer.ack(msg_id)
+            continue
+        outcome = _handle_person_observation(observation, msg_id, repo, consumer)
+        if outcome == "inserted":
+            inserted += 1
+        elif outcome == "duplicate":
+            duplicates += 1
+        else:
+            failed += 1
+    return inserted, duplicates, skipped, failed
+
+
 def connect_redis(cfg: Config) -> Redis:
     client = Redis.from_url(cfg.redis_url, decode_responses=False)
     client.ping()
@@ -383,6 +544,16 @@ def run_worker(
         redis_client, cfg.event_stream, cfg.consumer_group, cfg.consumer_name
     )
     consumer.ensure_group()
+    person_consumer: RedisStreamConsumer | None = None
+    if cfg.person_observation_enabled:
+        person_consumer = RedisStreamConsumer(
+            redis_client,
+            cfg.person_observation_stream,
+            cfg.person_observation_consumer_group,
+            cfg.person_observation_consumer_name,
+            start_id=cfg.person_observation_consumer_start_id,
+        )
+        person_consumer.ensure_group()
     repo = EventRepository(pg_conn)
     alert_policy_service = AlertPolicyService(repo)
     alert_publisher = AlertPublisher(redis_client, cfg.alert_stream)
@@ -401,7 +572,9 @@ def run_worker(
         "worker started stream=%s group=%s consumer=%s alert_stream=%s "
         "recording_enabled=%s record_request_stream=%s recording_event_types=%s "
         "recording_source_id=%s recording_max_requests_per_run=%s "
-        "recording_cooldown_seconds=%s",
+        "recording_cooldown_seconds=%s person_observation_enabled=%s "
+        "person_observation_stream=%s person_observation_group=%s "
+        "person_observation_start_id=%s",
         cfg.event_stream,
         cfg.consumer_group,
         cfg.consumer_name,
@@ -412,14 +585,66 @@ def run_worker(
         cfg.recording_source_id,
         cfg.recording_max_requests_per_run,
         cfg.recording_cooldown_seconds,
+        cfg.person_observation_enabled,
+        cfg.person_observation_stream,
+        cfg.person_observation_consumer_group,
+        cfg.person_observation_consumer_start_id,
     )
 
     total_inserted = 0
     total_duplicates = 0
+    total_person_inserted = 0
+    total_person_duplicates = 0
+    total_person_skipped = 0
+    total_person_failed = 0
     last_report = time.monotonic()
 
     while not shutdown_requested:
         try:
+            if person_consumer is not None:
+                person_pending = person_consumer.read_pending(count=cfg.batch_size)
+                if person_pending:
+                    pins, pdup, pskip, pfail = _process_person_observation_batch(
+                        person_pending,
+                        repo,
+                        person_consumer,
+                    )
+                    total_person_inserted += pins
+                    total_person_duplicates += pdup
+                    total_person_skipped += pskip
+                    total_person_failed += pfail
+                    if pins or pdup or pskip or pfail:
+                        logger.info(
+                            "person observation pending batch: inserted=%d "
+                            "duplicates=%d skipped=%d failed=%d",
+                            pins,
+                            pdup,
+                            pskip,
+                            pfail,
+                        )
+
+                person_new = person_consumer.read_new(
+                    count=cfg.batch_size, block_ms=1
+                )
+                if person_new:
+                    pins, pdup, pskip, pfail = _process_person_observation_batch(
+                        person_new,
+                        repo,
+                        person_consumer,
+                    )
+                    total_person_inserted += pins
+                    total_person_duplicates += pdup
+                    total_person_skipped += pskip
+                    total_person_failed += pfail
+                    logger.info(
+                        "person observation new batch: inserted=%d duplicates=%d "
+                        "skipped=%d failed=%d",
+                        pins,
+                        pdup,
+                        pskip,
+                        pfail,
+                    )
+
             # 1. Process pending messages (recovery)
             pending = consumer.read_pending(count=cfg.batch_size)
             if pending:
@@ -468,9 +693,15 @@ def run_worker(
             now = time.monotonic()
             if now - last_report >= 60:
                 logger.info(
-                    "worker summary: total_inserted=%d total_duplicates=%d",
+                    "worker summary: total_inserted=%d total_duplicates=%d "
+                    "total_person_inserted=%d total_person_duplicates=%d "
+                    "total_person_skipped=%d total_person_failed=%d",
                     total_inserted,
                     total_duplicates,
+                    total_person_inserted,
+                    total_person_duplicates,
+                    total_person_skipped,
+                    total_person_failed,
                 )
                 last_report = now
 
@@ -479,7 +710,13 @@ def run_worker(
             time.sleep(1)
 
     logger.info(
-        "worker stopped: total_inserted=%d total_duplicates=%d",
+        "worker stopped: total_inserted=%d total_duplicates=%d "
+        "total_person_inserted=%d total_person_duplicates=%d "
+        "total_person_skipped=%d total_person_failed=%d",
         total_inserted,
         total_duplicates,
+        total_person_inserted,
+        total_person_duplicates,
+        total_person_skipped,
+        total_person_failed,
     )

@@ -28,6 +28,11 @@ DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC = 10.0
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
+SNAPSHOT_ELIGIBLE_CLIP_STATUSES = ("ready", "generated")
+SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
+    "generated_corrupt",
+    BUNDLE_STATUS_DURATION_GUARD_FAILED,
+)
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -294,6 +299,7 @@ def _event_context_from_row(event_id: str, row: tuple) -> dict:
         "keyframe_uuid": row[9] if len(row) > 9 else payload.get("keyframe_uuid", ""),
         "severity": row[10] if len(row) > 10 else "",
         "evidence_policy": row[11] if len(row) > 11 else {},
+        "created_at": row[12] if len(row) > 12 else None,
         "previous_keyframe_uuid": media.get("previous_keyframe_uuid", ""),
     }
 
@@ -343,7 +349,7 @@ def _load_event_context(pg_conn: psycopg.Connection, event_id: str) -> dict:
             """
             SELECT event_type, camera_id, source_id, track_id, event_ts_ms,
                    frame_uuid, payload, confidence, source_event_id, keyframe_uuid,
-                   severity, evidence_policy
+                   severity, evidence_policy, created_at
             FROM events
             WHERE id = %s::uuid
             """,
@@ -451,11 +457,17 @@ def _event_annotation_from_context(
 
     overlays = []
     missing = []
-    bbox = payload.get("bbox") or payload.get("person_bbox")
-    bbox_source = "event.payload.bbox" if payload.get("bbox") else "event.payload.person_bbox"
+    bbox = payload.get("person_bbox")
+    bbox_source = "event.payload.person_bbox"
     if bbox is None:
-        bbox = media.get("bbox") or media.get("person_bbox")
-        bbox_source = "event.payload.media.bbox" if media.get("bbox") else "event.payload.media.person_bbox"
+        bbox = payload.get("bbox")
+        bbox_source = "event.payload.bbox"
+    if bbox is None:
+        bbox = media.get("person_bbox")
+        bbox_source = "event.payload.media.person_bbox"
+    if bbox is None:
+        bbox = media.get("bbox")
+        bbox_source = "event.payload.media.bbox"
     bbox_source_format = (
         payload.get("bbox_format")
         or payload.get("person_bbox_format")
@@ -891,7 +903,7 @@ def _clip_status_from_validation(clip_validation: dict) -> str:
     if clip_validation.get("decode_error_count", 0) > 0:
         return "generated_corrupt"
     if clip_validation.get("ok") is True:
-        return "generated"
+        return "ready"
     if clip_validation.get("ok") is False:
         return "generated_corrupt"
     return "generated_unverified"
@@ -1089,6 +1101,7 @@ def _finalize_p1_evidence_bundle(
         event_context,
         annotations_path=str(annotations_jsonl_out),
         summary_path=str(summary_out),
+        replay_metadata_path=str(sink_metadata_out),
     )
     logger.info(
         "continuous_annotations_written event_id=%s lines=%s faces=%s matched=%s",
@@ -1403,11 +1416,37 @@ def _process_sink_output(
     return updated
 
 
-def _snapshot_needed(pg_conn: psycopg.Connection) -> list[dict]:
-    """Return events with clip_status=ready that need snapshot generation.
+def _promote_generated_clips_to_ready(pg_conn: psycopg.Connection) -> int:
+    """Promote historical clean generated clips to the current ready status."""
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET media_status = 'ready',
+                    payload = jsonb_set(
+                        COALESCE(payload, '{}'::jsonb),
+                        '{media,clip_status}',
+                        '"ready"'::jsonb
+                    ),
+                    updated_at = now()
+                WHERE payload -> 'media' ->> 'clip_status' = 'generated'
+                  AND clip_path IS NOT NULL
+                  AND clip_path != ''
+                """
+            )
+            return cur.rowcount or 0
+    except Exception:
+        logger.exception("_promote_generated_clips_to_ready failed")
+        return 0
 
-    Conditions: clip_status is 'ready', snap_status is not 'ready' or
-    'not_required', snapshot_required=true, and clip_path is non-null.
+
+def _snapshot_needed(pg_conn: psycopg.Connection) -> list[dict]:
+    """Return events with clean clip statuses that need snapshot generation.
+
+    Conditions: clip_status is 'ready' or legacy-clean 'generated',
+    snap_status is not 'ready' or 'not_required', snapshot_required=true,
+    and clip_path is non-null.
     """
     try:
         with pg_conn.cursor() as cur:
@@ -1423,7 +1462,8 @@ def _snapshot_needed(pg_conn: psycopg.Connection) -> list[dict]:
                            AS snapshot_required,
                        payload -> 'media' ->> 'snapshot_status' AS snap_status
                 FROM events
-                WHERE payload -> 'media' ->> 'clip_status' = 'ready'
+                WHERE payload -> 'media' ->> 'clip_status'
+                      IN ('ready', 'generated')
                   AND clip_path IS NOT NULL
                   AND clip_path != ''
                 """
@@ -1526,7 +1566,7 @@ def _update_snapshot_status(
 
 
 def _mark_not_required(pg_conn: psycopg.Connection) -> int:
-    """Mark events with snapshot_required=false && clip ready as not_required."""
+    """Mark events with snapshot_required=false && clean clip as not_required."""
     try:
         with pg_conn.cursor() as cur:
             cur.execute(
@@ -1538,7 +1578,8 @@ def _mark_not_required(pg_conn: psycopg.Connection) -> int:
                         '"not_required"'::jsonb
                     ),
                     updated_at = now()
-                WHERE payload -> 'media' ->> 'clip_status' = 'ready'
+                WHERE payload -> 'media' ->> 'clip_status'
+                      IN ('ready', 'generated')
                   AND (
                       COALESCE(payload -> 'media' ->> 'snapshot_required', 'false') = 'false'
                       OR (payload -> 'media' ? 'snapshot_required'
@@ -1559,7 +1600,7 @@ def _process_pending_snapshots(
     snapshot_output_dir: str,
     default_pre_seconds: float,
 ) -> int:
-    """Generate snapshots for events that have clip_status=ready but no snapshot yet.
+    """Generate snapshots for events that have clean clips but no snapshot yet.
 
     Idempotent: skips events whose snapshot_status is already 'ready' or
     'not_required'.  If snapshot_status is 'failed' but the file exists

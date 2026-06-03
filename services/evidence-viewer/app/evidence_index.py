@@ -352,6 +352,17 @@ def normalize_bbox(
     height: float,
 ) -> dict[str, float] | None:
     values = bbox.get("values")
+    fmt = str(bbox.get("format") or "cxcywh").lower()
+    if not isinstance(values, list):
+        if isinstance(bbox.get("xyxy"), list):
+            values = bbox.get("xyxy")
+            fmt = "xyxy"
+        elif isinstance(bbox.get("xywh"), list):
+            values = bbox.get("xywh")
+            fmt = "xywh"
+        elif isinstance(bbox.get("cxcywh"), list):
+            values = bbox.get("cxcywh")
+            fmt = "cxcywh"
     if not isinstance(values, list) or len(values) < 4:
         return None
     try:
@@ -359,7 +370,6 @@ def normalize_bbox(
     except (TypeError, ValueError):
         return None
 
-    fmt = str(bbox.get("format") or "cxcywh").lower()
     if "cxcywh" in fmt:
         x1, y1, x2, y2 = v0 - v2 / 2, v1 - v3 / 2, v0 + v2 / 2, v1 + v3 / 2
     elif "xyxy" in fmt:
@@ -376,6 +386,36 @@ def normalize_bbox(
     if x2 <= x1 or y2 <= y1:
         return None
     return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+
+def overlay_objects_for_annotation(annotation: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return drawable overlay objects for one annotation record."""
+    objects: list[dict[str, Any]] = []
+    raw_objects = annotation.get("objects")
+    if isinstance(raw_objects, list):
+        objects.extend(obj for obj in raw_objects if isinstance(obj, dict))
+
+    if annotation.get("record_type") != "object_annotation":
+        return objects
+
+    obj: dict[str, Any] = {}
+    for key in (
+        "object_type",
+        "annotation_role",
+        "track_id",
+        "bbox",
+        "identity",
+        "label",
+        "action",
+        "style",
+        "landmarks",
+        "pose",
+    ):
+        if key in annotation:
+            obj[key] = annotation[key]
+    if obj:
+        objects.append(obj)
+    return objects
 
 
 def annotation_time_seconds(
@@ -406,7 +446,57 @@ def object_is_matched(obj: dict[str, Any]) -> bool:
     )
 
 
+def object_is_behavior_event(obj: dict[str, Any]) -> bool:
+    label = obj.get("label") if isinstance(obj.get("label"), dict) else {}
+    action = obj.get("action") if isinstance(obj.get("action"), dict) else {}
+    return bool(
+        obj.get("object_type") == "person"
+        and (
+            obj.get("annotation_role") == "behavior_event"
+            or label.get("kind") == "behavior_event"
+            or action.get("event_type") == "intrusion"
+            or action.get("status") == "event_triggered"
+        )
+    )
+
+
+def object_is_person_context(obj: dict[str, Any]) -> bool:
+    return bool(
+        obj.get("object_type") == "person"
+        and (
+            obj.get("annotation_role") == "person_context"
+            or _as_role_style_reason(obj) == "person_detection"
+        )
+    )
+
+
+def _as_role_style_reason(obj: dict[str, Any]) -> str:
+    style = obj.get("style") if isinstance(obj.get("style"), dict) else {}
+    return str(style.get("reason") or "")
+
+
+def object_visible_by_default(obj: dict[str, Any]) -> bool:
+    return (
+        object_is_person_context(obj)
+        or object_is_behavior_event(obj)
+        or object_is_matched(obj)
+    )
+
+
 def object_label(obj: dict[str, Any], annotation: dict[str, Any]) -> str:
+    if object_is_person_context(obj):
+        track = obj.get("track_id") or ""
+        return f"Person | track {track}" if track else "Person"
+
+    if object_is_behavior_event(obj):
+        label = obj.get("label") if isinstance(obj.get("label"), dict) else {}
+        text = label.get("text")
+        if text:
+            return str(text)
+        action = obj.get("action") if isinstance(obj.get("action"), dict) else {}
+        event_type = str(action.get("event_type") or "Intrusion")
+        return event_type.replace("_", " ").title()
+
     identity = obj.get("identity") if isinstance(obj.get("identity"), dict) else {}
     track = obj.get("track_id") or ""
     ts = annotation.get("timestamp_ms") or ""
@@ -440,6 +530,36 @@ def object_style(obj: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     style = obj.get("style") if isinstance(obj.get("style"), dict) else {}
     identity = obj.get("identity") if isinstance(obj.get("identity"), dict) else {}
     warnings: list[str] = []
+
+    if object_is_person_context(obj):
+        color = style.get("bbox_color") or style.get("color") or "#00C853"
+        return (
+            {
+                "bbox_color": color,
+                "label_color": style.get("label_color") or color,
+                "line_width": style.get("line_width") or 2,
+                "priority": style.get("priority") if style.get("priority") is not None else "context",
+                "reason": style.get("reason") or "person_detection",
+            },
+            warnings,
+        )
+
+    if object_is_behavior_event(obj):
+        color = style.get("bbox_color") or "#FF6D00"
+        action = obj.get("action") if isinstance(obj.get("action"), dict) else {}
+        reason = style.get("reason") or action.get("event_type") or "behavior_event"
+        priority = style.get("priority") if style.get("priority") is not None else "warning"
+        return (
+            {
+                "bbox_color": color,
+                "label_color": style.get("label_color") or color,
+                "line_width": style.get("line_width") or 3,
+                "priority": priority,
+                "reason": reason,
+            },
+            warnings,
+        )
+
     status = identity.get("status")
     match_status = identity.get("match_status")
     is_matched = object_is_matched(obj)
@@ -457,9 +577,9 @@ def object_style(obj: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         reason = "low_similarity_candidate"
         priority = style.get("priority") if style.get("priority") is not None else 30
     else:
-        color = style.get("bbox_color") or "#9E9E9E"
+        color = style.get("bbox_color") or "#00B0FF"
         if str(color).upper() in {"#D50000", "#FF0000", "#E53935", "#FF1744"}:
-            color = "#9E9E9E"
+            color = "#00B0FF"
             warnings.append("unknown_style_overridden_from_event_alert")
         reason = "unknown_face"
         priority = style.get("priority") if style.get("priority") is not None else 10

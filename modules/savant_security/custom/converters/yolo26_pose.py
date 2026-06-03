@@ -34,6 +34,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
         confidence_threshold: float = 0.35,
         keypoint_threshold: float = 0.25,
         force_nms: bool = False,
+        nms_threshold: float = 0.6,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -41,6 +42,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
             layout=decoder_layout,
             confidence_threshold=confidence_threshold,
             force_nms=force_nms,
+            nms_threshold=nms_threshold,
         )
         self._keypoint_threshold = keypoint_threshold
         self._call_count = 0
@@ -54,6 +56,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
             f"confidence_threshold={confidence_threshold} "
             f"keypoint_threshold={keypoint_threshold} "
             f"force_nms={force_nms}",
+            f"nms_threshold={nms_threshold}",
             flush=True,
         )
 

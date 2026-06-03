@@ -29,20 +29,25 @@ class RedisStreamConsumer:
         stream: str,
         group: str,
         consumer: str,
+        start_id: str = "$",
     ) -> None:
         self._client = client
         self._stream = stream
         self._group = group
         self._consumer = consumer
+        self._start_id = start_id
 
     def ensure_group(self) -> None:
         """Create the consumer group if it does not already exist."""
         try:
             self._client.xgroup_create(
-                self._stream, self._group, id="$", mkstream=True
+                self._stream, self._group, id=self._start_id, mkstream=True
             )
             logger.info(
-                "created consumer group=%s stream=%s", self._group, self._stream
+                "created consumer group=%s stream=%s start_id=%s",
+                self._group,
+                self._stream,
+                self._start_id,
             )
         except Exception as exc:
             if _GROUP_EXISTS_MSG in str(exc):

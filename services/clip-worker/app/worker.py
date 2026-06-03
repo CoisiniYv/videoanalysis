@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 
 import psycopg
 from redis import Redis
@@ -20,6 +21,15 @@ logger = logging.getLogger(__name__)
 
 shutdown_requested = False
 MISSING_KEYFRAME_ERROR = "missing_keyframe_uuid_and_anchored_lookup_unavailable"
+_MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
+_MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
+
+
+@dataclass(frozen=True)
+class ClipGateDecision:
+    allowed: bool
+    reason: str = ""
+    error_message: str = ""
 
 
 def _request_identity(req: dict) -> str:
@@ -38,6 +48,62 @@ def _keyframe_from_request(req: dict) -> tuple[str | None, str]:
     if keyframe_uuid:
         return str(keyframe_uuid), "keyframe_uuid"
     return None, MISSING_KEYFRAME_ERROR
+
+
+def _cooldown_gate_ts_ms(req: dict) -> int:
+    """Return a comparable timestamp for clip-worker cooldown decisions."""
+    now_ms = int(time.time() * 1000)
+    try:
+        ts_ms = int(req.get("event_ts_ms", 0) or 0)
+    except (TypeError, ValueError):
+        ts_ms = 0
+    if ts_ms < _MIN_EPOCH_MS or ts_ms > now_ms + _MAX_FUTURE_SKEW_MS:
+        return now_ms
+    return ts_ms
+
+
+def _max_jobs_limit_enabled(cfg: Config) -> bool:
+    """Only one-shot invocations may use CLIP_WORKER_MAX_JOBS_PER_RUN as a cap."""
+    return cfg.run_once and cfg.max_jobs_per_run > 0
+
+
+def _max_jobs_limit_reached(cfg: Config, jobs_created: int) -> bool:
+    return _max_jobs_limit_enabled(cfg) and jobs_created >= cfg.max_jobs_per_run
+
+
+def _clip_gate_decision(
+    cfg: Config,
+    *,
+    jobs_created: int,
+    active_job_count: int,
+    camera_id: str,
+    cooldown_gate_ts_ms: int,
+    last_job_by_camera: dict[str, int],
+) -> ClipGateDecision:
+    if _max_jobs_limit_reached(cfg, jobs_created):
+        return ClipGateDecision(
+            allowed=False,
+            reason="max_jobs_reached",
+            error_message="CLIP_WORKER_MAX_JOBS_PER_RUN reached",
+        )
+    if cfg.max_concurrent_jobs > 0 and active_job_count >= cfg.max_concurrent_jobs:
+        return ClipGateDecision(
+            allowed=False,
+            reason="max_concurrent_reached",
+            error_message="CLIP_WORKER_MAX_CONCURRENT_JOBS reached",
+        )
+    if (
+        cfg.per_camera_cooldown_seconds > 0
+        and camera_id
+        and cooldown_gate_ts_ms - last_job_by_camera.get(camera_id, 0)
+        < cfg.per_camera_cooldown_seconds * 1000
+    ):
+        return ClipGateDecision(
+            allowed=False,
+            reason="cooldown",
+            error_message="CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS reached",
+        )
+    return ClipGateDecision(allowed=True)
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -80,15 +146,19 @@ def run_worker(
     _ensure_group(redis_client, stream, group)
     replay = ReplayClient(cfg.replay_api_url)
     jobs_created = 0
+    active_jobs_until: list[float] = []
     last_job_by_camera: dict[str, int] = defaultdict(int)
     seen_requests: set[str] = set()
 
     logger.info(
         "clip-worker started stream=%s group=%s replay=%s "
-        "max_jobs_per_run=%s max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
+        "max_jobs_per_run=%s run_once=%s max_jobs_per_run_effective=%s "
+        "max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
         "stop_condition_mode=%s replay_fps=%s allow_unbounded_keyframe_fallback=%s",
         stream, group, cfg.replay_api_url,
         cfg.max_jobs_per_run,
+        cfg.run_once,
+        "enabled" if _max_jobs_limit_enabled(cfg) else "disabled",
         cfg.max_concurrent_jobs,
         cfg.per_camera_cooldown_seconds,
         cfg.replay_stop_condition_mode,
@@ -107,6 +177,9 @@ def run_worker(
                 count=10, block=cfg.poll_timeout_ms,
             )
             if not result:
+                if cfg.run_once:
+                    logger.info("clip-worker run_once completed with no messages")
+                    break
                 continue
 
             for _stream_name, entries in result:
@@ -131,69 +204,38 @@ def run_worker(
                     source_id = req.get("source_id", "")
                     source_event_id = req.get("source_event_id", "")
                     event_ts_ms = int(req.get("event_ts_ms", 0))
+                    cooldown_gate_ts_ms = _cooldown_gate_ts_ms(req)
                     camera_id = req.get("camera_id", "")
                     keyframe_uuid, keyframe_source = _keyframe_from_request(req)
+                    now_monotonic = time.monotonic()
+                    active_jobs_until = [
+                        until for until in active_jobs_until if until > now_monotonic
+                    ]
 
-                    if (
-                        cfg.max_jobs_per_run > 0
-                        and jobs_created >= cfg.max_jobs_per_run
-                    ):
+                    gate = _clip_gate_decision(
+                        cfg,
+                        jobs_created=jobs_created,
+                        active_job_count=len(active_jobs_until),
+                        camera_id=str(camera_id),
+                        cooldown_gate_ts_ms=cooldown_gate_ts_ms,
+                        last_job_by_camera=last_job_by_camera,
+                    )
+                    if not gate.allowed:
                         logger.info(
-                            "clip_worker_skipped max_jobs_reached event_id=%s "
-                            "source_event_id=%s",
-                            event_id,
-                            source_event_id,
-                        )
-                        update_clip_status(
-                            pg_conn,
-                            event_id,
-                            "skipped_by_poc_limit",
-                            error_message="CLIP_WORKER_MAX_JOBS_PER_RUN reached",
-                        )
-                        seen_requests.add(request_id)
-                        redis_client.xack(stream, group, msg_id)
-                        total_processed += 1
-                        continue
-
-                    if (
-                        cfg.max_concurrent_jobs > 0
-                        and jobs_created >= cfg.max_concurrent_jobs
-                    ):
-                        logger.info(
-                            "clip_worker_skipped max_concurrent_reached event_id=%s "
-                            "source_event_id=%s",
-                            event_id,
-                            source_event_id,
-                        )
-                        update_clip_status(
-                            pg_conn,
-                            event_id,
-                            "skipped_by_poc_limit",
-                            error_message="CLIP_WORKER_MAX_CONCURRENT_JOBS reached",
-                        )
-                        seen_requests.add(request_id)
-                        redis_client.xack(stream, group, msg_id)
-                        total_processed += 1
-                        continue
-
-                    if (
-                        cfg.per_camera_cooldown_seconds > 0
-                        and camera_id
-                        and event_ts_ms - last_job_by_camera[camera_id]
-                        < cfg.per_camera_cooldown_seconds * 1000
-                    ):
-                        logger.info(
-                            "clip_worker_skipped cooldown event_id=%s source_event_id=%s "
-                            "camera_id=%s",
+                            "clip_worker_skipped %s event_id=%s source_event_id=%s "
+                            "camera_id=%s jobs_created=%s run_once=%s",
+                            gate.reason,
                             event_id,
                             source_event_id,
                             camera_id,
+                            jobs_created,
+                            cfg.run_once,
                         )
                         update_clip_status(
                             pg_conn,
                             event_id,
                             "skipped_by_poc_limit",
-                            error_message="CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS reached",
+                            error_message=gate.error_message,
                         )
                         seen_requests.add(request_id)
                         redis_client.xack(stream, group, msg_id)
@@ -285,6 +327,8 @@ def run_worker(
                     # Create replay job
                     stop_condition_mode = cfg.replay_stop_condition_mode
                     fallback_reason = None
+                    pre_seconds = int(req.get("pre_seconds", cfg.default_pre_seconds))
+                    post_seconds = int(req.get("post_seconds", cfg.default_post_seconds))
                     if stop_condition_mode != "ts_delta_sec":
                         fallback_reason = (
                             "configured_frame_count_fallback"
@@ -292,8 +336,8 @@ def run_worker(
                     job_id = replay.create_job(
                         source_id=source_id,
                         keyframe_uuid=keyframe_uuid,
-                        pre_seconds=int(req.get("pre_seconds", cfg.default_pre_seconds)),
-                        post_seconds=int(req.get("post_seconds", cfg.default_post_seconds)),
+                        pre_seconds=pre_seconds,
+                        post_seconds=post_seconds,
                         sink_endpoint=cfg.replay_job_sink_url,
                         labels={"event_id": event_id},
                         stop_condition_mode=stop_condition_mode,
@@ -314,9 +358,12 @@ def run_worker(
                             replay_job_request=replay.last_job_request,
                         )
                         jobs_created += 1
+                        active_jobs_until.append(
+                            time.monotonic() + float(pre_seconds + post_seconds + 5)
+                        )
                         seen_requests.add(request_id)
                         if camera_id:
-                            last_job_by_camera[camera_id] = event_ts_ms
+                            last_job_by_camera[camera_id] = cooldown_gate_ts_ms
                     else:
                         logger.error(
                             "replay_job_creation_failed request_id=%s event_id=%s",
@@ -336,6 +383,13 @@ def run_worker(
             if now - last_report >= 60:
                 logger.info("clip-worker summary: total_processed=%d", total_processed)
                 last_report = now
+            if cfg.run_once:
+                logger.info(
+                    "clip-worker run_once completed: total_processed=%d jobs_created=%d",
+                    total_processed,
+                    jobs_created,
+                )
+                break
 
         except Exception:
             logger.exception("worker loop error, sleeping 1s")

@@ -12,6 +12,13 @@ parameters:
   batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
   max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
   pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+  pose_confidence_threshold: ${oc.decode:${oc.env:POSE_CONFIDENCE_THRESHOLD, 0.25}}
+  pose_keypoint_threshold: ${oc.decode:${oc.env:POSE_KEYPOINT_THRESHOLD, 0.25}}
+  pose_force_nms: ${oc.decode:${oc.env:POSE_FORCE_NMS, true}}
+  pose_selector_confidence_threshold: ${oc.decode:${oc.env:POSE_SELECTOR_CONFIDENCE_THRESHOLD, 0.25}}
+  pose_selector_nms_iou_threshold: ${oc.decode:${oc.env:POSE_SELECTOR_NMS_IOU_THRESHOLD, 0.6}}
+  pose_min_width: ${oc.decode:${oc.env:POSE_MIN_WIDTH, 20}}
+  pose_min_height: ${oc.decode:${oc.env:POSE_MIN_HEIGHT, 40}}
   face_detector_batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
   face_embedding_batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
   face_confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
@@ -55,9 +62,10 @@ pipeline:
             class_name: Yolo26PoseConverter
             kwargs:
               decoder_layout: post_nms_57
-              confidence_threshold: 0.01
-              keypoint_threshold: 0.01
-              force_nms: false
+              confidence_threshold: ${parameters.pose_confidence_threshold}
+              keypoint_threshold: ${parameters.pose_keypoint_threshold}
+              force_nms: ${parameters.pose_force_nms}
+              nms_threshold: ${parameters.pose_selector_nms_iou_threshold}
           objects:
             - class_id: 0
               label: person
@@ -65,10 +73,10 @@ pipeline:
                 module: savant.selector.detector
                 class_name: BBoxSelector
                 kwargs:
-                  confidence_threshold: 0.01
-                  nms_iou_threshold: 0.9
-                  min_width: 1
-                  min_height: 1
+                  confidence_threshold: ${parameters.pose_selector_confidence_threshold}
+                  nms_iou_threshold: ${parameters.pose_selector_nms_iou_threshold}
+                  min_width: ${parameters.pose_min_width}
+                  min_height: ${parameters.pose_min_height}
           attributes:
             - name: keypoints
 

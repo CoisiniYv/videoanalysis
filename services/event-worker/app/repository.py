@@ -78,6 +78,36 @@ _COUNT_BY_SID_SQL = """
 SELECT COUNT(*) FROM events WHERE source_event_id = %s
 """
 
+_INSERT_PERSON_BBOX_OBSERVATION_SQL = """
+INSERT INTO person_bbox_observations (
+    source_observation_id,
+    source_id,
+    camera_id,
+    track_id,
+    timestamp_ms,
+    frame_pts,
+    frame_num,
+    person_bbox,
+    person_confidence,
+    gate_status,
+    payload
+) VALUES (
+    %(source_observation_id)s,
+    %(source_id)s,
+    %(camera_id)s,
+    %(track_id)s,
+    %(timestamp_ms)s,
+    %(frame_pts)s,
+    %(frame_num)s,
+    %(person_bbox)s::jsonb,
+    %(person_confidence)s,
+    %(gate_status)s,
+    %(payload)s::jsonb
+)
+ON CONFLICT (source_observation_id) DO NOTHING
+RETURNING id
+"""
+
 EVIDENCE_TASK_STATUSES = (
     "pending",
     "processing",
@@ -104,6 +134,25 @@ def _not_implemented_reason(event: Dict[str, Any]) -> str:
     ) in ("watchlist_hit", "live_search_hit"):
         return _R3_1B_NOT_IMPLEMENTED_REASON
     return _R3_1A_NOT_IMPLEMENTED_REASON
+
+
+def _evidence_task_initial_status(event: Dict[str, Any]) -> tuple[str, str]:
+    """Return (status, error_message) for a new evidence task.
+
+    For watchlist_hit / live_search_hit and C1I.1 intrusion, the recording
+    pipeline (record_request -> clip-worker -> media-worker) can handle
+    evidence generation, so the task starts as 'pending' with no error.
+    Reserved behavior events still start as 'not_implemented'.
+    """
+    event_type = event.get("event_type", "")
+    algorithm_type = event.get("algorithm_type", "")
+    if algorithm_type == "face_intelligence" or event_type in (
+        "watchlist_hit",
+        "live_search_hit",
+        "intrusion",
+    ):
+        return "pending", ""
+    return "not_implemented", _R3_1A_NOT_IMPLEMENTED_REASON
 
 
 class EventRepository:
@@ -154,6 +203,32 @@ class EventRepository:
             row = cur.fetchone()
             return str(row["id"]) if row else None
 
+    def insert_person_bbox_observation(self, observation: Dict[str, Any]) -> str | None:
+        """Idempotently insert one accepted person bbox observation."""
+
+        payload = observation.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        person_bbox = observation.get("person_bbox")
+        params = {
+            "source_observation_id": observation.get("source_observation_id", ""),
+            "source_id": observation.get("source_id", ""),
+            "camera_id": observation.get("camera_id", ""),
+            "track_id": observation.get("track_id") or None,
+            "timestamp_ms": int(observation.get("timestamp_ms", 0)),
+            "frame_pts": observation.get("frame_pts"),
+            "frame_num": observation.get("frame_num"),
+            "person_bbox": json.dumps(person_bbox, ensure_ascii=False),
+            "person_confidence": observation.get("person_confidence"),
+            "gate_status": observation.get("gate_status") or "accepted",
+            "payload": json.dumps(payload, ensure_ascii=False),
+        }
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_INSERT_PERSON_BBOX_OBSERVATION_SQL, params)
+            row = cur.fetchone()
+            return str(row["id"]) if row else None
+
     def create_evidence_task(
         self,
         event: Dict[str, Any],
@@ -161,16 +236,15 @@ class EventRepository:
     ) -> str | None:
         """Create one idempotent evidence task for an event.
 
-        R3.1A records the task and marks media generation as
-        ``not_implemented`` unless a later media worker claims and updates it.
-        This keeps event ingestion idempotent and explicit: missing media is a
-        known lifecycle state, not an empty or ambiguous row.
+        For watchlist_hit / live_search_hit and C1I.1 intrusion the task starts
+        as 'pending' because the recording pipeline (record_request ->
+        clip-worker -> media-worker) can handle evidence generation.
         """
         task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"evidence:{event_id}"))
         policy = event.get("evidence_policy") or {}
         if not isinstance(policy, dict):
             policy = {}
-        reason = _not_implemented_reason(event)
+        initial_status, error_message = _evidence_task_initial_status(event)
 
         params = {
             "task_id": task_id,
@@ -187,8 +261,8 @@ class EventRepository:
             "clip_required": bool(event.get("clip_required", False)),
             "pre_seconds": int(policy.get("pre_seconds", 5)),
             "post_seconds": int(policy.get("post_seconds", 10)),
-            "status": "not_implemented",
-            "error_message": reason,
+            "status": initial_status,
+            "error_message": error_message,
         }
 
         with self._conn.cursor(row_factory=dict_row) as cur:
@@ -216,11 +290,16 @@ class EventRepository:
             row = cur.fetchone()
             task_id_out = str(row["task_id"]) if row else None
 
-        self.set_evidence_status(
-            event_id=event_id,
-            status="not_implemented",
-            error_message=reason,
-        )
+        # Only mark the event's media status immediately for not_implemented.
+        # For pending tasks, the media-worker will update the status after
+        # generating the bundle. Setting clip_status="pending" here would
+        # block the record_request gate in _handle_event.
+        if initial_status == "not_implemented":
+            self.set_evidence_status(
+                event_id=event_id,
+                status=initial_status,
+                error_message=error_message,
+            )
         return task_id_out
 
     def set_evidence_status(
@@ -336,6 +415,31 @@ class EventRepository:
             row = cur.fetchone()
         return int(row[0]) if row and row[0] is not None else None
 
+    def has_event_type_since_ts_ms(
+        self,
+        *,
+        source_id: str,
+        event_type: str,
+        since_ts_ms: int,
+    ) -> bool:
+        """Return True if an unsuppressed event type was created after a timestamp."""
+        if not source_id or not event_type:
+            return False
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM events
+                WHERE source_id = %s
+                  AND event_type = %s
+                  AND created_at >= to_timestamp(%s::double precision / 1000.0)
+                  AND COALESCE(status, 'new') <> 'suppressed'
+                LIMIT 1
+                """,
+                (source_id, event_type, since_ts_ms),
+            )
+            return cur.fetchone() is not None
+
     def mark_event_suppressed(
         self,
         event_id: str,
@@ -375,6 +479,22 @@ class EventRepository:
                 "SELECT payload->'media'->>'clip_status' FROM events "
                 "WHERE source_event_id = %s",
                 (source_event_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def get_evidence_task_status(self, event_id: str) -> str | None:
+        """Get the current evidence task status for an event, or None."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status
+                FROM evidence_tasks
+                WHERE event_id = %s::uuid
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (event_id,),
             )
             row = cur.fetchone()
             return row[0] if row else None

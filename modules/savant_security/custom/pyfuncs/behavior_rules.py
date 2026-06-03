@@ -26,13 +26,23 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, Set
+from typing import Any, Dict, Mapping, Set
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
 from custom.adapters.person_pose_adapter import build_person_pose_observations
 from custom.models.events import SecurityEvent, build_source_event_id
-from custom.models.pose import is_valid_track_id
+from custom.models.person_events import (
+    PersonBBoxObservationEventDraft,
+    build_person_source_observation_id,
+)
+from custom.models.pose import (
+    PersonQualityGateConfig,
+    PersonPoseObservation,
+    filter_person_pose_observations,
+    is_valid_track_id,
+    visible_keypoint_count,
+)
 from custom.models.tracks import TrackState
 from custom.services.camera_config import load_camera_config
 from custom.services.cooldown import CooldownTracker
@@ -42,11 +52,127 @@ from custom.services.frame_anchor_metadata import (
     FrameUuidRuntimeProbe,
     extract_frame_anchor_metadata,
 )
+from custom.services.person_observation_exporter import (
+    PersonObservationExporter,
+    PersonObservationThrottleMap,
+    create_person_observation_exporter,
+)
 from custom.services.rule_runtime import SourceRuntime, build_per_source_runtime
 
 
 _DEFAULT_LOG_INTERVAL = 15
 _DEFAULT_CONFIG_PATH = "/opt/savant/src/module/config/cameras.generated.yml"
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = os.getenv(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = os.getenv(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _config_float(config: Mapping[str, Any], key: str, default: float) -> float:
+    try:
+        value = config.get(key)
+        if value is None or str(value).strip() == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _config_int(config: Mapping[str, Any], key: str, default: int) -> int:
+    try:
+        value = config.get(key)
+        if value is None or str(value).strip() == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _intrusion_gate_config(rule_config: Mapping[str, Any]) -> PersonQualityGateConfig:
+    min_conf = _config_float(rule_config, "min_person_confidence", 0.25)
+    min_width = _config_float(rule_config, "min_person_width", 20.0)
+    min_height = _config_float(rule_config, "min_person_height", 40.0)
+    return PersonQualityGateConfig(
+        min_confidence=_env_float("INTRUSION_MIN_PERSON_CONFIDENCE", min_conf),
+        min_width=_env_float("INTRUSION_MIN_PERSON_WIDTH", min_width),
+        min_height=_env_float("INTRUSION_MIN_PERSON_HEIGHT", min_height),
+        min_visible_keypoints=_env_int(
+            "INTRUSION_MIN_VISIBLE_KEYPOINTS",
+            _config_int(rule_config, "min_visible_keypoints", 0),
+        ),
+        keypoint_threshold=_env_float("POSE_KEYPOINT_THRESHOLD", 0.25),
+        max_bbox_area_ratio=_env_float(
+            "INTRUSION_MAX_BBOX_AREA_RATIO",
+            _config_float(rule_config, "max_bbox_area_ratio", 0.9),
+        ),
+        min_aspect_ratio=_env_float(
+            "INTRUSION_MIN_BBOX_ASPECT_RATIO",
+            _config_float(rule_config, "min_bbox_aspect_ratio", 0.1),
+        ),
+        max_aspect_ratio=_env_float(
+            "INTRUSION_MAX_BBOX_ASPECT_RATIO",
+            _config_float(rule_config, "max_bbox_aspect_ratio", 4.0),
+        ),
+    )
+
+
+def _runtime_intrusion_config(runtime: SourceRuntime) -> Mapping[str, Any]:
+    rule_entry = runtime.camera_entry.rules.get("intrusion")
+    if rule_entry is None:
+        return {}
+    return rule_entry.config
+
+
+def _frame_dimensions(frame_meta, runtime: SourceRuntime) -> tuple[float | None, float | None]:
+    width = None
+    height = None
+    for attr in ("width", "frame_width", "source_frame_width"):
+        try:
+            value = getattr(frame_meta, attr, None)
+            if value:
+                width = float(value)
+                break
+        except Exception:
+            pass
+    for attr in ("height", "frame_height", "source_frame_height"):
+        try:
+            value = getattr(frame_meta, attr, None)
+            if value:
+                height = float(value)
+                break
+        except Exception:
+            pass
+    if width and height:
+        return width, height
+
+    points = []
+    for zone in runtime.camera_entry.zones.values():
+        points.extend(zone.points)
+    if points:
+        try:
+            inferred_width = max(float(pt[0]) for pt in points)
+            inferred_height = max(float(pt[1]) for pt in points)
+            width = width or inferred_width
+            height = height or inferred_height
+        except Exception:
+            pass
+    return width, height
 
 
 class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
@@ -99,6 +225,21 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             f"exporter={type(self.exporter).__name__}",
             flush=True,
         )
+        self.person_observation_exporter: PersonObservationExporter = (
+            create_person_observation_exporter()
+        )
+        self.person_observation_throttle = PersonObservationThrottleMap(
+            min_interval_ms=_env_int("PERSON_OBSERVATION_MIN_INTERVAL_MS", 1000)
+        )
+        self._person_observation_export_count = 0
+        self._person_observation_skip_count = 0
+        print(
+            f"stage=savant_security_person_observation_exporter "
+            f"exporter={type(self.person_observation_exporter).__name__} "
+            f"stream={os.getenv('PERSON_OBSERVATION_STREAM', 'security.person_observations')} "
+            f"min_interval_ms={_env_int('PERSON_OBSERVATION_MIN_INTERVAL_MS', 1000)}",
+            flush=True,
+        )
 
     # ------------------------------------------------------------------
     # Frame processing
@@ -138,12 +279,22 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         result = build_person_pose_observations(
             frame_meta, camera_id=runtime.camera_id
         )
-        observations = result.observations
+        raw_observations = result.observations
+        frame_width, frame_height = _frame_dimensions(frame_meta, runtime)
+        gate_config = _intrusion_gate_config(_runtime_intrusion_config(runtime))
+        gate_result = filter_person_pose_observations(
+            raw_observations,
+            gate_config,
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        observations = gate_result.accepted_observations
         timestamp_ms_used_by_event = (
-            max((obs.timestamp_ms for obs in observations), default=None)
-            if observations
+            max((obs.timestamp_ms for obs in raw_observations), default=None)
+            if raw_observations
             else None
         )
+        frame_anchor = extract_frame_anchor_metadata(frame_meta)
         self._frame_uuid_probe.probe(
             frame_meta,
             timestamp_ms_used_by_event=timestamp_ms_used_by_event,
@@ -153,6 +304,15 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             frame_meta,
             timestamp_ms_used_by_event=timestamp_ms_used_by_event,
             notes="BehaviorRulesPyFunc source-frame identity trace",
+        )
+        person_observations_exported, person_observations_skipped = (
+            self._export_person_observations(
+                observations=observations,
+                source_id=source_id,
+                camera_id=runtime.camera_id,
+                frame_meta=frame_meta,
+                frame_anchor=frame_anchor,
+            )
         )
         runtime.store.update(observations)
 
@@ -171,16 +331,120 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             tracked_count = sum(
                 1 for o in observations if is_valid_track_id(o.track_id)
             )
+            gate_stats = gate_result.stats.as_dict()
             print(
                 f"stage=savant_security_behavior_rules_tick "
                 f"frame={self.frame_count} "
                 f"source_id={source_id} "
+                f"raw_observation_count={len(raw_observations)} "
                 f"observation_count={len(observations)} "
                 f"tracked_count={tracked_count} "
                 f"track_count={runtime.store.track_count} "
-                f"events_exported={events_exported}",
+                f"events_exported={events_exported} "
+                f"person_observations_exported={person_observations_exported} "
+                f"person_observations_skipped={person_observations_skipped} "
+                f"total_person_observations_exported={self._person_observation_export_count} "
+                f"c1i1c_gate={gate_stats}",
                 flush=True,
             )
+
+    def _export_person_observations(
+        self,
+        *,
+        observations: list[PersonPoseObservation],
+        source_id: str,
+        camera_id: str,
+        frame_meta,
+        frame_anchor: Mapping[str, Any],
+    ) -> tuple[int, int]:
+        exported = 0
+        skipped = 0
+        frame_num = getattr(frame_meta, "frame_num", None)
+        frame_pts = self._int_or_none(frame_anchor.get("frame_pts"))
+
+        for index, obs in enumerate(observations):
+            track_id = int(obs.track_id) if is_valid_track_id(obs.track_id) else 0
+            track_part = str(track_id) if track_id > 0 else f"no_track:{index}"
+            throttle_key = f"{camera_id}:{track_part}"
+            if not self.person_observation_throttle.is_allowed(
+                throttle_key, obs.timestamp_ms
+            ):
+                skipped += 1
+                continue
+
+            draft = self._build_person_observation(
+                obs=obs,
+                source_id=source_id,
+                camera_id=camera_id,
+                frame_num=frame_num,
+                frame_pts=frame_pts,
+                index=index,
+                frame_anchor=frame_anchor,
+            )
+            self.person_observation_exporter.export(draft)
+            self.person_observation_throttle.record(throttle_key, obs.timestamp_ms)
+            exported += 1
+
+        self._person_observation_export_count += exported
+        self._person_observation_skip_count += skipped
+        return exported, skipped
+
+    def _build_person_observation(
+        self,
+        *,
+        obs: PersonPoseObservation,
+        source_id: str,
+        camera_id: str,
+        frame_num: Any,
+        frame_pts: int | None,
+        index: int,
+        frame_anchor: Mapping[str, Any],
+    ) -> PersonBBoxObservationEventDraft:
+        track_id = int(obs.track_id) if is_valid_track_id(obs.track_id) else 0
+        xyxy = [float(value) for value in obs.bbox.xyxy]
+        payload = {
+            "media": {
+                "frame_uuid": frame_anchor.get("frame_uuid"),
+                "keyframe_uuid": frame_anchor.get("keyframe_uuid"),
+                "previous_keyframe_uuid": frame_anchor.get("previous_keyframe_uuid"),
+                "frame_pts": frame_anchor.get("frame_pts"),
+                "frame_dts": frame_anchor.get("frame_dts"),
+                "duration": frame_anchor.get("duration"),
+                "frame_num": frame_anchor.get("frame_num"),
+                "ntp_timestamp": frame_anchor.get("ntp_timestamp"),
+                "time_base": frame_anchor.get("time_base"),
+                "source_id": frame_anchor.get("source_id") or source_id,
+                "metadata_source": frame_anchor.get("metadata_source"),
+            }
+        }
+        return PersonBBoxObservationEventDraft(
+            source_observation_id=build_person_source_observation_id(
+                source_id=source_id,
+                track_id=track_id,
+                timestamp_ms=obs.timestamp_ms,
+                index=index,
+            ),
+            producer=self.producer,
+            source_id=source_id,
+            camera_id=camera_id,
+            track_id=str(track_id) if track_id > 0 else None,
+            timestamp_ms=int(obs.timestamp_ms),
+            frame_pts=frame_pts,
+            frame_num=self._int_or_none(frame_num),
+            person_bbox=xyxy,
+            person_confidence=float(obs.confidence),
+            gate_status="accepted",
+            payload=payload,
+        )
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        try:
+            if value is None or str(value).strip() == "":
+                return None
+            return int(value)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Enrichment / export
@@ -208,16 +472,32 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         inside_ms = max(event.end_ts_ms - event.start_ts_ms, 0)
         bbox = track.current_bbox
 
+        person_bbox = {
+            "x": bbox.x,
+            "y": bbox.y,
+            "width": bbox.width,
+            "height": bbox.height,
+        }
+        gate_config = _intrusion_gate_config(_runtime_intrusion_config(runtime))
+        last_obs = track.observations[-1] if track.observations else None
+
         event.payload = {
             "zone_id": event.zone,
             "inside_ms": inside_ms,
-            "bbox": {
-                "x": bbox.x,
-                "y": bbox.y,
-                "width": bbox.width,
-                "height": bbox.height,
-            },
+            "person_bbox": person_bbox,
+            "bbox": dict(person_bbox),
             "bbox_source": "savant_detection",
+            "person_confidence": last_obs.confidence if last_obs else None,
+            "visible_keypoint_count": visible_keypoint_count(
+                last_obs.keypoints,
+                gate_config.keypoint_threshold,
+            ) if last_obs else 0,
+            "person_quality_gate": {
+                "status": "accepted",
+                "min_person_confidence": gate_config.min_confidence,
+                "min_person_width": gate_config.min_width,
+                "min_person_height": gate_config.min_height,
+            },
             "rule": event.rule_name,
             "media": {
                 "snapshot_required": event.snapshot_required,

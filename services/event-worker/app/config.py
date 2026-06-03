@@ -23,6 +23,11 @@ class Config:
     recording_source_id: str
     recording_max_requests_per_run: int
     recording_cooldown_seconds: int
+    person_observation_stream: str
+    person_observation_consumer_group: str
+    person_observation_consumer_name: str
+    person_observation_consumer_start_id: str
+    person_observation_enabled: bool
 
 
 def _csv_env(name: str) -> tuple[str, ...]:
@@ -31,6 +36,7 @@ def _csv_env(name: str) -> tuple[str, ...]:
 
 
 def load_config() -> Config:
+    consumer_name = os.getenv("CONSUMER_NAME", "event-worker-1")
     return Config(
         redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
         event_stream=os.getenv("EVENT_STREAM", "security.events"),
@@ -45,7 +51,7 @@ def load_config() -> Config:
             "postgresql://video:video@postgres:5432/video_analytics",
         ),
         consumer_group=os.getenv("CONSUMER_GROUP", "event-workers"),
-        consumer_name=os.getenv("CONSUMER_NAME", "event-worker-1"),
+        consumer_name=consumer_name,
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
         batch_size=int(os.getenv("EVENT_BATCH_SIZE", "10")),
         default_replay_source_id=os.getenv("DEFAULT_REPLAY_SOURCE_ID", ""),
@@ -57,4 +63,22 @@ def load_config() -> Config:
         recording_cooldown_seconds=int(
             os.getenv("RECORDING_COOLDOWN_SECONDS", "0")
         ),
+        person_observation_stream=os.getenv(
+            "PERSON_OBSERVATION_STREAM", "security.person_observations"
+        ),
+        person_observation_consumer_group=os.getenv(
+            "PERSON_OBSERVATION_CONSUMER_GROUP",
+            "person-observation-workers",
+        ),
+        person_observation_consumer_name=os.getenv(
+            "PERSON_OBSERVATION_CONSUMER_NAME",
+            f"{consumer_name}-person-observations",
+        ),
+        person_observation_consumer_start_id=os.getenv(
+            "PERSON_OBSERVATION_CONSUMER_START_ID", "$"
+        ),
+        person_observation_enabled=os.getenv(
+            "PERSON_OBSERVATION_CONSUMER_ENABLED", "true"
+        ).strip().lower()
+        in ("true", "1", "yes"),
     )

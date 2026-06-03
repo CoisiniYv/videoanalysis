@@ -83,7 +83,7 @@ services:
       RUST_LOG: ${RUST_LOG:-debug,replaydb=trace}
       DB_PATH: /opt/rocksdb
     volumes:
-      - ../modules/savant_replay/config.p1c_rtsp_inline.json:/opt/etc/config.json:ro
+      - ../modules/savant_replay/config.c1_official_replay_inline.json:/opt/etc/config.json:ro
       - /data/video-analytics/replay-c1-official-replay-dev:/opt/rocksdb:rw
     restart: unless-stopped
 
@@ -96,6 +96,8 @@ services:
         "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
       ]
     working_dir: /opt/savant/src/module
+    env_file:
+      - ./env/c1-official-replay-dev.env
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
@@ -108,7 +110,10 @@ services:
       POSE_BATCH_SIZE: "1"
       FACE_DETECTOR_BATCH_SIZE: "1"
       FACE_EMBEDDING_BATCH_SIZE: "16"
-      FACE_OBSERVATION_EXPORT_ENABLED: "${FACE_OBSERVATION_EXPORT_ENABLED:-false}"
+      FACE_OBSERVATION_EXPORT_ENABLED: "${FACE_OBSERVATION_EXPORT_ENABLED:-true}"
+      PERSON_OBSERVATION_EXPORT_ENABLED: "${PERSON_OBSERVATION_EXPORT_ENABLED:-true}"
+      PERSON_OBSERVATION_STREAM: "${PERSON_OBSERVATION_STREAM:-security.person_observations}"
+      PERSON_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_OBSERVATION_MIN_INTERVAL_MS:-1000}"
       C1F1_SAME_FRAME_DEBUG_ENABLED: "${C1F1_SAME_FRAME_DEBUG_ENABLED:-1}"
       SAVANT_MODULE_FILE: "${SAVANT_MODULE_FILE:-module.yml}"
       REDIS_URL: redis://redis:6379/0
@@ -141,11 +146,13 @@ services:
       [
         "/opt/savant/adapters/gst/sources/rtsp.sh",
       ]
+    env_file:
+      - ./env/c1-official-replay-dev.env
     environment:
       SOURCE_ID: c1e_rtsp_replay
       RTSP_URI: rtsp://10.37.57.112:8554/live/1080movie
       LOCATION: rtsp://10.37.57.112:8554/live/1080movie
-      RTSP_TRANSPORT: ${C1E_RTSP_TRANSPORT:-tcp}
+      RTSP_TRANSPORT: ${RTSP_TRANSPORT:-tcp}
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       SYNC_OUTPUT: "true"
       BUFFER_LEN: "2000"
@@ -180,6 +187,8 @@ services:
         BUILDKIT_INLINE_CACHE: "1"
     image: c1-official-event-worker:latest
     container_name: c1-official-event-worker
+    env_file:
+      - ./env/c1-official-replay-dev.env
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
@@ -188,15 +197,20 @@ services:
       RECORD_REQUEST_STREAM: security.record_requests
       RECORDING_ENABLED: "true"
       RECORDING_STRATEGY: "savant_replay"
-      RECORDING_EVENT_TYPES: intrusion,watchlist_hit
+      RECORDING_EVENT_TYPES: ${RECORDING_EVENT_TYPES:-watchlist_hit,intrusion}
       RECORDING_SOURCE_ID: c1e_rtsp_replay
-      RECORDING_MAX_REQUESTS_PER_RUN: "1"
-      RECORDING_COOLDOWN_SECONDS: "30"
+      RECORDING_MAX_REQUESTS_PER_RUN: "${RECORDING_MAX_REQUESTS_PER_RUN:-100}"
+      RECORDING_COOLDOWN_SECONDS: "${RECORDING_COOLDOWN_SECONDS:-30}"
       RECORDING_PRE_SECONDS: "5"
       RECORDING_POST_SECONDS: "5"
       DEFAULT_REPLAY_SOURCE_ID: c1e_rtsp_replay
       CONSUMER_GROUP: event-workers-c1-official-replay
       CONSUMER_NAME: event-worker-c1-official-replay-1
+      PERSON_OBSERVATION_CONSUMER_ENABLED: "true"
+      PERSON_OBSERVATION_STREAM: "${PERSON_OBSERVATION_STREAM:-security.person_observations}"
+      PERSON_OBSERVATION_CONSUMER_GROUP: person-observation-workers-c1-official-replay
+      PERSON_OBSERVATION_CONSUMER_NAME: event-worker-c1-official-replay-person-1
+      PERSON_OBSERVATION_CONSUMER_START_ID: "$$"
       POLL_TIMEOUT_MS: "2000"
       EVENT_BATCH_SIZE: "1"
     volumes:
@@ -222,11 +236,20 @@ services:
       FACE_WORKER_CONSUMER_NAME: c1f3b-smoke
       FACE_WORKER_CONSUMER_START_ID: "0"
       FACE_WORKER_ENABLED: "true"
-      GALLERY_MATCH_ENABLED: "false"
+      GALLERY_MATCH_ENABLED: "true"
+      WATCHLIST_MATCH_ENABLED: "${WATCHLIST_MATCH_ENABLED:-true}"
+      WATCHLIST_EVENT_STREAM: security.events
+      WATCHLIST_THRESHOLD: "${WATCHLIST_THRESHOLD:-0.50}"
+      WATCHLIST_TOP_K: "${WATCHLIST_TOP_K:-5}"
+      WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-test:archive:reese,test:archive:finch}"
+      WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
+      WATCHLIST_TARGET_REFRESH_SECONDS: "30"
       BATCH_SIZE: "50"
       POLL_TIMEOUT_MS: "2000"
     volumes:
       - ../services/face-worker:/app:rw
+      - /data/video-analytics/media:/data/video-analytics/media:ro
+      - /data/video-analytics/models:/data/video-analytics/models:ro
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -252,9 +275,10 @@ services:
       DEFAULT_PRE_SECONDS: "5"
       DEFAULT_POST_SECONDS: "5"
       KEYFRAME_LOOKUP_WINDOW_S: "10"
-      CLIP_WORKER_MAX_JOBS_PER_RUN: "1"
-      CLIP_WORKER_MAX_CONCURRENT_JOBS: "1"
-      CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "30"
+      CLIP_WORKER_MAX_JOBS_PER_RUN: "${CLIP_WORKER_MAX_JOBS_PER_RUN:-100}"
+      CLIP_WORKER_RUN_ONCE: "${CLIP_WORKER_RUN_ONCE:-false}"
+      CLIP_WORKER_MAX_CONCURRENT_JOBS: "${CLIP_WORKER_MAX_CONCURRENT_JOBS:-1}"
+      CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "${CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS:-30}"
       REPLAY_STOP_CONDITION_MODE: ts_delta_sec
       REPLAY_FPS: "30"
       ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
@@ -275,6 +299,8 @@ services:
         BUILDKIT_INLINE_CACHE: "1"
     image: p1c-rtsp-replay-media-worker:latest
     container_name: c1-official-media-worker
+    env_file:
+      - ./env/c1-official-replay-dev.env
     environment:
       DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
       SINK_OUTPUT_DIR: ${C1E_SINK_ROOT:-/media/replay-sink-output/c1e}
@@ -285,7 +311,7 @@ services:
       P1_SINK_STABILITY_CHECKS: "2"
       MEDIA_POLL_INTERVAL_S: "5"
       DEFAULT_PRE_SECONDS: "5"
-      EVIDENCE_MAX_DURATION_SLACK_SEC: "10"
+      EVIDENCE_MAX_DURATION_SLACK_SEC: "${EVIDENCE_MAX_DURATION_SLACK_SEC:-10}"
       EVIDENCE_PHASE: C1E-RTSP
       EVIDENCE_RUN_ID: ${C1E_RUN_ID:-}
       EVIDENCE_INPUT_TYPE: rtsp

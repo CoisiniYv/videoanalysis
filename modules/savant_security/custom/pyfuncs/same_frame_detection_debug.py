@@ -22,6 +22,14 @@ from typing import Any
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
+from custom.models.pose import (
+    BBox,
+    Keypoint,
+    PersonPoseObservation,
+    PersonQualityGateConfig,
+    evaluate_person_quality,
+)
+
 TRUTHY = {"1", "true", "yes", "on"}
 DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/c1f1"
 DEFAULT_OUTPUT_FILE = "same_frame_pose_face_summary.jsonl"
@@ -52,6 +60,26 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = os.getenv(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = os.getenv(name)
+        if value is None or str(value).strip() == "":
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
 def _safe_str(value: Any) -> str | None:
     if value is None:
         return None
@@ -78,14 +106,60 @@ def _to_xyxy(bbox: Any) -> list[float] | None:
     if bbox is None:
         return None
     try:
-        xc = float(bbox.x)
-        yc = float(bbox.y)
+        if hasattr(bbox, "xc") and hasattr(bbox, "yc"):
+            xc = float(bbox.xc)
+            yc = float(bbox.yc)
+        else:
+            x = float(getattr(bbox, "x", 0.0))
+            y = float(getattr(bbox, "y", 0.0))
+            w = float(getattr(bbox, "width", 0.0))
+            h = float(getattr(bbox, "height", 0.0))
+            return [round(x, 2), round(y, 2), round(x + w, 2), round(y + h, 2)]
         w = float(bbox.width)
         h = float(bbox.height)
         return [round(xc - w / 2, 2), round(yc - h / 2, 2),
                 round(xc + w / 2, 2), round(yc + h / 2, 2)]
     except Exception:
         return None
+
+
+def _frame_dimensions(frame_meta: Any) -> tuple[float | None, float | None]:
+    width = None
+    height = None
+    for attr in ("width", "frame_width", "source_frame_width"):
+        try:
+            value = getattr(frame_meta, attr, None)
+            if value:
+                width = float(value)
+                break
+        except Exception:
+            pass
+    for attr in ("height", "frame_height", "source_frame_height"):
+        try:
+            value = getattr(frame_meta, attr, None)
+            if value:
+                height = float(value)
+                break
+        except Exception:
+            pass
+    if width is None:
+        width = _env_float("C1I1C_FRAME_WIDTH", 1920.0)
+    if height is None:
+        height = _env_float("C1I1C_FRAME_HEIGHT", 1080.0)
+    return width, height
+
+
+def _gate_config() -> PersonQualityGateConfig:
+    return PersonQualityGateConfig(
+        min_confidence=_env_float("INTRUSION_MIN_PERSON_CONFIDENCE", 0.25),
+        min_width=_env_float("INTRUSION_MIN_PERSON_WIDTH", 20.0),
+        min_height=_env_float("INTRUSION_MIN_PERSON_HEIGHT", 40.0),
+        min_visible_keypoints=_env_int("INTRUSION_MIN_VISIBLE_KEYPOINTS", 0),
+        keypoint_threshold=_env_float("POSE_KEYPOINT_THRESHOLD", 0.25),
+        max_bbox_area_ratio=_env_float("INTRUSION_MAX_BBOX_AREA_RATIO", 0.9),
+        min_aspect_ratio=_env_float("INTRUSION_MIN_BBOX_ASPECT_RATIO", 0.1),
+        max_aspect_ratio=_env_float("INTRUSION_MAX_BBOX_ASPECT_RATIO", 4.0),
+    )
 
 
 def _extract_anchor_safe(frame_meta: Any) -> dict[str, Any]:
@@ -221,9 +295,10 @@ class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
 
         # Persons
         persons = []
+        frame_width, frame_height = _frame_dimensions(frame_meta)
         for obj in person_objects:
             try:
-                persons.append(self._extract_person_safe(obj))
+                persons.append(self._extract_person_safe(obj, frame_width, frame_height))
             except Exception:
                 pass
 
@@ -303,7 +378,12 @@ class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
             },
         }
 
-    def _extract_person_safe(self, obj: Any) -> dict[str, Any]:
+    def _extract_person_safe(
+        self,
+        obj: Any,
+        frame_width: float | None = None,
+        frame_height: float | None = None,
+    ) -> dict[str, Any]:
         """Extract person fields — each guarded."""
         track_id = None
         bbox = None
@@ -311,11 +391,16 @@ class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
         kp_count = 0
         visible_kp = 0
         mean_kp_conf = 0.0
+        keypoints: list[Keypoint] = []
 
         try:
             track_id = _read_attr(obj, "tracker", "track_id")
             if track_id is None:
                 track_id = _read_attr(obj, "nvtracker", "track_id")
+            if track_id is None:
+                track_id = getattr(obj, "track_id", None)
+            if track_id is None:
+                track_id = getattr(obj, "object_id", None)
         except Exception:
             pass
 
@@ -340,10 +425,50 @@ class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
                 )
                 if len(kp_list) >= 3 and len(kp_list) % 3 == 0:
                     confs = [kp_list[i + 2] for i in range(0, len(kp_list), 3)]
-                    visible_kp = sum(1 for c in confs if c > 0.01)
+                    visible_kp = sum(1 for c in confs if c >= _gate_config().keypoint_threshold)
                     mean_kp_conf = sum(confs) / len(confs) if confs else 0.0
+                    keypoints = [
+                        Keypoint(
+                            x=_safe_float(kp_list[i]),
+                            y=_safe_float(kp_list[i + 1]),
+                            confidence=_safe_float(kp_list[i + 2]),
+                        )
+                        for i in range(0, len(kp_list), 3)
+                    ]
         except Exception:
             pass
+
+        intrusion_gate = {
+            "accepted": False,
+            "reason": "bbox_unavailable",
+            "visible_keypoint_count": visible_kp,
+        }
+        if bbox is not None:
+            try:
+                x1, y1, x2, y2 = bbox
+                decision = evaluate_person_quality(
+                    PersonPoseObservation(
+                        bbox=BBox(
+                            x=float(x1),
+                            y=float(y1),
+                            width=float(x2) - float(x1),
+                            height=float(y2) - float(y1),
+                        ),
+                        confidence=conf,
+                        keypoints=keypoints,
+                    ),
+                    _gate_config(),
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                )
+                intrusion_gate = {
+                    "accepted": decision.accepted,
+                    "reason": decision.reason,
+                    "visible_keypoint_count": decision.visible_keypoint_count,
+                    "bbox_was_clamped": decision.bbox_was_clamped,
+                }
+            except Exception:
+                pass
 
         return {
             "track_id": _safe_str(track_id),
@@ -352,6 +477,7 @@ class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
             "keypoints_count": kp_count,
             "visible_keypoint_count": visible_kp,
             "mean_keypoint_confidence": round(mean_kp_conf, 4),
+            "intrusion_gate": intrusion_gate,
         }
 
     def _extract_face_safe(self, obj: Any) -> dict[str, Any]:

@@ -27,6 +27,7 @@ const dom = {
   refreshBundles: document.getElementById("refreshBundles"),
   video: document.getElementById("video"),
   canvas: document.getElementById("overlay"),
+  showPersons: document.getElementById("showPersons"),
   showMatched: document.getElementById("showMatched"),
   showUnknown: document.getElementById("showUnknown"),
   showLandmarks: document.getElementById("showLandmarks"),
@@ -212,16 +213,33 @@ function prepareAnnotations() {
 }
 
 function normalizeBbox(bbox, sourceWidth, sourceHeight) {
-  if (!bbox || !Array.isArray(bbox.values) || bbox.values.length < 4) {
+  if (!bbox) {
     addWarning("bbox_missing");
     return null;
   }
-  const values = bbox.values.slice(0, 4).map(Number);
+  let format = String(bbox.format || "cxcywh").toLowerCase();
+  let rawValues = null;
+  if (Array.isArray(bbox.values)) {
+    rawValues = bbox.values;
+  } else if (Array.isArray(bbox.xyxy)) {
+    rawValues = bbox.xyxy;
+    format = "xyxy";
+  } else if (Array.isArray(bbox.xywh)) {
+    rawValues = bbox.xywh;
+    format = "xywh";
+  } else if (Array.isArray(bbox.cxcywh)) {
+    rawValues = bbox.cxcywh;
+    format = "cxcywh";
+  }
+  if (!rawValues || rawValues.length < 4) {
+    addWarning("bbox_missing");
+    return null;
+  }
+  const values = rawValues.slice(0, 4).map(Number);
   if (values.some(value => !Number.isFinite(value))) {
     addWarning("bbox_invalid_values");
     return null;
   }
-  const format = String(bbox.format || "cxcywh").toLowerCase();
   let x1;
   let y1;
   let x2;
@@ -276,12 +294,50 @@ function isLowSimilarityObject(obj) {
     identity.match_status === "low_similarity_candidate";
 }
 
+function isBehaviorEventObject(obj) {
+  const label = obj.label || {};
+  const action = obj.action || {};
+  return obj.object_type === "person" && (
+    obj.annotation_role === "behavior_event" ||
+    label.kind === "behavior_event" ||
+    action.event_type === "intrusion" ||
+    action.status === "event_triggered"
+  );
+}
+
+function isPersonContextObject(obj) {
+  const style = obj.style || {};
+  return obj.object_type === "person" && (
+    obj.annotation_role === "person_context" ||
+    style.reason === "person_detection"
+  );
+}
+
 function objectVisible(obj) {
+  if (isBehaviorEventObject(obj)) return true;
+  if (isPersonContextObject(obj)) return dom.showPersons.checked;
   if (isMatchedObject(obj)) return dom.showMatched.checked;
   return dom.showUnknown.checked;
 }
 
 function labelForObject(obj, line) {
+  if (isBehaviorEventObject(obj)) {
+    const label = obj.label || {};
+    if (label.text) return String(label.text);
+    const action = obj.action || {};
+    const eventType = String(action.event_type || "Intrusion");
+    if (eventType === "intrusion") return "Intrusion";
+    return eventType.replace(/_/g, " ");
+  }
+  if (isPersonContextObject(obj)) {
+    const trackId = obj.track_id || "";
+    const detection = obj.detection || {};
+    const confidence = Number(detection.confidence);
+    const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(2) : "";
+    return ["Person", trackId ? `track ${trackId}` : "", confidenceText ? `conf ${confidenceText}` : ""]
+      .filter(Boolean)
+      .join(" | ");
+  }
   const identity = obj.identity || {};
   const trackId = obj.track_id || "";
   const timestamp = line.timestamp_ms || "";
@@ -300,8 +356,29 @@ function labelForObject(obj, line) {
 
 function styleForObject(obj) {
   const style = obj.style || {};
+  if (isPersonContextObject(obj)) {
+    const color = style.bbox_color || style.color || "#00C853";
+    return {
+      bboxColor: color,
+      labelColor: style.label_color || color,
+      lineWidth: Number(style.line_width || 2),
+      reason: style.reason || "person_detection",
+      priority: style.priority ?? "context"
+    };
+  }
+  if (isBehaviorEventObject(obj)) {
+    const color = style.bbox_color || style.color || "#FF6D00";
+    const action = obj.action || {};
+    return {
+      bboxColor: color,
+      labelColor: style.label_color || color,
+      lineWidth: Number(style.line_width || 3),
+      reason: style.reason || action.event_type || "behavior_event",
+      priority: style.priority ?? "warning"
+    };
+  }
   if (isMatchedObject(obj)) {
-    const color = style.bbox_color || "#D50000";
+    const color = style.bbox_color || style.color || "#D50000";
     return {
       bboxColor: color,
       labelColor: style.label_color || color,
@@ -322,9 +399,9 @@ function styleForObject(obj) {
       priority: style.priority ?? 30
     };
   }
-  let color = style.bbox_color || "#9E9E9E";
+  let color = style.bbox_color || style.color || "#00B0FF";
   if (ALERT_REDS.has(String(color).toUpperCase())) {
-    color = "#9E9E9E";
+    color = "#00B0FF";
     addWarning("unknown_style_overridden_from_event_alert");
   }
   return {
@@ -336,9 +413,38 @@ function styleForObject(obj) {
   };
 }
 
-function findActiveAnnotation(currentTime) {
+function objectsForLine(line) {
+  if (!line) return [];
+  const objects = Array.isArray(line.objects)
+    ? line.objects.filter(obj => obj && typeof obj === "object")
+    : [];
+  if (line.record_type === "object_annotation") {
+    const obj = {};
+    for (const key of ["object_type", "object_id", "annotation_role", "track_id", "bbox", "identity", "label", "action", "style", "landmarks", "pose", "detection", "gate"]) {
+      if (line[key] !== undefined) obj[key] = line[key];
+    }
+    if (Object.keys(obj).length > 0) {
+      objects.push(obj);
+    }
+  }
+  return objects;
+}
+
+function linesAtOverlayTime(overlayTimeSec) {
+  return state.preparedAnnotations.filter(line => (
+    Math.abs(line._overlayTimeSec - overlayTimeSec) <= 0.001
+  ));
+}
+
+function linesAtFramePts(framePts) {
+  return state.preparedAnnotations.filter(line => (
+    line._framePts !== null && framePts !== null && line._framePts === framePts
+  ));
+}
+
+function findActiveAnnotations(currentTime) {
   if (!state.preparedAnnotations.length) {
-    return { line: null, targetPts: null, mode: "none", matchedPts: null };
+    return { line: null, lines: [], targetPts: null, mode: "none", matchedPts: null };
   }
   const toleranceNs = Math.max(0, Number(dom.toleranceMs.value || 150)) * 1000000;
   const holdSec = Math.max(0, Number(dom.holdMs.value || 750)) / 1000;
@@ -363,36 +469,56 @@ function findActiveAnnotation(currentTime) {
   }
 
   if (nearest && nearestDelta <= toleranceNs) {
-    return { line: nearest, targetPts, mode: "frame_pts", matchedPts: nearest._framePts };
+    const lines = linesAtFramePts(nearest._framePts);
+    return {
+      line: nearest,
+      lines: lines.length ? lines : [nearest],
+      targetPts,
+      mode: "frame_pts",
+      matchedPts: nearest._framePts
+    };
   }
   if (latestPrior && currentTime - latestPrior._overlayTimeSec <= holdSec) {
+    const lines = linesAtOverlayTime(latestPrior._overlayTimeSec);
     return {
       line: latestPrior,
+      lines: lines.length ? lines : [latestPrior],
       targetPts,
       mode: `${latestPrior._alignment}_held`,
       matchedPts: latestPrior._framePts
     };
   }
-  return { line: null, targetPts, mode: "none", matchedPts: null };
+  return { line: null, lines: [], targetPts, mode: "none", matchedPts: null };
 }
 
 function resizeCanvas() {
-  const rect = dom.video.getBoundingClientRect();
+  const videoRect = dom.video.getBoundingClientRect();
+  const wrapRect = dom.video.parentElement.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  dom.canvas.style.width = `${rect.width}px`;
-  dom.canvas.style.height = `${rect.height}px`;
-  dom.canvas.width = Math.max(1, Math.round(rect.width * dpr));
-  dom.canvas.height = Math.max(1, Math.round(rect.height * dpr));
+
+  // Position canvas over the video's actual displayed rectangle,
+  // accounting for letterbox/centering within the .video-wrap container.
+  const offsetX = videoRect.left - wrapRect.left;
+  const offsetY = videoRect.top - wrapRect.top;
+
+  dom.canvas.style.left = `${offsetX}px`;
+  dom.canvas.style.top = `${offsetY}px`;
+  dom.canvas.style.width = `${videoRect.width}px`;
+  dom.canvas.style.height = `${videoRect.height}px`;
+  dom.canvas.width = Math.max(1, Math.round(videoRect.width * dpr));
+  dom.canvas.height = Math.max(1, Math.round(videoRect.height * dpr));
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function drawLandmarks(points, scaleX, scaleY, color) {
+function drawLandmarks(points, scaleX, scaleY, color, offsetX, offsetY) {
   if (!dom.showLandmarks.checked || !Array.isArray(points)) return;
   ctx.fillStyle = color;
+  const ox = offsetX || 0;
+  const oy = offsetY || 0;
   for (const point of points) {
     if (!Array.isArray(point) || point.length < 2) continue;
-    const x = Number(point[0]) * scaleX;
-    const y = Number(point[1]) * scaleY;
+    const x = Number(point[0]) * scaleX + ox;
+    const y = Number(point[1]) * scaleY + oy;
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     ctx.beginPath();
     ctx.arc(x, y, 2.8, 0, Math.PI * 2);
@@ -419,29 +545,38 @@ function drawOverlay() {
   const displayHeight = dom.canvas.clientHeight;
   ctx.clearRect(0, 0, displayWidth, displayHeight);
 
-  const active = findActiveAnnotation(dom.video.currentTime);
-  const line = active.line;
-  const objects = line ? (line.objects || []).filter(objectVisible) : [];
+  const active = findActiveAnnotations(dom.video.currentTime);
+  const overlayItems = active.lines.flatMap(line => (
+    objectsForLine(line).map(obj => ({ obj, line }))
+  )).filter(item => objectVisible(item.obj));
   const sourceWidth = dom.video.videoWidth || state.sourceWidth || DEFAULT_SOURCE_WIDTH;
   const sourceHeight = dom.video.videoHeight || state.sourceHeight || DEFAULT_SOURCE_HEIGHT;
+
+  // Use uniform scale to handle object-fit: contain letterboxing.
+  // The display rect has the video's intrinsic aspect ratio, but we
+  // compute a uniform scale from the source-to-display ratio to prevent
+  // any bbox distortion from non-uniform scaling.
   const scaleX = displayWidth / sourceWidth;
   const scaleY = displayHeight / sourceHeight;
+  const uniformScale = Math.min(scaleX, scaleY);
+  const offsetX_display = (displayWidth - sourceWidth * uniformScale) / 2;
+  const offsetY_display = (displayHeight - sourceHeight * uniformScale) / 2;
 
-  for (const obj of objects) {
+  for (const { obj, line } of overlayItems) {
     const bbox = normalizeBbox(obj.bbox, sourceWidth, sourceHeight);
     if (!bbox) continue;
     const style = styleForObject(obj);
-    const x = bbox.x1 * scaleX;
-    const y = bbox.y1 * scaleY;
-    const w = (bbox.x2 - bbox.x1) * scaleX;
-    const h = (bbox.y2 - bbox.y1) * scaleY;
+    const x = bbox.x1 * uniformScale + offsetX_display;
+    const y = bbox.y1 * uniformScale + offsetY_display;
+    const w = (bbox.x2 - bbox.x1) * uniformScale;
+    const h = (bbox.y2 - bbox.y1) * uniformScale;
     ctx.strokeStyle = style.bboxColor;
     ctx.lineWidth = style.lineWidth;
     ctx.strokeRect(x, y, w, h);
-    drawLandmarks(obj.landmarks?.points || [], scaleX, scaleY, style.bboxColor);
+    drawLandmarks(obj.landmarks?.points || [], uniformScale, uniformScale, style.bboxColor, offsetX_display, offsetY_display);
     drawLabel(labelForObject(obj, line), x, y, style.labelColor);
   }
-  updateDebug(active, objects.length);
+  updateDebug(active, overlayItems.length);
   requestAnimationFrame(drawOverlay);
 }
 
@@ -469,6 +604,9 @@ function renderDetails() {
   setText("firstVideoPts", state.firstVideoFramePts);
   setText("sourceSize", `${state.sourceWidth}x${state.sourceHeight}`);
   setText("annotationLines", summary.annotation_lines ?? state.annotations.length);
+  setText("personContextObjects", summary.person_context_count);
+  setText("personContextFrames", summary.person_context_frame_count);
+  setText("personContextTracks", summary.person_context_track_count);
   setText("faceObjects", summary.face_objects);
   setText("matchedObjects", summary.matched_objects);
   setText("unknownObjects", summary.unknown_objects);
@@ -505,6 +643,7 @@ function renderWarnings() {
 }
 
 for (const input of [
+  dom.showPersons,
   dom.showMatched,
   dom.showUnknown,
   dom.showLandmarks,
