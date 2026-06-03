@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 COMPOSE_FILE="$PROJECT_ROOT/infra/docker-compose.c1-official-replay-dev.yml"
 SERVICE="${C1F4C_SERVICE:-evidence-viewer}"
 CONTAINER="${C1F4C_CONTAINER:-c1-official-evidence-viewer}"
@@ -121,8 +121,8 @@ if grep -Eiq 'DATABASE_URL|POSTGRES|REDIS_URL|redis|postgres|nvidia|privileged' 
     fail_result "FAIL_COMPOSE_CONFIG" "forbidden dependency/env in evidence-viewer service"
 fi
 
-log "building and starting $SERVICE"
-docker compose -f "$COMPOSE_FILE" up -d --build "$SERVICE" >/tmp/c1f4c-compose-up.log
+log "starting $SERVICE"
+docker compose -f "$COMPOSE_FILE" up -d "$SERVICE" >/tmp/c1f4c-compose-up.log
 
 log "waiting for /health"
 for _ in $(seq 1 60); do

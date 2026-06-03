@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COMPOSE_FILE="${COMPOSE_FILE:-${REPO_ROOT}/infra/docker-compose.c1-official-replay-dev.yml}"
 API_URL="${API_URL:-http://127.0.0.1:8000}"
 DATABASE_URL="${DATABASE_URL:-postgresql://video:video@localhost:5438/video_analytics}"
@@ -19,7 +19,7 @@ export no_proxy="${no_proxy:-127.0.0.1,localhost,::1}"
 export DATABASE_URL
 
 note "starting postgres, redis, api"
-docker compose -f "$COMPOSE_FILE" up -d --build postgres redis api >/tmp/c1g2_compose_up.log
+docker compose -f "$COMPOSE_FILE" up -d postgres redis api >/tmp/c1g2_compose_up.log
 
 note "applying C1G.1 schema migration"
 if command -v psql >/dev/null 2>&1; then
