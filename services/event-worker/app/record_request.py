@@ -62,11 +62,18 @@ class RecordRequestPublisher:
     """
 
     def __init__(
-        self, client: Redis, stream: str, default_replay_source_id: str = ""
+        self,
+        client: Redis,
+        stream: str,
+        default_replay_source_id: str = "",
+        default_pre_seconds: int = DEFAULT_PRE_SECONDS,
+        default_post_seconds: int = DEFAULT_POST_SECONDS,
     ) -> None:
         self._client = client
         self._stream = stream
         self._default_replay_source_id = default_replay_source_id
+        self._default_pre_seconds = int(default_pre_seconds)
+        self._default_post_seconds = int(default_post_seconds)
 
     def publish(self, event: Dict[str, Any], event_id: str) -> str | None:
         """Publish a record_request for *event*.
@@ -108,8 +115,12 @@ class RecordRequestPublisher:
                 event.get("previous_keyframe_uuid")
                 or media.get("previous_keyframe_uuid")
             ),
-            "pre_seconds": int(evidence_policy.get("pre_seconds", DEFAULT_PRE_SECONDS)),
-            "post_seconds": int(evidence_policy.get("post_seconds", DEFAULT_POST_SECONDS)),
+            "pre_seconds": int(
+                evidence_policy.get("pre_seconds", self._default_pre_seconds)
+            ),
+            "post_seconds": int(
+                evidence_policy.get("post_seconds", self._default_post_seconds)
+            ),
             "strategy": "savant_replay",
             "status": "pending",
         }

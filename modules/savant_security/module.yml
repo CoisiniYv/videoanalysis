@@ -21,7 +21,7 @@ parameters:
   pose_min_height: ${oc.decode:${oc.env:POSE_MIN_HEIGHT, 40}}
   face_detector_batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
   face_embedding_batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
-  face_confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
+  face_confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.25}}
   face_nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
   face_min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
   face_min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
@@ -130,7 +130,7 @@ pipeline:
             module: savant.converter.yolo_v8face
             class_name: YoloV8faceConverter
             kwargs:
-              confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.6}}
+              confidence_threshold: ${parameters.face_confidence_threshold}
               nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
           objects:
             - class_id: 0
@@ -200,7 +200,8 @@ pipeline:
       kwargs:
         log_every_n_frames: 30
         cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
-        face_reid_min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.6}}
+        face_detector_confidence_threshold: ${parameters.face_confidence_threshold}
+        face_reid_min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}
         face_reid_min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
         face_reid_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
         face_reid_norm_tolerance: ${oc.decode:${oc.env:FACE_REID_NORM_TOLERANCE, 0.10}}

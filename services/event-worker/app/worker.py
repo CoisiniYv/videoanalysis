@@ -29,7 +29,7 @@ R3_1A_DEFAULT_EVIDENCE_POLICY = {
     "snapshot_required": True,
     "clip_required": True,
     "pre_seconds": 5,
-    "post_seconds": 10,
+    "post_seconds": 5,
 }
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
@@ -177,6 +177,8 @@ def _handle_event(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
+    recording_pre_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
+    recording_post_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["post_seconds"],
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -186,6 +188,7 @@ def _handle_event(
     Failures in alert/record publishing do not block ACK.
     """
     _apply_default_evidence_policy(event)
+    _apply_recording_window(event, recording_pre_seconds, recording_post_seconds)
     event_id = None
     try:
         event_id = repo.insert_event(event)
@@ -428,6 +431,44 @@ def _apply_default_evidence_policy(event: dict) -> None:
     media.setdefault("keyframe_uuid", event.get("keyframe_uuid"))
 
 
+def _apply_recording_window(
+    event: dict,
+    pre_seconds: int,
+    post_seconds: int,
+) -> None:
+    """Apply the configured recording window to clip-required events."""
+    if pre_seconds <= 0 or post_seconds <= 0:
+        return
+    payload = event.get("payload")
+    payload_media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    clip_required = bool(
+        event.get("clip_required", False)
+        or (
+            isinstance(payload_media, dict)
+            and payload_media.get("clip_required", False)
+        )
+    )
+    if not clip_required:
+        return
+
+    policy = event.get("evidence_policy")
+    if not isinstance(policy, dict):
+        policy = {}
+    policy["pre_seconds"] = int(pre_seconds)
+    policy["post_seconds"] = int(post_seconds)
+    event["evidence_policy"] = policy
+
+    if not isinstance(payload, dict):
+        payload = {}
+        event["payload"] = payload
+    media = payload.setdefault("media", {})
+    if not isinstance(media, dict):
+        media = {}
+        payload["media"] = media
+    media["pre_seconds"] = int(pre_seconds)
+    media["post_seconds"] = int(post_seconds)
+
+
 def _process_batch(
     messages: list[tuple[str, dict[bytes, bytes]]],
     repo: EventRepository,
@@ -441,6 +482,8 @@ def _process_batch(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
+    recording_pre_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
+    recording_post_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["post_seconds"],
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -463,6 +506,8 @@ def _process_batch(
             recording_source_id=recording_source_id,
             recording_max_requests_per_run=recording_max_requests_per_run,
             recording_cooldown_seconds=recording_cooldown_seconds,
+            recording_pre_seconds=recording_pre_seconds,
+            recording_post_seconds=recording_post_seconds,
         )
         if new:
             inserted += 1
@@ -562,6 +607,8 @@ def run_worker(
             redis_client,
             cfg.record_request_stream,
             default_replay_source_id=cfg.default_replay_source_id,
+            default_pre_seconds=cfg.recording_pre_seconds,
+            default_post_seconds=cfg.recording_post_seconds,
         )
         if cfg.recording_enabled
         else None
@@ -572,9 +619,10 @@ def run_worker(
         "worker started stream=%s group=%s consumer=%s alert_stream=%s "
         "recording_enabled=%s record_request_stream=%s recording_event_types=%s "
         "recording_source_id=%s recording_max_requests_per_run=%s "
-        "recording_cooldown_seconds=%s person_observation_enabled=%s "
+        "recording_cooldown_seconds=%s recording_pre_seconds=%s "
+        "recording_post_seconds=%s person_observation_enabled=%s "
         "person_observation_stream=%s person_observation_group=%s "
-        "person_observation_start_id=%s",
+        "person_observation_start_id=%s person_observation_batch_size=%s",
         cfg.event_stream,
         cfg.consumer_group,
         cfg.consumer_name,
@@ -585,10 +633,13 @@ def run_worker(
         cfg.recording_source_id,
         cfg.recording_max_requests_per_run,
         cfg.recording_cooldown_seconds,
+        cfg.recording_pre_seconds,
+        cfg.recording_post_seconds,
         cfg.person_observation_enabled,
         cfg.person_observation_stream,
         cfg.person_observation_consumer_group,
         cfg.person_observation_consumer_start_id,
+        cfg.person_observation_batch_size,
     )
 
     total_inserted = 0
@@ -602,7 +653,9 @@ def run_worker(
     while not shutdown_requested:
         try:
             if person_consumer is not None:
-                person_pending = person_consumer.read_pending(count=cfg.batch_size)
+                person_pending = person_consumer.read_pending(
+                    count=cfg.person_observation_batch_size
+                )
                 if person_pending:
                     pins, pdup, pskip, pfail = _process_person_observation_batch(
                         person_pending,
@@ -624,7 +677,7 @@ def run_worker(
                         )
 
                 person_new = person_consumer.read_new(
-                    count=cfg.batch_size, block_ms=1
+                    count=cfg.person_observation_batch_size, block_ms=1
                 )
                 if person_new:
                     pins, pdup, pskip, pfail = _process_person_observation_batch(
@@ -660,6 +713,8 @@ def run_worker(
                     recording_source_id=cfg.recording_source_id,
                     recording_max_requests_per_run=cfg.recording_max_requests_per_run,
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                    recording_pre_seconds=cfg.recording_pre_seconds,
+                    recording_post_seconds=cfg.recording_post_seconds,
                 )
                 total_inserted += ins
                 total_duplicates += dup
@@ -685,6 +740,8 @@ def run_worker(
                     recording_source_id=cfg.recording_source_id,
                     recording_max_requests_per_run=cfg.recording_max_requests_per_run,
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                    recording_pre_seconds=cfg.recording_pre_seconds,
+                    recording_post_seconds=cfg.recording_post_seconds,
                 )
                 total_inserted += ins
                 total_duplicates += dup

@@ -31,7 +31,8 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
     def __init__(
         self,
         log_every_n_frames: int = 30,
-        face_reid_min_confidence: float = 0.6,
+        face_detector_confidence_threshold: float = 0.25,
+        face_reid_min_confidence: float = 0.45,
         face_reid_min_face_size: float = 40.0,
         face_reid_min_interval_ms: int = 1000,
         face_reid_norm_tolerance: float = 0.10,
@@ -41,6 +42,9 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         super().__init__(**kwargs)
         self._log_interval = max(int(log_every_n_frames), 1)
         self._frame_count = 0
+        self._face_detector_confidence_threshold = float(
+            face_detector_confidence_threshold,
+        )
         self._config = {
             "face_reid_min_confidence": float(face_reid_min_confidence),
             "face_reid_min_face_size": float(face_reid_min_face_size),
@@ -50,6 +54,18 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
             min_interval_ms=int(face_reid_min_interval_ms),
         )
         self._camera_bundle = self._load_camera_bundle(cameras_config_path)
+        self._counters = {
+            "raw_face_detections": 0,
+            "detector_confidence_passed": 0,
+            "detector_confidence_rejected": 0,
+            "reid_allowed": 0,
+            "reid_skipped": 0,
+            "reid_rejected_by_confidence": 0,
+            "reid_rejected_by_size": 0,
+            "reid_rejected_by_landmarks": 0,
+            "reid_rejected_by_embedding_norm": 0,
+            "reid_rejected_by_other": 0,
+        }
 
     @staticmethod
     def _load_camera_bundle(config_path: str):
@@ -82,9 +98,14 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
 
         allowed_count = 0
         skipped_count = 0
+        self._counters["raw_face_detections"] += len(face_objects)
 
         for i, obj in enumerate(face_objects):
             inp = self._extract_input(obj, source_id, camera_id, frame_meta)
+            if inp.face_confidence >= self._face_detector_confidence_threshold:
+                self._counters["detector_confidence_passed"] += 1
+            else:
+                self._counters["detector_confidence_rejected"] += 1
             result = evaluate_reid_gate(inp, self._config)
 
             # Throttle check (only if gate passed)
@@ -104,13 +125,29 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
 
             if result.allowed:
                 allowed_count += 1
+                self._counters["reid_allowed"] += 1
             else:
                 skipped_count += 1
+                self._counters["reid_skipped"] += 1
+                self._count_rejection_reason(result.skip_reason)
 
         if self._frame_count % self._log_interval == 1:
             self._log_gate_results(
                 face_objects, source_id, camera_id, allowed_count, skipped_count,
             )
+
+    def _count_rejection_reason(self, reason: Optional[str]) -> None:
+        reason = reason or "unknown"
+        if reason == "low_confidence":
+            self._counters["reid_rejected_by_confidence"] += 1
+        elif reason == "face_too_small":
+            self._counters["reid_rejected_by_size"] += 1
+        elif reason in ("no_landmarks", "bad_landmarks"):
+            self._counters["reid_rejected_by_landmarks"] += 1
+        elif reason.startswith("bad_norm"):
+            self._counters["reid_rejected_by_embedding_norm"] += 1
+        elif reason != "throttled":
+            self._counters["reid_rejected_by_other"] += 1
 
     def _extract_input(
         self, obj, source_id: str, camera_id: str, frame_meta: Any,
@@ -206,6 +243,24 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
             f"[face_reid_gate] frame={self._frame_count} source={source_id} "
             f"camera={camera_id} "
             f"faces={n} allowed={allowed_count} skipped={skipped_count}",
+            flush=True,
+        )
+        print(
+            "[face_reid_gate_summary] "
+            f"raw_face_detections={self._counters['raw_face_detections']} "
+            f"detector_confidence_passed={self._counters['detector_confidence_passed']} "
+            f"detector_confidence_rejected={self._counters['detector_confidence_rejected']} "
+            f"reid_allowed={self._counters['reid_allowed']} "
+            f"reid_skipped={self._counters['reid_skipped']} "
+            f"reid_rejected_by_confidence={self._counters['reid_rejected_by_confidence']} "
+            f"reid_rejected_by_size={self._counters['reid_rejected_by_size']} "
+            f"reid_rejected_by_landmarks={self._counters['reid_rejected_by_landmarks']} "
+            f"reid_rejected_by_embedding_norm={self._counters['reid_rejected_by_embedding_norm']} "
+            f"reid_rejected_by_other={self._counters['reid_rejected_by_other']} "
+            f"detector_threshold={self._face_detector_confidence_threshold:.3f} "
+            f"reid_min_confidence={self._config['face_reid_min_confidence']:.3f} "
+            f"reid_min_face_size={self._config['face_reid_min_face_size']:.1f} "
+            f"reid_norm_tolerance={self._config['face_reid_norm_tolerance']:.3f}",
             flush=True,
         )
 

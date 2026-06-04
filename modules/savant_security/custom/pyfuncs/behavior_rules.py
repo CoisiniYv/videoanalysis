@@ -84,6 +84,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _person_bbox_observation_min_interval_ms(default: int = 333) -> int:
+    value = os.getenv("PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS")
+    if value is not None and str(value).strip() != "":
+        return _env_int("PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS", default)
+    return _env_int("PERSON_OBSERVATION_MIN_INTERVAL_MS", default)
+
+
 def _config_float(config: Mapping[str, Any], key: str, default: float) -> float:
     try:
         value = config.get(key)
@@ -228,8 +235,9 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         self.person_observation_exporter: PersonObservationExporter = (
             create_person_observation_exporter()
         )
+        person_observation_min_interval_ms = _person_bbox_observation_min_interval_ms()
         self.person_observation_throttle = PersonObservationThrottleMap(
-            min_interval_ms=_env_int("PERSON_OBSERVATION_MIN_INTERVAL_MS", 1000)
+            min_interval_ms=person_observation_min_interval_ms
         )
         self._person_observation_export_count = 0
         self._person_observation_skip_count = 0
@@ -237,7 +245,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             f"stage=savant_security_person_observation_exporter "
             f"exporter={type(self.person_observation_exporter).__name__} "
             f"stream={os.getenv('PERSON_OBSERVATION_STREAM', 'security.person_observations')} "
-            f"min_interval_ms={_env_int('PERSON_OBSERVATION_MIN_INTERVAL_MS', 1000)}",
+            f"min_interval_ms={person_observation_min_interval_ms}",
             flush=True,
         )
 

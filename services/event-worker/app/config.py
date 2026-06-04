@@ -23,10 +23,13 @@ class Config:
     recording_source_id: str
     recording_max_requests_per_run: int
     recording_cooldown_seconds: int
+    recording_pre_seconds: int
+    recording_post_seconds: int
     person_observation_stream: str
     person_observation_consumer_group: str
     person_observation_consumer_name: str
     person_observation_consumer_start_id: str
+    person_observation_batch_size: int
     person_observation_enabled: bool
 
 
@@ -63,6 +66,12 @@ def load_config() -> Config:
         recording_cooldown_seconds=int(
             os.getenv("RECORDING_COOLDOWN_SECONDS", "0")
         ),
+        recording_pre_seconds=int(
+            os.getenv("RECORDING_PRE_SECONDS", os.getenv("DEFAULT_PRE_SECONDS", "5"))
+        ),
+        recording_post_seconds=int(
+            os.getenv("RECORDING_POST_SECONDS", os.getenv("DEFAULT_POST_SECONDS", "5"))
+        ),
         person_observation_stream=os.getenv(
             "PERSON_OBSERVATION_STREAM", "security.person_observations"
         ),
@@ -76,6 +85,9 @@ def load_config() -> Config:
         ),
         person_observation_consumer_start_id=os.getenv(
             "PERSON_OBSERVATION_CONSUMER_START_ID", "$"
+        ),
+        person_observation_batch_size=int(
+            os.getenv("PERSON_OBSERVATION_BATCH_SIZE", "100")
         ),
         person_observation_enabled=os.getenv(
             "PERSON_OBSERVATION_CONSUMER_ENABLED", "true"
