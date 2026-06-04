@@ -17,6 +17,7 @@ from pathlib import Path
 import psycopg
 
 from app.annotated_snapshot import generate_annotated_snapshot
+from app.clip_sanitizer import sanitize_raw_clip
 from app.config import Config, load_config
 from app.continuous_annotation import write_continuous_annotation_bundle
 from app.snapshot import generate_snapshot
@@ -627,6 +628,17 @@ def _update_summary_with_bundle_validation(
             "clip_status": status.get("clip_status"),
             "decode_error_count": clip_validation.get("decode_error_count", 0),
             "decode_error_sample": clip_validation.get("decode_error_sample", []),
+            "raw_clip_sanitize_method": media.get("raw_clip_sanitize_method", ""),
+            "raw_clip_sanitize_decode_ok": media.get(
+                "raw_clip_sanitize_decode_ok"
+            ),
+            "raw_clip_sanitize_decode_error_count": media.get(
+                "raw_clip_sanitize_decode_error_count", 0
+            ),
+            "raw_clip_sanitize_fallback_used": bool(
+                media.get("raw_clip_sanitize_fallback_used")
+            ),
+            "raw_clip_sanitize_error": media.get("raw_clip_sanitize_error", ""),
         }
     )
     _atomic_write_json(summary_path, summary)
@@ -930,6 +942,7 @@ def _build_business_metadata(
     annotations_jsonl_path: str = "",
     summary_json_path: str = "",
     annotation_summary: dict | None = None,
+    sanitize_info: dict | None = None,
 ) -> dict:
     payload = event_context.get("payload", {})
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -951,6 +964,7 @@ def _build_business_metadata(
         offset.get("seconds", 0),
     )
     decode_probe = _probe_clip_decode(raw_clip_path)
+    sanitize_info = sanitize_info or {}
     duration_guard = _duration_guard(raw_clip_duration, expected_duration_seconds)
     duration_ok = _duration_ok(
         raw_clip_duration,
@@ -1032,6 +1046,18 @@ def _build_business_metadata(
             "raw_clip_duration": raw_clip_duration,
             "expected_duration_seconds": round(expected_duration_seconds, 3),
             "duration_probe_status": duration_probe_status,
+            "raw_clip_sanitize_method": sanitize_info.get("method", ""),
+            "raw_clip_sanitize_decode_ok": sanitize_info.get("decode_ok"),
+            "raw_clip_sanitize_decode_error_count": sanitize_info.get(
+                "decode_error_count", 0
+            ),
+            "raw_clip_sanitize_decode_error_sample": sanitize_info.get(
+                "decode_error_sample", []
+            ),
+            "raw_clip_sanitize_fallback_used": bool(
+                sanitize_info.get("fallback_used", False)
+            ),
+            "raw_clip_sanitize_error": sanitize_info.get("sanitize_error", ""),
             "clip_validation": clip_validation,
         },
         "annotations": {
@@ -1084,7 +1110,28 @@ def _finalize_p1_evidence_bundle(
     summary_out = evidence_dir / "summary.json"
 
     if not raw_clip.exists():
-        shutil.copy2(video_file, raw_clip)
+        sanitize_info = sanitize_raw_clip(video_file, str(raw_clip))
+        logger.info(
+            "raw_clip_sanitized event_id=%s source=%s raw_clip=%s method=%s "
+            "decode_ok=%s decode_errors=%s fallback_used=%s sanitize_error=%s",
+            event_id,
+            video_file,
+            raw_clip,
+            sanitize_info.get("method"),
+            sanitize_info.get("decode_ok"),
+            sanitize_info.get("decode_error_count"),
+            sanitize_info.get("fallback_used"),
+            sanitize_info.get("sanitize_error", ""),
+        )
+    else:
+        sanitize_info = {
+            "method": "existing",
+            "decode_ok": None,
+            "decode_error_count": 0,
+            "decode_error_sample": [],
+            "fallback_used": False,
+            "sanitize_error": "raw_clip already existed; sanitizer skipped",
+        }
     shutil.copy2(metadata_file, sink_metadata_out)
 
     event_context = _load_event_context(pg_conn, event_id)
@@ -1137,6 +1184,7 @@ def _finalize_p1_evidence_bundle(
         annotations_jsonl_path=str(annotations_jsonl_out),
         summary_json_path=str(summary_out),
         annotation_summary=annotation_summary,
+        sanitize_info=sanitize_info,
     )
     annotation_summary = _update_summary_with_bundle_validation(
         summary_out,
@@ -1173,6 +1221,15 @@ def _finalize_p1_evidence_bundle(
         "max_allowed_duration_seconds": clip_validation.get(
             "max_allowed_duration_seconds"
         ),
+        "raw_clip_sanitize_method": sanitize_info.get("method", ""),
+        "raw_clip_sanitize_decode_ok": sanitize_info.get("decode_ok"),
+        "raw_clip_sanitize_decode_error_count": sanitize_info.get(
+            "decode_error_count", 0
+        ),
+        "raw_clip_sanitize_fallback_used": bool(
+            sanitize_info.get("fallback_used", False)
+        ),
+        "raw_clip_sanitize_error": sanitize_info.get("sanitize_error", ""),
     }
 
 
@@ -1343,6 +1400,16 @@ def _process_sink_output(
                                         'annotations_jsonl_path', %(annotations_path)s::text,
                                         'summary_json_path', %(summary_path)s::text,
                                         'raw_clip_path', %(raw_clip_path)s::text,
+                                        'raw_clip_sanitize_method',
+                                            %(raw_clip_sanitize_method)s::text,
+                                        'raw_clip_sanitize_decode_ok',
+                                            %(raw_clip_sanitize_decode_ok)s::boolean,
+                                        'raw_clip_sanitize_decode_error_count',
+                                            %(raw_clip_sanitize_decode_error_count)s::int,
+                                        'raw_clip_sanitize_fallback_used',
+                                            %(raw_clip_sanitize_fallback_used)s::boolean,
+                                        'raw_clip_sanitize_error',
+                                            %(raw_clip_sanitize_error)s::text,
                                         'annotated_clip_path', NULL,
                                         'annotated_clip_status', 'not_generated',
                                         'annotation_status', %(annotation_status)s::text,
@@ -1375,6 +1442,22 @@ def _process_sink_output(
                             "annotations_path": bundle["annotations_jsonl"],
                             "summary_path": bundle["summary"],
                             "raw_clip_path": bundle["raw_clip"],
+                            "raw_clip_sanitize_method": bundle.get(
+                                "raw_clip_sanitize_method"
+                            ),
+                            "raw_clip_sanitize_decode_ok": bundle.get(
+                                "raw_clip_sanitize_decode_ok"
+                            ),
+                            "raw_clip_sanitize_decode_error_count": int(
+                                bundle.get("raw_clip_sanitize_decode_error_count")
+                                or 0
+                            ),
+                            "raw_clip_sanitize_fallback_used": bool(
+                                bundle.get("raw_clip_sanitize_fallback_used")
+                            ),
+                            "raw_clip_sanitize_error": bundle.get(
+                                "raw_clip_sanitize_error"
+                            ),
                             "annotation_status": bundle.get("annotation_status"),
                             "annotation_lines": int(bundle.get("annotation_lines") or 0),
                             "annotation_empty_reason": bundle.get(

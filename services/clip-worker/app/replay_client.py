@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import httpx
@@ -152,52 +153,108 @@ class ReplayClient:
         self.last_job_request = payload
 
         try:
-            logger.info("Replay job request payload=%s", payload)
-            resp = httpx.put(
-                f"{self._base_url}/api/v1/job",
-                json=payload,
-                timeout=self._timeout,
+            return self._submit_job_payload(payload)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "Replay API rejected primary job payload source_id=%s keyframe=%s "
+                "status=%s response=%s",
+                source_id,
+                keyframe_uuid,
+                exc.response.status_code if exc.response is not None else "",
+                (exc.response.text if exc.response is not None else "")[:500],
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("new_job") or data.get("job_id") or data.get("id")
-        except httpx.HTTPStatusError:
+
+            fallback_payloads: list[Dict[str, Any]] = []
             if stop_condition_mode == "ts_delta_sec":
-                fallback_payload = build_job_payload(
-                    source_id=source_id,
-                    keyframe_uuid=keyframe_uuid,
-                    pre_seconds=pre_seconds,
-                    post_seconds=post_seconds,
-                    sink_endpoint=sink_endpoint,
-                    labels=labels,
-                    stop_condition_mode="frame_count",
-                    fallback_reason="replay_api_rejected_ts_delta_sec",
-                    fps=fps,
+                fallback_payloads.append(
+                    build_job_payload(
+                        source_id=source_id,
+                        keyframe_uuid=keyframe_uuid,
+                        pre_seconds=pre_seconds,
+                        post_seconds=post_seconds,
+                        sink_endpoint=sink_endpoint,
+                        labels=labels,
+                        stop_condition_mode="frame_count",
+                        fallback_reason="replay_api_rejected_ts_delta_sec",
+                        fps=fps,
+                    )
                 )
-                self.last_job_request = fallback_payload
+
+            if not _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", False):
+                fallback_payloads.append(
+                    build_job_payload(
+                        source_id=source_id,
+                        keyframe_uuid=keyframe_uuid,
+                        pre_seconds=pre_seconds,
+                        post_seconds=post_seconds,
+                        sink_endpoint=sink_endpoint,
+                        labels=labels,
+                        stop_condition_mode=stop_condition_mode,
+                        fallback_reason=(
+                            "replay_api_rejected_without_constant_cadence"
+                        ),
+                        fps=fps,
+                        force_constant_cadence=True,
+                    )
+                )
+                if stop_condition_mode == "ts_delta_sec":
+                    fallback_payloads.append(
+                        build_job_payload(
+                            source_id=source_id,
+                            keyframe_uuid=keyframe_uuid,
+                            pre_seconds=pre_seconds,
+                            post_seconds=post_seconds,
+                            sink_endpoint=sink_endpoint,
+                            labels=labels,
+                            stop_condition_mode="frame_count",
+                            fallback_reason=(
+                                "replay_api_rejected_ts_delta_sec_constant_cadence"
+                            ),
+                            fps=fps,
+                            force_constant_cadence=True,
+                        )
+                    )
+
+            seen_payloads: set[str] = set()
+            for fallback_payload in fallback_payloads:
+                signature = str(fallback_payload)
+                if signature in seen_payloads:
+                    continue
+                seen_payloads.add(signature)
                 try:
                     logger.warning(
-                        "Replay API rejected ts_delta_sec; retrying with frame_count "
-                        "payload=%s",
+                        "Retrying Replay job request with fallback payload=%s",
                         fallback_payload,
                     )
-                    resp = httpx.put(
-                        f"{self._base_url}/api/v1/job",
-                        json=fallback_payload,
-                        timeout=self._timeout,
+                    return self._submit_job_payload(fallback_payload)
+                except httpx.HTTPStatusError as fallback_exc:
+                    logger.warning(
+                        "Replay fallback job payload rejected source_id=%s "
+                        "keyframe=%s status=%s response=%s",
+                        source_id,
+                        keyframe_uuid,
+                        (
+                            fallback_exc.response.status_code
+                            if fallback_exc.response is not None
+                            else ""
+                        ),
+                        (
+                            fallback_exc.response.text
+                            if fallback_exc.response is not None
+                            else ""
+                        )[:500],
                     )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    return data.get("new_job") or data.get("job_id") or data.get("id")
+                    continue
                 except Exception:
                     logger.exception(
-                        "Replay frame_count fallback failed source_id=%s keyframe=%s",
+                        "Replay fallback job request failed source_id=%s keyframe=%s",
                         source_id,
                         keyframe_uuid,
                     )
-                    return None
-            logger.exception(
-                "Replay job creation failed source_id=%s keyframe=%s",
+                    continue
+
+            logger.error(
+                "Replay job creation failed after fallbacks source_id=%s keyframe=%s",
                 source_id,
                 keyframe_uuid,
             )
@@ -210,6 +267,18 @@ class ReplayClient:
             )
             return None
 
+    def _submit_job_payload(self, payload: Dict[str, Any]) -> Optional[str]:
+        self.last_job_request = payload
+        logger.info("Replay job request payload=%s", payload)
+        resp = httpx.put(
+            f"{self._base_url}/api/v1/job",
+            json=payload,
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("new_job") or data.get("job_id") or data.get("id")
+
 
 def _effective_fps(fps: int) -> int:
     return fps if fps > 0 else 30
@@ -218,6 +287,13 @@ def _effective_fps(fps: int) -> int:
 def _frame_duration_nanos(fps: int) -> int:
     """Nanoseconds per frame for real-time Replay pacing."""
     return int(1_000_000_000 // _effective_fps(fps))
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 RELIABLE_SINK_OPTIONS: Dict[str, Any] = {
@@ -242,6 +318,7 @@ def build_job_payload(
     stop_condition_mode: str = "frame_count",
     fallback_reason: str | None = None,
     fps: int = 30,
+    force_constant_cadence: bool | None = None,
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
@@ -258,30 +335,39 @@ def build_job_payload(
         }
     else:
         stop_condition = {"frame_count": total_frames}
+    constant_cadence = (
+        _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", False)
+        if force_constant_cadence is None
+        else bool(force_constant_cadence)
+    )
+    configuration: Dict[str, Any] = {
+        "ts_sync": True,
+        "skip_intermediary_eos": False,
+        "send_eos": True,
+        "stop_on_incorrect_ts": False,
+        "stored_stream_id": source_id,
+        "resulting_stream_id": f"replay-event-{event_id}",
+        "routing_labels": "bypass",
+        "max_idle_duration": {"secs": 10, "nanos": 0},
+        "max_delivery_duration": {"secs": 30, "nanos": 0},
+        "send_metadata_only": False,
+        "labels": labels or {},
+    }
+    if constant_cadence:
+        frame_duration = {"secs": 0, "nanos": frame_duration_nanos}
+        configuration.update(
+            {
+                "ts_discrepancy_fix_duration": frame_duration,
+                "min_duration": frame_duration,
+                "max_duration": frame_duration,
+            }
+        )
     payload = {
         "sink": {
             "url": sink_endpoint,
             "options": RELIABLE_SINK_OPTIONS.copy(),
         },
-        "configuration": {
-            "ts_sync": True,
-            "skip_intermediary_eos": False,
-            "send_eos": True,
-            "stop_on_incorrect_ts": False,
-            "ts_discrepancy_fix_duration": {
-                "secs": 0,
-                "nanos": frame_duration_nanos,
-            },
-            "min_duration": {"secs": 0, "nanos": frame_duration_nanos},
-            "max_duration": {"secs": 0, "nanos": frame_duration_nanos},
-            "stored_stream_id": source_id,
-            "resulting_stream_id": f"replay-event-{event_id}",
-            "routing_labels": "bypass",
-            "max_idle_duration": {"secs": 10, "nanos": 0},
-            "max_delivery_duration": {"secs": 30, "nanos": 0},
-            "send_metadata_only": False,
-            "labels": labels or {},
-        },
+        "configuration": configuration,
         "stop_condition": stop_condition,
         "anchor_keyframe": keyframe_uuid,
         "anchor_wait_duration": {"secs": 1, "nanos": 0},

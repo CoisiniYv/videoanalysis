@@ -16,6 +16,22 @@ class Config:
     poll_timeout_ms: int
     batch_size: int
     consumer_start_id: str
+    watchlist_match_enabled: bool
+    watchlist_event_stream: str
+    watchlist_threshold: float
+    watchlist_top_k: int
+    watchlist_target_external_person_ids: tuple[str, ...]
+    watchlist_target_names: tuple[str, ...]
+    watchlist_target_refresh_seconds: int
+
+
+def _bool_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "")
+    return tuple(part.strip() for part in value.split(",") if part.strip())
 
 
 def load_config() -> Config:
@@ -41,5 +57,16 @@ def load_config() -> Config:
         consumer_start_id=os.getenv(
             "FACE_WORKER_CONSUMER_START_ID",
             os.getenv("FACE_OBSERVATION_CONSUMER_START_ID", "0"),
+        ),
+        watchlist_match_enabled=_bool_env("WATCHLIST_MATCH_ENABLED"),
+        watchlist_event_stream=os.getenv("WATCHLIST_EVENT_STREAM", "security.events"),
+        watchlist_threshold=float(os.getenv("WATCHLIST_THRESHOLD", "0.50")),
+        watchlist_top_k=int(os.getenv("WATCHLIST_TOP_K", "5")),
+        watchlist_target_external_person_ids=_csv_env(
+            "WATCHLIST_TARGET_EXTERNAL_PERSON_IDS"
+        ),
+        watchlist_target_names=_csv_env("WATCHLIST_TARGET_NAMES"),
+        watchlist_target_refresh_seconds=int(
+            os.getenv("WATCHLIST_TARGET_REFRESH_SECONDS", "30")
         ),
     )

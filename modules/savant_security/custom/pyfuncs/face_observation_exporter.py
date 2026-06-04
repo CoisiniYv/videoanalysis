@@ -277,17 +277,22 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             pass
         return ""
 
-    def _read_bbox_list(self, obj) -> Optional[List[float]]:
+    def _read_bbox(self, obj) -> Optional[dict]:
         bbox = getattr(obj, "bbox", None)
         if bbox is None:
             return None
         try:
-            return [
+            values = [
                 float(getattr(bbox, "xc", 0.0)),
                 float(getattr(bbox, "yc", 0.0)),
                 float(getattr(bbox, "width", 0.0)),
                 float(getattr(bbox, "height", 0.0)),
             ]
+            return {
+                "format": "cxcywh",
+                "values": values,
+                "coordinate_space": "pixel",
+            }
         except Exception:
             return None
 
@@ -307,7 +312,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
     ) -> Optional[FaceObservationEventDraft]:
         """Build a FaceObservationEventDraft from a Savant face object."""
         landmarks = self._read_landmarks(obj)
-        face_bbox = self._read_bbox_list(obj)
+        face_bbox = self._read_bbox(obj)
         face_confidence = float(getattr(obj, "confidence", 0.0))
         quality_score = self._read_gate_float(obj, "reid_quality_score")
 
@@ -332,6 +337,9 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             camera_id=camera_id,
             source_id=source_id,
             track_id=track_id,
+            person_track_id=str(track_id),
+            face_track_id=None,
+            track_id_semantics="person_track_id",
             timestamp_ms=timestamp_ms,
             frame_num=frame_num,
             person_bbox=person_bbox,
@@ -352,6 +360,9 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
 
         # Annotate with camera resolution metadata
         obs.payload["camera_config_resolved"] = camera_resolved
+        obs.payload["person_track_id"] = str(track_id)
+        obs.payload["face_track_id"] = None
+        obs.payload["track_id_semantics"] = "person_track_id"
         anchor = dict(frame_anchor or {})
         media = obs.payload.setdefault("media", {})
         if not isinstance(media, dict):
