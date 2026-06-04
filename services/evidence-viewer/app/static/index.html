@@ -51,7 +51,7 @@
         <label><input id="showUnknown" type="checkbox"> show unknown</label>
         <label><input id="showLandmarks" type="checkbox" checked> show landmarks</label>
         <label><input id="showLabels" type="checkbox" checked> show labels</label>
-        <label>hold ms <input id="holdMs" type="number" min="0" step="50" value="750"></label>
+        <label>hold ms <input id="holdMs" type="number" min="0" step="50" value="0"></label>
         <label>time tolerance ms <input id="toleranceMs" type="number" min="0" step="25" value="150"></label>
       </section>
 
@@ -75,7 +75,14 @@
             <dt>target pts</dt><dd id="targetPts">-</dd>
             <dt>matched pts</dt><dd id="matchedPts">-</dd>
             <dt>alignment</dt><dd id="alignmentMode">-</dd>
+            <dt>render policy</dt><dd id="renderPolicy">mode=per_track_hold</dd>
+            <dt>face policy</dt><dd id="faceOverlayPolicy">sparse_observation</dd>
+            <dt>matched face ms</dt><dd id="matchedFaceWindowMs">500</dd>
+            <dt>person context ms</dt><dd id="personContextWindowMs">1000</dd>
             <dt>active objects</dt><dd id="activeObjects">0</dd>
+            <dt>person_context window</dt><dd id="activePersonContext">0</dd>
+            <dt>matched_face window</dt><dd id="activeMatchedFaces">0</dd>
+            <dt>behavior_event window</dt><dd id="activeBehaviorEvents">0</dd>
             <dt>first video pts</dt><dd id="firstVideoPts">-</dd>
             <dt>source size</dt><dd id="sourceSize">-</dd>
           </dl>

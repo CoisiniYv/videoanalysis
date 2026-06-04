@@ -4,6 +4,15 @@ const NS_PER_SECOND = 1000000000;
 const ALERT_REDS = new Set(["#D50000", "#FF0000", "#E53935", "#FF1744"]);
 const DEFAULT_SOURCE_WIDTH = 1920;
 const DEFAULT_SOURCE_HEIGHT = 1080;
+const DEFAULT_SHOW_PERSON_BOXES = true;
+const FACE_OVERLAY_POLICY = "sparse_observation";
+const ROLE_RENDER_WINDOW_MS = {
+  behavior_event: 1500,
+  person_context: 1000,
+  matched_face: 500,
+  unknown_face: 500,
+  default: 500
+};
 
 const state = {
   bundles: [],
@@ -34,6 +43,13 @@ const dom = {
   showLabels: document.getElementById("showLabels"),
   holdMs: document.getElementById("holdMs"),
   toleranceMs: document.getElementById("toleranceMs"),
+  renderPolicy: document.getElementById("renderPolicy"),
+  activePersonContext: document.getElementById("activePersonContext"),
+  activeMatchedFaces: document.getElementById("activeMatchedFaces"),
+  activeBehaviorEvents: document.getElementById("activeBehaviorEvents"),
+  faceOverlayPolicy: document.getElementById("faceOverlayPolicy"),
+  matchedFaceWindowMs: document.getElementById("matchedFaceWindowMs"),
+  personContextWindowMs: document.getElementById("personContextWindowMs"),
   warningList: document.getElementById("warningList")
 };
 
@@ -175,20 +191,20 @@ function firstFrameWithPts(records) {
 }
 
 function annotationTimeSeconds(annotation, firstVideoFramePts) {
-  const framePts = numberOrNull(annotation.frame_pts);
-  if (framePts !== null && firstVideoFramePts !== null) {
-    return {
-      timeSec: (framePts - firstVideoFramePts) / NS_PER_SECOND,
-      mode: "frame_pts"
-    };
-  }
   const timeOffsetMs = numberOrNull(annotation.time_offset_ms);
   if (timeOffsetMs !== null) {
-    state.timeOffsetFallbackUsed = true;
-    addWarning("time_offset_ms_fallback");
     return {
       timeSec: timeOffsetMs / 1000,
-      mode: "time_offset_ms_fallback"
+      mode: "time_offset_ms"
+    };
+  }
+  const framePts = numberOrNull(annotation.frame_pts);
+  if (framePts !== null && firstVideoFramePts !== null) {
+    state.timeOffsetFallbackUsed = true;
+    addWarning("frame_pts_fallback");
+    return {
+      timeSec: (framePts - firstVideoFramePts) / NS_PER_SECOND,
+      mode: "frame_pts_fallback"
     };
   }
   addWarning("annotation_missing_frame_pts_and_time_offset_ms");
@@ -436,59 +452,64 @@ function linesAtOverlayTime(overlayTimeSec) {
   ));
 }
 
-function linesAtFramePts(framePts) {
-  return state.preparedAnnotations.filter(line => (
-    line._framePts !== null && framePts !== null && line._framePts === framePts
-  ));
+function lineRole(line) {
+  const obj = objectsForLine(line)[0];
+  if (!obj) return "default";
+  if (isBehaviorEventObject(obj)) return "behavior_event";
+  if (isPersonContextObject(obj)) return "person_context";
+  if (isMatchedObject(obj)) return "matched_face";
+  return "unknown_face";
+}
+
+function lineTrackKey(line) {
+  const obj = objectsForLine(line)[0] || {};
+  const type = obj.object_type || line.object_type || "obj";
+  const id =
+    obj.track_id ?? line.track_id ?? obj.object_id ?? line.object_id ?? line._index;
+  return `${type}:${id}`;
 }
 
 function findActiveAnnotations(currentTime) {
   if (!state.preparedAnnotations.length) {
-    return { line: null, lines: [], targetPts: null, mode: "none", matchedPts: null };
+    return { line: null, lines: [], targetMs: Math.round(currentTime * 1000), mode: "none", matchedMs: null };
   }
-  const toleranceNs = Math.max(0, Number(dom.toleranceMs.value || 150)) * 1000000;
-  const holdSec = Math.max(0, Number(dom.holdMs.value || 750)) / 1000;
-  const targetPts = state.firstVideoFramePts !== null
-    ? state.firstVideoFramePts + currentTime * NS_PER_SECOND
-    : null;
-  let nearest = null;
-  let nearestDelta = Infinity;
-  let latestPrior = null;
+  const userToleranceMs = Math.max(0, Number(dom.toleranceMs.value || 0));
+  const userHoldMs = Math.max(0, Number(dom.holdMs.value || 0));
+  const targetMs = Math.round(currentTime * 1000);
+  const byTrack = new Map();
 
   for (const line of state.preparedAnnotations) {
-    if (line._framePts !== null && targetPts !== null) {
-      const delta = Math.abs(line._framePts - targetPts);
-      if (delta < nearestDelta) {
-        nearest = line;
-        nearestDelta = delta;
-      }
-    }
-    if (line._overlayTimeSec <= currentTime) {
-      latestPrior = line;
+    if (line._overlayTimeSec === null || line._overlayTimeSec === undefined) continue;
+    const role = lineRole(line);
+    const baseWindowMs = ROLE_RENDER_WINDOW_MS[role] || ROLE_RENDER_WINDOW_MS.default;
+    const holdMs = baseWindowMs + userHoldMs;
+    const aheadMs = baseWindowMs * 0.5 + userToleranceMs;
+    const dtMs = (currentTime - line._overlayTimeSec) * 1000;
+    if (dtMs < -aheadMs || dtMs > holdMs) continue;
+    const key = lineTrackKey(line);
+    const previous = byTrack.get(key);
+    if (
+      !previous ||
+      Math.abs(line._overlayTimeSec - currentTime) <
+        Math.abs(previous._overlayTimeSec - currentTime)
+    ) {
+      byTrack.set(key, line);
     }
   }
 
-  if (nearest && nearestDelta <= toleranceNs) {
-    const lines = linesAtFramePts(nearest._framePts);
-    return {
-      line: nearest,
-      lines: lines.length ? lines : [nearest],
-      targetPts,
-      mode: "frame_pts",
-      matchedPts: nearest._framePts
-    };
+  const lines = [...byTrack.values()].sort(
+    (a, b) => a._overlayTimeSec - b._overlayTimeSec
+  );
+  if (!lines.length) {
+    return { line: null, lines: [], targetMs, mode: "none", matchedMs: null };
   }
-  if (latestPrior && currentTime - latestPrior._overlayTimeSec <= holdSec) {
-    const lines = linesAtOverlayTime(latestPrior._overlayTimeSec);
-    return {
-      line: latestPrior,
-      lines: lines.length ? lines : [latestPrior],
-      targetPts,
-      mode: `${latestPrior._alignment}_held`,
-      matchedPts: latestPrior._framePts
-    };
-  }
-  return { line: null, lines: [], targetPts, mode: "none", matchedPts: null };
+  return {
+    line: lines[0],
+    lines,
+    targetMs,
+    mode: "per_track_hold",
+    matchedMs: Math.round(lines[0]._overlayTimeSec * 1000)
+  };
 }
 
 function resizeCanvas() {
@@ -581,7 +602,24 @@ function drawOverlay() {
 }
 
 function setText(id, value) {
-  document.getElementById(id).textContent = value === undefined || value === null || value === "" ? "-" : String(value);
+  const element = document.getElementById(id);
+  if (!element) return;
+  element.textContent = value === undefined || value === null || value === "" ? "-" : String(value);
+}
+
+function activeRoleCounts(lines) {
+  const counts = {
+    person_context: 0,
+    matched_face: 0,
+    behavior_event: 0
+  };
+  for (const line of lines || []) {
+    const role = lineRole(line);
+    if (counts[role] !== undefined) {
+      counts[role] += 1;
+    }
+  }
+  return counts;
 }
 
 function renderDetails() {
@@ -619,11 +657,19 @@ function renderDetails() {
 }
 
 function updateDebug(active, objectCount) {
+  const counts = activeRoleCounts(active?.lines || []);
   setText("currentTime", dom.video.currentTime.toFixed(3));
-  setText("targetPts", active?.targetPts !== null && active?.targetPts !== undefined ? Math.round(active.targetPts) : "-");
-  setText("matchedPts", active?.matchedPts !== null && active?.matchedPts !== undefined ? Math.round(active.matchedPts) : "-");
+  setText("targetPts", active?.targetMs !== null && active?.targetMs !== undefined ? `${active.targetMs} ms` : "-");
+  setText("matchedPts", active?.matchedMs !== null && active?.matchedMs !== undefined ? `${active.matchedMs} ms` : "-");
   setText("alignmentMode", active?.mode || "-");
   setText("activeObjects", objectCount);
+  setText("renderPolicy", "mode=per_track_hold");
+  setText("faceOverlayPolicy", FACE_OVERLAY_POLICY);
+  setText("matchedFaceWindowMs", ROLE_RENDER_WINDOW_MS.matched_face);
+  setText("personContextWindowMs", ROLE_RENDER_WINDOW_MS.person_context);
+  setText("activePersonContext", counts.person_context);
+  setText("activeMatchedFaces", counts.matched_face);
+  setText("activeBehaviorEvents", counts.behavior_event);
 }
 
 function renderWarnings() {
@@ -668,7 +714,12 @@ dom.video.addEventListener("loadedmetadata", () => {
   resizeCanvas();
 });
 
+function applyOverlayDefaults() {
+  dom.showPersons.checked = DEFAULT_SHOW_PERSON_BOXES;
+}
+
 async function init() {
+  applyOverlayDefaults();
   await loadHealth();
   await loadBundles();
   resizeCanvas();
