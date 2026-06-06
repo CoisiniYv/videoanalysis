@@ -114,7 +114,8 @@ label {
 }
 
 input[type="text"],
-input[type="number"] {
+input[type="number"],
+select {
   width: 170px;
   border: 1px solid #3b4755;
   border-radius: 6px;
@@ -186,6 +187,43 @@ button:hover {
   border-radius: 8px;
   overflow: hidden;
   background: #05070a;
+}
+
+.source-banner {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 10px;
+  max-width: calc(100% - 20px);
+  border: 1px solid #3b4755;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: rgba(17, 22, 27, 0.88);
+  color: #edf2f7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.source-banner--production_sidecar {
+  border-color: #267a49;
+  background: rgba(13, 47, 29, 0.9);
+  color: #b9f6ca;
+}
+
+.source-banner--legacy_debug,
+.source-banner--preview_debug {
+  border-color: #8a6c1e;
+  background: rgba(51, 42, 19, 0.9);
+  color: #ffd166;
+}
+
+.source-banner--unavailable {
+  border-color: #7c3131;
+  background: rgba(55, 22, 22, 0.9);
+  color: #ffb4a8;
 }
 
 video {

@@ -21,11 +21,14 @@ const state = {
   annotations: [],
   sinkRecords: [],
   preparedAnnotations: [],
+  annotationSource: "auto",
+  annotationPayload: null,
   firstVideoFramePts: null,
   sourceWidth: DEFAULT_SOURCE_WIDTH,
   sourceHeight: DEFAULT_SOURCE_HEIGHT,
   warnings: new Set(),
-  timeOffsetFallbackUsed: false
+  timeOffsetFallbackUsed: false,
+  frameDurationMs: null
 };
 
 const dom = {
@@ -36,6 +39,8 @@ const dom = {
   refreshBundles: document.getElementById("refreshBundles"),
   video: document.getElementById("video"),
   canvas: document.getElementById("overlay"),
+  annotationSourceBanner: document.getElementById("annotationSourceBanner"),
+  annotationSource: document.getElementById("annotationSource"),
   showPersons: document.getElementById("showPersons"),
   showMatched: document.getElementById("showMatched"),
   showUnknown: document.getElementById("showUnknown"),
@@ -65,6 +70,50 @@ function addWarning(message) {
     state.warnings.add(message);
   }
   renderWarnings();
+}
+
+function annotationSourceLabel(source) {
+  const labels = {
+    auto: "Auto",
+    sidecar: "Production Sidecar",
+    sidecar_preview: "Preview Sidecar",
+    legacy: "Legacy Debug",
+    unavailable: "Auto unavailable"
+  };
+  return labels[source] || source || "unknown";
+}
+
+function annotationSourceKind(payload = {}) {
+  if (payload.annotation_source_kind) {
+    return payload.annotation_source_kind;
+  }
+  const kinds = {
+    sidecar: "production_sidecar",
+    sidecar_preview: "preview_debug",
+    legacy: "legacy_debug",
+    unavailable: "unavailable"
+  };
+  return kinds[payload.annotation_source] || "unavailable";
+}
+
+function updateAnnotationSourceBanner() {
+  if (!dom.annotationSourceBanner) return;
+  const payload = state.annotationPayload || {};
+  const kind = annotationSourceKind(payload);
+  dom.annotationSourceBanner.textContent = [
+    `annotation_source=${kind}`,
+    payload.production_ready === false ? "production_ready=false" : "",
+    payload.reason ? `reason=${payload.reason}` : "",
+    payload.fallback_used ? "fallback=true" : ""
+  ].filter(Boolean).join(" | ");
+  dom.annotationSourceBanner.className = `source-banner source-banner--${kind}`;
+}
+
+function applyAnnotationSourceLabels() {
+  if (!dom.annotationSource) return;
+  for (const option of dom.annotationSource.options) {
+    option.textContent = annotationSourceLabel(option.value);
+  }
 }
 
 async function fetchJson(path) {
@@ -141,6 +190,7 @@ function renderBundleList() {
       bundle.event_type || "event",
       bundle.source_id || "source",
       bundle.clip_status || "clip",
+      `ann ${bundle.default_annotation_source || "none"}`,
       `faces ${bundle.matched_objects || 0}/${bundle.unknown_objects || 0}`
     ].join(" | ");
     button.append(main, sub);
@@ -149,19 +199,27 @@ function renderBundleList() {
   }
 }
 
-async function selectBundle(eventId) {
+async function selectBundle(eventId, options = {}) {
+  const preserveVideo = Boolean(options.preserveVideo);
+  const previousVideoSrc = dom.video.currentSrc || dom.video.src || "";
+  const previousVideoTime = Number.isFinite(dom.video.currentTime) ? dom.video.currentTime : 0;
+  const previousPaused = dom.video.paused;
   state.selectedEventId = eventId;
   state.warnings = new Set();
   renderBundleList();
 
+  const annotationSource = dom.annotationSource?.value || state.annotationSource || "auto";
+  state.annotationSource = annotationSource;
+  const annotationParams = new URLSearchParams({ source: annotationSource });
   const [manifest, annotationsPayload, sinkPayload] = await Promise.all([
     fetchJson(`/api/bundles/${encodeURIComponent(eventId)}`),
-    fetchJson(`/api/bundles/${encodeURIComponent(eventId)}/annotations`),
+    fetchJson(`/api/bundles/${encodeURIComponent(eventId)}/annotations?${annotationParams.toString()}`),
     fetchJson(`/api/bundles/${encodeURIComponent(eventId)}/sink-metadata`)
   ]);
 
   state.manifest = manifest;
-  state.annotations = annotationsPayload.records || [];
+  state.annotationPayload = annotationsPayload;
+  state.annotations = annotationsPayload.records || annotationsPayload.annotations || [];
   state.sinkRecords = sinkPayload.records || [];
   for (const warning of [
     ...(manifest.warnings || []),
@@ -170,9 +228,16 @@ async function selectBundle(eventId) {
   ]) {
     addWarning(warning);
   }
+  if (annotationsPayload.legacy_warning) {
+    addWarning(annotationsPayload.legacy_warning);
+  }
+  if (annotationsPayload.preview_warning) {
+    addWarning(annotationsPayload.preview_warning);
+  }
 
   const first = firstFrameWithPts(state.sinkRecords);
   state.firstVideoFramePts = first ? Number(first.pts) : null;
+  state.frameDurationMs = inferFrameDurationMs(state.sinkRecords);
   state.sourceWidth = Number(first?.width || dom.video.videoWidth || DEFAULT_SOURCE_WIDTH);
   state.sourceHeight = Number(first?.height || dom.video.videoHeight || DEFAULT_SOURCE_HEIGHT);
   if (state.firstVideoFramePts === null) {
@@ -180,9 +245,18 @@ async function selectBundle(eventId) {
   }
 
   prepareAnnotations();
-  dom.video.src = manifest.raw_clip_url || "";
-  dom.video.load();
+  const nextVideoSrc = manifest.raw_clip_url || "";
+  if (!preserveVideo || previousVideoSrc !== new URL(nextVideoSrc, window.location.href).href) {
+    dom.video.src = nextVideoSrc;
+    dom.video.load();
+  } else {
+    dom.video.currentTime = previousVideoTime;
+    if (!previousPaused) {
+      dom.video.play().catch(err => addWarning(`video_resume_failed:${err.message}`));
+    }
+  }
   renderDetails();
+  drawOverlay();
   renderWarnings();
 }
 
@@ -190,7 +264,48 @@ function firstFrameWithPts(records) {
   return records.find(record => Number.isFinite(Number(record.pts))) || null;
 }
 
-function annotationTimeSeconds(annotation, firstVideoFramePts) {
+function inferFrameDurationMs(records) {
+  const ptsValues = (records || [])
+    .map(record => numberOrNull(record.pts ?? record.frame_pts))
+    .filter(value => value !== null)
+    .sort((a, b) => a - b);
+  const deltas = [];
+  for (let index = 1; index < ptsValues.length; index += 1) {
+    const delta = ptsValues[index] - ptsValues[index - 1];
+    if (delta > 0) deltas.push(delta / 1000000);
+  }
+  if (!deltas.length) return null;
+  deltas.sort((a, b) => a - b);
+  const mid = Math.floor(deltas.length / 2);
+  return deltas.length % 2 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
+}
+
+function annotationTimeSeconds(annotation, firstVideoFramePts, frameDurationMs = null) {
+  const tMs = numberOrNull(annotation.t_ms);
+  const tS = numberOrNull(annotation.t_s);
+  const framePts = numberOrNull(annotation.frame_pts);
+  let framePtsTimeSec = null;
+  if (framePts !== null && firstVideoFramePts !== null) {
+    framePtsTimeSec = (framePts - firstVideoFramePts) / NS_PER_SECOND;
+  }
+  if (tMs !== null) {
+    if (framePtsTimeSec !== null && Math.abs((tMs / 1000) - framePtsTimeSec) > 0.5) {
+      addWarning("t_ms_frame_pts_disagreement");
+    }
+    return {
+      timeSec: tMs / 1000,
+      mode: "t_ms"
+    };
+  }
+  if (tS !== null) {
+    if (framePtsTimeSec !== null && Math.abs(tS - framePtsTimeSec) > 0.5) {
+      addWarning("t_ms_frame_pts_disagreement");
+    }
+    return {
+      timeSec: tS,
+      mode: "t_s"
+    };
+  }
   const timeOffsetMs = numberOrNull(annotation.time_offset_ms);
   if (timeOffsetMs !== null) {
     return {
@@ -198,12 +313,19 @@ function annotationTimeSeconds(annotation, firstVideoFramePts) {
       mode: "time_offset_ms"
     };
   }
-  const framePts = numberOrNull(annotation.frame_pts);
-  if (framePts !== null && firstVideoFramePts !== null) {
+  const clipFrameIndex = numberOrNull(annotation.clip_frame_index);
+  const safeFrameDurationMs = numberOrNull(annotation.clip_frame_duration_ms || annotation.frame_duration_ms || frameDurationMs);
+  if (clipFrameIndex !== null && safeFrameDurationMs !== null && safeFrameDurationMs > 0) {
+    return {
+      timeSec: (clipFrameIndex * safeFrameDurationMs) / 1000,
+      mode: "clip_frame_index"
+    };
+  }
+  if (framePtsTimeSec !== null) {
     state.timeOffsetFallbackUsed = true;
     addWarning("frame_pts_fallback");
     return {
-      timeSec: (framePts - firstVideoFramePts) / NS_PER_SECOND,
+      timeSec: framePtsTimeSec,
       mode: "frame_pts_fallback"
     };
   }
@@ -214,8 +336,9 @@ function annotationTimeSeconds(annotation, firstVideoFramePts) {
 function prepareAnnotations() {
   state.timeOffsetFallbackUsed = false;
   state.preparedAnnotations = state.annotations
+    .filter(line => line && line.displayable !== false)
     .map((line, index) => {
-      const timing = annotationTimeSeconds(line, state.firstVideoFramePts);
+      const timing = annotationTimeSeconds(line, state.firstVideoFramePts, state.frameDurationMs);
       return {
         ...line,
         _index: index,
@@ -295,7 +418,12 @@ function clamp(value, min, max) {
 
 function isMatchedObject(obj) {
   const identity = obj.identity || {};
+  const label = obj.label || {};
   return Boolean(
+    label.kind === "known_face" ||
+    label.display_name ||
+    label.external_person_id ||
+    label.person_id !== null && label.person_id !== undefined ||
     identity.status === "matched" ||
     identity.match_status === "above_threshold" ||
     identity.external_person_id ||
@@ -323,9 +451,11 @@ function isBehaviorEventObject(obj) {
 
 function isPersonContextObject(obj) {
   const style = obj.style || {};
+  const label = obj.label || {};
   return obj.object_type === "person" && (
     obj.annotation_role === "person_context" ||
-    style.reason === "person_detection"
+    style.reason === "person_detection" ||
+    label.kind === "person"
   );
 }
 
@@ -355,6 +485,7 @@ function labelForObject(obj, line) {
       .join(" | ");
   }
   const identity = obj.identity || {};
+  const label = obj.label || {};
   const trackId = obj.track_id || "";
   const timestamp = line.timestamp_ms || "";
   if (!isMatchedObject(obj)) {
@@ -362,8 +493,8 @@ function labelForObject(obj, line) {
       .filter(Boolean)
       .join(" | ");
   }
-  const name = identity.display_name || identity.external_person_id || "Matched face";
-  const similarity = Number(identity.similarity);
+  const name = label.display_name || identity.display_name || label.external_person_id || identity.external_person_id || "Matched face";
+  const similarity = Number(label.similarity ?? identity.similarity);
   const similarityText = Number.isFinite(similarity) ? similarity.toFixed(3) : "n/a";
   return [`${name} ${similarityText}`, trackId ? `track ${trackId}` : "", timestamp ? `ts ${timestamp}` : ""]
     .filter(Boolean)
@@ -434,7 +565,9 @@ function objectsForLine(line) {
   const objects = Array.isArray(line.objects)
     ? line.objects.filter(obj => obj && typeof obj === "object")
     : [];
-  if (line.record_type === "object_annotation") {
+  const isTopLevelObject = line.record_type === "object_annotation" ||
+    (!line.record_type && typeof line.object_type === "string" && line.bbox);
+  if (isTopLevelObject) {
     const obj = {};
     for (const key of ["object_type", "object_id", "annotation_role", "track_id", "bbox", "identity", "label", "action", "style", "landmarks", "pose", "detection", "gate"]) {
       if (line[key] !== undefined) obj[key] = line[key];
@@ -665,11 +798,23 @@ function updateDebug(active, objectCount) {
   setText("activeObjects", objectCount);
   setText("renderPolicy", "mode=per_track_hold");
   setText("faceOverlayPolicy", FACE_OVERLAY_POLICY);
+  const annotationPayload = state.annotationPayload || {};
+  setText(
+    "annotationSourceStatus",
+    [
+      annotationSourceKind(annotationPayload),
+      annotationSourceLabel(annotationPayload.annotation_source || state.annotationSource),
+      annotationPayload.fallback_used ? "fallback" : "",
+      annotationPayload.reason ? `reason=${annotationPayload.reason}` : ""
+    ].filter(Boolean).join(" | ")
+  );
+  setText("annotationFileStatus", annotationPayload.annotation_file || annotationPayload.source_hint);
   setText("matchedFaceWindowMs", ROLE_RENDER_WINDOW_MS.matched_face);
   setText("personContextWindowMs", ROLE_RENDER_WINDOW_MS.person_context);
   setText("activePersonContext", counts.person_context);
   setText("activeMatchedFaces", counts.matched_face);
   setText("activeBehaviorEvents", counts.behavior_event);
+  updateAnnotationSourceBanner();
 }
 
 function renderWarnings() {
@@ -697,9 +842,18 @@ for (const input of [
   dom.holdMs,
   dom.toleranceMs
 ]) {
+  if (!input) continue;
   input.addEventListener("input", drawOverlay);
   input.addEventListener("change", drawOverlay);
 }
+
+dom.annotationSource?.addEventListener("change", () => {
+  if (state.selectedEventId) {
+    selectBundle(state.selectedEventId, { preserveVideo: true }).catch(err => addWarning(`annotation_source_switch_failed:${err.message}`));
+  } else {
+    drawOverlay();
+  }
+});
 
 dom.refreshBundles.addEventListener("click", () => {
   state.selectedEventId = null;
@@ -716,6 +870,7 @@ dom.video.addEventListener("loadedmetadata", () => {
 
 function applyOverlayDefaults() {
   dom.showPersons.checked = DEFAULT_SHOW_PERSON_BOXES;
+  applyAnnotationSourceLabels();
 }
 
 async function init() {

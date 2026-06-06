@@ -40,12 +40,23 @@
 
     <section class="viewer">
       <div class="video-wrap" id="videoWrap">
+        <div id="annotationSourceBanner" class="source-banner source-banner--unavailable">
+          annotation_source=unavailable
+        </div>
         <video id="video" controls preload="metadata"></video>
         <canvas id="overlay"></canvas>
       </div>
 
       <section class="panel controls">
         <h2>Overlay Controls</h2>
+        <label>annotation source
+          <select id="annotationSource">
+            <option value="auto" selected>Auto (production sidecar)</option>
+            <option value="sidecar">Sidecar (production)</option>
+            <option value="sidecar_preview">Sidecar Preview (rebased)</option>
+            <option value="legacy">Legacy</option>
+          </select>
+        </label>
         <label><input id="showPersons" type="checkbox" checked> show person boxes</label>
         <label><input id="showMatched" type="checkbox" checked> show matched</label>
         <label><input id="showUnknown" type="checkbox"> show unknown</label>
@@ -77,6 +88,8 @@
             <dt>alignment</dt><dd id="alignmentMode">-</dd>
             <dt>render policy</dt><dd id="renderPolicy">mode=per_track_hold</dd>
             <dt>face policy</dt><dd id="faceOverlayPolicy">sparse_observation</dd>
+            <dt>annotation source</dt><dd id="annotationSourceStatus">auto</dd>
+            <dt>annotation file</dt><dd id="annotationFileStatus">-</dd>
             <dt>matched face ms</dt><dd id="matchedFaceWindowMs">500</dd>
             <dt>person context ms</dt><dd id="personContextWindowMs">1000</dd>
             <dt>active objects</dt><dd id="activeObjects">0</dd>
@@ -110,6 +123,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=c1k1f-render-compat"></script>
 </body>
 </html>
