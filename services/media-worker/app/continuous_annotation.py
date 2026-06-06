@@ -19,6 +19,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.annotation_style import build_style
+from app.identity_scope import apply_watchlist_identity_strict, unknown_watchlist_identity
 
 logger = logging.getLogger(__name__)
 
@@ -1371,10 +1372,29 @@ def _identity_for_observation(
     observation: dict[str, Any],
     event_identity: dict[str, Any],
     gallery_candidates: dict[str, dict[str, Any]],
+    event_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_observation_id = str(observation.get("source_observation_id") or "")
     candidate = None
-    if source_observation_id and source_observation_id == event_identity.get(
+    if event_context is not None and _event_expects_known_face(event_context):
+        trigger = str(event_identity.get("source_observation_id") or "")
+        if not trigger:
+            return unknown_watchlist_identity(
+                threshold=event_identity.get("threshold", 0.5),
+                skip_reason="missing_trigger_source_observation_id",
+            )
+        if not source_observation_id:
+            return unknown_watchlist_identity(
+                threshold=event_identity.get("threshold", 0.5),
+                skip_reason="missing_source_observation_id",
+            )
+        if source_observation_id != trigger:
+            return unknown_watchlist_identity(
+                threshold=event_identity.get("threshold", 0.5),
+                skip_reason="source_observation_id_mismatch",
+            )
+        candidate = event_identity
+    elif source_observation_id and source_observation_id == event_identity.get(
         "source_observation_id"
     ):
         candidate = event_identity
@@ -1439,8 +1459,10 @@ def _propagate_identities_by_track(
     event_context: dict[str, Any],
 ) -> int:
     """Propagate a known face identity to unknown faces on the same track."""
+    if _event_expects_known_face(event_context):
+        return 0
     if os.getenv(
-        "ANNOTATION_TRACK_IDENTITY_PROPAGATION", "true"
+        "ANNOTATION_TRACK_IDENTITY_PROPAGATION", "false"
     ).lower() in {"0", "false", "no"}:
         return 0
 
@@ -1633,6 +1655,7 @@ def _annotation_object(
     result = {
         "object_type": object_type,
         "object_id": f"{object_id_prefix}:{source_obs_id}",
+        "source_observation_id": source_obs_id,
         "track_id": str(observation.get("track_id") or ""),
         "person_track_id": str(person_track_id or "") if person_track_id is not None else None,
         "face_track_id": str(face_track_id) if face_track_id not in (None, "") else None,
@@ -1663,6 +1686,12 @@ def _annotation_object(
     # Include bbox_source for debugging geometry issues.
     if bbox_source:
         result["bbox_source"] = bbox_source
+    if not is_behavior and _event_expects_known_face(event_context):
+        result = apply_watchlist_identity_strict(
+            result,
+            trigger_source_observation_id=_event_identity(event_context).get("source_observation_id"),
+            identity=identity,
+        )
     return result
 
 
@@ -2912,6 +2941,7 @@ def build_continuous_annotations(
             observation=observation,
             event_identity=event_identity,
             gallery_candidates=gallery_candidates,
+            event_context=event_context,
         )
         obj = _annotation_object(
             observation=observation,
