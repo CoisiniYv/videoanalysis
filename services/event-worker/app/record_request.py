@@ -13,6 +13,111 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
+C2_POST_SAVANT_TOPOLOGIES = {"post_savant", "post_savant_replay"}
+
+
+def _first_policy_value(event: Dict[str, Any], key: str) -> Any:
+    """Return a C2 policy value from evidence policy, media, payload, or event."""
+    payload = event.get("payload") or {}
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media", {})
+    media = media if isinstance(media, dict) else {}
+    evidence_policy = event.get("evidence_policy") or {}
+    evidence_policy = evidence_policy if isinstance(evidence_policy, dict) else {}
+    for source in (evidence_policy, media, payload, event):
+        if key in source and source.get(key) is not None:
+            return source.get(key)
+    return None
+
+
+def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """Attach explicit C2 post-Savant evidence policy to a record_request."""
+    replay_source_kind = _first_policy_value(event, "replay_source_kind")
+    evidence_topology = _first_policy_value(event, "evidence_topology")
+    is_post_savant = str(replay_source_kind or "").strip() == "post_savant" or (
+        str(evidence_topology or "").strip() in C2_POST_SAVANT_TOPOLOGIES
+    )
+    if not is_post_savant:
+        return
+
+    record["replay_source_kind"] = "post_savant"
+    record["evidence_topology"] = str(evidence_topology or "post_savant")
+    record["annotation_source_policy"] = str(
+        _first_policy_value(event, "annotation_source_policy")
+        or "post_savant_sink_metadata_only"
+    )
+    record["allow_db_annotation_fallback"] = bool(
+        _first_policy_value(event, "allow_db_annotation_fallback") is True
+    )
+    record["allow_legacy_annotation_fallback"] = bool(
+        _first_policy_value(event, "allow_legacy_annotation_fallback") is True
+    )
+    for key in (
+        "frame_pts",
+        "frame_num",
+        "metadata_domain",
+        "requested_start_pts",
+        "requested_end_pts",
+        "event_frame_pts",
+        "replay_anchor_pts",
+        "replay_anchor_keyframe",
+        "replay_stop_strategy",
+    ):
+        value = _first_policy_value(event, key)
+        if value is not None:
+            record[key] = value
+
+
+def build_record_request(
+    event: Dict[str, Any],
+    event_id: str,
+    *,
+    request_id: str | None = None,
+    default_replay_source_id: str = "",
+    default_pre_seconds: int = DEFAULT_PRE_SECONDS,
+    default_post_seconds: int = DEFAULT_POST_SECONDS,
+) -> Dict[str, Any] | None:
+    """Build the record_request payload published to Redis."""
+    source_event_id = event.get("source_event_id", "")
+    source_id = _resolve_source_id(event, default_replay_source_id)
+    payload = event.get("payload") or {}
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    evidence_policy = event.get("evidence_policy") or {}
+    if not isinstance(evidence_policy, dict):
+        evidence_policy = {}
+
+    if not source_id:
+        logger.error(
+            "record_request_skipped: no source_id could be resolved "
+            "for source_event_id=%s",
+            source_event_id,
+        )
+        return None
+
+    record = {
+        "request_id": request_id or str(uuid.uuid4()),
+        "event_id": event_id,
+        "source_event_id": source_event_id,
+        "camera_id": event.get("camera_id", ""),
+        "source_id": source_id,
+        "event_ts_ms": int(event.get("event_ts_ms", 0)),
+        "frame_uuid": event.get("frame_uuid"),
+        "keyframe_uuid": event.get("keyframe_uuid"),
+        "previous_keyframe_uuid": (
+            event.get("previous_keyframe_uuid")
+            or (media.get("previous_keyframe_uuid") if isinstance(media, dict) else None)
+        ),
+        "pre_seconds": int(
+            evidence_policy.get("pre_seconds", default_pre_seconds)
+        ),
+        "post_seconds": int(
+            evidence_policy.get("post_seconds", default_post_seconds)
+        ),
+        "strategy": "savant_replay",
+        "status": "pending",
+    }
+    _apply_c2_post_savant_policy(record, event)
+    return record
 
 
 def _resolve_source_id(event: Dict[str, Any], default_source_id: str = "") -> str:
@@ -86,44 +191,17 @@ class RecordRequestPublisher:
             The Redis message id, or None on failure.
         """
         source_event_id = event.get("source_event_id", "")
-        request_id = str(uuid.uuid4())
-        source_id = _resolve_source_id(event, self._default_replay_source_id)
-        payload = event.get("payload") or {}
-        media = payload.get("media", {}) if isinstance(payload, dict) else {}
-        evidence_policy = event.get("evidence_policy") or {}
-        if not isinstance(evidence_policy, dict):
-            evidence_policy = {}
-
-        if not source_id:
-            logger.error(
-                "record_request_skipped: no source_id could be resolved "
-                "for source_event_id=%s",
-                source_event_id,
-            )
+        record = build_record_request(
+            event,
+            event_id,
+            default_replay_source_id=self._default_replay_source_id,
+            default_pre_seconds=self._default_pre_seconds,
+            default_post_seconds=self._default_post_seconds,
+        )
+        if record is None:
             return None
-
-        record = {
-            "request_id": request_id,
-            "event_id": event_id,
-            "source_event_id": source_event_id,
-            "camera_id": event.get("camera_id", ""),
-            "source_id": source_id,
-            "event_ts_ms": int(event.get("event_ts_ms", 0)),
-            "frame_uuid": event.get("frame_uuid"),
-            "keyframe_uuid": event.get("keyframe_uuid"),
-            "previous_keyframe_uuid": (
-                event.get("previous_keyframe_uuid")
-                or media.get("previous_keyframe_uuid")
-            ),
-            "pre_seconds": int(
-                evidence_policy.get("pre_seconds", self._default_pre_seconds)
-            ),
-            "post_seconds": int(
-                evidence_policy.get("post_seconds", self._default_post_seconds)
-            ),
-            "strategy": "savant_replay",
-            "status": "pending",
-        }
+        request_id = str(record["request_id"])
+        source_id = str(record["source_id"])
 
         fields = {
             "request_id": request_id,

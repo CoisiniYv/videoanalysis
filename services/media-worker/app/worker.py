@@ -1318,6 +1318,11 @@ def _build_c2_event_metadata(
         },
         "replay": {
             "replay_job_id": replay_job_id,
+            "replay_source_kind": (
+                configuration.get("labels", {}).get("replay_source_kind", "")
+                if isinstance(configuration.get("labels"), dict)
+                else ""
+            ),
             "anchor_keyframe_uuid": replay_job_request.get("anchor_keyframe", ""),
             "offset_seconds": offset.get("seconds", 0),
             "stop_condition": stop_condition,
@@ -1388,6 +1393,12 @@ def _finalize_c2_post_savant_evidence_bundle(
     replay_job_request = media.get("replay_job_request") or {}
     if not isinstance(replay_job_request, dict):
         replay_job_request = {}
+    replay_configuration = replay_job_request.get("configuration") or {}
+    if not isinstance(replay_configuration, dict):
+        replay_configuration = {}
+    replay_labels = replay_configuration.get("labels") or {}
+    if not isinstance(replay_labels, dict):
+        replay_labels = {}
 
     result = build_post_savant_evidence_bundle(
         input_dir=Path(meta_dir),
@@ -1399,6 +1410,37 @@ def _finalize_c2_post_savant_evidence_bundle(
         min_fps=os.getenv("MIN_FPS"),
         fps_gating_applied=_c2_post_savant_fps_gating_applied(),
         source_input_fps_estimate=_to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
+        event_metadata={
+            "replay_source_kind": replay_labels.get("replay_source_kind"),
+            "c2_3b_record_request_id": replay_labels.get("request_id"),
+            "c2_3b_source_event_id": (
+                replay_labels.get("source_event_id")
+                or event_context.get("source_event_id", "")
+            ),
+            "c2_3b_event_type": event_context.get("event_type", ""),
+            "c2_3b_camera_id": event_context.get("camera_id", ""),
+            "c2_3b_source_id": event_context.get("source_id", ""),
+            "c2_3b_frame_pts": replay_labels.get("frame_pts"),
+            "c2_3b_frame_num": replay_labels.get("frame_num"),
+            "requested_start_pts": replay_labels.get("requested_start_pts"),
+            "requested_end_pts": replay_labels.get("requested_end_pts"),
+            "event_frame_pts": replay_labels.get("event_frame_pts"),
+            "replay_anchor_keyframe": replay_job_request.get("anchor_keyframe"),
+            "replay_anchor_pts": replay_labels.get("replay_anchor_pts"),
+            "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
+            "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
+            "time_domain_crop_applied": False,
+            "annotation_source_policy": replay_labels.get("annotation_source_policy"),
+            "allow_db_annotation_fallback": (
+                replay_labels.get("allow_db_annotation_fallback") == "true"
+            ),
+            "allow_legacy_annotation_fallback": (
+                replay_labels.get("allow_legacy_annotation_fallback") == "true"
+            ),
+            "replay_stored_stream_id": replay_configuration.get("stored_stream_id"),
+            "replay_resulting_stream_id": replay_configuration.get("resulting_stream_id"),
+        },
+        video_integrity_required=True,
     )
     business_metadata = _build_c2_event_metadata(
         event_context=event_context,

@@ -50,6 +50,33 @@ def _keyframe_from_request(req: dict) -> tuple[str | None, str]:
     return None, MISSING_KEYFRAME_ERROR
 
 
+def _replay_job_labels(event_id: str, req: dict) -> dict[str, str]:
+    """Build Replay labels, preserving explicit C2 post-Savant policy fields."""
+    labels = {"event_id": event_id}
+    for key in (
+        "request_id",
+        "source_event_id",
+        "replay_source_kind",
+        "evidence_topology",
+        "annotation_source_policy",
+        "allow_db_annotation_fallback",
+        "allow_legacy_annotation_fallback",
+        "frame_pts",
+        "frame_num",
+        "metadata_domain",
+        "requested_start_pts",
+        "requested_end_pts",
+        "event_frame_pts",
+        "replay_anchor_pts",
+        "replay_anchor_keyframe",
+        "replay_stop_strategy",
+    ):
+        value = req.get(key)
+        if value is not None and value != "":
+            labels[key] = str(value).lower() if isinstance(value, bool) else str(value)
+    return labels
+
+
 def _cooldown_gate_ts_ms(req: dict) -> int:
     """Return a comparable timestamp for clip-worker cooldown decisions."""
     now_ms = int(time.time() * 1000)
@@ -333,16 +360,21 @@ def run_worker(
                         fallback_reason = (
                             "configured_frame_count_fallback"
                         )
+                    replay_stop_strategy = str(req.get("replay_stop_strategy") or "")
+                    offset_seconds_override = (
+                        0.0 if replay_stop_strategy == "anchor_start_offset_zero" else None
+                    )
                     job_id = replay.create_job(
                         source_id=source_id,
                         keyframe_uuid=keyframe_uuid,
                         pre_seconds=pre_seconds,
                         post_seconds=post_seconds,
                         sink_endpoint=cfg.replay_job_sink_url,
-                        labels={"event_id": event_id},
+                        labels=_replay_job_labels(event_id, req),
                         stop_condition_mode=stop_condition_mode,
                         fallback_reason=fallback_reason,
                         fps=cfg.replay_fps,
+                        offset_seconds_override=offset_seconds_override,
                     )
 
                     if job_id:

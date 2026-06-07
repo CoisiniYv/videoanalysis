@@ -125,6 +125,7 @@ class ReplayClient:
         stop_condition_mode: str = "frame_count",
         fallback_reason: str | None = None,
         fps: int = 30,
+        offset_seconds_override: float | None = None,
     ) -> Optional[str]:
         """PUT /api/v1/job — create a re-streaming job.
 
@@ -149,6 +150,7 @@ class ReplayClient:
             stop_condition_mode=stop_condition_mode,
             fallback_reason=fallback_reason,
             fps=fps,
+            offset_seconds_override=offset_seconds_override,
         )
         self.last_job_request = payload
 
@@ -177,6 +179,7 @@ class ReplayClient:
                         stop_condition_mode="frame_count",
                         fallback_reason="replay_api_rejected_ts_delta_sec",
                         fps=fps,
+                        offset_seconds_override=offset_seconds_override,
                     )
                 )
 
@@ -195,6 +198,7 @@ class ReplayClient:
                         ),
                         fps=fps,
                         force_constant_cadence=True,
+                        offset_seconds_override=offset_seconds_override,
                     )
                 )
                 if stop_condition_mode == "ts_delta_sec":
@@ -212,6 +216,7 @@ class ReplayClient:
                             ),
                             fps=fps,
                             force_constant_cadence=True,
+                            offset_seconds_override=offset_seconds_override,
                         )
                     )
 
@@ -319,6 +324,7 @@ def build_job_payload(
     fallback_reason: str | None = None,
     fps: int = 30,
     force_constant_cadence: bool | None = None,
+    offset_seconds_override: float | None = None,
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
@@ -371,7 +377,13 @@ def build_job_payload(
         "stop_condition": stop_condition,
         "anchor_keyframe": keyframe_uuid,
         "anchor_wait_duration": {"secs": 1, "nanos": 0},
-        "offset": {"seconds": float(pre_seconds)},
+        "offset": {
+            "seconds": (
+                float(pre_seconds)
+                if offset_seconds_override is None
+                else float(offset_seconds_override)
+            )
+        },
         "attributes": [],
     }
     if fallback_reason is not None:
