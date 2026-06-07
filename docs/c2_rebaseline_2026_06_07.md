@@ -166,6 +166,55 @@ Important nuance: FPS gating was applied in Savant, but the emitted metadata row
 - Timestamp-based annotation-to-video mapping remains the fallback if drift returns.
 - The C2.2A 10 second probe was not yet event anchored as event-5s/event+5s.
 
+## Identity Binding Status
+
+C2 currently has ordinary face observations only. This is not evidence of face-recognition failure. The current C2 POC has not connected the face-worker, complete PostgreSQL face schema, pgvector gallery matching, match result persistence, or watchlist-hit identity path.
+
+Current proven facts:
+
+- C2 production sidecars contain ordinary face objects.
+- `known_face_count=0` is expected before identity binding.
+- The C2 POC compose does not currently include face-worker.
+- The PostgreSQL instance observed during C2.2A did not contain the complete face schema needed for `face_observations`, `match_results`, gallery match records, or watchlist records.
+- Redis `security.face_observations` exists and received C2.2A messages for `source_id=c2_post_savant_fps_probe`.
+- Redis face observations include `source_observation_id`, `track_id` / `person_track_id`, `frame_pts`, face bbox, landmarks, and embedding data.
+- Redis observation records and C2 sidecar face objects can be precisely joined with `frame_pts + track_id + bbox`.
+- This join proves that C2 has usable keys for a future identity-binding merge.
+
+Representative observed join:
+
+```text
+source_id=c2_post_savant_fps_probe
+redis.source_observation_id=face:c2_post_savant_fps_probe:1:9721:1
+redis.track_id=1
+redis.frame_pts=9721166666
+redis.face_bbox.cxcywh=[1132.8235, 540.4671, 74.3597, 73.6284]
+sidecar.frame_index=5
+sidecar.frame_pts=9721166666
+sidecar.face.track_id=1
+sidecar.face.bbox.xyxy=[1095.6436, 503.6529, 1170.0034, 577.2813]
+```
+
+Current unproven identity facts:
+
+- face-worker consumption of C2 Redis observations;
+- `face_observations` database writes for C2 observations;
+- pgvector gallery match;
+- match result persistence;
+- `watchlist_hit`;
+- `known_face` sidecar annotation;
+- viewer identity proof.
+
+Rules before C2.4:
+
+- Do not mark ordinary face objects as `known_face`.
+- Do not claim the visible people were matched by gallery search.
+- Do not claim watchlist visual proof.
+- Do not write temporary or fake `person_name` values for identity display.
+- Viewer should display only `Face Observation` / `Unknown Face` for these C2 sidecar face objects.
+
+C2.4 should implement identity binding by consuming face-worker / gallery match / watchlist results into an `identity_patch`, then merging that patch back into the matching sidecar face object using the proven join keys. The expected join should include `source_observation_id` when it is written back to the C2 sidecar, with `frame_pts + track_id + bbox` as the conservative verification guard.
+
 ## Docker Compose Rules
 
 Canonical / allowed compose and env files:
