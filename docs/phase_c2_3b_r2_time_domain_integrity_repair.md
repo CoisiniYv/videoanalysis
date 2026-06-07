@@ -75,6 +75,23 @@ ready, so the result marker is partial.
 
 ## Current Runtime Result
 
+Final status:
+
+```text
+PARTIAL_C2_3B_R2_STABLE_SINK_WORKAROUND_READY
+```
+
+Commit:
+
+```text
+25f74ffc3ba61e2f20ae3515b889cc447b2fd48f
+test(c2): add time-domain evidence integrity gate and stable sink workaround
+```
+
+Warning: event-style Replay output is still not production-ready. The accepted
+runtime path is the stable post-Savant sink PTS crop workaround, not a pass for
+event-style Replay job evidence.
+
 Latest R2 smoke:
 
 ```bash
@@ -146,6 +163,9 @@ The stable sink crop bundle records:
 This result does not prove event-style Replay evidence is production-ready.
 C2.4 identity binding should not start until the project either accepts this
 workaround as the C2.3B boundary or repairs event-style Replay output itself.
+Next decision: manually review the R2 stable sink crop HTML/contact sheet. Only
+if that review accepts the workaround should C2.4 begin, and C2.4 must state
+`evidence_capture_mode=stable_post_savant_sink_time_crop`.
 
 ## Result Markers
 
