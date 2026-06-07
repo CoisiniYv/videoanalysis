@@ -679,7 +679,7 @@ def sanitize_intrusion_rule(rule: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "algorithm_id": "behavior.intrusion",
-        "rule_id": DEFAULT_INTRUSION_RULE_ID,
+        "rule_id": rule.get("rule_id") or DEFAULT_INTRUSION_RULE_ID,
         "enabled": bool(rule.get("enabled", True)),
         "zone": rule.get("zone"),
         "severity": rule.get("severity"),
