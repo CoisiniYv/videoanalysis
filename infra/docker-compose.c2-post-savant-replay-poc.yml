@@ -127,3 +127,22 @@ services:
     volumes:
       - /data/video-analytics/media:/media:rw
     restart: unless-stopped
+
+  evidence-viewer:
+    build:
+      context: ../services/evidence-viewer
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: c1-official-evidence-viewer:latest
+    container_name: c2-poc-evidence-viewer
+    environment:
+      EVIDENCE_ROOT: /evidence
+      EVIDENCE_VIEWER_HOST: 0.0.0.0
+      EVIDENCE_VIEWER_PORT: "8090"
+      EVIDENCE_VIEWER_MAX_BUNDLES: "200"
+    volumes:
+      - ${C2_POC_VIEWER_EVIDENCE_ROOT:-/data/video-analytics/media/evidence}:/evidence:ro
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
