@@ -27,6 +27,42 @@ def test_auto_unavailable_exposes_unavailable_source_kind_without_legacy_fallbac
     assert payload["legacy_available"] is True
 
 
+def test_auto_unavailable_when_sidecar_missing_and_legacy_exists_for_intrusion(tmp_path: Path) -> None:
+    evidence_root = _make_evidence_root(tmp_path)
+    _make_bundle(evidence_root, production_ready=False, event_type="intrusion", include_sidecar=False)
+    viewer = _activate_viewer(evidence_root)
+
+    payload = _get_annotations(viewer, source="auto")
+    manifest = _get_manifest(viewer)
+
+    assert payload["annotation_source"] == "unavailable"
+    assert payload["annotation_source_kind"] == "unavailable"
+    assert payload["fallback_used"] is False
+    assert payload["fallback_reason"] is None
+    assert payload["reason"] == "production_sidecar_annotations_missing"
+    assert payload["legacy_available"] is True
+    assert payload["sidecar_available"] is False
+    assert manifest["default_annotation_source"] == "unavailable"
+    assert manifest["default_annotation_source_kind"] == "unavailable"
+    assert manifest["auto_requires_production_sidecar"] is True
+
+
+def test_auto_unavailable_when_sidecar_non_ready_and_legacy_exists_for_intrusion(tmp_path: Path) -> None:
+    evidence_root = _make_evidence_root(tmp_path)
+    _make_bundle(evidence_root, production_ready=False, event_type="intrusion")
+    viewer = _activate_viewer(evidence_root)
+
+    payload = _get_annotations(viewer, source="auto")
+
+    assert payload["annotation_source"] == "unavailable"
+    assert payload["annotation_source_kind"] == "unavailable"
+    assert payload["fallback_used"] is False
+    assert payload["fallback_reason"] is None
+    assert payload["reason"] == "cache_stale_or_epoch_mismatch"
+    assert payload["legacy_available"] is True
+    assert payload["sidecar_available"] is True
+
+
 def test_manifest_default_source_kind_is_unavailable_for_not_ready_watchlist(tmp_path: Path) -> None:
     evidence_root = _make_evidence_root(tmp_path)
     _make_bundle(evidence_root, production_ready=False)
@@ -45,7 +81,7 @@ def test_manifest_default_source_kind_is_unavailable_for_not_ready_watchlist(tmp
 
 def test_ready_sidecar_exposes_production_source_kind(tmp_path: Path) -> None:
     evidence_root = _make_evidence_root(tmp_path)
-    _make_bundle(evidence_root, production_ready=True)
+    _make_bundle(evidence_root, production_ready=True, event_type="intrusion")
     viewer = _activate_viewer(evidence_root)
 
     payload = _get_annotations(viewer, source="auto")
@@ -67,6 +103,8 @@ def test_explicit_legacy_source_is_marked_debug(tmp_path: Path) -> None:
     assert payload["annotation_source"] == "legacy"
     assert payload["annotation_source_kind"] == "legacy_debug"
     assert payload["fallback_used"] is False
+    assert payload["production_ready"] is None
+    assert payload["legacy_warning"] is not None
     assert payload["count"] == 1
     assert payload["legacy_known_face_blocked"] == 1
     face = payload["annotations"][0]
@@ -135,17 +173,23 @@ def _make_bundle(
     evidence_root: Path,
     *,
     production_ready: bool,
+    event_type: str = "watchlist_hit",
+    include_sidecar: bool = True,
     preview: bool = False,
 ) -> Path:
     bundle = evidence_root / "event-1"
     bundle.mkdir()
     _write_json(
         bundle / "metadata.json",
-        {"event": {"event_id": "event-1", "event_type": "watchlist_hit"}},
+        {"event": {"event_id": "event-1", "event_type": event_type}},
     )
-    _write_json(bundle / "summary.json", {"event_type": "watchlist_hit"})
-    _write_json(bundle / "summary.frame_cache.identity.json", _sidecar_summary(production_ready=production_ready))
-    _write_jsonl(bundle / "annotations.frame_cache.identity.jsonl", [_sidecar_face("Sidecar Reese")])
+    _write_json(bundle / "summary.json", {"event_type": event_type})
+    if include_sidecar:
+        _write_json(
+            bundle / "summary.frame_cache.identity.json",
+            _sidecar_summary(production_ready=production_ready, event_type=event_type),
+        )
+        _write_jsonl(bundle / "annotations.frame_cache.identity.jsonl", [_sidecar_face("Sidecar Reese")])
     _write_jsonl(bundle / "annotations.jsonl", [_legacy_face("Legacy Reese")])
     if preview:
         _write_jsonl(
@@ -159,8 +203,9 @@ def _make_bundle(
     return bundle
 
 
-def _sidecar_summary(*, production_ready: bool) -> dict[str, Any]:
+def _sidecar_summary(*, production_ready: bool, event_type: str) -> dict[str, Any]:
     return {
+        "event_type": event_type,
         "sidecar_type": "production",
         "timeline_domain": "final_canonical_clip",
         "annotation_status": "ready" if production_ready else "cache_stale_or_epoch_mismatch",

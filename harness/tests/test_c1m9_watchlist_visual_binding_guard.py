@@ -40,6 +40,24 @@ def test_watchlist_auto_unavailable_is_not_visually_confirmed(tmp_path: Path) ->
     assert payload["visual_binding_reason"] == "cache_stale_or_epoch_mismatch"
     assert payload["records"] == []
     assert payload["fallback_used"] is False
+    assert payload["legacy_used_for_visual_binding"] is False
+
+
+def test_watchlist_auto_sidecar_missing_does_not_fallback_to_legacy_visual_binding(tmp_path: Path) -> None:
+    evidence_root = _make_evidence_root(tmp_path)
+    _make_bundle(evidence_root, production_ready=False, include_sidecar=False)
+    viewer = _activate_viewer(evidence_root)
+
+    payload = _get_annotations(viewer, source="auto")
+    manifest = _get_manifest(viewer)
+
+    assert payload["annotation_source"] == "unavailable"
+    assert payload["visual_evidence_status"] == "unverified"
+    assert payload["visual_binding_reason"] == "production_sidecar_annotations_missing"
+    assert payload["fallback_used"] is False
+    assert payload["legacy_used_for_visual_binding"] is False
+    assert manifest["default_annotation_source"] == "unavailable"
+    assert manifest["default_annotation_source_kind"] == "unavailable"
 
 
 def test_watchlist_legacy_debug_blocks_known_face_confirmation(tmp_path: Path) -> None:
@@ -119,7 +137,12 @@ def _make_evidence_root(tmp_path: Path) -> Path:
     return root
 
 
-def _make_bundle(evidence_root: Path, *, production_ready: bool) -> Path:
+def _make_bundle(
+    evidence_root: Path,
+    *,
+    production_ready: bool,
+    include_sidecar: bool = True,
+) -> Path:
     bundle = evidence_root / "event-1"
     bundle.mkdir()
     _write_json(
@@ -127,8 +150,12 @@ def _make_bundle(evidence_root: Path, *, production_ready: bool) -> Path:
         {"event": {"event_id": "event-1", "event_type": "watchlist_hit"}},
     )
     _write_json(bundle / "summary.json", {"event_type": "watchlist_hit"})
-    _write_json(bundle / "summary.frame_cache.identity.json", _sidecar_summary(production_ready=production_ready))
-    _write_jsonl(bundle / "annotations.frame_cache.identity.jsonl", [_sidecar_face()])
+    if include_sidecar:
+        _write_json(
+            bundle / "summary.frame_cache.identity.json",
+            _sidecar_summary(production_ready=production_ready),
+        )
+        _write_jsonl(bundle / "annotations.frame_cache.identity.jsonl", [_sidecar_face()])
     _write_jsonl(bundle / "annotations.jsonl", [_legacy_known_face()])
     return bundle
 

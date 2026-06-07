@@ -276,10 +276,7 @@ def annotation_source_summary(bundle_dir: Path) -> dict:
     legacy_available = legacy_path.is_file()
     watchlist_event = _is_watchlist_bundle(bundle_dir)
     sidecar_ready, sidecar_not_ready_reason = _production_sidecar_ready(bundle_dir)
-    if watchlist_event:
-        default_source = "sidecar" if sidecar_ready else ANNOTATION_SOURCE_UNAVAILABLE
-    else:
-        default_source = "sidecar" if sidecar_available else ("legacy" if legacy_available else None)
+    default_source = "sidecar" if sidecar_ready else ANNOTATION_SOURCE_UNAVAILABLE
     visual_summary = visual_evidence_summary(bundle_dir)
     return {
         "sidecar_available": sidecar_available,
@@ -289,6 +286,7 @@ def annotation_source_summary(bundle_dir: Path) -> dict:
         "legacy_available": legacy_available,
         "legacy_debug_only": legacy_available,
         "preview_debug_only": sidecar_preview_available,
+        "auto_requires_production_sidecar": True,
         "watchlist_auto_requires_production_sidecar": watchlist_event,
         "default_annotation_source": default_source,
         "default_annotation_source_kind": (
@@ -325,33 +323,22 @@ def select_annotation_file(bundle_dir: Path, source: AnnotationSource = "auto") 
         if not legacy_path.is_file():
             raise FileNotFoundError(f"{LEGACY_ANNOTATIONS_FILE} not found")
         return _annotation_selection("legacy", legacy_path, fallback_used=False, fallback_reason=None, bundle_dir=bundle_dir)
-    if _is_watchlist_bundle(bundle_dir):
-        if sidecar_ready and sidecar_path.is_file():
-            return _annotation_selection("sidecar", sidecar_path, fallback_used=False, fallback_reason=None, bundle_dir=bundle_dir)
-        return {
-            "annotation_source": ANNOTATION_SOURCE_UNAVAILABLE,
-            "annotation_source_kind": _annotation_source_kind(ANNOTATION_SOURCE_UNAVAILABLE),
-            "annotation_file": None,
-            "path": None,
-            "fallback_used": False,
-            "fallback_reason": None,
-            "preview": False,
-            "reason": "production_sidecar_not_ready",
-            "legacy_available": legacy_path.is_file(),
-            "sidecar_available": sidecar_path.is_file(),
-            "sidecar_summary_available": (bundle_dir / SIDECAR_SUMMARY_FILE).is_file(),
-            "sidecar_not_ready_reason": not_ready_reason,
-        }
-    if sidecar_path.is_file():
+    if sidecar_ready and sidecar_path.is_file():
         return _annotation_selection("sidecar", sidecar_path, fallback_used=False, fallback_reason=None, bundle_dir=bundle_dir)
-    if legacy_path.is_file():
-        return _annotation_selection(
-            "legacy",
-            legacy_path,
-            fallback_used=True,
-            fallback_reason="sidecar_annotations_missing",
-        )
-    raise FileNotFoundError(f"{SIDECAR_ANNOTATIONS_FILE} and {LEGACY_ANNOTATIONS_FILE} not found")
+    return {
+        "annotation_source": ANNOTATION_SOURCE_UNAVAILABLE,
+        "annotation_source_kind": _annotation_source_kind(ANNOTATION_SOURCE_UNAVAILABLE),
+        "annotation_file": None,
+        "path": None,
+        "fallback_used": False,
+        "fallback_reason": None,
+        "preview": False,
+        "reason": not_ready_reason or "production_sidecar_not_ready",
+        "legacy_available": legacy_path.is_file(),
+        "sidecar_available": sidecar_path.is_file(),
+        "sidecar_summary_available": (bundle_dir / SIDECAR_SUMMARY_FILE).is_file(),
+        "sidecar_not_ready_reason": not_ready_reason,
+    }
 
 
 def _production_sidecar_ready(bundle_dir: Path) -> tuple[bool, str]:
@@ -396,6 +383,7 @@ def visual_evidence_summary(bundle_dir: Path) -> dict:
         sidecar_summary.get("event_type"),
         legacy_summary.get("event_type"),
     )
+    sidecar_file_available = (bundle_dir / SIDECAR_ANNOTATIONS_FILE).is_file()
     source_observation_id = _first_text(
         sidecar_summary.get("source_observation_id"),
         _dict(sidecar_summary.get("event_anchor")).get("source_observation_id"),
@@ -409,6 +397,8 @@ def visual_evidence_summary(bundle_dir: Path) -> dict:
     reason = str(sidecar_summary.get("visual_binding_reason") or "")
     if not reason and sidecar_status == "cache_stale_or_epoch_mismatch":
         reason = "cache_stale_or_epoch_mismatch"
+    if not reason and not sidecar_file_available:
+        reason = "production_sidecar_annotations_missing"
     if not reason and not sidecar_ready:
         reason = "production_sidecar_not_ready"
     if not reason:
