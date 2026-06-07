@@ -71,6 +71,9 @@ class TestEventToDict:
         assert d["camera_id"] == "cam1"
         assert d["source_id"] == "cam1"
         assert d["track_id"] == "42"
+        assert d["person_track_id"] == "42"
+        assert d["face_track_id"] is None
+        assert d["track_id_semantics"] == "person_track_id"
         assert d["timestamp_ms"] == 1710000000000
         assert d["person_bbox"] == [100.0, 200.0, 80.0, 180.0]
         assert d["face_bbox"] == [115.0, 215.0, 42.0, 42.0]
@@ -78,6 +81,58 @@ class TestEventToDict:
         assert len(d["landmarks"]) == 5
         assert d["quality"] == 0.82
         assert d["model_name"] == "scrfd_2.5g"
+
+    def test_constructor_accepts_person_track_id_contract(self):
+        event = FaceObservationEventDraft(
+            source_observation_id="face:cam1:42:1000",
+            camera_id="cam1",
+            source_id="src1",
+            track_id=42,
+            person_track_id="42",
+            face_track_id="face-7",
+            track_id_semantics="person_track_id",
+            timestamp_ms=1000,
+            embedding=[0.01] * 512,
+            embedding_dim=512,
+        )
+
+        d = event.to_dict()
+
+        assert d["track_id"] == "42"
+        assert d["person_track_id"] == "42"
+        assert d["face_track_id"] == "face-7"
+        assert d["track_id_semantics"] == "person_track_id"
+        assert d["embedding_dim"] == 512
+
+    def test_person_track_id_backfills_wire_track_id(self):
+        event = FaceObservationEventDraft(
+            source_observation_id="face:cam1:42:1000",
+            camera_id="cam1",
+            source_id="src1",
+            track_id=0,
+            person_track_id="42",
+            timestamp_ms=1000,
+        )
+
+        d = event.to_dict()
+
+        assert d["track_id"] == "42"
+        assert d["person_track_id"] == "42"
+
+    def test_from_draft_preserves_explicit_track_identity_fields(self):
+        draft = _draft()
+        draft.source_observation_id = "face:cam1:42:1000"
+        draft.person_track_id = "42"
+        draft.face_track_id = "face-7"
+        draft.track_id_semantics = "person_track_id"
+
+        event = FaceObservationEventDraft.from_draft(draft, producer="gpu0")
+        d = event.to_dict()
+
+        assert d["track_id"] == "42"
+        assert d["person_track_id"] == "42"
+        assert d["face_track_id"] == "face-7"
+        assert d["track_id_semantics"] == "person_track_id"
 
     def test_quality_preserved(self):
         draft = _draft(quality=0.91)
@@ -151,3 +206,4 @@ class TestEventToJson:
         event = FaceObservationEventDraft.from_draft(draft, producer="gpu0")
         d = event.to_dict()
         assert d["track_id"] is None
+        assert d["person_track_id"] is None
