@@ -18,6 +18,7 @@ from app.schemas.events import (
     EvidenceTaskResponse,
     StatusUpdateRequest,
 )
+from app.services.evidence_detail_resolver import resolve_event_evidence_detail
 
 router = APIRouter(prefix="/api/v1/events", tags=["events"])
 
@@ -168,6 +169,7 @@ def events_get_evidence(
     payload = EventEvidenceResponse.from_event_and_tasks(
         event=event,
         evidence_tasks=evidence_tasks,
+        evidence_detail=resolve_event_evidence_detail(event),
     )
     return _ok(payload.model_dump(), request_id)
 

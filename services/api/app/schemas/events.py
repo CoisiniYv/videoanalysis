@@ -257,12 +257,14 @@ class EventEvidenceResponse(BaseModel):
     error_message: Optional[str] = None
     event: EventResponse
     evidence_tasks: List[EvidenceTaskResponse] = Field(default_factory=list)
+    evidence_detail: Dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_event_and_tasks(
         cls,
         event: EventResponse,
         evidence_tasks: List[EvidenceTaskResponse],
+        evidence_detail: Dict[str, Any] | None = None,
     ) -> "EventEvidenceResponse":
         first_task = evidence_tasks[0] if evidence_tasks else None
         metadata_path = event.metadata_path or (
@@ -306,4 +308,5 @@ class EventEvidenceResponse(BaseModel):
             error_message=error_message,
             event=event,
             evidence_tasks=evidence_tasks,
+            evidence_detail=evidence_detail or {},
         )
