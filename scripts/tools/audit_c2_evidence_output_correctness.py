@@ -229,12 +229,7 @@ def audit_bundle(
         "frames_without_objects": sum(1 for row in sidecar_rows if not _frame_has_objects(row)),
         "warnings": warnings,
         "failures": failures,
-        "identity_semantics": {
-            "known_face_zero_expected_before_c2_4": True,
-            "identity_binding_connected": False,
-            "recognition_claim_allowed": False,
-            "known_face_zero_is_failure": False,
-        },
+        "identity_semantics": _identity_semantics(summary, object_counts),
     }
 
     contact_sheet_path = output_dir / "contact_sheet.jpg"
@@ -1094,6 +1089,21 @@ def _count_objects(rows: list[dict[str, Any]]) -> dict[str, int]:
             counts["keypoints"] += len(_pose_keypoints(obj))
             counts["face_landmarks"] += len(_landmark_points(obj))
     return counts
+
+
+def _identity_semantics(summary: dict[str, Any], object_counts: dict[str, int]) -> dict[str, Any]:
+    identity_binding_connected = bool(summary.get("identity_binding_connected"))
+    known_face_count = int(object_counts.get("known_face") or 0)
+    recognition_claim_allowed = bool(summary.get("recognition_claim_allowed")) and known_face_count > 0
+    return {
+        "known_face_zero_expected_before_c2_4": not identity_binding_connected,
+        "identity_binding_connected": identity_binding_connected,
+        "identity_patch_source": summary.get("identity_patch_source"),
+        "recognition_claim_allowed": recognition_claim_allowed,
+        "known_face_zero_is_failure": identity_binding_connected,
+        "known_face_count": known_face_count,
+        "unknown_face_count": int(object_counts.get("face") or 0),
+    }
 
 
 def _count_frame_objects(objects: list[dict[str, Any]]) -> dict[str, int]:
