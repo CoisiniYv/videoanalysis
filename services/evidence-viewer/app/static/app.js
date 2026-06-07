@@ -5,6 +5,7 @@ const ALERT_REDS = new Set(["#D50000", "#FF0000", "#E53935", "#FF1744"]);
 const DEFAULT_SOURCE_WIDTH = 1920;
 const DEFAULT_SOURCE_HEIGHT = 1080;
 const DEFAULT_SHOW_PERSON_BOXES = true;
+const DEFAULT_SHOW_UNKNOWN_FACES = true;
 const FACE_OVERLAY_POLICY = "sparse_observation";
 const ROLE_RENDER_WINDOW_MS = {
   behavior_event: 1500,
@@ -870,6 +871,7 @@ dom.video.addEventListener("loadedmetadata", () => {
 
 function applyOverlayDefaults() {
   dom.showPersons.checked = DEFAULT_SHOW_PERSON_BOXES;
+  dom.showUnknown.checked = DEFAULT_SHOW_UNKNOWN_FACES;
   applyAnnotationSourceLabels();
 }
 

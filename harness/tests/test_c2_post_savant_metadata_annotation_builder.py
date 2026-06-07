@@ -75,6 +75,26 @@ def test_face_bbox_and_landmarks_emit_face_observation_only_annotation(tmp_path:
     assert summary["face_landmarks_count"] == 5
 
 
+def test_face_bbox_path_is_viewer_compatible_without_known_face_identity(tmp_path: Path) -> None:
+    builder = _activate_builder()
+    metadata = [_frame(objects=[_face_object()])]
+
+    rows, summary = builder.build_annotations_from_metadata(metadata)
+
+    face = rows[0]["objects"][0]
+    assert face["object_type"] == "face"
+    assert face["bbox"]["format"] == "xyxy"
+    assert isinstance(face["bbox"]["xyxy"], list)
+    assert len(face["bbox"]["xyxy"]) == 4
+    assert face["bbox"]["coordinate_space"] == "pixel"
+    assert face["landmarks"]["points"][0] == [90.0, 100.0]
+    assert face["identity"]["visual_evidence_status"] == "observation_only"
+    assert face["identity"]["match_status"] == "not_searched"
+    assert face["label"]["kind"] == "unknown_face"
+    assert face.get("annotation_role") != "watchlist_trigger_face"
+    assert summary["object_counts"]["known_face"] == 0
+
+
 def test_no_objects_is_not_production_ready(tmp_path: Path) -> None:
     builder = _activate_builder()
 

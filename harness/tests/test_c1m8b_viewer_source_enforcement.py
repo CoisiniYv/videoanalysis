@@ -93,6 +93,29 @@ def test_ready_sidecar_exposes_production_source_kind(tmp_path: Path) -> None:
     assert payload["visual_evidence_status"] == "verified"
 
 
+def test_ready_sidecar_keeps_unknown_face_observation_without_known_face_upgrade(tmp_path: Path) -> None:
+    evidence_root = _make_evidence_root(tmp_path)
+    _make_bundle(evidence_root, production_ready=True, event_type="intrusion")
+    viewer = _activate_viewer(evidence_root)
+
+    payload = _get_annotations(viewer, source="auto")
+    objects = [
+        obj
+        for record in payload["annotations"]
+        for obj in record.get("objects", [])
+        if isinstance(obj, dict)
+    ]
+    faces = [obj for obj in objects if obj.get("object_type") == "face"]
+
+    assert payload["annotation_source"] == "sidecar"
+    assert faces
+    assert faces[0]["label"]["kind"] == "unknown_face"
+    assert faces[0]["identity"]["visual_evidence_status"] == "observation_only"
+    assert faces[0]["identity"]["match_status"] == "not_searched"
+    assert faces[0].get("annotation_role") != "watchlist_trigger_face"
+    assert not any((obj.get("label") or {}).get("kind") == "known_face" for obj in faces)
+
+
 def test_explicit_legacy_source_is_marked_debug(tmp_path: Path) -> None:
     evidence_root = _make_evidence_root(tmp_path)
     _make_bundle(evidence_root, production_ready=False)
@@ -189,7 +212,10 @@ def _make_bundle(
             bundle / "summary.frame_cache.identity.json",
             _sidecar_summary(production_ready=production_ready, event_type=event_type),
         )
-        _write_jsonl(bundle / "annotations.frame_cache.identity.jsonl", [_sidecar_face("Sidecar Reese")])
+        _write_jsonl(
+            bundle / "annotations.frame_cache.identity.jsonl",
+            [_sidecar_face("Sidecar Reese"), _sidecar_unknown_face()],
+        )
     _write_jsonl(bundle / "annotations.jsonl", [_legacy_face("Legacy Reese")])
     if preview:
         _write_jsonl(
@@ -236,6 +262,45 @@ def _sidecar_face(name: str) -> dict[str, Any]:
         "t_ms": 1000,
         "source_observation_id": "face:event-1:1",
         "label": {"kind": "known_face", "display_name": name},
+    }
+
+
+def _sidecar_unknown_face() -> dict[str, Any]:
+    return {
+        "schema_version": "2.0-c2-post-savant",
+        "annotation_source": "post_savant_sink_metadata",
+        "production_ready": True,
+        "displayable": True,
+        "frame_index": 0,
+        "clip_frame_index": 0,
+        "frame_pts": 1_000_000_000,
+        "frame_uuid": "frame-event-1",
+        "objects": [
+            {
+                "object_type": "face",
+                "namespace": "yolov8_face",
+                "label": {"kind": "unknown_face"},
+                "track_id": "41",
+                "bbox": {
+                    "format": "xyxy",
+                    "coordinate_space": "pixel",
+                    "xyxy": [10.0, 20.0, 40.0, 60.0],
+                    "confidence": 0.9,
+                    "source": "detection_box",
+                },
+                "landmarks": {
+                    "format": "5_point",
+                    "coordinate_space": "pixel",
+                    "points": [[15.0, 25.0], [30.0, 25.0]],
+                },
+                "identity": {
+                    "source_observation_id": None,
+                    "visual_evidence_status": "observation_only",
+                    "status": "unknown",
+                    "match_status": "not_searched",
+                },
+            }
+        ],
     }
 
 
