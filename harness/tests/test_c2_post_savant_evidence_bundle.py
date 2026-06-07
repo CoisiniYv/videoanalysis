@@ -73,10 +73,12 @@ def test_metadata_rows_matching_decoded_video_frames_are_verified(tmp_path: Path
     assert summary["decoded_video_frame_count"] == 240
     assert summary["sidecar_frame_count"] == 240
     assert summary["frame_count"] == 240
+    assert summary["evidence_topology"] == "post_savant_replay"
     assert summary["trim_occurred"] is False
     assert summary["timeline_reconciliation_status"] == "frame_counts_match"
     assert summary["production_ready"] is True
     assert summary["visual_evidence_status"] == "verified_same_stream_metadata"
+    assert summary["legacy_used_for_visual_binding"] is False
     assert summary["fps"]["max_fps"] == "8/1"
     assert summary["fps"]["min_fps"] == "2/1"
     assert summary["fps"]["fps_gating_applied"] is True

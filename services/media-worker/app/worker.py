@@ -20,6 +20,10 @@ from app.annotated_snapshot import generate_annotated_snapshot
 from app.clip_sanitizer import sanitize_raw_clip
 from app.config import Config, load_config
 from app.continuous_annotation import write_continuous_annotation_bundle
+from app.post_savant_evidence_bundle import (
+    EVIDENCE_TOPOLOGY as C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+    build_post_savant_evidence_bundle,
+)
 from app.snapshot import generate_snapshot
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,7 @@ DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC = 10.0
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
+C2_POST_SAVANT_FINALIZER_ENV = "EVIDENCE_TOPOLOGY"
 SNAPSHOT_ELIGIBLE_CLIP_STATUSES = ("ready", "generated")
 SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
     "generated_corrupt",
@@ -167,6 +172,9 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
                 (event_id,),
             )
             row = cur.fetchone()
+            has_annotation_outputs = (
+                len(row) < 3 or (bool(row[1]) and bool(row[2]))
+            ) if row is not None else False
             return row is not None and row[0] in (
                 "ready",
                 "generated",
@@ -174,7 +182,7 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
                 "generated_unverified",
                 BUNDLE_STATUS_DURATION_GUARD_FAILED,
                 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
-            ) and bool(row[1]) and bool(row[2])
+            ) and has_annotation_outputs
     except Exception:
         return False
 
@@ -1233,6 +1241,216 @@ def _finalize_p1_evidence_bundle(
     }
 
 
+def _env_text(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value
+
+
+def _c2_post_savant_finalizer_enabled() -> bool:
+    return _env_text(C2_POST_SAVANT_FINALIZER_ENV).strip().lower() == (
+        C2_POST_SAVANT_EVIDENCE_TOPOLOGY
+    )
+
+
+def _c2_post_savant_fps_gating_applied() -> bool | None:
+    value = os.getenv("C2_POST_SAVANT_FPS_GATING_APPLIED")
+    if value is None:
+        value = os.getenv("MAX_FPS_CONTROL")
+    if value is None:
+        return None
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _bundle_clip_status_from_c2_summary(summary: dict) -> str:
+    if summary.get("production_ready") is True:
+        return "ready"
+    if summary.get("annotation_status") == "timeline_reconciliation_unverified":
+        return "generated_unverified"
+    return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
+
+
+def _build_c2_event_metadata(
+    *,
+    event_context: dict,
+    replay_job_id: str,
+    replay_job_request: dict,
+    sink_output_dir: str,
+    bundle_result: object,
+) -> dict:
+    summary = getattr(bundle_result, "summary")
+    raw_clip_path = str(getattr(bundle_result, "raw_clip_path"))
+    sink_metadata_path = str(getattr(bundle_result, "sink_metadata_path"))
+    production_sidecar_path = str(getattr(bundle_result, "production_sidecar_path"))
+    summary_path = str(getattr(bundle_result, "summary_path"))
+    output_dir = str(getattr(bundle_result, "output_dir"))
+    stop_condition = replay_job_request.get("stop_condition") or {}
+    configuration = replay_job_request.get("configuration") or {}
+    offset = replay_job_request.get("offset") or {}
+    raw_clip_size = 0
+    try:
+        raw_clip_size = Path(raw_clip_path).stat().st_size
+    except OSError:
+        raw_clip_size = 0
+    object_counts = summary.get("object_counts") if isinstance(summary, dict) else {}
+    if not isinstance(object_counts, dict):
+        object_counts = {}
+
+    return {
+        "schema_version": "2.0-c2",
+        "phase": os.getenv("EVIDENCE_PHASE", "C2.3A"),
+        "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
+        "evidence_type": "security_event_post_savant_replay_clip",
+        "evidence_topology": C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+        "recording_strategy": "savant_replay",
+        "event": {
+            "event_id": event_context.get("event_id", ""),
+            "source_event_id": event_context.get("source_event_id", ""),
+            "event_type": event_context.get("event_type", ""),
+            "camera_id": event_context.get("camera_id", ""),
+            "source_id": event_context.get("source_id", ""),
+            "track_id": event_context.get("track_id", ""),
+            "event_ts_ms": event_context.get("event_ts_ms", 0),
+            "frame_uuid": event_context.get("frame_uuid", ""),
+            "keyframe_uuid": event_context.get("keyframe_uuid", ""),
+            "previous_keyframe_uuid": event_context.get("previous_keyframe_uuid", ""),
+        },
+        "replay": {
+            "replay_job_id": replay_job_id,
+            "anchor_keyframe_uuid": replay_job_request.get("anchor_keyframe", ""),
+            "offset_seconds": offset.get("seconds", 0),
+            "stop_condition": stop_condition,
+            "stop_condition_mode": _stop_condition_mode(stop_condition),
+            "fallback_reason": replay_job_request.get("fallback_reason", ""),
+            "stored_stream_id": configuration.get("stored_stream_id", ""),
+            "resulting_stream_id": configuration.get("resulting_stream_id", ""),
+        },
+        "media": {
+            "evidence_dir": output_dir,
+            "sink_output_dir": sink_output_dir,
+            "sink_metadata_path": sink_metadata_path,
+            "raw_clip_path": raw_clip_path,
+            "production_sidecar_path": production_sidecar_path,
+            "summary_json_path": summary_path,
+            "raw_clip_size": raw_clip_size,
+            "annotated_clip_path": None,
+            "annotated_clip_status": "not_generated",
+        },
+        "annotations": {
+            "annotation_source": summary.get("annotation_source"),
+            "annotation_source_kind": "production_sidecar",
+            "annotations_jsonl_path": production_sidecar_path,
+            "summary_json_path": summary_path,
+            "annotation_status": summary.get("annotation_status"),
+            "production_ready": bool(summary.get("production_ready")),
+            "legacy_used_for_visual_binding": bool(
+                summary.get("legacy_used_for_visual_binding")
+            ),
+            "legacy_fallback_allowed": bool(summary.get("legacy_fallback_allowed")),
+            "visual_evidence_status": summary.get("visual_evidence_status"),
+            "frame_count": int(summary.get("frame_count") or 0),
+            "sidecar_frame_count": int(summary.get("sidecar_frame_count") or 0),
+            "object_counts": object_counts,
+            "person_count": int(object_counts.get("person") or 0),
+            "face_count": int(object_counts.get("face") or 0),
+            "known_face_count": int(object_counts.get("known_face") or 0),
+            "annotation_mode": "post_savant_sink_metadata_sidecar",
+        },
+        "status": {
+            "clip_status": _bundle_clip_status_from_c2_summary(summary),
+        },
+        "limitations": list(summary.get("limitations") or []),
+    }
+
+
+def _finalize_c2_post_savant_evidence_bundle(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    meta_dir: str,
+    metadata_file: str,
+    evidence_output_dir: str,
+) -> dict:
+    """Package post-Savant sink output as a C2 production evidence bundle."""
+    event_context = _load_event_context(pg_conn, event_id)
+    payload = event_context.get("payload", {})
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    if not isinstance(media, dict):
+        media = {}
+    sink_metadata = _load_sink_metadata_file(metadata_file)
+    replay_job_id = (
+        media.get("replay_job_id")
+        or sink_metadata.get("job_id")
+        or sink_metadata.get("new_job")
+        or ""
+    )
+    replay_job_request = media.get("replay_job_request") or {}
+    if not isinstance(replay_job_request, dict):
+        replay_job_request = {}
+
+    result = build_post_savant_evidence_bundle(
+        input_dir=Path(meta_dir),
+        output_dir=Path(evidence_output_dir) / event_id,
+        copy_video=True,
+        trim_sidecar_to_video=True,
+        overwrite=False,
+        max_fps=os.getenv("MAX_FPS"),
+        min_fps=os.getenv("MIN_FPS"),
+        fps_gating_applied=_c2_post_savant_fps_gating_applied(),
+        source_input_fps_estimate=_to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
+    )
+    business_metadata = _build_c2_event_metadata(
+        event_context=event_context,
+        replay_job_id=replay_job_id,
+        replay_job_request=replay_job_request,
+        sink_output_dir=meta_dir,
+        bundle_result=result,
+    )
+    metadata_out = result.output_dir / "metadata.json"
+    _atomic_write_json(metadata_out, business_metadata)
+    summary = result.summary
+    object_counts = summary.get("object_counts") or {}
+    if not isinstance(object_counts, dict):
+        object_counts = {}
+    return {
+        "evidence_dir": str(result.output_dir),
+        "raw_clip": str(result.raw_clip_path),
+        "metadata": str(metadata_out),
+        "sink_metadata": str(result.sink_metadata_path),
+        "event_annotation": "",
+        "annotations_jsonl": str(result.production_sidecar_path),
+        "summary": str(result.summary_path),
+        "sink_output_path": meta_dir,
+        "clip_status": business_metadata.get("status", {}).get(
+            "clip_status", "generated_unverified"
+        ),
+        "annotation_status": summary.get("annotation_status"),
+        "annotation_lines": int(summary.get("sidecar_frame_count") or 0),
+        "annotation_empty_reason": "",
+        "annotation_unavailable_reason": "",
+        "overlay_available": bool(summary.get("production_ready")),
+        "frontend_overlay_required": bool(summary.get("production_ready")),
+        "duration_guard_status": "not_applicable",
+        "duration_guard_failed": False,
+        "max_allowed_duration_seconds": None,
+        "raw_clip_sanitize_method": "post_savant_evidence_bundle",
+        "raw_clip_sanitize_decode_ok": None,
+        "raw_clip_sanitize_decode_error_count": 0,
+        "raw_clip_sanitize_fallback_used": False,
+        "raw_clip_sanitize_error": "",
+        "evidence_topology": C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+        "annotation_source": summary.get("annotation_source"),
+        "production_ready": bool(summary.get("production_ready")),
+        "legacy_used_for_visual_binding": bool(
+            summary.get("legacy_used_for_visual_binding")
+        ),
+        "person_count": int(object_counts.get("person") or 0),
+        "face_count": int(object_counts.get("face") or 0),
+        "known_face_count": int(object_counts.get("known_face") or 0),
+    }
+
+
 def _process_sink_output(
     pg_conn: psycopg.Connection,
     sink_dir: str,
@@ -1270,11 +1488,16 @@ def _process_sink_output(
             logger.debug("media_skip: event already ready event_id=%s", event_id)
             continue
 
+        c2_post_savant_finalizer_enabled = _c2_post_savant_finalizer_enabled()
+        finalizer_enabled = (
+            p1_raw_clip_finalizer_enabled or c2_post_savant_finalizer_enabled
+        )
+
         video_file = _find_video_file(meta_dir)
         if not video_file:
             continue  # not ready yet
 
-        if p1_raw_clip_finalizer_enabled and candidate_dirs is not None:
+        if finalizer_enabled and candidate_dirs is not None:
             try:
                 current_size = Path(video_file).stat().st_size
             except OSError:
@@ -1297,7 +1520,20 @@ def _process_sink_output(
 
         metadata_file = str(Path(meta_dir) / "metadata.json")
         bundle = None
-        if p1_raw_clip_finalizer_enabled:
+        if c2_post_savant_finalizer_enabled:
+            if not evidence_output_dir:
+                logger.error("c2_post_savant_finalizer enabled but no evidence_output_dir")
+                continue
+            bundle = _finalize_c2_post_savant_evidence_bundle(
+                pg_conn,
+                event_id=event_id,
+                meta_dir=meta_dir,
+                metadata_file=metadata_file,
+                evidence_output_dir=evidence_output_dir,
+            )
+            clip_path = bundle["raw_clip"]
+            clip_status = bundle.get("clip_status", "generated_unverified")
+        elif p1_raw_clip_finalizer_enabled:
             if not evidence_output_dir:
                 logger.error("p1_finalizer enabled but no evidence_output_dir")
                 continue
@@ -1400,6 +1636,20 @@ def _process_sink_output(
                                         'annotations_jsonl_path', %(annotations_path)s::text,
                                         'summary_json_path', %(summary_path)s::text,
                                         'raw_clip_path', %(raw_clip_path)s::text,
+                                        'evidence_topology',
+                                            %(evidence_topology)s::text,
+                                        'annotation_source',
+                                            %(annotation_source)s::text,
+                                        'production_ready',
+                                            %(production_ready)s::boolean,
+                                        'legacy_used_for_visual_binding',
+                                            %(legacy_used_for_visual_binding)s::boolean,
+                                        'person_count',
+                                            %(person_count)s::int,
+                                        'face_count',
+                                            %(face_count)s::int,
+                                        'known_face_count',
+                                            %(known_face_count)s::int,
                                         'raw_clip_sanitize_method',
                                             %(raw_clip_sanitize_method)s::text,
                                         'raw_clip_sanitize_decode_ok',
@@ -1442,6 +1692,19 @@ def _process_sink_output(
                             "annotations_path": bundle["annotations_jsonl"],
                             "summary_path": bundle["summary"],
                             "raw_clip_path": bundle["raw_clip"],
+                            "evidence_topology": bundle.get("evidence_topology", ""),
+                            "annotation_source": bundle.get("annotation_source", ""),
+                            "production_ready": bool(
+                                bundle.get("production_ready", False)
+                            ),
+                            "legacy_used_for_visual_binding": bool(
+                                bundle.get("legacy_used_for_visual_binding", False)
+                            ),
+                            "person_count": int(bundle.get("person_count") or 0),
+                            "face_count": int(bundle.get("face_count") or 0),
+                            "known_face_count": int(
+                                bundle.get("known_face_count") or 0
+                            ),
                             "raw_clip_sanitize_method": bundle.get(
                                 "raw_clip_sanitize_method"
                             ),
