@@ -155,6 +155,26 @@ def test_output_jsonl_has_one_row_per_frame(tmp_path: Path) -> None:
     assert summary["frame_count"] == 3
 
 
+def test_max_frames_trims_rows_without_breaking_face_overlay_schema(tmp_path: Path) -> None:
+    builder = _activate_builder()
+    metadata = [
+        _frame(pts=1000 + index, uuid=f"frame-{index}", objects=[_person_object(), _face_object()])
+        for index in range(4)
+    ]
+
+    rows, summary = builder.build_annotations_from_metadata(metadata, max_frames=2)
+
+    assert len(rows) == 2
+    assert summary["original_metadata_frame_count"] == 4
+    assert summary["sidecar_frame_count"] == 2
+    assert summary["sidecar_trimmed"] is True
+    face = next(obj for obj in rows[-1]["objects"] if obj["object_type"] == "face")
+    assert face["bbox"]["format"] == "xyxy"
+    assert face["bbox"]["coordinate_space"] == "pixel"
+    assert face["landmarks"]["points"][0] == [90.0, 100.0]
+    assert face["label"]["kind"] == "unknown_face"
+
+
 def test_summary_counts_match_jsonl_contents(tmp_path: Path) -> None:
     builder = _activate_builder()
     metadata_path = tmp_path / "metadata.json"

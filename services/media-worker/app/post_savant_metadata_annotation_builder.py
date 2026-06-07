@@ -65,11 +65,18 @@ def build_post_savant_annotation_sidecar(
     metadata_path: Path,
     output_jsonl_path: Path,
     summary_path: Path,
+    *,
+    max_frames: int | None = None,
+    extra_limitations: list[str] | None = None,
 ) -> BuildResult:
     """Read native sink metadata and write a production annotation sidecar."""
 
     frames = load_native_metadata(metadata_path)
-    rows, summary = build_annotations_from_metadata(frames)
+    rows, summary = build_annotations_from_metadata(
+        frames,
+        max_frames=max_frames,
+        extra_limitations=extra_limitations,
+    )
     output_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     _write_jsonl(output_jsonl_path, rows)
@@ -116,8 +123,18 @@ def load_native_metadata(path: Path) -> list[dict[str, Any]]:
     return []
 
 
-def build_annotations_from_metadata(frames: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def build_annotations_from_metadata(
+    frames: Iterable[dict[str, Any]],
+    *,
+    max_frames: int | None = None,
+    extra_limitations: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     frame_list = [frame for frame in frames if _is_native_frame(frame)]
+    original_frame_count = len(frame_list)
+    if max_frames is not None:
+        if max_frames < 0:
+            raise ValueError("max_frames must be >= 0")
+        frame_list = frame_list[:max_frames]
     first_pts = _first_number(frame.get("pts") for frame in frame_list)
     rows: list[dict[str, Any]] = []
     counts = {
@@ -198,6 +215,9 @@ def build_annotations_from_metadata(frames: Iterable[dict[str, Any]]) -> tuple[l
         frame_uuid_count=frame_uuid_count,
         source_observation_id_count=source_observation_id_count,
     )
+    for limitation in extra_limitations or []:
+        if limitation and limitation not in limitations:
+            limitations.append(limitation)
     summary = {
         "schema_version": SCHEMA_VERSION,
         "sidecar_type": "production",
@@ -223,6 +243,9 @@ def build_annotations_from_metadata(frames: Iterable[dict[str, Any]]) -> tuple[l
         "trigger_face_row_match_type": None,
         "source_observation_id": None,
         "frame_count": len(rows),
+        "original_metadata_frame_count": original_frame_count,
+        "sidecar_frame_count": len(rows),
+        "sidecar_trimmed": len(rows) < original_frame_count,
         "frames_with_objects_count": frames_with_objects,
         "object_count": sum(counts.values()),
         "object_counts": counts,
@@ -613,12 +636,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metadata", required=True, type=Path)
     parser.add_argument("--output-jsonl", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)
+    parser.add_argument("--max-frames", type=int, default=None)
     args = parser.parse_args(argv)
 
     result = build_post_savant_annotation_sidecar(
         metadata_path=args.metadata,
         output_jsonl_path=args.output_jsonl,
         summary_path=args.summary,
+        max_frames=args.max_frames,
     )
     print(json.dumps(result.summary, sort_keys=True))
     return 0
