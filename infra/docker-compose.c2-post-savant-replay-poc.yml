@@ -1,0 +1,129 @@
+# C2.0 POC: verify that Replay retains object metadata when it stores a
+# post-Savant stream and replays it to video-file-sink.
+
+name: c2-post-savant-replay-poc
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: c2-poc-redis
+    ports:
+      - "6395:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  replay-service:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: c2-poc-replay-service
+    ports:
+      - "8098:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-debug,replaydb=trace}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.c2_post_savant_replay_poc.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-c2-post-savant-replay-poc:/opt/rocksdb:rw
+    restart: unless-stopped
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: c2-poc-savant
+    entrypoint:
+      [
+        "bash", "-c",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
+      ]
+    working_dir: /opt/savant/src/module
+    env_file:
+      - ./env/c2-post-savant-replay-poc.env
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      SOURCE_ID: ${SOURCE_ID:-c2_post_savant_replay_poc}
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      POSE_BATCH_SIZE: "1"
+      FACE_DETECTOR_BATCH_SIZE: "1"
+      FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.25}"
+      FACE_REID_MIN_INTERVAL_MS: "${FACE_REID_MIN_INTERVAL_MS:-1000}"
+      FACE_REID_MIN_CONFIDENCE: "${FACE_REID_MIN_CONFIDENCE:-0.45}"
+      FACE_REID_MIN_FACE_SIZE: "${FACE_REID_MIN_FACE_SIZE:-40}"
+      FACE_REID_NORM_TOLERANCE: "${FACE_REID_NORM_TOLERANCE:-0.10}"
+      FACE_OBSERVATION_EXPORT_ENABLED: "${FACE_OBSERVATION_EXPORT_ENABLED:-true}"
+      PERSON_OBSERVATION_EXPORT_ENABLED: "${PERSON_OBSERVATION_EXPORT_ENABLED:-true}"
+      PERSON_OBSERVATION_STREAM: "${PERSON_OBSERVATION_STREAM:-security.person_observations}"
+      PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS:-333}"
+      PERSON_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_OBSERVATION_MIN_INTERVAL_MS:-333}"
+      C1F1_SAME_FRAME_DEBUG_ENABLED: "${C1F1_SAME_FRAME_DEBUG_ENABLED:-1}"
+      SAVANT_MODULE_FILE: "${SAVANT_MODULE_FILE:-module.yml}"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.c1e_replay.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
+      replay-service: { condition: service_started }
+    restart: unless-stopped
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: c2-poc-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/rtsp.sh",
+      ]
+    env_file:
+      - ./env/c2-post-savant-replay-poc.env
+    environment:
+      SOURCE_ID: ${SOURCE_ID:-c2_post_savant_replay_poc}
+      RTSP_URI: rtsp://10.37.57.112:8554/live/1080movie
+      LOCATION: rtsp://10.37.57.112:8554/live/1080movie
+      RTSP_TRANSPORT: ${RTSP_TRANSPORT:-tcp}
+      ZMQ_ENDPOINT: dealer+connect:tcp://savant-security:5557
+      SYNC_OUTPUT: "true"
+      BUFFER_LEN: "2000"
+      EOS_ON_START: "false"
+      FFMPEG_TIMEOUT_MS: "20000"
+    depends_on:
+      - savant-security
+    restart: unless-stopped
+
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: c2-poc-video-file-sink
+    entrypoint:
+      [
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      DIR_LOCATION: ${C2_POC_SINK_CONTAINER_ROOT:-/media/c2-post-savant-replay-poc}/%source_id%/%src_filename%/
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: "${METADATA_JSON_FORMAT:-native}"
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    restart: unless-stopped
