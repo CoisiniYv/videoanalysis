@@ -9,27 +9,30 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 CW_DIR = str(Path(__file__).resolve().parents[2] / "services" / "clip-worker")
+for name in list(sys.modules):
+    if name == "app" or name.startswith("app."):
+        del sys.modules[name]
+if CW_DIR in sys.path:
+    sys.path.remove(CW_DIR)
 if CW_DIR not in sys.path:
     sys.path.insert(0, CW_DIR)
 
-from app.replay_client import ReplayClient, _ts_ms_to_iso
+from app import replay_client as replay_client_module
+from app.replay_client import ReplayClient, _ts_ms_to_unix_seconds
 
 
 # ===========================================================================
-# _ts_ms_to_iso
+# _ts_ms_to_unix_seconds
 # ===========================================================================
 
 
-def test_ts_ms_to_iso_returns_iso8601_utc():
+def test_ts_ms_to_unix_seconds_returns_epoch_seconds():
     # 2026-01-15T10:30:00.000Z = 1768473000000 ms
-    result = _ts_ms_to_iso(1768473000000)
-    assert result.endswith("+00:00") or result.endswith("Z")
-    assert "2026-01-15" in result
+    assert _ts_ms_to_unix_seconds(1768473000000) == 1768473000
 
 
-def test_ts_ms_to_iso_handles_zero():
-    result = _ts_ms_to_iso(0)
-    assert result.startswith("1970-01-01")
+def test_ts_ms_to_unix_seconds_handles_zero():
+    assert _ts_ms_to_unix_seconds(0) == 0
 
 
 # ===========================================================================
@@ -37,9 +40,9 @@ def test_ts_ms_to_iso_handles_zero():
 # ===========================================================================
 
 
-def test_find_keyframe_passes_from_to_when_ts_ms_provided():
-    """When ts_ms > 0, from/to are set as ISO 8601 timestamps."""
-    with patch("app.replay_client.httpx.post") as mock_post:
+def test_find_keyframe_passes_unix_seconds_from_to_when_ts_ms_provided():
+    """When ts_ms > 0, Replay keyframe lookup uses Unix-second from/to."""
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "keyframes": ["source_1", ["019e5910-6c0e-7451-bab0-ba019495b968"]]
@@ -53,17 +56,14 @@ def test_find_keyframe_passes_from_to_when_ts_ms_provided():
         assert result == "019e5910-6c0e-7451-bab0-ba019495b968"
         payload = mock_post.call_args.kwargs["json"]
         assert payload["source_id"] == "source_1"
-        assert payload["limit"] == 1
-        # from/to must be present (not None) when ts_ms > 0
-        assert payload["from"] is not None
-        assert payload["to"] is not None
-        # from < to chronologically
-        assert payload["from"] < payload["to"]
+        assert payload["limit"] == 20
+        assert payload["from"] == 1768472990
+        assert payload["to"] == 1768473010
 
 
 def test_find_keyframe_passes_null_from_to_when_ts_ms_zero():
     """When ts_ms == 0, from/to are None (unbounded lookup)."""
-    with patch("app.replay_client.httpx.post") as mock_post:
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "keyframes": ["source_1", ["uuid-1"]]
@@ -82,7 +82,7 @@ def test_find_keyframe_passes_null_from_to_when_ts_ms_zero():
 
 def test_find_keyframe_window_is_symmetric():
     """The from/to window is centered on event_ts_ms."""
-    with patch("app.replay_client.httpx.post") as mock_post:
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "keyframes": ["s", ["kf-1"]]
@@ -91,15 +91,63 @@ def test_find_keyframe_window_is_symmetric():
         mock_post.return_value = mock_resp
 
         client = ReplayClient("http://replay:8080")
-        # 1000 ms = 1 second, window_s=5 → from=-4000ms, to=+6000ms
-        client.find_keyframe("source_1", ts_ms=1000, window_s=5)
+        # 11000 ms = 11 seconds, window_s=5 -> from=6s, to=16s.
+        client.find_keyframe("source_1", ts_ms=11000, window_s=5)
 
         payload = mock_post.call_args.kwargs["json"]
-        from_ts = payload["from"]
-        to_ts = payload["to"]
-        # Verify ISO 8601 format
-        assert "T" in from_ts
-        assert "T" in to_ts
+        assert payload["from"] == 6
+        assert payload["to"] == 16
+
+
+def test_find_keyframe_selects_nearest_uuid7_keyframe_to_anchor():
+    """Replay may return several keyframes; choose the nearest UUIDv7 timestamp."""
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "keyframes": [
+                "source_1",
+                [
+                    "019ea66c-01c5-7cf0-bf59-298587f529f4",
+                    "019ea66c-2a80-77e1-94ce-271405cee78c",
+                    "019ea66c-533b-7b71-bab6-0c9d630bc1cd",
+                ],
+            ]
+        }
+        mock_resp.raise_for_status.return_value = None
+        mock_post.return_value = mock_resp
+
+        client = ReplayClient("http://replay:8080")
+        result = client.find_keyframe("source_1", ts_ms=1780908564000, window_s=30)
+
+        assert result == "019ea66c-2a80-77e1-94ce-271405cee78c"
+
+
+def test_find_keyframe_can_select_first_keyframe_at_or_after_anchor():
+    """Event Replay anchoring needs the next keyframe so offset rewind covers the event."""
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "keyframes": [
+                "source_1",
+                [
+                    "019ea66c-01c5-7cf0-bf59-298587f529f4",
+                    "019ea66c-2a80-77e1-94ce-271405cee78c",
+                    "019ea66c-533b-7b71-bab6-0c9d630bc1cd",
+                ],
+            ]
+        }
+        mock_resp.raise_for_status.return_value = None
+        mock_post.return_value = mock_resp
+
+        client = ReplayClient("http://replay:8080")
+        result = client.find_keyframe(
+            "source_1",
+            ts_ms=1780908570000,
+            window_s=30,
+            selection="at_or_after",
+        )
+
+        assert result == "019ea66c-533b-7b71-bab6-0c9d630bc1cd"
 
 
 # ===========================================================================
@@ -154,7 +202,7 @@ def test_missing_event_ts_ms_would_fail_cleanly():
 
 def test_no_keyframe_found_fails_with_event_context():
     """When find_keyframe returns None, error includes source_id and event_ts_ms."""
-    with patch("app.replay_client.httpx.post") as mock_post:
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 404
         mock_post.return_value = mock_resp
@@ -179,7 +227,7 @@ def test_timestamp_anchored_lookup_is_idempotent():
     window_s = 10
 
     # Two calls with same parameters
-    with patch("app.replay_client.httpx.post") as mock_post:
+    with patch.object(replay_client_module.httpx, "post") as mock_post:
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
             "keyframes": ["s", ["uuid-consistent"]]
@@ -191,7 +239,7 @@ def test_timestamp_anchored_lookup_is_idempotent():
         result1 = client.find_keyframe("source_1", ts_ms=ts_ms, window_s=window_s)
         payload1 = mock_post.call_args.kwargs["json"]
 
-    with patch("app.replay_client.httpx.post") as mock_post2:
+    with patch.object(replay_client_module.httpx, "post") as mock_post2:
         mock_resp2 = MagicMock()
         mock_resp2.json.return_value = {
             "keyframes": ["s", ["uuid-consistent"]]

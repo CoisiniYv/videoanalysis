@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
 C2_POST_SAVANT_TOPOLOGIES = {"post_savant", "post_savant_replay"}
+C2_POST_SAVANT_REPLAY_STOP_STRATEGY = "event_anchor_pre_seconds_rewind"
 
 
 def _first_policy_value(event: Dict[str, Any], key: str) -> Any:
@@ -61,11 +62,11 @@ def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) 
         "event_frame_pts",
         "replay_anchor_pts",
         "replay_anchor_keyframe",
-        "replay_stop_strategy",
     ):
         value = _first_policy_value(event, key)
         if value is not None:
             record[key] = value
+    record["replay_stop_strategy"] = C2_POST_SAVANT_REPLAY_STOP_STRATEGY
 
 
 def build_record_request(

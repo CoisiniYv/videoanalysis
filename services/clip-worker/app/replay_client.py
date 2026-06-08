@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from uuid import UUID
 from typing import Any, Dict, Optional
 
 import httpx
@@ -11,9 +12,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def _ts_ms_to_epoch_ns(ts_ms: int) -> int:
-    """Convert epoch milliseconds to epoch nanoseconds (u64)."""
-    return int(ts_ms * 1_000_000)
+def _ts_ms_to_unix_seconds(ts_ms: int) -> int:
+    """Convert epoch milliseconds to Unix seconds for Replay keyframe lookup."""
+    return int(ts_ms // 1000)
+
+
+def _uuid7_timestamp_ms(value: str) -> int | None:
+    """Extract the millisecond timestamp from Savant UUIDv7-style frame IDs."""
+    try:
+        return int((UUID(value).int >> 80) & ((1 << 48) - 1))
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 class ReplayClient:
@@ -42,6 +51,7 @@ class ReplayClient:
         source_id: str,
         ts_ms: int = 0,
         window_s: float = 10.0,
+        selection: str = "nearest",
     ) -> Optional[str]:
         """POST /api/v1/keyframes/find — find nearest keyframe UUID.
 
@@ -53,19 +63,21 @@ class ReplayClient:
             source_id: Replay source identifier.
             ts_ms: Event timestamp in epoch milliseconds (event_ts_ms).
             window_s: Search window in seconds around *ts_ms*.
+            selection: ``nearest`` or ``at_or_after`` for UUIDv7 timestamp
+                selection within the returned keyframe list.
 
         Returns:
             keyframe_uuid string, or None if not found.
         """
-        from_ns = None
-        to_ns = None
+        from_unix_s = None
+        to_unix_s = None
         if ts_ms > 0:
-            from_ns = _ts_ms_to_epoch_ns(int(ts_ms - window_s * 1000))
-            to_ns = _ts_ms_to_epoch_ns(int(ts_ms + window_s * 1000))
+            from_unix_s = _ts_ms_to_unix_seconds(int(ts_ms - window_s * 1000))
+            to_unix_s = _ts_ms_to_unix_seconds(int(ts_ms + window_s * 1000))
             logger.info(
                 "keyframe_lookup_anchored source_id=%s event_ts_ms=%s "
-                "window_s=%s from_ns=%s to_ns=%s",
-                source_id, ts_ms, window_s, from_ns, to_ns,
+                "window_s=%s from_unix_s=%s to_unix_s=%s",
+                source_id, ts_ms, window_s, from_unix_s, to_unix_s,
             )
         else:
             logger.warning(
@@ -75,11 +87,12 @@ class ReplayClient:
                 ts_ms,
             )
 
-        body: Dict[str, Any] = {"source_id": source_id, "limit": 1}
-        if from_ns is not None:
-            body["from"] = from_ns
-        if to_ns is not None:
-            body["to"] = to_ns
+        body: Dict[str, Any] = {
+            "source_id": source_id,
+            "from": from_unix_s,
+            "to": to_unix_s,
+            "limit": 20 if ts_ms > 0 else 1,
+        }
 
         try:
             resp = httpx.post(
@@ -101,7 +114,11 @@ class ReplayClient:
             if isinstance(kfs, list) and len(kfs) > 1:
                 uuid_list = kfs[1]
                 if isinstance(uuid_list, list) and len(uuid_list) > 0:
-                    return uuid_list[0]
+                    return _select_keyframe_uuid(
+                        uuid_list,
+                        ts_ms=ts_ms,
+                        selection=selection,
+                    )
             # Fallback: try older formats
             if isinstance(kfs, list) and len(kfs) > 0:
                 first = kfs[0]
@@ -283,6 +300,39 @@ class ReplayClient:
         resp.raise_for_status()
         data = resp.json()
         return data.get("new_job") or data.get("job_id") or data.get("id")
+
+
+def _select_keyframe_uuid(
+    uuid_list: list[Any],
+    *,
+    ts_ms: int,
+    selection: str = "nearest",
+) -> str | None:
+    candidates = [value for value in uuid_list if isinstance(value, str)]
+    if not candidates:
+        return None
+    if ts_ms <= 0:
+        return candidates[0]
+
+    scored: list[tuple[int, str]] = []
+    unscored: list[str] = []
+    for value in candidates:
+        uuid_ts_ms = _uuid7_timestamp_ms(value)
+        if uuid_ts_ms is None:
+            unscored.append(value)
+            continue
+        scored.append((uuid_ts_ms, value))
+    if scored:
+        if selection == "at_or_after":
+            future = [item for item in scored if item[0] >= ts_ms]
+            if future:
+                return min(future)[1]
+            return max(scored)[1]
+        # Prefer the closest keyframe to the requested Replay timeline anchor.
+        # For equal distance, prefer the later keyframe so a bounded clip is
+        # less likely to end before the event.
+        return min((abs(ts - ts_ms), -ts, value) for ts, value in scored)[2]
+    return unscored[0]
 
 
 def _effective_fps(fps: int) -> int:

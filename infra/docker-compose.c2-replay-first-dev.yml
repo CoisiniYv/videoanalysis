@@ -264,7 +264,7 @@ services:
       REPLAY_STOP_CONDITION_MODE: frame_count
       REPLAY_FPS: "${REPLAY_FPS:-24}"
       REPLAY_FORCE_CONSTANT_CADENCE: "true"
-      REPLAY_ANCHOR_STRATEGY: event_start_keyframe
+      REPLAY_ANCHOR_STRATEGY: event_keyframe
       ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
     volumes:
       - ../services/clip-worker:/app:rw
@@ -330,6 +330,8 @@ services:
       FRAME_CACHE_SIDECAR_OUTPUT_ANNOTATIONS: annotations.frame_cache.identity.jsonl
       FRAME_CACHE_SIDECAR_OUTPUT_SUMMARY: summary.frame_cache.identity.json
       FRAME_CACHE_SIDECAR_STREAM: security.frame_annotations
+      FRAME_CACHE_FRESHNESS_GUARD_MODE: metadata_pts
+      FRAME_CACHE_REQUIRE_EVENT_CENTERED: "false"
       EVIDENCE_PHASE: C2.15-REPLAY-FIRST-RTSP
       EVIDENCE_INPUT_TYPE: rtsp
       EVIDENCE_INPUT_URI: ${C2_REPLAY_FIRST_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}

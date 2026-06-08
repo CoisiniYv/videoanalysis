@@ -152,9 +152,9 @@ def test_find_keyframe_sends_from_to_for_timestamp_window(monkeypatch) -> None:
     client = ReplayClient("http://replay-service:8080")
 
     assert client.find_keyframe("c1e_rtsp_replay", ts_ms=100_000, window_s=10) == "kf-1"
-    assert captured["json"]["from"] == 90_000_000_000
-    assert captured["json"]["to"] == 110_000_000_000
-    assert captured["json"]["limit"] == 1
+    assert captured["json"]["from"] == 90
+    assert captured["json"]["to"] == 110
+    assert captured["json"]["limit"] == 20
 
 
 def test_unbounded_keyframe_fallback_disabled_by_default(monkeypatch) -> None:

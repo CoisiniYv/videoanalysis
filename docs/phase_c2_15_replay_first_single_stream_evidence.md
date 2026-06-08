@@ -66,6 +66,40 @@ The bundle must not contain or require an `annotated_clip` video. No generated
 media path is allowed: annotated video clips are not generated. The 8090 viewer
 overlays JSONL annotations over the raw clip at display time.
 
+## Replay Timeline Alignment
+
+C2.15 follows Savant Replay semantics directly instead of post-processing the
+raw clip into an artificial event-centered file:
+
+- `keyframes/find` is bounded with Unix-second `from` / `to` values around the
+  event frame timestamp. The worker requests multiple candidates and chooses the
+  first UUIDv7 keyframe at or after the event when an event-keyframe strategy is
+  active.
+- Replay jobs anchor on that keyframe and use `offset.seconds =
+  DEFAULT_PRE_SECONDS`. Replay starts from a decodable keyframe selected by the
+  service, so the event is required to be inside the clip, not exactly centered
+  at 5 seconds.
+- `ts_sync=true` is kept for delivery pacing. Replay does not rewrite encoded
+  PTS/DTS, so raw video and annotations are aligned by the final
+  `video-file-sink` `sink_metadata.json` PTS/UUID timeline.
+- The video-file-sink receives final EOS from Replay with `CHUNK_SIZE=0`, so the
+  media-worker only finalizes outputs after video, metadata, and duration probe
+  are all available.
+
+The first runtime proof after this correction was:
+
+- Evidence bundle:
+  `/data/video-analytics/media/evidence/e61a566e-fb72-468f-8a06-ba532b3dfd07`
+- Raw clip: H.264 `raw_clip.mov`, `24000/1001`, duration `10.010013`, 240
+  decoded frames, zero ffmpeg decode errors.
+- Continuity diagnostic: 240 raw frames, zero raw PTS/DTS gaps, 240
+  `VideoFrame` metadata rows plus EOS, zero metadata PTS order anomalies, zero
+  sorted metadata gaps.
+- Sidecar alignment: `production_ready=true`, `canonical_clip=true`,
+  `event_pts_inside_clip=true`, `event_projected_t_s=8.800456`,
+  `event_center_required=false`, `freshness_guard_mode=metadata_pts`, and no
+  forbidden embedding/image/base64/crop payload in the sidecar/report surface.
+
 ## Face Matching Path
 
 Savant writes face observations to Redis. `face-worker` persists observations to

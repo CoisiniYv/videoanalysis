@@ -145,7 +145,7 @@ def test_replay_job_uses_original_stream_cadence_not_inference_fps() -> None:
     assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "frame_count"
     assert clip_env["REPLAY_FPS"] == "${REPLAY_FPS:-24}"
     assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
-    assert clip_env["REPLAY_ANCHOR_STRATEGY"] == "event_start_keyframe"
+    assert clip_env["REPLAY_ANCHOR_STRATEGY"] == "event_keyframe"
 
 
 def test_replay_first_uses_frame_cache_for_annotations() -> None:
@@ -160,6 +160,8 @@ def test_replay_first_uses_frame_cache_for_annotations() -> None:
     assert media_env["FRAME_CACHE_SIDECAR_EVENT_TYPES"] == "intrusion,watchlist_hit"
     assert media_env["FRAME_CACHE_SIDECAR_REQUIRE_TRIGGER_FACE"] == "false"
     assert media_env["FRAME_CACHE_SIDECAR_STREAM"] == "security.frame_annotations"
+    assert media_env["FRAME_CACHE_FRESHNESS_GUARD_MODE"] == "metadata_pts"
+    assert media_env["FRAME_CACHE_REQUIRE_EVENT_CENTERED"] == "false"
 
 
 def test_intrusion_sidecar_can_render_bbox_without_watchlist_identity() -> None:

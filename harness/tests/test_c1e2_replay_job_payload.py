@@ -121,7 +121,7 @@ def test_replay_payload_uses_24fps_cadence_for_24fps_rtsp_source() -> None:
     assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
 
 
-def test_event_start_anchor_strategy_uses_requested_window_start() -> None:
+def test_event_start_anchor_strategy_uses_event_anchor_and_replay_offset() -> None:
     _activate_clip_worker_path()
     from app.worker import (
         REPLAY_ANCHOR_STRATEGY_EVENT_START,
@@ -135,12 +135,31 @@ def test_event_start_anchor_strategy_uses_requested_window_start() -> None:
         req,
         pre_seconds=5,
         anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
-    ) == 1_780_906_976_235
+    ) == 1_780_906_981_235
     assert _replay_offset_seconds(
-        replay_stop_strategy="",
+        replay_stop_strategy="anchor_start_offset_zero",
         anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
         pre_seconds=5,
-    ) == 0.0
+    ) is None
+
+
+def test_event_start_anchor_strategy_prefers_frame_uuid_time_domain() -> None:
+    _activate_clip_worker_path()
+    from app.worker import (
+        REPLAY_ANCHOR_STRATEGY_EVENT_START,
+        _replay_anchor_lookup_ts_ms,
+    )
+
+    req = {
+        "event_ts_ms": 1_780_906_981_235,
+        "frame_uuid": "019ea673-362c-7142-a716-a50edb062ebe",
+    }
+
+    assert _replay_anchor_lookup_ts_ms(
+        req,
+        pre_seconds=5,
+        anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
+    ) == 1_780_909_028_908
 
 
 def test_event_start_anchor_strategy_forces_keyframe_lookup() -> None:
@@ -167,15 +186,15 @@ def test_clip_worker_default_config_uses_reliable_sink_and_replay_fps(monkeypatc
 
 
 def test_replay_config_ttl_and_default_sink_options_match_c1e2() -> None:
-    replay_config = ROOT / "modules" / "savant_replay" / "config.p1c_rtsp_inline.json"
+    replay_config = ROOT / "modules" / "savant_replay" / "config.c2_replay_first_dev.json"
     data = json.loads(replay_config.read_text(encoding="utf-8"))
 
     assert data["storage"]["rocksdb"]["data_expiration_ttl"] == {
-        "secs": 300,
+        "secs": 30,
         "nanos": 0,
     }
     assert data["storage"]["rocksdb"]["compaction_period"] == {
-        "secs": 120,
+        "secs": 30,
         "nanos": 0,
     }
     assert data["common"]["default_job_sink_options"] == {

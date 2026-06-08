@@ -14,7 +14,7 @@ import psycopg
 from redis import Redis
 
 from app.config import Config, load_config
-from app.replay_client import ReplayClient
+from app.replay_client import ReplayClient, _uuid7_timestamp_ms
 from app.repository import update_clip_status
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ MISSING_KEYFRAME_ERROR = "missing_keyframe_uuid_and_anchored_lookup_unavailable"
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
 REPLAY_ANCHOR_STRATEGY_EVENT_START = "event_start_keyframe"
+REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME = "event_keyframe"
 
 
 @dataclass(frozen=True)
@@ -58,13 +59,37 @@ def _replay_anchor_lookup_ts_ms(
     anchor_strategy: str,
 ) -> int:
     event_ts_ms = int(req.get("event_ts_ms", 0) or 0)
-    if anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START and event_ts_ms > 0:
-        return max(0, event_ts_ms - int(pre_seconds * 1000))
+    if anchor_strategy in {
+        REPLAY_ANCHOR_STRATEGY_EVENT_START,
+        REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME,
+    }:
+        frame_uuid_ms = _uuid7_timestamp_ms(str(req.get("frame_uuid") or ""))
+        if frame_uuid_ms is not None:
+            if anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START:
+                logger.warning(
+                    "replay_anchor_strategy_deprecated strategy=%s; using "
+                    "event_keyframe semantics because Replay offset rewinds "
+                    "from anchor",
+                    anchor_strategy,
+                )
+            return frame_uuid_ms
+        if event_ts_ms > 0:
+            if anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START:
+                logger.warning(
+                    "replay_anchor_strategy_deprecated strategy=%s; using "
+                    "event_keyframe semantics because Replay offset rewinds "
+                    "from anchor",
+                    anchor_strategy,
+                )
+            return event_ts_ms
     return event_ts_ms
 
 
 def _should_lookup_replay_anchor(anchor_strategy: str) -> bool:
-    return anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START
+    return anchor_strategy in {
+        REPLAY_ANCHOR_STRATEGY_EVENT_START,
+        REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME,
+    }
 
 
 def _replay_offset_seconds(
@@ -73,10 +98,7 @@ def _replay_offset_seconds(
     anchor_strategy: str,
     pre_seconds: int,
 ) -> float | None:
-    if replay_stop_strategy == "anchor_start_offset_zero":
-        return 0.0
-    if anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START:
-        return 0.0
+    _ = (replay_stop_strategy, anchor_strategy, pre_seconds)
     return None
 
 
@@ -366,18 +388,28 @@ def run_worker(
                             total_processed += 1
                             continue
 
-                        # Timestamp-anchored keyframe lookup.
-                        # The event_start_keyframe strategy asks Replay for a
-                        # keyframe around the requested clip start, then uses
-                        # zero offset so the output includes the event window.
+                        # Timestamp-anchored keyframe lookup. Replay offset
+                        # rewinds from the anchor keyframe, so the anchor must
+                        # be near the event, not near the desired window start.
                         lookup_ts_ms = _replay_anchor_lookup_ts_ms(
                             req,
                             pre_seconds=pre_seconds,
                             anchor_strategy=cfg.replay_anchor_strategy,
                         )
                         keyframe_uuid = replay.find_keyframe(
-                            source_id, lookup_ts_ms,
-                            window_s=cfg.keyframe_lookup_window_s,
+                            source_id,
+                            lookup_ts_ms,
+                            window_s=max(
+                                cfg.keyframe_lookup_window_s,
+                                pre_seconds * 3,
+                            ),
+                            selection=(
+                                "at_or_after"
+                                if _should_lookup_replay_anchor(
+                                    cfg.replay_anchor_strategy
+                                )
+                                else "nearest"
+                            ),
                         )
 
                     if not keyframe_uuid:

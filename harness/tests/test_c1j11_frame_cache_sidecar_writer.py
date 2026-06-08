@@ -11,6 +11,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 MEDIA_WORKER_ROOT = str(ROOT / "services" / "media-worker")
+for name in list(sys.modules):
+    if name == "app" or name.startswith("app."):
+        del sys.modules[name]
+if MEDIA_WORKER_ROOT in sys.path:
+    sys.path.remove(MEDIA_WORKER_ROOT)
 if MEDIA_WORKER_ROOT not in sys.path:
     sys.path.insert(0, MEDIA_WORKER_ROOT)
 
@@ -387,6 +392,81 @@ def test_fresh_pts_fallback_row_is_allowed(tmp_path: Path) -> None:
     assert summary["frame_identity_confidence"] == "none"
 
 
+def test_metadata_pts_guard_allows_replay_pts_matched_rows_with_old_wall_clock(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        json.dumps({"frame_num": 0, "pts": 34_646}) + "\n",
+        encoding="utf-8",
+    )
+    event = _event()
+    event["created_at"] = "2026-06-06T08:01:27.655618Z"
+    message = _frame_message(created_at="2026-06-06T07:28:44.614117Z")
+
+    summary, result = _write(
+        tmp_path,
+        event=event,
+        messages=[message],
+        evidence_dir=evidence_dir,
+        config=_config(enabled=True, freshness_guard_mode="metadata_pts"),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert rows
+    assert rows[0]["clip_timeline_match"] == "metadata_frame_pts_exact"
+    assert rows[0]["displayable"] is True
+    assert summary["freshness_guard_mode"] == "metadata_pts"
+    assert summary["clip_timeline_alignment"]["freshness_guard_mode"] == "metadata_pts"
+    assert summary["rows_rejected_stale_cache"] == 0
+    assert summary["rows_rejected_epoch_mismatch"] == 0
+    assert summary["rows_rejected_pts_non_unique"] == 0
+    assert summary["annotation_status"] == "complete"
+
+
+def test_replay_first_can_be_ready_when_event_inside_but_not_centered(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        "\n".join(
+            [
+                json.dumps({"frame_num": 0, "pts": 10_000_000_000}),
+                json.dumps({"frame_num": 1, "pts": 13_000_000_000}),
+                json.dumps({"frame_num": 239, "pts": 19_968_000_000}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    event = _event()
+    event["payload"]["observation"]["frame_pts"] = 13_000_000_000
+    event["payload"]["media"]["frame_pts"] = 13_000_000_000
+    message = _frame_message(frame_pts=13_000_000_000)
+
+    summary, result = _write(
+        tmp_path,
+        event=event,
+        messages=[message],
+        evidence_dir=evidence_dir,
+        config=_config(
+            enabled=True,
+            freshness_guard_mode="metadata_pts",
+            require_event_centered=False,
+        ),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert rows
+    assert summary["event_pts_inside_clip"] is True
+    assert summary["event_center_required"] is False
+    assert summary["event_centered_in_clip"] is False
+    assert summary["canonical_clip"] is True
+    assert summary["production_ready"] is False
+    assert "person_context_missing" in summary["production_ready_failures"]
+    assert "event_not_centered_in_clip" not in summary["production_ready_failures"]
+
+
 def test_visual_binding_verified_when_production_ready_trigger_uuid_bound() -> None:
     summary = _trigger_visual_binding_summary(
         event=_event(),
@@ -551,6 +631,9 @@ def _intrusion_event() -> dict[str, Any]:
 def _frame_message(
     *,
     source_observation_id: str = SOURCE_OBSERVATION_ID,
+    frame_pts: int = 34_646,
+    frame_uuid: str = "frame-34646",
+    timestamp_ms: int = 1_780_000_000_250,
     include_forbidden: bool = False,
     created_at: str = "2026-06-06T08:01:26.171308Z",
 ) -> dict[str, Any]:
@@ -576,10 +659,10 @@ def _frame_message(
         "message_type": "frame_annotation",
         "source_id": "c1e_rtsp_replay",
         "camera_id": "cam_c1e_rtsp_replay",
-        "frame_pts": 34_646,
-        "frame_uuid": "frame-34646",
+        "frame_pts": frame_pts,
+        "frame_uuid": frame_uuid,
         "frame_num": 1,
-        "timestamp_ms": 1_780_000_000_250,
+        "timestamp_ms": timestamp_ms,
         "created_at": created_at,
         "objects": [face],
     }

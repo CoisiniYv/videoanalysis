@@ -40,7 +40,7 @@ def test_c2_record_request_carries_post_savant_policy_fields() -> None:
     assert record["requested_start_pts"] == 4_721_166_666
     assert record["requested_end_pts"] == 14_721_166_666
     assert record["event_frame_pts"] == 9_721_166_666
-    assert record["replay_stop_strategy"] == "anchor_start_offset_zero"
+    assert record["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
     assert record["pre_seconds"] == 3
     assert record["post_seconds"] == 3
 
@@ -83,7 +83,7 @@ def test_clip_worker_replay_labels_preserve_c2_stream_mapping() -> None:
     assert labels["requested_start_pts"] == "4721166666"
     assert labels["requested_end_pts"] == "14721166666"
     assert labels["event_frame_pts"] == "9721166666"
-    assert labels["replay_stop_strategy"] == "anchor_start_offset_zero"
+    assert labels["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
 
 
 def test_replay_job_payload_uses_record_request_source_as_stored_stream() -> None:
@@ -104,7 +104,6 @@ def test_replay_job_payload_uses_record_request_source_as_stored_stream() -> Non
         stop_condition_mode="ts_delta_sec",
         fps=24,
         force_constant_cadence=True,
-        offset_seconds_override=0.0,
     )
 
     assert payload["configuration"]["stored_stream_id"] == "c2_post_savant_fps_probe"
@@ -114,7 +113,7 @@ def test_replay_job_payload_uses_record_request_source_as_stored_stream() -> Non
         "post_savant_sink_metadata_only"
     )
     assert payload["sink"]["url"] == "dealer+connect:tcp://video-file-sink:6666"
-    assert payload["offset"]["seconds"] == 0.0
+    assert payload["offset"]["seconds"] == 3.0
     assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 6.0}}
     assert "frame_count" not in payload["stop_condition"]
 
@@ -129,6 +128,7 @@ def test_media_worker_c2_summary_records_c2_3b_mapping_fields(
     pg_conn = _FakeConnection([_event_row(event_id)])
 
     monkeypatch.setenv("EVIDENCE_PHASE", "C2.3B")
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 6.0)
     monkeypatch.setattr(
         worker,
         "build_post_savant_evidence_bundle",
@@ -156,7 +156,7 @@ def test_media_worker_c2_summary_records_c2_3b_mapping_fields(
     assert summary["allow_legacy_annotation_fallback"] is False
     assert summary["requested_start_pts"] == "4721166666"
     assert summary["requested_end_pts"] == "14721166666"
-    assert summary["replay_stop_strategy"] == "anchor_start_offset_zero"
+    assert summary["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
 
 
 def _activate_service_module(service_root: Path, module_name: str) -> Any:
@@ -193,7 +193,7 @@ def _c2_event() -> dict[str, Any]:
                 "requested_start_pts": 4_721_166_666,
                 "requested_end_pts": 14_721_166_666,
                 "event_frame_pts": 9_721_166_666,
-                "replay_stop_strategy": "anchor_start_offset_zero",
+                "replay_stop_strategy": "legacy_anchor_start_offset_zero",
             }
         },
         "evidence_policy": {
@@ -207,7 +207,7 @@ def _c2_event() -> dict[str, Any]:
             "requested_start_pts": 4_721_166_666,
             "requested_end_pts": 14_721_166_666,
             "event_frame_pts": 9_721_166_666,
-            "replay_stop_strategy": "anchor_start_offset_zero",
+            "replay_stop_strategy": "legacy_anchor_start_offset_zero",
         },
     }
 
@@ -232,7 +232,7 @@ def _c2_record_request() -> dict[str, Any]:
         "requested_start_pts": 4_721_166_666,
         "requested_end_pts": 14_721_166_666,
         "event_frame_pts": 9_721_166_666,
-        "replay_stop_strategy": "anchor_start_offset_zero",
+        "replay_stop_strategy": "event_anchor_pre_seconds_rewind",
         "strategy": "savant_replay",
         "status": "pending",
     }
@@ -249,7 +249,13 @@ def _make_sink_output(tmp_path: Path, *, event_id: str) -> Path:
                 "source_id": f"replay-event-{event_id}",
                 "job_id": "job-c2-3b",
                 "labels": {"event_id": event_id},
-                "objects": [],
+                "objects": [
+                    {
+                        "namespace": "yolo26_pose",
+                        "label": "person",
+                        "id": 1,
+                    }
+                ],
             },
             sort_keys=True,
         )
@@ -293,7 +299,7 @@ def _event_row(event_id: str) -> tuple[Any, ...]:
                             "requested_start_pts": "4721166666",
                             "requested_end_pts": "14721166666",
                             "event_frame_pts": "9721166666",
-                            "replay_stop_strategy": "anchor_start_offset_zero",
+                            "replay_stop_strategy": "event_anchor_pre_seconds_rewind",
                         },
                     },
                 },

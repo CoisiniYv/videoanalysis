@@ -50,7 +50,7 @@ def test_replay_client_find_keyframe():
         call_args = mock_post.call_args
         payload = call_args.kwargs["json"]
         assert payload["source_id"] == "source_1"
-        assert payload["limit"] == 1
+        assert payload["limit"] == 20
 
 
 def test_replay_client_find_keyframe_404():

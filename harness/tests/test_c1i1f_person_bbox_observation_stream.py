@@ -629,14 +629,14 @@ class _ClipFakeReplay:
 
     def __init__(self, _url: str) -> None:
         self.jobs: list[dict[str, Any]] = []
-        self.find_keyframe_calls: list[tuple[Any, ...]] = []
+        self.find_keyframe_calls: list[dict[str, Any]] = []
         self.last_job_request: dict[str, Any] = {}
         _ClipFakeReplay.instances.append(self)
 
     def find_keyframe(self, *args, **_kwargs):
         if not self.allow_find_keyframe:
             raise AssertionError("keyframe lookup should be bypassed")
-        self.find_keyframe_calls.append(args)
+        self.find_keyframe_calls.append({"args": args, "kwargs": dict(_kwargs)})
         return "lookup-kf-1"
 
     def create_job(self, **kwargs):
@@ -738,9 +738,14 @@ def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -
         _ClipFakeReplay.allow_find_keyframe = False
 
     replay = _ClipFakeReplay.instances[-1]
-    assert replay.find_keyframe_calls == [("c1e_rtsp_replay", 1_780_000_005_000)]
+    assert replay.find_keyframe_calls == [
+        {
+            "args": ("c1e_rtsp_replay", 1_780_000_010_000),
+            "kwargs": {"window_s": 15, "selection": "at_or_after"},
+        }
+    ]
     assert replay.jobs[0]["keyframe_uuid"] == "lookup-kf-1"
-    assert replay.jobs[0]["offset_seconds_override"] == 0.0
+    assert replay.jobs[0]["offset_seconds_override"] is None
     assert redis_client.acked == ["1-0"]
     assert updates[-1]["status"] == "replay_job_created"
 

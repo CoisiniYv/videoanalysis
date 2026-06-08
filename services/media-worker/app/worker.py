@@ -61,6 +61,11 @@ def request_shutdown(signum: int, _frame: object) -> None:
 def _parse_ndjson(filepath: Path) -> dict | None:
     """Parse an NDJSON (JSON Lines) file, returning the first valid JSON object."""
     try:
+        if filepath.stat().st_size <= 0:
+            return None
+    except OSError:
+        return None
+    try:
         with open(filepath, "r") as f:
             for line in f:
                 line = line.strip()
@@ -91,6 +96,9 @@ def _find_metadata_files(sink_dir: str) -> list[dict]:
             try:
                 with open(meta_file, "r") as f:
                     data = json.load(f)
+            except json.JSONDecodeError:
+                logger.debug("metadata file not finalized yet path=%s", meta_file)
+                continue
             except Exception:
                 logger.exception("failed to parse %s", meta_file)
                 continue
@@ -111,6 +119,30 @@ def _find_video_file(meta_dir: str) -> str | None:
         for f in Path(meta_dir).glob(ext):
             return str(f)
     return None
+
+
+def _sink_output_ready_for_finalizer(
+    *,
+    video_file: str,
+    metadata_file: str,
+) -> tuple[bool, str]:
+    """Return whether video-file-sink output is safe to publish as evidence."""
+    video_path = Path(video_file)
+    metadata_path = Path(metadata_file)
+    try:
+        if video_path.stat().st_size <= 0:
+            return False, "video_file_empty"
+    except OSError:
+        return False, "video_file_missing"
+    try:
+        if metadata_path.stat().st_size <= 0:
+            return False, "metadata_file_empty"
+    except OSError:
+        return False, "metadata_file_missing"
+
+    if _probe_video_duration_seconds(video_file) is None:
+        return False, "video_duration_unavailable"
+    return True, "ready"
 
 
 _UUID_RE = re.compile(
@@ -1312,6 +1344,10 @@ def _event_for_frame_cache_sidecar(event_context: dict) -> dict:
     }
 
 
+def _is_sink_video_frame(row: dict) -> bool:
+    return row.get("type") == "VideoFrame"
+
+
 def _object_counts_from_sidecar_summary(summary: dict) -> dict:
     known = int(summary.get("known_face_count") or summary.get("known_face_objects_count") or 0)
     unknown = int(summary.get("unknown_face_count") or 0)
@@ -1561,8 +1597,18 @@ def _finalize_c2_post_savant_evidence_bundle(
         shutil.copy2(source_video, raw_clip_path)
     shutil.copy2(metadata_file, sink_metadata_path)
     sink_metadata_rows = load_native_metadata(sink_metadata_path)
-    decoded_frame_count = len([row for row in sink_metadata_rows if isinstance(row, dict)])
-    metadata_has_objects = any(bool(row.get("objects")) for row in sink_metadata_rows if isinstance(row, dict))
+    decoded_frame_count = len(
+        [
+            row
+            for row in sink_metadata_rows
+            if isinstance(row, dict) and _is_sink_video_frame(row)
+        ]
+    )
+    metadata_has_objects = any(
+        bool(row.get("objects"))
+        for row in sink_metadata_rows
+        if isinstance(row, dict) and _is_sink_video_frame(row)
+    )
 
     if metadata_has_objects:
         result = build_post_savant_evidence_bundle(
@@ -1754,6 +1800,8 @@ def _process_sink_output(
         if not video_file:
             continue  # not ready yet
 
+        metadata_file = str(Path(meta_dir) / "metadata.json")
+
         if finalizer_enabled and candidate_dirs is not None:
             try:
                 current_size = Path(video_file).stat().st_size
@@ -1775,7 +1823,22 @@ def _process_sink_output(
                 )
                 continue
 
-        metadata_file = str(Path(meta_dir) / "metadata.json")
+        if finalizer_enabled:
+            ready, reason = _sink_output_ready_for_finalizer(
+                video_file=video_file,
+                metadata_file=metadata_file,
+            )
+            if not ready:
+                logger.info(
+                    "media_wait_for_finalized_sink_output event_id=%s meta_dir=%s "
+                    "video_file=%s reason=%s",
+                    event_id,
+                    meta_dir,
+                    video_file,
+                    reason,
+                )
+                continue
+
         bundle = None
         if c2_post_savant_finalizer_enabled:
             if not evidence_output_dir:

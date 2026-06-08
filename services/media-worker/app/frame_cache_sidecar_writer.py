@@ -600,6 +600,7 @@ def _production_sidecar_contract_summary(
     min_event_t = _float_config(config, "canonical_event_min_t_s", 4.0)
     max_event_t = _float_config(config, "canonical_event_max_t_s", 6.5)
     max_event_ratio = _float_config(config, "canonical_event_max_position_ratio", 0.70)
+    require_event_centered = bool(config.get("require_event_centered", True))
 
     duration_ok = (
         clip_duration_seconds is not None
@@ -636,9 +637,9 @@ def _production_sidecar_contract_summary(
         failures.append("canonical_duration_not_verified")
     if event_metrics["event_pts_inside_clip"] is not True:
         failures.append("event_pts_outside_clip")
-    if not event_center_ok:
+    if require_event_centered and not event_center_ok:
         failures.append("event_not_centered_in_clip")
-    if not event_ratio_ok:
+    if require_event_centered and not event_ratio_ok:
         failures.append("event_position_ratio_too_late")
     if not timeline_aligned:
         failures.extend(written_contract.get("failures") or ["rows_not_fully_rebased_to_final_metadata"])
@@ -669,8 +670,8 @@ def _production_sidecar_contract_summary(
     canonical_clip = bool(
         duration_ok
         and event_metrics["event_pts_inside_clip"] is True
-        and event_center_ok
-        and event_ratio_ok
+        and (event_center_ok or not require_event_centered)
+        and (event_ratio_ok or not require_event_centered)
         and metadata_path_matches
         and raw_clip_path_matches
     )
@@ -709,6 +710,8 @@ def _production_sidecar_contract_summary(
         "event_position_ratio": (
             round(float(event_ratio), 6) if event_ratio is not None else None
         ),
+        "event_center_required": require_event_centered,
+        "event_centered_in_clip": bool(event_center_ok),
         "metadata_path_used": metadata_path,
         "raw_clip_path_used": raw_clip_path,
         "metadata_path_matches_raw_clip": bool(metadata_path_matches and raw_clip_path_matches),
@@ -720,6 +723,8 @@ def _production_sidecar_contract_summary(
         "rows_rejected_stale_cache": rows_rejected_stale_cache,
         "rows_rejected_epoch_mismatch": rows_rejected_epoch_mismatch,
         "rows_rejected_pts_non_unique": rows_rejected_pts_non_unique,
+        "freshness_guard_mode": clip_timeline_summary.get("freshness_guard_mode"),
+        "freshness_guard_status": clip_timeline_summary.get("freshness_guard_status"),
         "rows_displayable": rows_displayable,
         "rows_non_displayable": rows_non_displayable,
         "rows_dropped_out_of_window": rows_out_of_window,
@@ -795,6 +800,8 @@ def apply_frame_cache_freshness_guard(
     event_epoch_ms = _event_wall_clock_epoch_ms(event)
     summary["event_created_at_epoch_ms"] = event_epoch_ms
     summary["event_created_at_source"] = _event_wall_clock_source(event)
+    guard_mode = str(config.get("freshness_guard_mode") or "wall_clock").strip().lower()
+    summary["freshness_guard_mode"] = guard_mode
     if event_epoch_ms is None:
         summary["freshness_guard_status"] = "missing_event_created_at"
     lower_ms = summary.get("freshness_window_start_epoch_ms")
@@ -819,6 +826,8 @@ def apply_frame_cache_freshness_guard(
             )
 
         if row.get("displayable") is False:
+            continue
+        if guard_mode in {"metadata_pts", "metadata", "pts"}:
             continue
         if is_pts_fallback and not _row_is_fresh(
             row_created_ms,
@@ -865,6 +874,9 @@ def _empty_freshness_guard_summary(
     event_epoch_ms = _event_wall_clock_epoch_ms(event)
     return {
         "freshness_guard_enabled": True,
+        "freshness_guard_mode": str(
+            config.get("freshness_guard_mode") or "wall_clock"
+        ),
         "freshness_guard_status": "not_evaluated",
         "max_row_age_before_event_seconds": before_s,
         "max_row_age_after_event_seconds": after_s,

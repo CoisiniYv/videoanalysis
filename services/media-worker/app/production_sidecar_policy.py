@@ -24,6 +24,8 @@ DEFAULT_SIDECAR_CONFIG = {
     "summary_filename": "summary.frame_cache.identity.json",
     "stream_name": "security.frame_annotations",
     "redis_url": "redis://redis:6379/0",
+    "freshness_guard_mode": "wall_clock",
+    "require_event_centered": True,
     "max_row_age_before_event_seconds": None,
     "max_row_age_after_event_seconds": None,
 }
@@ -117,6 +119,14 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
                 or config["stream_name"]
             ),
             "redis_url": str(source.get("REDIS_URL") or config["redis_url"]),
+            "freshness_guard_mode": str(
+                source.get("FRAME_CACHE_FRESHNESS_GUARD_MODE")
+                or config["freshness_guard_mode"]
+            ),
+            "require_event_centered": _boolish(
+                source.get("FRAME_CACHE_REQUIRE_EVENT_CENTERED"),
+                bool(config["require_event_centered"]),
+            ),
             "max_row_age_before_event_seconds": _optional_positive_float(
                 source.get("FRAME_CACHE_MAX_ROW_AGE_BEFORE_EVENT_SECONDS"),
                 config["max_row_age_before_event_seconds"],
