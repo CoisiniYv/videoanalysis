@@ -142,9 +142,10 @@ def test_replay_job_uses_original_stream_cadence_not_inference_fps() -> None:
     compose = _compose()
     clip_env = compose["services"]["clip-worker"]["environment"]
 
-    assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
+    assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "frame_count"
     assert clip_env["REPLAY_FPS"] == "${REPLAY_FPS:-24}"
     assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
+    assert clip_env["REPLAY_ANCHOR_STRATEGY"] == "event_start_keyframe"
 
 
 def test_replay_first_uses_frame_cache_for_annotations() -> None:

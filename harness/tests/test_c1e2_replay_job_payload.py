@@ -121,6 +121,28 @@ def test_replay_payload_uses_24fps_cadence_for_24fps_rtsp_source() -> None:
     assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
 
 
+def test_event_start_anchor_strategy_uses_requested_window_start() -> None:
+    _activate_clip_worker_path()
+    from app.worker import (
+        REPLAY_ANCHOR_STRATEGY_EVENT_START,
+        _replay_anchor_lookup_ts_ms,
+        _replay_offset_seconds,
+    )
+
+    req = {"event_ts_ms": 1_780_906_981_235}
+
+    assert _replay_anchor_lookup_ts_ms(
+        req,
+        pre_seconds=5,
+        anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
+    ) == 1_780_906_976_235
+    assert _replay_offset_seconds(
+        replay_stop_strategy="",
+        anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
+        pre_seconds=5,
+    ) == 0.0
+
+
 def test_clip_worker_default_config_uses_reliable_sink_and_replay_fps(monkeypatch) -> None:
     _activate_clip_worker_path()
     from app.config import load_config

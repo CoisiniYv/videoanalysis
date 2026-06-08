@@ -516,6 +516,7 @@ def _clip_config(**overrides: Any):
         "per_camera_cooldown_seconds": 30,
         "replay_stop_condition_mode": "ts_delta_sec",
         "replay_fps": 30,
+        "replay_anchor_strategy": "request_keyframe",
         "allow_unbounded_keyframe_fallback": False,
     }
     values.update(overrides)

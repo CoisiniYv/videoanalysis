@@ -25,6 +25,7 @@ class Config:
     per_camera_cooldown_seconds: int
     replay_stop_condition_mode: str
     replay_fps: int
+    replay_anchor_strategy: str
     allow_unbounded_keyframe_fallback: bool
 
 
@@ -62,6 +63,9 @@ def load_config() -> Config:
             "REPLAY_STOP_CONDITION_MODE", "frame_count"
         ),
         replay_fps=int(os.getenv("REPLAY_FPS", "30")),
+        replay_anchor_strategy=os.getenv(
+            "REPLAY_ANCHOR_STRATEGY", "request_keyframe"
+        ),
         allow_unbounded_keyframe_fallback=os.getenv(
             "ALLOW_UNBOUNDED_KEYFRAME_FALLBACK", "false"
         ).strip().lower() in ("1", "true", "yes"),

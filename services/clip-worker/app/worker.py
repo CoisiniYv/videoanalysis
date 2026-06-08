@@ -23,6 +23,7 @@ shutdown_requested = False
 MISSING_KEYFRAME_ERROR = "missing_keyframe_uuid_and_anchored_lookup_unavailable"
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
+REPLAY_ANCHOR_STRATEGY_EVENT_START = "event_start_keyframe"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,31 @@ def _keyframe_from_request(req: dict) -> tuple[str | None, str]:
     if keyframe_uuid:
         return str(keyframe_uuid), "keyframe_uuid"
     return None, MISSING_KEYFRAME_ERROR
+
+
+def _replay_anchor_lookup_ts_ms(
+    req: dict,
+    *,
+    pre_seconds: int,
+    anchor_strategy: str,
+) -> int:
+    event_ts_ms = int(req.get("event_ts_ms", 0) or 0)
+    if anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START and event_ts_ms > 0:
+        return max(0, event_ts_ms - int(pre_seconds * 1000))
+    return event_ts_ms
+
+
+def _replay_offset_seconds(
+    *,
+    replay_stop_strategy: str,
+    anchor_strategy: str,
+    pre_seconds: int,
+) -> float | None:
+    if replay_stop_strategy == "anchor_start_offset_zero":
+        return 0.0
+    if anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START:
+        return 0.0
+    return None
 
 
 def _replay_job_labels(event_id: str, req: dict) -> dict[str, str]:
@@ -233,6 +259,8 @@ def run_worker(
                     event_ts_ms = int(req.get("event_ts_ms", 0))
                     cooldown_gate_ts_ms = _cooldown_gate_ts_ms(req)
                     camera_id = req.get("camera_id", "")
+                    pre_seconds = int(req.get("pre_seconds", cfg.default_pre_seconds))
+                    post_seconds = int(req.get("post_seconds", cfg.default_post_seconds))
                     keyframe_uuid, keyframe_source = _keyframe_from_request(req)
                     now_monotonic = time.monotonic()
                     active_jobs_until = [
@@ -325,9 +353,17 @@ def run_worker(
                             total_processed += 1
                             continue
 
-                        # Timestamp-anchored keyframe lookup
+                        # Timestamp-anchored keyframe lookup.
+                        # The event_start_keyframe strategy asks Replay for a
+                        # keyframe around the requested clip start, then uses
+                        # zero offset so the output includes the event window.
+                        lookup_ts_ms = _replay_anchor_lookup_ts_ms(
+                            req,
+                            pre_seconds=pre_seconds,
+                            anchor_strategy=cfg.replay_anchor_strategy,
+                        )
                         keyframe_uuid = replay.find_keyframe(
-                            source_id, event_ts_ms,
+                            source_id, lookup_ts_ms,
                             window_s=cfg.keyframe_lookup_window_s,
                         )
 
@@ -354,15 +390,15 @@ def run_worker(
                     # Create replay job
                     stop_condition_mode = cfg.replay_stop_condition_mode
                     fallback_reason = None
-                    pre_seconds = int(req.get("pre_seconds", cfg.default_pre_seconds))
-                    post_seconds = int(req.get("post_seconds", cfg.default_post_seconds))
                     if stop_condition_mode != "ts_delta_sec":
                         fallback_reason = (
                             "configured_frame_count_fallback"
                         )
                     replay_stop_strategy = str(req.get("replay_stop_strategy") or "")
-                    offset_seconds_override = (
-                        0.0 if replay_stop_strategy == "anchor_start_offset_zero" else None
+                    offset_seconds_override = _replay_offset_seconds(
+                        replay_stop_strategy=replay_stop_strategy,
+                        anchor_strategy=cfg.replay_anchor_strategy,
+                        pre_seconds=pre_seconds,
                     )
                     job_id = replay.create_job(
                         source_id=source_id,
