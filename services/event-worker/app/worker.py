@@ -31,6 +31,7 @@ R3_1A_DEFAULT_EVIDENCE_POLICY = {
     "pre_seconds": 5,
     "post_seconds": 5,
 }
+RECORDING_PRIORITY_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
 
@@ -291,18 +292,29 @@ def _handle_event(
                     skip_reason = "max_requests_reached"
                 elif recording_cooldown_seconds > 0:
                     last_recorded_at = recording_state.last_recorded_at_ms.get(source_id)
-                    if (
+                    last_recorded_event_type = (
+                        recording_state.last_recorded_event_type.get(source_id)
+                    )
+                    cooldown_active = (
                         last_recorded_at is not None
                         and recording_gate_ts_ms - last_recorded_at
                         < recording_cooldown_seconds * 1000
+                    )
+                    priority_event_overrides_intrusion_cooldown = (
+                        cooldown_active
+                        and event_type in RECORDING_PRIORITY_EVENT_TYPES
+                        and last_recorded_event_type == "intrusion"
+                    )
+                    if (
+                        cooldown_active
+                        and not priority_event_overrides_intrusion_cooldown
                     ):
                         allowed = False
                         skip_reason = "cooldown"
                     elif (
                         event_type == "intrusion"
                         and last_recorded_at is not None
-                        and recording_state.last_recorded_event_type.get(source_id)
-                        == "intrusion"
+                        and last_recorded_event_type == "intrusion"
                         and hasattr(repo, "has_event_type_since_ts_ms")
                         and repo.has_event_type_since_ts_ms(
                             source_id=source_id,
