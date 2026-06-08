@@ -313,7 +313,13 @@ def run_worker(
                             event_id,
                         )
                     else:
-                        if not cfg.allow_unbounded_keyframe_fallback:
+                        lookup_required = _should_lookup_replay_anchor(
+                            cfg.replay_anchor_strategy
+                        )
+                        if (
+                            not lookup_required
+                            and not cfg.allow_unbounded_keyframe_fallback
+                        ):
                             logger.warning(
                                 "clip_worker_blocked %s request_id=%s "
                                 "source_event_id=%s source_id=%s event_ts_ms=%s",

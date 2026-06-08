@@ -625,14 +625,19 @@ class _ClipFakeRedis:
 
 class _ClipFakeReplay:
     instances: list["_ClipFakeReplay"] = []
+    allow_find_keyframe = False
 
     def __init__(self, _url: str) -> None:
         self.jobs: list[dict[str, Any]] = []
+        self.find_keyframe_calls: list[tuple[Any, ...]] = []
         self.last_job_request: dict[str, Any] = {}
         _ClipFakeReplay.instances.append(self)
 
-    def find_keyframe(self, *_args, **_kwargs):
-        raise AssertionError("keyframe lookup should be bypassed")
+    def find_keyframe(self, *args, **_kwargs):
+        if not self.allow_find_keyframe:
+            raise AssertionError("keyframe lookup should be bypassed")
+        self.find_keyframe_calls.append(args)
+        return "lookup-kf-1"
 
     def create_job(self, **kwargs):
         self.jobs.append(kwargs)
@@ -683,6 +688,59 @@ def test_clip_worker_submits_replay_job_when_record_request_allowed(monkeypatch)
     assert len(replay.jobs) == 1
     assert replay.jobs[0]["source_id"] == "c1e_rtsp_replay"
     assert replay.jobs[0]["keyframe_uuid"] == "kf-1"
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-2",
+        "event_id": "00000000-0000-0000-0000-000000000002",
+        "source_event_id": "evt-2",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_010_000,
+        "strategy": "savant_replay",
+        "keyframe_uuid": "event-kf-should-be-ignored",
+        "previous_keyframe_uuid": "prev-kf-should-be-ignored",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(request)
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = True
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    try:
+        worker.run_worker(
+            _clip_config(
+                run_once=True,
+                max_jobs_per_run=100,
+                max_concurrent_jobs=0,
+                per_camera_cooldown_seconds=0,
+                replay_anchor_strategy="event_start_keyframe",
+            ),
+            redis_client,
+            object(),
+        )
+    finally:
+        _ClipFakeReplay.allow_find_keyframe = False
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls == [("c1e_rtsp_replay", 1_780_000_005_000)]
+    assert replay.jobs[0]["keyframe_uuid"] == "lookup-kf-1"
+    assert replay.jobs[0]["offset_seconds_override"] == 0.0
     assert redis_client.acked == ["1-0"]
     assert updates[-1]["status"] == "replay_job_created"
 
