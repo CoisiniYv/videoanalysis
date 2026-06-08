@@ -27,6 +27,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: c2-replay-first-postgres
+    profiles: ["c2-local-postgres"]
     environment:
       POSTGRES_USER: video
       POSTGRES_PASSWORD: video
@@ -158,7 +159,7 @@ services:
       - ./env/c1-official-replay-dev.env
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      DATABASE_URL: ${C2_REPLAY_FIRST_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
       EVENT_STREAM: security.events
       ALERT_STREAM: security.alerts
       RECORD_REQUEST_STREAM: security.record_requests
@@ -187,9 +188,10 @@ services:
       EVENT_BATCH_SIZE: "1"
     volumes:
       - ../services/event-worker:/app:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis: { condition: service_healthy }
-      postgres: { condition: service_healthy }
     restart: unless-stopped
 
   face-worker:
@@ -201,7 +203,7 @@ services:
     image: c2-replay-first-face-worker:latest
     container_name: c2-replay-first-face-worker
     environment:
-      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      DATABASE_URL: ${C2_REPLAY_FIRST_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
       REDIS_URL: redis://redis:6379/0
       FACE_OBSERVATION_STREAM: security.face_observations
       FACE_WORKER_CONSUMER_GROUP: face-worker-c2-replay-first
@@ -222,9 +224,10 @@ services:
       - ../services/face-worker:/app:rw
       - /data/video-analytics/media:/data/video-analytics/media:ro
       - /data/video-analytics/models:/data/video-analytics/models:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis: { condition: service_healthy }
-      postgres: { condition: service_healthy }
     restart: unless-stopped
 
   clip-worker:
@@ -237,7 +240,7 @@ services:
     container_name: c2-replay-first-clip-worker
     environment:
       REDIS_URL: redis://redis:6379/0
-      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      DATABASE_URL: ${C2_REPLAY_FIRST_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
       RECORD_REQUEST_STREAM: security.record_requests
       REPLAY_API_URL: http://replay-service:8080
       REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
@@ -257,9 +260,10 @@ services:
       ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
     volumes:
       - ../services/clip-worker:/app:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis: { condition: service_healthy }
-      postgres: { condition: service_healthy }
       replay-service: { condition: service_started }
       video-file-sink: { condition: service_started }
     restart: unless-stopped
@@ -292,7 +296,7 @@ services:
     env_file:
       - ./env/c1-official-replay-dev.env
     environment:
-      DATABASE_URL: postgresql://video:video@postgres:5432/video_analytics
+      DATABASE_URL: ${C2_REPLAY_FIRST_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
       SINK_OUTPUT_DIR: ${C2_REPLAY_FIRST_SINK_ROOT:-/media/replay-sink-output/c2-replay-first}
       SNAPSHOT_OUTPUT_DIR: /media/c2-replay-first-snapshots
       ANNOTATED_OUTPUT_DIR: /media/c2-replay-first-snapshots/annotated
@@ -326,8 +330,9 @@ services:
       - ../services/media-worker:/app:rw
       - ../modules/savant_security/config:/opt/savant/src/module/config:ro
       - /data/video-analytics/media:/media:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      postgres: { condition: service_healthy }
       video-file-sink: { condition: service_started }
     restart: unless-stopped
 

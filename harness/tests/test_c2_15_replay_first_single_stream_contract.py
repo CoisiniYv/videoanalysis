@@ -97,6 +97,22 @@ def test_watchlist_targets_are_registered_reese_and_finch() -> None:
     assert env["WATCHLIST_TARGET_NAMES"] == "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
 
 
+def test_workers_default_to_existing_gallery_postgres() -> None:
+    compose = _compose()
+    services = compose["services"]
+    expected = (
+        "${C2_REPLAY_FIRST_DATABASE_URL:-"
+        "postgresql://video:video@host.docker.internal:5432/video_analytics}"
+    )
+
+    assert services["postgres"]["profiles"] == ["c2-local-postgres"]
+    for service_name in ("event-worker", "face-worker", "clip-worker", "media-worker"):
+        service = services[service_name]
+        assert service["environment"]["DATABASE_URL"] == expected
+        assert "host.docker.internal:host-gateway" in service["extra_hosts"]
+        assert "postgres" not in service.get("depends_on", {})
+
+
 def test_camera_config_includes_replay_first_source() -> None:
     doc = yaml.safe_load(_text(CAMERA_CONFIG))
     camera = doc["cameras"]["c2_replay_first_rtsp"]

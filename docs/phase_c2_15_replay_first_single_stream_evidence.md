@@ -74,6 +74,13 @@ pgvector, filters the configured Reese/Finch watchlist, and emits real
 threshold-passing `watchlist_hit` events back to Redis. The event-worker remains
 the writer for `events`, `evidence_tasks`, and `record_requests`.
 
+The default development compose points worker `DATABASE_URL` values at the
+existing host PostgreSQL on `host.docker.internal:5432`, because that database
+already contains the registered Reese and Finch gallery embeddings. A separate
+empty `c2-replay-first-postgres` service remains available behind the
+`c2-local-postgres` profile for future isolated database tests, but it is not
+the default watchlist runtime.
+
 Sidecars and reports must not include embedding vectors, image bytes, base64
 images, or crop bytes.
 
