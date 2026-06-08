@@ -75,7 +75,6 @@ class WatchlistMatchEmitter:
                 observation=obs,
                 gallery_match=gallery_match,
                 threshold=self._cfg.watchlist_threshold,
-                event_type="watchlist_hit",
             )
             publish_security_event(
                 self._redis,
