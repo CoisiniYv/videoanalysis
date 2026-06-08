@@ -75,6 +75,16 @@ def test_clean_video_with_matching_sidecar_passes() -> None:
     assert result["production_gate_passed"] is True
 
 
+def test_clean_replay_video_with_sparse_sidecar_passes() -> None:
+    gate = _activate_media_module("app.post_savant_video_integrity")
+
+    result = gate.evaluate_video_integrity(_base_stats(sidecar_frame_count=75))
+
+    assert result["integrity_status"] == "pass"
+    assert result["production_gate_passed"] is True
+    assert "decoded_frame_count_sidecar_frame_count_mismatch" not in result["failure_reasons"]
+
+
 def test_trim_without_time_domain_crop_fails() -> None:
     gate = _activate_media_module("app.post_savant_video_integrity")
 

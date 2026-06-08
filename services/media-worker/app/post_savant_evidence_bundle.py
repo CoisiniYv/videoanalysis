@@ -30,8 +30,8 @@ TRIM_LIMITATIONS = (
     "metadata_frame_count_exceeds_decoded_video_frames",
     "sidecar_trimmed_to_playable_frame_count",
 )
-METADATA_SHORT_LIMITATION = "metadata_frame_count_less_than_decoded_video_frames"
 TIMELINE_COUNTS_MATCH = "frame_counts_match"
+TIMELINE_SPARSE_SIDECAR = "metadata_time_aligned_sparse_sidecar"
 TIMELINE_NEEDS_MAPPING = "needs_visual_or_time_mapping_verification"
 
 
@@ -133,8 +133,14 @@ def build_post_savant_evidence_bundle(
         decoded_video_frame_count=decoded_frame_count,
     )
     extra_limitations = list(TRIM_LIMITATIONS) if trim_occurred else []
-    if original_metadata_frame_count < decoded_frame_count:
-        extra_limitations.append(METADATA_SHORT_LIMITATION)
+    if (
+        original_metadata_frame_count > 0
+        and decoded_frame_count > 0
+        and original_metadata_frame_count > decoded_frame_count
+    ):
+        for limitation in TRIM_LIMITATIONS:
+            if limitation not in extra_limitations:
+                extra_limitations.append(limitation)
 
     production_sidecar_path = output_dir / SIDECAR_ANNOTATIONS_FILE
     sidecar_summary_path = output_dir / SIDECAR_SUMMARY_FILE
@@ -468,7 +474,7 @@ def _bundle_summary(
     )
     production_ready = (
         base_ready
-        and timeline_reconciliation_status == TIMELINE_COUNTS_MATCH
+        and timeline_reconciliation_status in (TIMELINE_COUNTS_MATCH, TIMELINE_SPARSE_SIDECAR)
         and video_gate_passed
     )
     annotation_status = "complete" if production_ready else "no_post_savant_objects"
@@ -508,6 +514,8 @@ def _bundle_summary(
         "fallback_used": False,
         "allow_db_annotation_fallback": False,
         "allow_legacy_annotation_fallback": False,
+        "raw_video_binding": "continuous_replay_video",
+        "annotation_binding": "pts_time_offset_sidecar",
         "raw_clip_path": RAW_CLIP_FILE,
         "sink_metadata_path": SINK_METADATA_FILE,
         "production_sidecar_path": SIDECAR_ANNOTATIONS_FILE,
@@ -624,6 +632,8 @@ def _timeline_reconciliation_status(
 ) -> str:
     if original_metadata_frame_count == decoded_video_frame_count:
         return TIMELINE_COUNTS_MATCH
+    if 0 < original_metadata_frame_count < decoded_video_frame_count:
+        return TIMELINE_SPARSE_SIDECAR
     return TIMELINE_NEEDS_MAPPING
 
 

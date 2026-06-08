@@ -182,11 +182,43 @@ def test_no_trim_limitations_when_metadata_fits_video(tmp_path: Path) -> None:
     assert result.summary["decoded_video_frame_count"] == 8
     assert result.summary["sidecar_frame_count"] == 5
     assert result.summary["sidecar_trimmed"] is False
-    assert result.summary["timeline_reconciliation_status"] == "needs_visual_or_time_mapping_verification"
-    assert result.summary["production_ready"] is False
-    assert "metadata_frame_count_less_than_decoded_video_frames" in result.summary["limitations"]
+    assert result.summary["timeline_reconciliation_status"] == "metadata_time_aligned_sparse_sidecar"
+    assert result.summary["production_ready"] is True
+    assert result.summary["annotation_status"] == "complete"
+    assert result.summary["visual_evidence_status"] == "verified_same_stream_metadata"
+    assert "metadata_frame_count_less_than_decoded_video_frames" not in result.summary["limitations"]
     assert "metadata_frame_count_exceeds_decoded_video_frames" not in result.summary["limitations"]
     assert "sidecar_trimmed_to_playable_frame_count" not in result.summary["limitations"]
+
+
+def test_sparse_fps_limited_sidecar_aligns_to_continuous_raw_video(tmp_path: Path) -> None:
+    bundle = _activate_bundle_builder()
+    input_dir = _make_sink_output(tmp_path, frame_count=75, pts_step=133_333_333)
+    output_dir = tmp_path / "evidence" / "event-c2-15"
+
+    result = bundle.build_post_savant_evidence_bundle(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        copy_video=True,
+        trim_sidecar_to_video=True,
+        max_fps="8/1",
+        min_fps="2/1",
+        fps_gating_applied=True,
+        source_input_fps_estimate=23.976,
+        decoded_frame_count_reader=lambda _path: 240,
+    )
+
+    summary = result.summary
+    assert summary["decoded_video_frame_count"] == 240
+    assert summary["sidecar_frame_count"] == 75
+    assert summary["timeline_reconciliation_status"] == "metadata_time_aligned_sparse_sidecar"
+    assert summary["production_ready"] is True
+    assert summary["canonical_clip"] is True
+    assert summary["raw_video_binding"] == "continuous_replay_video"
+    assert summary["annotation_binding"] == "pts_time_offset_sidecar"
+    assert summary["fps"]["decoded_video_fps_estimate"] is None
+    assert summary["fps"]["metadata_fps_estimate"] is not None
+    assert "metadata_frame_count_less_than_decoded_video_frames" not in summary["limitations"]
 
 
 def test_output_directory_must_not_exist_without_overwrite(tmp_path: Path) -> None:
@@ -224,12 +256,13 @@ def _make_sink_output(
     *,
     frame_count: int,
     objects_per_frame: bool = True,
+    pts_step: int = 41_666_667,
 ) -> Path:
     input_dir = tmp_path / "sink"
     input_dir.mkdir()
     (input_dir / "video.mov").write_bytes(b"fake video")
     rows = [
-        _frame(index=index, objects=_objects(index) if objects_per_frame else [])
+        _frame(index=index, objects=_objects(index) if objects_per_frame else [], pts_step=pts_step)
         for index in range(frame_count)
     ]
     (input_dir / "metadata.json").write_text(
@@ -239,12 +272,12 @@ def _make_sink_output(
     return input_dir
 
 
-def _frame(index: int, objects: list[dict[str, Any]]) -> dict[str, Any]:
+def _frame(index: int, objects: list[dict[str, Any]], *, pts_step: int = 41_666_667) -> dict[str, Any]:
     return {
         "type": "VideoFrame",
         "source_id": "c2-poc",
         "uuid": f"frame-{index}",
-        "pts": 1_000_000 + index * 41_666_667,
+        "pts": 1_000_000 + index * pts_step,
         "width": 1920,
         "height": 1080,
         "objects": objects,

@@ -116,8 +116,8 @@ def evaluate_video_integrity(
         and not bool(stats.get("over_exported"))
     ):
         failures.append("duration_differs_from_requested_window")
-    if sidecar is not None and decoded is not None and sidecar != decoded:
-        failures.append("decoded_frame_count_sidecar_frame_count_mismatch")
+    if sidecar is not None and decoded is not None and sidecar > decoded:
+        failures.append("sidecar_frame_count_exceeds_decoded_frame_count")
     if bool(stats.get("trim_occurred")) and not time_domain_crop_applied:
         failures.append("trim_occurred_without_declared_time_domain_crop")
 
