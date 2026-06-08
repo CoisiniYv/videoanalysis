@@ -183,7 +183,7 @@ class ReplayClient:
                     )
                 )
 
-            if not _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", False):
+            if not _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True):
                 fallback_payloads.append(
                     build_job_payload(
                         source_id=source_id,
@@ -342,7 +342,7 @@ def build_job_payload(
     else:
         stop_condition = {"frame_count": total_frames}
     constant_cadence = (
-        _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", False)
+        _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True)
         if force_constant_cadence is None
         else bool(force_constant_cadence)
     )

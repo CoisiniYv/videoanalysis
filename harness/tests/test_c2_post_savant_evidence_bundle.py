@@ -221,6 +221,77 @@ def test_sparse_fps_limited_sidecar_aligns_to_continuous_raw_video(tmp_path: Pat
     assert "metadata_frame_count_less_than_decoded_video_frames" not in summary["limitations"]
 
 
+def test_replay_first_raw_metadata_uses_frame_cache_sidecar(tmp_path: Path, monkeypatch: Any) -> None:
+    worker = _activate_media_worker()
+    input_dir = _make_sink_output(tmp_path, frame_count=4, objects_per_frame=False)
+    event_id = "00000000-0000-4000-8000-000000000123"
+    output_root = tmp_path / "evidence"
+    pg_conn = object()
+
+    def fake_context(_conn: object, _event_id: str) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "source_event_id": "savant_security:c2_replay_first_rtsp:2:intrusion:1",
+            "event_type": "intrusion",
+            "camera_id": "c2_replay_first_rtsp",
+            "source_id": "c2_replay_first_rtsp",
+            "track_id": "2",
+            "event_ts_ms": 1_780_000_000_000,
+            "frame_uuid": "frame-1",
+            "frame_pts": 1_000_000 + 41_666_667,
+            "payload": {"media": {"frame_uuid": "frame-1", "frame_pts": 1_000_000 + 41_666_667}},
+        }
+
+    def fake_sidecar_writer(**kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        out = Path(kwargs["evidence_dir"])
+        sidecar = out / "annotations.frame_cache.identity.jsonl"
+        sidecar.write_text(
+            json.dumps({
+                "source": "frame_annotation_cache",
+                "source_id": "c2_replay_first_rtsp",
+                "camera_id": "c2_replay_first_rtsp",
+                "object_type": "person",
+                "frame_pts": 1_000_000 + 41_666_667,
+                "bbox": {"format": "xyxy", "xyxy": [1, 2, 3, 4]},
+                "displayable": True,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "annotation_status": "complete",
+            "annotations_written": 1,
+            "rows_written": 1,
+            "rows_total_input": 1,
+            "person_context_rows": 1,
+            "known_face_count": 0,
+            "unknown_face_count": 0,
+            "embedding_vectors_in_output": 0,
+            "image_bytes_in_output": 0,
+            "production_ready_failures": [],
+        }, {"written": True, "annotations_path": str(sidecar), "summary_path": str(out / "summary.frame_cache.identity.json")}
+
+    monkeypatch.setattr(worker, "_load_event_context", fake_context)
+    monkeypatch.setattr(worker, "write_frame_cache_identity_sidecar", fake_sidecar_writer)
+
+    result = worker._finalize_c2_post_savant_evidence_bundle(
+        pg_conn,
+        event_id=event_id,
+        meta_dir=str(input_dir),
+        metadata_file=str(input_dir / "metadata.json"),
+        evidence_output_dir=str(output_root),
+    )
+
+    summary = json.loads((output_root / event_id / "summary.json").read_text(encoding="utf-8"))
+    assert result["raw_clip"].endswith("raw_clip.mov")
+    assert result["annotations_jsonl"].endswith("annotations.frame_cache.identity.jsonl")
+    assert summary["annotation_source"] == "frame_annotation_cache"
+    assert summary["raw_video_binding"] == "continuous_replay_video"
+    assert summary["annotation_binding"] == "frame_annotation_cache_pts_sidecar"
+    assert summary["decoded_video_frame_count"] == 4
+    assert summary["sidecar_frame_count"] == 1
+    assert summary["object_counts"]["person"] == 1
+
+
 def test_output_directory_must_not_exist_without_overwrite(tmp_path: Path) -> None:
     bundle = _activate_bundle_builder()
     input_dir = _make_sink_output(tmp_path, frame_count=2)
@@ -249,6 +320,16 @@ def _activate_bundle_builder() -> Any:
         sys.path.remove(str(MEDIA_WORKER_ROOT))
     sys.path.insert(0, str(MEDIA_WORKER_ROOT))
     return importlib.import_module("app.post_savant_evidence_bundle")
+
+
+def _activate_media_worker() -> Any:
+    for name in list(sys.modules):
+        if name == "app" or name.startswith("app."):
+            del sys.modules[name]
+    if str(MEDIA_WORKER_ROOT) in sys.path:
+        sys.path.remove(str(MEDIA_WORKER_ROOT))
+    sys.path.insert(0, str(MEDIA_WORKER_ROOT))
+    return importlib.import_module("app.worker")
 
 
 def _make_sink_output(

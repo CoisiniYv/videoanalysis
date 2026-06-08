@@ -138,6 +138,29 @@ def test_evidence_uses_raw_clip_and_jsonl_not_annotated_video() -> None:
     assert "annotated video clips are not generated" in doc
 
 
+def test_replay_job_uses_original_stream_cadence_not_inference_fps() -> None:
+    compose = _compose()
+    clip_env = compose["services"]["clip-worker"]["environment"]
+
+    assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
+    assert clip_env["REPLAY_FPS"] == "${REPLAY_FPS:-24}"
+    assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
+
+
+def test_replay_first_uses_frame_cache_for_annotations() -> None:
+    compose = _compose()
+    savant_env = compose["services"]["savant-security"]["environment"]
+    media_env = compose["services"]["media-worker"]["environment"]
+
+    assert savant_env["FRAME_ANNOTATION_EXPORT_ENABLED"] == "true"
+    assert savant_env["FRAME_ANNOTATION_STREAM"] == "security.frame_annotations"
+    assert savant_env["FRAME_ANNOTATION_INCLUDE_EMBEDDING"] == "false"
+    assert media_env["FRAME_CACHE_SIDECAR_ENABLED"] == "true"
+    assert media_env["FRAME_CACHE_SIDECAR_EVENT_TYPES"] == "intrusion,watchlist_hit"
+    assert media_env["FRAME_CACHE_SIDECAR_REQUIRE_TRIGGER_FACE"] == "false"
+    assert media_env["FRAME_CACHE_SIDECAR_STREAM"] == "security.frame_annotations"
+
+
 def test_evidence_viewer_serves_port_8090() -> None:
     compose = _compose()
     viewer = compose["services"]["evidence-viewer"]

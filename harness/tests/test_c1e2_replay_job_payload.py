@@ -93,6 +93,32 @@ def test_replay_payload_ts_delta_keeps_reliable_sink_and_offset() -> None:
     assert payload["stop_condition"]["ts_delta_sec"]["max_delta_sec"] == 10.0
     assert payload["offset"]["seconds"] == 5.0
     assert payload["sink"]["options"]["send_retries"] == 5
+    interval = {"secs": 0, "nanos": 33333333}
+    assert payload["configuration"]["min_duration"] == interval
+    assert payload["configuration"]["max_duration"] == interval
+    assert payload["configuration"]["ts_discrepancy_fix_duration"] == interval
+
+
+def test_replay_payload_uses_24fps_cadence_for_24fps_rtsp_source() -> None:
+    _activate_clip_worker_path()
+    from app.replay_client import build_job_payload
+
+    payload = build_job_payload(
+        source_id="c2_replay_first_rtsp",
+        keyframe_uuid="kf-123",
+        pre_seconds=5,
+        post_seconds=5,
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
+        labels={"event_id": "ev-123"},
+        stop_condition_mode="ts_delta_sec",
+        fps=24,
+    )
+
+    interval = {"secs": 0, "nanos": 41666666}
+    assert payload["configuration"]["min_duration"] == interval
+    assert payload["configuration"]["max_duration"] == interval
+    assert payload["configuration"]["ts_discrepancy_fix_duration"] == interval
+    assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
 
 
 def test_clip_worker_default_config_uses_reliable_sink_and_replay_fps(monkeypatch) -> None:

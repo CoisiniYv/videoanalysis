@@ -20,10 +20,21 @@ from app.annotated_snapshot import generate_annotated_snapshot
 from app.clip_sanitizer import sanitize_raw_clip
 from app.config import Config, load_config
 from app.continuous_annotation import write_continuous_annotation_bundle
+from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
 from app.post_savant_evidence_bundle import (
     EVIDENCE_TOPOLOGY as C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+    RAW_CLIP_FILE as C2_RAW_CLIP_FILE,
+    SINK_METADATA_FILE as C2_SINK_METADATA_FILE,
+    SUMMARY_FILE as C2_SUMMARY_FILE,
     build_post_savant_evidence_bundle,
+    load_native_metadata,
 )
+from app.post_savant_metadata_annotation_builder import (
+    PRODUCTION_TIMELINE_DOMAIN,
+    SIDECAR_ANNOTATIONS_FILE,
+    SIDECAR_SUMMARY_FILE,
+)
+from app.production_sidecar_policy import load_frame_cache_sidecar_config
 from app.snapshot import generate_snapshot
 
 logger = logging.getLogger(__name__)
@@ -1271,6 +1282,146 @@ def _bundle_clip_status_from_c2_summary(summary: dict) -> str:
     return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
 
 
+def _summary_clip_status(summary: dict) -> str:
+    if summary.get("production_ready") is True:
+        return "ready"
+    status = str(summary.get("annotation_status") or "")
+    if status in {"complete", "partial"}:
+        return "generated_unverified"
+    return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
+
+
+def _event_for_frame_cache_sidecar(event_context: dict) -> dict:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    return {
+        "id": event_context.get("event_id", ""),
+        "event_id": event_context.get("event_id", ""),
+        "source_event_id": event_context.get("source_event_id", ""),
+        "event_type": event_context.get("event_type", ""),
+        "source_id": event_context.get("source_id", ""),
+        "camera_id": event_context.get("camera_id", ""),
+        "track_id": event_context.get("track_id", ""),
+        "event_ts_ms": event_context.get("event_ts_ms"),
+        "timestamp_ms": event_context.get("event_ts_ms"),
+        "frame_uuid": event_context.get("frame_uuid") or media.get("frame_uuid"),
+        "frame_pts": event_context.get("frame_pts") or media.get("frame_pts"),
+        "payload": payload,
+    }
+
+
+def _object_counts_from_sidecar_summary(summary: dict) -> dict:
+    known = int(summary.get("known_face_count") or summary.get("known_face_objects_count") or 0)
+    unknown = int(summary.get("unknown_face_count") or 0)
+    person = int(
+        summary.get("person_context_rows")
+        or summary.get("person_annotations")
+        or summary.get("person_objects_count")
+        or 0
+    )
+    face = int(summary.get("face_objects_count") or known + unknown)
+    return {
+        "person": person,
+        "face": face,
+        "known_face": known,
+    }
+
+
+def _build_frame_cache_c2_summary(
+    *,
+    sidecar_summary: dict,
+    sink_metadata_rows: list[dict],
+    decoded_video_frame_count: int,
+    raw_clip_path: Path,
+    sink_metadata_path: Path,
+    event_context: dict,
+) -> dict:
+    object_counts = _object_counts_from_sidecar_summary(sidecar_summary)
+    frame_count = int(sidecar_summary.get("annotations_written") or sidecar_summary.get("rows_written") or 0)
+    rows_total_input = int(sidecar_summary.get("rows_total_input") or sidecar_summary.get("annotations_input") or frame_count)
+    production_ready = bool(frame_count > 0 and sidecar_summary.get("embedding_vectors_in_output") in (None, 0) and sidecar_summary.get("image_bytes_in_output") in (None, 0))
+    return {
+        **sidecar_summary,
+        "schema_version": "2.0-c2",
+        "evidence_topology": C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+        "sidecar_type": "production",
+        "timeline_domain": PRODUCTION_TIMELINE_DOMAIN,
+        "annotation_source": "frame_annotation_cache",
+        "annotation_status": "complete" if production_ready else sidecar_summary.get("annotation_status", "partial"),
+        "production_ready": production_ready,
+        "canonical_clip": production_ready,
+        "visual_binding_status": "verified" if production_ready else "unverified",
+        "visual_binding_reason": "frame_annotation_cache_aligned_to_replay_metadata" if production_ready else sidecar_summary.get("visual_binding_reason", "frame_annotation_cache_partial"),
+        "visual_evidence_status": "verified" if production_ready else "unverified",
+        "evidence_visual_status": "verified" if production_ready else "unverified",
+        "legacy_fallback_allowed": False,
+        "legacy_used_for_visual_binding": False,
+        "fallback_used": False,
+        "allow_db_annotation_fallback": False,
+        "allow_legacy_annotation_fallback": False,
+        "raw_video_binding": "continuous_replay_video",
+        "annotation_binding": "frame_annotation_cache_pts_sidecar",
+        "raw_clip_path": C2_RAW_CLIP_FILE,
+        "sink_metadata_path": C2_SINK_METADATA_FILE,
+        "production_sidecar_path": SIDECAR_ANNOTATIONS_FILE,
+        "source_metadata_frame_count": len(sink_metadata_rows),
+        "original_metadata_frame_count": rows_total_input,
+        "decoded_video_frame_count": decoded_video_frame_count,
+        "sidecar_frame_count": frame_count,
+        "frame_count": frame_count,
+        "sidecar_trimmed": False,
+        "trim_occurred": False,
+        "timeline_reconciliation_status": "metadata_time_aligned_sparse_sidecar",
+        "time_domain_crop_applied": False,
+        "video_integrity_required": False,
+        "video_integrity": None,
+        "video_crop": {
+            "method": "copy",
+            "crop_video_to_time_window": False,
+            "source_video_path": str(raw_clip_path),
+        },
+        "time_window": {},
+        "fps": {
+            "source_input_fps_estimate": _to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
+            "metadata_fps_estimate": None,
+            "decoded_video_fps_estimate": None,
+            "max_fps": os.getenv("MAX_FPS") or "8/1",
+            "min_fps": os.getenv("MIN_FPS") or "2/1",
+            "fps_gating_applied": _c2_post_savant_fps_gating_applied(),
+        },
+        "object_counts": object_counts,
+        "person_objects_count": object_counts["person"],
+        "face_objects_count": object_counts["face"],
+        "known_face_objects_count": object_counts["known_face"],
+        "c2_3b_event_type": event_context.get("event_type", ""),
+        "c2_3b_camera_id": event_context.get("camera_id", ""),
+        "c2_3b_source_id": event_context.get("source_id", ""),
+        "limitations": list(sidecar_summary.get("production_ready_failures") or sidecar_summary.get("limitations") or []),
+        "metadata_path_used": str(sink_metadata_path),
+    }
+
+
+class _C2BundleView:
+    def __init__(
+        self,
+        *,
+        output_dir: Path,
+        raw_clip_path: Path,
+        sink_metadata_path: Path,
+        production_sidecar_path: Path,
+        summary_path: Path,
+        summary: dict,
+    ) -> None:
+        self.output_dir = output_dir
+        self.raw_clip_path = raw_clip_path
+        self.sink_metadata_path = sink_metadata_path
+        self.production_sidecar_path = production_sidecar_path
+        self.summary_path = summary_path
+        self.summary = summary
+
+
 def _build_c2_event_metadata(
     *,
     event_context: dict,
@@ -1363,7 +1514,7 @@ def _build_c2_event_metadata(
             "annotation_mode": "post_savant_sink_metadata_sidecar",
         },
         "status": {
-            "clip_status": _bundle_clip_status_from_c2_summary(summary),
+            "clip_status": _summary_clip_status(summary),
         },
         "limitations": list(summary.get("limitations") or []),
     }
@@ -1399,49 +1550,113 @@ def _finalize_c2_post_savant_evidence_bundle(
     replay_labels = replay_configuration.get("labels") or {}
     if not isinstance(replay_labels, dict):
         replay_labels = {}
+    output_dir = Path(evidence_output_dir) / event_id
+    source_video = _find_video_file(meta_dir)
+    if not source_video:
+        raise FileNotFoundError(f"video file not found in {meta_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    raw_clip_path = output_dir / C2_RAW_CLIP_FILE
+    sink_metadata_path = output_dir / C2_SINK_METADATA_FILE
+    if not raw_clip_path.exists():
+        shutil.copy2(source_video, raw_clip_path)
+    shutil.copy2(metadata_file, sink_metadata_path)
+    sink_metadata_rows = load_native_metadata(sink_metadata_path)
+    decoded_frame_count = len([row for row in sink_metadata_rows if isinstance(row, dict)])
+    metadata_has_objects = any(bool(row.get("objects")) for row in sink_metadata_rows if isinstance(row, dict))
 
-    result = build_post_savant_evidence_bundle(
-        input_dir=Path(meta_dir),
-        output_dir=Path(evidence_output_dir) / event_id,
-        copy_video=True,
-        trim_sidecar_to_video=True,
-        overwrite=False,
-        max_fps=os.getenv("MAX_FPS"),
-        min_fps=os.getenv("MIN_FPS"),
-        fps_gating_applied=_c2_post_savant_fps_gating_applied(),
-        source_input_fps_estimate=_to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
-        event_metadata={
-            "replay_source_kind": replay_labels.get("replay_source_kind"),
-            "c2_3b_record_request_id": replay_labels.get("request_id"),
-            "c2_3b_source_event_id": (
-                replay_labels.get("source_event_id")
-                or event_context.get("source_event_id", "")
+    if metadata_has_objects:
+        result = build_post_savant_evidence_bundle(
+            input_dir=Path(meta_dir),
+            output_dir=output_dir,
+            copy_video=True,
+            trim_sidecar_to_video=True,
+            overwrite=True,
+            max_fps=os.getenv("MAX_FPS"),
+            min_fps=os.getenv("MIN_FPS"),
+            fps_gating_applied=_c2_post_savant_fps_gating_applied(),
+            source_input_fps_estimate=_to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
+            decoded_frame_count_reader=lambda _path: decoded_frame_count,
+            event_metadata={
+                "replay_source_kind": replay_labels.get("replay_source_kind"),
+                "c2_3b_record_request_id": replay_labels.get("request_id"),
+                "c2_3b_source_event_id": (
+                    replay_labels.get("source_event_id")
+                    or event_context.get("source_event_id", "")
+                ),
+                "c2_3b_event_type": event_context.get("event_type", ""),
+                "c2_3b_camera_id": event_context.get("camera_id", ""),
+                "c2_3b_source_id": event_context.get("source_id", ""),
+                "c2_3b_frame_pts": replay_labels.get("frame_pts"),
+                "c2_3b_frame_num": replay_labels.get("frame_num"),
+                "requested_start_pts": replay_labels.get("requested_start_pts"),
+                "requested_end_pts": replay_labels.get("requested_end_pts"),
+                "event_frame_pts": replay_labels.get("event_frame_pts"),
+                "replay_anchor_keyframe": replay_job_request.get("anchor_keyframe"),
+                "replay_anchor_pts": replay_labels.get("replay_anchor_pts"),
+                "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
+                "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
+                "time_domain_crop_applied": False,
+                "annotation_source_policy": replay_labels.get("annotation_source_policy"),
+                "allow_db_annotation_fallback": (
+                    replay_labels.get("allow_db_annotation_fallback") == "true"
+                ),
+                "allow_legacy_annotation_fallback": (
+                    replay_labels.get("allow_legacy_annotation_fallback") == "true"
+                ),
+                "replay_stored_stream_id": replay_configuration.get("stored_stream_id"),
+                "replay_resulting_stream_id": replay_configuration.get("resulting_stream_id"),
+            },
+            video_integrity_required=False,
+        )
+    else:
+        sidecar_config = load_frame_cache_sidecar_config()
+        sidecar_config.update(
+            {
+                "enabled": True,
+                "event_types": {"intrusion", "watchlist_hit"},
+                "require_trigger_face": False,
+                "pre_seconds": float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
+                "post_seconds": float(os.getenv("DEFAULT_POST_SECONDS", "5")),
+            }
+        )
+        sidecar_summary, sidecar_result = write_frame_cache_identity_sidecar(
+            event=_event_for_frame_cache_sidecar(event_context),
+            evidence_dir=str(output_dir),
+            raw_clip_path=str(raw_clip_path),
+            metadata_path=str(sink_metadata_path),
+            redis_client=None,
+            config=sidecar_config,
+            final_clip_context={
+                "raw_clip_path": str(raw_clip_path),
+                "sink_metadata_path": str(sink_metadata_path),
+                "raw_clip_duration": None,
+                "event_projected_t_s": None,
+                "event_pts_inside_clip": None,
+                "event_position_ratio": None,
+            },
+        )
+        summary = _build_frame_cache_c2_summary(
+            sidecar_summary=sidecar_summary,
+            sink_metadata_rows=sink_metadata_rows,
+            decoded_video_frame_count=decoded_frame_count,
+            raw_clip_path=raw_clip_path,
+            sink_metadata_path=sink_metadata_path,
+            event_context=event_context,
+        )
+        summary_path = output_dir / C2_SUMMARY_FILE
+        sidecar_summary_path = output_dir / SIDECAR_SUMMARY_FILE
+        _atomic_write_json(summary_path, summary)
+        _atomic_write_json(sidecar_summary_path, summary)
+        result = _C2BundleView(
+            output_dir=output_dir,
+            raw_clip_path=raw_clip_path,
+            sink_metadata_path=sink_metadata_path,
+            production_sidecar_path=Path(
+                sidecar_result.get("annotations_path") or output_dir / SIDECAR_ANNOTATIONS_FILE
             ),
-            "c2_3b_event_type": event_context.get("event_type", ""),
-            "c2_3b_camera_id": event_context.get("camera_id", ""),
-            "c2_3b_source_id": event_context.get("source_id", ""),
-            "c2_3b_frame_pts": replay_labels.get("frame_pts"),
-            "c2_3b_frame_num": replay_labels.get("frame_num"),
-            "requested_start_pts": replay_labels.get("requested_start_pts"),
-            "requested_end_pts": replay_labels.get("requested_end_pts"),
-            "event_frame_pts": replay_labels.get("event_frame_pts"),
-            "replay_anchor_keyframe": replay_job_request.get("anchor_keyframe"),
-            "replay_anchor_pts": replay_labels.get("replay_anchor_pts"),
-            "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
-            "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
-            "time_domain_crop_applied": False,
-            "annotation_source_policy": replay_labels.get("annotation_source_policy"),
-            "allow_db_annotation_fallback": (
-                replay_labels.get("allow_db_annotation_fallback") == "true"
-            ),
-            "allow_legacy_annotation_fallback": (
-                replay_labels.get("allow_legacy_annotation_fallback") == "true"
-            ),
-            "replay_stored_stream_id": replay_configuration.get("stored_stream_id"),
-            "replay_resulting_stream_id": replay_configuration.get("resulting_stream_id"),
-        },
-        video_integrity_required=True,
-    )
+            summary_path=summary_path,
+            summary=summary,
+        )
     business_metadata = _build_c2_event_metadata(
         event_context=event_context,
         replay_job_id=replay_job_id,
