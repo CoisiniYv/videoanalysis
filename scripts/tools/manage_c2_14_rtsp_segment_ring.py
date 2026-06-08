@@ -309,6 +309,27 @@ def deterministic_segment_id(candidate: SegmentCandidate, stats: dict[str, Any])
     return f"{stem}-{digest.hexdigest()[:12]}"
 
 
+def in_place_segment_id(candidate: SegmentCandidate) -> str:
+    return safe_segment_id(candidate.source_dir.name)
+
+
+def candidate_is_stable(candidate: SegmentCandidate, *, completed_age_seconds: float, now: datetime | None = None) -> bool:
+    if completed_age_seconds <= 0:
+        return True
+    current_time = now or utc_now()
+    newest_mtime = max(
+        path.stat().st_mtime
+        for path in (candidate.video_path, candidate.metadata_path)
+        if path.exists()
+    )
+    newest = datetime.fromtimestamp(newest_mtime, timezone.utc)
+    return (current_time - newest).total_seconds() >= completed_age_seconds
+
+
+def is_candidate_in_ring(candidate: SegmentCandidate, *, ring_root: Path, source_id: str) -> bool:
+    return is_relative_to(candidate.source_dir, segments_root(ring_root, source_id))
+
+
 def build_index_row(
     *,
     source_id: str,
@@ -376,6 +397,8 @@ def adopt_candidate_into_ring(
     source_id: str,
     ring_root: Path,
     ttl_seconds: int,
+    completed_age_seconds: float = 0.0,
+    existing_rows_by_id: dict[str, dict[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     compatible, reason, stats = candidate_is_compatible(candidate, source_id)
@@ -387,19 +410,32 @@ def adopt_candidate_into_ring(
             "metadata_source_ids": stats.get("metadata_source_ids"),
             "frame_count": stats.get("frame_count"),
         }
-    segment_id = deterministic_segment_id(candidate, stats)
-    segment_dir = segments_root(ring_root, source_id) / segment_id
+    if not candidate_is_stable(candidate, completed_age_seconds=completed_age_seconds, now=now):
+        return {
+            "status": "skipped",
+            "reason": "candidate_not_completed_or_stable",
+            "source_dir": str(candidate.source_dir),
+            "metadata_source_ids": stats.get("metadata_source_ids"),
+            "frame_count": stats.get("frame_count"),
+        }
+
+    in_place = is_candidate_in_ring(candidate, ring_root=ring_root, source_id=source_id)
+    segment_id = in_place_segment_id(candidate) if in_place else deterministic_segment_id(candidate, stats)
+    segment_dir = candidate.source_dir if in_place else segments_root(ring_root, source_id) / segment_id
     segment_dir.mkdir(parents=True, exist_ok=True)
-    video_dst = segment_dir / ("video.mp4" if candidate.video_path.suffix.lower() == ".mp4" else "video.mov")
-    metadata_dst = segment_dir / "metadata.json"
-    shutil.copy2(candidate.video_path, video_dst)
-    shutil.copy2(candidate.metadata_path, metadata_dst)
+    video_dst = candidate.video_path if in_place else segment_dir / ("video.mp4" if candidate.video_path.suffix.lower() == ".mp4" else "video.mov")
+    metadata_dst = candidate.metadata_path if in_place else segment_dir / "metadata.json"
+    if not in_place:
+        shutil.copy2(candidate.video_path, video_dst)
+        shutil.copy2(candidate.metadata_path, metadata_dst)
+    existing_row = (existing_rows_by_id or {}).get(segment_id) or {}
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "source_id": source_id,
         "segment_id": segment_id,
         "status": "complete",
         "created_by": "manage_c2_14_rtsp_segment_ring.py",
+        "index_mode": "in_place_live_ring" if in_place else "adopted_copy",
         "source_video_path": str(candidate.video_path),
         "source_metadata_path": str(candidate.metadata_path),
         "video_path": str(video_dst),
@@ -407,6 +443,12 @@ def adopt_candidate_into_ring(
         "stats": stats,
     }
     write_json(segment_dir / "segment_manifest.json", manifest)
+    created_at = parse_iso_datetime(existing_row.get("created_at"))
+    if created_at is None:
+        try:
+            created_at = datetime.fromtimestamp(min(video_dst.stat().st_mtime, metadata_dst.stat().st_mtime), timezone.utc)
+        except OSError:
+            created_at = now
     row = build_index_row(
         source_id=source_id,
         segment_id=segment_id,
@@ -415,9 +457,17 @@ def adopt_candidate_into_ring(
         metadata_path=metadata_dst,
         stats=stats,
         ttl_seconds=ttl_seconds,
-        created_at=now,
+        created_at=created_at,
     )
-    return {"status": "indexed", "reason": reason, "row": row, "manifest_path": str(segment_dir / "segment_manifest.json")}
+    row["evidence_refs"] = list(existing_row.get("evidence_refs") or [])
+    row["cleanup_eligible"] = bool(existing_row.get("cleanup_eligible", True))
+    return {
+        "status": "indexed",
+        "reason": reason,
+        "row": row,
+        "manifest_path": str(segment_dir / "segment_manifest.json"),
+        "in_place": in_place,
+    }
 
 
 def index_existing(
@@ -426,12 +476,15 @@ def index_existing(
     ring_root: Path,
     source_id: str,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    completed_age_seconds: float = 0.0,
     overwrite_index: bool = True,
 ) -> dict[str, Any]:
     require_source_id(source_id)
     ring_source = source_ring_root(ring_root, source_id)
     ring_source.mkdir(parents=True, exist_ok=True)
     candidates = discover_segment_candidates(source_dir)
+    existing = read_jsonl(index_path(ring_root, source_id))
+    existing_rows_by_id = {str(row.get("segment_id") or ""): row for row in existing if row.get("segment_id")}
     indexed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     now = utc_now()
@@ -441,6 +494,8 @@ def index_existing(
             source_id=source_id,
             ring_root=ring_root,
             ttl_seconds=ttl_seconds,
+            completed_age_seconds=completed_age_seconds,
+            existing_rows_by_id=existing_rows_by_id,
             now=now,
         )
         if result.get("status") == "indexed":
@@ -450,7 +505,6 @@ def index_existing(
     if overwrite_index:
         write_jsonl(index_path(ring_root, source_id), indexed)
     else:
-        existing = read_jsonl(index_path(ring_root, source_id))
         merged = merge_index_rows(existing + indexed)
         write_jsonl(index_path(ring_root, source_id), merged)
         indexed = merged
@@ -466,6 +520,8 @@ def index_existing(
         "compatible_segments_found": len([row for row in indexed if row.get("source_id") == source_id]),
         "index_row_count": len(indexed),
         "indexed_segment_ids": [row["segment_id"] for row in indexed],
+        "completed_age_seconds": completed_age_seconds,
+        "in_place_indexed_count": len([row for row in indexed if is_relative_to(Path(str(row.get("segment_dir") or "")), segments_root(ring_root, source_id))]),
         "skipped_count": len(skipped),
         "skipped": skipped[:50],
     }
@@ -507,6 +563,11 @@ def inspect_config(*, ring_root: Path, source_id: str) -> dict[str, Any]:
             "chunk_idx_supported_by_official_adapter": True,
             "current_chunk_size_is_ring_ready": str(chunk_size) not in ("", "0"),
             "current_dir_location_uses_chunk_idx": "%chunk_idx" in str(dir_location),
+            "official_template_tokens": {
+                "source_id": "%source_id",
+                "src_filename": "%src_filename",
+                "chunk_idx": "%chunk_idx",
+            },
         },
         "replay_storage": {
             "config_path": str(replay_config),
@@ -884,6 +945,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(index_p)
     index_p.add_argument("--source-dir", type=Path, required=True)
     index_p.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS)
+    index_p.add_argument("--completed-age-seconds", type=float, default=0.0)
     index_p.add_argument("--append-index", action="store_true")
 
     dry_p = sub.add_parser("retention-dry-run")

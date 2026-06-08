@@ -87,11 +87,15 @@ def event_anchor(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def filter_metadata_frames(frames: list[dict[str, Any]], window: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item["frame"] for item in filter_metadata_frames_with_indices(frames, window)]
+
+
+def filter_metadata_frames_with_indices(frames: list[dict[str, Any]], window: dict[str, Any]) -> list[dict[str, Any]]:
     basis = window["basis"]
     start = int(window["requested_start"])
     end = int(window["requested_end"])
     selected = []
-    for frame in frames:
+    for frame_index, frame in enumerate(frames):
         if basis == "pts":
             value = ring.frame_pts(frame)
         else:
@@ -99,7 +103,7 @@ def filter_metadata_frames(frames: list[dict[str, Any]], window: dict[str, Any])
         if value is None:
             continue
         if start <= value <= end:
-            selected.append(frame)
+            selected.append({"frame_index": frame_index, "frame": frame, "time_value": value})
     return selected
 
 
@@ -137,6 +141,117 @@ def concatenate_or_copy_raw_clip(segments: list[dict[str, Any]], output_path: Pa
         "segment_video_paths": [str(path) for path in video_paths],
         "time_domain_crop_applied": False,
     }
+
+
+def crop_window_clip_from_segment(
+    *,
+    segment: dict[str, Any],
+    selected_indices: list[int],
+    output_path: Path,
+    requested_duration_s: float,
+) -> dict[str, Any]:
+    if not selected_indices:
+        return {"status": "failed", "reason": "no_frames_selected_for_window"}
+    if shutil.which("ffmpeg") is None:
+        return {"status": "failed", "reason": "ffmpeg_missing_for_window_crop"}
+    start_index = min(selected_indices)
+    end_index = max(selected_indices)
+    expected_count = end_index - start_index + 1
+    if expected_count != len(selected_indices):
+        return {
+            "status": "failed",
+            "reason": "non_contiguous_frame_window",
+            "selected_frame_count": len(selected_indices),
+            "start_frame_index": start_index,
+            "end_frame_index": end_index,
+        }
+    if requested_duration_s <= 0:
+        return {"status": "failed", "reason": "requested_duration_not_positive"}
+    output_fps = len(selected_indices) / requested_duration_s
+    filter_expr = f"select=between(n\\,{start_index}\\,{end_index}),setpts=N/({output_fps:.8f}*TB)"
+    video_path = Path(str(segment.get("video_path") or ""))
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(video_path),
+            "-vf",
+            filter_expr,
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            f"{output_fps:.8f}",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return {
+            "status": "failed",
+            "reason": "ffmpeg_window_crop_failed",
+            "stderr": proc.stderr[-1000:],
+            "start_frame_index": start_index,
+            "end_frame_index": end_index,
+        }
+    return {
+        "status": "reencoded_single_segment_window",
+        "raw_clip_path": str(output_path),
+        "segment_video_paths": [str(video_path)],
+        "time_domain_crop_applied": True,
+        "source_frame_start_index": start_index,
+        "source_frame_end_index": end_index,
+        "selected_frame_count": len(selected_indices),
+        "requested_duration_s": requested_duration_s,
+        "output_fps": output_fps,
+        "codec": "libx264",
+    }
+
+
+def build_window_raw_clip(
+    *,
+    selected_segments: list[dict[str, Any]],
+    selected_by_segment: list[dict[str, Any]],
+    output_path: Path,
+    requested_duration_s: float,
+) -> dict[str, Any]:
+    non_empty = [item for item in selected_by_segment if item["selected_indices"]]
+    if len(selected_segments) == 1 and len(non_empty) == 1:
+        return crop_window_clip_from_segment(
+            segment=selected_segments[0],
+            selected_indices=non_empty[0]["selected_indices"],
+            output_path=output_path,
+            requested_duration_s=requested_duration_s,
+        )
+    return {
+        "status": "failed",
+        "reason": "multi_segment_window_crop_not_implemented",
+        "selected_segment_count": len(selected_segments),
+        "segments_with_selected_frames": len(non_empty),
+    }
+
+
+def event_frame_in_filtered_metadata(event: dict[str, Any], frames: list[dict[str, Any]]) -> bool:
+    anchor = event_anchor(event)
+    frame_pts = anchor.get("frame_pts")
+    frame_uuid = anchor.get("frame_uuid")
+    for frame in frames:
+        if frame_uuid and ring.frame_uuid(frame) == frame_uuid:
+            return True
+        if frame_pts is not None and ring.frame_pts(frame) == frame_pts:
+            return True
+    return False
 
 
 def evaluate_clip_acceptance(
@@ -234,13 +349,82 @@ def build_clip_from_ring(
 
     selected_segments = window["selected_segments"]
     frames: list[dict[str, Any]] = []
+    selected_by_segment: list[dict[str, Any]] = []
     for segment in selected_segments:
-        frames.extend(ring.load_native_metadata(Path(str(segment["metadata_path"]))))
-    filtered_frames = filter_metadata_frames(frames, window)
+        segment_frames = ring.load_native_metadata(Path(str(segment["metadata_path"])))
+        indexed_frames = filter_metadata_frames_with_indices(segment_frames, window)
+        selected_by_segment.append(
+            {
+                "segment_id": segment.get("segment_id"),
+                "selected_indices": [int(item["frame_index"]) for item in indexed_frames],
+                "selected_frame_count": len(indexed_frames),
+            }
+        )
+        frames.extend(item["frame"] for item in indexed_frames)
+    filtered_frames = frames
     sink_metadata_path = output_dir / "sink_metadata.json"
     ring.write_jsonl(sink_metadata_path, filtered_frames)
-    raw_clip_path = output_dir / ("raw_clip.mp4" if str(selected_segments[0].get("video_path", "")).endswith(".mp4") else "raw_clip.mov")
-    clip_result = concatenate_or_copy_raw_clip(selected_segments, raw_clip_path)
+    raw_clip_path = output_dir / "raw_clip.mp4"
+    requested_duration_s = float(pre_seconds + post_seconds)
+    clip_result = build_window_raw_clip(
+        selected_segments=selected_segments,
+        selected_by_segment=selected_by_segment,
+        output_path=raw_clip_path,
+        requested_duration_s=requested_duration_s,
+    )
+    if clip_result.get("status") == "failed":
+        summary = {
+            "schema_version": SCHEMA_VERSION,
+            "phase": "C2.14",
+            "evidence_capture_mode": "rtsp_segment_ring",
+            "event_identity": event_identity(event),
+            "event_type": event.get("event_type"),
+            "source_id": resolved_source_id,
+            "camera_id": event.get("camera_id"),
+            "event_frame_pts": anchor["frame_pts"],
+            "event_ts_ms": anchor["event_ts_ms"],
+            "raw_clip": None,
+            "sink_metadata": str(sink_metadata_path),
+            "sidecar": None,
+            "selected_segment_ids": [segment.get("segment_id") for segment in selected_segments],
+            "selected_segment_window_covers_event": bool(window["window_covered"] and window["event_frame_located"]),
+            "selected_frames_by_segment": selected_by_segment,
+            "decoded_video_frame_count": None,
+            "sidecar_frame_count": 0,
+            "video_integrity_status": "not_run",
+            "video_integrity_pass": False,
+            "fallback_used": False,
+            "legacy_used_for_visual_binding": False,
+            "db_window_fallback_used": False,
+            "event_style_replay_job_passed": False,
+            "visual_evidence_required_for_evidence_pass": True,
+            "clip_result": clip_result,
+            "acceptance": {
+                "passed": False,
+                "failure_reasons": [clip_result.get("reason") or "window_clip_build_failed"],
+                "fallback_used": False,
+                "legacy_used_for_visual_binding": False,
+                "db_window_fallback_used": False,
+                "event_style_replay_job_passed": False,
+            },
+            "status": "partial",
+            "reason": clip_result.get("reason") or "window_clip_build_failed",
+        }
+        write_json(output_dir / "summary.json", summary)
+        write_json(output_dir / "event.json", event)
+        write_json(output_dir / "evidence_join_report.json", window)
+        write_json(output_dir / "video_integrity_report.json", {"integrity_status": "not_run", "production_gate_passed": False, "reason": summary["reason"]})
+        scan = ring.scan_for_unsafe_payload({"event": event, "summary": summary, "join": window})
+        write_json(output_dir / "unsafe_payload_scan.json", scan)
+        (output_dir / "operator_rtsp_event_clip_report.html").write_text(render_html(summary, window, {"integrity_status": "not_run"}), encoding="utf-8")
+        return {
+            "status": "partial",
+            "reason": summary["reason"],
+            "result_marker": RESULT_PARTIAL if scan["passed"] else RESULT_FAIL,
+            "bundle_path": str(output_dir),
+            "summary": summary,
+            "unsafe_payload_scan": scan,
+        }
     sidecar_path = output_dir / SIDECAR_ANNOTATIONS_FILE
     sidecar_summary_path = output_dir / "summary.frame_cache.identity.json"
     sidecar = build_post_savant_annotation_sidecar(
@@ -252,16 +436,17 @@ def build_clip_from_ring(
     integrity = inspect_video_integrity(
         raw_clip_path,
         decode_log_path=output_dir / "video_integrity_decode_errors.log",
-        requested_duration_s=float(pre_seconds + post_seconds),
+        requested_duration_s=requested_duration_s,
         sidecar_frame_count=len(sidecar.rows),
-        trim_occurred=False,
-        time_domain_crop_applied=False,
+        trim_occurred=bool(clip_result.get("time_domain_crop_applied")),
+        time_domain_crop_applied=bool(clip_result.get("time_domain_crop_applied")),
     )
+    event_located_in_metadata = event_frame_in_filtered_metadata(event, filtered_frames)
     acceptance = evaluate_clip_acceptance(
         raw_clip_exists=raw_clip_path.is_file() and raw_clip_path.stat().st_size > 0,
         metadata_exists=sink_metadata_path.is_file() and sink_metadata_path.stat().st_size > 0,
         sidecar_exists=sidecar_path.is_file(),
-        selected_segment_window_covers_event=bool(window["window_covered"] and window["event_frame_located"]),
+        selected_segment_window_covers_event=bool(window["window_covered"] and window["event_frame_located"] and event_located_in_metadata),
         decoded_video_frame_count=ring.int_or_none(integrity.get("decoded_frame_count")),
         sidecar_frame_count=len(sidecar.rows),
         video_integrity_pass=bool(integrity.get("production_gate_passed")),
@@ -284,7 +469,9 @@ def build_clip_from_ring(
         "sink_metadata": str(sink_metadata_path),
         "sidecar": str(sidecar_path),
         "selected_segment_ids": [segment.get("segment_id") for segment in selected_segments],
-        "selected_segment_window_covers_event": bool(window["window_covered"] and window["event_frame_located"]),
+        "selected_segment_window_covers_event": bool(window["window_covered"] and window["event_frame_located"] and event_located_in_metadata),
+        "event_frame_located_in_filtered_metadata": event_located_in_metadata,
+        "selected_frames_by_segment": selected_by_segment,
         "decoded_video_frame_count": integrity.get("decoded_frame_count"),
         "sidecar_frame_count": len(sidecar.rows),
         "video_integrity_status": integrity.get("integrity_status"),
