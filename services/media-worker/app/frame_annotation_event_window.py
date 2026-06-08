@@ -9,10 +9,11 @@ from statistics import median
 from typing import Any
 
 
-SUPPORTED_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
+IDENTITY_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
+SUPPORTED_EVENT_TYPES = IDENTITY_EVENT_TYPES | {"intrusion"}
 
 
-def extract_watchlist_event_anchor(
+def extract_evidence_event_anchor(
     event: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Extract the event anchor used to scope a frame annotation window."""
@@ -108,14 +109,16 @@ def extract_watchlist_event_anchor(
         "threshold": _first_float(match, payload, keys=("threshold", "match_threshold")),
     }
 
+    required_fields = [
+        "source_id",
+        "camera_id",
+        "frame_uuid_or_frame_pts",
+    ]
+    if event_type in IDENTITY_EVENT_TYPES:
+        required_fields.insert(2, "source_observation_id")
     missing_fields = [
         field
-        for field in (
-            "source_id",
-            "camera_id",
-            "source_observation_id",
-            "frame_uuid_or_frame_pts",
-        )
+        for field in required_fields
         if (
             (field == "frame_uuid_or_frame_pts" and not anchor.get("frame_uuid") and anchor.get("frame_pts") is None)
             or (field != "frame_uuid_or_frame_pts" and not anchor.get(field))
@@ -140,6 +143,14 @@ def extract_watchlist_event_anchor(
         "has_threshold": anchor.get("threshold") is not None,
     }
     return anchor, summary
+
+
+def extract_watchlist_event_anchor(
+    event: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Backward-compatible alias for evidence event anchor extraction."""
+
+    return extract_evidence_event_anchor(event)
 
 
 def select_frame_annotation_event_window(

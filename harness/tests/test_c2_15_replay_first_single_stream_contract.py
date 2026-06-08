@@ -161,6 +161,18 @@ def test_replay_first_uses_frame_cache_for_annotations() -> None:
     assert media_env["FRAME_CACHE_SIDECAR_STREAM"] == "security.frame_annotations"
 
 
+def test_intrusion_sidecar_can_render_bbox_without_watchlist_identity() -> None:
+    compose = _compose()
+    media_env = compose["services"]["media-worker"]["environment"]
+
+    assert "intrusion" in media_env["FRAME_CACHE_SIDECAR_EVENT_TYPES"].split(",")
+    assert media_env["FRAME_CACHE_SIDECAR_REQUIRE_TRIGGER_FACE"] == "false"
+    assert media_env["FRAME_CACHE_SIDECAR_WRITE_MODE"] == "sidecar_only"
+    assert media_env["FRAME_CACHE_SIDECAR_OUTPUT_ANNOTATIONS"] == (
+        "annotations.frame_cache.identity.jsonl"
+    )
+
+
 def test_evidence_viewer_serves_port_8090() -> None:
     compose = _compose()
     viewer = compose["services"]["evidence-viewer"]

@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.frame_annotation_event_window import (
-    extract_watchlist_event_anchor,
+    extract_evidence_event_anchor,
     select_frame_annotation_event_window,
 )
 from app.frame_annotation_shadow_builder import (
@@ -286,7 +286,7 @@ def build_sidecar_identity_annotations(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build sidecar annotations from frame cache messages and event payload."""
 
-    anchor, anchor_summary = extract_watchlist_event_anchor(event)
+    anchor, anchor_summary = extract_evidence_event_anchor(event)
     source_id = anchor.get("source_id") if anchor else None
     camera_id = anchor.get("camera_id") if anchor else None
     source_observation_id = anchor.get("source_observation_id") if anchor else None
@@ -363,7 +363,7 @@ def _read_frame_annotations(
     config: dict[str, Any],
     event: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    anchor, _summary = extract_watchlist_event_anchor(event)
+    anchor, _summary = extract_evidence_event_anchor(event)
     source_id = anchor.get("source_id") if anchor else None
     camera_id = anchor.get("camera_id") if anchor else None
     stream_name = str(config.get("stream_name") or "security.frame_annotations")
@@ -656,7 +656,8 @@ def _production_sidecar_contract_summary(
         failures.append("pts_fallback_rows_rejected_as_non_unique")
     if stale_timing_rows > 0:
         failures.append("stale_timing_on_non_displayable_rows")
-    if identity_scope_status != "trigger_only":
+    identity_event = _event_requires_identity_trigger(event)
+    if identity_event and identity_scope_status != "trigger_only":
         failures.append("known_face_not_trigger_only")
     if int(written_contract.get("person_context_rows") or 0) <= 0:
         failures.append("person_context_missing")
@@ -726,6 +727,7 @@ def _production_sidecar_contract_summary(
         "clip_timeline_match_distribution": dict(match_distribution),
         "identity_scope_status": identity_scope_status,
         "known_face_trigger_only": identity_scope_status == "trigger_only",
+        "identity_trigger_required": identity_event,
         "person_context_rows": int(written_contract.get("person_context_rows") or 0),
         "legacy_fallback_allowed": False,
         "production_ready_failures": failures,
@@ -998,7 +1000,7 @@ def _trigger_visual_binding_summary(
     annotation_status: str | None,
     fallback_reason: str | None,
 ) -> dict[str, Any]:
-    anchor, _anchor_summary = extract_watchlist_event_anchor(event)
+    anchor, _anchor_summary = extract_evidence_event_anchor(event)
     source_observation_id = anchor.get("source_observation_id") if anchor else None
     trigger = _find_trigger_face_row(
         annotations,
@@ -1159,7 +1161,7 @@ def _event_clip_metrics(
     clip_timeline_summary: dict[str, Any],
     clip_duration_seconds: float | None,
 ) -> dict[str, Any]:
-    anchor, _summary = extract_watchlist_event_anchor(event)
+    anchor, _summary = extract_evidence_event_anchor(event)
     event_pts = _int_or_none((anchor or {}).get("frame_pts"))
     first_pts = _int_or_none(clip_timeline_summary.get("first_pts"))
     last_pts = _int_or_none(clip_timeline_summary.get("last_pts"))
@@ -1210,6 +1212,11 @@ def _identity_scope_status(
     if known_rows and identity_counts.get("trigger_known_face_present") is True:
         return "trigger_only"
     return "missing_trigger_known_face"
+
+
+def _event_requires_identity_trigger(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("event_type") or "").strip()
+    return event_type in {"watchlist_hit", "live_search_hit"}
 
 
 def _path_matches_context(
@@ -1407,7 +1414,7 @@ def _base_summary(
     old_annotations_path: str,
     old_summary_path: str,
 ) -> dict[str, Any]:
-    anchor, _anchor_summary = extract_watchlist_event_anchor(event)
+    anchor, _anchor_summary = extract_evidence_event_anchor(event)
     return {
         "schema_version": SCHEMA_VERSION,
         "phase": PHASE,

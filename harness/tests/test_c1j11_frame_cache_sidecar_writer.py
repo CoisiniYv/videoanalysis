@@ -65,7 +65,7 @@ def test_disabled_sidecar_returns_skipped_without_writing(tmp_path: Path) -> Non
     assert not (evidence_dir / "summary.frame_cache.identity.json").exists()
 
 
-def test_non_watchlist_event_skipped(tmp_path: Path) -> None:
+def test_non_allowed_event_skipped(tmp_path: Path) -> None:
     event = _event()
     event["event_type"] = "intrusion"
     evidence_dir = _evidence_dir(tmp_path)
@@ -84,6 +84,48 @@ def test_non_watchlist_event_skipped(tmp_path: Path) -> None:
     assert result["written"] is False
     assert summary["skip_reason"] == "event_type_not_allowed"
     assert state.sidecar_skipped_event_type == 1
+
+
+def test_intrusion_event_writes_person_bbox_sidecar_without_known_face(tmp_path: Path) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        "\n".join(
+            [
+                json.dumps({"frame_num": 0, "pts": 15_000_000_000, "frame_uuid": "frame-start"}),
+                json.dumps({"frame_num": 120, "pts": 20_000_000_000, "frame_uuid": "frame-intrusion"}),
+                json.dumps({"frame_num": 240, "pts": 25_000_000_000, "frame_uuid": "frame-end"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary, result = _write(
+        tmp_path,
+        event=_intrusion_event(),
+        messages=[_intrusion_frame_message()],
+        evidence_dir=evidence_dir,
+        config=_config(
+            enabled=True,
+            event_types={"intrusion", "watchlist_hit"},
+            require_trigger_face=False,
+        ),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert result["written"] is True
+    assert summary["annotation_status"] == "complete"
+    assert summary["production_ready"] is True
+    assert summary["identity_trigger_required"] is False
+    assert summary["identity_scope_status"] == "missing_trigger_known_face"
+    assert summary["person_context_rows"] >= 1
+    assert summary["known_face_count"] == 0
+    assert summary["embedding_vectors_in_output"] == 0
+    assert summary["image_bytes_in_output"] == 0
+    assert rows
+    assert all((row.get("label") or {}).get("kind") != "known_face" for row in rows)
+    assert any(row.get("object_type") == "person" for row in rows)
+    assert any(row.get("clip_timeline_match") == "metadata_frame_uuid" for row in rows)
 
 
 def test_freshness_guard_env_thresholds_are_configurable() -> None:
@@ -492,6 +534,20 @@ def _event(*, event_id: str = "event-1") -> dict[str, Any]:
     }
 
 
+def _intrusion_event() -> dict[str, Any]:
+    return {
+        "event_id": "event-intrusion-1",
+        "event_type": "intrusion",
+        "source_event_id": "savant_security:c1e_rtsp_replay:13:intrusion:1780000000000",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "track_id": "13",
+        "frame_uuid": "frame-intrusion",
+        "frame_pts": 20_000_000_000,
+        "event_ts_ms": 1_780_000_000_250,
+    }
+
+
 def _frame_message(
     *,
     source_observation_id: str = SOURCE_OBSERVATION_ID,
@@ -526,6 +582,35 @@ def _frame_message(
         "timestamp_ms": 1_780_000_000_250,
         "created_at": created_at,
         "objects": [face],
+    }
+
+
+def _intrusion_frame_message() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "message_type": "frame_annotation",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "frame_pts": 20_000_000_000,
+        "frame_uuid": "frame-intrusion",
+        "frame_num": 120,
+        "timestamp_ms": 20_000,
+        "created_at": "2026-06-06T08:01:26.171308Z",
+        "objects": [
+            {
+                "object_id": "person-13",
+                "object_type": "person",
+                "track_id": "13",
+                "source_observation_id": "person:c1e_rtsp_replay:13:20000",
+                "bbox": {
+                    "format": "xyxy",
+                    "xyxy": [100, 120, 220, 360],
+                    "confidence": 0.91,
+                    "coordinate_space": "pixel",
+                },
+                "quality": {"detector_confidence": 0.91},
+            }
+        ],
     }
 
 
