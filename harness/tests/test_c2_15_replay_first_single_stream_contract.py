@@ -197,5 +197,8 @@ def test_source_and_clip_lengths_are_configurable() -> None:
     assert FIXED_RTSP in _text(DOC)
     assert event_env["RECORDING_PRE_SECONDS"] == "${RECORDING_PRE_SECONDS:-5}"
     assert event_env["RECORDING_POST_SECONDS"] == "${RECORDING_POST_SECONDS:-5}"
+    assert event_env["RECORDING_MAX_REQUESTS_PER_RUN"] == (
+        "${RECORDING_MAX_REQUESTS_PER_RUN:-0}"
+    )
     assert clip_env["DEFAULT_PRE_SECONDS"] == "${DEFAULT_PRE_SECONDS:-5}"
     assert clip_env["DEFAULT_POST_SECONDS"] == "${DEFAULT_POST_SECONDS:-5}"
