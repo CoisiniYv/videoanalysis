@@ -143,6 +143,17 @@ def test_event_start_anchor_strategy_uses_requested_window_start() -> None:
     ) == 0.0
 
 
+def test_event_start_anchor_strategy_forces_keyframe_lookup() -> None:
+    _activate_clip_worker_path()
+    from app.worker import (
+        REPLAY_ANCHOR_STRATEGY_EVENT_START,
+        _should_lookup_replay_anchor,
+    )
+
+    assert _should_lookup_replay_anchor(REPLAY_ANCHOR_STRATEGY_EVENT_START) is True
+    assert _should_lookup_replay_anchor("request_keyframe") is False
+
+
 def test_clip_worker_default_config_uses_reliable_sink_and_replay_fps(monkeypatch) -> None:
     _activate_clip_worker_path()
     from app.config import load_config

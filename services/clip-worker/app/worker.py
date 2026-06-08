@@ -63,6 +63,10 @@ def _replay_anchor_lookup_ts_ms(
     return event_ts_ms
 
 
+def _should_lookup_replay_anchor(anchor_strategy: str) -> bool:
+    return anchor_strategy == REPLAY_ANCHOR_STRATEGY_EVENT_START
+
+
 def _replay_offset_seconds(
     *,
     replay_stop_strategy: str,
@@ -262,6 +266,9 @@ def run_worker(
                     pre_seconds = int(req.get("pre_seconds", cfg.default_pre_seconds))
                     post_seconds = int(req.get("post_seconds", cfg.default_post_seconds))
                     keyframe_uuid, keyframe_source = _keyframe_from_request(req)
+                    if _should_lookup_replay_anchor(cfg.replay_anchor_strategy):
+                        keyframe_uuid = None
+                        keyframe_source = "event_start_keyframe_lookup"
                     now_monotonic = time.monotonic()
                     active_jobs_until = [
                         until for until in active_jobs_until if until > now_monotonic
