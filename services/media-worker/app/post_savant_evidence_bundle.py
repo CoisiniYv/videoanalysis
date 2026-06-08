@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -229,6 +230,12 @@ def read_decoded_video_frame_count(video_path: Path) -> int:
     cv2_count = _read_frame_count_cv2(video_path)
     if cv2_count is not None:
         return cv2_count
+    imageio_count = _read_frame_count_imageio_ffmpeg(video_path)
+    if imageio_count is not None:
+        return imageio_count
+    ffmpeg_count = _read_frame_count_ffmpeg_decode(video_path)
+    if ffmpeg_count is not None:
+        return ffmpeg_count
     raise RuntimeError("decoded_video_frame_count_unavailable")
 
 
@@ -312,8 +319,9 @@ def _copy_or_crop_video(
     duration_seconds = max(0.0, (float(requested_end_pts) - float(requested_start_pts)) / 1_000_000_000.0)
     if duration_seconds <= 0:
         raise ValueError("video_crop_duration_must_be_positive")
+    ffmpeg_exe = _ffmpeg_executable()
     command = [
-        "ffmpeg",
+        ffmpeg_exe,
         "-hide_banner",
         "-nostdin",
         "-y",
@@ -343,12 +351,27 @@ def _copy_or_crop_video(
     return {
         "method": "ffmpeg_time_domain_transcode",
         "crop_video_to_time_window": True,
+        "ffmpeg_executable": ffmpeg_exe,
         "diagnostic_remux_or_transcode": False,
         "source_video_path": str(source_video_path),
         "start_seconds": start_seconds,
         "duration_seconds": duration_seconds,
         "ffmpeg_log_path": str(log_path),
     }
+
+
+def _ffmpeg_executable() -> str:
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+    try:
+        import imageio_ffmpeg  # type: ignore[import-not-found]
+    except Exception as exc:
+        raise FileNotFoundError("ffmpeg executable unavailable") from exc
+    try:
+        return str(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception as exc:
+        raise FileNotFoundError("imageio_ffmpeg executable unavailable") from exc
 
 
 def _requested_duration_s(time_window: dict[str, Any]) -> float | None:
@@ -424,6 +447,54 @@ def _read_frame_count_cv2(video_path: Path) -> int | None:
         return value if value > 0 else None
     finally:
         capture.release()
+
+
+def _read_frame_count_imageio_ffmpeg(video_path: Path) -> int | None:
+    try:
+        import imageio_ffmpeg  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    try:
+        frames, _duration = imageio_ffmpeg.count_frames_and_secs(str(video_path))
+    except Exception:
+        return None
+    value = _int_or_none(frames)
+    return value if value is not None and value > 0 else None
+
+
+def _read_frame_count_ffmpeg_decode(video_path: Path) -> int | None:
+    try:
+        ffmpeg_exe = _ffmpeg_executable()
+    except FileNotFoundError:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg_exe,
+                "-hide_banner",
+                "-nostdin",
+                "-i",
+                str(video_path),
+                "-map",
+                "0:v:0",
+                "-f",
+                "null",
+                "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    stderr = completed.stderr or ""
+    matches = re.findall(r"frame=\s*(\d+)", stderr)
+    if not matches:
+        return None
+    value = _int_or_none(matches[-1])
+    return value if value is not None and value > 0 else None
 
 
 def _find_required(input_dir: Path, names: tuple[str, ...], label: str) -> Path:

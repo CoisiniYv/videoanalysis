@@ -748,9 +748,19 @@ function activeRoleCounts(lines) {
     behavior_event: 0
   };
   for (const line of lines || []) {
-    const role = lineRole(line);
-    if (counts[role] !== undefined) {
-      counts[role] += 1;
+    const objects = objectsForLine(line);
+    if (objects.length) {
+      for (const obj of objects) {
+        const role = lineRole({ ...line, ...obj });
+        if (counts[role] !== undefined) {
+          counts[role] += 1;
+        }
+      }
+    } else {
+      const role = lineRole(line);
+      if (counts[role] !== undefined) {
+        counts[role] += 1;
+      }
     }
   }
   return counts;

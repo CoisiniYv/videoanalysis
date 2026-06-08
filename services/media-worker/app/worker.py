@@ -26,8 +26,12 @@ from app.post_savant_evidence_bundle import (
     RAW_CLIP_FILE as C2_RAW_CLIP_FILE,
     SINK_METADATA_FILE as C2_SINK_METADATA_FILE,
     SUMMARY_FILE as C2_SUMMARY_FILE,
+    _copy_or_crop_video as _c2_copy_or_crop_video,
+    _select_time_domain_frames as _c2_select_time_domain_frames,
+    _write_jsonl as _c2_write_metadata_jsonl,
     build_post_savant_evidence_bundle,
     load_native_metadata,
+    read_decoded_video_frame_count,
 )
 from app.post_savant_metadata_annotation_builder import (
     PRODUCTION_TIMELINE_DOMAIN,
@@ -233,6 +237,13 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
 def _to_float(value: object) -> float | None:
     try:
         return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
 
@@ -1331,6 +1342,7 @@ def _event_for_frame_cache_sidecar(event_context: dict) -> dict:
     return {
         "id": event_context.get("event_id", ""),
         "event_id": event_context.get("event_id", ""),
+        "created_at": event_context.get("created_at"),
         "source_event_id": event_context.get("source_event_id", ""),
         "event_type": event_context.get("event_type", ""),
         "source_id": event_context.get("source_id", ""),
@@ -1373,11 +1385,32 @@ def _build_frame_cache_c2_summary(
     raw_clip_path: Path,
     sink_metadata_path: Path,
     event_context: dict,
+    time_window: dict | None = None,
+    video_crop: dict | None = None,
 ) -> dict:
     object_counts = _object_counts_from_sidecar_summary(sidecar_summary)
     frame_count = int(sidecar_summary.get("annotations_written") or sidecar_summary.get("rows_written") or 0)
     rows_total_input = int(sidecar_summary.get("rows_total_input") or sidecar_summary.get("annotations_input") or frame_count)
-    production_ready = bool(frame_count > 0 and sidecar_summary.get("embedding_vectors_in_output") in (None, 0) and sidecar_summary.get("image_bytes_in_output") in (None, 0))
+    production_ready_failures = list(
+        sidecar_summary.get("production_ready_failures")
+        or sidecar_summary.get("limitations")
+        or []
+    )
+    if (time_window or {}).get("time_domain_crop_failed") is True:
+        production_ready_failures.append("time_domain_crop_failed")
+    production_ready = bool(
+        frame_count > 0
+        and sidecar_summary.get("embedding_vectors_in_output") in (None, 0)
+        and sidecar_summary.get("image_bytes_in_output") in (None, 0)
+        and sidecar_summary.get("production_ready") is not False
+        and not production_ready_failures
+    )
+    time_window = time_window or {}
+    video_crop = video_crop or {
+        "method": "copy",
+        "crop_video_to_time_window": False,
+        "source_video_path": str(raw_clip_path),
+    }
     return {
         **sidecar_summary,
         "schema_version": "2.0-c2",
@@ -1410,15 +1443,11 @@ def _build_frame_cache_c2_summary(
         "sidecar_trimmed": False,
         "trim_occurred": False,
         "timeline_reconciliation_status": "metadata_time_aligned_sparse_sidecar",
-        "time_domain_crop_applied": False,
+        "time_domain_crop_applied": bool(time_window.get("time_domain_crop_applied")),
         "video_integrity_required": False,
         "video_integrity": None,
-        "video_crop": {
-            "method": "copy",
-            "crop_video_to_time_window": False,
-            "source_video_path": str(raw_clip_path),
-        },
-        "time_window": {},
+        "video_crop": video_crop,
+        "time_window": time_window,
         "fps": {
             "source_input_fps_estimate": _to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
             "metadata_fps_estimate": None,
@@ -1434,8 +1463,54 @@ def _build_frame_cache_c2_summary(
         "c2_3b_event_type": event_context.get("event_type", ""),
         "c2_3b_camera_id": event_context.get("camera_id", ""),
         "c2_3b_source_id": event_context.get("source_id", ""),
-        "limitations": list(sidecar_summary.get("production_ready_failures") or sidecar_summary.get("limitations") or []),
+        "limitations": production_ready_failures,
         "metadata_path_used": str(sink_metadata_path),
+    }
+
+
+def _c2_frame_cache_time_domain_window(
+    *,
+    event_context: dict,
+    replay_labels: dict,
+) -> dict:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    pre_seconds = _to_float(os.getenv("DEFAULT_PRE_SECONDS", "5")) or 5.0
+    post_seconds = _to_float(os.getenv("DEFAULT_POST_SECONDS", "5")) or 5.0
+    event_frame_pts = _to_int(
+        replay_labels.get("event_frame_pts")
+        or replay_labels.get("frame_pts")
+        or event_context.get("frame_pts")
+        or media.get("event_frame_pts")
+        or media.get("frame_pts")
+    )
+    requested_start_pts = _to_int(
+        replay_labels.get("requested_start_pts")
+        or media.get("requested_start_pts")
+    )
+    requested_end_pts = _to_int(
+        replay_labels.get("requested_end_pts")
+        or media.get("requested_end_pts")
+    )
+    if event_frame_pts is not None:
+        if requested_start_pts is None:
+            requested_start_pts = max(0, int(event_frame_pts - pre_seconds * 1_000_000_000))
+        if requested_end_pts is None:
+            requested_end_pts = int(event_frame_pts + post_seconds * 1_000_000_000)
+    return {
+        "requested_start_pts": requested_start_pts,
+        "requested_end_pts": requested_end_pts,
+        "event_frame_pts": event_frame_pts,
+        "pre_seconds": pre_seconds,
+        "post_seconds": post_seconds,
+        "expected_event_t_s": pre_seconds,
+        "requested_duration_s": (
+            round((requested_end_pts - requested_start_pts) / 1_000_000_000.0, 9)
+            if requested_start_pts is not None and requested_end_pts is not None
+            else None
+        ),
     }
 
 
@@ -1593,21 +1668,90 @@ def _finalize_c2_post_savant_evidence_bundle(
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_clip_path = output_dir / C2_RAW_CLIP_FILE
     sink_metadata_path = output_dir / C2_SINK_METADATA_FILE
-    if not raw_clip_path.exists():
-        shutil.copy2(source_video, raw_clip_path)
-    shutil.copy2(metadata_file, sink_metadata_path)
-    sink_metadata_rows = load_native_metadata(sink_metadata_path)
-    decoded_frame_count = len(
-        [
-            row
-            for row in sink_metadata_rows
-            if isinstance(row, dict) and _is_sink_video_frame(row)
-        ]
+    frame_cache_window = _c2_frame_cache_time_domain_window(
+        event_context=event_context,
+        replay_labels=replay_labels,
     )
+    source_metadata_rows = [
+        row
+        for row in load_native_metadata(Path(metadata_file))
+        if isinstance(row, dict) and _is_sink_video_frame(row)
+    ]
+    frame_cache_time_window = {
+        "time_domain_crop_applied": False,
+        **frame_cache_window,
+    }
+    frame_cache_video_crop: dict = {
+        "method": "copy",
+        "crop_video_to_time_window": False,
+        "source_video_path": source_video,
+    }
     metadata_has_objects = any(
         bool(row.get("objects"))
-        for row in sink_metadata_rows
+        for row in source_metadata_rows
         if isinstance(row, dict) and _is_sink_video_frame(row)
+    )
+    if (
+        metadata_has_objects
+        and _env_bool("C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
+        and frame_cache_window.get("requested_start_pts") is not None
+        and frame_cache_window.get("requested_end_pts") is not None
+    ):
+        frame_cache_time_window = {
+            **frame_cache_window,
+            "time_domain_crop_applied": True,
+        }
+    elif (
+        _env_bool("C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
+        and frame_cache_window.get("requested_start_pts") is not None
+        and frame_cache_window.get("requested_end_pts") is not None
+    ):
+        try:
+            selected_rows, selected_time_window = _c2_select_time_domain_frames(
+                source_metadata_rows,
+                requested_start_pts=_to_int(frame_cache_window.get("requested_start_pts")),
+                requested_end_pts=_to_int(frame_cache_window.get("requested_end_pts")),
+                event_frame_pts=_to_int(frame_cache_window.get("event_frame_pts")),
+                enabled=True,
+            )
+            frame_cache_time_window = {**frame_cache_window, **selected_time_window}
+            frame_cache_video_crop = _c2_copy_or_crop_video(
+                source_video_path=Path(source_video),
+                output_video_path=raw_clip_path,
+                source_frames=source_metadata_rows,
+                time_window=frame_cache_time_window,
+                copy_video=True,
+                crop_video_to_time_window=True,
+            )
+            _c2_write_metadata_jsonl(sink_metadata_path, selected_rows)
+        except Exception as exc:
+            logger.warning(
+                "c2_frame_cache_time_domain_crop_failed event_id=%s error=%s",
+                event_id,
+                exc,
+            )
+            frame_cache_time_window = {
+                **frame_cache_time_window,
+                "time_domain_crop_applied": False,
+                "time_domain_crop_failed": True,
+                "time_domain_crop_error": f"{type(exc).__name__}:{exc}",
+            }
+            if not raw_clip_path.exists():
+                shutil.copy2(source_video, raw_clip_path)
+            shutil.copy2(metadata_file, sink_metadata_path)
+    else:
+        if not raw_clip_path.exists():
+            shutil.copy2(source_video, raw_clip_path)
+        shutil.copy2(metadata_file, sink_metadata_path)
+    sink_metadata_rows = (
+        []
+        if metadata_has_objects
+        else load_native_metadata(sink_metadata_path)
+    )
+    decoded_frame_count = (
+        None
+        if metadata_has_objects
+        else read_decoded_video_frame_count(Path(raw_clip_path))
     )
 
     if metadata_has_objects:
@@ -1621,7 +1765,15 @@ def _finalize_c2_post_savant_evidence_bundle(
             min_fps=os.getenv("MIN_FPS"),
             fps_gating_applied=_c2_post_savant_fps_gating_applied(),
             source_input_fps_estimate=_to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
-            decoded_frame_count_reader=lambda _path: decoded_frame_count,
+            requested_start_pts=_to_int(frame_cache_time_window.get("requested_start_pts")),
+            requested_end_pts=_to_int(frame_cache_time_window.get("requested_end_pts")),
+            event_frame_pts=_to_int(frame_cache_time_window.get("event_frame_pts")),
+            time_domain_crop_applied=bool(
+                frame_cache_time_window.get("time_domain_crop_applied")
+            ),
+            crop_video_to_time_window=bool(
+                frame_cache_time_window.get("time_domain_crop_applied")
+            ),
             event_metadata={
                 "replay_source_kind": replay_labels.get("replay_source_kind"),
                 "c2_3b_record_request_id": replay_labels.get("request_id"),
@@ -1641,7 +1793,9 @@ def _finalize_c2_post_savant_evidence_bundle(
                 "replay_anchor_pts": replay_labels.get("replay_anchor_pts"),
                 "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
                 "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
-                "time_domain_crop_applied": False,
+                "time_domain_crop_applied": bool(
+                    frame_cache_time_window.get("time_domain_crop_applied")
+                ),
                 "annotation_source_policy": replay_labels.get("annotation_source_policy"),
                 "allow_db_annotation_fallback": (
                     replay_labels.get("allow_db_annotation_fallback") == "true"
@@ -1675,7 +1829,8 @@ def _finalize_c2_post_savant_evidence_bundle(
             final_clip_context={
                 "raw_clip_path": str(raw_clip_path),
                 "sink_metadata_path": str(sink_metadata_path),
-                "raw_clip_duration": None,
+                "raw_clip_duration": _probe_video_duration_seconds(str(raw_clip_path)),
+                "expected_event_t_s": frame_cache_time_window.get("expected_event_t_s"),
                 "event_projected_t_s": None,
                 "event_pts_inside_clip": None,
                 "event_position_ratio": None,
@@ -1684,10 +1839,12 @@ def _finalize_c2_post_savant_evidence_bundle(
         summary = _build_frame_cache_c2_summary(
             sidecar_summary=sidecar_summary,
             sink_metadata_rows=sink_metadata_rows,
-            decoded_video_frame_count=decoded_frame_count,
+            decoded_video_frame_count=int(decoded_frame_count or 0),
             raw_clip_path=raw_clip_path,
             sink_metadata_path=sink_metadata_path,
             event_context=event_context,
+            time_window=frame_cache_time_window,
+            video_crop=frame_cache_video_crop,
         )
         summary_path = output_dir / C2_SUMMARY_FILE
         sidecar_summary_path = output_dir / SIDECAR_SUMMARY_FILE
@@ -1844,13 +2001,29 @@ def _process_sink_output(
             if not evidence_output_dir:
                 logger.error("c2_post_savant_finalizer enabled but no evidence_output_dir")
                 continue
-            bundle = _finalize_c2_post_savant_evidence_bundle(
-                pg_conn,
-                event_id=event_id,
-                meta_dir=meta_dir,
-                metadata_file=metadata_file,
-                evidence_output_dir=evidence_output_dir,
-            )
+            try:
+                bundle = _finalize_c2_post_savant_evidence_bundle(
+                    pg_conn,
+                    event_id=event_id,
+                    meta_dir=meta_dir,
+                    metadata_file=metadata_file,
+                    evidence_output_dir=evidence_output_dir,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "c2_post_savant_finalizer_failed event_id=%s meta_dir=%s",
+                    event_id,
+                    meta_dir,
+                )
+                _mark_media_finalize_failed(
+                    pg_conn,
+                    event_id=event_id,
+                    sink_path=meta_dir,
+                    error_message=f"{type(exc).__name__}:{exc}",
+                )
+                if meta_dir:
+                    processed_dirs.add(meta_dir)
+                continue
             clip_path = bundle["raw_clip"]
             clip_status = bundle.get("clip_status", "generated_unverified")
         elif p1_raw_clip_finalizer_enabled:
@@ -2080,6 +2253,47 @@ def _process_sink_output(
             logger.exception("failed to update event_id=%s", event_id)
 
     return updated
+
+
+def _mark_media_finalize_failed(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    sink_path: str,
+    error_message: str,
+) -> None:
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET media_status = %(clip_status_text)s,
+                    payload = jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                COALESCE(payload, '{}'::jsonb),
+                                '{media,clip_status}',
+                                %(clip_status)s::jsonb
+                            ),
+                            '{media,sink_output_path}',
+                            %(sink_path)s::jsonb
+                        ),
+                        '{media,finalizer_error}',
+                        %(error_message)s::jsonb
+                    ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "clip_status_text": BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
+                    "clip_status": json.dumps(BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED),
+                    "sink_path": json.dumps(sink_path),
+                    "error_message": json.dumps(error_message),
+                },
+            )
+    except Exception:
+        logger.exception("failed to mark media finalizer failure event_id=%s", event_id)
 
 
 def _promote_generated_clips_to_ready(pg_conn: psycopg.Connection) -> int:

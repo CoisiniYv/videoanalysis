@@ -167,6 +167,12 @@ def write_frame_cache_identity_sidecar(
             identity_annotations,
             metadata_path=metadata_path,
         )
+        window_summary = (
+            build_summary.get("window_summary")
+            if isinstance(build_summary.get("window_summary"), dict)
+            else {}
+        )
+        clip_timeline_summary.update(window_summary)
         aligned_annotations = clip_timeline_summary.pop("_annotations")
         freshness_summary = _empty_freshness_guard_summary(
             annotations=aligned_annotations,
@@ -186,13 +192,22 @@ def write_frame_cache_identity_sidecar(
             identity_annotations, dropped_annotations, filter_summary = filter_production_sidecar_rows(
                 aligned_annotations
             )
+            identity_annotations = collapse_annotations_to_frame_rows(
+                identity_annotations,
+                metadata_path=metadata_path,
+            )
+            filter_summary["rows_written"] = len(identity_annotations)
+            filter_summary["rows_non_displayable"] = 0
         else:
-            identity_annotations = aligned_annotations
+            identity_annotations = collapse_annotations_to_frame_rows(
+                aligned_annotations,
+                metadata_path=metadata_path,
+            )
             dropped_annotations = []
             filter_summary = {
                 "rows_total_input": len(aligned_annotations),
-                "rows_written": len(aligned_annotations),
-                "rows_non_displayable": sum(1 for row in aligned_annotations if row.get("displayable") is False),
+                "rows_written": len(identity_annotations),
+                "rows_non_displayable": 0,
                 "rows_dropped_total": 0,
                 "rows_dropped_out_of_window": 0,
                 "rows_dropped_missing": 0,
@@ -306,6 +321,11 @@ def build_sidecar_identity_annotations(
         anchor_frame_pts=anchor.get("frame_pts"),
         anchor_frame_uuid=anchor.get("frame_uuid"),
         anchor_source_observation_id=source_observation_id,
+        anchor_event_ts_ms=(
+            _event_wall_clock_epoch_ms(event)
+            or anchor.get("event_ts_ms")
+            or anchor.get("timestamp_ms")
+        ),
         pre_seconds=pre_seconds,
         post_seconds=post_seconds,
         max_frames=max_frames,
@@ -355,6 +375,156 @@ def _align_sidecar_annotations_to_metadata(
         "_annotations": aligned,
         "metadata_path": str(path),
     }
+
+
+def _frame_rows_from_metadata(
+    metadata_path: str | None,
+) -> dict[tuple[str, Any], dict[str, Any]]:
+    path = Path(str(metadata_path or ""))
+    if not metadata_path or not path.is_file():
+        return {}
+    rows: dict[tuple[str, Any], dict[str, Any]] = {}
+    for index, frame in enumerate(load_metadata_rows(path)):
+        if not isinstance(frame, dict):
+            continue
+        frame_pts = _int_or_none(frame.get("pts") or frame.get("frame_pts"))
+        frame_uuid = _text_or_none(frame.get("frame_uuid") or frame.get("uuid")) or ""
+        frame_index = (
+            _int_or_none(frame.get("frame_num"))
+            if _int_or_none(frame.get("frame_num")) is not None
+            else index
+        )
+        base = {
+            "schema_version": SCHEMA_VERSION,
+            "source": "frame_annotation_cache",
+            "source_id": None,
+            "camera_id": None,
+            "clip_frame_index": frame_index,
+            "t_ms": None,
+            "t_s": None,
+            "frame_pts": frame_pts,
+            "frame_uuid": frame_uuid or None,
+            "matched_metadata_pts": frame_pts,
+            "metadata_source_id": _text_or_none(frame.get("source_id")),
+            "clip_timeline_match": None,
+            "clip_timeline_delta_ns": None,
+            "displayable": True,
+            "objects": [],
+        }
+        if frame_pts is not None and ("pts", frame_pts) not in rows:
+            rows[("pts", frame_pts)] = copy.deepcopy(base)
+        if frame_uuid and ("uuid", frame_uuid) not in rows:
+            rows[("uuid", frame_uuid)] = copy.deepcopy(base)
+        if frame_index is not None and ("index", frame_index) not in rows:
+            rows[("index", frame_index)] = copy.deepcopy(base)
+    return rows
+
+
+def _metadata_frame_group_key(
+    row: dict[str, Any],
+    frame_rows: dict[tuple[str, Any], dict[str, Any]],
+) -> tuple[str, Any]:
+    matched_pts = _int_or_none(row.get("matched_metadata_pts"))
+    if matched_pts is not None:
+        return ("pts", matched_pts)
+    frame_uuid = _text_or_none(row.get("frame_uuid"))
+    if frame_uuid and ("uuid", frame_uuid) in frame_rows:
+        return ("uuid", frame_uuid)
+    frame_index = _int_or_none(row.get("clip_frame_index"))
+    if frame_index is not None and ("index", frame_index) in frame_rows:
+        return ("index", frame_index)
+    frame_pts = _int_or_none(row.get("frame_pts"))
+    if frame_pts is not None and ("pts", frame_pts) in frame_rows:
+        return ("pts", frame_pts)
+    return ("source", f"{frame_uuid or ''}:{frame_pts if frame_pts is not None else ''}:{frame_index if frame_index is not None else ''}")
+
+
+def collapse_annotations_to_frame_rows(
+    annotations: list[dict[str, Any]],
+    *,
+    metadata_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Collapse object-level annotations into one JSONL row per final metadata frame."""
+
+    frame_rows = _frame_rows_from_metadata(metadata_path)
+    grouped: dict[tuple[str, Any], dict[str, Any]] = {}
+    order: dict[tuple[str, Any], int] = {}
+    for index, row in enumerate(copy.deepcopy(annotations)):
+        if not isinstance(row, dict):
+            continue
+        if row.get("displayable") is False:
+            continue
+        key = _metadata_frame_group_key(row, frame_rows)
+        frame = copy.deepcopy(grouped.get(key) or frame_rows.get(key) or {})
+        if not frame:
+            frame = {
+                "schema_version": row.get("schema_version") or SCHEMA_VERSION,
+                "source": row.get("source"),
+                "source_id": row.get("source_id"),
+                "camera_id": row.get("camera_id"),
+                "clip_frame_index": _int_or_none(row.get("clip_frame_index")),
+                "t_ms": _int_or_none(row.get("t_ms")),
+                "t_s": _float_or_none(row.get("t_s")),
+                "frame_pts": _int_or_none(row.get("frame_pts")),
+                "frame_uuid": _text_or_none(row.get("frame_uuid")),
+                "matched_metadata_pts": _int_or_none(row.get("matched_metadata_pts")),
+                "clip_timeline_match": row.get("clip_timeline_match"),
+                "clip_timeline_delta_ns": _int_or_none(row.get("clip_timeline_delta_ns")),
+                "displayable": True,
+                "objects": [],
+            }
+        frame["source_id"] = frame.get("source_id") or row.get("source_id")
+        frame["camera_id"] = frame.get("camera_id") or row.get("camera_id")
+        frame["t_ms"] = frame.get("t_ms") if frame.get("t_ms") is not None else _int_or_none(row.get("t_ms"))
+        frame["t_s"] = frame.get("t_s") if frame.get("t_s") is not None else _float_or_none(row.get("t_s"))
+        frame["clip_timeline_match"] = frame.get("clip_timeline_match") or row.get("clip_timeline_match")
+        frame["clip_timeline_delta_ns"] = (
+            frame.get("clip_timeline_delta_ns")
+            if frame.get("clip_timeline_delta_ns") is not None
+            else _int_or_none(row.get("clip_timeline_delta_ns"))
+        )
+        frame.setdefault("objects", [])
+        obj = copy.deepcopy(row)
+        source_frame_pts = _int_or_none(row.get("frame_pts"))
+        source_frame_uuid = _text_or_none(row.get("frame_uuid"))
+        if source_frame_pts is not None and source_frame_pts != _int_or_none(frame.get("frame_pts")):
+            obj.setdefault("source_frame_pts", source_frame_pts)
+        if source_frame_uuid and source_frame_uuid != _text_or_none(frame.get("frame_uuid")):
+            obj.setdefault("source_frame_uuid", source_frame_uuid)
+        for key_to_remove in (
+            "schema_version",
+            "source",
+            "source_id",
+            "camera_id",
+            "clip_frame_index",
+            "t_ms",
+            "t_s",
+            "frame_pts",
+            "frame_uuid",
+            "matched_metadata_pts",
+            "clip_timeline_match",
+            "clip_timeline_delta_ns",
+            "displayable",
+        ):
+            obj.pop(key_to_remove, None)
+        frame["objects"].append(_sanitize_value(obj))
+        grouped[key] = frame
+        order.setdefault(key, index)
+
+    def sort_key(item: tuple[tuple[str, Any], dict[str, Any]]) -> tuple[int, int, str]:
+        key, frame = item
+        frame_index = _int_or_none(frame.get("clip_frame_index"))
+        return (
+            frame_index if frame_index is not None else order.get(key, 1_000_000),
+            _int_or_none(frame.get("matched_metadata_pts") or frame.get("frame_pts")) or 0,
+            str(frame.get("frame_uuid") or ""),
+        )
+
+    return [
+        _sanitize_value(frame)
+        for _key, frame in sorted(grouped.items(), key=sort_key)
+        if frame.get("objects")
+    ]
 
 
 def _read_frame_annotations(
@@ -514,7 +684,7 @@ def _count_identity_annotations(annotations: list[dict[str, Any]]) -> dict[str, 
     known = 0
     unknown = 0
     trigger = False
-    for row in annotations:
+    for row in _iter_annotation_objects(annotations):
         if row.get("object_type") != "face":
             continue
         label = row.get("label") if isinstance(row.get("label"), dict) else {}
@@ -595,11 +765,24 @@ def _production_sidecar_contract_summary(
     vector_count = _count_forbidden(annotations, FORBIDDEN_VECTOR_FIELDS)
     image_count = _count_forbidden(annotations, FORBIDDEN_IMAGE_FIELDS)
 
-    min_duration = _float_config(config, "canonical_min_duration_seconds", 9.25)
-    max_duration = _float_config(config, "canonical_max_duration_seconds", 10.75)
-    min_event_t = _float_config(config, "canonical_event_min_t_s", 4.0)
-    max_event_t = _float_config(config, "canonical_event_max_t_s", 6.5)
-    max_event_ratio = _float_config(config, "canonical_event_max_position_ratio", 0.70)
+    min_duration = _float_config(config, "canonical_min_duration_seconds", 8.0)
+    max_duration = _float_config(config, "canonical_max_duration_seconds", 12.5)
+    expected_event_t = _float_config(config, "canonical_expected_event_t_s", 5.0)
+    event_center_tolerance = _float_config(
+        config,
+        "canonical_event_center_tolerance_seconds",
+        0.5,
+    )
+    min_event_t = _float_config(
+        config,
+        "canonical_event_min_t_s",
+        expected_event_t - event_center_tolerance,
+    )
+    max_event_t = _float_config(
+        config,
+        "canonical_event_max_t_s",
+        expected_event_t + event_center_tolerance,
+    )
     require_event_centered = bool(config.get("require_event_centered", True))
 
     duration_ok = (
@@ -612,7 +795,6 @@ def _production_sidecar_contract_summary(
         and min_event_t <= float(event_projected) <= max_event_t
     )
     event_ratio = event_metrics["event_position_ratio"]
-    event_ratio_ok = event_ratio is not None and float(event_ratio) <= max_event_ratio
     metadata_path_matches = _path_matches_context(
         actual=metadata_path,
         final_clip_context=final_clip_context,
@@ -639,8 +821,6 @@ def _production_sidecar_contract_summary(
         failures.append("event_pts_outside_clip")
     if require_event_centered and not event_center_ok:
         failures.append("event_not_centered_in_clip")
-    if require_event_centered and not event_ratio_ok:
-        failures.append("event_position_ratio_too_late")
     if not timeline_aligned:
         failures.extend(written_contract.get("failures") or ["rows_not_fully_rebased_to_final_metadata"])
     if not metadata_path_matches or not raw_clip_path_matches:
@@ -671,7 +851,6 @@ def _production_sidecar_contract_summary(
         duration_ok
         and event_metrics["event_pts_inside_clip"] is True
         and (event_center_ok or not require_event_centered)
-        and (event_ratio_ok or not require_event_centered)
         and metadata_path_matches
         and raw_clip_path_matches
     )
@@ -707,6 +886,8 @@ def _production_sidecar_contract_summary(
         "event_projected_t_s": (
             round(float(event_projected), 6) if event_projected is not None else None
         ),
+        "expected_event_t_s": round(float(expected_event_t), 6),
+        "event_center_tolerance_seconds": round(float(event_center_tolerance), 6),
         "event_position_ratio": (
             round(float(event_ratio), 6) if event_ratio is not None else None
         ),
@@ -984,8 +1165,7 @@ def _production_written_rows_contract(rows: list[dict[str, Any]]) -> dict[str, A
             invalid_match += 1
         if "t_ms" not in row and "t_s" not in row:
             missing_timing += 1
-        if row.get("object_type") == "person" and row.get("annotation_role") == "person_context":
-            person_context_rows += 1
+        person_context_rows += _person_context_count(row)
     if non_displayable:
         failures.append("non_displayable_rows_in_production_sidecar")
     if invalid_match:
@@ -1062,7 +1242,7 @@ def _find_trigger_face_row(
     *,
     source_observation_id: str,
 ) -> dict[str, Any] | None:
-    for row in annotations:
+    for row in _iter_annotation_objects(annotations):
         if not isinstance(row, dict):
             continue
         if row.get("object_type") != "face":
@@ -1210,7 +1390,7 @@ def _identity_scope_status(
 ) -> str:
     known_rows = []
     non_trigger_known_rows = []
-    for row in annotations:
+    for row in _iter_annotation_objects(annotations):
         if not isinstance(row, dict):
             continue
         label = row.get("label") if isinstance(row.get("label"), dict) else {}
@@ -1229,6 +1409,53 @@ def _identity_scope_status(
 def _event_requires_identity_trigger(event: dict[str, Any]) -> bool:
     event_type = str(event.get("event_type") or "").strip()
     return event_type in {"watchlist_hit", "live_search_hit"}
+
+
+def _iter_annotation_objects(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        objects = row.get("objects")
+        if isinstance(objects, list):
+            for obj in objects:
+                if isinstance(obj, dict):
+                    merged = {
+                        "schema_version": row.get("schema_version"),
+                        "source": row.get("source"),
+                        "source_id": row.get("source_id"),
+                        "camera_id": row.get("camera_id"),
+                        "clip_frame_index": row.get("clip_frame_index"),
+                        "t_ms": row.get("t_ms"),
+                        "t_s": row.get("t_s"),
+                        "frame_pts": row.get("frame_pts"),
+                        "frame_uuid": row.get("frame_uuid"),
+                        "matched_metadata_pts": row.get("matched_metadata_pts"),
+                        "clip_timeline_match": row.get("clip_timeline_match"),
+                        "clip_timeline_delta_ns": row.get("clip_timeline_delta_ns"),
+                        "displayable": row.get("displayable"),
+                    }
+                    merged.update(obj)
+                    output.append(merged)
+            continue
+        output.append(row)
+    return output
+
+
+def _person_context_count(row: dict[str, Any]) -> int:
+    objects = row.get("objects")
+    if isinstance(objects, list):
+        return sum(
+            1
+            for obj in objects
+            if isinstance(obj, dict)
+            and obj.get("object_type") == "person"
+            and obj.get("annotation_role") == "person_context"
+        )
+    return int(
+        row.get("object_type") == "person"
+        and row.get("annotation_role") == "person_context"
+    )
 
 
 def _path_matches_context(
@@ -1624,6 +1851,12 @@ def _decode_maybe_text(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return _decode_text(value)
 
 
 def _int_or_none(value: Any) -> int | None:

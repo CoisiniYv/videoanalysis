@@ -518,6 +518,12 @@ def _clip_config(**overrides: Any):
         "replay_fps": 30,
         "replay_anchor_strategy": "request_keyframe",
         "allow_unbounded_keyframe_fallback": False,
+        "keyframe_lookup_retries": 0,
+        "keyframe_lookup_retry_sleep_s": 0.0,
+        "frame_annotation_stream": "security.frame_annotations",
+        "frame_annotation_anchor_lookback_count": 100,
+        "frame_annotation_anchor_wall_clock_slack_s": 1.0,
+        "frame_annotation_anchor_pts_tolerance_s": 15.0,
     }
     values.update(overrides)
     return Config(**values)
@@ -603,8 +609,13 @@ def test_clip_worker_run_once_mode_can_enforce_max_jobs_cap() -> None:
 
 
 class _ClipFakeRedis:
-    def __init__(self, request: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        request: dict[str, Any],
+        frame_annotations: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.request = request
+        self.frame_annotations = frame_annotations or []
         self.acked: list[str] = []
         self.reads = 0
 
@@ -622,10 +633,24 @@ class _ClipFakeRedis:
         self.acked.append(msg_id.decode("utf-8") if isinstance(msg_id, bytes) else msg_id)
         return 1
 
+    def xrevrange(self, _stream, max="+", min="-", count=100):
+        _ = (max, min)
+        entries = []
+        for index, message in enumerate(reversed(self.frame_annotations[:count])):
+            stream_id = message.get("_stream_id", f"{index + 1}-0")
+            entries.append(
+                (
+                    str(stream_id).encode("utf-8"),
+                    {b"data": json.dumps(message).encode("utf-8")},
+                )
+            )
+        return entries
+
 
 class _ClipFakeReplay:
     instances: list["_ClipFakeReplay"] = []
     allow_find_keyframe = False
+    keyframe_uuid = "lookup-kf-1"
 
     def __init__(self, _url: str) -> None:
         self.jobs: list[dict[str, Any]] = []
@@ -637,7 +662,7 @@ class _ClipFakeReplay:
         if not self.allow_find_keyframe:
             raise AssertionError("keyframe lookup should be bypassed")
         self.find_keyframe_calls.append({"args": args, "kwargs": dict(_kwargs)})
-        return "lookup-kf-1"
+        return self.keyframe_uuid
 
     def create_job(self, **kwargs):
         self.jobs.append(kwargs)
@@ -703,6 +728,7 @@ def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -
         "source_id": "c1e_rtsp_replay",
         "camera_id": "cam_c1e_rtsp_replay",
         "event_ts_ms": 1_780_000_010_000,
+        "frame_uuid": "019ea722-e76e-74a3-b448-be6876fa4ee7",
         "strategy": "savant_replay",
         "keyframe_uuid": "event-kf-should-be-ignored",
         "previous_keyframe_uuid": "prev-kf-should-be-ignored",
@@ -718,6 +744,7 @@ def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -
 
     _ClipFakeReplay.instances.clear()
     _ClipFakeReplay.allow_find_keyframe = True
+    _ClipFakeReplay.keyframe_uuid = "019ea722-e9b6-79f1-b21c-f910aede49ad"
     worker.shutdown_requested = False
     monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
     monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
@@ -736,17 +763,124 @@ def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -
         )
     finally:
         _ClipFakeReplay.allow_find_keyframe = False
+        _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
 
     replay = _ClipFakeReplay.instances[-1]
     assert replay.find_keyframe_calls == [
         {
-            "args": ("c1e_rtsp_replay", 1_780_000_010_000),
-            "kwargs": {"window_s": 15, "selection": "at_or_after"},
+            "args": ("c1e_rtsp_replay", 1_780_920_548_086),
+            "kwargs": {"window_s": 10, "selection": "strict_at_or_after"},
         }
     ]
-    assert replay.jobs[0]["keyframe_uuid"] == "lookup-kf-1"
-    assert replay.jobs[0]["offset_seconds_override"] is None
+    assert replay.jobs[0]["keyframe_uuid"] == "019ea722-e9b6-79f1-b21c-f910aede49ad"
+    assert replay.jobs[0]["offset_seconds_override"] == 5.584
+    assert replay.jobs[0]["duration_seconds_override"] == 10.0
     assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_event_anchor_strategy_prefers_frame_annotation_pts_anchor(monkeypatch) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-pts",
+        "event_id": "00000000-0000-0000-0000-000000000003",
+        "source_event_id": "evt-pts",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "event-frame",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "strategy": "savant_replay",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "anchor-before-target",
+                "frame_pts": 14_900_000_000,
+                "_stream_id": "1780000015000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "stale-loop-anchor",
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780000000000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "future-loop-anchor",
+                "frame_pts": 73_000_000_000,
+                "_stream_id": "1780000015000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "anchor-at-post-window",
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780000015000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "other",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "wrong-source",
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780000015000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = False
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=0,
+            per_camera_cooldown_seconds=0,
+            replay_anchor_strategy="event_keyframe",
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls == []
+    assert replay.jobs[0]["keyframe_uuid"] == "anchor-at-post-window"
+    assert replay.jobs[0]["offset_seconds_override"] == 10.0
+    assert replay.jobs[0]["duration_seconds_override"] == 10.0
+    labels = replay.jobs[0]["labels"]
+    assert labels["replay_anchor_pts"] == "15000000000"
+    assert labels["replay_anchor_frame_uuid"] == "anchor-at-post-window"
+    assert labels["replay_anchor_selection_method"] == "frame_cache_pts_at_or_after"
+    assert labels["requested_start_pts"] == "5000000000"
+    assert labels["requested_end_pts"] == "15000000000"
+    assert labels["replay_offset_seconds"] == "10.000000"
+    assert labels["replay_duration_seconds"] == "10.000000"
     assert updates[-1]["status"] == "replay_job_created"
 
 
@@ -757,7 +891,7 @@ def test_c1i1f_config_and_migration_contract() -> None:
     doctor = DOCTOR.read_text(encoding="utf-8")
 
     assert "PERSON_OBSERVATION_EXPORT_ENABLED=true" in env
-    assert "PERSON_OBSERVATION_MIN_INTERVAL_MS=1000" in env
+    assert "PERSON_OBSERVATION_MIN_INTERVAL_MS=333" in env
     assert "PERSON_OBSERVATION_STREAM=security.person_observations" in env
     assert "CLIP_WORKER_RUN_ONCE=false" in env
     assert "PERSON_OBSERVATION_CONSUMER_ENABLED" in compose

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+from datetime import datetime, timezone
 from statistics import median
 from typing import Any
 
@@ -161,9 +162,11 @@ def select_frame_annotation_event_window(
     anchor_frame_pts: int | None,
     anchor_frame_uuid: str | None,
     anchor_source_observation_id: str | None,
+    anchor_event_ts_ms: int | None = None,
     pre_seconds: float = 5.0,
     post_seconds: float = 5.0,
     max_frames: int = 300,
+    wall_clock_slack_seconds: float = 5.0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select a bounded event-centered window from frame annotation messages."""
 
@@ -176,6 +179,14 @@ def select_frame_annotation_event_window(
         for message in copied
         if message.get("source_id") == source_id and message.get("camera_id") == camera_id
     ]
+    source_camera_candidates = len(candidates)
+    candidates, wall_clock_summary = _filter_by_event_wall_clock(
+        candidates,
+        anchor_event_ts_ms=anchor_event_ts_ms,
+        pre_seconds=pre_seconds,
+        post_seconds=post_seconds,
+        slack_seconds=wall_clock_slack_seconds,
+    )
     candidates.sort(key=_message_sort_key)
 
     median_pts_delta = _median_delta(
@@ -241,13 +252,60 @@ def select_frame_annotation_event_window(
         "post_seconds": float(post_seconds),
         "window_messages": len(window),
         "candidate_messages_after_source_camera_filter": len(candidates),
+        "source_camera_candidate_messages": source_camera_candidates,
         "max_frames": int(max_frames),
         "window_bounded": window_bounded and len(window) <= max_frames,
         "window_frame_count_method": window_frame_count_method,
         "missing_reason": missing_reason,
         "returned_whole_lookback": len(window) == len(candidates) and len(candidates) > max_frames,
+        **wall_clock_summary,
     }
     return window, summary
+
+
+def _filter_by_event_wall_clock(
+    messages: list[dict[str, Any]],
+    *,
+    anchor_event_ts_ms: int | None,
+    pre_seconds: float,
+    post_seconds: float,
+    slack_seconds: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    event_epoch = _epoch_ms_or_none(anchor_event_ts_ms)
+    if event_epoch is None:
+        return messages, {
+            "wall_clock_filter_enabled": False,
+            "wall_clock_filter_reason": "missing_anchor_event_ts_ms",
+            "wall_clock_filter_start_epoch_ms": None,
+            "wall_clock_filter_end_epoch_ms": None,
+            "wall_clock_filter_input_messages": len(messages),
+            "wall_clock_filter_output_messages": len(messages),
+            "wall_clock_filter_rejected_messages": 0,
+        }
+    lower = int(round(event_epoch - (float(pre_seconds) + float(slack_seconds)) * 1000.0))
+    upper = int(round(event_epoch + (float(post_seconds) + float(slack_seconds)) * 1000.0))
+    filtered = []
+    rejected = 0
+    missing = 0
+    for message in messages:
+        message_epoch = _message_wall_clock_epoch_ms(message)
+        if message_epoch is None:
+            missing += 1
+            continue
+        if lower <= message_epoch <= upper:
+            filtered.append(message)
+        else:
+            rejected += 1
+    return filtered, {
+        "wall_clock_filter_enabled": True,
+        "wall_clock_filter_reason": "event_ts_ms",
+        "wall_clock_filter_start_epoch_ms": lower,
+        "wall_clock_filter_end_epoch_ms": upper,
+        "wall_clock_filter_input_messages": len(messages),
+        "wall_clock_filter_output_messages": len(filtered),
+        "wall_clock_filter_rejected_messages": rejected,
+        "wall_clock_filter_missing_timestamp_messages": missing,
+    }
 
 
 def _find_anchor_index(
@@ -355,6 +413,42 @@ def _message_sort_key(message: dict[str, Any]) -> tuple[int, int, int, str]:
     ts_value = int(timestamp_ms) if isinstance(timestamp_ms, int) else 0
     stream_order = int(message.get("_stream_order")) if isinstance(message.get("_stream_order"), int) else 0
     return pts_missing, pts_value, ts_value, f"{stream_order:012d}:{message.get('_stream_id') or ''}"
+
+
+def _message_wall_clock_epoch_ms(message: dict[str, Any]) -> int | None:
+    for key in ("created_at", "frame_annotation_created_at", "redis_created_at"):
+        value = _epoch_ms_or_none(message.get(key))
+        if value is not None:
+            return value
+    stream_id = message.get("_stream_id")
+    if isinstance(stream_id, str) and "-" in stream_id:
+        return _epoch_ms_or_none(stream_id.split("-", 1)[0])
+    return None
+
+
+def _epoch_ms_or_none(value: Any) -> int | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return int(round(dt.timestamp() * 1000.0))
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric <= 0:
+            return None
+        return int(round(numeric if numeric > 10_000_000_000 else numeric * 1000.0))
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return _epoch_ms_or_none(int(text))
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(round(dt.timestamp() * 1000.0))
 
 
 def _validate_window_args(*, pre_seconds: float, post_seconds: float, max_frames: int) -> None:

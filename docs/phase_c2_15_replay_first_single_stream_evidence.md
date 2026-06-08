@@ -1,6 +1,7 @@
 # C2.15 Replay-First Single-Stream Evidence Baseline
 
-Status: configuration baseline and contract before runtime apply.
+Status: replay-first runtime alignment baseline with PTS-window evidence
+contracts.
 
 ## Goal
 
@@ -68,37 +69,64 @@ overlays JSONL annotations over the raw clip at display time.
 
 ## Replay Timeline Alignment
 
-C2.15 follows Savant Replay semantics directly instead of post-processing the
-raw clip into an artificial event-centered file:
+C2.15 uses the Replay service as the media source and preserves the Savant event
+frame timeline instead of using a broad database window to visually bind
+annotations after the fact:
 
-- `keyframes/find` is bounded with Unix-second `from` / `to` values around the
-  event frame timestamp. The worker requests multiple candidates and chooses the
-  first UUIDv7 keyframe at or after the event when an event-keyframe strategy is
-  active.
-- Replay jobs anchor on that keyframe and use `offset.seconds =
-  DEFAULT_PRE_SECONDS`. Replay starts from a decodable keyframe selected by the
-  service, so the event is required to be inside the clip, not exactly centered
-  at 5 seconds.
-- `ts_sync=true` is kept for delivery pacing. Replay does not rewrite encoded
-  PTS/DTS, so raw video and annotations are aligned by the final
-  `video-file-sink` `sink_metadata.json` PTS/UUID timeline.
-- The video-file-sink receives final EOS from Replay with `CHUNK_SIZE=0`, so the
+- The event-worker preserves `frame_pts`, `event_frame_pts`,
+  `requested_start_pts`, and `requested_end_pts` in each post-Savant
+  `record_request`. For the default 5 second pre-event and 5 second post-event
+  policy, the requested PTS window is `event_frame_pts - 5s` through
+  `event_frame_pts + 5s`.
+- The clip-worker first looks in `security.frame_annotations` for a fresh
+  same-source, same-camera frame annotation whose `frame_pts` is at or after
+  `requested_end_pts`. This selects a Replay anchor that covers the complete
+  post-event window.
+- The selected frame annotation supplies the Replay `anchor_keyframe`
+  `frame_uuid`. `offset.seconds` becomes `pre_seconds + (anchor_pts -
+  event_frame_pts)`, so Replay starts at the requested pre-event boundary even
+  when the decodable anchor is later than the alarm frame.
+- The Replay `stop_condition` duration is the requested PTS window duration,
+  normally `pre_seconds + post_seconds`. It is not `offset + post_seconds`.
+  This prevents 14 second or longer raw clips when the anchor is several seconds
+  after the event.
+- `ts_sync=true` remains enabled. Replay/video-file-sink deliver the raw media
+  and native `sink_metadata.json`; media-worker then applies the same
+  `requested_start_pts` / `requested_end_pts` window to both video and metadata
+  before writing `raw_clip.mov` and
+  `annotations.frame_cache.identity.jsonl`.
+- Event alignment is evaluated by PTS/UUID, not by a fixed frame count. A
+  24 FPS RTSP clip may have a slightly variable decoded frame count; the hard
+  invariant is that the event frame appears at `pre_seconds` within the final
+  evidence clip and that raw video, sink metadata, sidecar JSONL, and the 8090
+  viewer report share the same per-camera PTS/UUID timeline.
+- If no fresh same-camera frame annotation anchor can cover the requested PTS
+  window within the configured tolerance, the clip-worker fails closed. It does
+  not use stale Redis rows, cross-loop frame UUIDs, broad DB window fallback, or
+  legacy visual binding.
+- The video-file-sink receives final EOS from Replay with `CHUNK_SIZE=0`, so
   media-worker only finalizes outputs after video, metadata, and duration probe
   are all available.
 
-The first runtime proof after this correction was:
+Runtime evidence after this correction:
 
-- Evidence bundle:
-  `/data/video-analytics/media/evidence/e61a566e-fb72-468f-8a06-ba532b3dfd07`
-- Raw clip: H.264 `raw_clip.mov`, `24000/1001`, duration `10.010013`, 240
-  decoded frames, zero ffmpeg decode errors.
-- Continuity diagnostic: 240 raw frames, zero raw PTS/DTS gaps, 240
-  `VideoFrame` metadata rows plus EOS, zero metadata PTS order anomalies, zero
-  sorted metadata gaps.
-- Sidecar alignment: `production_ready=true`, `canonical_clip=true`,
-  `event_pts_inside_clip=true`, `event_projected_t_s=8.800456`,
-  `event_center_required=false`, `freshness_guard_mode=metadata_pts`, and no
-  forbidden embedding/image/base64/crop payload in the sidecar/report surface.
+- Evidence bundle
+  `/data/video-analytics/media/evidence/3913caea-ffdc-4973-8eea-ec58e7b72e9e`
+  was finalized as `production_ready=true` with `time_domain_crop_applied=true`,
+  239 decoded video frames, 146 sidecar frames, requested PTS window
+  `13438566666..23438566666`, event PTS `18438566666`, requested duration
+  `10.0`, and actual metadata duration about `9.926588889`.
+- Evidence bundle
+  `/data/video-analytics/media/evidence/5f37ef8e-a00b-47bb-98b6-36a4ca892010`
+  was finalized as `production_ready=true` with `time_domain_crop_applied=true`,
+  239 decoded video frames, 158 sidecar frames, requested PTS window
+  `3972244444..13972244444`, event PTS `8972244444`, requested duration `10.0`,
+  and actual metadata duration about `9.926577778`.
+- A later event
+  `1a382d50-c4be-4a78-96b1-1083f3248959` had no fresh/near frame annotation
+  anchor for its requested post-event PTS target, so clip-worker did not create
+  a Replay job. This is the intended fail-closed behavior until live anchor
+  availability is improved.
 
 ## Face Matching Path
 
@@ -127,8 +155,14 @@ annotations in the 8090 viewer.
 
 ## Known Caveats
 
-- Existing running C2 containers may still be the older post-Savant ring path
-  until this compose is applied.
-- Runtime verification and generated evidence are separate follow-up steps.
-- Replay TTL, worker latency, and clip pre/post seconds must be reviewed again
+- This step proves the one-camera replay-first evidence alignment path, not the
+  final two-T4 / 60-stream sizing target.
+- The current strict anchor policy may fail to create a Replay job when Redis
+  does not yet contain a fresh same-camera frame annotation near
+  `requested_end_pts`. That is safer than generating a playable but misbound
+  clip.
+- Existing generated bundles remain runtime artifacts under
+  `/data/video-analytics/media/evidence`; `/data/video-analytics` is not cleaned
+  by this work.
+- Replay TTL, worker latency, and clip pre/post seconds must be tuned again
   before multi-camera tests.

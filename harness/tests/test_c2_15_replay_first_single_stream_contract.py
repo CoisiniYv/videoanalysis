@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import yaml
@@ -15,6 +16,7 @@ SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.c1e_replay.yml"
 DOC = ROOT / "docs" / "phase_c2_15_replay_first_single_stream_evidence.md"
 FIXED_RTSP = "rtsp://10.37.57.112:8554/live/1080movie"
+CLIP_WORKER_ROOT = ROOT / "services" / "clip-worker"
 
 
 def _text(path: Path) -> str:
@@ -27,6 +29,16 @@ def _compose() -> dict:
 
 def _replay_config() -> dict:
     return json.loads(_text(REPLAY_CONFIG))
+
+
+def _activate_clip_worker_path() -> None:
+    for name in list(sys.modules):
+        if name == "app" or name.startswith("app."):
+            del sys.modules[name]
+    service_root = str(CLIP_WORKER_ROOT)
+    if service_root in sys.path:
+        sys.path.remove(service_root)
+    sys.path.insert(0, service_root)
 
 
 def test_files_exist() -> None:
@@ -142,10 +154,79 @@ def test_replay_job_uses_original_stream_cadence_not_inference_fps() -> None:
     compose = _compose()
     clip_env = compose["services"]["clip-worker"]["environment"]
 
-    assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "frame_count"
+    assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
     assert clip_env["REPLAY_FPS"] == "${REPLAY_FPS:-24}"
-    assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
+    assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == "false"
     assert clip_env["REPLAY_ANCHOR_STRATEGY"] == "event_keyframe"
+    assert clip_env["KEYFRAME_LOOKUP_WINDOW_S"] == "${KEYFRAME_LOOKUP_WINDOW_S:-15}"
+    assert clip_env["KEYFRAME_LOOKUP_RETRIES"] == "${KEYFRAME_LOOKUP_RETRIES:-8}"
+    assert clip_env["KEYFRAME_LOOKUP_RETRY_SLEEP_S"] == (
+        "${KEYFRAME_LOOKUP_RETRY_SLEEP_S:-1.0}"
+    )
+
+
+def test_clip_worker_uses_fresh_frame_annotation_pts_anchor() -> None:
+    compose = _compose()
+    clip_env = compose["services"]["clip-worker"]["environment"]
+    doc = _text(DOC)
+
+    assert clip_env["FRAME_ANNOTATION_STREAM"] == "security.frame_annotations"
+    assert clip_env["FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT"] == (
+        "${FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT:-20000}"
+    )
+    assert clip_env["FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S"] == (
+        "${FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S:-1.0}"
+    )
+    assert clip_env["FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S"] == (
+        "${FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S:-15.0}"
+    )
+    assert "same-source, same-camera frame annotation" in doc
+    assert "`requested_end_pts`" in doc
+    assert "stale Redis rows" in doc
+    assert "cross-loop frame UUIDs" in doc
+
+
+def test_replay_job_stop_condition_uses_requested_window_not_offset_plus_post() -> None:
+    _activate_clip_worker_path()
+    from app.replay_client import build_job_payload
+
+    payload = build_job_payload(
+        source_id="c2_replay_first_rtsp",
+        keyframe_uuid="frame-annotation-anchor",
+        pre_seconds=5,
+        post_seconds=5,
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
+        labels={
+            "event_id": "ev-c2-15",
+            "event_frame_pts": "10000000000",
+            "requested_start_pts": "5000000000",
+            "requested_end_pts": "15000000000",
+            "replay_anchor_pts": "15000000000",
+        },
+        stop_condition_mode="ts_delta_sec",
+        fps=24,
+        offset_seconds_override=10.0,
+        duration_seconds_override=10.0,
+    )
+
+    assert payload["offset"]["seconds"] == 10.0
+    assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
+    assert payload["configuration"]["labels"]["requested_start_pts"] == "5000000000"
+    assert payload["configuration"]["labels"]["requested_end_pts"] == "15000000000"
+
+
+def test_replay_alignment_doc_requires_event_pts_window_and_fail_closed_binding() -> None:
+    doc = _text(DOC)
+
+    assert "`frame_pts`, `event_frame_pts`" in doc
+    assert "`requested_start_pts`, and `requested_end_pts`" in doc
+    assert "The Replay `stop_condition` duration is the requested PTS window duration" in doc
+    assert "It is not `offset + post_seconds`" in doc
+    assert "event frame appears at `pre_seconds`" in doc
+    assert "raw video, sink metadata, sidecar JSONL, and the 8090" in doc
+    assert "broad DB window fallback" in doc
+    assert "legacy visual binding" in doc
+    assert "fails closed" in doc
 
 
 def test_replay_first_uses_frame_cache_for_annotations() -> None:
@@ -161,7 +242,17 @@ def test_replay_first_uses_frame_cache_for_annotations() -> None:
     assert media_env["FRAME_CACHE_SIDECAR_REQUIRE_TRIGGER_FACE"] == "false"
     assert media_env["FRAME_CACHE_SIDECAR_STREAM"] == "security.frame_annotations"
     assert media_env["FRAME_CACHE_FRESHNESS_GUARD_MODE"] == "metadata_pts"
-    assert media_env["FRAME_CACHE_REQUIRE_EVENT_CENTERED"] == "false"
+    assert media_env["FRAME_CACHE_REQUIRE_EVENT_CENTERED"] == "true"
+    assert media_env["FRAME_CACHE_CANONICAL_MIN_DURATION_SECONDS"] == (
+        "${FRAME_CACHE_CANONICAL_MIN_DURATION_SECONDS:-8.0}"
+    )
+    assert media_env["FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS"] == (
+        "${FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS:-12.5}"
+    )
+    assert media_env["FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS"] == (
+        "${FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS:-0.75}"
+    )
+    assert media_env["C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED"] == "true"
 
 
 def test_intrusion_sidecar_can_render_bbox_without_watchlist_identity() -> None:

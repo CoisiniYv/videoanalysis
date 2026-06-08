@@ -30,6 +30,8 @@ from app.production_sidecar_policy import (  # noqa: E402
 
 
 SOURCE_OBSERVATION_ID = "face:c1e_rtsp_replay:13:34646"
+EVENT_CREATED_AT = "2026-06-06T08:01:27.655618Z"
+EVENT_TS_MS = 1_780_732_887_656
 
 
 class FakeRedis:
@@ -128,8 +130,9 @@ def test_intrusion_event_writes_person_bbox_sidecar_without_known_face(tmp_path:
     assert summary["embedding_vectors_in_output"] == 0
     assert summary["image_bytes_in_output"] == 0
     assert rows
-    assert all((row.get("label") or {}).get("kind") != "known_face" for row in rows)
-    assert any(row.get("object_type") == "person" for row in rows)
+    objects = [obj for row in rows for obj in row.get("objects", [])]
+    assert all((obj.get("label") or {}).get("kind") != "known_face" for obj in objects)
+    assert any(obj.get("object_type") == "person" for obj in objects)
     assert any(row.get("clip_timeline_match") == "metadata_frame_uuid" for row in rows)
 
 
@@ -174,16 +177,18 @@ def test_sidecar_output_contains_known_face_when_identity_patch_matches(tmp_path
     _summary, result = _write(tmp_path)
 
     rows = _read_jsonl(Path(result["annotations_path"]))
+    objects = [obj for row in rows for obj in row.get("objects", [])]
 
-    assert any((row.get("label") or {}).get("kind") == "known_face" for row in rows)
+    assert any((obj.get("label") or {}).get("kind") == "known_face" for obj in objects)
 
 
 def test_trigger_face_gets_watchlist_trigger_role(tmp_path: Path) -> None:
     _summary, result = _write(tmp_path)
 
     rows = _read_jsonl(Path(result["annotations_path"]))
+    objects = [obj for row in rows for obj in row.get("objects", [])]
 
-    assert any(row.get("annotation_role") == "watchlist_trigger_face" for row in rows)
+    assert any(obj.get("annotation_role") == "watchlist_trigger_face" for obj in objects)
 
 
 def test_missing_trigger_face_returns_partial_without_raise(tmp_path: Path) -> None:
@@ -311,11 +316,18 @@ def test_sidecar_timing_aligns_to_final_clip_metadata(tmp_path: Path) -> None:
 
     summary, result = _write(tmp_path, evidence_dir=evidence_dir)
     rows = _read_jsonl(Path(result["annotations_path"]))
-    trigger = next(row for row in rows if row.get("annotation_role") == "watchlist_trigger_face")
+    trigger_row = next(
+        row
+        for row in rows
+        if any(
+            obj.get("annotation_role") == "watchlist_trigger_face"
+            for obj in row.get("objects", [])
+        )
+    )
 
-    assert trigger["t_ms"] == 5000
-    assert trigger["clip_frame_index"] == 120
-    assert trigger["clip_timeline_match"] == "metadata_frame_uuid"
+    assert trigger_row["t_ms"] == 5000
+    assert trigger_row["clip_frame_index"] == 120
+    assert trigger_row["clip_timeline_match"] == "metadata_frame_uuid"
     assert summary["clip_timeline_alignment"]["status"] == "aligned"
     assert summary["visual_binding_status"] == "unverified"
     assert summary["evidence_visual_status"] == "unverified"
@@ -334,7 +346,6 @@ def test_stale_pts_fallback_row_is_rejected_fail_closed(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     event = _event()
-    event["created_at"] = "2026-06-06T08:01:27.655618Z"
     message = _frame_message(created_at="2026-06-06T07:28:44.614117Z")
 
     summary, result = _write(
@@ -344,19 +355,15 @@ def test_stale_pts_fallback_row_is_rejected_fail_closed(tmp_path: Path) -> None:
         evidence_dir=evidence_dir,
     )
     rows = _read_jsonl(Path(result["annotations_path"]))
-    dropped = _read_jsonl(evidence_dir / "annotations.frame_cache.identity.dropped.debug.jsonl")
 
     assert rows == []
-    assert any(row.get("stale_or_epoch_mismatch") is True for row in dropped)
-    assert summary["annotation_status"] == "cache_stale_or_epoch_mismatch"
+    assert summary["annotation_status"] == "missing_frame_metadata"
     assert summary["production_ready"] is False
-    assert summary["rows_rejected_stale_cache"] >= 1
-    assert summary["rows_rejected_epoch_mismatch"] >= 1
-    assert summary["rows_rejected_pts_non_unique"] >= 1
-    assert "trigger_row_stale_or_epoch_mismatch" in summary["production_ready_failures"]
+    assert summary["clip_timeline_alignment"]["wall_clock_filter_enabled"] is True
+    assert summary["clip_timeline_alignment"]["wall_clock_filter_rejected_messages"] == 1
     assert summary["visual_binding_status"] == "unverified"
     assert summary["evidence_visual_status"] == "unverified"
-    assert summary["visual_binding_reason"] == "cache_stale_or_epoch_mismatch"
+    assert summary["visual_binding_reason"] == "canonical_duration_not_verified"
     assert summary["frame_identity_confidence"] == "none"
     assert summary["trigger_face_row_exists"] is False
     assert summary["trigger_face_row_passed_freshness_guard"] is False
@@ -369,7 +376,6 @@ def test_fresh_pts_fallback_row_is_allowed(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     event = _event()
-    event["created_at"] = "2026-06-06T08:01:27.655618Z"
     message = _frame_message(created_at="2026-06-06T08:01:26.171308Z")
 
     summary, result = _write(
@@ -383,7 +389,9 @@ def test_fresh_pts_fallback_row_is_allowed(tmp_path: Path) -> None:
     assert len(rows) >= 1
     assert rows[0]["clip_timeline_match"] == "metadata_frame_pts_exact"
     assert rows[0]["displayable"] is True
-    assert rows[0]["frame_annotation_created_at"] == "2026-06-06T08:01:26.171308Z"
+    assert rows[0]["objects"][0]["frame_annotation_created_at"] == (
+        "2026-06-06T08:01:26.171308Z"
+    )
     assert summary["annotation_status"] == "complete"
     assert summary["rows_matched_by_pts_fallback"] >= 1
     assert summary["rows_rejected_stale_cache"] == 0
@@ -392,7 +400,99 @@ def test_fresh_pts_fallback_row_is_allowed(tmp_path: Path) -> None:
     assert summary["frame_identity_confidence"] == "none"
 
 
-def test_metadata_pts_guard_allows_replay_pts_matched_rows_with_old_wall_clock(
+def test_sidecar_collapses_multiple_objects_to_one_row_per_metadata_frame(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        "\n".join(
+            [
+                json.dumps({"frame_num": 0, "pts": 34_646, "frame_uuid": "frame-34646"}),
+                json.dumps({"frame_num": 1, "pts": 76_312, "frame_uuid": "frame-next"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    face = _frame_message()
+    person = _intrusion_frame_message()["objects"][0]
+    second_person = copy.deepcopy(person)
+    second_person["object_id"] = "person-14"
+    second_person["track_id"] = "14"
+    second_person["source_observation_id"] = "person:c1e_rtsp_replay:14:34646"
+    face["objects"] = [person, second_person]
+
+    summary, result = _write(
+        tmp_path,
+        messages=[face],
+        evidence_dir=evidence_dir,
+        config=_config(enabled=True, freshness_guard_mode="metadata_pts"),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert len(rows) == 1
+    assert summary["rows_written"] == 1
+    assert summary["annotations_written"] == 1
+    assert rows[0]["frame_uuid"] == "frame-34646"
+    assert rows[0]["clip_timeline_match"] == "metadata_frame_uuid"
+    assert len(rows[0]["objects"]) == 2
+    assert {obj["object_type"] for obj in rows[0]["objects"]} == {"person"}
+
+
+def test_sidecar_groups_different_source_frames_by_final_metadata_pts(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        json.dumps({"frame_num": 0, "pts": 10_000_000_000, "frame_uuid": "final-frame"})
+        + "\n",
+        encoding="utf-8",
+    )
+    event = _intrusion_event()
+    event["event_ts_ms"] = 1_780_918_000_000
+    event["created_at"] = 1_780_918_000_000
+    event["frame_pts"] = 10_000_000_000
+    event["frame_uuid"] = "final-frame"
+    first = _intrusion_frame_message()
+    first["frame_pts"] = 9_990_000_000
+    first["frame_uuid"] = "source-a"
+    first["timestamp_ms"] = 1_780_918_000_000
+    first["created_at"] = 1_780_918_000_000
+    second = copy.deepcopy(first)
+    second["frame_pts"] = 10_010_000_000
+    second["frame_uuid"] = "source-b"
+    second["objects"][0]["source_observation_id"] = "person:c1e_rtsp_replay:14:10010"
+    second["objects"][0]["track_id"] = "14"
+
+    summary, result = _write(
+        tmp_path,
+        event=event,
+        messages=[first, second],
+        evidence_dir=evidence_dir,
+        config=_config(
+            enabled=True,
+            event_types={"intrusion", "watchlist_hit"},
+            require_trigger_face=False,
+            freshness_guard_mode="metadata_pts",
+        ),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert len(rows) == 1
+    assert rows[0]["frame_uuid"] == "final-frame"
+    assert rows[0]["frame_pts"] == 10_000_000_000
+    assert rows[0]["matched_metadata_pts"] == 10_000_000_000
+    assert len(rows[0]["objects"]) == 2
+    assert {obj["source_frame_uuid"] for obj in rows[0]["objects"]} == {"source-a", "source-b"}
+    assert {obj["source_frame_pts"] for obj in rows[0]["objects"]} == {
+        9_990_000_000,
+        10_010_000_000,
+    }
+    assert summary["rows_written"] == 1
+    assert summary["annotations_written"] == 1
+
+
+def test_metadata_pts_guard_rejects_old_wall_clock_loop_rows(
     tmp_path: Path,
 ) -> None:
     evidence_dir = _evidence_dir(tmp_path)
@@ -401,7 +501,6 @@ def test_metadata_pts_guard_allows_replay_pts_matched_rows_with_old_wall_clock(
         encoding="utf-8",
     )
     event = _event()
-    event["created_at"] = "2026-06-06T08:01:27.655618Z"
     message = _frame_message(created_at="2026-06-06T07:28:44.614117Z")
 
     summary, result = _write(
@@ -413,15 +512,15 @@ def test_metadata_pts_guard_allows_replay_pts_matched_rows_with_old_wall_clock(
     )
     rows = _read_jsonl(Path(result["annotations_path"]))
 
-    assert rows
-    assert rows[0]["clip_timeline_match"] == "metadata_frame_pts_exact"
-    assert rows[0]["displayable"] is True
+    assert rows == []
     assert summary["freshness_guard_mode"] == "metadata_pts"
     assert summary["clip_timeline_alignment"]["freshness_guard_mode"] == "metadata_pts"
+    assert summary["clip_timeline_alignment"]["wall_clock_filter_enabled"] is True
+    assert summary["clip_timeline_alignment"]["wall_clock_filter_rejected_messages"] == 1
     assert summary["rows_rejected_stale_cache"] == 0
     assert summary["rows_rejected_epoch_mismatch"] == 0
     assert summary["rows_rejected_pts_non_unique"] == 0
-    assert summary["annotation_status"] == "complete"
+    assert summary["annotation_status"] == "missing_frame_metadata"
 
 
 def test_replay_first_can_be_ready_when_event_inside_but_not_centered(
@@ -523,9 +622,10 @@ def test_visual_binding_verified_with_fresh_pts_fallback_medium_confidence() -> 
 def test_writer_uses_event_payload_bridge_without_identity_patches(tmp_path: Path) -> None:
     summary, result = _write(tmp_path)
     rows = _read_jsonl(Path(result["annotations_path"]))
+    objects = [obj for row in rows for obj in row.get("objects", [])]
 
     assert summary["identity_source"] == "event_payload_bridge"
-    assert any(row.get("identity_source") == "event_payload_bridge" for row in rows)
+    assert any(obj.get("identity_source") == "event_payload_bridge" for obj in objects)
 
 
 def _write(
@@ -573,19 +673,24 @@ def _evidence_dir(tmp_path: Path) -> Path:
     (evidence_dir / "annotations.jsonl").write_text('{"old":true}\n', encoding="utf-8")
     (evidence_dir / "summary.json").write_text('{"old_summary":true}\n', encoding="utf-8")
     (evidence_dir / "raw_clip.mov").write_bytes(b"video")
-    (evidence_dir / "sink_metadata.json").write_text('{"metadata":true}\n', encoding="utf-8")
+    (evidence_dir / "sink_metadata.json").write_text(
+        json.dumps({"frame_num": 0, "pts": 34_646, "frame_uuid": "frame-34646"})
+        + "\n",
+        encoding="utf-8",
+    )
     return evidence_dir
 
 
 def _event(*, event_id: str = "event-1") -> dict[str, Any]:
     return {
         "event_id": event_id,
+        "created_at": EVENT_CREATED_AT,
         "event_type": "watchlist_hit",
         "source_event_id": "watchlist_hit:face:c1e_rtsp_replay:13:34646:2",
         "source_id": "c1e_rtsp_replay",
         "camera_id": "cam_c1e_rtsp_replay",
         "frame_uuid": "frame-34646",
-        "event_ts_ms": 1_780_000_000_250,
+        "event_ts_ms": EVENT_TS_MS,
         "payload": {
             "match": {
                 "source_observation_id": SOURCE_OBSERVATION_ID,
@@ -600,13 +705,13 @@ def _event(*, event_id: str = "event-1") -> dict[str, Any]:
             "observation": {
                 "source_id": "c1e_rtsp_replay",
                 "camera_id": "cam_c1e_rtsp_replay",
-                "timestamp_ms": 1_780_000_000_250,
+                "timestamp_ms": EVENT_TS_MS,
                 "frame_pts": 34_646,
                 "frame_uuid": "frame-34646",
                 "face_bbox": {"xyxy": [10, 20, 30, 40], "confidence": 0.88},
             },
             "media": {
-                "event_ts_ms": 1_780_000_000_250,
+                "event_ts_ms": EVENT_TS_MS,
                 "frame_pts": 34_646,
                 "frame_uuid": "frame-34646",
             },
@@ -617,6 +722,7 @@ def _event(*, event_id: str = "event-1") -> dict[str, Any]:
 def _intrusion_event() -> dict[str, Any]:
     return {
         "event_id": "event-intrusion-1",
+        "created_at": EVENT_CREATED_AT,
         "event_type": "intrusion",
         "source_event_id": "savant_security:c1e_rtsp_replay:13:intrusion:1780000000000",
         "source_id": "c1e_rtsp_replay",
@@ -624,7 +730,7 @@ def _intrusion_event() -> dict[str, Any]:
         "track_id": "13",
         "frame_uuid": "frame-intrusion",
         "frame_pts": 20_000_000_000,
-        "event_ts_ms": 1_780_000_000_250,
+        "event_ts_ms": EVENT_TS_MS,
     }
 
 
@@ -633,7 +739,7 @@ def _frame_message(
     source_observation_id: str = SOURCE_OBSERVATION_ID,
     frame_pts: int = 34_646,
     frame_uuid: str = "frame-34646",
-    timestamp_ms: int = 1_780_000_000_250,
+    timestamp_ms: int = EVENT_TS_MS,
     include_forbidden: bool = False,
     created_at: str = "2026-06-06T08:01:26.171308Z",
 ) -> dict[str, Any]:

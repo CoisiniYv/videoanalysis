@@ -105,6 +105,72 @@ def test_required_standard_bundle_files_are_created(tmp_path: Path) -> None:
     assert (output_dir / "summary.frame_cache.identity.json").is_file()
 
 
+def test_decoded_frame_count_falls_back_to_imageio_ffmpeg(monkeypatch: Any, tmp_path: Path) -> None:
+    bundle = _activate_bundle_builder()
+    video_path = tmp_path / "raw_clip.mov"
+    video_path.write_bytes(b"fake video")
+
+    class _ImageioFfmpeg:
+        @staticmethod
+        def count_frames_and_secs(path: str) -> tuple[int, float]:
+            assert path == str(video_path)
+            return 240, 10.0
+
+    monkeypatch.setattr(bundle, "_read_frame_count_ffprobe", lambda _path: None)
+    monkeypatch.setattr(bundle, "_read_frame_count_cv2", lambda _path: None)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", _ImageioFfmpeg)
+
+    assert bundle.read_decoded_video_frame_count(video_path) == 240
+
+
+def test_video_time_crop_falls_back_to_imageio_ffmpeg_executable(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    bundle = _activate_bundle_builder()
+    input_video = tmp_path / "source.mov"
+    output_video = tmp_path / "raw_clip.mov"
+    input_video.write_bytes(b"fake video")
+    calls: list[list[str]] = []
+
+    class _ImageioFfmpeg:
+        @staticmethod
+        def get_ffmpeg_exe() -> str:
+            return "/tmp/imageio-ffmpeg"
+
+    class _Completed:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command: list[str], **_kwargs: Any) -> _Completed:
+        calls.append(command)
+        output_video.write_bytes(b"cropped")
+        return _Completed()
+
+    monkeypatch.setattr(bundle.shutil, "which", lambda _name: None)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", _ImageioFfmpeg)
+    monkeypatch.setattr(bundle.subprocess, "run", fake_run)
+
+    result = bundle._copy_or_crop_video(
+        source_video_path=input_video,
+        output_video_path=output_video,
+        source_frames=[{"pts": 1_000_000_000}, {"pts": 3_000_000_000}],
+        time_window={
+            "time_domain_crop_applied": True,
+            "requested_start_pts": 2_000_000_000,
+            "requested_end_pts": 4_000_000_000,
+        },
+        copy_video=True,
+        crop_video_to_time_window=True,
+    )
+
+    assert calls
+    assert calls[0][0] == "/tmp/imageio-ffmpeg"
+    assert result["ffmpeg_executable"] == "/tmp/imageio-ffmpeg"
+    assert result["start_seconds"] == 1.0
+    assert result["duration_seconds"] == 2.0
+
+
 def test_bundle_builder_does_not_use_db_or_redis_access(tmp_path: Path, monkeypatch: Any) -> None:
     bundle = _activate_bundle_builder()
     input_dir = _make_sink_output(tmp_path, frame_count=2)
@@ -272,6 +338,7 @@ def test_replay_first_raw_metadata_uses_frame_cache_sidecar(tmp_path: Path, monk
 
     monkeypatch.setattr(worker, "_load_event_context", fake_context)
     monkeypatch.setattr(worker, "write_frame_cache_identity_sidecar", fake_sidecar_writer)
+    monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 4)
 
     result = worker._finalize_c2_post_savant_evidence_bundle(
         pg_conn,

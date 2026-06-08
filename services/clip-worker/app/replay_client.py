@@ -63,8 +63,9 @@ class ReplayClient:
             source_id: Replay source identifier.
             ts_ms: Event timestamp in epoch milliseconds (event_ts_ms).
             window_s: Search window in seconds around *ts_ms*.
-            selection: ``nearest`` or ``at_or_after`` for UUIDv7 timestamp
-                selection within the returned keyframe list.
+            selection: ``nearest``, ``at_or_after``, or
+                ``strict_at_or_after`` for UUIDv7 timestamp selection within
+                the returned keyframe list.
 
         Returns:
             keyframe_uuid string, or None if not found.
@@ -143,6 +144,7 @@ class ReplayClient:
         fallback_reason: str | None = None,
         fps: int = 30,
         offset_seconds_override: float | None = None,
+        duration_seconds_override: float | None = None,
     ) -> Optional[str]:
         """PUT /api/v1/job — create a re-streaming job.
 
@@ -168,6 +170,7 @@ class ReplayClient:
             fallback_reason=fallback_reason,
             fps=fps,
             offset_seconds_override=offset_seconds_override,
+            duration_seconds_override=duration_seconds_override,
         )
         self.last_job_request = payload
 
@@ -197,6 +200,7 @@ class ReplayClient:
                         fallback_reason="replay_api_rejected_ts_delta_sec",
                         fps=fps,
                         offset_seconds_override=offset_seconds_override,
+                        duration_seconds_override=duration_seconds_override,
                     )
                 )
 
@@ -214,8 +218,8 @@ class ReplayClient:
                             "replay_api_rejected_without_constant_cadence"
                         ),
                         fps=fps,
-                        force_constant_cadence=True,
                         offset_seconds_override=offset_seconds_override,
+                        duration_seconds_override=duration_seconds_override,
                     )
                 )
                 if stop_condition_mode == "ts_delta_sec":
@@ -232,8 +236,8 @@ class ReplayClient:
                                 "replay_api_rejected_ts_delta_sec_constant_cadence"
                             ),
                             fps=fps,
-                            force_constant_cadence=True,
                             offset_seconds_override=offset_seconds_override,
+                            duration_seconds_override=duration_seconds_override,
                         )
                     )
 
@@ -328,6 +332,11 @@ def _select_keyframe_uuid(
             if future:
                 return min(future)[1]
             return max(scored)[1]
+        if selection == "strict_at_or_after":
+            future = [item for item in scored if item[0] >= ts_ms]
+            if future:
+                return min(future)[1]
+            return None
         # Prefer the closest keyframe to the requested Replay timeline anchor.
         # For equal distance, prefer the later keyframe so a bounded clip is
         # less likely to end before the event.
@@ -375,12 +384,17 @@ def build_job_payload(
     fps: int = 30,
     force_constant_cadence: bool | None = None,
     offset_seconds_override: float | None = None,
+    duration_seconds_override: float | None = None,
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
     effective_fps = _effective_fps(fps)
     frame_duration_nanos = _frame_duration_nanos(effective_fps)
-    expected_seconds = float(pre_seconds) + float(post_seconds)
+    expected_seconds = (
+        float(duration_seconds_override)
+        if duration_seconds_override is not None
+        else float(pre_seconds) + float(post_seconds)
+    )
     total_frames = int(round(expected_seconds * effective_fps))
     stop_condition: Dict[str, Any]
     if stop_condition_mode == "ts_delta_sec":
@@ -391,11 +405,7 @@ def build_job_payload(
         }
     else:
         stop_condition = {"frame_count": total_frames}
-    constant_cadence = (
-        _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True)
-        if force_constant_cadence is None
-        else bool(force_constant_cadence)
-    )
+    frame_duration = {"secs": 0, "nanos": frame_duration_nanos}
     configuration: Dict[str, Any] = {
         "ts_sync": True,
         "skip_intermediary_eos": False,
@@ -408,16 +418,13 @@ def build_job_payload(
         "max_delivery_duration": {"secs": 30, "nanos": 0},
         "send_metadata_only": False,
         "labels": labels or {},
+        # Current Replay API requires these timing fields with ts_sync. The
+        # evidence window is still bounded by stop_condition, preferably
+        # ts_delta_sec; frame_count must not be treated as the evidence clock.
+        "ts_discrepancy_fix_duration": frame_duration,
+        "min_duration": frame_duration,
+        "max_duration": frame_duration,
     }
-    if constant_cadence:
-        frame_duration = {"secs": 0, "nanos": frame_duration_nanos}
-        configuration.update(
-            {
-                "ts_discrepancy_fix_duration": frame_duration,
-                "min_duration": frame_duration,
-                "max_duration": frame_duration,
-            }
-        )
     payload = {
         "sink": {
             "url": sink_endpoint,

@@ -76,6 +76,33 @@ def test_publish_preserves_keyframe_uuid():
     assert record["keyframe_uuid"] == "kf-abc"
 
 
+def test_publish_preserves_savant_event_frame_pts_window():
+    fake = fakeredis.FakeRedis(decode_responses=False)
+    pub = RecordRequestPublisher(fake, "security.record_requests")
+    event = _make_event(
+        source_id="c2_replay_first_rtsp",
+        camera_id="c2_replay_first_rtsp",
+        payload={
+            "media": {
+                "source_id": "c2_replay_first_rtsp",
+                "frame_pts": 20_513_100_000,
+                "frame_num": 139531,
+                "metadata_source": "video_frame",
+            }
+        },
+        evidence_policy={},
+    )
+    pub.publish(event, event_id="uuid-pts")
+
+    _, fields = fake.xrange("security.record_requests", "-", "+")[0]
+    record = json.loads(fields[b"data"])
+    assert record["frame_pts"] == 20_513_100_000
+    assert record["event_frame_pts"] == 20_513_100_000
+    assert record["requested_start_pts"] == 15_513_100_000
+    assert record["requested_end_pts"] == 25_513_100_000
+    assert record["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
+
+
 def test_publish_handles_missing_keyframe():
     fake = fakeredis.FakeRedis(decode_responses=False)
     pub = RecordRequestPublisher(fake, "security.record_requests")

@@ -26,6 +26,10 @@ DEFAULT_SIDECAR_CONFIG = {
     "redis_url": "redis://redis:6379/0",
     "freshness_guard_mode": "wall_clock",
     "require_event_centered": True,
+    "canonical_min_duration_seconds": 8.0,
+    "canonical_max_duration_seconds": 12.5,
+    "canonical_expected_event_t_s": 5.0,
+    "canonical_event_center_tolerance_seconds": 0.75,
     "max_row_age_before_event_seconds": None,
     "max_row_age_after_event_seconds": None,
 }
@@ -127,6 +131,22 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
                 source.get("FRAME_CACHE_REQUIRE_EVENT_CENTERED"),
                 bool(config["require_event_centered"]),
             ),
+            "canonical_min_duration_seconds": _positive_float(
+                source.get("FRAME_CACHE_CANONICAL_MIN_DURATION_SECONDS"),
+                float(config["canonical_min_duration_seconds"]),
+            ),
+            "canonical_max_duration_seconds": _positive_float(
+                source.get("FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS"),
+                float(config["canonical_max_duration_seconds"]),
+            ),
+            "canonical_expected_event_t_s": _positive_float(
+                source.get("FRAME_CACHE_CANONICAL_EXPECTED_EVENT_T_S"),
+                float(config["canonical_expected_event_t_s"]),
+            ),
+            "canonical_event_center_tolerance_seconds": _positive_float(
+                source.get("FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS"),
+                float(config["canonical_event_center_tolerance_seconds"]),
+            ),
             "max_row_age_before_event_seconds": _optional_positive_float(
                 source.get("FRAME_CACHE_MAX_ROW_AGE_BEFORE_EVENT_SECONDS"),
                 config["max_row_age_before_event_seconds"],
@@ -201,6 +221,14 @@ def _optional_positive_float(value: Any, default: float | None) -> float | None:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed if parsed > 0 else float(default)
 
 
 def _csv_set(value: str | None, *, default: set[str]) -> set[str]:

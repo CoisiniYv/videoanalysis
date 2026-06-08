@@ -15,6 +15,7 @@ DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
 C2_POST_SAVANT_TOPOLOGIES = {"post_savant", "post_savant_replay"}
 C2_POST_SAVANT_REPLAY_STOP_STRATEGY = "event_anchor_pre_seconds_rewind"
+PTS_TIME_BASE = 1_000_000_000
 
 
 def _first_policy_value(event: Dict[str, Any], key: str) -> Any:
@@ -35,8 +36,12 @@ def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) 
     """Attach explicit C2 post-Savant evidence policy to a record_request."""
     replay_source_kind = _first_policy_value(event, "replay_source_kind")
     evidence_topology = _first_policy_value(event, "evidence_topology")
+    metadata_source = _first_policy_value(event, "metadata_source")
+    frame_pts = _first_policy_value(event, "frame_pts")
     is_post_savant = str(replay_source_kind or "").strip() == "post_savant" or (
         str(evidence_topology or "").strip() in C2_POST_SAVANT_TOPOLOGIES
+    ) or (
+        str(metadata_source or "").strip() == "video_frame" and frame_pts is not None
     )
     if not is_post_savant:
         return
@@ -67,6 +72,43 @@ def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) 
         if value is not None:
             record[key] = value
     record["replay_stop_strategy"] = C2_POST_SAVANT_REPLAY_STOP_STRATEGY
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_event_frame_timeline(record: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """Preserve the event frame PTS window used for Replay/sidecar alignment."""
+    for key in ("frame_pts", "frame_num", "metadata_domain"):
+        value = _first_policy_value(event, key)
+        if value is not None and record.get(key) in (None, ""):
+            record[key] = value
+
+    event_frame_pts = _int_or_none(record.get("event_frame_pts"))
+    if event_frame_pts is None:
+        event_frame_pts = _int_or_none(_first_policy_value(event, "event_frame_pts"))
+    if event_frame_pts is None:
+        event_frame_pts = _int_or_none(record.get("frame_pts"))
+    if event_frame_pts is None:
+        return
+
+    record.setdefault("event_frame_pts", event_frame_pts)
+    pre_seconds = _int_or_none(record.get("pre_seconds")) or DEFAULT_PRE_SECONDS
+    post_seconds = _int_or_none(record.get("post_seconds")) or DEFAULT_POST_SECONDS
+    record.setdefault(
+        "requested_start_pts",
+        max(0, int(event_frame_pts) - int(pre_seconds) * PTS_TIME_BASE),
+    )
+    record.setdefault(
+        "requested_end_pts",
+        int(event_frame_pts) + int(post_seconds) * PTS_TIME_BASE,
+    )
 
 
 def build_record_request(
@@ -118,6 +160,7 @@ def build_record_request(
         "status": "pending",
     }
     _apply_c2_post_savant_policy(record, event)
+    _apply_event_frame_timeline(record, event)
     return record
 
 

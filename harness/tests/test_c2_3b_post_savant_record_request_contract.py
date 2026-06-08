@@ -134,6 +134,7 @@ def test_media_worker_c2_summary_records_c2_3b_mapping_fields(
         "build_post_savant_evidence_bundle",
         lambda **kwargs: _fake_builder_result(kwargs["output_dir"], kwargs["event_metadata"]),
     )
+    monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 2)
 
     bundle = worker._finalize_c2_post_savant_evidence_bundle(
         pg_conn,

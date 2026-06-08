@@ -134,12 +134,32 @@ def test_event_start_anchor_strategy_uses_event_anchor_and_replay_offset() -> No
     assert _replay_anchor_lookup_ts_ms(
         req,
         pre_seconds=5,
+        post_seconds=5,
         anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
-    ) == 1_780_906_981_235
+    ) == 1_780_906_986_235
     assert _replay_offset_seconds(
         replay_stop_strategy="anchor_start_offset_zero",
         anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
         pre_seconds=5,
+        post_seconds=5,
+    ) is None
+
+
+def test_replay_anchor_lookup_requires_keyframe_covering_post_window() -> None:
+    _activate_clip_worker_path()
+    from app.replay_client import _select_keyframe_uuid
+    from app.worker import REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME, _replay_anchor_selection
+
+    assert _replay_anchor_selection(REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME) == (
+        "strict_at_or_after"
+    )
+    assert _select_keyframe_uuid(
+        [
+            "019ea72a-7587-7403-ae7f-fb03a3c3c3c4",
+            "019ea72a-9e42-73f0-9d14-202735611b69",
+        ],
+        ts_ms=1_780_921_059_069,
+        selection="strict_at_or_after",
     ) is None
 
 
@@ -158,8 +178,34 @@ def test_event_start_anchor_strategy_prefers_frame_uuid_time_domain() -> None:
     assert _replay_anchor_lookup_ts_ms(
         req,
         pre_seconds=5,
+        post_seconds=5,
         anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_START,
-    ) == 1_780_909_028_908
+    ) == 1_780_909_033_908
+
+
+def test_event_keyframe_strategy_keeps_duration_on_requested_window() -> None:
+    _activate_clip_worker_path()
+    from app.worker import (
+        REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME,
+        _replay_duration_seconds,
+        _replay_offset_seconds,
+    )
+
+    offset = _replay_offset_seconds(
+        replay_stop_strategy="event_anchor_pre_seconds_rewind",
+        anchor_strategy=REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME,
+        pre_seconds=5,
+        post_seconds=5,
+        event_frame_uuid="019ea722-e76e-74a3-b448-be6876fa4ee7",
+        keyframe_uuid="019ea722-e9b6-79f1-b21c-f910aede49ad",
+    )
+
+    assert offset == 5.584
+    assert _replay_duration_seconds(
+        pre_seconds=5,
+        post_seconds=5,
+        offset_seconds_override=offset,
+    ) == 10.0
 
 
 def test_event_start_anchor_strategy_forces_keyframe_lookup() -> None:

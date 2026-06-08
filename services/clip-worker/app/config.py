@@ -27,6 +27,12 @@ class Config:
     replay_fps: int
     replay_anchor_strategy: str
     allow_unbounded_keyframe_fallback: bool
+    keyframe_lookup_retries: int
+    keyframe_lookup_retry_sleep_s: float
+    frame_annotation_stream: str
+    frame_annotation_anchor_lookback_count: int
+    frame_annotation_anchor_wall_clock_slack_s: float
+    frame_annotation_anchor_pts_tolerance_s: float
 
 
 def load_config() -> Config:
@@ -69,4 +75,20 @@ def load_config() -> Config:
         allow_unbounded_keyframe_fallback=os.getenv(
             "ALLOW_UNBOUNDED_KEYFRAME_FALLBACK", "false"
         ).strip().lower() in ("1", "true", "yes"),
+        keyframe_lookup_retries=int(os.getenv("KEYFRAME_LOOKUP_RETRIES", "0")),
+        keyframe_lookup_retry_sleep_s=float(
+            os.getenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "1.0")
+        ),
+        frame_annotation_stream=os.getenv(
+            "FRAME_ANNOTATION_STREAM", "security.frame_annotations"
+        ),
+        frame_annotation_anchor_lookback_count=int(
+            os.getenv("FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT", "20000")
+        ),
+        frame_annotation_anchor_wall_clock_slack_s=float(
+            os.getenv("FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S", "1.0")
+        ),
+        frame_annotation_anchor_pts_tolerance_s=float(
+            os.getenv("FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S", "15.0")
+        ),
     )
