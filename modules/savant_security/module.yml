@@ -11,6 +11,9 @@ parameters:
   log_level: ${oc.env:LOGLEVEL, INFO}
   batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
   max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
+  max_fps_control: ${oc.decode:${oc.env:MAX_FPS_CONTROL, true}}
+  max_fps: ${oc.env:MAX_FPS, 8/1}
+  min_fps: ${oc.env:MIN_FPS, 2/1}
   pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
   pose_confidence_threshold: ${oc.decode:${oc.env:POSE_CONFIDENCE_THRESHOLD, 0.25}}
   pose_keypoint_threshold: ${oc.decode:${oc.env:POSE_KEYPOINT_THRESHOLD, 0.25}}
@@ -27,6 +30,7 @@ parameters:
   face_min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
   face_min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
   max_same_source_frames: 1
+  batched_push_timeout: ${oc.decode:${oc.env:BATCHED_PUSH_TIMEOUT, 40000}}
   queue_maxsize: 10
 
 pipeline:
