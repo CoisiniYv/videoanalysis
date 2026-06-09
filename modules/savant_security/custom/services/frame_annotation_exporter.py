@@ -43,6 +43,7 @@ class FrameAnnotationExporterConfig:
     redis_maxlen: int = DEFAULT_REDIS_MAXLEN
     write_timeout_ms: int = DEFAULT_WRITE_TIMEOUT_MS
     log_every_n: int = DEFAULT_LOG_EVERY_N
+    min_interval_ms: int = 0
 
     def build_config(self) -> FrameAnnotationBuildConfig:
         return FrameAnnotationBuildConfig(
@@ -61,6 +62,7 @@ class FrameAnnotationExporterCounters:
     frames_exported: int = 0
     frames_skipped_disabled: int = 0
     frames_skipped_no_anchor: int = 0
+    frames_skipped_throttled: int = 0
     validation_errors: int = 0
     redis_write_errors: int = 0
     objects_exported_person: int = 0
@@ -74,6 +76,7 @@ class FrameAnnotationExporterCounters:
             "frames_exported": self.frames_exported,
             "frames_skipped_disabled": self.frames_skipped_disabled,
             "frames_skipped_no_anchor": self.frames_skipped_no_anchor,
+            "frames_skipped_throttled": self.frames_skipped_throttled,
             "validation_errors": self.validation_errors,
             "redis_write_errors": self.redis_write_errors,
             "objects_exported_person": self.objects_exported_person,
@@ -207,6 +210,7 @@ class FrameAnnotationExportRuntime:
         self.resolve_camera_id = resolve_camera_id or (lambda source_id: source_id)
         self.counters = FrameAnnotationExporterCounters()
         self._keyframe_pts_by_source_uuid: dict[tuple[str, str], int] = {}
+        self._last_emit_pts_ns_by_source: dict[str, int] = {}
 
     def process_frame(self, frame_meta: Any) -> dict[str, Any] | None:
         self.counters.frames_seen += 1
@@ -238,6 +242,11 @@ class FrameAnnotationExportRuntime:
             keyframe_pts = self._keyframe_pts_by_source_uuid.get(
                 (source_id, previous_keyframe_uuid)
             )
+        is_keyframe = frame_uuid is not None and keyframe_uuid == frame_uuid
+        if self._throttled(source_id, frame_pts, is_keyframe=is_keyframe):
+            self.counters.frames_skipped_throttled += 1
+            self._log_tick(source_id, camera_id)
+            return None
         if frame_pts is None and frame_uuid is None:
             self.counters.frames_skipped_no_anchor += 1
             self._log_warning(
@@ -306,6 +315,32 @@ class FrameAnnotationExportRuntime:
         self.counters.objects_exported_face += counts["face"]
         self._log_tick(source_id, camera_id)
         return message
+
+    def _throttled(
+        self,
+        source_id: str,
+        frame_pts: int | None,
+        *,
+        is_keyframe: bool,
+    ) -> bool:
+        interval_ms = int(getattr(self.config, "min_interval_ms", 0) or 0)
+        if interval_ms <= 0 or frame_pts is None:
+            return False
+        source_key = source_id or "__unknown_source__"
+        if is_keyframe:
+            self._last_emit_pts_ns_by_source[source_key] = int(frame_pts)
+            return False
+        interval_ns = interval_ms * 1_000_000
+        last = self._last_emit_pts_ns_by_source.get(source_key)
+        if last is not None:
+            delta = int(frame_pts) - last
+            if delta < 0:
+                self._last_emit_pts_ns_by_source[source_key] = int(frame_pts)
+                return False
+            if delta < interval_ns:
+                return True
+        self._last_emit_pts_ns_by_source[source_key] = int(frame_pts)
+        return False
 
     def _log_warning(self, reason: str, **fields: Any) -> None:
         if not self._should_log():

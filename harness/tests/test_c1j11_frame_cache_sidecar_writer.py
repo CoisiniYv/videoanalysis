@@ -489,15 +489,16 @@ def test_sidecar_groups_different_source_frames_by_final_metadata_pts(
     event["frame_pts"] = 10_000_000_000
     event["frame_uuid"] = "final-frame"
     first = _intrusion_frame_message()
-    first["frame_pts"] = 9_990_000_000
+    first["frame_pts"] = 9_970_000_000
     first["frame_uuid"] = "source-a"
     first["timestamp_ms"] = 1_780_918_000_000
     first["created_at"] = 1_780_918_000_000
     second = copy.deepcopy(first)
     second["frame_pts"] = 10_010_000_000
     second["frame_uuid"] = "source-b"
-    second["objects"][0]["source_observation_id"] = "person:c1e_rtsp_replay:14:10010"
-    second["objects"][0]["track_id"] = "14"
+    second["objects"][0]["source_observation_id"] = "person:c1e_rtsp_replay:13:10010"
+    second["objects"][0]["track_id"] = "13"
+    second["objects"][0]["bbox"]["xyxy"] = [104, 122, 224, 362]
 
     summary, result = _write(
         tmp_path,
@@ -517,14 +518,51 @@ def test_sidecar_groups_different_source_frames_by_final_metadata_pts(
     assert rows[0]["frame_uuid"] == "final-frame"
     assert rows[0]["frame_pts"] == 10_000_000_000
     assert rows[0]["matched_metadata_pts"] == 10_000_000_000
-    assert len(rows[0]["objects"]) == 2
-    assert {obj["source_frame_uuid"] for obj in rows[0]["objects"]} == {"source-a", "source-b"}
-    assert {obj["source_frame_pts"] for obj in rows[0]["objects"]} == {
-        9_990_000_000,
-        10_010_000_000,
-    }
+    assert len(rows[0]["objects"]) == 1
+    assert rows[0]["objects"][0]["source_frame_uuid"] == "source-b"
+    assert rows[0]["objects"][0]["source_frame_pts"] == 10_010_000_000
+    assert rows[0]["objects"][0]["bbox"]["xyxy"] == [104.0, 122.0, 224.0, 362.0]
     assert summary["rows_written"] == 1
     assert summary["annotations_written"] == 1
+    assert summary["collapse_input_objects"] == 2
+    assert summary["collapse_output_objects"] == 1
+    assert summary["collapse_identity_many_to_one_dropped"] == 1
+    assert summary["collapse_identity_many_to_one_replaced"] == 1
+    reader_summary = summary["frame_cache_reader_summary"]
+    assert reader_summary["duplicate_frame_anchor_messages"] == 0
+
+
+def test_sidecar_dedups_duplicate_source_frame_objects(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        json.dumps({"frame_num": 0, "pts": 34_646, "frame_uuid": "frame-34646"})
+        + "\n",
+        encoding="utf-8",
+    )
+    message = _frame_message()
+    duplicate = copy.deepcopy(message)
+
+    summary, result = _write(
+        tmp_path,
+        messages=[message, duplicate],
+        evidence_dir=evidence_dir,
+        config=_config(enabled=True, freshness_guard_mode="metadata_pts"),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert len(rows) == 1
+    assert len(rows[0]["objects"]) == 1
+    assert rows[0]["objects"][0]["track_id"] == "13"
+    assert summary["collapse_input_objects"] == 2
+    assert summary["collapse_output_objects"] == 1
+    assert summary["collapse_duplicate_fingerprint_dropped"] == 1
+    reader_summary = summary["frame_cache_reader_summary"]
+    assert reader_summary["duplicate_frame_uuid_messages"] == 1
+    assert reader_summary["duplicate_frame_pts_messages"] == 1
+    assert reader_summary["duplicate_frame_anchor_messages"] == 1
+    assert reader_summary["max_messages_per_frame_anchor"] == 2
 
 
 def test_metadata_pts_guard_rejects_old_wall_clock_loop_rows(

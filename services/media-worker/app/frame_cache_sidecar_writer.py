@@ -194,13 +194,16 @@ def write_frame_cache_identity_sidecar(
             identity_annotations = collapse_annotations_to_frame_rows(
                 identity_annotations,
                 metadata_path=metadata_path,
+                dedup_summary=filter_summary,
             )
             filter_summary["rows_written"] = len(identity_annotations)
             filter_summary["rows_non_displayable"] = 0
         else:
+            collapse_summary: dict[str, Any] = {}
             identity_annotations = collapse_annotations_to_frame_rows(
                 aligned_annotations,
                 metadata_path=metadata_path,
+                dedup_summary=collapse_summary,
             )
             dropped_annotations = []
             filter_summary = {
@@ -211,6 +214,7 @@ def write_frame_cache_identity_sidecar(
                 "rows_dropped_out_of_window": 0,
                 "rows_dropped_missing": 0,
                 **freshness_summary,
+                **collapse_summary,
             }
         counts = _count_identity_annotations(identity_annotations)
         clip_timeline_summary = {**clip_timeline_summary, **freshness_summary, **filter_summary}
@@ -444,16 +448,27 @@ def _metadata_frame_group_key(
     return ("source", f"{frame_uuid or ''}:{frame_pts if frame_pts is not None else ''}:{frame_index if frame_index is not None else ''}")
 
 
+_LARGE_PTS_DELTA_NS = 10**30
+
+
 def collapse_annotations_to_frame_rows(
     annotations: list[dict[str, Any]],
     *,
     metadata_path: str | None = None,
+    dedup_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Collapse object-level annotations into one JSONL row per final metadata frame."""
 
     frame_rows = _frame_rows_from_metadata(metadata_path)
     grouped: dict[tuple[str, Any], dict[str, Any]] = {}
     order: dict[tuple[str, Any], int] = {}
+    collapse_stats = {
+        "collapse_input_objects": 0,
+        "collapse_output_objects": 0,
+        "collapse_duplicate_fingerprint_dropped": 0,
+        "collapse_identity_many_to_one_dropped": 0,
+        "collapse_identity_many_to_one_replaced": 0,
+    }
     for index, row in enumerate(copy.deepcopy(annotations)):
         if not isinstance(row, dict):
             continue
@@ -489,6 +504,9 @@ def collapse_annotations_to_frame_rows(
             else _int_or_none(row.get("clip_timeline_delta_ns"))
         )
         frame.setdefault("objects", [])
+        frame.setdefault("_object_fingerprints", set())
+        frame.setdefault("_identity_slots", {})
+        frame.setdefault("_identity_slot_deltas", {})
         obj = copy.deepcopy(row)
         source_frame_pts = _int_or_none(row.get("frame_pts"))
         source_frame_uuid = _text_or_none(row.get("frame_uuid"))
@@ -512,7 +530,51 @@ def collapse_annotations_to_frame_rows(
             "displayable",
         ):
             obj.pop(key_to_remove, None)
-        frame["objects"].append(_sanitize_value(obj))
+        sanitized = _sanitize_value(obj)
+        collapse_stats["collapse_input_objects"] += 1
+
+        duplicate_key = _frame_object_duplicate_key(
+            sanitized,
+            source_frame_pts=source_frame_pts,
+            source_frame_uuid=source_frame_uuid,
+        )
+        seen_fingerprints = frame["_object_fingerprints"]
+        if duplicate_key is not None and duplicate_key in seen_fingerprints:
+            collapse_stats["collapse_duplicate_fingerprint_dropped"] += 1
+            grouped[key] = frame
+            order.setdefault(key, index)
+            continue
+        if duplicate_key is not None:
+            seen_fingerprints.add(duplicate_key)
+
+        identity_key = _frame_object_identity_key(sanitized)
+        identity_slots = frame["_identity_slots"]
+        identity_deltas = frame["_identity_slot_deltas"]
+        target_frame_pts = _int_or_none(
+            frame.get("matched_metadata_pts")
+            if frame.get("matched_metadata_pts") is not None
+            else frame.get("frame_pts")
+        )
+        source_delta = _object_source_delta_ns(
+            sanitized,
+            target_frame_pts=target_frame_pts,
+            fallback_source_frame_pts=source_frame_pts,
+        )
+        if identity_key is not None and identity_key in identity_slots:
+            current_delta = identity_deltas.get(identity_key, _LARGE_PTS_DELTA_NS)
+            if source_delta < current_delta:
+                frame["objects"][identity_slots[identity_key]] = sanitized
+                identity_deltas[identity_key] = source_delta
+                collapse_stats["collapse_identity_many_to_one_replaced"] += 1
+            collapse_stats["collapse_identity_many_to_one_dropped"] += 1
+            grouped[key] = frame
+            order.setdefault(key, index)
+            continue
+
+        if identity_key is not None:
+            identity_slots[identity_key] = len(frame["objects"])
+            identity_deltas[identity_key] = source_delta
+        frame["objects"].append(sanitized)
         grouped[key] = frame
         order.setdefault(key, index)
 
@@ -525,11 +587,79 @@ def collapse_annotations_to_frame_rows(
             str(frame.get("frame_uuid") or ""),
         )
 
-    return [
-        _sanitize_value(frame)
-        for _key, frame in sorted(grouped.items(), key=sort_key)
-        if frame.get("objects")
-    ]
+    result: list[dict[str, Any]] = []
+    for _key, frame in sorted(grouped.items(), key=sort_key):
+        frame.pop("_object_fingerprints", None)
+        frame.pop("_identity_slots", None)
+        frame.pop("_identity_slot_deltas", None)
+        if frame.get("objects"):
+            result.append(_sanitize_value(frame))
+    collapse_stats["collapse_output_objects"] = sum(
+        len(frame.get("objects") or []) for frame in result
+    )
+    if dedup_summary is not None:
+        dedup_summary.update(collapse_stats)
+    return result
+
+
+def _frame_object_duplicate_key(
+    obj: dict[str, Any],
+    *,
+    source_frame_pts: int | None,
+    source_frame_uuid: str | None,
+) -> tuple[Any, ...] | None:
+    """Return a key for true duplicate objects from the same source frame."""
+
+    object_type = _text_or_none(obj.get("object_type"))
+    source_anchor = (
+        source_frame_uuid or _text_or_none(obj.get("source_frame_uuid")) or "",
+        source_frame_pts
+        if source_frame_pts is not None
+        else _int_or_none(obj.get("source_frame_pts")),
+    )
+    fingerprint = _text_or_none(obj.get("source_object_fingerprint"))
+    if fingerprint is not None:
+        return ("source_object_fingerprint", fingerprint, *source_anchor)
+    return (
+        "fallback",
+        object_type,
+        _text_or_none(obj.get("track_id")) or "",
+        _text_or_none(obj.get("source_observation_id")) or "",
+        _int_or_none(obj.get("original_object_index")),
+        json.dumps(obj.get("bbox"), sort_keys=True, separators=(",", ":"), default=str),
+        *source_anchor,
+    )
+
+
+def _frame_object_identity_key(obj: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return a same-frame identity key that intentionally ignores bbox."""
+
+    object_type = _text_or_none(obj.get("object_type"))
+    if object_type not in {"person", "face", "known_face"}:
+        return None
+    track_id = _text_or_none(obj.get("track_id"))
+    if track_id is not None:
+        return (object_type, "track_id", track_id)
+    source_observation_id = _text_or_none(obj.get("source_observation_id"))
+    if source_observation_id is not None:
+        return (object_type, "source_observation_id", source_observation_id)
+    return None
+
+
+def _object_source_delta_ns(
+    obj: dict[str, Any],
+    *,
+    target_frame_pts: int | None,
+    fallback_source_frame_pts: int | None,
+) -> int:
+    if target_frame_pts is None:
+        return _LARGE_PTS_DELTA_NS
+    source_frame_pts = _int_or_none(obj.get("source_frame_pts"))
+    if source_frame_pts is None:
+        source_frame_pts = fallback_source_frame_pts
+    if source_frame_pts is None:
+        return _LARGE_PTS_DELTA_NS
+    return abs(int(source_frame_pts) - int(target_frame_pts))
 
 
 def _read_frame_annotations(
@@ -557,6 +687,12 @@ def _read_frame_annotations(
         "messages_filtered_camera": 0,
         "earliest_frame_pts": None,
         "latest_frame_pts": None,
+        "duplicate_frame_uuid_messages": 0,
+        "duplicate_frame_pts_messages": 0,
+        "duplicate_frame_anchor_messages": 0,
+        "max_messages_per_frame_uuid": 0,
+        "max_messages_per_frame_pts": 0,
+        "max_messages_per_frame_anchor": 0,
         "lookback_count": lookback_count,
         "max_scan": max_scan,
         "consumer_group_used": False,
@@ -588,7 +724,37 @@ def _read_frame_annotations(
     if pts_values:
         summary["earliest_frame_pts"] = min(pts_values)
         summary["latest_frame_pts"] = max(pts_values)
+    uuid_values = [
+        frame_uuid
+        for item in messages
+        if (frame_uuid := _text_or_none(item.get("frame_uuid"))) is not None
+    ]
+    anchor_values = []
+    for item in messages:
+        frame_uuid = _text_or_none(item.get("frame_uuid"))
+        frame_pts = _int_or_none(item.get("frame_pts"))
+        if frame_uuid is None and frame_pts is None:
+            continue
+        anchor_values.append((frame_uuid or "", frame_pts))
+    duplicate_uuid, max_uuid = _duplicate_message_count(uuid_values)
+    duplicate_pts, max_pts = _duplicate_message_count(pts_values)
+    duplicate_anchor, max_anchor = _duplicate_message_count(anchor_values)
+    summary["duplicate_frame_uuid_messages"] = duplicate_uuid
+    summary["duplicate_frame_pts_messages"] = duplicate_pts
+    summary["duplicate_frame_anchor_messages"] = duplicate_anchor
+    summary["max_messages_per_frame_uuid"] = max_uuid
+    summary["max_messages_per_frame_pts"] = max_pts
+    summary["max_messages_per_frame_anchor"] = max_anchor
     return messages, summary
+
+
+def _duplicate_message_count(values: list[Any]) -> tuple[int, int]:
+    counts: dict[Any, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return 0, 0
+    return sum(count - 1 for count in counts.values() if count > 1), max(counts.values())
 
 
 def _frame_cache_annotations(
@@ -753,6 +919,17 @@ def _production_sidecar_contract_summary(
             + int(clip_timeline_summary.get("annotations_matched_frame_pts_nearest") or 0)
         )
     )
+    collapse_input_objects = int(clip_timeline_summary.get("collapse_input_objects") or 0)
+    collapse_output_objects = int(clip_timeline_summary.get("collapse_output_objects") or 0)
+    collapse_duplicate_fingerprint_dropped = int(
+        clip_timeline_summary.get("collapse_duplicate_fingerprint_dropped") or 0
+    )
+    collapse_identity_many_to_one_dropped = int(
+        clip_timeline_summary.get("collapse_identity_many_to_one_dropped") or 0
+    )
+    collapse_identity_many_to_one_replaced = int(
+        clip_timeline_summary.get("collapse_identity_many_to_one_replaced") or 0
+    )
     trigger_stale_or_epoch_mismatch = (
         clip_timeline_summary.get("trigger_row_stale_or_epoch_mismatch") is True
     )
@@ -909,6 +1086,11 @@ def _production_sidecar_contract_summary(
         "rows_rejected_stale_cache": rows_rejected_stale_cache,
         "rows_rejected_epoch_mismatch": rows_rejected_epoch_mismatch,
         "rows_rejected_pts_non_unique": rows_rejected_pts_non_unique,
+        "collapse_input_objects": collapse_input_objects,
+        "collapse_output_objects": collapse_output_objects,
+        "collapse_duplicate_fingerprint_dropped": collapse_duplicate_fingerprint_dropped,
+        "collapse_identity_many_to_one_dropped": collapse_identity_many_to_one_dropped,
+        "collapse_identity_many_to_one_replaced": collapse_identity_many_to_one_replaced,
         "freshness_guard_mode": clip_timeline_summary.get("freshness_guard_mode"),
         "freshness_guard_status": clip_timeline_summary.get("freshness_guard_status"),
         "rows_displayable": rows_displayable,

@@ -35,11 +35,17 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
         redis_maxlen: int = 10000,
         write_timeout_ms: int = 50,
         log_every_n_frames: int = 300,
+        min_interval_ms: int | None = None,
         cameras_config_path: str = "",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._camera_bundle = self._load_camera_bundle(cameras_config_path)
+        if min_interval_ms is None:
+            min_interval_ms = _env_int(
+                "FRAME_ANNOTATION_EXPORT_MIN_INTERVAL_MS",
+                _env_int("FRAME_ANNOTATION_MIN_INTERVAL_MS", 0),
+            )
         config = FrameAnnotationExporterConfig(
             enabled=_as_bool(enabled),
             producer=str(producer),
@@ -52,6 +58,7 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             redis_maxlen=int(redis_maxlen),
             write_timeout_ms=int(write_timeout_ms),
             log_every_n=int(log_every_n_frames),
+            min_interval_ms=int(min_interval_ms),
         )
         exporter = create_frame_annotation_exporter(config)
         self._runtime = FrameAnnotationExportRuntime(
@@ -66,6 +73,7 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             f"ttl_seconds={config.ttl_seconds} "
             f"max_objects_per_frame={config.max_objects_per_frame} "
             f"redis_maxlen={config.redis_maxlen} "
+            f"min_interval_ms={config.min_interval_ms} "
             f"include_keypoints={config.include_keypoints} "
             f"include_landmarks={config.include_landmarks} "
             "include_embedding_vector=false",
@@ -111,3 +119,15 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    import os
+
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return default
