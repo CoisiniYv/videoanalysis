@@ -439,6 +439,41 @@ def test_sidecar_collapses_multiple_objects_to_one_row_per_metadata_frame(
     assert {obj["object_type"] for obj in rows[0]["objects"]} == {"person"}
 
 
+def test_uuid_keyed_sink_metadata_prevents_looped_pts_misalignment(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = _evidence_dir(tmp_path)
+    (evidence_dir / "sink_metadata.json").write_text(
+        "\n".join(
+            [
+                json.dumps({"frame_num": 0, "pts": 34_646, "uuid": "loop-a-frame"}),
+                json.dumps({"frame_num": 1, "pts": 34_646, "uuid": "loop-b-frame"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    event = _event()
+    event["frame_uuid"] = "loop-b-frame"
+    message = _frame_message(frame_pts=34_646, frame_uuid="loop-b-frame")
+
+    summary, result = _write(
+        tmp_path,
+        event=event,
+        messages=[message],
+        evidence_dir=evidence_dir,
+        config=_config(enabled=True, freshness_guard_mode="metadata_pts"),
+    )
+    rows = _read_jsonl(Path(result["annotations_path"]))
+
+    assert len(rows) == 1
+    assert rows[0]["frame_uuid"] == "loop-b-frame"
+    assert rows[0]["clip_frame_index"] == 1
+    assert rows[0]["clip_timeline_match"] == "metadata_frame_uuid"
+    assert summary["rows_matched_by_frame_uuid"] == 1
+    assert summary["rows_matched_by_pts_fallback"] == 0
+
+
 def test_sidecar_groups_different_source_frames_by_final_metadata_pts(
     tmp_path: Path,
 ) -> None:

@@ -92,6 +92,17 @@ def validate_frame_annotation_message(
         data["frame_pts"] = _require_int(frame_pts, "frame_pts")
     if frame_uuid is not None:
         data["frame_uuid"] = _require_non_empty_string(frame_uuid, "frame_uuid")
+    for field_name in ("keyframe_uuid", "previous_keyframe_uuid"):
+        if data.get(field_name) is not None:
+            data[field_name] = _require_non_empty_string(
+                data[field_name],
+                field_name,
+            )
+    for field_name in ("keyframe_pts", "frame_dts", "duration"):
+        if data.get(field_name) is not None:
+            data[field_name] = _require_int(data[field_name], field_name)
+    if data.get("time_base") is not None:
+        data["time_base"] = _require_non_empty_string(data["time_base"], "time_base")
 
     if data.get("frame_num") is not None:
         data["frame_num"] = _require_int(data["frame_num"], "frame_num")

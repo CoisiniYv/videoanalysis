@@ -11,7 +11,7 @@ parameters:
   log_level: ${oc.env:LOGLEVEL, INFO}
   batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
   max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
-  max_fps_control: ${oc.decode:${oc.env:MAX_FPS_CONTROL, true}}
+  max_fps_control: ${oc.decode:${oc.env:MAX_FPS_CONTROL, false}}
   max_fps: ${oc.env:MAX_FPS, 8/1}
   min_fps: ${oc.env:MIN_FPS, 2/1}
   pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
@@ -36,12 +36,30 @@ parameters:
 pipeline:
   source:
     element: zeromq_source_bin
+    ingress_frame_filter:
+      module: custom.filters.pts_fps_gate
+      class_name: PtsFpsGate
+      kwargs:
+        enabled: ${parameters.max_fps_control}
+        max_fps: ${parameters.max_fps}
+        min_fps: ${parameters.min_fps}
+        log_every_n_frames: ${oc.decode:${oc.env:INGRESS_FPS_GATE_LOG_EVERY_N, 300}}
     properties:
       socket: ${oc.env:ZMQ_SRC_ENDPOINT}
       source_id: ${oc.decode:${oc.env:SOURCE_ID, null}}
       source_id_prefix: ${oc.decode:${oc.env:SOURCE_ID_PREFIX, null}}
 
   elements:
+    # ------------------------------------------------------------------
+    # ReplaySavantFrameDumpPyFunc — debug-only Replay->Savant pixel proof.
+    # Disabled by default. When explicitly targeted by UUID/PTS, writes the
+    # pre-inference Savant runtime frame for comparison against Replay media.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: replay_savant_frame_dump
+      module: custom.pyfuncs.replay_savant_frame_dump
+      class_name: ReplaySavantFrameDumpPyFunc
+
     # ------------------------------------------------------------------
     # YOLO26-pose — person detection with 17 COCO keypoints.
     # Same ONNX model used by phase3h-zmq.

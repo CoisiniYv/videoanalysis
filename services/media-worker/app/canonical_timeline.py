@@ -171,7 +171,7 @@ def align_annotations_to_clip_metadata(
     by_pts: dict[int, dict[str, Any]] = {}
     pts_frames: list[tuple[int, int, dict[str, Any]]] = []
     for frame in frames:
-        frame_uuid = frame.get("frame_uuid")
+        frame_uuid = _row_uuid(frame)
         if isinstance(frame_uuid, str) and frame_uuid and frame_uuid not in by_uuid:
             by_uuid[frame_uuid] = frame
         pts = _row_pts(frame)
@@ -201,7 +201,7 @@ def align_annotations_to_clip_metadata(
         frame = None
         match_kind = "missing"
         delta_ns: int | None = None
-        frame_uuid = row.get("frame_uuid")
+        frame_uuid = _row_uuid(row)
         if isinstance(frame_uuid, str) and frame_uuid and by_uuid:
             frame = by_uuid.get(frame_uuid)
             if frame is not None:
@@ -297,6 +297,14 @@ def infer_metadata_pts_nearest_tolerance_ns(metadata_rows: list[dict[str, Any]])
     else:
         tolerance = DEFAULT_PTS_NEAREST_TOLERANCE_NS
     return min(tolerance, MAX_PTS_NEAREST_TOLERANCE_NS)
+
+
+def _row_uuid(row: dict[str, Any]) -> str | None:
+    for key in ("frame_uuid", "uuid"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _nearest_metadata_frame(

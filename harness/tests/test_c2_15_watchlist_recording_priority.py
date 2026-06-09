@@ -167,6 +167,7 @@ def _watchlist_event(source_event_id: str) -> dict[str, Any]:
 
 
 def _load_event_worker() -> Any:
+    _clear_event_worker_app_imports()
     if str(EVENT_WORKER_ROOT) not in sys.path:
         sys.path.insert(0, str(EVENT_WORKER_ROOT))
     from app import worker

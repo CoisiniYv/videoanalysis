@@ -29,13 +29,13 @@
   "out_stream": {
     "url": "dealer+connect:tcp://savant-security:5557",
     "options": {
-      "send_timeout": {"secs": 1, "nanos": 0},
-      "send_retries": 3,
-      "receive_timeout": {"secs": 1, "nanos": 0},
-      "receive_retries": 3,
-      "send_hwm": 1000,
-      "receive_hwm": 100,
-      "inflight_ops": 100
+      "send_timeout": {"secs": 5, "nanos": 0},
+      "send_retries": 10,
+      "receive_timeout": {"secs": 5, "nanos": 0},
+      "receive_retries": 10,
+      "send_hwm": 10000,
+      "receive_hwm": 10000,
+      "inflight_ops": 1000
     }
   },
   "storage": {

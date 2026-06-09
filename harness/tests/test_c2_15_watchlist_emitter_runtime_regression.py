@@ -152,6 +152,7 @@ def test_watchlist_emitter_publishes_threshold_hit_without_unsafe_payload() -> N
 
 
 def _load_watchlist_match_emitter() -> type:
+    _clear_face_worker_app_imports()
     if str(FACE_WORKER_ROOT) not in sys.path:
         sys.path.insert(0, str(FACE_WORKER_ROOT))
     from app.worker import WatchlistMatchEmitter

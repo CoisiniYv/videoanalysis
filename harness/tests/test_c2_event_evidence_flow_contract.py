@@ -417,6 +417,77 @@ def test_c2_frame_cache_finalizer_crops_raw_clip_and_metadata_to_event_pts_windo
     assert summary["clip_timeline_alignment"]["metadata_frame_count"] == 5
 
 
+def test_c2_frame_cache_crop_failure_replaces_partial_raw_clip(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    worker = _activate_media_worker()
+    event_id = "99999999-9999-4999-8999-999999999999"
+    sink_dir = _make_sink_output_without_objects(tmp_path, event_id=event_id)
+    source_video = sink_dir / "job-output" / "video.mov"
+    source_video.write_bytes(b"source replay video")
+    evidence_root = tmp_path / "evidence"
+
+    def fake_crop(**kwargs: Any) -> dict[str, Any]:
+        Path(kwargs["output_video_path"]).write_bytes(b"bad")
+        raise RuntimeError("video_time_domain_crop_failed:0")
+
+    def fake_sidecar_writer(**kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        sidecar = Path(kwargs["evidence_dir"]) / "annotations.frame_cache.identity.jsonl"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "clip_frame_index": 0,
+                    "frame_pts": 0,
+                    "objects": [
+                        {
+                            "object_type": "person",
+                            "annotation_role": "person_context",
+                        }
+                    ],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "annotation_status": "complete",
+            "annotations_written": 1,
+            "rows_written": 1,
+            "rows_total_input": 1,
+            "person_context_rows": 1,
+            "known_face_count": 0,
+            "unknown_face_count": 0,
+            "embedding_vectors_in_output": 0,
+            "image_bytes_in_output": 0,
+            "production_ready_failures": [],
+        }, {"written": True, "annotations_path": str(sidecar), "summary_path": str(Path(kwargs["evidence_dir"]) / "summary.frame_cache.identity.json")}
+
+    monkeypatch.setenv("DEFAULT_PRE_SECONDS", "2")
+    monkeypatch.setenv("DEFAULT_POST_SECONDS", "2")
+    monkeypatch.setenv("C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", "true")
+    monkeypatch.setattr(worker, "_c2_copy_or_crop_video", fake_crop)
+    monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 2)
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 1.58)
+    monkeypatch.setattr(worker, "write_frame_cache_identity_sidecar", fake_sidecar_writer)
+
+    result = worker._finalize_c2_post_savant_evidence_bundle(
+        _FakeConnection([_event_row(event_id)]),
+        event_id=event_id,
+        meta_dir=str(sink_dir / "job-output"),
+        metadata_file=str(sink_dir / "job-output" / "metadata.json"),
+        evidence_output_dir=str(evidence_root),
+    )
+
+    raw_clip = Path(result["raw_clip"])
+    summary = json.loads(Path(result["summary"]).read_text(encoding="utf-8"))
+    assert raw_clip.read_bytes() == b"source replay video"
+    assert summary["time_domain_crop_applied"] is False
+    assert summary["time_window"]["time_domain_crop_failed"] is True
+    assert "time_domain_crop_failed" in summary["production_ready_failures"]
+
+
 def test_c2_object_metadata_finalizer_uses_pts_window_crop(
     tmp_path: Path,
     monkeypatch: Any,

@@ -25,6 +25,7 @@ PROBED_ATTRS = (
     "frame_uuid",
     "previous_keyframe_uuid",
     "keyframe_uuid",
+    "keyframe",
     "pts",
     "dts",
     "duration",
@@ -120,6 +121,22 @@ def _to_optional_int(value: Any) -> int | None:
         return None
 
 
+def _to_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    try:
+        text = str(value).strip().lower()
+    except Exception:
+        return None
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def _to_time_base(value: Any) -> str | None:
     if value is None:
         return None
@@ -143,6 +160,7 @@ def extract_frame_anchor_metadata(frame_meta: Any) -> dict[str, Any]:
         "frame_uuid": None,
         "keyframe_uuid": None,
         "previous_keyframe_uuid": None,
+        "keyframe_pts": None,
         "frame_pts": None,
         "frame_dts": None,
         "duration": None,
@@ -167,14 +185,21 @@ def extract_frame_anchor_metadata(frame_meta: Any) -> dict[str, Any]:
             direct_keyframe_uuid = _to_optional_str(
                 _safe_raw_attr(video_frame, "keyframe_uuid")
             )
+            frame_uuid = _to_optional_str(_safe_raw_attr(video_frame, "uuid"))
+            frame_pts = _to_optional_int(_safe_raw_attr(video_frame, "pts"))
+            is_keyframe = _to_optional_bool(_safe_raw_attr(video_frame, "keyframe"))
+            keyframe_uuid = (
+                frame_uuid
+                if is_keyframe is True and frame_uuid is not None
+                else direct_keyframe_uuid or previous_keyframe_uuid
+            )
             anchor.update(
                 {
-                    "frame_uuid": _to_optional_str(
-                        _safe_raw_attr(video_frame, "uuid")
-                    ),
-                    "keyframe_uuid": direct_keyframe_uuid or previous_keyframe_uuid,
+                    "frame_uuid": frame_uuid,
+                    "keyframe_uuid": keyframe_uuid,
                     "previous_keyframe_uuid": previous_keyframe_uuid,
-                    "frame_pts": _to_optional_int(_safe_raw_attr(video_frame, "pts")),
+                    "keyframe_pts": frame_pts if is_keyframe is True else None,
+                    "frame_pts": frame_pts,
                     "frame_dts": _to_optional_int(_safe_raw_attr(video_frame, "dts")),
                     "duration": _to_optional_int(
                         _safe_raw_attr(video_frame, "duration")
@@ -202,6 +227,10 @@ def extract_frame_anchor_metadata(frame_meta: Any) -> dict[str, Any]:
         if anchor["previous_keyframe_uuid"] is None:
             anchor["previous_keyframe_uuid"] = _to_optional_str(
                 _safe_raw_attr(frame_meta, "previous_keyframe_uuid")
+            )
+        if anchor["keyframe_pts"] is None:
+            anchor["keyframe_pts"] = _to_optional_int(
+                _safe_raw_attr(frame_meta, "keyframe_pts")
             )
 
         if anchor["frame_pts"] is None:
@@ -403,6 +432,7 @@ def _inspect_object(obj: Any) -> dict[str, Any]:
         "frame_uuid": attrs.get("frame_uuid"),
         "previous_keyframe_uuid": attrs.get("previous_keyframe_uuid"),
         "keyframe_uuid": attrs.get("keyframe_uuid"),
+        "keyframe": attrs.get("keyframe"),
         "pts": attrs.get("pts"),
         "dts": attrs.get("dts"),
         "duration": attrs.get("duration"),
@@ -497,6 +527,7 @@ class FrameUuidRuntimeProbe:
             "video_frame_uuid": video_frame.get("uuid"),
             "video_frame_previous_keyframe_uuid": video_frame.get("previous_keyframe_uuid"),
             "video_frame_keyframe_uuid": video_frame.get("keyframe_uuid"),
+            "video_frame_keyframe": video_frame.get("keyframe"),
             "nested_objects": nested,
             "pts": attrs.get("pts"),
             "dts": attrs.get("dts"),

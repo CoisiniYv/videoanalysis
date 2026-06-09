@@ -40,6 +40,11 @@ def test_c2_record_request_carries_post_savant_policy_fields() -> None:
     assert record["requested_start_pts"] == 4_721_166_666
     assert record["requested_end_pts"] == 14_721_166_666
     assert record["event_frame_pts"] == 9_721_166_666
+    assert record["event_frame_uuid"] == "frame-c2-3b"
+    assert record["previous_keyframe_uuid"] == "previous-kf-c2-3b"
+    assert record["keyframe_uuid"] == "event-kf-c2-3b"
+    assert record["anchor_keyframe_uuid"] == "previous-kf-c2-3b"
+    assert record["anchor_keyframe_pts"] == 8_000_000_000
     assert record["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
     assert record["pre_seconds"] == 3
     assert record["post_seconds"] == 3
@@ -83,6 +88,9 @@ def test_clip_worker_replay_labels_preserve_c2_stream_mapping() -> None:
     assert labels["requested_start_pts"] == "4721166666"
     assert labels["requested_end_pts"] == "14721166666"
     assert labels["event_frame_pts"] == "9721166666"
+    assert labels["event_frame_uuid"] == "frame-c2-3b"
+    assert labels["anchor_keyframe_uuid"] == "previous-kf-c2-3b"
+    assert labels["anchor_keyframe_pts"] == "8000000000"
     assert labels["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
 
 
@@ -157,6 +165,11 @@ def test_media_worker_c2_summary_records_c2_3b_mapping_fields(
     assert summary["allow_legacy_annotation_fallback"] is False
     assert summary["requested_start_pts"] == "4721166666"
     assert summary["requested_end_pts"] == "14721166666"
+    assert summary["evidence_anchor_strategy"] == "uuid_first_pts_verified"
+    assert summary["anchor_keyframe_uuid"] == "previous-kf-c2-3b"
+    assert summary["anchor_keyframe_pts"] == "8000000000"
+    assert summary["post_window_proof_used"] is True
+    assert summary["start_window_coverage_used"] is True
     assert summary["replay_stop_strategy"] == "event_anchor_pre_seconds_rewind"
 
 
@@ -179,6 +192,9 @@ def _c2_event() -> dict[str, Any]:
         "camera_id": "cam-c2",
         "source_id": "c2_post_savant_fps_probe",
         "event_ts_ms": 1_780_000_000_000,
+        "frame_uuid": "frame-c2-3b",
+        "keyframe_uuid": "event-kf-c2-3b",
+        "previous_keyframe_uuid": "previous-kf-c2-3b",
         "frame_pts": 9_721_166_666,
         "frame_num": 5,
         "payload": {
@@ -194,6 +210,7 @@ def _c2_event() -> dict[str, Any]:
                 "requested_start_pts": 4_721_166_666,
                 "requested_end_pts": 14_721_166_666,
                 "event_frame_pts": 9_721_166_666,
+                "anchor_keyframe_pts": 8_000_000_000,
                 "replay_stop_strategy": "legacy_anchor_start_offset_zero",
             }
         },
@@ -208,6 +225,7 @@ def _c2_event() -> dict[str, Any]:
             "requested_start_pts": 4_721_166_666,
             "requested_end_pts": 14_721_166_666,
             "event_frame_pts": 9_721_166_666,
+            "anchor_keyframe_pts": 8_000_000_000,
             "replay_stop_strategy": "legacy_anchor_start_offset_zero",
         },
     }
@@ -233,6 +251,11 @@ def _c2_record_request() -> dict[str, Any]:
         "requested_start_pts": 4_721_166_666,
         "requested_end_pts": 14_721_166_666,
         "event_frame_pts": 9_721_166_666,
+        "event_frame_uuid": "frame-c2-3b",
+        "previous_keyframe_uuid": "previous-kf-c2-3b",
+        "keyframe_uuid": "event-kf-c2-3b",
+        "anchor_keyframe_uuid": "previous-kf-c2-3b",
+        "anchor_keyframe_pts": 8_000_000_000,
         "replay_stop_strategy": "event_anchor_pre_seconds_rewind",
         "strategy": "savant_replay",
         "status": "pending",
@@ -300,6 +323,13 @@ def _event_row(event_id: str) -> tuple[Any, ...]:
                             "requested_start_pts": "4721166666",
                             "requested_end_pts": "14721166666",
                             "event_frame_pts": "9721166666",
+                            "event_frame_uuid": "frame-c2-3b",
+                            "anchor_keyframe_uuid": "previous-kf-c2-3b",
+                            "anchor_keyframe_pts": "8000000000",
+                            "post_window_frame_uuid": "post-window-frame-c2-3b",
+                            "post_window_frame_pts": "14721166666",
+                            "start_window_frame_uuid": "start-window-frame-c2-3b",
+                            "start_window_frame_pts": "4721166666",
                             "replay_stop_strategy": "event_anchor_pre_seconds_rewind",
                         },
                     },

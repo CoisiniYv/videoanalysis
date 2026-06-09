@@ -65,6 +65,12 @@ def build_frame_annotation_message(
     frame_objects: Iterable[Any],
     frame_pts: int | None = None,
     frame_uuid: str | None = None,
+    keyframe_uuid: str | None = None,
+    previous_keyframe_uuid: str | None = None,
+    keyframe_pts: int | None = None,
+    frame_dts: int | None = None,
+    duration: int | None = None,
+    time_base: str | None = None,
     frame_num: int | None = None,
     timestamp_ms: int | None = None,
     created_at: str | None = None,
@@ -110,6 +116,12 @@ def build_frame_annotation_message(
         "camera_id": camera_id,
         "frame_pts": frame_pts,
         "frame_uuid": frame_uuid,
+        "keyframe_uuid": keyframe_uuid,
+        "previous_keyframe_uuid": previous_keyframe_uuid,
+        "keyframe_pts": keyframe_pts,
+        "frame_dts": frame_dts,
+        "duration": duration,
+        "time_base": time_base,
         "frame_num": frame_num,
         "timestamp_ms": timestamp_ms,
         "objects": objects,
@@ -566,6 +578,14 @@ def _validate_frame_annotation_message_compat(
         raise ValueError("missing_camera_id")
     if data.get("frame_pts") is None and not _has_text(data.get("frame_uuid")):
         raise ValueError("missing_frame_anchor")
+    for field_name in ("keyframe_uuid", "previous_keyframe_uuid", "time_base"):
+        value = data.get(field_name)
+        if value is not None and not _has_text(value):
+            raise ValueError(f"missing_{field_name}")
+    for field_name in ("keyframe_pts", "frame_dts", "duration"):
+        value = data.get(field_name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"invalid_{field_name}")
     ttl_seconds = data.get("ttl_seconds")
     if not isinstance(ttl_seconds, int) or ttl_seconds < 1 or ttl_seconds > 3600:
         raise ValueError("invalid_ttl_seconds")

@@ -62,16 +62,52 @@ def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) 
         "frame_pts",
         "frame_num",
         "metadata_domain",
+        "event_frame_uuid",
         "requested_start_pts",
         "requested_end_pts",
         "event_frame_pts",
-        "replay_anchor_pts",
-        "replay_anchor_keyframe",
+        "anchor_keyframe_uuid",
+        "anchor_keyframe_pts",
+        "keyframe_uuid",
+        "previous_keyframe_uuid",
+        "keyframe_pts",
+        "previous_keyframe_pts",
+        "time_base",
     ):
         value = _first_policy_value(event, key)
         if value is not None:
             record[key] = value
     record["replay_stop_strategy"] = C2_POST_SAVANT_REPLAY_STOP_STRATEGY
+
+
+def _normalize_anchor_keyframe_uuid(record: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """Normalize the Replay anchor from the alarm-frame keyframe UUID family."""
+    explicit_anchor_keyframe_uuid = (
+        record.get("anchor_keyframe_uuid")
+        or _first_policy_value(event, "anchor_keyframe_uuid")
+    )
+    alarm_frame_anchor_uuid = (
+        record.get("previous_keyframe_uuid")
+        or _first_policy_value(event, "previous_keyframe_uuid")
+        or record.get("keyframe_uuid")
+        or _first_policy_value(event, "keyframe_uuid")
+    )
+    anchor_keyframe_uuid = explicit_anchor_keyframe_uuid or alarm_frame_anchor_uuid
+    if anchor_keyframe_uuid:
+        record["anchor_keyframe_uuid"] = anchor_keyframe_uuid
+    if not anchor_keyframe_uuid or record.get("anchor_keyframe_pts") not in (None, ""):
+        return
+    if str(record.get("previous_keyframe_uuid") or "") == str(anchor_keyframe_uuid):
+        previous_keyframe_pts = _first_policy_value(event, "previous_keyframe_pts")
+        previous_keyframe_pts_int = _int_or_none(previous_keyframe_pts)
+        if previous_keyframe_pts_int is not None:
+            record["anchor_keyframe_pts"] = previous_keyframe_pts_int
+            return
+    if str(record.get("keyframe_uuid") or "") == str(anchor_keyframe_uuid):
+        keyframe_pts = _first_policy_value(event, "keyframe_pts")
+        keyframe_pts_int = _int_or_none(keyframe_pts)
+        if keyframe_pts_int is not None:
+            record["anchor_keyframe_pts"] = keyframe_pts_int
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -141,11 +177,17 @@ def build_record_request(
         "request_id": request_id or str(uuid.uuid4()),
         "event_id": event_id,
         "source_event_id": source_event_id,
+        "event_type": event.get("event_type", ""),
         "camera_id": event.get("camera_id", ""),
         "source_id": source_id,
         "event_ts_ms": int(event.get("event_ts_ms", 0)),
         "frame_uuid": event.get("frame_uuid"),
-        "keyframe_uuid": event.get("keyframe_uuid"),
+        "event_frame_uuid": event.get("event_frame_uuid") or event.get("frame_uuid"),
+        "keyframe_uuid": (
+            event.get("keyframe_uuid")
+            or (media.get("keyframe_uuid") if isinstance(media, dict) else None)
+        ),
+        "anchor_keyframe_uuid": event.get("anchor_keyframe_uuid"),
         "previous_keyframe_uuid": (
             event.get("previous_keyframe_uuid")
             or (media.get("previous_keyframe_uuid") if isinstance(media, dict) else None)
@@ -160,6 +202,7 @@ def build_record_request(
         "status": "pending",
     }
     _apply_c2_post_savant_policy(record, event)
+    _normalize_anchor_keyframe_uuid(record, event)
     _apply_event_frame_timeline(record, event)
     return record
 

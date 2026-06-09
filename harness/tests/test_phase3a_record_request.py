@@ -56,9 +56,10 @@ def test_publish_contains_required_fields():
     record = json.loads(fields[b"data"])
 
     for key in ("request_id", "event_id", "source_event_id", "camera_id",
-                 "source_id", "event_ts_ms", "pre_seconds", "post_seconds",
-                 "strategy", "status"):
+                 "source_id", "event_type", "event_ts_ms", "pre_seconds",
+                 "post_seconds", "strategy", "status"):
         assert key in record, f"Missing field: {key}"
+    assert record["event_type"] == "intrusion"
     assert record["strategy"] == "savant_replay"
     assert record["status"] == "pending"
     assert record["pre_seconds"] == 5
@@ -68,12 +69,34 @@ def test_publish_contains_required_fields():
 def test_publish_preserves_keyframe_uuid():
     fake = fakeredis.FakeRedis(decode_responses=False)
     pub = RecordRequestPublisher(fake, "security.record_requests")
-    event = _make_event(keyframe_uuid="kf-abc")
+    event = _make_event(keyframe_uuid="kf-abc", keyframe_pts=12_000)
     pub.publish(event, event_id="uuid-2")
 
     _, fields = fake.xrange("security.record_requests", "-", "+")[0]
     record = json.loads(fields[b"data"])
     assert record["keyframe_uuid"] == "kf-abc"
+    assert record["anchor_keyframe_uuid"] == "kf-abc"
+    assert record["anchor_keyframe_pts"] == 12_000
+
+
+def test_publish_normalizes_anchor_keyframe_uuid_from_previous_keyframe_uuid():
+    fake = fakeredis.FakeRedis(decode_responses=False)
+    pub = RecordRequestPublisher(fake, "security.record_requests")
+    event = _make_event(
+        keyframe_uuid="event-kf",
+        keyframe_pts=7_000,
+        previous_keyframe_uuid="previous-kf",
+        previous_keyframe_pts=6_000,
+        payload={"media": {"previous_keyframe_uuid": "media-previous-kf"}},
+    )
+    pub.publish(event, event_id="uuid-2b")
+
+    _, fields = fake.xrange("security.record_requests", "-", "+")[0]
+    record = json.loads(fields[b"data"])
+    assert record["previous_keyframe_uuid"] == "previous-kf"
+    assert record["keyframe_uuid"] == "event-kf"
+    assert record["anchor_keyframe_uuid"] == "previous-kf"
+    assert record["anchor_keyframe_pts"] == 6_000
 
 
 def test_publish_preserves_savant_event_frame_pts_window():
@@ -97,6 +120,7 @@ def test_publish_preserves_savant_event_frame_pts_window():
     _, fields = fake.xrange("security.record_requests", "-", "+")[0]
     record = json.loads(fields[b"data"])
     assert record["frame_pts"] == 20_513_100_000
+    assert record["event_frame_uuid"] == "frm-001"
     assert record["event_frame_pts"] == 20_513_100_000
     assert record["requested_start_pts"] == 15_513_100_000
     assert record["requested_end_pts"] == 25_513_100_000

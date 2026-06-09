@@ -41,6 +41,7 @@ class FakeVideoFrame:
     uuid = "019e7863-296d-7c40-9422-23add71cc39a"
     previous_keyframe_uuid = "019e7863-keyframe-prev"
     keyframe_uuid = None
+    keyframe = False
     pts = 1228900000
     dts = 1144900000
     duration = 41708333
@@ -64,6 +65,7 @@ def test_extract_frame_anchor_metadata_prefers_nested_video_frame() -> None:
     assert anchor["frame_uuid"] == FakeVideoFrame.uuid
     assert anchor["previous_keyframe_uuid"] == FakeVideoFrame.previous_keyframe_uuid
     assert anchor["keyframe_uuid"] == FakeVideoFrame.previous_keyframe_uuid
+    assert anchor["keyframe_pts"] is None
     assert anchor["frame_pts"] == FakeVideoFrame.pts
     assert anchor["frame_dts"] == FakeVideoFrame.dts
     assert anchor["duration"] == FakeVideoFrame.duration
@@ -85,6 +87,7 @@ def test_extract_frame_anchor_metadata_missing_values_do_not_raise() -> None:
         "frame_uuid",
         "keyframe_uuid",
         "previous_keyframe_uuid",
+        "keyframe_pts",
         "frame_pts",
         "frame_dts",
         "duration",
@@ -96,6 +99,54 @@ def test_extract_frame_anchor_metadata_missing_values_do_not_raise() -> None:
     }
     assert anchor["frame_uuid"] is None
     assert anchor["previous_keyframe_uuid"] is None
+
+
+def test_extract_frame_anchor_metadata_marks_explicit_keyframe() -> None:
+    helper = _load_helper()
+
+    class KeyVideoFrame:
+        uuid = "019e7863-1000-7000-8000-000000000000"
+        previous_keyframe_uuid = None
+        keyframe_uuid = None
+        keyframe = True
+        pts = 4_000_000_000
+        dts = 4_000_000_000
+        duration = 41_666_667
+        time_base = (1, 1000000000)
+        source_id = "source-a"
+
+    class KeyFrameMeta:
+        source_id = "source-a"
+        video_frame = KeyVideoFrame()
+
+    anchor = helper.extract_frame_anchor_metadata(KeyFrameMeta())
+
+    assert anchor["frame_uuid"] == KeyVideoFrame.uuid
+    assert anchor["keyframe_uuid"] == KeyVideoFrame.uuid
+    assert anchor["keyframe_pts"] == KeyVideoFrame.pts
+
+
+def test_extract_frame_anchor_metadata_does_not_guess_unknown_keyframe() -> None:
+    helper = _load_helper()
+
+    class UnknownKeyVideoFrame:
+        uuid = "019e7863-2000-7000-8000-000000000000"
+        previous_keyframe_uuid = None
+        keyframe_uuid = None
+        keyframe = None
+        pts = 5_000_000_000
+        time_base = (1, 1000000000)
+        source_id = "source-a"
+
+    class UnknownKeyFrameMeta:
+        source_id = "source-a"
+        video_frame = UnknownKeyVideoFrame()
+
+    anchor = helper.extract_frame_anchor_metadata(UnknownKeyFrameMeta())
+
+    assert anchor["frame_uuid"] == UnknownKeyVideoFrame.uuid
+    assert anchor["keyframe_uuid"] is None
+    assert anchor["keyframe_pts"] is None
 
 
 def test_behavior_rules_uses_anchor_for_security_event_and_payload_media() -> None:
@@ -167,6 +218,9 @@ def test_face_worker_repository_preserves_unknown_payload_media_fields() -> None
 
 
 def test_face_match_event_inherits_anchor_from_observation_payload() -> None:
+    for name in list(sys.modules):
+        if name == "app" or name.startswith("app."):
+            del sys.modules[name]
     if str(FACE_WORKER_ROOT) not in sys.path:
         sys.path.insert(0, str(FACE_WORKER_ROOT))
     from app.face_match_event_service import build_watchlist_hit_event

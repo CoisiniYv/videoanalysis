@@ -159,6 +159,12 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             "camera_id": message.get("camera_id", ""),
             "frame_pts": _stream_text(message.get("frame_pts")),
             "frame_uuid": _stream_text(message.get("frame_uuid")),
+            "keyframe_uuid": _stream_text(message.get("keyframe_uuid")),
+            "previous_keyframe_uuid": _stream_text(message.get("previous_keyframe_uuid")),
+            "keyframe_pts": _stream_text(message.get("keyframe_pts")),
+            "frame_dts": _stream_text(message.get("frame_dts")),
+            "duration": _stream_text(message.get("duration")),
+            "time_base": _stream_text(message.get("time_base")),
             "timestamp_ms": _stream_text(message.get("timestamp_ms")),
             "ttl_seconds": _stream_text(message.get("ttl_seconds")),
             "object_count": str(len(message.get("objects") or [])),
@@ -200,6 +206,7 @@ class FrameAnnotationExportRuntime:
         self.exporter = exporter or DisabledFrameAnnotationExporter()
         self.resolve_camera_id = resolve_camera_id or (lambda source_id: source_id)
         self.counters = FrameAnnotationExporterCounters()
+        self._keyframe_pts_by_source_uuid: dict[tuple[str, str], int] = {}
 
     def process_frame(self, frame_meta: Any) -> dict[str, Any] | None:
         self.counters.frames_seen += 1
@@ -215,6 +222,22 @@ class FrameAnnotationExportRuntime:
         frame_anchor = extract_frame_anchor_metadata(frame_meta)
         frame_pts = _int_or_none(frame_anchor.get("frame_pts"))
         frame_uuid = _text_or_none(frame_anchor.get("frame_uuid"))
+        keyframe_uuid = _text_or_none(frame_anchor.get("keyframe_uuid"))
+        previous_keyframe_uuid = _text_or_none(frame_anchor.get("previous_keyframe_uuid"))
+        keyframe_pts = _int_or_none(frame_anchor.get("keyframe_pts"))
+        frame_dts = _int_or_none(frame_anchor.get("frame_dts"))
+        duration = _int_or_none(frame_anchor.get("duration"))
+        time_base = _text_or_none(frame_anchor.get("time_base"))
+        if keyframe_uuid and keyframe_pts is not None:
+            self._keyframe_pts_by_source_uuid[(source_id, keyframe_uuid)] = keyframe_pts
+        elif keyframe_uuid:
+            keyframe_pts = self._keyframe_pts_by_source_uuid.get(
+                (source_id, keyframe_uuid)
+            )
+        if previous_keyframe_uuid and keyframe_pts is None:
+            keyframe_pts = self._keyframe_pts_by_source_uuid.get(
+                (source_id, previous_keyframe_uuid)
+            )
         if frame_pts is None and frame_uuid is None:
             self.counters.frames_skipped_no_anchor += 1
             self._log_warning(
@@ -235,6 +258,12 @@ class FrameAnnotationExportRuntime:
                 camera_id=camera_id,
                 frame_pts=frame_pts,
                 frame_uuid=frame_uuid,
+                keyframe_uuid=keyframe_uuid,
+                previous_keyframe_uuid=previous_keyframe_uuid,
+                keyframe_pts=keyframe_pts,
+                frame_dts=frame_dts,
+                duration=duration,
+                time_base=time_base,
                 frame_num=frame_num,
                 timestamp_ms=timestamp_ms,
                 frame_objects=frame_objects,

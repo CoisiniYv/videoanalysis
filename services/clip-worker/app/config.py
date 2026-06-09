@@ -25,6 +25,7 @@ class Config:
     per_camera_cooldown_seconds: int
     replay_stop_condition_mode: str
     replay_fps: int
+    replay_duration_extra_slack_s: float
     replay_anchor_strategy: str
     allow_unbounded_keyframe_fallback: bool
     keyframe_lookup_retries: int
@@ -69,6 +70,9 @@ def load_config() -> Config:
             "REPLAY_STOP_CONDITION_MODE", "frame_count"
         ),
         replay_fps=int(os.getenv("REPLAY_FPS", "30")),
+        replay_duration_extra_slack_s=float(
+            os.getenv("REPLAY_DURATION_EXTRA_SLACK_S", "0")
+        ),
         replay_anchor_strategy=os.getenv(
             "REPLAY_ANCHOR_STRATEGY", "request_keyframe"
         ),
@@ -89,6 +93,6 @@ def load_config() -> Config:
             os.getenv("FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S", "1.0")
         ),
         frame_annotation_anchor_pts_tolerance_s=float(
-            os.getenv("FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S", "15.0")
+            os.getenv("FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S", "1.0")
         ),
     )

@@ -1012,6 +1012,14 @@ def _build_business_metadata(
         media = {}
     stop_condition = replay_job_request.get("stop_condition") or {}
     configuration = replay_job_request.get("configuration") or {}
+    replay_labels = configuration.get("labels") or {}
+    if not isinstance(replay_labels, dict):
+        replay_labels = {}
+    anchor_metadata = _uuid_first_anchor_metadata(
+        replay_labels=replay_labels,
+        replay_job_request=replay_job_request,
+        time_window=summary.get("time_window") if isinstance(summary, dict) else {},
+    )
     offset = replay_job_request.get("offset") or {}
     raw_clip_size = 0
     try:
@@ -1082,7 +1090,16 @@ def _build_business_metadata(
             "source_id": event_context.get("source_id", ""),
             "track_id": event_context.get("track_id", ""),
             "event_ts_ms": event_context.get("event_ts_ms", 0),
-            "frame_uuid": event_context.get("frame_uuid", ""),
+            "frame_uuid": (
+                anchor_metadata.get("event_frame_uuid")
+                or event_context.get("frame_uuid", "")
+            ),
+            "event_frame_uuid": (
+                anchor_metadata.get("event_frame_uuid")
+                or event_context.get("event_frame_uuid", "")
+                or event_context.get("frame_uuid", "")
+            ),
+            "event_frame_pts": anchor_metadata.get("event_frame_pts", ""),
             "keyframe_uuid": event_context.get("keyframe_uuid", ""),
             "previous_keyframe_uuid": event_context.get("previous_keyframe_uuid", ""),
         },
@@ -1377,6 +1394,59 @@ def _object_counts_from_sidecar_summary(summary: dict) -> dict:
     }
 
 
+def _uuid_first_anchor_metadata(
+    *,
+    replay_labels: dict,
+    replay_job_request: dict,
+    time_window: dict | None = None,
+) -> dict:
+    time_window = time_window or {}
+    anchor_keyframe_uuid = (
+        replay_labels.get("anchor_keyframe_uuid")
+        or replay_job_request.get("anchor_keyframe")
+    )
+    event_frame_uuid = (
+        replay_labels.get("event_frame_uuid")
+        or replay_labels.get("frame_uuid")
+    )
+    metadata = {
+        "evidence_anchor_strategy": "uuid_first_pts_verified",
+        "event_frame_uuid": event_frame_uuid,
+        "event_frame_pts": replay_labels.get("event_frame_pts"),
+        "anchor_keyframe_uuid": anchor_keyframe_uuid,
+        "anchor_keyframe_pts": replay_labels.get("anchor_keyframe_pts"),
+        "requested_start_pts": (
+            replay_labels.get("requested_start_pts")
+            or time_window.get("requested_start_pts")
+        ),
+        "requested_end_pts": (
+            replay_labels.get("requested_end_pts")
+            or time_window.get("requested_end_pts")
+        ),
+        "actual_start_pts": time_window.get("actual_start_pts"),
+        "actual_end_pts": time_window.get("actual_end_pts"),
+        "post_window_frame_uuid": replay_labels.get("post_window_frame_uuid"),
+        "post_window_frame_pts": replay_labels.get("post_window_frame_pts"),
+        "start_window_frame_uuid": replay_labels.get("start_window_frame_uuid"),
+        "start_window_frame_pts": replay_labels.get("start_window_frame_pts"),
+        "time_domain_crop_applied": bool(time_window.get("time_domain_crop_applied")),
+        "crop_reason": (
+            "requested_pts_window"
+            if time_window.get("time_domain_crop_applied")
+            else "not_applied"
+        ),
+    }
+    metadata["post_window_proof_used"] = bool(metadata.get("post_window_frame_uuid"))
+    metadata["start_window_coverage_used"] = bool(
+        metadata.get("start_window_frame_uuid")
+    )
+    return {
+        key: value
+        for key, value in metadata.items()
+        if value is not None and value != ""
+    }
+
+
 def _build_frame_cache_c2_summary(
     *,
     sidecar_summary: dict,
@@ -1406,6 +1476,15 @@ def _build_frame_cache_c2_summary(
         and not production_ready_failures
     )
     time_window = time_window or {}
+    replay_labels = time_window.get("replay_labels")
+    replay_labels = replay_labels if isinstance(replay_labels, dict) else {}
+    replay_job_request = time_window.get("replay_job_request")
+    replay_job_request = replay_job_request if isinstance(replay_job_request, dict) else {}
+    anchor_metadata = _uuid_first_anchor_metadata(
+        replay_labels=replay_labels,
+        replay_job_request=replay_job_request,
+        time_window=time_window,
+    )
     video_crop = video_crop or {
         "method": "copy",
         "crop_video_to_time_window": False,
@@ -1463,8 +1542,10 @@ def _build_frame_cache_c2_summary(
         "c2_3b_event_type": event_context.get("event_type", ""),
         "c2_3b_camera_id": event_context.get("camera_id", ""),
         "c2_3b_source_id": event_context.get("source_id", ""),
+        "production_ready_failures": production_ready_failures,
         "limitations": production_ready_failures,
         "metadata_path_used": str(sink_metadata_path),
+        **anchor_metadata,
     }
 
 
@@ -1549,6 +1630,14 @@ def _build_c2_event_metadata(
     output_dir = str(getattr(bundle_result, "output_dir"))
     stop_condition = replay_job_request.get("stop_condition") or {}
     configuration = replay_job_request.get("configuration") or {}
+    replay_labels = configuration.get("labels") or {}
+    if not isinstance(replay_labels, dict):
+        replay_labels = {}
+    anchor_metadata = _uuid_first_anchor_metadata(
+        replay_labels=replay_labels,
+        replay_job_request=replay_job_request,
+        time_window=summary.get("time_window") if isinstance(summary, dict) else {},
+    )
     offset = replay_job_request.get("offset") or {}
     raw_clip_size = 0
     try:
@@ -1574,18 +1663,36 @@ def _build_c2_event_metadata(
             "source_id": event_context.get("source_id", ""),
             "track_id": event_context.get("track_id", ""),
             "event_ts_ms": event_context.get("event_ts_ms", 0),
-            "frame_uuid": event_context.get("frame_uuid", ""),
+            "frame_uuid": (
+                anchor_metadata.get("event_frame_uuid")
+                or event_context.get("frame_uuid", "")
+            ),
+            "event_frame_uuid": (
+                anchor_metadata.get("event_frame_uuid")
+                or event_context.get("event_frame_uuid", "")
+                or event_context.get("frame_uuid", "")
+            ),
+            "event_frame_pts": anchor_metadata.get("event_frame_pts", ""),
             "keyframe_uuid": event_context.get("keyframe_uuid", ""),
             "previous_keyframe_uuid": event_context.get("previous_keyframe_uuid", ""),
         },
         "replay": {
             "replay_job_id": replay_job_id,
             "replay_source_kind": (
-                configuration.get("labels", {}).get("replay_source_kind", "")
-                if isinstance(configuration.get("labels"), dict)
-                else ""
+                replay_labels.get("replay_source_kind", "")
             ),
             "anchor_keyframe_uuid": replay_job_request.get("anchor_keyframe", ""),
+            "anchor_keyframe_pts": anchor_metadata.get("anchor_keyframe_pts", ""),
+            "evidence_anchor_strategy": anchor_metadata.get(
+                "evidence_anchor_strategy",
+                "uuid_first_pts_verified",
+            ),
+            "post_window_proof_used": bool(
+                anchor_metadata.get("post_window_proof_used")
+            ),
+            "start_window_coverage_used": bool(
+                anchor_metadata.get("start_window_coverage_used")
+            ),
             "offset_seconds": offset.get("seconds", 0),
             "stop_condition": stop_condition,
             "stop_condition_mode": _stop_condition_mode(stop_condition),
@@ -1627,6 +1734,7 @@ def _build_c2_event_metadata(
         "status": {
             "clip_status": _summary_clip_status(summary),
         },
+        "anchor": anchor_metadata,
         "limitations": list(summary.get("limitations") or []),
     }
 
@@ -1680,6 +1788,8 @@ def _finalize_c2_post_savant_evidence_bundle(
     frame_cache_time_window = {
         "time_domain_crop_applied": False,
         **frame_cache_window,
+        "replay_labels": replay_labels,
+        "replay_job_request": replay_job_request,
     }
     frame_cache_video_crop: dict = {
         "method": "copy",
@@ -1700,6 +1810,8 @@ def _finalize_c2_post_savant_evidence_bundle(
         frame_cache_time_window = {
             **frame_cache_window,
             "time_domain_crop_applied": True,
+            "replay_labels": replay_labels,
+            "replay_job_request": replay_job_request,
         }
     elif (
         _env_bool("C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
@@ -1715,6 +1827,8 @@ def _finalize_c2_post_savant_evidence_bundle(
                 enabled=True,
             )
             frame_cache_time_window = {**frame_cache_window, **selected_time_window}
+            frame_cache_time_window["replay_labels"] = replay_labels
+            frame_cache_time_window["replay_job_request"] = replay_job_request
             frame_cache_video_crop = _c2_copy_or_crop_video(
                 source_video_path=Path(source_video),
                 output_video_path=raw_clip_path,
@@ -1735,9 +1849,14 @@ def _finalize_c2_post_savant_evidence_bundle(
                 "time_domain_crop_applied": False,
                 "time_domain_crop_failed": True,
                 "time_domain_crop_error": f"{type(exc).__name__}:{exc}",
+                "replay_labels": replay_labels,
+                "replay_job_request": replay_job_request,
             }
-            if not raw_clip_path.exists():
-                shutil.copy2(source_video, raw_clip_path)
+            # ffmpeg can leave a tiny, undecodable MOV header behind when a
+            # requested PTS crop selects no frames. Replace that failed crop
+            # with the source Replay output so the bundle can still surface a
+            # fail-closed summary with time_domain_crop_failed=true.
+            shutil.copy2(source_video, raw_clip_path)
             shutil.copy2(metadata_file, sink_metadata_path)
     else:
         if not raw_clip_path.exists():
@@ -1775,6 +1894,11 @@ def _finalize_c2_post_savant_evidence_bundle(
                 frame_cache_time_window.get("time_domain_crop_applied")
             ),
             event_metadata={
+                **_uuid_first_anchor_metadata(
+                    replay_labels=replay_labels,
+                    replay_job_request=replay_job_request,
+                    time_window=frame_cache_time_window,
+                ),
                 "replay_source_kind": replay_labels.get("replay_source_kind"),
                 "c2_3b_record_request_id": replay_labels.get("request_id"),
                 "c2_3b_source_event_id": (
@@ -1789,8 +1913,6 @@ def _finalize_c2_post_savant_evidence_bundle(
                 "requested_start_pts": replay_labels.get("requested_start_pts"),
                 "requested_end_pts": replay_labels.get("requested_end_pts"),
                 "event_frame_pts": replay_labels.get("event_frame_pts"),
-                "replay_anchor_keyframe": replay_job_request.get("anchor_keyframe"),
-                "replay_anchor_pts": replay_labels.get("replay_anchor_pts"),
                 "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
                 "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
                 "time_domain_crop_applied": bool(

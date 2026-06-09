@@ -424,10 +424,16 @@ def _metadata_frame_group_key(
     row: dict[str, Any],
     frame_rows: dict[tuple[str, Any], dict[str, Any]],
 ) -> tuple[str, Any]:
+    frame_uuid = _text_or_none(row.get("frame_uuid"))
+    if (
+        row.get("clip_timeline_match") == "metadata_frame_uuid"
+        and frame_uuid
+        and ("uuid", frame_uuid) in frame_rows
+    ):
+        return ("uuid", frame_uuid)
     matched_pts = _int_or_none(row.get("matched_metadata_pts"))
     if matched_pts is not None:
         return ("pts", matched_pts)
-    frame_uuid = _text_or_none(row.get("frame_uuid"))
     if frame_uuid and ("uuid", frame_uuid) in frame_rows:
         return ("uuid", frame_uuid)
     frame_index = _int_or_none(row.get("clip_frame_index"))

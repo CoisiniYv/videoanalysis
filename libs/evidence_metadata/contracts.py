@@ -57,6 +57,12 @@ class FrameAnnotationMessage:
     timestamp_ms: int | None
     objects: list[FrameAnnotationObject]
     ttl_seconds: int
+    keyframe_uuid: str | None = None
+    previous_keyframe_uuid: str | None = None
+    keyframe_pts: int | None = None
+    frame_dts: int | None = None
+    duration: int | None = None
+    time_base: str | None = None
     created_at: str | None = None
 
 

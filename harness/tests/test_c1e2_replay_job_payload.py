@@ -183,7 +183,7 @@ def test_event_start_anchor_strategy_prefers_frame_uuid_time_domain() -> None:
     ) == 1_780_909_033_908
 
 
-def test_event_keyframe_strategy_keeps_duration_on_requested_window() -> None:
+def test_event_keyframe_strategy_covers_offset_plus_post_window() -> None:
     _activate_clip_worker_path()
     from app.worker import (
         REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME,
@@ -205,7 +205,7 @@ def test_event_keyframe_strategy_keeps_duration_on_requested_window() -> None:
         pre_seconds=5,
         post_seconds=5,
         offset_seconds_override=offset,
-    ) == 10.0
+    ) == 10.584
 
 
 def test_event_start_anchor_strategy_forces_keyframe_lookup() -> None:
@@ -225,10 +225,21 @@ def test_clip_worker_default_config_uses_reliable_sink_and_replay_fps(monkeypatc
 
     monkeypatch.delenv("REPLAY_JOB_SINK_URL", raising=False)
     monkeypatch.delenv("REPLAY_FPS", raising=False)
+    monkeypatch.delenv("REPLAY_DURATION_EXTRA_SLACK_S", raising=False)
     cfg = load_config()
 
     assert cfg.replay_job_sink_url == "dealer+connect:tcp://video-file-sink:6666"
     assert cfg.replay_fps == 30
+    assert cfg.replay_duration_extra_slack_s == 0.0
+
+
+def test_clip_worker_config_reads_replay_duration_extra_slack(monkeypatch) -> None:
+    _activate_clip_worker_path()
+    from app.config import load_config
+
+    monkeypatch.setenv("REPLAY_DURATION_EXTRA_SLACK_S", "15")
+
+    assert load_config().replay_duration_extra_slack_s == 15.0
 
 
 def test_replay_config_ttl_and_default_sink_options_match_c1e2() -> None:

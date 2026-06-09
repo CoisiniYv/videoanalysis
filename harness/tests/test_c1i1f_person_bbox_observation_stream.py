@@ -463,9 +463,12 @@ def test_watchlist_evidence_can_contain_face_annotation_and_person_context() -> 
     _activate(MEDIA_WORKER_DIR)
     from app.continuous_annotation import build_continuous_annotations
 
+    event_context = _event_context("watchlist_hit")
+    event_context["created_at"] = "2026-06-03T09:14:11+00:00"
+
     lines, summary = build_continuous_annotations(
         _Conn(),
-        _event_context("watchlist_hit"),
+        event_context,
     )
     face_lines = [
         line for line in lines
@@ -516,6 +519,7 @@ def _clip_config(**overrides: Any):
         "per_camera_cooldown_seconds": 30,
         "replay_stop_condition_mode": "ts_delta_sec",
         "replay_fps": 30,
+        "replay_duration_extra_slack_s": 0.0,
         "replay_anchor_strategy": "request_keyframe",
         "allow_unbounded_keyframe_fallback": False,
         "keyframe_lookup_retries": 0,
@@ -523,7 +527,7 @@ def _clip_config(**overrides: Any):
         "frame_annotation_stream": "security.frame_annotations",
         "frame_annotation_anchor_lookback_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,
-        "frame_annotation_anchor_pts_tolerance_s": 15.0,
+        "frame_annotation_anchor_pts_tolerance_s": 1.0,
     }
     values.update(overrides)
     return Config(**values)
@@ -560,6 +564,40 @@ def test_clip_worker_max_concurrent_still_blocks_when_active_job_limit_reached()
     assert decision.allowed is False
     assert decision.reason == "max_concurrent_reached"
     assert decision.error_message == "CLIP_WORKER_MAX_CONCURRENT_JOBS reached"
+
+
+def test_clip_worker_priority_event_bypasses_poc_concurrency_and_cooldown() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _clip_gate_decision
+
+    decision = _clip_gate_decision(
+        _clip_config(
+            run_once=False,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=1,
+            per_camera_cooldown_seconds=30,
+        ),
+        jobs_created=1000,
+        active_job_count=1,
+        camera_id="c2_replay_first_rtsp",
+        cooldown_gate_ts_ms=1_780_000_010_000,
+        last_job_by_camera={"c2_replay_first_rtsp": 1_780_000_000_000},
+        event_type="watchlist_hit",
+    )
+
+    assert decision.allowed is True
+
+
+def test_clip_worker_derives_priority_event_type_from_legacy_source_event_id() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _record_request_event_type
+
+    assert (
+        _record_request_event_type(
+            {"source_event_id": "watchlist_hit:face:c2_replay_first_rtsp:49:374708:6"}
+        )
+        == "watchlist_hit"
+    )
 
 
 def test_clip_worker_per_camera_cooldown_still_blocks_same_camera() -> None:
@@ -611,10 +649,10 @@ def test_clip_worker_run_once_mode_can_enforce_max_jobs_cap() -> None:
 class _ClipFakeRedis:
     def __init__(
         self,
-        request: dict[str, Any],
+        request: dict[str, Any] | list[dict[str, Any]],
         frame_annotations: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.request = request
+        self.requests = request if isinstance(request, list) else [request]
         self.frame_annotations = frame_annotations or []
         self.acked: list[str] = []
         self.reads = 0
@@ -626,8 +664,11 @@ class _ClipFakeRedis:
         self.reads += 1
         if self.reads > 1:
             return []
-        fields = {b"data": json.dumps(self.request).encode("utf-8")}
-        return [(b"security.record_requests", [(b"1-0", fields)])]
+        entries = []
+        for index, request in enumerate(self.requests, start=1):
+            fields = {b"data": json.dumps(request).encode("utf-8")}
+            entries.append((f"{index}-0".encode("utf-8"), fields))
+        return [(b"security.record_requests", entries)]
 
     def xack(self, _stream, _group, msg_id):
         self.acked.append(msg_id.decode("utf-8") if isinstance(msg_id, bytes) else msg_id)
@@ -656,6 +697,7 @@ class _ClipFakeReplay:
         self.jobs: list[dict[str, Any]] = []
         self.find_keyframe_calls: list[dict[str, Any]] = []
         self.last_job_request: dict[str, Any] = {}
+        self.last_job_payload: dict[str, Any] = {}
         _ClipFakeReplay.instances.append(self)
 
     def find_keyframe(self, *args, **_kwargs):
@@ -665,8 +707,11 @@ class _ClipFakeReplay:
         return self.keyframe_uuid
 
     def create_job(self, **kwargs):
+        from app.replay_client import build_job_payload
+
         self.jobs.append(kwargs)
         self.last_job_request = dict(kwargs)
+        self.last_job_payload = build_job_payload(**kwargs)
         return "replay-job-1"
 
 
@@ -717,7 +762,74 @@ def test_clip_worker_submits_replay_job_when_record_request_allowed(monkeypatch)
     assert updates[-1]["status"] == "replay_job_created"
 
 
-def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -> None:
+def test_clip_worker_watchlist_request_not_skipped_by_intrusion_active_job(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    intrusion_request = {
+        "request_id": "req-intrusion",
+        "event_id": "00000000-0000-0000-0000-000000000101",
+        "source_event_id": "intrusion:c2_replay_first_rtsp:track-1",
+        "event_type": "intrusion",
+        "source_id": "c2_replay_first_rtsp",
+        "camera_id": "c2_replay_first_rtsp",
+        "event_ts_ms": 1_780_000_000_000,
+        "strategy": "savant_replay",
+        "keyframe_uuid": "kf-intrusion",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    watchlist_request = {
+        "request_id": "req-watchlist",
+        "event_id": "00000000-0000-0000-0000-000000000102",
+        "source_event_id": "watchlist_hit:face:c2_replay_first_rtsp:49:374708:6",
+        "event_type": "watchlist_hit",
+        "source_id": "c2_replay_first_rtsp",
+        "camera_id": "c2_replay_first_rtsp",
+        "event_ts_ms": 1_780_000_010_000,
+        "strategy": "savant_replay",
+        "keyframe_uuid": "kf-watchlist",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis([intrusion_request, watchlist_request])
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=1,
+            per_camera_cooldown_seconds=30,
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert [job["keyframe_uuid"] for job in replay.jobs] == [
+        "kf-intrusion",
+        "kf-watchlist",
+    ]
+    assert redis_client.acked == ["1-0", "2-0"]
+    assert [update["status"] for update in updates] == [
+        "replay_job_created",
+        "replay_job_created",
+    ]
+
+
+def test_event_start_anchor_strategy_does_not_clear_provided_keyframe(monkeypatch) -> None:
     _activate(CLIP_WORKER_DIR)
     import app.worker as worker
 
@@ -730,8 +842,8 @@ def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -
         "event_ts_ms": 1_780_000_010_000,
         "frame_uuid": "019ea722-e76e-74a3-b448-be6876fa4ee7",
         "strategy": "savant_replay",
-        "keyframe_uuid": "event-kf-should-be-ignored",
-        "previous_keyframe_uuid": "prev-kf-should-be-ignored",
+        "keyframe_uuid": "event-kf-direct",
+        "previous_keyframe_uuid": "prev-kf-direct",
         "pre_seconds": 5,
         "post_seconds": 5,
     }
@@ -766,20 +878,15 @@ def test_event_start_anchor_strategy_uses_bounded_keyframe_lookup(monkeypatch) -
         _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
 
     replay = _ClipFakeReplay.instances[-1]
-    assert replay.find_keyframe_calls == [
-        {
-            "args": ("c1e_rtsp_replay", 1_780_920_548_086),
-            "kwargs": {"window_s": 10, "selection": "strict_at_or_after"},
-        }
-    ]
-    assert replay.jobs[0]["keyframe_uuid"] == "019ea722-e9b6-79f1-b21c-f910aede49ad"
-    assert replay.jobs[0]["offset_seconds_override"] == 5.584
-    assert replay.jobs[0]["duration_seconds_override"] == 10.0
+    assert replay.find_keyframe_calls == []
+    assert replay.jobs[0]["keyframe_uuid"] == "prev-kf-direct"
+    assert replay.jobs[0]["offset_seconds_override"] is None
+    assert replay.jobs[0]["duration_seconds_override"] is None
     assert redis_client.acked == ["1-0"]
     assert updates[-1]["status"] == "replay_job_created"
 
 
-def test_event_anchor_strategy_prefers_frame_annotation_pts_anchor(monkeypatch) -> None:
+def test_post_savant_uuid_anchor_uses_frame_domain_proofs_without_lookup(monkeypatch) -> None:
     _activate(CLIP_WORKER_DIR)
     import app.worker as worker
 
@@ -790,12 +897,16 @@ def test_event_anchor_strategy_prefers_frame_annotation_pts_anchor(monkeypatch) 
         "source_id": "c1e_rtsp_replay",
         "camera_id": "cam_c1e_rtsp_replay",
         "event_ts_ms": 1_780_000_015_000,
-        "frame_uuid": "event-frame",
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
         "frame_pts": 10_000_000_000,
         "event_frame_pts": 10_000_000_000,
         "requested_start_pts": 5_000_000_000,
         "requested_end_pts": 15_000_000_000,
+        "anchor_keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
         "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
         "pre_seconds": 5,
         "post_seconds": 5,
     }
@@ -806,7 +917,32 @@ def test_event_anchor_strategy_prefers_frame_annotation_pts_anchor(monkeypatch) 
                 "message_type": "frame_annotation",
                 "source_id": "c1e_rtsp_replay",
                 "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_000_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2800-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
+                "keyframe_pts": 6_000_000_000,
+                "frame_pts": 6_000_000_000,
+                "_stream_id": "1780925279000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
                 "frame_uuid": "anchor-before-target",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
                 "frame_pts": 14_900_000_000,
                 "_stream_id": "1780000015000-0",
             },
@@ -830,9 +966,23 @@ def test_event_anchor_strategy_prefers_frame_annotation_pts_anchor(monkeypatch) 
                 "message_type": "frame_annotation",
                 "source_id": "c1e_rtsp_replay",
                 "camera_id": "cam_c1e_rtsp_replay",
-                "frame_uuid": "anchor-at-post-window",
+                "frame_uuid": "019ea769-aae8-72c1-9dd4-84fc94555a7e",
+                "keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "keyframe_pts": 12_000_000_000,
                 "frame_pts": 15_000_000_000,
-                "_stream_id": "1780000015000-0",
+                "_stream_id": "1780925283000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
             },
             {
                 "message_type": "frame_annotation",
@@ -870,18 +1020,1267 @@ def test_event_anchor_strategy_prefers_frame_annotation_pts_anchor(monkeypatch) 
 
     replay = _ClipFakeReplay.instances[-1]
     assert replay.find_keyframe_calls == []
-    assert replay.jobs[0]["keyframe_uuid"] == "anchor-at-post-window"
-    assert replay.jobs[0]["offset_seconds_override"] == 10.0
-    assert replay.jobs[0]["duration_seconds_override"] == 10.0
+    assert replay.jobs[0]["keyframe_uuid"] == "019ea76b-2800-7000-8000-000000000000"
+    assert replay.last_job_request["keyframe_uuid"] == request["anchor_keyframe_uuid"]
+    assert replay.last_job_payload["anchor_keyframe"] == request["anchor_keyframe_uuid"]
+    assert replay.jobs[0]["keyframe_uuid"] != "019ea76b-1000-7000-8000-000000000000"
+    assert replay.jobs[0]["keyframe_uuid"] != "019ea76b-3000-7000-8000-000000000000"
+    assert replay.jobs[0]["offset_seconds_override"] == 1.0
+    assert replay.jobs[0]["duration_seconds_override"] == 11.0
     labels = replay.jobs[0]["labels"]
-    assert labels["replay_anchor_pts"] == "15000000000"
-    assert labels["replay_anchor_frame_uuid"] == "anchor-at-post-window"
-    assert labels["replay_anchor_selection_method"] == "frame_cache_pts_at_or_after"
+    assert labels["event_frame_uuid"] == "019ea76b-26ab-75e0-a8da-9285e28adc69"
+    assert labels["anchor_keyframe_uuid"] == "019ea76b-2800-7000-8000-000000000000"
+    assert labels["anchor_keyframe_pts"] == "6000000000"
+    assert labels["anchor_keyframe_source"] == "anchor_keyframe_uuid"
+    assert labels["evidence_anchor_strategy"] == "uuid_first_pts_verified"
+    assert labels["start_window_frame_uuid"] == "019ea76b-1000-7000-8000-000000000000"
+    assert labels["start_window_frame_pts"] == "4000000000"
+    assert labels["start_window_coverage_used"] == "true"
+    assert labels["post_window_frame_pts"] == "15000000000"
+    assert labels["post_window_frame_uuid"] == "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25"
+    assert labels["post_window_proof_used"] == "true"
+    assert labels["post_window_frame_uuid"] != labels["anchor_keyframe_uuid"]
+    assert labels["start_window_frame_uuid"] != labels["anchor_keyframe_uuid"]
+    assert labels["frame_domain_proof_method"] == (
+        "frame_cache_start_window_keyframe_and_post_window_pts"
+    )
     assert labels["requested_start_pts"] == "5000000000"
     assert labels["requested_end_pts"] == "15000000000"
-    assert labels["replay_offset_seconds"] == "10.000000"
-    assert labels["replay_duration_seconds"] == "10.000000"
+    assert labels["replay_offset_seconds"] == "1.000000"
+    assert labels["replay_duration_seconds"] == "11.000000"
     assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_post_savant_replay_duration_slack_extends_raw_sink_window(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-pts-slack",
+        "event_id": "00000000-0000-0000-0000-000000000103",
+        "source_event_id": "evt-pts-slack",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "anchor_keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_000_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2800-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
+                "keyframe_pts": 6_000_000_000,
+                "frame_pts": 6_000_000_000,
+                "_stream_id": "1780925279000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = False
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=0,
+            per_camera_cooldown_seconds=0,
+            replay_anchor_strategy="event_keyframe",
+            replay_duration_extra_slack_s=15.0,
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.jobs[0]["offset_seconds_override"] == 1.0
+    assert replay.jobs[0]["duration_seconds_override"] == 26.0
+    assert replay.last_job_payload["stop_condition"] == {
+        "ts_delta_sec": {"max_delta_sec": 26.0}
+    }
+    labels = replay.jobs[0]["labels"]
+    assert labels["replay_duration_extra_slack_s"] == "15.0"
+    assert labels["replay_duration_seconds"] == "26.000000"
+    assert labels["requested_start_pts"] == "5000000000"
+    assert labels["requested_end_pts"] == "15000000000"
+    assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_post_savant_missing_event_anchor_uses_keyframes_find_after_pts_proof(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-pts-post-kf",
+        "event_id": "00000000-0000-0000-0000-00000000000a",
+        "source_event_id": "evt-pts-post-kf",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2400-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "lookup-kf-1",
+                "keyframe_uuid": "lookup-kf-1",
+                "previous_keyframe_uuid": "lookup-kf-1",
+                "keyframe_pts": 6_000_000_000,
+                "frame_pts": 6_000_000_000,
+                "_stream_id": "1780925279000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = True
+    _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    try:
+        worker.run_worker(
+            _clip_config(
+                run_once=True,
+                max_jobs_per_run=100,
+                max_concurrent_jobs=0,
+                per_camera_cooldown_seconds=0,
+                replay_anchor_strategy="event_keyframe",
+            ),
+            redis_client,
+            object(),
+        )
+    finally:
+        _ClipFakeReplay.allow_find_keyframe = False
+        _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls
+    assert replay.jobs[0]["keyframe_uuid"] == "lookup-kf-1"
+    assert replay.last_job_payload["anchor_keyframe"] == "lookup-kf-1"
+    assert replay.jobs[0]["keyframe_uuid"] != "019ea76b-1000-7000-8000-000000000000"
+    assert replay.jobs[0]["keyframe_uuid"] != "019ea76b-3000-7000-8000-000000000000"
+    assert replay.jobs[0]["offset_seconds_override"] == 1.0
+    assert replay.jobs[0]["duration_seconds_override"] == 11.0
+    labels = replay.jobs[0]["labels"]
+    assert labels["anchor_keyframe_uuid"] == "lookup-kf-1"
+    assert labels["anchor_keyframe_pts"] == "6000000000"
+    assert labels["anchor_keyframe_source"] == "keyframes_find_pts_verified"
+    assert labels["evidence_anchor_strategy"] == "uuid_first_pts_verified"
+    assert labels["start_window_frame_uuid"] == "019ea76b-2400-7000-8000-000000000000"
+    assert labels["post_window_frame_uuid"] == "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25"
+    assert labels["start_window_coverage_used"] == "true"
+    assert labels["post_window_proof_used"] == "true"
+    assert labels["post_window_frame_uuid"] != labels["anchor_keyframe_uuid"]
+    assert labels["start_window_frame_uuid"] != labels["anchor_keyframe_uuid"]
+    assert labels["post_window_frame_pts"] == "15000000000"
+    assert labels["replay_offset_seconds"] == "1.000000"
+    assert labels["replay_duration_seconds"] == "11.000000"
+    assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_post_savant_keyframes_find_must_not_return_post_window_keyframe(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-pts-post-window-kf",
+        "event_id": "00000000-0000-0000-0000-00000000000b",
+        "source_event_id": "evt-pts-post-window-kf",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "event_frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2400-7000-8000-000000000000",
+                "keyframe_uuid": "start-window-kf",
+                "previous_keyframe_uuid": "start-window-kf",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "post-window-kf",
+                "previous_keyframe_uuid": "post-window-kf",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = True
+    _ClipFakeReplay.keyframe_uuid = "post-window-kf"
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    try:
+        worker.run_worker(
+            _clip_config(
+                run_once=True,
+                max_jobs_per_run=100,
+                max_concurrent_jobs=0,
+                per_camera_cooldown_seconds=0,
+                replay_anchor_strategy="event_keyframe",
+            ),
+            redis_client,
+            object(),
+        )
+    finally:
+        _ClipFakeReplay.allow_find_keyframe = False
+        _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls
+    assert replay.jobs == []
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error_message"].startswith(
+        "keyframes_find_returned_proof_keyframe"
+    )
+    assert "proof=post_window_frame" in updates[-1]["error_message"]
+
+
+def test_post_savant_keyframes_find_must_not_return_start_window_keyframe(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-pts-start-window-kf",
+        "event_id": "00000000-0000-0000-0000-00000000000c",
+        "source_event_id": "evt-pts-start-window-kf",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "event_frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2400-7000-8000-000000000000",
+                "keyframe_uuid": "start-window-kf",
+                "previous_keyframe_uuid": "start-window-kf",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "post-window-kf",
+                "previous_keyframe_uuid": "post-window-kf",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = True
+    _ClipFakeReplay.keyframe_uuid = "start-window-kf"
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    try:
+        worker.run_worker(
+            _clip_config(
+                run_once=True,
+                max_jobs_per_run=100,
+                max_concurrent_jobs=0,
+                per_camera_cooldown_seconds=0,
+                replay_anchor_strategy="event_keyframe",
+            ),
+            redis_client,
+            object(),
+        )
+    finally:
+        _ClipFakeReplay.allow_find_keyframe = False
+        _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls
+    assert replay.jobs == []
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error_message"].startswith(
+        "keyframes_find_returned_proof_keyframe"
+    )
+    assert "proof=start_window_frame" in updates[-1]["error_message"]
+
+
+def test_post_savant_anchor_does_not_require_event_ts_ms(monkeypatch) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-pts-no-event-ts",
+        "event_id": "00000000-0000-0000-0000-000000000004",
+        "source_event_id": "evt-pts-no-event-ts",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 0,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "anchor_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_000_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = False
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=0,
+            per_camera_cooldown_seconds=0,
+            replay_anchor_strategy="event_keyframe",
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.jobs[0]["keyframe_uuid"] == "019ea76b-1000-7000-8000-000000000000"
+    assert replay.jobs[0]["offset_seconds_override"] == 0.0
+    assert replay.jobs[0]["duration_seconds_override"] == 22.0
+    assert replay.last_job_payload["anchor_keyframe"] == request["anchor_keyframe_uuid"]
+    labels = replay.jobs[0]["labels"]
+    assert labels["anchor_keyframe_uuid"] == request["anchor_keyframe_uuid"]
+    assert labels["replay_offset_seconds"] == "0.000000"
+    assert labels["replay_duration_seconds"] == "22.000000"
+    assert replay.find_keyframe_calls == []
+    assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_post_savant_request_without_pts_window_fails_closed(monkeypatch) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-post-savant-no-pts",
+        "event_id": "00000000-0000-0000-0000-000000000005",
+        "source_event_id": "evt-post-savant-no-pts",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(request)
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = False
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=0,
+            per_camera_cooldown_seconds=0,
+            replay_anchor_strategy="event_keyframe",
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls == []
+    assert replay.jobs == []
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error_message"].startswith(
+        "missing_post_savant_frame_pts_window"
+    )
+
+
+def test_post_savant_anchor_without_anchor_keyframe_pts_fails_closed(monkeypatch) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-post-savant-missing-anchor-pts",
+        "event_id": "00000000-0000-0000-0000-000000000006",
+        "source_event_id": "evt-post-savant-missing-anchor-pts",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "anchor_keyframe_uuid": "019ea76b-2800-7000-8000-000000000000",
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2400-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = False
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=0,
+            per_camera_cooldown_seconds=0,
+            replay_anchor_strategy="event_keyframe",
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls == []
+    assert replay.jobs == []
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error_message"].startswith("missing_anchor_keyframe_pts")
+    assert "019ea76b-2800-7000-8000-000000000000" in updates[-1]["error_message"]
+
+
+def test_post_savant_keyframes_find_does_not_reuse_request_anchor_pts(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    request = {
+        "request_id": "req-lookup-stale-anchor-pts",
+        "event_id": "00000000-0000-0000-0000-00000000000d",
+        "source_event_id": "evt-lookup-stale-anchor-pts",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "event_frame_uuid": "019ea76b-26ab-75e0-a8da-9285e28adc69",
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "anchor_keyframe_pts": 6_000_000_000,
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2400-7000-8000-000000000000",
+                "keyframe_uuid": "start-window-kf",
+                "previous_keyframe_uuid": "start-window-kf",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "post-window-kf",
+                "previous_keyframe_uuid": "post-window-kf",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = True
+    _ClipFakeReplay.keyframe_uuid = "lookup-kf-without-annotation"
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    try:
+        worker.run_worker(
+            _clip_config(
+                run_once=True,
+                max_jobs_per_run=100,
+                max_concurrent_jobs=0,
+                per_camera_cooldown_seconds=0,
+                replay_anchor_strategy="event_keyframe",
+            ),
+            redis_client,
+            object(),
+        )
+    finally:
+        _ClipFakeReplay.allow_find_keyframe = False
+        _ClipFakeReplay.keyframe_uuid = "lookup-kf-1"
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls
+    assert replay.jobs == []
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error_message"].startswith("missing_anchor_keyframe_pts")
+    assert "lookup-kf-without-annotation" in updates[-1]["error_message"]
+
+
+def test_post_savant_event_frame_uuid_is_not_anchor_unless_keyframe(monkeypatch) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    event_frame_uuid = "019ea76b-26ab-75e0-a8da-9285e28adc69"
+    request = {
+        "request_id": "req-post-savant-event-frame-anchor",
+        "event_id": "00000000-0000-0000-0000-000000000007",
+        "source_event_id": "evt-post-savant-event-frame-anchor",
+        "source_id": "c1e_rtsp_replay",
+        "camera_id": "cam_c1e_rtsp_replay",
+        "event_ts_ms": 1_780_000_015_000,
+        "frame_uuid": event_frame_uuid,
+        "event_frame_uuid": event_frame_uuid,
+        "frame_pts": 10_000_000_000,
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "anchor_keyframe_uuid": event_frame_uuid,
+        "anchor_keyframe_pts": 10_000_000_000,
+        "strategy": "savant_replay",
+        "replay_source_kind": "post_savant",
+        "evidence_topology": "post_savant_replay",
+        "annotation_source_policy": "post_savant_sink_metadata_only",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
+    redis_client = _ClipFakeRedis(
+        request,
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-2400-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": event_frame_uuid,
+                "keyframe_uuid": "019ea76b-2000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-2000-7000-8000-000000000000",
+                "keyframe_pts": 8_000_000_000,
+                "frame_pts": 10_000_000_000,
+                "_stream_id": "1780925280000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-3000-7000-8000-000000000000",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _ClipFakeReplay.instances.clear()
+    _ClipFakeReplay.allow_find_keyframe = False
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _ClipFakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            run_once=True,
+            max_jobs_per_run=100,
+            max_concurrent_jobs=0,
+            per_camera_cooldown_seconds=0,
+            replay_anchor_strategy="event_keyframe",
+        ),
+        redis_client,
+        object(),
+    )
+
+    replay = _ClipFakeReplay.instances[-1]
+    assert replay.find_keyframe_calls == []
+    assert replay.jobs == []
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["error_message"].startswith("event_frame_anchor_not_keyframe")
+
+
+def test_anchor_keyframe_pts_recovery_rejects_mismatched_keyframe_reference() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_anchor_keyframe_pts
+
+    event_frame_uuid = "019ea76b-26ab-75e0-a8da-9285e28adc69"
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": event_frame_uuid,
+                "keyframe_uuid": "019ea76b-2000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-2000-7000-8000-000000000000",
+                "keyframe_pts": 8_000_000_000,
+                "frame_pts": 10_000_000_000,
+                "_stream_id": "1780925280000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "post-window-frame",
+                "keyframe_uuid": "post-window-keyframe",
+                "previous_keyframe_uuid": "post-window-keyframe",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+
+    assert (
+        _find_anchor_keyframe_pts(
+            redis_client,
+            stream_name="security.frame_annotations",
+            source_id="c1e_rtsp_replay",
+            camera_id="cam_c1e_rtsp_replay",
+            anchor_keyframe_uuid=event_frame_uuid,
+            count=100,
+        )
+        is None
+    )
+
+
+def test_anchor_keyframe_pts_from_request_does_not_reuse_mismatched_keyframe_pts() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _anchor_keyframe_pts_from_request
+
+    req = {
+        "anchor_keyframe_uuid": "previous-kf",
+        "previous_keyframe_uuid": "previous-kf",
+        "keyframe_uuid": "event-kf",
+        "keyframe_pts": 8_000_000_000,
+    }
+
+    assert (
+        _anchor_keyframe_pts_from_request(
+            req,
+            anchor_keyframe_uuid="previous-kf",
+        )
+        is None
+    )
+
+
+def test_anchor_keyframe_pts_recovery_ignores_previous_reference_without_exact_keyframe() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_anchor_keyframe_pts
+
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "event-frame",
+                "keyframe_uuid": "event-kf",
+                "previous_keyframe_uuid": "previous-kf",
+                "keyframe_pts": 8_000_000_000,
+                "frame_pts": 10_000_000_000,
+                "_stream_id": "1780925280000-0",
+            },
+        ],
+    )
+
+    assert (
+        _find_anchor_keyframe_pts(
+            redis_client,
+            stream_name="security.frame_annotations",
+            source_id="c1e_rtsp_replay",
+            camera_id="cam_c1e_rtsp_replay",
+            anchor_keyframe_uuid="previous-kf",
+            count=100,
+        )
+        is None
+    )
+
+
+def test_frame_annotation_anchor_rejects_previous_loop_high_pts() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_frame_annotation_anchor
+
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea769-aae8-72c1-9dd4-84fc94555a7e",
+                "frame_pts": 21_198_900_000,
+                "_stream_id": "1780000015000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-37f0-78a3-b4e2-2d3c6744c7ba",
+                "frame_pts": 9_500_000_000,
+                "_stream_id": "1780000016000-0",
+            },
+        ],
+    )
+
+    anchor = _find_frame_annotation_anchor(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="c1e_rtsp_replay",
+        camera_id="cam_c1e_rtsp_replay",
+        target_pts=9_407_544_444,
+        count=100,
+        min_stream_ms=1780000014000,
+        max_pts_delta_ns=1_000_000_000,
+        min_frame_uuid_ms=1780925277867,
+    )
+
+    assert anchor is not None
+    assert anchor.frame_uuid == "019ea76b-37f0-78a3-b4e2-2d3c6744c7ba"
+    assert anchor.frame_pts == 9_500_000_000
+
+
+def test_replay_frame_domain_proofs_use_start_keyframe_and_post_window_frame() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_replay_frame_domain_proofs
+
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "not-a-keyframe",
+                "keyframe_uuid": "older-keyframe",
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925277000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_000_000_000,
+                "_stream_id": "1780925272000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25",
+                "keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "previous_keyframe_uuid": "019ea76b-1000-7000-8000-000000000000",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+
+    proofs = _find_replay_frame_domain_proofs(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="c1e_rtsp_replay",
+        camera_id="cam_c1e_rtsp_replay",
+        requested_start_pts=5_000_000_000,
+        requested_end_pts=15_000_000_000,
+        count=100,
+        min_start_stream_ms=1780925270000,
+        min_post_stream_ms=1780925277000,
+        max_start_pts_delta_ns=5_000_000_000,
+        max_post_pts_delta_ns=1_000_000_000,
+        min_start_frame_uuid_ms=1780925200000,
+        min_post_frame_uuid_ms=1780925277867,
+    )
+
+    assert proofs is not None
+    assert proofs.start_window_frame.frame_uuid == "019ea76b-1000-7000-8000-000000000000"
+    assert proofs.post_window_frame.frame_uuid == "019ea76b-3bdb-7ac3-b60c-959c2a7dcf25"
+
+
+def test_replay_frame_domain_proofs_use_start_window_keyframe_reference() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_replay_frame_domain_proofs
+
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "start-window-frame",
+                "keyframe_uuid": "replay-keyframe-uuid",
+                "previous_keyframe_uuid": "replay-keyframe-uuid",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925277000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "post-window-frame",
+                "keyframe_uuid": "replay-keyframe-uuid",
+                "previous_keyframe_uuid": "replay-keyframe-uuid",
+                "keyframe_pts": 4_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+
+    proofs = _find_replay_frame_domain_proofs(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="c1e_rtsp_replay",
+        camera_id="cam_c1e_rtsp_replay",
+        requested_start_pts=5_000_000_000,
+        requested_end_pts=15_000_000_000,
+        count=100,
+        min_start_stream_ms=1780925270000,
+        min_post_stream_ms=1780925277000,
+        max_start_pts_delta_ns=5_000_000_000,
+        max_post_pts_delta_ns=1_000_000_000,
+    )
+
+    assert proofs is not None
+    assert proofs.start_window_frame.frame_uuid == "start-window-frame"
+    assert proofs.start_window_frame.frame_pts == 4_900_000_000
+    assert proofs.start_window_frame.keyframe_uuid == "replay-keyframe-uuid"
+    assert proofs.start_window_frame.keyframe_pts == 4_000_000_000
+    assert proofs.start_window_frame.anchor_method == (
+        "frame_annotation_start_window_keyframe_reference"
+    )
+    assert proofs.post_window_frame.frame_uuid == "post-window-frame"
+
+
+def test_replay_frame_domain_proofs_allow_gop_keyframe_before_start_window() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_replay_frame_domain_proofs
+
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "start-window-frame",
+                "keyframe_uuid": "replay-keyframe-uuid",
+                "previous_keyframe_uuid": "replay-keyframe-uuid",
+                "keyframe_pts": 3_500_000_000,
+                "frame_pts": 4_950_000_000,
+                "_stream_id": "1780925277000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "post-window-frame",
+                "keyframe_uuid": "later-keyframe-uuid",
+                "previous_keyframe_uuid": "later-keyframe-uuid",
+                "keyframe_pts": 12_000_000_000,
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+
+    proofs = _find_replay_frame_domain_proofs(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="c1e_rtsp_replay",
+        camera_id="cam_c1e_rtsp_replay",
+        requested_start_pts=10_000_000_000,
+        requested_end_pts=15_000_000_000,
+        count=100,
+        min_start_stream_ms=1780925270000,
+        min_post_stream_ms=1780925277000,
+        max_start_pts_delta_ns=6_000_000_000,
+        max_post_pts_delta_ns=1_000_000_000,
+        max_keyframe_pts_delta_ns=15_000_000_000,
+    )
+
+    assert proofs is not None
+    assert proofs.start_window_frame.frame_uuid == "start-window-frame"
+    assert proofs.start_window_frame.frame_pts == 4_950_000_000
+    assert proofs.start_window_frame.keyframe_uuid == "replay-keyframe-uuid"
+    assert proofs.start_window_frame.keyframe_pts == 3_500_000_000
+    assert proofs.post_window_frame.frame_uuid == "post-window-frame"
+
+
+def test_replay_frame_domain_proofs_reject_keyframe_reference_without_pts() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _find_replay_frame_domain_proofs
+
+    redis_client = _ClipFakeRedis(
+        {},
+        frame_annotations=[
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "start-window-frame",
+                "keyframe_uuid": "replay-keyframe-uuid",
+                "previous_keyframe_uuid": "replay-keyframe-uuid",
+                "frame_pts": 4_900_000_000,
+                "_stream_id": "1780925277000-0",
+            },
+            {
+                "message_type": "frame_annotation",
+                "source_id": "c1e_rtsp_replay",
+                "camera_id": "cam_c1e_rtsp_replay",
+                "frame_uuid": "post-window-frame",
+                "keyframe_uuid": "replay-keyframe-uuid",
+                "previous_keyframe_uuid": "replay-keyframe-uuid",
+                "frame_pts": 15_000_000_000,
+                "_stream_id": "1780925283000-0",
+            },
+        ],
+    )
+
+    proofs = _find_replay_frame_domain_proofs(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="c1e_rtsp_replay",
+        camera_id="cam_c1e_rtsp_replay",
+        requested_start_pts=5_000_000_000,
+        requested_end_pts=15_000_000_000,
+        count=100,
+        min_start_stream_ms=1780925270000,
+        min_post_stream_ms=1780925277000,
+        max_start_pts_delta_ns=5_000_000_000,
+        max_post_pts_delta_ns=1_000_000_000,
+    )
+
+    assert proofs is None
+
+
+def test_frame_annotation_anchor_freshness_prefers_frame_uuid_over_publish_time() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _frame_annotation_anchor_min_stream_ms
+
+    min_stream_ms = _frame_annotation_anchor_min_stream_ms(
+        {
+            "frame_uuid": "019ea773-28a1-71a0-a0b8-925443e181a2",
+            "event_ts_ms": 1_780_926_037_901,
+        },
+        slack_seconds=1.0,
+    )
+
+    assert min_stream_ms == 1_780_925_801_657
+
+
+def test_frame_annotation_anchor_freshness_ignores_watchlist_pts_ms() -> None:
+    _activate(CLIP_WORKER_DIR)
+    from app.worker import _frame_annotation_anchor_min_stream_ms
+
+    min_stream_ms = _frame_annotation_anchor_min_stream_ms(
+        {
+            "frame_uuid": "019ea773-28a1-71a0-a0b8-925443e181a2",
+            "event_ts_ms": 56_134,
+        },
+        slack_seconds=1.0,
+    )
+
+    assert min_stream_ms == 1_780_925_801_657
+    assert _frame_annotation_anchor_min_stream_ms(
+        {"event_ts_ms": 56_134},
+        slack_seconds=1.0,
+    ) is None
+
+
+def test_frame_annotation_anchor_freshness_uses_epoch_event_time_without_uuid(
+    monkeypatch,
+) -> None:
+    _activate(CLIP_WORKER_DIR)
+    import app.worker as worker
+
+    monkeypatch.setattr(worker.time, "time", lambda: 1_780_926_038.0)
+
+    min_stream_ms = worker._frame_annotation_anchor_min_stream_ms(
+        {"event_ts_ms": 1_780_926_037_901},
+        slack_seconds=1.0,
+    )
+
+    assert min_stream_ms == 1_780_926_036_901
 
 
 def test_c1i1f_config_and_migration_contract() -> None:

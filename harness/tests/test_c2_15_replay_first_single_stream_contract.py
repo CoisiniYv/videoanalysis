@@ -77,17 +77,37 @@ def test_replay_cache_is_bounded_to_30_seconds() -> None:
     assert storage["compaction_period"] == {"secs": 30, "nanos": 0}
 
 
-def test_savant_fps_limit_is_parameterized_to_2_8fps() -> None:
+def test_replay_to_savant_out_stream_has_backpressure_headroom() -> None:
+    replay = _replay_config()
+    out_options = replay["out_stream"]["options"]
+
+    assert out_options["send_timeout"] == {"secs": 5, "nanos": 0}
+    assert out_options["send_retries"] >= 10
+    assert out_options["send_hwm"] >= 10000
+    assert out_options["receive_hwm"] >= 10000
+    assert out_options["inflight_ops"] >= 1000
+
+
+def test_savant_ingress_fps_gate_is_parameterized_but_default_off() -> None:
     compose = _compose()
     env = compose["services"]["savant-security"]["environment"]
-    module = _text(SAVANT_MODULE)
+    module = yaml.safe_load(_text(SAVANT_MODULE))
+    source = module["pipeline"]["source"]
+    ingress_filter = source["ingress_frame_filter"]
 
-    assert env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-true}"
+    assert env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-false}"
     assert env["MAX_FPS"] == "${MAX_FPS:-8/1}"
     assert env["MIN_FPS"] == "${MIN_FPS:-2/1}"
-    assert "max_fps_control: ${oc.decode:${oc.env:MAX_FPS_CONTROL, true}}" in module
-    assert "max_fps: ${oc.env:MAX_FPS, 8/1}" in module
-    assert "min_fps: ${oc.env:MIN_FPS, 2/1}" in module
+    assert module["parameters"]["max_fps_control"] == (
+        "${oc.decode:${oc.env:MAX_FPS_CONTROL, false}}"
+    )
+    assert module["parameters"]["max_fps"] == "${oc.env:MAX_FPS, 8/1}"
+    assert module["parameters"]["min_fps"] == "${oc.env:MIN_FPS, 2/1}"
+    assert ingress_filter["module"] == "custom.filters.pts_fps_gate"
+    assert ingress_filter["class_name"] == "PtsFpsGate"
+    assert ingress_filter["kwargs"]["enabled"] == "${parameters.max_fps_control}"
+    assert ingress_filter["kwargs"]["max_fps"] == "${parameters.max_fps}"
+    assert ingress_filter["kwargs"]["min_fps"] == "${parameters.min_fps}"
 
 
 def test_existing_yolo_pose_face_adaface_chain_is_preserved() -> None:
@@ -156,6 +176,9 @@ def test_replay_job_uses_original_stream_cadence_not_inference_fps() -> None:
 
     assert clip_env["REPLAY_STOP_CONDITION_MODE"] == "ts_delta_sec"
     assert clip_env["REPLAY_FPS"] == "${REPLAY_FPS:-24}"
+    assert clip_env["REPLAY_DURATION_EXTRA_SLACK_S"] == (
+        "${REPLAY_DURATION_EXTRA_SLACK_S:-15}"
+    )
     assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == "false"
     assert clip_env["REPLAY_ANCHOR_STRATEGY"] == "event_keyframe"
     assert clip_env["KEYFRAME_LOOKUP_WINDOW_S"] == "${KEYFRAME_LOOKUP_WINDOW_S:-15}"
@@ -178,50 +201,130 @@ def test_clip_worker_uses_fresh_frame_annotation_pts_anchor() -> None:
         "${FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S:-1.0}"
     )
     assert clip_env["FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S"] == (
-        "${FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S:-15.0}"
+        "${FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S:-1.0}"
     )
-    assert "same-source, same-camera frame annotation" in doc
+    assert "same-source, same-camera frame-domain proofs" in doc
     assert "`requested_end_pts`" in doc
+    assert "two fresh" in doc
+    assert "real keyframe at or before" in doc
+    assert "post-window candidate" in doc
+    assert "at or after the event frame UUID timestamp" in doc
     assert "stale Redis rows" in doc
     assert "cross-loop frame UUIDs" in doc
 
 
-def test_replay_job_stop_condition_uses_requested_window_not_offset_plus_post() -> None:
+def test_replay_job_stop_condition_can_cover_decodable_gop_before_final_crop() -> None:
     _activate_clip_worker_path()
     from app.replay_client import build_job_payload
 
     payload = build_job_payload(
         source_id="c2_replay_first_rtsp",
-        keyframe_uuid="frame-annotation-anchor",
+        keyframe_uuid="start-keyframe-anchor",
         pre_seconds=5,
         post_seconds=5,
         sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
         labels={
             "event_id": "ev-c2-15",
+            "event_frame_uuid": "alarm-frame-uuid",
             "event_frame_pts": "10000000000",
             "requested_start_pts": "5000000000",
             "requested_end_pts": "15000000000",
-            "replay_anchor_pts": "15000000000",
+            "anchor_keyframe_uuid": "start-keyframe-anchor",
+            "anchor_keyframe_pts": "4000000000",
+            "post_window_frame_pts": "15000000000",
+            "post_window_frame_uuid": "post-window-frame",
+            "start_window_frame_uuid": "start-window-frame",
         },
         stop_condition_mode="ts_delta_sec",
         fps=24,
-        offset_seconds_override=10.0,
-        duration_seconds_override=10.0,
+        offset_seconds_override=7.0,
+        duration_seconds_override=11.0,
     )
 
-    assert payload["offset"]["seconds"] == 10.0
-    assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
+    assert payload["anchor_keyframe"] == "start-keyframe-anchor"
+    assert payload["offset"]["seconds"] == 7.0
+    assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 11.0}}
     assert payload["configuration"]["labels"]["requested_start_pts"] == "5000000000"
     assert payload["configuration"]["labels"]["requested_end_pts"] == "15000000000"
+    assert payload["configuration"]["labels"]["post_window_frame_uuid"] == (
+        "post-window-frame"
+    )
+    assert payload["configuration"]["labels"]["anchor_keyframe_uuid"] == (
+        "start-keyframe-anchor"
+    )
+
+
+def test_replay_uuid_contract_keeps_event_frame_and_anchor_keyframe_distinct() -> None:
+    _activate_clip_worker_path()
+    from app.replay_client import build_job_payload
+
+    payload = build_job_payload(
+        source_id="c2_replay_first_rtsp",
+        keyframe_uuid="replay-keyframe-uuid",
+        pre_seconds=5,
+        post_seconds=5,
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
+        labels={
+            "event_id": "ev-c2-15-uuid",
+            "event_frame_uuid": "alarm-frame-uuid",
+            "event_frame_pts": "10000000000",
+            "requested_start_pts": "5000000000",
+            "requested_end_pts": "15000000000",
+            "anchor_keyframe_uuid": "replay-keyframe-uuid",
+            "anchor_keyframe_pts": "4000000000",
+            "post_window_frame_uuid": "post-window-frame-uuid",
+            "post_window_frame_pts": "15000000000",
+            "start_window_frame_uuid": "start-window-frame-uuid",
+            "start_window_frame_pts": "5000000000",
+        },
+        stop_condition_mode="ts_delta_sec",
+        fps=24,
+        offset_seconds_override=7.0,
+        duration_seconds_override=11.0,
+    )
+
+    labels = payload["configuration"]["labels"]
+    assert payload["anchor_keyframe"] == "replay-keyframe-uuid"
+    assert payload["anchor_keyframe"] == labels["anchor_keyframe_uuid"]
+    assert payload["anchor_keyframe"] != labels["event_frame_uuid"]
+    assert payload["anchor_keyframe"] != labels["post_window_frame_uuid"]
+    assert payload["anchor_keyframe"] != labels["start_window_frame_uuid"]
+    assert labels["event_frame_uuid"] == "alarm-frame-uuid"
+    assert labels["post_window_frame_uuid"] == "post-window-frame-uuid"
+    assert labels["event_frame_pts"] == "10000000000"
+    assert labels["requested_start_pts"] == "5000000000"
+    assert labels["requested_end_pts"] == "15000000000"
 
 
 def test_replay_alignment_doc_requires_event_pts_window_and_fail_closed_binding() -> None:
     doc = _text(DOC)
 
-    assert "`frame_pts`, `event_frame_pts`" in doc
-    assert "`requested_start_pts`, and `requested_end_pts`" in doc
-    assert "The Replay `stop_condition` duration is the requested PTS window duration" in doc
-    assert "It is not `offset + post_seconds`" in doc
+    assert "`frame_pts`" in doc
+    assert "`event_frame_pts`" in doc
+    assert "`event_frame_uuid`" in doc
+    assert "`anchor_keyframe_uuid`" in doc
+    assert "`requested_start_pts`" in doc
+    assert "`requested_end_pts`" in doc
+    assert "UUID remains the primary frame identity" in doc
+    assert "The Savant alarm frame `frame_uuid`" in doc
+    assert "identifies the event frame" in doc
+    assert "not automatically a valid Replay `anchor_keyframe`" in doc
+    assert "`previous_keyframe_uuid` first, otherwise" in doc
+    assert "they must not\n  replace UUID identity" in doc
+    assert "Neither proof may replace `anchor_keyframe_uuid`" in doc
+    assert "Replay `anchor_keyframe` is the event/record_request" in doc
+    assert "that exact UUID and PTS" in doc
+    assert "proof keyframe is rejected" in doc
+    assert "fails closed with `missing_anchor_keyframe_pts`" in doc
+    assert "`offset.seconds` is the PTS" in doc
+    assert "delta from `anchor_keyframe_pts` back to `requested_start_pts`" in doc
+    assert "coverage duration from the earliest" in doc
+    assert "`REPLAY_DURATION_EXTRA_SLACK_S` extends this raw Replay/video-file-sink" in doc
+    assert "it does not change the requested evidence window" in doc
+    assert "`video-file-sink` is only the ZMQ file sink" in doc
+    assert "Extending the window therefore belongs in the\n  clip-worker Replay job" in doc
+    assert "Media-worker then crops raw video and sink metadata" in doc
+    assert "Do not bypass the\nviewer `production_ready` gate" in doc
     assert "event frame appears at `pre_seconds`" in doc
     assert "raw video, sink metadata, sidecar JSONL, and the 8090" in doc
     assert "broad DB window fallback" in doc
