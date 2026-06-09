@@ -3,7 +3,7 @@ cameras:
     enabled: true
     source_id: primary_rtsp
     name: Primary RTSP Camera
-    rtsp_url: rtsp://10.37.57.112:8554/live/1080movie
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
     gpu_id: 0
     zones:
       primary_full_frame:

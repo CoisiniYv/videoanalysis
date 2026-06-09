@@ -153,8 +153,8 @@ services:
       - ./env/midterm.env
     environment:
       SOURCE_ID: primary_rtsp
-      RTSP_URI: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
-      LOCATION: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
+      RTSP_URI: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://192.168.1.105:8554/live/1080movie}
+      LOCATION: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://192.168.1.105:8554/live/1080movie}
       RTSP_TRANSPORT: ${RTSP_TRANSPORT:-tcp}
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       SYNC_OUTPUT: "true"
@@ -361,7 +361,7 @@ services:
       EVIDENCE_SCHEMA_VERSION: 2.0-midterm
       EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS: "false"
       EVIDENCE_INPUT_TYPE: rtsp
-      EVIDENCE_INPUT_URI: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
+      EVIDENCE_INPUT_URI: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://192.168.1.105:8554/live/1080movie}
       EVIDENCE_LOCAL_FILE_USED: "false"
       EVIDENCE_TEST_VIDEO_USED: "false"
       EVIDENCE_SOURCE_EXTRACTION_FALLBACK: "false"
