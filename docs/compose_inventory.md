@@ -1,38 +1,54 @@
 # Compose Inventory
 
-Date: 2026-05-26
-Status: **inventory only** — no files moved, no files deleted, no service
-logic touched.
+Date: 2026-06-09
+Status: current active C2 replay-first runtime plus historical C1 inventory.
 
 This file is the authoritative answer to "which compose do I run?"
 when a developer or future Claude session opens `infra/`.
 
 ---
 
-## 1. Current main file
+## 1. Current active runtime
 
-**`infra/docker-compose.c1-official-adapter.yml`** is the current main
-runtime. It implements the C1.2 official adapter ↔ module topology
-and was the target of the verified C1.2 smoke. All operator workflows
-(`scripts/camera_config_cli.py`, the C1.3 CLI, the smoke script) point
-at this compose. Future face-pipeline phases (F1.1b, F1.2, F2, F3)
-will integrate into this compose, not a sibling.
+For the current replay evidence work, run:
+
+```bash
+docker compose -f infra/docker-compose.c2-replay-first-dev.yml up -d
+```
+
+This starts the `c2-replay-first-dev` project and `c2-replay-first-*`
+containers. Its dedicated env file is
+`infra/env/c2-replay-first-dev.env`. It records RTSP into Replay before Savant,
+then cuts evidence through Replay jobs, video-file-sink, media-worker, and the
+8090 evidence viewer.
+
+C2 replay-first uses the existing host PostgreSQL by default via
+`host.docker.internal:5432`; the `c2-replay-first-postgres` service is isolated
+behind the `c2-local-postgres` profile.
+
+## 2. Historical C1 baselines
+
+**`infra/docker-compose.c1-official-replay-dev.yml`** is the root-level C1
+official Replay/dev baseline. Use it only when deliberately validating C1.
 
 Bring-up:
 
 ```bash
-docker compose -f infra/docker-compose.c1-official-adapter.yml up -d \
-  redis postgres api savant-security event-worker metadata-sink video-file-sink
+docker compose -f infra/docker-compose.c1-official-replay-dev.yml up -d
 ```
 
-See `docs/phase_c1_2_official_adapter_runtime.md` for the full
-runbook.
+The older **`docker-compose.c1-official-adapter.yml`** no longer exists at root
+`infra/`. It is archived at
+`infra/archive/phase-only/20260602/docker-compose.c1-official-adapter.yml` and
+should be treated as phase-only history, not a runnable current entrypoint.
 
-## 2. Classification table
+## 3. Classification table
 
 | File | Class | Notes |
 |---|---|---|
-| `docker-compose.c1-official-adapter.yml` | **current-main** | C1.2 runtime; mounted with `modules/savant_security`; controller-managed source adapters |
+| `docker-compose.c2-replay-first-dev.yml` | **current-active-c2-evidence** | Active C2.15 replay-first evidence runtime; uses `env/c2-replay-first-dev.env` and `c2-replay-first-*` containers |
+| `docker-compose.c1-official-replay-dev.yml` | **c1-replay-regression-baseline** | C1 official Replay/dev baseline; not the current C2 runtime |
+| `docker-compose.c2-post-savant-replay-poc.yml` | **legacy-c2-poc** | Earlier C2 post-Savant Replay metadata-retention POC; superseded for current evidence work by `docker-compose.c2-replay-first-dev.yml` |
 | `docker-compose.dev.yml` | **future-target** | Filename matches the R1 §4 reserved slot (backend-only dev stack: redis + postgres + api + event-worker). Current content (`phase0-dev`) is a pre-R1 partial; R1.x consolidation will refine it. Not used by current-main. |
 | `docker-compose.phase1c.yml` | **legacy-phase-poc** | Phase 1C smoke (GPU inference basics) |
 | `docker-compose.phase1d.yml` | **legacy-phase-poc** | Phase 1D smoke (YOLO26-pose converter) |
@@ -52,11 +68,11 @@ runbook.
 | `docker-compose.savant-smoke.yml` | **legacy-phase-poc** | Phase 1B minimal Savant smoke (single pyfunc) |
 
 Every entry classed as `legacy-phase-poc` carries a `# LEGACY / PHASE
-POC — do not use for mainline runtime` banner at line 1 of the file
+POC — do not use for active C2 runtime` banner at line 1 of the file
 itself (added in the same commit as this inventory). The banner is
 purely documentary — `docker compose` ignores comment lines.
 
-## 3. What "legacy-phase-poc" means
+## 4. What "legacy-phase-poc" means
 
 - These composes were the runtime entrypoint for a specific phase
   milestone in the past.
@@ -66,7 +82,7 @@ purely documentary — `docker compose` ignores comment lines.
 - They are **not deleted** because the R1 consolidation plan
   (`docs/phase_r1_mainline_consolidation_plan.md`) explicitly defers
   module / compose removal to a later sub-phase.
-- They are **not the mainline runtime**. New work must NOT target them.
+- They are **not the active runtime**. New work must NOT target them.
 - Specifically:
   - Do not add new services to these files.
   - Do not extend their feature surface.
@@ -76,7 +92,7 @@ purely documentary — `docker compose` ignores comment lines.
     `phase3b-clip-worker`, `phase3b-replay-service` — banned by
     CLAUDE.md §9.5 and by `scripts/smoke/check_media_output_lockdown.sh`).
 
-## 4. What "future-target" means
+## 5. What "future-target" means
 
 - `docker-compose.dev.yml` occupies a filename slot reserved by the
   R1 plan for the consolidated backend-only dev stack (redis +
@@ -87,16 +103,16 @@ purely documentary — `docker compose` ignores comment lines.
 - Not used by `c1-official-adapter.yml` today.
 - Do NOT delete or rename it — the R1 plan needs this slot.
 
-## 5. Why no `unknown` entries
+## 6. Why no `unknown` entries
 
 Every compose file in `infra/` matches one of the three classes above.
 This row of the user's classification template is intentionally empty.
 
-## 6. Reference policy
+## 7. Reference policy
 
 | Rule | Status |
 |---|---|
-| Add a new compose for a new phase? | **No.** R1 §4 forbids new `docker-compose.phaseXX.yml` files. Extend the current-main or future-target slots via profiles / env. |
+| Add a new compose for a new phase? | **No.** R1 §4 forbids new `docker-compose.phaseXX.yml` files. Extend the active C2 compose, a named baseline, or future-target slots via profiles / env. |
 | Edit a legacy compose for a new feature? | **No.** Legacy composes are read-only regression scaffolds. |
 | Delete a legacy compose? | **No.** Deferred to a future R1.x consolidation phase. |
 | Rename a legacy compose? | **No.** The matching `scripts/smoke/check_phaseX*.sh` and historical phase docs hard-code these names. |
@@ -104,7 +120,7 @@ This row of the user's classification template is intentionally empty.
 
 ---
 
-## 7. Related documents
+## 8. Related documents
 
 | Document | Content |
 |---|---|
@@ -116,4 +132,5 @@ This row of the user's classification template is intentionally empty.
 
 ---
 
-*Written 2026-05-26. Inventory only, no service logic changes.*
+*Updated 2026-06-09 to distinguish the active C2 replay-first runtime from
+historical C1 baselines.*

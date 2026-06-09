@@ -1,7 +1,32 @@
 # C2.15 Replay-First Single-Stream Evidence Baseline
 
-Status: replay-first runtime alignment baseline with PTS-window evidence
-contracts.
+Status: current active replay-first development runtime alignment baseline with
+PTS-window evidence contracts.
+
+## Current Active Runtime
+
+As of 2026-06-09, the running evidence stack is C2 replay-first, not C1:
+
+- Docker compose project: `c2-replay-first-dev`.
+- Compose file: `infra/docker-compose.c2-replay-first-dev.yml`.
+- C2 env file: `infra/env/c2-replay-first-dev.env`.
+- Running containers use the `c2-replay-first-*` prefix.
+- The viewer is `c2-replay-first-evidence-viewer` on host port `8090`.
+- Worker `DATABASE_URL` defaults to the existing host PostgreSQL at
+  `host.docker.internal:5432`, currently provided by the separate
+  `phase0-postgres` container. The C2-local PostgreSQL service is behind the
+  `c2-local-postgres` profile and is not part of the default runtime.
+- C1 files such as `infra/docker-compose.c1-official-replay-dev.yml` and
+  `infra/env/c1-official-replay-dev.env` remain C1 baselines. They are not the
+  running C2 replay-first stack.
+
+Quick verification:
+
+```bash
+docker compose ls
+docker ps --format 'table {{.Names}}\t{{.Status}}' | rg 'c2-replay-first|phase0-postgres'
+docker compose -f infra/docker-compose.c2-replay-first-dev.yml config
+```
 
 ## Goal
 
@@ -42,6 +67,7 @@ database broad windows, or `event_ts_ms` as visual binding anchors.
 ## Runtime Files
 
 - Compose: `infra/docker-compose.c2-replay-first-dev.yml`
+- Env: `infra/env/c2-replay-first-dev.env`
 - Replay config: `modules/savant_replay/config.c2_replay_first_dev.json`
 - Savant module: `modules/savant_security/module.yml`
 - Camera config: `modules/savant_security/config/cameras.c1e_replay.yml`
@@ -51,12 +77,23 @@ database broad windows, or `event_ts_ms` as visual binding anchors.
 
 - `C2_REPLAY_FIRST_RTSP_URI`: RTSP source, default
   `rtsp://10.37.57.112:8554/live/1080movie`.
-- `MAX_FPS_CONTROL`: Savant inference throttle enabled by default.
+- `MAX_FPS_CONTROL`: Savant inference throttle enabled by default in C2
+  replay-first. The shared Savant module still defaults this off so C1 remains
+  unchanged unless C1 explicitly opts in.
 - `MAX_FPS`: default `8/1`.
 - `MIN_FPS`: default `2/1`.
 - `DEFAULT_PRE_SECONDS` / `RECORDING_PRE_SECONDS`: default `5`.
 - `DEFAULT_POST_SECONDS` / `RECORDING_POST_SECONDS`: default `5`.
-- `WATCHLIST_THRESHOLD`: default `0.65`.
+- `POSE_INFER_INTERVAL`: C2 replay-first default `1`, so pose inference runs
+  every other admitted Savant frame. The shared Savant module default remains
+  `0` for C1-compatible behavior.
+- `POSE_CONFIDENCE_THRESHOLD` / `POSE_SELECTOR_CONFIDENCE_THRESHOLD`: default
+  `0.50`.
+- `POSE_KEYPOINT_THRESHOLD`: default `0.35`.
+- `POSE_MIN_WIDTH` / `POSE_MIN_HEIGHT`: default `60` / `100` pixels.
+- `FACE_CONFIDENCE_THRESHOLD`: default `0.50`; low-confidence YOLOv8-face
+  detections are not sent to AdaFace/watchlist matching.
+- `WATCHLIST_THRESHOLD`: default `0.60`.
 - `WATCHLIST_TARGET_EXTERNAL_PERSON_IDS`: default
   `demo:f4_3:reese,demo:f4_3:finch`.
 

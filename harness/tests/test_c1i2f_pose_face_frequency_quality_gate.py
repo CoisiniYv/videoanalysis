@@ -113,6 +113,22 @@ def test_face_detector_threshold_uses_actual_face_confidence_env_at_025() -> Non
     assert converter_kwargs["confidence_threshold"] == "${parameters.face_confidence_threshold}"
 
 
+def test_shared_module_defaults_remain_c1_compatible_without_c2_overrides() -> None:
+    env = _load_env()
+    module = _load_module()
+    pose = _find_element("yolo26_pose")
+
+    assert "POSE_INFER_INTERVAL" not in env
+    assert float(_default_value(module["parameters"]["pose_infer_interval"])) == 0
+    assert float(_default_value(module["parameters"]["pose_confidence_threshold"])) == 0.25
+    assert float(_default_value(module["parameters"]["pose_keypoint_threshold"])) == 0.25
+    assert float(_default_value(module["parameters"]["pose_selector_confidence_threshold"])) == 0.25
+    assert float(_default_value(module["parameters"]["pose_selector_nms_iou_threshold"])) == 0.6
+    assert float(_default_value(module["parameters"]["pose_min_width"])) == 20
+    assert float(_default_value(module["parameters"]["pose_min_height"])) == 40
+    assert pose["properties"]["interval"] == "${parameters.pose_infer_interval}"
+
+
 def test_face_reid_min_confidence_is_separate_and_not_below_035() -> None:
     env = _load_env()
     gate_kwargs = _find_element("face_reid_gate")["kwargs"]

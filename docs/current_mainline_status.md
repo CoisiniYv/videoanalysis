@@ -1,5 +1,23 @@
 # Current Mainline Status
 
+## 2026-06-09 Active Runtime Clarification
+
+The currently running evidence stack in this checkout is C2 replay-first:
+
+- Branch: `c2/post-savant-poc`.
+- Compose project: `c2-replay-first-dev`.
+- Compose file: `infra/docker-compose.c2-replay-first-dev.yml`.
+- Env file: `infra/env/c2-replay-first-dev.env`.
+- Containers: `c2-replay-first-*`.
+- Evidence viewer: host port `8090`.
+- Database: workers default to the existing host PostgreSQL on
+  `host.docker.internal:5432`, currently the separate `phase0-postgres`
+  container.
+
+C1 files remain available as C1 baselines and regression references. They are
+not the active Docker runtime unless explicitly started with their own compose
+file.
+
 Date: 2026-05-29
 Status: R2 consolidation snapshot.
 
@@ -58,4 +76,3 @@ F4.3B proves that the recognition chain is viable on `testVideo/1080movie.mp4`; 
 - Media output lifecycle is not production-grade for recognition evidence.
 - Thresholds need more data before production use.
 - YOLO26-pose + YOLOv8-Face + AdaFace are statically present in the c1 official runtime, but runtime log verification should be repeated before performance testing.
-

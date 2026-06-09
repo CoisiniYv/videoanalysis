@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "infra" / "docker-compose.c2-replay-first-dev.yml"
+ENV_FILE = ROOT / "infra" / "env" / "c2-replay-first-dev.env"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.c2_replay_first_dev.json"
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.c1e_replay.yml"
@@ -25,6 +26,17 @@ def _text(path: Path) -> str:
 
 def _compose() -> dict:
     return yaml.safe_load(_text(COMPOSE))
+
+
+def _env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in _text(path).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
 
 
 def _replay_config() -> dict:
@@ -43,10 +55,27 @@ def _activate_clip_worker_path() -> None:
 
 def test_files_exist() -> None:
     assert COMPOSE.exists()
+    assert ENV_FILE.exists()
     assert REPLAY_CONFIG.exists()
     assert SAVANT_MODULE.exists()
     assert CAMERA_CONFIG.exists()
     assert DOC.exists()
+
+
+def test_replay_first_runtime_uses_c2_env_not_c1_env() -> None:
+    compose = _compose()
+    expected = ["./env/c2-replay-first-dev.env"]
+    for service_name in (
+        "savant-security",
+        "source-adapter",
+        "event-worker",
+        "media-worker",
+    ):
+        assert compose["services"][service_name]["env_file"] == expected
+
+    rendered = _text(COMPOSE)
+    assert "./env/c1-official-replay-dev.env" not in rendered
+    assert "c2-replay-first-dev" in _text(ENV_FILE)
 
 
 def test_topology_records_rtsp_in_replay_before_savant() -> None:
@@ -88,14 +117,14 @@ def test_replay_to_savant_out_stream_has_backpressure_headroom() -> None:
     assert out_options["inflight_ops"] >= 1000
 
 
-def test_savant_ingress_fps_gate_is_parameterized_but_default_off() -> None:
+def test_savant_ingress_fps_gate_is_parameterized_and_default_on() -> None:
     compose = _compose()
     env = compose["services"]["savant-security"]["environment"]
     module = yaml.safe_load(_text(SAVANT_MODULE))
     source = module["pipeline"]["source"]
     ingress_filter = source["ingress_frame_filter"]
 
-    assert env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-false}"
+    assert env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-true}"
     assert env["MAX_FPS"] == "${MAX_FPS:-8/1}"
     assert env["MIN_FPS"] == "${MIN_FPS:-2/1}"
     assert module["parameters"]["max_fps_control"] == (
@@ -110,6 +139,50 @@ def test_savant_ingress_fps_gate_is_parameterized_but_default_off() -> None:
     assert ingress_filter["kwargs"]["min_fps"] == "${parameters.min_fps}"
 
 
+def test_pose_and_face_runtime_calibration_is_c2_only_over_shared_defaults() -> None:
+    compose = _compose()
+    env_file = _env(ENV_FILE)
+    env = compose["services"]["savant-security"]["environment"]
+    module = yaml.safe_load(_text(SAVANT_MODULE))
+    pose = next(
+        element
+        for element in module["pipeline"]["elements"]
+        if element.get("name") == "yolo26_pose"
+    )
+
+    assert env["POSE_INFER_INTERVAL"] == "${POSE_INFER_INTERVAL:-1}"
+    assert env["POSE_CONFIDENCE_THRESHOLD"] == "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
+    assert env["POSE_KEYPOINT_THRESHOLD"] == "${POSE_KEYPOINT_THRESHOLD:-0.35}"
+    assert env["POSE_SELECTOR_CONFIDENCE_THRESHOLD"] == (
+        "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.50}"
+    )
+    assert env["POSE_SELECTOR_NMS_IOU_THRESHOLD"] == (
+        "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
+    )
+    assert env["POSE_MIN_WIDTH"] == "${POSE_MIN_WIDTH:-60}"
+    assert env["POSE_MIN_HEIGHT"] == "${POSE_MIN_HEIGHT:-100}"
+    assert env["FACE_CONFIDENCE_THRESHOLD"] == "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
+    assert env_file["MAX_FPS_CONTROL"] == "true"
+    assert env_file["POSE_INFER_INTERVAL"] == "1"
+    assert env_file["POSE_CONFIDENCE_THRESHOLD"] == "0.50"
+    assert env_file["POSE_SELECTOR_CONFIDENCE_THRESHOLD"] == "0.50"
+    assert env_file["FACE_CONFIDENCE_THRESHOLD"] == "0.50"
+    assert env_file["WATCHLIST_THRESHOLD"] == "0.60"
+    assert module["parameters"]["max_fps_control"] == (
+        "${oc.decode:${oc.env:MAX_FPS_CONTROL, false}}"
+    )
+    assert module["parameters"]["pose_infer_interval"] == (
+        "${oc.decode:${oc.env:POSE_INFER_INTERVAL, 0}}"
+    )
+    assert module["parameters"]["pose_confidence_threshold"] == (
+        "${oc.decode:${oc.env:POSE_CONFIDENCE_THRESHOLD, 0.25}}"
+    )
+    assert module["parameters"]["face_confidence_threshold"] == (
+        "${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.25}}"
+    )
+    assert pose["properties"]["interval"] == "${parameters.pose_infer_interval}"
+
+
 def test_existing_yolo_pose_face_adaface_chain_is_preserved() -> None:
     module = _text(SAVANT_MODULE)
     assert "yolo26_pose" in module
@@ -122,7 +195,7 @@ def test_watchlist_targets_are_registered_reese_and_finch() -> None:
     compose = _compose()
     env = compose["services"]["face-worker"]["environment"]
     assert env["WATCHLIST_MATCH_ENABLED"] == "true"
-    assert env["WATCHLIST_THRESHOLD"] == "${WATCHLIST_THRESHOLD:-0.65}"
+    assert env["WATCHLIST_THRESHOLD"] == "${WATCHLIST_THRESHOLD:-0.60}"
     assert env["WATCHLIST_TARGET_EXTERNAL_PERSON_IDS"] == (
         "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
     )

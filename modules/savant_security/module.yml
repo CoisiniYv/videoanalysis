@@ -15,6 +15,7 @@ parameters:
   max_fps: ${oc.env:MAX_FPS, 8/1}
   min_fps: ${oc.env:MIN_FPS, 2/1}
   pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
+  pose_infer_interval: ${oc.decode:${oc.env:POSE_INFER_INTERVAL, 0}}
   pose_confidence_threshold: ${oc.decode:${oc.env:POSE_CONFIDENCE_THRESHOLD, 0.25}}
   pose_keypoint_threshold: ${oc.decode:${oc.env:POSE_KEYPOINT_THRESHOLD, 0.25}}
   pose_force_nms: ${oc.decode:${oc.env:POSE_FORCE_NMS, true}}
@@ -67,7 +68,7 @@ pipeline:
     - element: nvinfer@complex_model
       name: yolo26_pose
       properties:
-        interval: 0
+        interval: ${parameters.pose_infer_interval}
       model:
         format: onnx
         model_file: /models/yolo26_pose/yolo26_pose.onnx

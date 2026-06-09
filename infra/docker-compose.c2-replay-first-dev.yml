@@ -67,7 +67,7 @@ services:
       ]
     working_dir: /opt/savant/src/module
     env_file:
-      - ./env/c1-official-replay-dev.env
+      - ./env/c2-replay-first-dev.env
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
@@ -77,14 +77,21 @@ services:
       DOWNLOAD_PATH: /downloads
       BATCH_SIZE: "1"
       MAX_PARALLEL_STREAMS: "1"
-      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
+      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-true}"
       MAX_FPS: "${MAX_FPS:-8/1}"
       MIN_FPS: "${MIN_FPS:-2/1}"
       BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
       POSE_BATCH_SIZE: "1"
+      POSE_INFER_INTERVAL: "${POSE_INFER_INTERVAL:-1}"
+      POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_KEYPOINT_THRESHOLD: "${POSE_KEYPOINT_THRESHOLD:-0.35}"
+      POSE_SELECTOR_CONFIDENCE_THRESHOLD: "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_SELECTOR_NMS_IOU_THRESHOLD: "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
+      POSE_MIN_WIDTH: "${POSE_MIN_WIDTH:-60}"
+      POSE_MIN_HEIGHT: "${POSE_MIN_HEIGHT:-100}"
       FACE_DETECTOR_BATCH_SIZE: "1"
       FACE_EMBEDDING_BATCH_SIZE: "16"
-      FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.25}"
+      FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
       FACE_REID_MIN_INTERVAL_MS: "${FACE_REID_MIN_INTERVAL_MS:-1000}"
       FACE_REID_MIN_CONFIDENCE: "${FACE_REID_MIN_CONFIDENCE:-0.45}"
       FACE_REID_MIN_FACE_SIZE: "${FACE_REID_MIN_FACE_SIZE:-40}"
@@ -142,7 +149,7 @@ services:
         "/opt/savant/adapters/gst/sources/rtsp.sh",
       ]
     env_file:
-      - ./env/c1-official-replay-dev.env
+      - ./env/c2-replay-first-dev.env
     environment:
       SOURCE_ID: c2_replay_first_rtsp
       RTSP_URI: ${C2_REPLAY_FIRST_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
@@ -169,7 +176,7 @@ services:
     image: c2-replay-first-event-worker:latest
     container_name: c2-replay-first-event-worker
     env_file:
-      - ./env/c1-official-replay-dev.env
+      - ./env/c2-replay-first-dev.env
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: ${C2_REPLAY_FIRST_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
@@ -226,7 +233,7 @@ services:
       GALLERY_MATCH_ENABLED: "true"
       WATCHLIST_MATCH_ENABLED: "true"
       WATCHLIST_EVENT_STREAM: security.events
-      WATCHLIST_THRESHOLD: "${WATCHLIST_THRESHOLD:-0.65}"
+      WATCHLIST_THRESHOLD: "${WATCHLIST_THRESHOLD:-0.60}"
       WATCHLIST_TOP_K: "${WATCHLIST_TOP_K:-5}"
       WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
@@ -315,7 +322,7 @@ services:
     image: c2-replay-first-media-worker:latest
     container_name: c2-replay-first-media-worker
     env_file:
-      - ./env/c1-official-replay-dev.env
+      - ./env/c2-replay-first-dev.env
     environment:
       DATABASE_URL: ${C2_REPLAY_FIRST_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
       SINK_OUTPUT_DIR: ${C2_REPLAY_FIRST_SINK_ROOT:-/media/replay-sink-output/c2-replay-first}
@@ -358,7 +365,14 @@ services:
       EVIDENCE_SECOND_RTSP_PULL: "false"
       MAX_FPS: "${MAX_FPS:-8/1}"
       MIN_FPS: "${MIN_FPS:-2/1}"
-      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
+      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-true}"
+      FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_KEYPOINT_THRESHOLD: "${POSE_KEYPOINT_THRESHOLD:-0.35}"
+      POSE_SELECTOR_CONFIDENCE_THRESHOLD: "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_SELECTOR_NMS_IOU_THRESHOLD: "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
+      POSE_MIN_WIDTH: "${POSE_MIN_WIDTH:-60}"
+      POSE_MIN_HEIGHT: "${POSE_MIN_HEIGHT:-100}"
       SOURCE_INPUT_FPS_ESTIMATE: "24"
       WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
