@@ -1,4 +1,4 @@
-"""C1J.2 frame annotation exporter services.
+"""Frame annotation exporter services.
 
 The runtime wrapper is deliberately small: build and validate one message, then
 write it to a bounded Redis Stream. Failures are counted and logged, never
@@ -92,7 +92,7 @@ class FrameAnnotationExporter(ABC):
 
 
 class DisabledFrameAnnotationExporter(FrameAnnotationExporter):
-    """No-op sink used when the C1J.2 producer is disabled or unavailable."""
+    """No-op sink used when the frame annotation producer is disabled or unavailable."""
 
     def __init__(self, reason: str = "disabled") -> None:
         self.reason = reason
@@ -133,7 +133,7 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
         )
 
         print(
-            "stage=savant_security_frame_annotation_exporter_init "
+            "component=savant_security_frame_annotation_exporter_init "
             f"redis_url={self._redis_url} "
             f"stream={self._stream} "
             f"maxlen={self._maxlen} "
@@ -182,7 +182,7 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             return True
         except Exception as exc:
             print(
-                "stage=savant_security_frame_annotation_redis_warning "
+                "component=savant_security_frame_annotation_redis_warning "
                 f"stream={self._stream} "
                 f"source_id={message.get('source_id', '')} "
                 f"frame_pts={message.get('frame_pts')} "
@@ -311,7 +311,7 @@ class FrameAnnotationExportRuntime:
         if not self._should_log():
             return
         parts = [
-            "stage=savant_security_frame_annotation_warning",
+            "component=savant_security_frame_annotation_warning",
             f"reason={reason}",
         ]
         for key, value in fields.items():
@@ -323,7 +323,7 @@ class FrameAnnotationExportRuntime:
             return
         counters = self.counters.as_dict()
         print(
-            "stage=savant_security_frame_annotation_tick "
+            "component=savant_security_frame_annotation_tick "
             f"enabled={self.config.enabled} "
             f"source_id={source_id} "
             f"camera_id={camera_id} "
@@ -354,7 +354,7 @@ def create_frame_annotation_exporter(
         )
     except Exception as exc:
         print(
-            "stage=savant_security_frame_annotation_exporter_init_warning "
+            "component=savant_security_frame_annotation_exporter_init_warning "
             f"stream={config.stream} "
             f"error={type(exc).__name__}:{str(exc).replace(chr(10), ' | ')}",
             flush=True,

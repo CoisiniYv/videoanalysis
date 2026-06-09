@@ -24,7 +24,7 @@ from app.identity_scope import apply_watchlist_identity_strict, unknown_watchlis
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
-C1I_MVP_ANNOTATION_SCHEMA_VERSION = "c1i.mvp.annotation.v1"
+INTRUSION_ANNOTATION_SCHEMA_VERSION = "intrusion.annotation.v1"
 DEFAULT_PRE_SECONDS = 5.0
 DEFAULT_POST_SECONDS = 5.0
 ANNOTATION_STATUS_COMPLETE = "complete"
@@ -523,7 +523,7 @@ def _intrusion_mvp_annotation_record(
     media = _payload_media(payload)
     timestamp_ms = _to_int(event_context.get("event_ts_ms"))
     return {
-        "schema_version": C1I_MVP_ANNOTATION_SCHEMA_VERSION,
+        "schema_version": INTRUSION_ANNOTATION_SCHEMA_VERSION,
         "record_type": "object_annotation",
         "annotation_role": "behavior_event",
         "annotation_status": ANNOTATION_STATUS_COMPLETE,
@@ -721,7 +721,7 @@ def build_person_context_annotation(
         return None
 
     record = {
-        "schema_version": C1I_MVP_ANNOTATION_SCHEMA_VERSION,
+        "schema_version": INTRUSION_ANNOTATION_SCHEMA_VERSION,
         "record_type": "object_annotation",
         "annotation_role": "person_context",
         "annotation_status": ANNOTATION_STATUS_COMPLETE,
@@ -2789,7 +2789,7 @@ def build_continuous_annotations(
                 "annotation_status": annotation_status,
                 "overlay_available": bool(lines),
                 "frontend_overlay_required": bool(lines),
-                "annotation_mode": "c1i_mvp_intrusion_with_person_context",
+                "annotation_mode": "intrusion_with_person_context",
                 "annotation_records_loaded": person_context_stats.get(
                     "person_metadata_count",
                     person_context_stats.get("person_observation_count", 0),

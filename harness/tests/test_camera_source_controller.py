@@ -129,7 +129,7 @@ def test_start_builds_docker_run(script_mod, sources_path):
             "start",
             "--sources", sources_path,
             "--source-id", "phase3h",
-            "--network", "c1-official-adapter_default",
+            "--network", "video-analytics-midterm_default",
         ],
         runner=runner,
         logger=lambda msg: None,

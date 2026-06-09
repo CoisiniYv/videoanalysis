@@ -1,0 +1,409 @@
+# Midterm single-camera deployment topology.
+#
+# Official recording order:
+#   RTSP source -> Replay storage -> Savant inference -> Redis/Postgres
+#   event -> Replay job -> video-file-sink -> media-worker evidence bundle
+#
+# Evidence policy:
+#   raw_clip is the Replay/video-file-sink original video output.
+#   annotations are JSONL sidecars consumed by the 8090 evidence viewer.
+#   annotated video clips are not generated.
+
+name: video-analytics-midterm
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: video-analytics-midterm-redis
+    ports:
+      - "6396:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: video-analytics-midterm-postgres
+    profiles: ["local-postgres"]
+    environment:
+      POSTGRES_USER: video
+      POSTGRES_PASSWORD: video
+      POSTGRES_DB: video_analytics
+    ports:
+      - "5439:5432"
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+      - /data/video-analytics/postgres-midterm:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "video", "-d", "video_analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  replay-service:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-service
+    ports:
+      - "8098:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-debug,replaydb=trace}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm:/opt/rocksdb:rw
+    restart: unless-stopped
+
+  savant-security:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: video-analytics-midterm-savant
+    entrypoint:
+      [
+        "bash", "-c",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
+      ]
+    working_dir: /opt/savant/src/module
+    env_file:
+      - ./env/midterm.env
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      SOURCE_ID: primary_rtsp
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "1"
+      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-true}"
+      MAX_FPS: "${MAX_FPS:-8/1}"
+      MIN_FPS: "${MIN_FPS:-2/1}"
+      BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
+      POSE_BATCH_SIZE: "1"
+      POSE_INFER_INTERVAL: "${POSE_INFER_INTERVAL:-1}"
+      POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_KEYPOINT_THRESHOLD: "${POSE_KEYPOINT_THRESHOLD:-0.35}"
+      POSE_SELECTOR_CONFIDENCE_THRESHOLD: "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_SELECTOR_NMS_IOU_THRESHOLD: "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
+      POSE_MIN_WIDTH: "${POSE_MIN_WIDTH:-60}"
+      POSE_MIN_HEIGHT: "${POSE_MIN_HEIGHT:-100}"
+      FACE_DETECTOR_BATCH_SIZE: "1"
+      FACE_EMBEDDING_BATCH_SIZE: "16"
+      FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
+      FACE_REID_MIN_INTERVAL_MS: "${FACE_REID_MIN_INTERVAL_MS:-1000}"
+      FACE_REID_MIN_CONFIDENCE: "${FACE_REID_MIN_CONFIDENCE:-0.45}"
+      FACE_REID_MIN_FACE_SIZE: "${FACE_REID_MIN_FACE_SIZE:-40}"
+      FACE_REID_NORM_TOLERANCE: "${FACE_REID_NORM_TOLERANCE:-0.10}"
+      FACE_OBSERVATION_EXPORT_ENABLED: "true"
+      PERSON_OBSERVATION_EXPORT_ENABLED: "true"
+      FRAME_ANNOTATION_EXPORT_ENABLED: "true"
+      FRAME_ANNOTATION_STREAM: security.frame_annotations
+      FRAME_ANNOTATION_TTL_SECONDS: "120"
+      FRAME_ANNOTATION_REDIS_MAXLEN: "20000"
+      FRAME_ANNOTATION_INCLUDE_KEYPOINTS: compact
+      FRAME_ANNOTATION_INCLUDE_LANDMARKS: compact
+      FRAME_ANNOTATION_INCLUDE_EMBEDDING: "false"
+      PERSON_OBSERVATION_STREAM: security.person_observations
+      PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS:-333}"
+      PERSON_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_OBSERVATION_MIN_INTERVAL_MS:-333}"
+      SAME_FRAME_DEBUG_ENABLED: "1"
+      REPLAY_SAVANT_FRAME_DUMP_ENABLED: "${REPLAY_SAVANT_FRAME_DUMP_ENABLED:-false}"
+      REPLAY_SAVANT_FRAME_DUMP_TARGET_UUIDS: "${REPLAY_SAVANT_FRAME_DUMP_TARGET_UUIDS:-}"
+      REPLAY_SAVANT_FRAME_DUMP_TARGET_PTS: "${REPLAY_SAVANT_FRAME_DUMP_TARGET_PTS:-}"
+      REPLAY_SAVANT_FRAME_DUMP_ROOT: "${REPLAY_SAVANT_FRAME_DUMP_ROOT:-/data/video-analytics/media/debug/runtime_frame_dump}"
+      REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES: "${REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES:-20}"
+      SAVANT_MODULE_FILE: module.yml
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.midterm.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
+      WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
+      OUTPUT_FRAME: '{"codec":"h264","encoder":"nvenc","encoder_params":{"iframeinterval":25}}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
+      - /data/video-analytics/media:/data/video-analytics/media:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  source-adapter:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-source-adapter
+    entrypoint:
+      [
+        "/opt/savant/adapters/gst/sources/rtsp.sh",
+      ]
+    env_file:
+      - ./env/midterm.env
+    environment:
+      SOURCE_ID: primary_rtsp
+      RTSP_URI: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
+      LOCATION: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
+      RTSP_TRANSPORT: ${RTSP_TRANSPORT:-tcp}
+      ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      SYNC_OUTPUT: "true"
+      BUFFER_LEN: "2000"
+      EOS_ON_START: "false"
+      FFMPEG_TIMEOUT_MS: "20000"
+      WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
+      WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
+    depends_on:
+      - replay-service
+      - savant-security
+    restart: unless-stopped
+
+  event-worker:
+    build:
+      context: ../services/event-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-event-worker:latest
+    container_name: video-analytics-midterm-event-worker
+    env_file:
+      - ./env/midterm.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
+      EVENT_STREAM: security.events
+      ALERT_STREAM: security.alerts
+      RECORD_REQUEST_STREAM: security.record_requests
+      RECORDING_ENABLED: "true"
+      RECORDING_STRATEGY: savant_replay
+      RECORDING_EVENT_TYPES: ${RECORDING_EVENT_TYPES:-watchlist_hit,intrusion}
+      RECORDING_SOURCE_ID: primary_rtsp
+      RECORDING_MAX_REQUESTS_PER_RUN: "${RECORDING_MAX_REQUESTS_PER_RUN:-0}"
+      RECORDING_COOLDOWN_SECONDS: "${RECORDING_COOLDOWN_SECONDS:-30}"
+      DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
+      DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"
+      RECORDING_PRE_SECONDS: "${RECORDING_PRE_SECONDS:-5}"
+      RECORDING_POST_SECONDS: "${RECORDING_POST_SECONDS:-5}"
+      DEFAULT_REPLAY_SOURCE_ID: primary_rtsp
+      WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
+      WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
+      CONSUMER_GROUP: event-workers-midterm
+      CONSUMER_NAME: event-worker-midterm-1
+      PERSON_OBSERVATION_CONSUMER_ENABLED: "true"
+      PERSON_OBSERVATION_STREAM: security.person_observations
+      PERSON_OBSERVATION_CONSUMER_GROUP: person-observation-workers-midterm
+      PERSON_OBSERVATION_CONSUMER_NAME: event-worker-midterm-person-1
+      PERSON_OBSERVATION_CONSUMER_START_ID: "${PERSON_OBSERVATION_CONSUMER_START_ID:-$$}"
+      PERSON_OBSERVATION_BATCH_SIZE: "${PERSON_OBSERVATION_BATCH_SIZE:-100}"
+      POLL_TIMEOUT_MS: "2000"
+      EVENT_BATCH_SIZE: "1"
+    volumes:
+      - ../services/event-worker:/app:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  face-worker:
+    build:
+      context: ../services/face-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-face-worker:latest
+    container_name: video-analytics-midterm-face-worker
+    environment:
+      DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
+      REDIS_URL: redis://redis:6379/0
+      FACE_OBSERVATION_STREAM: security.face_observations
+      FACE_WORKER_CONSUMER_GROUP: face-worker-midterm
+      FACE_WORKER_CONSUMER_NAME: face-worker-midterm-1
+      FACE_WORKER_CONSUMER_START_ID: "${FACE_WORKER_CONSUMER_START_ID:-0}"
+      FACE_WORKER_ENABLED: "true"
+      GALLERY_MATCH_ENABLED: "true"
+      WATCHLIST_MATCH_ENABLED: "true"
+      WATCHLIST_EVENT_STREAM: security.events
+      WATCHLIST_THRESHOLD: "${WATCHLIST_THRESHOLD:-0.60}"
+      WATCHLIST_TOP_K: "${WATCHLIST_TOP_K:-5}"
+      WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
+      WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
+      WATCHLIST_TARGET_REFRESH_SECONDS: "30"
+      BATCH_SIZE: "50"
+      POLL_TIMEOUT_MS: "2000"
+    volumes:
+      - ../services/face-worker:/app:rw
+      - /data/video-analytics/media:/data/video-analytics/media:ro
+      - /data/video-analytics/models:/data/video-analytics/models:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  clip-worker:
+    build:
+      context: ../services/clip-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-clip-worker:latest
+    container_name: video-analytics-midterm-clip-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
+      RECORD_REQUEST_STREAM: security.record_requests
+      REPLAY_API_URL: http://replay-service:8080
+      REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
+      CONSUMER_GROUP: clip-workers-midterm
+      CONSUMER_NAME: clip-worker-midterm-1
+      POLL_TIMEOUT_MS: "5000"
+      DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
+      DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"
+      KEYFRAME_LOOKUP_WINDOW_S: "${KEYFRAME_LOOKUP_WINDOW_S:-15}"
+      CLIP_WORKER_MAX_JOBS_PER_RUN: "${CLIP_WORKER_MAX_JOBS_PER_RUN:-100}"
+      CLIP_WORKER_RUN_ONCE: "${CLIP_WORKER_RUN_ONCE:-false}"
+      CLIP_WORKER_MAX_CONCURRENT_JOBS: "${CLIP_WORKER_MAX_CONCURRENT_JOBS:-1}"
+      CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS: "${CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS:-30}"
+      REPLAY_STOP_CONDITION_MODE: ts_delta_sec
+      REPLAY_FPS: "${REPLAY_FPS:-24}"
+      REPLAY_DURATION_EXTRA_SLACK_S: "${REPLAY_DURATION_EXTRA_SLACK_S:-15}"
+      REPLAY_FORCE_CONSTANT_CADENCE: "false"
+      REPLAY_ANCHOR_STRATEGY: event_keyframe
+      KEYFRAME_LOOKUP_RETRIES: "${KEYFRAME_LOOKUP_RETRIES:-8}"
+      KEYFRAME_LOOKUP_RETRY_SLEEP_S: "${KEYFRAME_LOOKUP_RETRY_SLEEP_S:-1.0}"
+      FRAME_ANNOTATION_STREAM: security.frame_annotations
+      FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT: "${FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT:-20000}"
+      FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S: "${FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S:-1.0}"
+      FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S: "${FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S:-1.0}"
+      ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
+    volumes:
+      - ../services/clip-worker:/app:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis: { condition: service_healthy }
+      replay-service: { condition: service_started }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink
+    entrypoint:
+      [
+        "python", "/opt/savant/adapters/gst/sinks/video_files.py",
+      ]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      DIR_LOCATION: ${VIDEO_ANALYTICS_SINK_DIR_LOCATION:-/media/replay-sink-output/midterm/%source_id%/%src_filename%/}
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+    volumes:
+      - /data/video-analytics/media:/media:rw
+    restart: unless-stopped
+
+  media-worker:
+    build:
+      context: ../services/media-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-media-worker:latest
+    container_name: video-analytics-midterm-media-worker
+    env_file:
+      - ./env/midterm.env
+    environment:
+      DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
+      SINK_OUTPUT_DIR: ${VIDEO_ANALYTICS_SINK_ROOT:-/media/replay-sink-output/midterm}
+      SNAPSHOT_OUTPUT_DIR: /media/midterm-snapshots
+      ANNOTATED_OUTPUT_DIR: /media/midterm-snapshots/annotated
+      EVIDENCE_OUTPUT_DIR: /media/evidence
+      P1_RAW_CLIP_FINALIZER_ENABLED: "true"
+      P1_SINK_STABILITY_CHECKS: "2"
+      MEDIA_POLL_INTERVAL_S: "5"
+      DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
+      DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"
+      EVIDENCE_MAX_DURATION_SLACK_SEC: "${EVIDENCE_MAX_DURATION_SLACK_SEC:-10}"
+      RAW_CLIP_SANITIZE_MODE: "off"
+      ANNOTATION_TRACK_IDENTITY_PROPAGATION: "true"
+      FACE_OBSERVATION_CREATED_AT_MARGIN_SECONDS: "15"
+      ALLOW_FACE_TIMESTAMP_ONLY_QUERY: "false"
+      EVIDENCE_TOPOLOGY: post_savant_replay
+      FRAME_CACHE_SIDECAR_ENABLED: "true"
+      FRAME_CACHE_SIDECAR_EVENT_TYPES: "intrusion,watchlist_hit"
+      FRAME_CACHE_SIDECAR_REQUIRE_TRIGGER_FACE: "false"
+      FRAME_CACHE_SIDECAR_WRITE_MODE: sidecar_only
+      FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN: "${FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN:-100}"
+      FRAME_CACHE_SIDECAR_LOOKBACK_COUNT: "${FRAME_CACHE_SIDECAR_LOOKBACK_COUNT:-20000}"
+      FRAME_CACHE_SIDECAR_MAX_SCAN: "${FRAME_CACHE_SIDECAR_MAX_SCAN:-20000}"
+      FRAME_CACHE_SIDECAR_OUTPUT_ANNOTATIONS: annotations.frame_cache.identity.jsonl
+      FRAME_CACHE_SIDECAR_OUTPUT_SUMMARY: summary.frame_cache.identity.json
+      FRAME_CACHE_SIDECAR_STREAM: security.frame_annotations
+      FRAME_CACHE_FRESHNESS_GUARD_MODE: metadata_pts
+      FRAME_CACHE_REQUIRE_EVENT_CENTERED: "true"
+      FRAME_CACHE_CANONICAL_MIN_DURATION_SECONDS: "${FRAME_CACHE_CANONICAL_MIN_DURATION_SECONDS:-8.0}"
+      FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS: "${FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS:-12.5}"
+      FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS: "${FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS:-0.75}"
+      FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED: "true"
+      EVIDENCE_VERSION: midterm
+      EVIDENCE_SCHEMA_VERSION: 2.0-midterm
+      EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS: "false"
+      EVIDENCE_INPUT_TYPE: rtsp
+      EVIDENCE_INPUT_URI: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://10.37.57.112:8554/live/1080movie}
+      EVIDENCE_LOCAL_FILE_USED: "false"
+      EVIDENCE_TEST_VIDEO_USED: "false"
+      EVIDENCE_SOURCE_EXTRACTION_FALLBACK: "false"
+      EVIDENCE_SECOND_RTSP_PULL: "false"
+      MAX_FPS: "${MAX_FPS:-8/1}"
+      MIN_FPS: "${MIN_FPS:-2/1}"
+      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-true}"
+      FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_KEYPOINT_THRESHOLD: "${POSE_KEYPOINT_THRESHOLD:-0.35}"
+      POSE_SELECTOR_CONFIDENCE_THRESHOLD: "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_SELECTOR_NMS_IOU_THRESHOLD: "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
+      POSE_MIN_WIDTH: "${POSE_MIN_WIDTH:-60}"
+      POSE_MIN_HEIGHT: "${POSE_MIN_HEIGHT:-100}"
+      SOURCE_INPUT_FPS_ESTIMATE: "24"
+      WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:f4_3:reese,demo:f4_3:finch}"
+      WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.midterm.yml
+    volumes:
+      - ../services/media-worker:/app:rw
+      - ../modules/savant_security/config:/opt/savant/src/module/config:ro
+      - /data/video-analytics/media:/media:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  evidence-viewer:
+    build:
+      context: ../services/evidence-viewer
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-evidence-viewer:latest
+    container_name: video-analytics-midterm-evidence-viewer
+    environment:
+      EVIDENCE_ROOT: /evidence
+      EVIDENCE_VIEWER_HOST: 0.0.0.0
+      EVIDENCE_VIEWER_PORT: "8090"
+      EVIDENCE_VIEWER_MAX_BUNDLES: "200"
+    volumes:
+      - /data/video-analytics/media/evidence:/evidence:ro
+    ports:
+      - "8090:8090"
+    restart: unless-stopped

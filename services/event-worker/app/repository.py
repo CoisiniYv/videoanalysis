@@ -139,7 +139,7 @@ def _not_implemented_reason(event: Dict[str, Any]) -> str:
 def _evidence_task_initial_status(event: Dict[str, Any]) -> tuple[str, str]:
     """Return (status, error_message) for a new evidence task.
 
-    For watchlist_hit / live_search_hit and C1I.1 intrusion, the recording
+    For watchlist_hit / live_search_hit and intrusion, the recording
     pipeline (record_request -> clip-worker -> media-worker) can handle
     evidence generation, so the task starts as 'pending' with no error.
     Reserved behavior events still start as 'not_implemented'.
@@ -236,7 +236,7 @@ class EventRepository:
     ) -> str | None:
         """Create one idempotent evidence task for an event.
 
-        For watchlist_hit / live_search_hit and C1I.1 intrusion the task starts
+        For watchlist_hit / live_search_hit and intrusion the task starts
         as 'pending' because the recording pipeline (record_request ->
         clip-worker -> media-worker) can handle evidence generation.
         """

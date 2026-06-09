@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Operator-friendly camera config CLI (Phase C1.3).
+"""Operator-friendly camera config CLI.
 
-Wraps the FastAPI camera endpoints, the C1.1 runtime config exporter,
-the C1.2 source controller, and a Pillow-based ROI preview into a
+Wraps the FastAPI camera endpoints, runtime config exporter,
+the source controller, and a Pillow-based ROI preview into a
 single command surface. Operators get one entry point instead of curl
 + export_runtime_configs.py + camera_source_controller.py + (today)
 nothing for ROI preview.
@@ -643,7 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--sources", default="infra/generated/sources.generated.yml"
     )
     p_start.add_argument(
-        "--network", default="c1-official-adapter_default"
+        "--network", default="video-analytics-midterm_default"
     )
     p_start.add_argument(
         "--testvideo-mount", default=None,

@@ -1,4 +1,4 @@
-"""Timeline matching helpers for C1J frame annotation metadata."""
+"""Timeline matching helpers for frame annotation metadata."""
 
 from __future__ import annotations
 

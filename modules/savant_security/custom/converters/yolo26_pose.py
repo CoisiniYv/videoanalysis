@@ -27,8 +27,8 @@ _DETAILED_LOG_LIMIT = 5
 _SUMMARY_INTERVAL = 300
 _RESTORE_STRETCH = "stretch"
 _RESTORE_LETTERBOX = "letterbox"
-_BUILDER_VERSION = "c1m5_letterbox_restore_v1"
-_RUNTIME_DEBUG_MARKER = "C1M5R_RUNTIME_FRESHNESS_MARKER"
+_BUILDER_VERSION = "pose_letterbox_restore_v1"
+_RUNTIME_DEBUG_MARKER = "POSE_RUNTIME_FRESHNESS_MARKER"
 
 
 class Yolo26PoseConverter(BaseComplexModelOutputConverter):
@@ -43,7 +43,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
         nms_threshold: float = 0.6,
         coordinate_restore_mode: str = _RESTORE_LETTERBOX,
         debug_dump_enabled: bool = False,
-        debug_dump_dir: str = "/data/video-analytics/artifacts/c1m5/pose_converter_debug",
+        debug_dump_dir: str = "/data/video-analytics/artifacts/pose_converter_debug",
         debug_dump_max_records: int = 200,
         **kwargs,
     ):
@@ -66,7 +66,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
         self._last_attrs_len = 0
         self._last_first_keypoints_len = 0
         print(
-            f"stage=phase2c_converter_init "
+            f"component=pose_converter_init "
             f"builder_version={_BUILDER_VERSION} "
             f"runtime_debug_marker={_RUNTIME_DEBUG_MARKER} "
             f"decoder_layout={decoder_layout} "
@@ -89,7 +89,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
             return self._call_impl(*output_layers, model=model, roi=roi)
         except Exception as exc:
             print(
-                f"stage=phase2c_converter_error error={exc}",
+                f"component=pose_converter_error error={exc}",
                 flush=True,
             )
             raise
@@ -106,7 +106,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
 
         if is_detailed:
             print(
-                f"stage=phase2c_converter_entered "
+                f"component=pose_converter_entered "
                 f"call_count={self._call_count} "
                 f"output_layers_count={len(output_layers)}",
                 flush=True,
@@ -116,7 +116,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
 
         if is_detailed:
             print(
-                f"stage=phase2c_converter_tensor "
+                f"component=pose_converter_tensor "
                 f"raw_shape={list(tensor.shape)} "
                 f"raw_dtype={tensor.dtype} "
                 f"raw_min={tensor.min() if tensor.size > 0 else 'N/A'} "
@@ -127,7 +127,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
 
         if tensor.size == 0:
             if is_detailed:
-                print("stage=phase2c_converter_return bbox_tensor_empty=true reason=empty_tensor", flush=True)
+                print("component=pose_converter_return bbox_tensor_empty=true reason=empty_tensor", flush=True)
             return np.empty((0, 6), dtype=np.float32), []
 
         detections, _layout = decode_pose_output(tensor, self._decoder_config)
@@ -135,13 +135,13 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
 
         if is_detailed:
             print(
-                f"stage=phase2c_converter_decode returned_detections={len(detections)}",
+                f"component=pose_converter_decode returned_detections={len(detections)}",
                 flush=True,
             )
 
         if not detections:
             if is_detailed:
-                print("stage=phase2c_converter_return bbox_tensor_empty=true reason=no_detections_after_decode", flush=True)
+                print("component=pose_converter_return bbox_tensor_empty=true reason=no_detections_after_decode", flush=True)
             return np.empty((0, 6), dtype=np.float32), []
 
         input_shape = list(model.input.shape)
@@ -152,7 +152,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
 
         if is_detailed:
             print(
-                f"stage=phase2c_converter_model "
+                f"component=pose_converter_model "
                 f"input_shape={input_shape} model_h={model_h} model_w={model_w}",
                 flush=True,
             )
@@ -167,7 +167,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
 
         if is_detailed:
             print(
-                f"stage=phase2c_converter_roi "
+                f"component=pose_converter_roi "
                 f"roi={list(roi)} "
                 f"restore_mode={transform['mode']} "
                 f"scale_x={transform['stretch_scale_x']:.4f} "
@@ -232,7 +232,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
             bbox0 = bbox_tensor[0]
             kpts0_list = attrs_rows[0][0][1] if attrs_rows else []
             print(
-                f"phase=phase2c_converter_bbox_debug "
+                f"component=pose_converter_bbox_debug "
                 f"raw_first_detection_xyxy=({det0.bbox[0]:.2f},{det0.bbox[1]:.2f},{det0.bbox[2]:.2f},{det0.bbox[3]:.2f}) "
                 f"converted_first_bbox_cxcywh=({bbox0[2]:.2f},{bbox0[3]:.2f},{bbox0[4]:.2f},{bbox0[5]:.2f})",
                 flush=True,
@@ -244,7 +244,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
         if bbox_tensor.shape[0] > 0:
             if is_detailed:
                 print(
-                    f"stage=phase2c_converter_return "
+                    f"component=pose_converter_return "
                     f"bbox_tensor_shape={list(bbox_tensor.shape)} "
                     f"attrs_len={len(attrs_rows)}",
                     flush=True,
@@ -304,7 +304,7 @@ class Yolo26PoseConverter(BaseComplexModelOutputConverter):
             self._debug_dump_records += 1
         except Exception as exc:
             if self._debug_dump_records == 0:
-                print(f"stage=phase2c_converter_debug_dump_failed error={exc}", flush=True)
+                print(f"component=pose_converter_debug_dump_failed error={exc}", flush=True)
             self._debug_dump_records = self._debug_dump_max_records
 
 

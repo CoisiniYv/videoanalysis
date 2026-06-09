@@ -1,11 +1,11 @@
-"""SameFrameDetectionDebugPyFunc — C1F.1c same-frame pose + face summary export.
+"""SameFrameDetectionDebugPyFunc — same-frame pose + face summary export.
 
 Reads person (YOLO26-pose + nvtracker) and face (YOLOv8-Face + association)
 metadata from the same frame and writes a lightweight JSONL summary.
 
-Environment gate: C1F1_SAME_FRAME_DEBUG_ENABLED=1
+Environment gate: SAME_FRAME_DEBUG_ENABLED=1
 
-Output: /data/video-analytics/artifacts/c1f1/same_frame_pose_face_summary.jsonl
+Output: /data/video-analytics/artifacts/same_frame/same_frame_pose_face_summary.jsonl
 
 HARDENED: This pyfunc must NEVER cause the Savant pipeline to stop.
 - No file I/O in on_start() (causes GStreamer pipeline stop).
@@ -31,7 +31,7 @@ from custom.models.pose import (
 )
 
 TRUTHY = {"1", "true", "yes", "on"}
-DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/c1f1"
+DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/same_frame"
 DEFAULT_OUTPUT_FILE = "same_frame_pose_face_summary.jsonl"
 DEFAULT_MAX_FRAMES = 0  # 0 = unlimited
 
@@ -44,6 +44,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return value.strip().lower() in TRUTHY
     except Exception:
         return default
+
+
+def _env_first(names: tuple[str, ...], default: str = "") -> str:
+    for name in names:
+        try:
+            value = os.getenv(name)
+            if value is not None and str(value).strip() != "":
+                return value
+        except Exception:
+            pass
+    return default
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -143,9 +154,15 @@ def _frame_dimensions(frame_meta: Any) -> tuple[float | None, float | None]:
         except Exception:
             pass
     if width is None:
-        width = _env_float("C1I1C_FRAME_WIDTH", 1920.0)
+        width = _safe_float(
+            _env_first(("SAME_FRAME_WIDTH",), "1920.0"),
+            1920.0,
+        )
     if height is None:
-        height = _env_float("C1I1C_FRAME_HEIGHT", 1080.0)
+        height = _safe_float(
+            _env_first(("SAME_FRAME_HEIGHT",), "1080.0"),
+            1080.0,
+        )
     return width, height
 
 
@@ -174,7 +191,7 @@ def _extract_anchor_safe(frame_meta: Any) -> dict[str, Any]:
 
 
 class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
-    """Export same-frame pose + face summary as JSONL for C1F.1c.
+    """Export same-frame pose + face summary as JSONL.
 
     HARDENED: every method is wrapped in try/except. File I/O is lazy
     (first process_frame, not on_start). This pyfunc must never cause
@@ -184,15 +201,22 @@ class SameFrameDetectionDebugPyFunc(NvDsPyFuncPlugin):
     def __init__(self, log_every_n_frames: int = 30, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._log_interval = max(int(log_every_n_frames), 1)
-        self._enabled = _env_flag("C1F1_SAME_FRAME_DEBUG_ENABLED")
+        self._enabled = _env_flag("SAME_FRAME_DEBUG_ENABLED")
         self._output_dir = Path(
-            os.getenv("C1F1_SAME_FRAME_OUTPUT_DIR", DEFAULT_OUTPUT_DIR)
+            _env_first(
+                ("SAME_FRAME_OUTPUT_DIR",),
+                DEFAULT_OUTPUT_DIR,
+            )
         )
-        self._output_file = os.getenv(
-            "C1F1_SAME_FRAME_OUTPUT_FILE", DEFAULT_OUTPUT_FILE
+        self._output_file = _env_first(
+            ("SAME_FRAME_OUTPUT_FILE",),
+            DEFAULT_OUTPUT_FILE,
         )
         self._max_frames = int(
-            os.getenv("C1F1_SAME_FRAME_MAX_FRAMES", str(DEFAULT_MAX_FRAMES))
+            _env_first(
+                ("SAME_FRAME_MAX_FRAMES",),
+                str(DEFAULT_MAX_FRAMES),
+            )
         )
         self._frame_count = 0
         self._written = 0

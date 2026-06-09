@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Export both runtime config files from the FastAPI camera service (Phase C1.2).
+"""Export runtime config files from the FastAPI camera service.
 
 Produces:
 
 1. ``modules/savant_security/config/cameras.generated.yml``
    The Savant module reads this through ``custom.services.camera_config``.
    It is byte-equivalent to the FastAPI ``/api/v1/cameras/config/export``
-   response (the C1 export schema).
+   response.
 
 2. ``infra/generated/sources.generated.yml``
    The adapter-side source manifest read by
@@ -45,7 +45,7 @@ EXPORT_PATH = "/api/v1/cameras/config/export"
 HTTP_TIMEOUT_SECONDS = 30
 
 # Default ZMQ endpoint the gstreamer source adapter will connect to.
-# Format matches what the C1.2 compose's savant-security service exposes.
+# Format matches what the midterm compose's source adapter path expects.
 DEFAULT_ZMQ_ENDPOINT = "dealer+connect:tcp://savant-security:5555"
 
 ADAPTER_TYPE_GSTREAMER = "gstreamer"

@@ -49,7 +49,7 @@ class PtsFpsGate(BaseFrameFilter):
         self._frames_accepted_by_source: dict[str, int] = {}
 
         print(
-            "stage=savant_security_pts_fps_gate_init "
+            "component=savant_security_pts_fps_gate_init "
             f"enabled={self.enabled} max_fps={self.max_fps:g} "
             f"min_fps={self.min_fps:g} min_interval_ns={self.min_interval_ns}",
             flush=True,
@@ -109,7 +109,7 @@ class PtsFpsGate(BaseFrameFilter):
             return
         accepted = self._frames_accepted_by_source.get(source_key, 0)
         print(
-            "stage=savant_security_pts_fps_gate_tick "
+            "component=savant_security_pts_fps_gate_tick "
             f"source_id={source_key} seen={seen} accepted={accepted} "
             f"enabled={self.enabled} max_fps={self.max_fps:g}",
             flush=True,

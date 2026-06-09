@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "2.0-c2-post-savant"
+SCHEMA_VERSION = "2.0-midterm-post-savant"
 ANNOTATION_SOURCE = "post_savant_sink_metadata"
 SIDECAR_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
 SIDECAR_SUMMARY_FILE = "summary.frame_cache.identity.json"
@@ -536,7 +536,7 @@ def _limitations(
         limitations.append("frame_uuid_missing_in_native_metadata")
     if source_observation_id_count <= 0:
         limitations.append("source_observation_id_missing_in_native_metadata")
-        limitations.append("watchlist_trigger_identity_binding_not_verified_in_c2_1")
+        limitations.append("watchlist_trigger_identity_binding_not_verified")
     return limitations
 
 
@@ -631,7 +631,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build a C2 production annotation sidecar from post-Savant sink metadata."
+        description="Build a production annotation sidecar from post-Savant sink metadata."
     )
     parser.add_argument("--metadata", required=True, type=Path)
     parser.add_argument("--output-jsonl", required=True, type=Path)

@@ -22,13 +22,13 @@ from app.config import Config, load_config
 from app.continuous_annotation import write_continuous_annotation_bundle
 from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
 from app.post_savant_evidence_bundle import (
-    EVIDENCE_TOPOLOGY as C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
-    RAW_CLIP_FILE as C2_RAW_CLIP_FILE,
-    SINK_METADATA_FILE as C2_SINK_METADATA_FILE,
-    SUMMARY_FILE as C2_SUMMARY_FILE,
-    _copy_or_crop_video as _c2_copy_or_crop_video,
-    _select_time_domain_frames as _c2_select_time_domain_frames,
-    _write_jsonl as _c2_write_metadata_jsonl,
+    EVIDENCE_TOPOLOGY as POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
+    RAW_CLIP_FILE,
+    SINK_METADATA_FILE,
+    SUMMARY_FILE,
+    _copy_or_crop_video,
+    _select_time_domain_frames,
+    _write_jsonl as _write_metadata_jsonl,
     build_post_savant_evidence_bundle,
     load_native_metadata,
     read_decoded_video_frame_count,
@@ -48,7 +48,7 @@ DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC = 10.0
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
-C2_POST_SAVANT_FINALIZER_ENV = "EVIDENCE_TOPOLOGY"
+POST_SAVANT_FINALIZER_ENV = "EVIDENCE_TOPOLOGY"
 SNAPSHOT_ELIGIBLE_CLIP_STATUSES = ("ready", "generated")
 SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
     "generated_corrupt",
@@ -1068,7 +1068,8 @@ def _build_business_metadata(
 
     return {
         "schema_version": "1.0",
-        "phase": os.getenv("EVIDENCE_PHASE", "P1"),
+        "project_version": _evidence_version("P1"),
+        **_legacy_metadata_fields("P1"),
         "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
         "evidence_type": "security_event_replay_clip",
         "recording_strategy": "savant_replay",
@@ -1319,14 +1320,32 @@ def _env_text(name: str, default: str = "") -> str:
     return value
 
 
-def _c2_post_savant_finalizer_enabled() -> bool:
-    return _env_text(C2_POST_SAVANT_FINALIZER_ENV).strip().lower() == (
-        C2_POST_SAVANT_EVIDENCE_TOPOLOGY
+def _evidence_version(default: str = "") -> str:
+    return _env_text("EVIDENCE_VERSION", default)
+
+
+def _evidence_schema_version(default: str) -> str:
+    return _env_text("EVIDENCE_SCHEMA_VERSION", default)
+
+
+def _include_legacy_metadata_fields() -> bool:
+    return _env_bool("EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS", default=False)
+
+
+def _legacy_metadata_fields(default_version: str) -> dict:
+    if not _include_legacy_metadata_fields():
+        return {}
+    return {"legacy_project_version": _evidence_version(default_version)}
+
+
+def _post_savant_finalizer_enabled() -> bool:
+    return _env_text(POST_SAVANT_FINALIZER_ENV).strip().lower() == (
+        POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY
     )
 
 
-def _c2_post_savant_fps_gating_applied() -> bool | None:
-    value = os.getenv("C2_POST_SAVANT_FPS_GATING_APPLIED")
+def _post_savant_fps_gating_applied() -> bool | None:
+    value = os.getenv("POST_SAVANT_FPS_GATING_APPLIED")
     if value is None:
         value = os.getenv("MAX_FPS_CONTROL")
     if value is None:
@@ -1334,7 +1353,7 @@ def _c2_post_savant_fps_gating_applied() -> bool | None:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _bundle_clip_status_from_c2_summary(summary: dict) -> str:
+def _bundle_clip_status_from_post_savant_summary(summary: dict) -> str:
     if summary.get("production_ready") is True:
         return "ready"
     if summary.get("annotation_status") == "timeline_reconciliation_unverified":
@@ -1447,7 +1466,7 @@ def _uuid_first_anchor_metadata(
     }
 
 
-def _build_frame_cache_c2_summary(
+def _build_frame_cache_summary(
     *,
     sidecar_summary: dict,
     sink_metadata_rows: list[dict],
@@ -1490,10 +1509,11 @@ def _build_frame_cache_c2_summary(
         "crop_video_to_time_window": False,
         "source_video_path": str(raw_clip_path),
     }
-    return {
+    summary = {
         **sidecar_summary,
-        "schema_version": "2.0-c2",
-        "evidence_topology": C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+        "schema_version": _evidence_schema_version("2.0-midterm"),
+        "project_version": _evidence_version(""),
+        "evidence_topology": POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
         "sidecar_type": "production",
         "timeline_domain": PRODUCTION_TIMELINE_DOMAIN,
         "annotation_source": "frame_annotation_cache",
@@ -1511,8 +1531,8 @@ def _build_frame_cache_c2_summary(
         "allow_legacy_annotation_fallback": False,
         "raw_video_binding": "continuous_replay_video",
         "annotation_binding": "frame_annotation_cache_pts_sidecar",
-        "raw_clip_path": C2_RAW_CLIP_FILE,
-        "sink_metadata_path": C2_SINK_METADATA_FILE,
+        "raw_clip_path": RAW_CLIP_FILE,
+        "sink_metadata_path": SINK_METADATA_FILE,
         "production_sidecar_path": SIDECAR_ANNOTATIONS_FILE,
         "source_metadata_frame_count": len(sink_metadata_rows),
         "original_metadata_frame_count": rows_total_input,
@@ -1533,23 +1553,29 @@ def _build_frame_cache_c2_summary(
             "decoded_video_fps_estimate": None,
             "max_fps": os.getenv("MAX_FPS") or "8/1",
             "min_fps": os.getenv("MIN_FPS") or "2/1",
-            "fps_gating_applied": _c2_post_savant_fps_gating_applied(),
+            "fps_gating_applied": _post_savant_fps_gating_applied(),
         },
         "object_counts": object_counts,
         "person_objects_count": object_counts["person"],
         "face_objects_count": object_counts["face"],
         "known_face_objects_count": object_counts["known_face"],
-        "c2_3b_event_type": event_context.get("event_type", ""),
-        "c2_3b_camera_id": event_context.get("camera_id", ""),
-        "c2_3b_source_id": event_context.get("source_id", ""),
         "production_ready_failures": production_ready_failures,
         "limitations": production_ready_failures,
         "metadata_path_used": str(sink_metadata_path),
         **anchor_metadata,
     }
+    if _include_legacy_metadata_fields():
+        summary.update(
+            {
+                "legacy_event_type": event_context.get("event_type", ""),
+                "legacy_camera_id": event_context.get("camera_id", ""),
+                "legacy_source_id": event_context.get("source_id", ""),
+            }
+        )
+    return summary
 
 
-def _c2_frame_cache_time_domain_window(
+def _frame_cache_time_domain_window(
     *,
     event_context: dict,
     replay_labels: dict,
@@ -1595,7 +1621,7 @@ def _c2_frame_cache_time_domain_window(
     }
 
 
-class _C2BundleView:
+class _EvidenceBundleView:
     def __init__(
         self,
         *,
@@ -1614,7 +1640,7 @@ class _C2BundleView:
         self.summary = summary
 
 
-def _build_c2_event_metadata(
+def _build_event_metadata(
     *,
     event_context: dict,
     replay_job_id: str,
@@ -1649,11 +1675,12 @@ def _build_c2_event_metadata(
         object_counts = {}
 
     return {
-        "schema_version": "2.0-c2",
-        "phase": os.getenv("EVIDENCE_PHASE", "C2.3A"),
+        "schema_version": _evidence_schema_version("2.0-midterm"),
+        "project_version": _evidence_version("midterm"),
+        **_legacy_metadata_fields("midterm"),
         "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
         "evidence_type": "security_event_post_savant_replay_clip",
-        "evidence_topology": C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+        "evidence_topology": POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
         "recording_strategy": "savant_replay",
         "event": {
             "event_id": event_context.get("event_id", ""),
@@ -1739,7 +1766,7 @@ def _build_c2_event_metadata(
     }
 
 
-def _finalize_c2_post_savant_evidence_bundle(
+def _finalize_post_savant_evidence_bundle(
     pg_conn: psycopg.Connection,
     *,
     event_id: str,
@@ -1747,7 +1774,7 @@ def _finalize_c2_post_savant_evidence_bundle(
     metadata_file: str,
     evidence_output_dir: str,
 ) -> dict:
-    """Package post-Savant sink output as a C2 production evidence bundle."""
+    """Package post-Savant sink output as a production evidence bundle."""
     event_context = _load_event_context(pg_conn, event_id)
     payload = event_context.get("payload", {})
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -1774,9 +1801,9 @@ def _finalize_c2_post_savant_evidence_bundle(
     if not source_video:
         raise FileNotFoundError(f"video file not found in {meta_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_clip_path = output_dir / C2_RAW_CLIP_FILE
-    sink_metadata_path = output_dir / C2_SINK_METADATA_FILE
-    frame_cache_window = _c2_frame_cache_time_domain_window(
+    raw_clip_path = output_dir / RAW_CLIP_FILE
+    sink_metadata_path = output_dir / SINK_METADATA_FILE
+    frame_cache_window = _frame_cache_time_domain_window(
         event_context=event_context,
         replay_labels=replay_labels,
     )
@@ -1803,7 +1830,7 @@ def _finalize_c2_post_savant_evidence_bundle(
     )
     if (
         metadata_has_objects
-        and _env_bool("C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
+        and _env_bool("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
         and frame_cache_window.get("requested_start_pts") is not None
         and frame_cache_window.get("requested_end_pts") is not None
     ):
@@ -1814,12 +1841,12 @@ def _finalize_c2_post_savant_evidence_bundle(
             "replay_job_request": replay_job_request,
         }
     elif (
-        _env_bool("C2_FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
+        _env_bool("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
         and frame_cache_window.get("requested_start_pts") is not None
         and frame_cache_window.get("requested_end_pts") is not None
     ):
         try:
-            selected_rows, selected_time_window = _c2_select_time_domain_frames(
+            selected_rows, selected_time_window = _select_time_domain_frames(
                 source_metadata_rows,
                 requested_start_pts=_to_int(frame_cache_window.get("requested_start_pts")),
                 requested_end_pts=_to_int(frame_cache_window.get("requested_end_pts")),
@@ -1829,7 +1856,7 @@ def _finalize_c2_post_savant_evidence_bundle(
             frame_cache_time_window = {**frame_cache_window, **selected_time_window}
             frame_cache_time_window["replay_labels"] = replay_labels
             frame_cache_time_window["replay_job_request"] = replay_job_request
-            frame_cache_video_crop = _c2_copy_or_crop_video(
+            frame_cache_video_crop = _copy_or_crop_video(
                 source_video_path=Path(source_video),
                 output_video_path=raw_clip_path,
                 source_frames=source_metadata_rows,
@@ -1837,10 +1864,10 @@ def _finalize_c2_post_savant_evidence_bundle(
                 copy_video=True,
                 crop_video_to_time_window=True,
             )
-            _c2_write_metadata_jsonl(sink_metadata_path, selected_rows)
+            _write_metadata_jsonl(sink_metadata_path, selected_rows)
         except Exception as exc:
             logger.warning(
-                "c2_frame_cache_time_domain_crop_failed event_id=%s error=%s",
+                "frame_cache_time_domain_crop_failed event_id=%s error=%s",
                 event_id,
                 exc,
             )
@@ -1874,6 +1901,46 @@ def _finalize_c2_post_savant_evidence_bundle(
     )
 
     if metadata_has_objects:
+        builder_event_metadata = {
+            **_uuid_first_anchor_metadata(
+                replay_labels=replay_labels,
+                replay_job_request=replay_job_request,
+                time_window=frame_cache_time_window,
+            ),
+            "replay_source_kind": replay_labels.get("replay_source_kind"),
+            "requested_start_pts": replay_labels.get("requested_start_pts"),
+            "requested_end_pts": replay_labels.get("requested_end_pts"),
+            "event_frame_pts": replay_labels.get("event_frame_pts"),
+            "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
+            "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
+            "time_domain_crop_applied": bool(
+                frame_cache_time_window.get("time_domain_crop_applied")
+            ),
+            "annotation_source_policy": replay_labels.get("annotation_source_policy"),
+            "allow_db_annotation_fallback": (
+                replay_labels.get("allow_db_annotation_fallback") == "true"
+            ),
+            "allow_legacy_annotation_fallback": (
+                replay_labels.get("allow_legacy_annotation_fallback") == "true"
+            ),
+            "replay_stored_stream_id": replay_configuration.get("stored_stream_id"),
+            "replay_resulting_stream_id": replay_configuration.get("resulting_stream_id"),
+        }
+        if _include_legacy_metadata_fields():
+            builder_event_metadata.update(
+                {
+                    "legacy_record_request_id": replay_labels.get("request_id"),
+                    "legacy_source_event_id": (
+                        replay_labels.get("source_event_id")
+                        or event_context.get("source_event_id", "")
+                    ),
+                    "legacy_event_type": event_context.get("event_type", ""),
+                    "legacy_camera_id": event_context.get("camera_id", ""),
+                    "legacy_source_id": event_context.get("source_id", ""),
+                    "legacy_frame_pts": replay_labels.get("frame_pts"),
+                    "legacy_frame_num": replay_labels.get("frame_num"),
+                }
+            )
         result = build_post_savant_evidence_bundle(
             input_dir=Path(meta_dir),
             output_dir=output_dir,
@@ -1882,7 +1949,7 @@ def _finalize_c2_post_savant_evidence_bundle(
             overwrite=True,
             max_fps=os.getenv("MAX_FPS"),
             min_fps=os.getenv("MIN_FPS"),
-            fps_gating_applied=_c2_post_savant_fps_gating_applied(),
+            fps_gating_applied=_post_savant_fps_gating_applied(),
             source_input_fps_estimate=_to_float(os.getenv("SOURCE_INPUT_FPS_ESTIMATE")),
             requested_start_pts=_to_int(frame_cache_time_window.get("requested_start_pts")),
             requested_end_pts=_to_int(frame_cache_time_window.get("requested_end_pts")),
@@ -1893,41 +1960,7 @@ def _finalize_c2_post_savant_evidence_bundle(
             crop_video_to_time_window=bool(
                 frame_cache_time_window.get("time_domain_crop_applied")
             ),
-            event_metadata={
-                **_uuid_first_anchor_metadata(
-                    replay_labels=replay_labels,
-                    replay_job_request=replay_job_request,
-                    time_window=frame_cache_time_window,
-                ),
-                "replay_source_kind": replay_labels.get("replay_source_kind"),
-                "c2_3b_record_request_id": replay_labels.get("request_id"),
-                "c2_3b_source_event_id": (
-                    replay_labels.get("source_event_id")
-                    or event_context.get("source_event_id", "")
-                ),
-                "c2_3b_event_type": event_context.get("event_type", ""),
-                "c2_3b_camera_id": event_context.get("camera_id", ""),
-                "c2_3b_source_id": event_context.get("source_id", ""),
-                "c2_3b_frame_pts": replay_labels.get("frame_pts"),
-                "c2_3b_frame_num": replay_labels.get("frame_num"),
-                "requested_start_pts": replay_labels.get("requested_start_pts"),
-                "requested_end_pts": replay_labels.get("requested_end_pts"),
-                "event_frame_pts": replay_labels.get("event_frame_pts"),
-                "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
-                "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
-                "time_domain_crop_applied": bool(
-                    frame_cache_time_window.get("time_domain_crop_applied")
-                ),
-                "annotation_source_policy": replay_labels.get("annotation_source_policy"),
-                "allow_db_annotation_fallback": (
-                    replay_labels.get("allow_db_annotation_fallback") == "true"
-                ),
-                "allow_legacy_annotation_fallback": (
-                    replay_labels.get("allow_legacy_annotation_fallback") == "true"
-                ),
-                "replay_stored_stream_id": replay_configuration.get("stored_stream_id"),
-                "replay_resulting_stream_id": replay_configuration.get("resulting_stream_id"),
-            },
+            event_metadata=builder_event_metadata,
             video_integrity_required=False,
         )
     else:
@@ -1958,7 +1991,7 @@ def _finalize_c2_post_savant_evidence_bundle(
                 "event_position_ratio": None,
             },
         )
-        summary = _build_frame_cache_c2_summary(
+        summary = _build_frame_cache_summary(
             sidecar_summary=sidecar_summary,
             sink_metadata_rows=sink_metadata_rows,
             decoded_video_frame_count=int(decoded_frame_count or 0),
@@ -1968,11 +2001,11 @@ def _finalize_c2_post_savant_evidence_bundle(
             time_window=frame_cache_time_window,
             video_crop=frame_cache_video_crop,
         )
-        summary_path = output_dir / C2_SUMMARY_FILE
+        summary_path = output_dir / SUMMARY_FILE
         sidecar_summary_path = output_dir / SIDECAR_SUMMARY_FILE
         _atomic_write_json(summary_path, summary)
         _atomic_write_json(sidecar_summary_path, summary)
-        result = _C2BundleView(
+        result = _EvidenceBundleView(
             output_dir=output_dir,
             raw_clip_path=raw_clip_path,
             sink_metadata_path=sink_metadata_path,
@@ -1982,7 +2015,7 @@ def _finalize_c2_post_savant_evidence_bundle(
             summary_path=summary_path,
             summary=summary,
         )
-    business_metadata = _build_c2_event_metadata(
+    business_metadata = _build_event_metadata(
         event_context=event_context,
         replay_job_id=replay_job_id,
         replay_job_request=replay_job_request,
@@ -2021,7 +2054,7 @@ def _finalize_c2_post_savant_evidence_bundle(
         "raw_clip_sanitize_decode_error_count": 0,
         "raw_clip_sanitize_fallback_used": False,
         "raw_clip_sanitize_error": "",
-        "evidence_topology": C2_POST_SAVANT_EVIDENCE_TOPOLOGY,
+        "evidence_topology": POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
         "annotation_source": summary.get("annotation_source"),
         "production_ready": bool(summary.get("production_ready")),
         "legacy_used_for_visual_binding": bool(
@@ -2070,9 +2103,9 @@ def _process_sink_output(
             logger.debug("media_skip: event already ready event_id=%s", event_id)
             continue
 
-        c2_post_savant_finalizer_enabled = _c2_post_savant_finalizer_enabled()
+        post_savant_finalizer_enabled = _post_savant_finalizer_enabled()
         finalizer_enabled = (
-            p1_raw_clip_finalizer_enabled or c2_post_savant_finalizer_enabled
+            p1_raw_clip_finalizer_enabled or post_savant_finalizer_enabled
         )
 
         video_file = _find_video_file(meta_dir)
@@ -2119,12 +2152,12 @@ def _process_sink_output(
                 continue
 
         bundle = None
-        if c2_post_savant_finalizer_enabled:
+        if post_savant_finalizer_enabled:
             if not evidence_output_dir:
-                logger.error("c2_post_savant_finalizer enabled but no evidence_output_dir")
+                logger.error("post_savant_finalizer enabled but no evidence_output_dir")
                 continue
             try:
-                bundle = _finalize_c2_post_savant_evidence_bundle(
+                bundle = _finalize_post_savant_evidence_bundle(
                     pg_conn,
                     event_id=event_id,
                     meta_dir=meta_dir,
@@ -2133,7 +2166,7 @@ def _process_sink_output(
                 )
             except Exception as exc:
                 logger.exception(
-                    "c2_post_savant_finalizer_failed event_id=%s meta_dir=%s",
+                    "post_savant_finalizer_failed event_id=%s meta_dir=%s",
                     event_id,
                     meta_dir,
                 )

@@ -1,6 +1,6 @@
-"""BehaviorRulesPyFunc — mainline behavior-rule entrypoint (Phase C1.2).
+"""BehaviorRulesPyFunc — mainline behavior-rule entrypoint.
 
-Reads the C1 export schema via ``custom.services.camera_config`` and
+Reads the camera runtime config via ``custom.services.camera_config`` and
 routes each frame through the per-source state + rules built by
 ``custom.services.rule_runtime``. The rule layer itself is unchanged —
 this pyfunc is the Savant ↔ pure-Python adapter only.
@@ -17,9 +17,7 @@ Lifecycle / failure modes:
 - ``snapshot_required`` / ``clip_required`` / ``severity`` flow from
   YAML → ``RuleConfig`` → ``IntrusionRule`` → ``SecurityEvent``.
 
-This pyfunc is wired by ``modules/savant_security/module.yml``. The
-legacy ``custom.pyfuncs.behavior_event_export_probe`` in
-``savant_phase3h_zmq`` is untouched.
+This pyfunc is wired by ``modules/savant_security/module.yml``.
 """
 
 from __future__ import annotations
@@ -217,7 +215,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         self._frame_anchor_trace = FrameAnchorTraceWriter()
 
         print(
-            f"stage=savant_security_behavior_rules_init "
+            f"component=savant_security_behavior_rules_init "
             f"config_path={cameras_config_path} "
             f"sources={sorted(self.runtimes.keys())} "
             f"camera_ids={[rt.camera_id for rt in self.runtimes.values()]} "
@@ -228,7 +226,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
 
         self.exporter: EventExporter = create_event_exporter()
         print(
-            f"stage=savant_security_behavior_rules_exporter "
+            f"component=savant_security_behavior_rules_exporter "
             f"exporter={type(self.exporter).__name__}",
             flush=True,
         )
@@ -242,7 +240,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         self._person_observation_export_count = 0
         self._person_observation_skip_count = 0
         print(
-            f"stage=savant_security_person_observation_exporter "
+            f"component=savant_security_person_observation_exporter "
             f"exporter={type(self.person_observation_exporter).__name__} "
             f"stream={os.getenv('PERSON_OBSERVATION_STREAM', 'security.person_observations')} "
             f"min_interval_ms={person_observation_min_interval_ms}",
@@ -260,7 +258,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         except Exception:
             import traceback
             print(
-                f"stage=savant_security_behavior_rules_error "
+                f"component=savant_security_behavior_rules_error "
                 f"frame={self.frame_count} "
                 f"traceback={traceback.format_exc().replace(chr(10), ' | ')}",
                 flush=True,
@@ -274,7 +272,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             if source_id and source_id not in self._unknown_source_warned:
                 self._unknown_source_warned.add(source_id)
                 print(
-                    f"stage=savant_security_behavior_rules_unknown_source "
+                    f"component=savant_security_behavior_rules_unknown_source "
                     f"source_id={source_id} "
                     f"known_sources={sorted(self.runtimes.keys())}",
                     flush=True,
@@ -341,7 +339,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             )
             gate_stats = gate_result.stats.as_dict()
             print(
-                f"stage=savant_security_behavior_rules_tick "
+                f"component=savant_security_behavior_rules_tick "
                 f"frame={self.frame_count} "
                 f"source_id={source_id} "
                 f"raw_observation_count={len(raw_observations)} "
@@ -352,7 +350,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 f"person_observations_exported={person_observations_exported} "
                 f"person_observations_skipped={person_observations_skipped} "
                 f"total_person_observations_exported={self._person_observation_export_count} "
-                f"c1i1c_gate={gate_stats}",
+                f"person_gate={gate_stats}",
                 flush=True,
             )
 

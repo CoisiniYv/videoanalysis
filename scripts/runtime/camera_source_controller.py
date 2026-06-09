@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Camera source adapter controller (Phase C1.2).
+"""Camera source adapter controller.
 
 Treats each external video source as a *Docker container* that can be
 attached or detached at will. This matches Savant's official
@@ -20,8 +20,8 @@ The adapter container name is fixed at
 ``video-analytics-source-{source_id}`` so subsequent stop/status calls
 can target it deterministically.
 
-This is a CLI controller, not a daemon. Future C1.3 / C1.4 can extend
-this with a Retina RTSP Service driver or build an API on top of it.
+This is a CLI controller, not a daemon. Future runtime work can extend this
+with a Retina RTSP Service driver or build an API on top of it.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ import yaml
 
 
 DEFAULT_SOURCES_PATH = "infra/generated/sources.generated.yml"
-DEFAULT_NETWORK = "c1-official-adapter_default"
+DEFAULT_NETWORK = "video-analytics-midterm_default"
 DEFAULT_ADAPTER_IMAGE = "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
 CONTAINER_NAME_TEMPLATE = "video-analytics-source-{source_id}"
 

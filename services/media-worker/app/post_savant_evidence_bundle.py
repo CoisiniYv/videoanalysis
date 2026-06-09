@@ -25,7 +25,7 @@ from app.post_savant_video_integrity import inspect_video_integrity
 RAW_CLIP_FILE = "raw_clip.mov"
 SINK_METADATA_FILE = "sink_metadata.json"
 SUMMARY_FILE = "summary.json"
-SCHEMA_VERSION = "2.0-c2"
+SCHEMA_VERSION = os.getenv("EVIDENCE_SCHEMA_VERSION", "2.0-midterm")
 EVIDENCE_TOPOLOGY = "post_savant_replay"
 TRIM_LIMITATIONS = (
     "metadata_frame_count_exceeds_decoded_video_frames",
@@ -610,7 +610,7 @@ def _bundle_summary(
             "known_face": int(object_counts.get("known_face") or 0),
         },
         "limitations": [
-            _c2_2_limitation(limitation) for limitation in limitations
+            _normalize_limitation(limitation) for limitation in limitations
         ],
     }
     if evidence_capture_mode is not None:
@@ -624,12 +624,12 @@ def _bundle_summary(
     if workaround_reason is not None:
         summary["workaround_reason"] = workaround_reason
     if replay_timing_metadata:
-        summary.update(_c2_replay_timing_summary_fields(replay_timing_metadata))
-    summary.update(_c2_event_summary_fields(event_metadata))
+        summary.update(_replay_timing_summary_fields(replay_timing_metadata))
+    summary.update(_event_summary_fields(event_metadata))
     return summary
 
 
-def _c2_replay_timing_summary_fields(metadata: dict[str, Any]) -> dict[str, Any]:
+def _replay_timing_summary_fields(metadata: dict[str, Any]) -> dict[str, Any]:
     allowed = (
         "requested_start_pts",
         "requested_end_pts",
@@ -662,18 +662,18 @@ def _c2_replay_timing_summary_fields(metadata: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _c2_event_summary_fields(event_metadata: dict[str, Any]) -> dict[str, Any]:
+def _event_summary_fields(event_metadata: dict[str, Any]) -> dict[str, Any]:
     if not event_metadata:
         return {}
     allowed = (
         "replay_source_kind",
-        "c2_3b_record_request_id",
-        "c2_3b_source_event_id",
-        "c2_3b_event_type",
-        "c2_3b_camera_id",
-        "c2_3b_source_id",
-        "c2_3b_frame_pts",
-        "c2_3b_frame_num",
+        "legacy_record_request_id",
+        "legacy_source_event_id",
+        "legacy_event_type",
+        "legacy_camera_id",
+        "legacy_source_id",
+        "legacy_frame_pts",
+        "legacy_frame_num",
         "evidence_topology",
         "annotation_source_policy",
         "allow_db_annotation_fallback",
@@ -711,10 +711,10 @@ def _c2_event_summary_fields(event_metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _c2_2_limitation(limitation: Any) -> str:
+def _normalize_limitation(limitation: Any) -> str:
     text = str(limitation)
-    if text == "watchlist_trigger_identity_binding_not_verified_in_c2_1":
-        return "watchlist_trigger_identity_binding_not_verified_in_c2_2r"
+    if text == "watchlist_trigger_identity_binding_not_verified":
+        return "watchlist_trigger_identity_binding_not_verified"
     return text
 
 

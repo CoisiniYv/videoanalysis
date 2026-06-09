@@ -445,7 +445,7 @@ def test_start_source_delegates(cli, monkeypatch):
             "start-source",
             "--source-id", "src_001",
             "--sources", "infra/generated/sources.generated.yml",
-            "--network", "c1-official-adapter_default",
+            "--network", "video-analytics-midterm_default",
         ],
         logger=lambda msg: None,
     )

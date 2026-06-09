@@ -1,9 +1,7 @@
-# Phase C1.2 — Official adapter / module runtime module.yml
+# Video Analytics security runtime module.
 #
-# Mirrors the savant_phase3h_zmq pipeline (zeromq_source_bin + YOLO26-pose
-# + nvtracker), but routes the rule evaluation through
-# custom.pyfuncs.behavior_rules.BehaviorRulesPyFunc which reads the
-# C1-shaped cameras.generated.yml via custom.services.camera_config.
+# RTSP frames arrive through a Savant ZMQ source, then run YOLO26-pose,
+# nvtracker, YOLOv8-Face, AdaFace, rule evaluation, and Redis export.
 
 name: savant_security
 
@@ -63,7 +61,6 @@ pipeline:
 
     # ------------------------------------------------------------------
     # YOLO26-pose — person detection with 17 COCO keypoints.
-    # Same ONNX model used by phase3h-zmq.
     # ------------------------------------------------------------------
     - element: nvinfer@complex_model
       name: yolo26_pose
@@ -92,7 +89,7 @@ pipeline:
               nms_threshold: ${parameters.pose_selector_nms_iou_threshold}
               coordinate_restore_mode: ${parameters.pose_coordinate_restore_mode}
               debug_dump_enabled: ${oc.decode:${oc.env:POSE_CONVERTER_DEBUG_DUMP_ENABLED, false}}
-              debug_dump_dir: ${oc.env:POSE_CONVERTER_DEBUG_DUMP_DIR, /data/video-analytics/artifacts/c1m5/pose_converter_debug}
+              debug_dump_dir: ${oc.env:POSE_CONVERTER_DEBUG_DUMP_DIR, /data/video-analytics/artifacts/pose_converter_debug}
               debug_dump_max_records: ${oc.decode:${oc.env:POSE_CONVERTER_DEBUG_DUMP_MAX_RECORDS, 200}}
           objects:
             - class_id: 0
@@ -118,7 +115,7 @@ pipeline:
         ll-config-file: /opt/savant/src/module/config/config_tracker_NvDCF_perf.yml
 
     # ------------------------------------------------------------------
-    # BehaviorRulesPyFunc — R1.1 registry-driven, C1.1 loader-driven.
+    # BehaviorRulesPyFunc — registry-driven behavior rule adapter.
     # Reads cameras.generated.yml at startup, routes per-source.
     # ------------------------------------------------------------------
     - element: pyfunc
@@ -135,7 +132,7 @@ pipeline:
 
     # ------------------------------------------------------------------
     # YOLOv8-Face — full-frame face detector with 5-point landmarks.
-    # Phase F1.2.  Static batch = 1 (model constraint).
+    # Static batch = 1 (model constraint).
     # Official converter: savant.converter.yolo_v8face.
     # ------------------------------------------------------------------
     - element: nvinfer@complex_model
@@ -173,7 +170,7 @@ pipeline:
             - name: landmarks
 
     # ------------------------------------------------------------------
-    # FacePersonAssociatorPyFunc — F1.3 face-person association.
+    # FacePersonAssociatorPyFunc — face-person association.
     # Links YOLOv8-Face detections to YOLO26-pose person tracks.
     # Attaches person_track_id / association_score to face objects.
     # Does NOT emit face observations to Redis.
@@ -186,7 +183,7 @@ pipeline:
         log_every_n_frames: 30
 
     # ------------------------------------------------------------------
-    # AdaFace — F2.1 face embedding attribute model.
+    # AdaFace — face embedding attribute model.
     # Runs on aligned face crops from YOLOv8-Face detections.
     # Outputs 512-d feature vector (NOT L2-normalized).
     # Official sample pattern: nvinfer@attribute_model + AlignFace + TensorToVector.
@@ -216,7 +213,7 @@ pipeline:
             - name: feature
 
     # ------------------------------------------------------------------
-    # FaceReidGatePyFunc — F2.2 quality gate + per-track throttle.
+    # FaceReidGatePyFunc — quality gate + per-track throttle.
     # Evaluates face quality and embedding eligibility for ReID.
     # Attaches reid_allowed / reid_skip_reason / reid_quality_score.
     # Does NOT emit face observations to Redis.
@@ -235,7 +232,7 @@ pipeline:
         face_reid_norm_tolerance: ${oc.decode:${oc.env:FACE_REID_NORM_TOLERANCE, 0.10}}
 
     # ------------------------------------------------------------------
-    # FaceObservationExporterPyFunc — F2.3 Redis face observation producer.
+    # FaceObservationExporterPyFunc — Redis face observation producer.
     # Exports reid_allowed=true face observations to Redis Stream
     # security.face_observations. No image bytes. No pgvector/watchlist.
     # ------------------------------------------------------------------
@@ -250,7 +247,7 @@ pipeline:
         export_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
 
     # ------------------------------------------------------------------
-    # FrameAnnotationExporterPyFunc — C1J.2 gated prototype.
+    # FrameAnnotationExporterPyFunc — lightweight.
     # Exports lightweight per-frame person/face metadata to bounded Redis
     # Stream security.frame_annotations when FRAME_ANNOTATION_EXPORT_ENABLED=true.
     # Default is disabled/no-op. No image bytes. No embedding vectors.
@@ -274,7 +271,7 @@ pipeline:
         write_timeout_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_WRITE_TIMEOUT_MS, 50}}
 
     # ------------------------------------------------------------------
-    # FaceEmbeddingDebugPyFunc — F2.1 embedding smoke visibility probe.
+    # FaceEmbeddingDebugPyFunc — embedding visibility probe.
     # Logs feature dim, raw L2 norm, person_track_id, landmarks.
     # Does NOT emit face observations to Redis.
     # ------------------------------------------------------------------
@@ -286,9 +283,9 @@ pipeline:
         log_every_n_frames: 30
 
     # ------------------------------------------------------------------
-    # SameFrameDetectionDebugPyFunc — C1F.1c same-frame pose + face summary.
+    # SameFrameDetectionDebugPyFunc — same-frame pose + face summary.
     # Reads person + face metadata from same frame, writes JSONL summary.
-    # Environment gate: C1F1_SAME_FRAME_DEBUG_ENABLED=1
+    # Environment gate: SAME_FRAME_DEBUG_ENABLED=1
     # Does NOT emit events, images, or annotated clips.
     # ------------------------------------------------------------------
     - element: pyfunc
@@ -296,12 +293,12 @@ pipeline:
       module: custom.pyfuncs.same_frame_detection_debug
       class_name: SameFrameDetectionDebugPyFunc
       kwargs:
-        output_dir: /data/video-analytics/artifacts/c1f1
+        output_dir: /data/video-analytics/artifacts/same_frame
         output_file: same_frame_pose_face_summary.jsonl
         max_frames: 0
 
     # ------------------------------------------------------------------
-    # FaceDebugPyFunc — F1.2 smoke visibility probe.
+    # FaceDebugPyFunc — face detector visibility probe.
     # Logs face object count + first few bbox/landmark values.
     # Does NOT emit face observations to Redis.
     # ------------------------------------------------------------------

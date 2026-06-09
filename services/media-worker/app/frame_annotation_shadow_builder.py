@@ -1,4 +1,4 @@
-"""Build shadow evidence annotations from C1J frame annotation cache data."""
+"""Build shadow evidence annotations from frame annotation cache data."""
 
 from __future__ import annotations
 

@@ -13,13 +13,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
-C2_POST_SAVANT_TOPOLOGIES = {"post_savant", "post_savant_replay"}
-C2_POST_SAVANT_REPLAY_STOP_STRATEGY = "event_anchor_pre_seconds_rewind"
+POST_SAVANT_EVIDENCE_TOPOLOGIES = {"post_savant", "post_savant_replay"}
+POST_SAVANT_REPLAY_STOP_STRATEGY = "event_anchor_pre_seconds_rewind"
 PTS_TIME_BASE = 1_000_000_000
 
 
 def _first_policy_value(event: Dict[str, Any], key: str) -> Any:
-    """Return a C2 policy value from evidence policy, media, payload, or event."""
+    """Return an evidence policy value from policy, media, payload, or event."""
     payload = event.get("payload") or {}
     payload = payload if isinstance(payload, dict) else {}
     media = payload.get("media", {})
@@ -32,14 +32,14 @@ def _first_policy_value(event: Dict[str, Any], key: str) -> Any:
     return None
 
 
-def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) -> None:
-    """Attach explicit C2 post-Savant evidence policy to a record_request."""
+def _apply_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """Attach explicit post-Savant evidence policy to a record_request."""
     replay_source_kind = _first_policy_value(event, "replay_source_kind")
     evidence_topology = _first_policy_value(event, "evidence_topology")
     metadata_source = _first_policy_value(event, "metadata_source")
     frame_pts = _first_policy_value(event, "frame_pts")
     is_post_savant = str(replay_source_kind or "").strip() == "post_savant" or (
-        str(evidence_topology or "").strip() in C2_POST_SAVANT_TOPOLOGIES
+        str(evidence_topology or "").strip() in POST_SAVANT_EVIDENCE_TOPOLOGIES
     ) or (
         str(metadata_source or "").strip() == "video_frame" and frame_pts is not None
     )
@@ -77,7 +77,7 @@ def _apply_c2_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) 
         value = _first_policy_value(event, key)
         if value is not None:
             record[key] = value
-    record["replay_stop_strategy"] = C2_POST_SAVANT_REPLAY_STOP_STRATEGY
+    record["replay_stop_strategy"] = POST_SAVANT_REPLAY_STOP_STRATEGY
 
 
 def _normalize_anchor_keyframe_uuid(record: Dict[str, Any], event: Dict[str, Any]) -> None:
@@ -201,7 +201,7 @@ def build_record_request(
         "strategy": "savant_replay",
         "status": "pending",
     }
-    _apply_c2_post_savant_policy(record, event)
+    _apply_post_savant_policy(record, event)
     _normalize_anchor_keyframe_uuid(record, event)
     _apply_event_frame_timeline(record, event)
     return record

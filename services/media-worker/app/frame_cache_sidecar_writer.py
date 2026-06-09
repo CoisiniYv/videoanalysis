@@ -1,4 +1,4 @@
-"""C1J.11 frame-cache identity sidecar writer.
+"""Frame-cache identity sidecar writer for production evidence.
 
 This module is dependency-light so it can run inside the existing media-worker
 image. It performs read-only Redis XREVRANGE calls, writes sidecar files under
@@ -32,7 +32,6 @@ from app.canonical_timeline import (
 from app.production_sidecar_policy import should_attempt_sidecar
 
 
-PHASE = "C1J.11"
 SCHEMA_VERSION = "1.0"
 TIMELINE_DOMAIN_FINAL_CANONICAL_CLIP = "final_canonical_clip"
 SIDECAR_TYPE_PRODUCTION = "production"
@@ -94,7 +93,7 @@ def write_frame_cache_identity_sidecar(
     state: Any | None = None,
     final_clip_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Write C1J.11 frame-cache identity sidecar files when enabled."""
+    """Write frame-cache frame-cache identity sidecar files when enabled."""
 
     event_copy = copy.deepcopy(event) if isinstance(event, dict) else {}
     out_dir = Path(evidence_dir)
@@ -1660,9 +1659,9 @@ def _base_summary(
     old_summary_path: str,
 ) -> dict[str, Any]:
     anchor, _anchor_summary = extract_evidence_event_anchor(event)
-    return {
+    summary = {
         "schema_version": SCHEMA_VERSION,
-        "phase": PHASE,
+        "project_version": _env_text("EVIDENCE_VERSION", "midterm"),
         "generated_at": _utc_now(),
         "sidecar_enabled": bool(config.get("enabled")),
         "sidecar_mode": config.get("write_mode"),
@@ -1729,6 +1728,9 @@ def _base_summary(
         "db_writes": False,
         "production_redis_writes": False,
     }
+    if _env_bool("EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS", default=False):
+        summary["legacy_project_version"] = summary["project_version"]
+    return summary
 
 
 def _annotation_status_from_counts(
@@ -1863,6 +1865,22 @@ def _text_or_none(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return _decode_text(value)
+
+
+def _env_text(name: str, default: str = "") -> str:
+    import os
+
+    value = os.getenv(name)
+    return default if value is None else value
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    import os
+
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _int_or_none(value: Any) -> int | None:

@@ -1,7 +1,7 @@
-"""C1J.11 production sidecar policy helpers.
+"""production production sidecar policy helpers.
 
 The policy is deliberately small and env-driven. The default is disabled and
-the only write mode accepted in C1J.11 is ``sidecar_only``.
+the only write mode accepted in production is ``sidecar_only``.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ class FrameCacheSidecarRunState:
 
 
 def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[str, Any]:
-    """Load C1J.11 sidecar config from env with safe defaults."""
+    """Load production sidecar config from env with safe defaults."""
 
     source = env if env is not None else os.environ
     config = dict(DEFAULT_SIDECAR_CONFIG)

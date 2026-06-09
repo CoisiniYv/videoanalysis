@@ -35,6 +35,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return default
 
 
+def _env_first(names: tuple[str, ...], default: str = "") -> str:
+    for name in names:
+        try:
+            value = os.getenv(name)
+            if value is not None:
+                return value
+        except Exception:
+            pass
+    return default
+
+
 def _env_csv_set(name: str) -> set[str]:
     try:
         value = os.getenv(name, "")
@@ -46,6 +57,20 @@ def _env_csv_set(name: str) -> set[str]:
 def _env_int_set(name: str) -> set[int]:
     out: set[int] = set()
     for item in _env_csv_set(name):
+        try:
+            out.add(int(item))
+        except Exception:
+            pass
+    return out
+
+
+def _env_csv_set_first(names: tuple[str, ...]) -> set[str]:
+    return {item.strip() for item in _env_first(names).split(",") if item.strip()}
+
+
+def _env_int_set_first(names: tuple[str, ...]) -> set[int]:
+    out: set[int] = set()
+    for item in _env_csv_set_first(names):
         try:
             out.add(int(item))
         except Exception:
@@ -102,19 +127,32 @@ class ReplaySavantFrameDumpPyFunc(NvDsPyFuncPlugin):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._enabled = _env_flag("C2_REPLAY_SAVANT_FRAME_DUMP_ENABLED")
-        self._target_uuids = _env_csv_set("C2_REPLAY_SAVANT_FRAME_DUMP_TARGET_UUIDS")
-        self._target_pts = _env_int_set("C2_REPLAY_SAVANT_FRAME_DUMP_TARGET_PTS")
+        self._enabled = _env_flag("REPLAY_SAVANT_FRAME_DUMP_ENABLED")
+        self._target_uuids = _env_csv_set_first(
+            ("REPLAY_SAVANT_FRAME_DUMP_TARGET_UUIDS",)
+        )
+        self._target_pts = _env_int_set_first(
+            ("REPLAY_SAVANT_FRAME_DUMP_TARGET_PTS",)
+        )
         self._output_root = Path(
-            os.getenv("C2_REPLAY_SAVANT_FRAME_DUMP_ROOT", DEFAULT_OUTPUT_ROOT)
+            _env_first(
+                ("REPLAY_SAVANT_FRAME_DUMP_ROOT",),
+                DEFAULT_OUTPUT_ROOT,
+            )
         )
         self._max_frames = max(
             0,
-            _safe_int(os.getenv("C2_REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES"), 20),
+            _safe_int(
+                _env_first(
+                    ("REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES",),
+                    "20",
+                ),
+                20,
+            ),
         )
         self._written = 0
         print(
-            "stage=c2_replay_savant_frame_dump_init "
+            "component=replay_savant_frame_dump_init "
             f"enabled={self._enabled} target_uuid_count={len(self._target_uuids)} "
             f"target_pts_count={len(self._target_pts)} max_frames={self._max_frames} "
             f"output_root={self._output_root}",
@@ -128,7 +166,7 @@ class ReplaySavantFrameDumpPyFunc(NvDsPyFuncPlugin):
             self._process_frame_inner(buffer, frame_meta)
         except Exception as exc:
             print(
-                "stage=c2_replay_savant_frame_dump "
+                "component=replay_savant_frame_dump "
                 f"status=error error={type(exc).__name__}: {exc}",
                 flush=True,
             )
@@ -190,7 +228,7 @@ class ReplaySavantFrameDumpPyFunc(NvDsPyFuncPlugin):
             "created_by": "debug_only_runtime_frame_dump",
             "capture_backend": "pyds.get_nvds_buf_surface",
             "capture_batch_id": batch_id,
-            "capture_stage": "replay_savant_frame_dump",
+            "capture_component": "replay_savant_frame_dump",
             "target_match": {"uuid": target_by_uuid, "pts": target_by_pts},
             "schema_version": "1.0",
         }
@@ -200,7 +238,7 @@ class ReplaySavantFrameDumpPyFunc(NvDsPyFuncPlugin):
         )
         self._written += 1
         print(
-            "stage=c2_replay_savant_frame_dump "
+            "component=replay_savant_frame_dump "
             f"status=written source_id={source_id} frame_uuid={frame_uuid} "
             f"frame_pts={anchor.get('frame_pts')} image_path={jpg_path}",
             flush=True,

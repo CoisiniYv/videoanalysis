@@ -1,4 +1,4 @@
-"""Raw video integrity gate for C2 post-Savant evidence bundles."""
+"""Raw video integrity gate for post-Savant evidence bundles."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def inspect_video_integrity(
     """Inspect *video_path* and return the production gate result.
 
     The gate intentionally combines decode output with packet/keyframe/timeline
-    checks. A clean ffmpeg decode log alone is not sufficient for C2 production
+    checks. A clean ffmpeg decode log alone is not sufficient for production
     evidence because event-style Replay can emit visually corrupt but decodable
     streams when the first independent decode point is far from the clip start.
     """
@@ -70,7 +70,7 @@ def evaluate_video_integrity(
     first_keyframe_grace_s: float = DEFAULT_FIRST_KEYFRAME_GRACE_S,
     requested_duration_slack_s: float = DEFAULT_REQUESTED_DURATION_SLACK_S,
 ) -> dict[str, Any]:
-    """Evaluate pre-collected video stats as a C2 production gate."""
+    """Evaluate pre-collected video stats as a production gate."""
 
     failures: list[str] = []
     warnings: list[str] = []

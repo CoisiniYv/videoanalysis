@@ -1,4 +1,4 @@
-"""Event-scoped frame annotation window helpers for C1J.5."""
+"""Event-scoped frame annotation window helpers for event-window."""
 
 from __future__ import annotations
 

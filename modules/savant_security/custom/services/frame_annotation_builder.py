@@ -1,8 +1,8 @@
-"""Build C1J frame annotation messages from Savant-like frame objects.
+"""Build frame annotation messages from Savant-like frame objects.
 
 This module intentionally imports no Savant classes. The pyfunc passes Savant
 runtime objects in, while pure tests pass small fakes with the same attributes.
-The final message is validated against the C1J.1 contract before it leaves the
+The final message is validated against the frame annotation contract before it leaves the
 builder.
 """
 
@@ -77,7 +77,7 @@ def build_frame_annotation_message(
     config: FrameAnnotationBuildConfig | None = None,
     validator: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Return a validated C1J frame annotation message.
+    """Return a validated frame annotation message.
 
     The input objects are only read. No object metadata is mutated or copied
     back to the caller.
@@ -561,7 +561,7 @@ def _validate_frame_annotation_message_compat(
 ) -> dict[str, Any]:
     """Runtime fallback for containers that only mount ``modules/savant_security``.
 
-    Repo tests and local tooling use the canonical C1J.1 validator from
+    Repo tests and local tooling use the canonical frame annotation validator from
     ``libs.evidence_metadata``. This fallback preserves the same hard safety
     rules so a gated Savant prototype can still fail closed instead of
     exporting unchecked messages when the root library is not mounted.

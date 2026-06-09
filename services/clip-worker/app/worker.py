@@ -26,7 +26,7 @@ _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
 REPLAY_ANCHOR_STRATEGY_EVENT_START = "event_start_keyframe"
 REPLAY_ANCHOR_STRATEGY_EVENT_KEYFRAME = "event_keyframe"
 PTS_TIME_BASE = 1_000_000_000
-C2_POST_SAVANT_TOPOLOGIES = {"post_savant", "post_savant_replay"}
+POST_SAVANT_EVIDENCE_TOPOLOGIES = {"post_savant", "post_savant_replay"}
 POST_SAVANT_MISSING_FRAME_TIMELINE_ERROR = "missing_post_savant_frame_pts_window"
 MISSING_ANCHOR_KEYFRAME_PTS_ERROR = "missing_anchor_keyframe_pts"
 ANCHOR_KEYFRAME_PTS_OUTSIDE_WINDOW_ERROR = "anchor_keyframe_pts_outside_requested_window"
@@ -141,7 +141,7 @@ def _is_post_savant_media_request(req: dict) -> bool:
     metadata_domain = str(req.get("metadata_domain") or "").strip()
     return (
         replay_source_kind == "post_savant"
-        or evidence_topology in C2_POST_SAVANT_TOPOLOGIES
+        or evidence_topology in POST_SAVANT_EVIDENCE_TOPOLOGIES
         or annotation_policy == "post_savant_sink_metadata_only"
         or (
             str(req.get("strategy") or "").strip() == "savant_replay"
@@ -1128,7 +1128,7 @@ def _replay_job_labels(
     replay_offset_seconds: float | None = None,
     replay_duration_seconds: float | None = None,
 ) -> dict[str, str]:
-    """Build Replay labels, preserving explicit C2 post-Savant policy fields."""
+    """Build Replay labels, preserving explicit post-Savant policy fields."""
     labels = {"event_id": event_id}
     for key in (
         "request_id",

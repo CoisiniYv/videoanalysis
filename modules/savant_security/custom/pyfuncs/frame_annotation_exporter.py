@@ -1,4 +1,4 @@
-"""FrameAnnotationExporterPyFunc — C1J.2 gated prototype producer.
+"""FrameAnnotationExporterPyFunc — lightweight producer.
 
 Exports lightweight frame-indexed person/face metadata to
 ``security.frame_annotations`` when ``FRAME_ANNOTATION_EXPORT_ENABLED=true``.
@@ -20,7 +20,7 @@ from custom.services.frame_annotation_exporter import (
 
 
 class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
-    """Gated Savant adapter for C1J frame annotation stream export."""
+    """Gated Savant adapter for frame annotation stream export."""
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             resolve_camera_id=self._resolve_camera_id,
         )
         print(
-            "stage=savant_security_frame_annotation_pyfunc_init "
+            "component=savant_security_frame_annotation_pyfunc_init "
             f"enabled={config.enabled} "
             f"stream={config.stream} "
             f"ttl_seconds={config.ttl_seconds} "
@@ -82,7 +82,7 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             return load_camera_config(config_path)
         except Exception as exc:
             print(
-                "stage=savant_security_frame_annotation_camera_config_warning "
+                "component=savant_security_frame_annotation_camera_config_warning "
                 f"config_path={config_path} "
                 f"error={type(exc).__name__}:{str(exc).replace(chr(10), ' | ')}",
                 flush=True,
@@ -101,7 +101,7 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             self._runtime.process_frame(frame_meta)
         except Exception as exc:
             print(
-                "stage=savant_security_frame_annotation_unexpected_warning "
+                "component=savant_security_frame_annotation_unexpected_warning "
                 f"error={type(exc).__name__}:{str(exc).replace(chr(10), ' | ')}",
                 flush=True,
             )
