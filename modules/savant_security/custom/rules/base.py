@@ -1,8 +1,8 @@
-"""Abstract base class for behavior rules.
+"""Abstract base classes for behavior rules.
 
-All concrete rules (intrusion, loitering, crowd_gathering, fall, ...)
-inherit from ``BehaviorRule`` and implement ``evaluate(track)``. Rules
-must remain pure Python — no Savant or DeepStream imports.
+Single-track rules implement ``BehaviorRule.evaluate(track)``. Multi-track
+rules implement ``FrameBehaviorRule.evaluate_frame(frame_tracks, frame_ts_ms)``.
+Rules must remain pure Python — no Savant or DeepStream imports.
 """
 
 from __future__ import annotations
@@ -51,3 +51,32 @@ class BehaviorRule(ABC):
         """
         camera_id = track.observations[-1].camera_id if track.observations else ""
         return f"{camera_id}:{track.track_id}:{self.zone.name}"
+
+
+class FrameBehaviorRule(ABC):
+    """Abstract frame-level behavior rule.
+
+    ``evaluate_frame`` is called once per source frame after the
+    ``TrackStateStore`` has been updated. It receives the full active track set
+    and returns zero or more events for that frame.
+    """
+
+    rule_type: str = ""
+
+    def __init__(
+        self,
+        rule_config: RuleConfig,
+        zone: ZoneConfig,
+        cooldown: CooldownTracker,
+    ) -> None:
+        self.config = rule_config
+        self.zone = zone
+        self.cooldown = cooldown
+
+    @abstractmethod
+    def evaluate_frame(
+        self,
+        frame_tracks: list[TrackState],
+        frame_ts_ms: int,
+    ) -> list[SecurityEvent]:
+        """Evaluate all active tracks for one frame."""

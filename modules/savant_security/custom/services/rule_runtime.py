@@ -23,9 +23,15 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from custom.models.camera_config import CameraConfig, RuleConfig, ZoneConfig
-from custom.models.tracks import TrackStateStore
-from custom.rules import BehaviorRule, build_rules
+from custom.models.events import SecurityEvent
+from custom.models.pose import PersonPoseObservation
+from custom.models.tracks import TrackState, TrackStateStore
+from custom.rules import BehaviorRule, FrameBehaviorRule, build_rules
 from custom.services.camera_config import CameraConfigBundle, CameraEntry
+from custom.services.algorithm_activation import (
+    behavior_rule_type_for_algorithm_id,
+    is_behavior_algorithm_id,
+)
 from custom.services.cooldown import CooldownTracker
 
 
@@ -36,8 +42,18 @@ class SourceRuntime:
     source_id: str
     camera_id: str
     camera_entry: CameraEntry
-    rules: List[BehaviorRule] = field(default_factory=list)
+    rules: List[BehaviorRule | FrameBehaviorRule] = field(default_factory=list)
+    single_track_rules: List[BehaviorRule] = field(default_factory=list)
+    frame_rules: List[FrameBehaviorRule] = field(default_factory=list)
     store: TrackStateStore = field(default_factory=TrackStateStore)
+
+
+@dataclass
+class RuleEvaluation:
+    """Rule event plus optional representative track for enrichment."""
+
+    event: SecurityEvent
+    track: TrackState | None = None
 
 
 def camera_entry_to_legacy_config(cam: CameraEntry) -> CameraConfig:
@@ -54,20 +70,34 @@ def camera_entry_to_legacy_config(cam: CameraEntry) -> CameraConfig:
         zones[zone_name] = ZoneConfig(name=zone_name, polygon=polygon)
 
     rules: Dict[str, RuleConfig] = {}
-    for rule_type, rule_entry in cam.rules.items():
+    for rule_id, rule_entry in cam.rules.items():
         if not rule_entry.enabled:
             continue
+        if not is_behavior_algorithm_id(rule_entry.algorithm_id):
+            continue
+        runtime_rule_type = behavior_rule_type_for_algorithm_id(rule_entry.algorithm_id)
+        if runtime_rule_type is None:
+            print(
+                f"stage=savant_security_rule_algorithm_unknown "
+                f"rule_id={rule_id} "
+                f"algorithm_id={rule_entry.algorithm_id}",
+                flush=True,
+            )
+            continue
         cfg = rule_entry.config
-        rules[rule_type] = RuleConfig(
-            name=rule_type,
-            rule_type=rule_type,
-            zone=str(cfg.get("zone", "")),
+        zone_id = str(cfg.get("zone_id") or cfg.get("zone") or "")
+        rules[rule_id] = RuleConfig(
+            name=rule_id,
+            rule_type=runtime_rule_type,
+            zone=zone_id,
             enabled=True,
             min_inside_ms=int(cfg.get("min_inside_ms", 1000)),
             cooldown_s=int(cfg.get("cooldown_s", 30)),
             severity=str(cfg.get("severity", "medium")),
             snapshot_required=bool(cfg.get("snapshot_required", True)),
             clip_required=bool(cfg.get("clip_required", True)),
+            config=dict(cfg),
+            algorithm_id=rule_entry.algorithm_id,
         )
 
     return CameraConfig(camera_id=cam.camera_id, zones=zones, rules=rules)
@@ -94,14 +124,76 @@ def build_per_source_runtime(
             # The camera has zero enabled rules. Skip — keeps logs and
             # tests cleaner than a runtime entry that always no-ops.
             continue
+        single_track_rules = [rule for rule in rules if isinstance(rule, BehaviorRule)]
+        frame_rules = [rule for rule in rules if isinstance(rule, FrameBehaviorRule)]
         out[cam.source_id] = SourceRuntime(
             source_id=cam.source_id,
             camera_id=cam.camera_id,
             camera_entry=cam,
             rules=rules,
+            single_track_rules=single_track_rules,
+            frame_rules=frame_rules,
             store=TrackStateStore(
                 observation_window_s=observation_window_s,
                 track_timeout_s=track_timeout_s,
             ),
         )
     return out
+
+
+def evaluate_runtime_frame(
+    runtime: SourceRuntime,
+    observations: list[PersonPoseObservation],
+    *,
+    frame_ts_ms: int | None = None,
+) -> list[RuleEvaluation]:
+    """Update source state and evaluate configured rules for one frame.
+
+    Single-track rules run once per active track. Frame-level rules run once
+    per source frame and may return multiple events.
+    """
+    runtime.store.update(observations)
+    active_tracks = runtime.store.active_tracks
+    evaluations: list[RuleEvaluation] = []
+
+    for track in active_tracks:
+        for rule in runtime.single_track_rules:
+            event = rule.evaluate(track)
+            if event is not None:
+                evaluations.append(RuleEvaluation(event=event, track=track))
+
+    resolved_frame_ts_ms = (
+        frame_ts_ms
+        if frame_ts_ms is not None
+        else max((obs.timestamp_ms for obs in observations), default=0)
+    )
+    if resolved_frame_ts_ms <= 0:
+        resolved_frame_ts_ms = max(
+            (track.last_seen_ms for track in active_tracks),
+            default=0,
+        )
+
+    for rule in runtime.frame_rules:
+        for event in rule.evaluate_frame(active_tracks, resolved_frame_ts_ms) or []:
+            evaluations.append(
+                RuleEvaluation(
+                    event=event,
+                    track=representative_track_for_event(event, active_tracks),
+                )
+            )
+    return evaluations
+
+
+def representative_track_for_event(
+    event: SecurityEvent,
+    active_tracks: list[TrackState],
+) -> TrackState | None:
+    try:
+        event_track_id = int(getattr(event, "track_id", None) or 0)
+    except (TypeError, ValueError):
+        event_track_id = 0
+    if event_track_id > 0:
+        for track in active_tracks:
+            if track.track_id == event_track_id:
+                return track
+    return None

@@ -17,10 +17,11 @@ from typing import Callable, Dict, List, Type
 from custom.models.camera_config import CameraConfig, RuleConfig, ZoneConfig
 from custom.services.cooldown import CooldownTracker
 
-from custom.rules.base import BehaviorRule
+from custom.rules.base import BehaviorRule, FrameBehaviorRule
 
 
-RuleFactory = Callable[[RuleConfig, ZoneConfig, CooldownTracker], BehaviorRule]
+RuleInstance = BehaviorRule | FrameBehaviorRule
+RuleFactory = Callable[[RuleConfig, ZoneConfig, CooldownTracker], RuleInstance]
 
 
 class RuleRegistry:
@@ -52,10 +53,10 @@ class RuleRegistry:
 REGISTRY = RuleRegistry()
 
 
-def register_rule(rule_type: str) -> Callable[[Type[BehaviorRule]], Type[BehaviorRule]]:
+def register_rule(rule_type: str) -> Callable[[Type[RuleInstance]], Type[RuleInstance]]:
     """Decorator that registers a ``BehaviorRule`` subclass with ``REGISTRY``."""
 
-    def _decorator(cls: Type[BehaviorRule]) -> Type[BehaviorRule]:
+    def _decorator(cls: Type[RuleInstance]) -> Type[RuleInstance]:
         cls.rule_type = rule_type
         REGISTRY.register(rule_type, cls)
         return cls
@@ -66,7 +67,7 @@ def register_rule(rule_type: str) -> Callable[[Type[BehaviorRule]], Type[Behavio
 def build_rules(
     camera_config: CameraConfig,
     cooldown: CooldownTracker,
-) -> List[BehaviorRule]:
+) -> List[RuleInstance]:
     """Instantiate every enabled rule declared in *camera_config*.
 
     Disabled rules are skipped at build time so the pyfunc loop does not
@@ -78,7 +79,7 @@ def build_rules(
     Returns the rules in stable iteration order so per-frame logs are
     deterministic.
     """
-    rules: List[BehaviorRule] = []
+    rules: List[RuleInstance] = []
     for rule_name, rule_cfg in camera_config.rules.items():
         if not rule_cfg.enabled:
             continue

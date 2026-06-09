@@ -166,6 +166,8 @@ def test_get_intrusion_rule(camera_config_module, valid_yaml_file):
     bundle = camera_config_module.load_camera_config(valid_yaml_file)
     rule = bundle.get_rule("cam_001", "intrusion")
     assert rule is not None
+    assert rule.rule_id == "intrusion"
+    assert rule.algorithm_id == "behavior.intrusion"
     assert rule.rule_type == "intrusion"
     assert rule.enabled is True
     assert rule.config["zone"] == "perimeter"
@@ -181,6 +183,49 @@ def test_rule_config_strips_enabled_key(camera_config_module, valid_yaml_file):
     bundle = camera_config_module.load_camera_config(valid_yaml_file)
     rule = bundle.get_rule("cam_001", "intrusion")
     assert "enabled" not in rule.config
+
+
+def test_load_generated_algorithm_rule_shape(camera_config_module, tmp_path):
+    yaml_text = textwrap.dedent("""
+        cameras:
+          cam_001:
+            enabled: true
+            source_id: phase3h
+            name: Cam
+            input:
+              type: rtsp
+              rtsp_url: rtsp://x
+              rtsp_transport: tcp
+            zones:
+              perimeter:
+                zone_id: perimeter
+                zone_type: polygon
+                points: [[0,0],[10,0],[10,10],[0,10]]
+            rules:
+              intrusion_lobby:
+                rule_id: intrusion_lobby
+                algorithm_id: behavior.intrusion
+                enabled: true
+                config:
+                  zone_id: perimeter
+                  min_inside_ms: 1000
+                  cooldown_s: 30
+              watchlist_main:
+                rule_id: watchlist_main
+                algorithm_id: face.watchlist
+                enabled: true
+                config:
+                  threshold: 0.75
+    """).strip()
+    p = tmp_path / "generated.yml"
+    p.write_text(yaml_text)
+    bundle = camera_config_module.load_camera_config(str(p))
+    cam = bundle.get_camera("cam_001")
+    assert cam.rtsp_url == "rtsp://x"
+    assert set(cam.rules) == {"intrusion_lobby", "watchlist_main"}
+    rule = cam.rules["intrusion_lobby"]
+    assert rule.algorithm_id == "behavior.intrusion"
+    assert rule.config["zone"] == "perimeter"
 
 
 # ===========================================================================

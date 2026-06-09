@@ -124,7 +124,16 @@ class FakeCameraRepository:
 
     # -- rule -----------------------------------------------------------
 
-    def create_rule(self, *, camera_id, rule_type, enabled, config) -> Dict[str, Any]:
+    def create_rule(
+        self,
+        *,
+        camera_id,
+        rule_type,
+        enabled,
+        config,
+        rule_id=None,
+        algorithm_id=None,
+    ) -> Dict[str, Any]:
         for r in self.rules:
             if r["camera_id"] == camera_id and r["rule_type"] == rule_type:
                 raise _UniqueViolation(
@@ -134,6 +143,8 @@ class FakeCameraRepository:
         row = {
             "id": self._rule_id_seq,
             "camera_id": camera_id,
+            "rule_id": rule_id or rule_type,
+            "algorithm_id": algorithm_id or rule_type,
             "rule_type": rule_type,
             "enabled": enabled,
             "config": dict(config or {}),

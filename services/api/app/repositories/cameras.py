@@ -415,7 +415,9 @@ class CameraRepository:
         self,
         *,
         camera_id: str,
-        algorithm_type: str,
+        rule_id: Optional[str],
+        algorithm_id: str,
+        rule_type: str,
         enabled: bool,
         zone_id: Optional[str],
         line_id: Optional[str],
@@ -428,20 +430,21 @@ class CameraRepository:
                 config, evidence_policy
             )
             VALUES (
-                %(camera_id)s, %(rule_id)s, %(algorithm_type)s,
-                %(algorithm_type)s, %(enabled)s,
+                %(camera_id)s, %(rule_id)s, %(algorithm_id)s,
+                %(rule_type)s, %(enabled)s,
                 %(zone_id)s, %(line_id)s,
                 %(config)s::jsonb, %(evidence_policy)s::jsonb
             )
-            RETURNING *, rule_type AS algorithm_type
+            RETURNING *, algorithm_id AS algorithm_type
         """
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 query,
                 {
                     "camera_id": camera_id,
-                    "rule_id": f"rule_{algorithm_type.replace('.', '_')}",
-                    "algorithm_type": algorithm_type,
+                    "rule_id": rule_id or f"rule_{algorithm_id.replace('.', '_')}",
+                    "algorithm_id": algorithm_id,
+                    "rule_type": rule_type,
                     "enabled": enabled,
                     "zone_id": zone_id,
                     "line_id": line_id,
@@ -455,7 +458,7 @@ class CameraRepository:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                SELECT *, rule_type AS algorithm_type
+                SELECT *, algorithm_id AS algorithm_type
                 FROM camera_rules
                 WHERE camera_id = %(id)s
                 ORDER BY id
@@ -465,16 +468,17 @@ class CameraRepository:
             return cur.fetchall()
 
     def get_algorithm_rule(
-        self, camera_id: str, rule_id: int
+        self, camera_id: str, rule_id: int | str
     ) -> Optional[Dict[str, Any]]:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                SELECT *, rule_type AS algorithm_type
+                SELECT *, algorithm_id AS algorithm_type
                 FROM camera_rules
-                WHERE camera_id = %(camera_id)s AND id = %(rule_id)s
+                WHERE camera_id = %(camera_id)s
+                  AND (id::text = %(rule_id)s OR rule_id = %(rule_id)s)
                 """,
-                {"camera_id": camera_id, "rule_id": rule_id},
+                {"camera_id": camera_id, "rule_id": str(rule_id)},
             )
             return cur.fetchone()
 
@@ -482,12 +486,14 @@ class CameraRepository:
         self,
         *,
         camera_id: str,
-        rule_id: int,
+        rule_id: int | str,
         enabled: Optional[bool],
         zone_id: Optional[str],
         line_id: Optional[str],
         config: Optional[Dict[str, Any]],
         evidence_policy: Optional[Dict[str, Any]],
+        algorithm_id: Optional[str] = None,
+        rule_type: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         existing = self.get_algorithm_rule(camera_id, rule_id)
         if existing is None:
@@ -497,6 +503,8 @@ class CameraRepository:
         next_zone_id = existing.get("zone_id") if zone_id is None else zone_id
         next_line_id = existing.get("line_id") if line_id is None else line_id
         next_config = existing.get("config") if config is None else config
+        next_algorithm_id = existing.get("algorithm_id") if algorithm_id is None else algorithm_id
+        next_rule_type = existing.get("rule_type") if rule_type is None else rule_type
         next_evidence_policy = (
             existing.get("evidence_policy")
             if evidence_policy is None
@@ -508,18 +516,23 @@ class CameraRepository:
                 """
                 UPDATE camera_rules
                 SET enabled = %(enabled)s,
+                    algorithm_id = %(algorithm_id)s,
+                    rule_type = %(rule_type)s,
                     zone_id = %(zone_id)s,
                     line_id = %(line_id)s,
                     config = %(config)s::jsonb,
                     evidence_policy = %(evidence_policy)s::jsonb,
                     updated_at = now()
-                WHERE camera_id = %(camera_id)s AND id = %(rule_id)s
-                RETURNING *, rule_type AS algorithm_type
+                WHERE camera_id = %(camera_id)s
+                  AND (id::text = %(rule_id)s OR rule_id = %(rule_id)s)
+                RETURNING *, algorithm_id AS algorithm_type
                 """,
                 {
                     "camera_id": camera_id,
-                    "rule_id": rule_id,
+                    "rule_id": str(rule_id),
                     "enabled": next_enabled,
+                    "algorithm_id": next_algorithm_id,
+                    "rule_type": next_rule_type,
                     "zone_id": next_zone_id,
                     "line_id": next_line_id,
                     "config": json.dumps(next_config or {}),
@@ -529,17 +542,18 @@ class CameraRepository:
             return cur.fetchone()
 
     def set_algorithm_rule_enabled(
-        self, camera_id: str, rule_id: int, enabled: bool
+        self, camera_id: str, rule_id: int | str, enabled: bool
     ) -> Optional[Dict[str, Any]]:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
                 UPDATE camera_rules
                 SET enabled = %(enabled)s, updated_at = now()
-                WHERE camera_id = %(camera_id)s AND id = %(rule_id)s
-                RETURNING *, rule_type AS algorithm_type
+                WHERE camera_id = %(camera_id)s
+                  AND (id::text = %(rule_id)s OR rule_id = %(rule_id)s)
+                RETURNING *, algorithm_id AS algorithm_type
                 """,
-                {"camera_id": camera_id, "rule_id": rule_id, "enabled": enabled},
+                {"camera_id": camera_id, "rule_id": str(rule_id), "enabled": enabled},
             )
             return cur.fetchone()
 

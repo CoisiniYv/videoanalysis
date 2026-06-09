@@ -167,15 +167,18 @@ def test_export_cam_001_shape(client):
     assert perim["points"] == [[100, 300], [900, 300], [900, 700], [100, 700]]
 
     rules = cam["rules"]
-    assert "intrusion" in rules
-    intr = rules["intrusion"]
+    assert "rule_behavior_intrusion" in rules
+    intr = rules["rule_behavior_intrusion"]
+    assert intr["rule_id"] == "rule_behavior_intrusion"
+    assert intr["algorithm_id"] == "behavior.intrusion"
+    assert intr["rule_type"] == "intrusion"
     assert intr["enabled"] is True
-    assert intr["zone"] == "perimeter"
-    assert intr["min_inside_ms"] == 1000
-    assert intr["cooldown_s"] == 30
-    assert intr["severity"] == "medium"
-    assert intr["snapshot_required"] is True
-    assert intr["clip_required"] is True
+    assert intr["config"]["zone"] == "perimeter"
+    assert intr["config"]["min_inside_ms"] == 1000
+    assert intr["config"]["cooldown_s"] == 30
+    assert intr["config"]["severity"] == "medium"
+    assert intr["config"]["snapshot_required"] is True
+    assert intr["config"]["clip_required"] is True
 
 
 # ===========================================================================

@@ -70,7 +70,9 @@ class FakeCameraRepository:
         self,
         *,
         camera_id: str,
-        algorithm_type: str,
+        rule_id: str,
+        algorithm_id: str,
+        rule_type: str,
         enabled: bool,
         zone_id: Optional[str],
         line_id: Optional[str],
@@ -80,9 +82,11 @@ class FakeCameraRepository:
         self._rule_id += 1
         row = {
             "id": self._rule_id,
+            "rule_id": rule_id,
             "camera_id": camera_id,
-            "rule_type": algorithm_type,
-            "algorithm_type": algorithm_type,
+            "algorithm_id": algorithm_id,
+            "rule_type": rule_type,
+            "algorithm_type": algorithm_id,
             "enabled": enabled,
             "zone_id": zone_id,
             "line_id": line_id,
@@ -97,9 +101,11 @@ class FakeCameraRepository:
     def list_algorithm_rules(self, camera_id: str) -> List[Dict[str, Any]]:
         return [r for r in self.rules if r["camera_id"] == camera_id]
 
-    def get_algorithm_rule(self, camera_id: str, rule_id: int) -> Optional[Dict[str, Any]]:
+    def get_algorithm_rule(self, camera_id: str, rule_id: int | str) -> Optional[Dict[str, Any]]:
         for rule in self.rules:
-            if rule["camera_id"] == camera_id and rule["id"] == rule_id:
+            if rule["camera_id"] == camera_id and (
+                str(rule["id"]) == str(rule_id) or rule["rule_id"] == str(rule_id)
+            ):
                 return rule
         return None
 
@@ -107,16 +113,23 @@ class FakeCameraRepository:
         self,
         *,
         camera_id: str,
-        rule_id: int,
+        rule_id: int | str,
         enabled: Optional[bool],
         zone_id: Optional[str],
         line_id: Optional[str],
         config: Optional[Dict[str, Any]],
         evidence_policy: Optional[Dict[str, Any]],
+        algorithm_id: Optional[str] = None,
+        rule_type: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         row = self.get_algorithm_rule(camera_id, rule_id)
         if row is None:
             return None
+        if algorithm_id is not None:
+            row["algorithm_id"] = algorithm_id
+            row["algorithm_type"] = algorithm_id
+        if rule_type is not None:
+            row["rule_type"] = rule_type
         if enabled is not None:
             row["enabled"] = enabled
         if zone_id is not None:
@@ -131,7 +144,7 @@ class FakeCameraRepository:
         return row
 
     def set_algorithm_rule_enabled(
-        self, camera_id: str, rule_id: int, enabled: bool
+        self, camera_id: str, rule_id: int | str, enabled: bool
     ) -> Optional[Dict[str, Any]]:
         row = self.get_algorithm_rule(camera_id, rule_id)
         if row is None:
@@ -147,7 +160,7 @@ def repo() -> FakeCameraRepository:
 
 def test_algorithm_schema_supports_config_and_evidence_policy():
     body = AlgorithmRuleCreate(
-        algorithm_type="intrusion",
+        algorithm_id="behavior.intrusion",
         enabled=True,
         zone_id="perimeter",
         config={"min_inside_ms": 1000},
@@ -158,7 +171,7 @@ def test_algorithm_schema_supports_config_and_evidence_policy():
             post_seconds=10,
         ),
     )
-    assert body.algorithm_type == "intrusion"
+    assert body.algorithm_id == "behavior.intrusion"
     assert body.config["min_inside_ms"] == 1000
     assert body.evidence_policy.clip_required is True
 
@@ -172,16 +185,17 @@ def _json_response_body(response: JSONResponse) -> dict:
 def test_get_algorithms():
     body = algorithms_list(request_id="req-1")
     algorithms = body["data"]["algorithms"]
-    assert {a["algorithm_type"] for a in algorithms} == {
-        "intrusion",
-        "loitering",
-        "crowd_gathering",
-        "running",
-        "chasing",
-        "fall",
-        "wall_climb",
+    assert {a["algorithm_id"] for a in algorithms} == {
+        "behavior.intrusion",
+        "behavior.loitering",
+        "behavior.crowd_gathering",
+        "behavior.running",
+        "behavior.chasing",
+        "behavior.fall",
+        "behavior.wall_climb_suspicious",
         "face_intelligence",
     }
+    assert "behavior.chasing" in {a["algorithm_id"] for a in algorithms}
 
 
 def test_create_camera_algorithm_rule_validates_registry_zone_and_policy(repo):
@@ -203,7 +217,8 @@ def test_create_camera_algorithm_rule_validates_registry_zone_and_policy(repo):
         "cam_001", body, repo=repo, request_id="req-1"
     )
     data = resp["data"]
-    assert data["algorithm_type"] == "intrusion"
+    assert data["algorithm_id"] == "behavior.intrusion"
+    assert data["algorithm_type"] == "behavior.intrusion"
     assert data["zone_id"] == "perimeter"
     assert data["evidence_policy"]["snapshot_required"] is True
     assert data["evidence_policy"]["clip_required"] is True
@@ -211,7 +226,7 @@ def test_create_camera_algorithm_rule_validates_registry_zone_and_policy(repo):
 
 def test_unknown_algorithm_type_is_rejected():
     with pytest.raises(ValueError):
-        AlgorithmRuleCreate(algorithm_type="unknown_algo", config={})
+        AlgorithmRuleCreate(algorithm_id="unknown_algo", config={})
 
 
 def test_zone_id_must_belong_to_camera(repo):
@@ -242,6 +257,8 @@ def test_enable_disable_algorithm_rule(repo):
     created = camera_algorithm_rules_create(
         "cam_001", body, repo=repo, request_id="req-1"
     )
+    assert created["data"]["algorithm_id"] == "behavior.wall_climb_suspicious"
+    assert repo.rules[0]["rule_type"] == "wall_climb"
     rule_id = created["data"]["rule_id"]
 
     disabled = camera_algorithm_rules_disable(

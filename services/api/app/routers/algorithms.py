@@ -1,4 +1,4 @@
-"""R3 algorithm registry and camera algorithm-rule endpoints."""
+"""Algorithm registry and camera algorithm-rule endpoints."""
 
 from __future__ import annotations
 
@@ -8,6 +8,14 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from app.algorithm_ids import (
+    BEHAVIOR_ALGORITHM_IDS,
+    FACE_RULE_ALGORITHM_IDS,
+    behavior_rule_type_for_algorithm_id,
+    family_algorithm_id_for_rule,
+    is_face_rule_algorithm_id,
+    normalize_algorithm_id,
+)
 from app.algorithm_registry import get_algorithm, list_algorithms
 from app.db import get_conn
 from app.repositories.cameras import CameraRepository
@@ -53,23 +61,30 @@ def _err_response(status_code: int, message: str, request_id: str) -> JSONRespon
 
 @router.get("/algorithms")
 def algorithms_list(request_id: str = Depends(_request_id)) -> dict:
+    algorithms = []
+    for definition in list_algorithms():
+        item = definition.model_dump()
+        item["algorithm_type"] = item["algorithm_id"]
+        algorithms.append(item)
     return _ok(
-        {"algorithms": [a.model_dump() for a in list_algorithms()]},
+        {"algorithms": algorithms},
         request_id,
     )
 
 
-@router.get("/algorithms/{algorithm_type}")
+@router.get("/algorithms/{algorithm_id}")
 def algorithms_get(
-    algorithm_type: str,
+    algorithm_id: str,
     request_id: str = Depends(_request_id),
 ) -> dict:
-    definition = get_algorithm(algorithm_type)
+    definition = get_algorithm(algorithm_id)
     if definition is None:
         return _err_response(
-            404, f"unknown algorithm_type: {algorithm_type}", request_id
+            404, f"unknown algorithm_id: {algorithm_id}", request_id
         )
-    return _ok(definition.model_dump(), request_id)
+    data = definition.model_dump()
+    data["algorithm_type"] = data["algorithm_id"]
+    return _ok(data, request_id)
 
 
 def _validate_zone_line(
@@ -79,9 +94,14 @@ def _validate_zone_line(
     repo: CameraRepository,
 ) -> str:
     zones = repo.list_zones(camera_id)
-    zone_names = {z["zone_name"] for z in zones}
+    zone_names = {z.get("zone_id") or z["zone_name"] for z in zones}
+    polygon_zone_names = {
+        z.get("zone_id") or z["zone_name"]
+        for z in zones
+        if z["zone_type"] == "polygon"
+    }
     line_names = {
-        z["zone_name"]
+        z.get("zone_id") or z["zone_name"]
         for z in zones
         if z["zone_type"] in ("line", "direction_line")
     }
@@ -91,24 +111,39 @@ def _validate_zone_line(
 
     if zone_id and zone_id not in zone_names:
         return f"zone_id does not belong to camera {camera_id!r}: {zone_id!r}"
+    if zone_id and zone_id not in polygon_zone_names:
+        return f"zone_id must reference a polygon zone on camera {camera_id!r}: {zone_id!r}"
     if line_id and line_id not in line_names:
         return f"line_id does not reference a line zone on camera {camera_id!r}: {line_id!r}"
     return ""
 
 
 def _merge_and_validate_config(
-    algorithm_type: str, config: Dict[str, Any]
+    algorithm_id: str,
+    config: Dict[str, Any],
+    *,
+    zone_id: str | None = None,
+    line_id: str | None = None,
+    severity: str | None = None,
 ) -> tuple[Dict[str, Any] | None, str]:
-    definition = get_algorithm(algorithm_type)
+    normalized = normalize_algorithm_id(algorithm_id)
+    definition = get_algorithm(family_algorithm_id_for_rule(normalized))
     if definition is None:
-        return None, f"unknown algorithm_type: {algorithm_type}"
+        return None, f"unknown algorithm_id: {algorithm_id}"
 
     merged = {**definition.default_config, **(config or {})}
+    if zone_id:
+        merged["zone_id"] = zone_id
+        merged.setdefault("zone", zone_id)
+    if line_id:
+        merged["line_id"] = line_id
+    if severity:
+        merged["severity"] = severity
     schema = definition.config_schema or {}
     required = schema.get("required", [])
     for field in required:
         if field not in merged:
-            return None, f"config.{field} is required for {algorithm_type}"
+            return None, f"config.{field} is required for {normalized}"
 
     properties = schema.get("properties", {})
     for field, spec in properties.items():
@@ -124,6 +159,33 @@ def _merge_and_validate_config(
     return merged, ""
 
 
+def _validate_algorithm_bindings(
+    algorithm_id: str,
+    *,
+    zone_id: str | None,
+    line_id: str | None,
+) -> str:
+    normalized = normalize_algorithm_id(algorithm_id)
+    definition = get_algorithm(family_algorithm_id_for_rule(normalized))
+    if definition is None:
+        return f"unknown algorithm_id: {algorithm_id}"
+    if normalized in BEHAVIOR_ALGORITHM_IDS and not normalized.startswith("behavior."):
+        return f"behavior algorithm_id must use behavior.*: {algorithm_id}"
+    if normalized in FACE_RULE_ALGORITHM_IDS and not is_face_rule_algorithm_id(normalized):
+        return f"face algorithm_id must use face.*: {algorithm_id}"
+    if normalized == "behavior.wall_climb_suspicious":
+        if not line_id:
+            return "line_id is required for behavior.wall_climb_suspicious"
+    elif normalized in BEHAVIOR_ALGORITHM_IDS:
+        if not zone_id:
+            return f"zone_id is required for {normalized}"
+    if zone_id and not definition.supports_roi:
+        return f"{normalized} does not support zone_id"
+    if line_id and not definition.supports_line:
+        return f"{normalized} does not support line_id"
+    return ""
+
+
 @router.post("/cameras/{camera_id}/algorithm-rules")
 def camera_algorithm_rules_create(
     camera_id: str,
@@ -134,31 +196,38 @@ def camera_algorithm_rules_create(
     if repo.get_camera(camera_id) is None:
         return _err_response(404, f"camera not found: {camera_id}", request_id)
 
-    definition = get_algorithm(body.algorithm_type)
+    algorithm_id = body.algorithm_id or ""
+    definition = get_algorithm(family_algorithm_id_for_rule(algorithm_id))
     if definition is None:
         return _err_response(
-            400, f"unknown algorithm_type: {body.algorithm_type}", request_id
+            400, f"unknown algorithm_id: {algorithm_id}", request_id
         )
-    if body.zone_id and not definition.supports_roi:
-        return _err_response(
-            400, f"{body.algorithm_type} does not support zone_id", request_id
-        )
-    if body.line_id and not definition.supports_line:
-        return _err_response(
-            400, f"{body.algorithm_type} does not support line_id", request_id
-        )
+
+    binding_error = _validate_algorithm_bindings(
+        algorithm_id, zone_id=body.zone_id, line_id=body.line_id
+    )
+    if binding_error:
+        return _err_response(400, binding_error, request_id)
 
     zone_error = _validate_zone_line(camera_id=camera_id, body=body, repo=repo)
     if zone_error:
         return _err_response(400, zone_error, request_id)
 
-    config, error = _merge_and_validate_config(body.algorithm_type, body.config)
+    config, error = _merge_and_validate_config(
+        algorithm_id,
+        body.config,
+        zone_id=body.zone_id,
+        line_id=body.line_id,
+        severity=body.severity,
+    )
     if error:
         return _err_response(400, error, request_id)
 
     row = repo.create_algorithm_rule(
         camera_id=camera_id,
-        algorithm_type=body.algorithm_type,
+        rule_id=body.rule_id,
+        algorithm_id=algorithm_id,
+        rule_type=behavior_rule_type_for_algorithm_id(algorithm_id) or algorithm_id,
         enabled=body.enabled,
         zone_id=body.zone_id,
         line_id=body.line_id,
@@ -191,7 +260,7 @@ def camera_algorithm_rules_list(
 @router.put("/cameras/{camera_id}/algorithm-rules/{rule_id}")
 def camera_algorithm_rules_update(
     camera_id: str,
-    rule_id: int,
+    rule_id: str,
     body: AlgorithmRuleUpdate,
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
@@ -206,19 +275,49 @@ def camera_algorithm_rules_update(
     if zone_error:
         return _err_response(400, zone_error, request_id)
 
+    algorithm_id = normalize_algorithm_id(
+        body.algorithm_id
+        or existing.get("algorithm_id")
+        or existing.get("algorithm_type")
+        or existing.get("rule_type", "")
+    )
+    zone_id = existing.get("zone_id") if body.zone_id is None else body.zone_id
+    line_id = existing.get("line_id") if body.line_id is None else body.line_id
+
+    binding_error = _validate_algorithm_bindings(
+        algorithm_id, zone_id=zone_id, line_id=line_id
+    )
+    if binding_error:
+        return _err_response(400, binding_error, request_id)
+
     config = body.config
     if config is not None:
-        merged, error = _merge_and_validate_config(existing["rule_type"], config)
+        merged, error = _merge_and_validate_config(
+            algorithm_id,
+            config,
+            zone_id=zone_id,
+            line_id=line_id,
+            severity=body.severity,
+        )
         if error:
             return _err_response(400, error, request_id)
         config = merged
+    elif body.severity is not None:
+        existing_config = existing.get("config") or {}
+        config = {**existing_config, "severity": body.severity}
 
     row = repo.update_algorithm_rule(
         camera_id=camera_id,
         rule_id=rule_id,
+        algorithm_id=algorithm_id if body.algorithm_id else None,
+        rule_type=(
+            behavior_rule_type_for_algorithm_id(algorithm_id) or algorithm_id
+            if body.algorithm_id
+            else None
+        ),
         enabled=body.enabled,
-        zone_id=body.zone_id,
-        line_id=body.line_id,
+        zone_id=zone_id,
+        line_id=line_id,
         config=config,
         evidence_policy=(
             body.evidence_policy.model_dump()
@@ -231,7 +330,7 @@ def camera_algorithm_rules_update(
 
 def _set_rule_enabled(
     camera_id: str,
-    rule_id: int,
+    rule_id: str,
     enabled: bool,
     repo: CameraRepository,
     request_id: str,
@@ -247,7 +346,7 @@ def _set_rule_enabled(
 @router.post("/cameras/{camera_id}/algorithm-rules/{rule_id}/enable")
 def camera_algorithm_rules_enable(
     camera_id: str,
-    rule_id: int,
+    rule_id: str,
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
 ) -> dict:
@@ -257,7 +356,7 @@ def camera_algorithm_rules_enable(
 @router.post("/cameras/{camera_id}/algorithm-rules/{rule_id}/disable")
 def camera_algorithm_rules_disable(
     camera_id: str,
-    rule_id: int,
+    rule_id: str,
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
 ) -> dict:

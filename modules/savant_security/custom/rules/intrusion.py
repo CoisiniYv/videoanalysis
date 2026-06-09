@@ -49,6 +49,13 @@ class IntrusionRule(BehaviorRule):
             description=f"Track {track.track_id} intruded zone '{self.zone.name}'",
             snapshot_required=self.config.snapshot_required,
             clip_required=self.config.clip_required,
+            payload={
+                "algorithm_id": "behavior.intrusion",
+                "rule_id": self.config.name,
+                "camera_id": last_obs.camera_id,
+                "zone_id": self.zone.name,
+                "inside_ms": inside_ms,
+            },
         )
 
     def _continuous_inside(self, track: TrackState):

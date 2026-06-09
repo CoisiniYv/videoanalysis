@@ -19,23 +19,20 @@ from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
+from app.algorithm_ids import (
+    BEHAVIOR_ALGORITHM_IDS,
+    FACE_RULE_ALGORITHM_IDS,
+    RULE_ALGORITHM_IDS,
+    behavior_rule_type_for_algorithm_id,
+    normalize_algorithm_id,
+)
 
 SCHEMA_VERSION_RUNTIME = "c1g2.runtime_config.v1"
 SCHEMA_VERSION_SUMMARY = "c1g2.export_summary.v1"
 SCHEMA_VERSION_APPLY_PLAN = "c1g2.apply_plan.v1"
 DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/c1g2/generated-config"
 
-ALLOWED_ALGORITHM_IDS = {
-    "behavior.intrusion",
-    "behavior.loitering",
-    "behavior.crowd_gathering",
-    "behavior.fall",
-    "behavior.running",
-    "behavior.wall_climb_suspicious",
-    "face.observation",
-    "face.watchlist",
-    "face.live_search",
-}
+ALLOWED_ALGORITHM_IDS = set(RULE_ALGORITHM_IDS)
 
 ALLOWED_ZONE_TYPES = {"polygon", "line", "direction_line"}
 
@@ -78,13 +75,14 @@ class ExportResult:
 
 
 def classify_algorithm_rule(algorithm_id: str) -> str:
+    algorithm_id = normalize_algorithm_id(algorithm_id)
     if algorithm_id == "face.observation":
         return "observation"
     if algorithm_id == "face.watchlist":
         return "alert"
     if algorithm_id == "face.live_search":
         return "alert_config"
-    if algorithm_id.startswith("behavior.") and algorithm_id in ALLOWED_ALGORITHM_IDS:
+    if algorithm_id in BEHAVIOR_ALGORITHM_IDS:
         return "alert"
     raise ValueError(f"unknown algorithm_id: {algorithm_id}")
 
@@ -193,6 +191,9 @@ def _normalize_and_validate(
             zones.append(normalized_zone)
 
         zone_ids = {zone["zone_id"] for zone in zones}
+        polygon_zone_ids = {
+            zone["zone_id"] for zone in zones if zone["zone_type"] == "polygon"
+        }
         line_zone_ids = {
             zone["zone_id"]
             for zone in zones
@@ -207,6 +208,7 @@ def _normalize_and_validate(
             _validate_rule(
                 normalized_rule,
                 zone_ids=zone_ids,
+                polygon_zone_ids=polygon_zone_ids,
                 line_zone_ids=line_zone_ids,
                 path=f"{cam_path}.rules.{normalized_rule.get('rule_id', '<missing>')}",
                 errors=errors,
@@ -287,15 +289,19 @@ def _validate_zone(zone: dict[str, Any], path: str, errors: list[dict[str, Any]]
 
 
 def _normalize_rule(rule: dict[str, Any]) -> dict[str, Any]:
-    algorithm_id = str(rule.get("algorithm_id") or rule.get("rule_type") or "")
+    algorithm_id = normalize_algorithm_id(str(rule.get("algorithm_id") or rule.get("rule_type") or ""))
     rule_id = str(rule.get("rule_id") or f"rule_{algorithm_id.replace('.', '_')}" or rule.get("id") or "")
     return {
         "id": rule.get("id"),
         "rule_id": rule_id,
         "algorithm_id": algorithm_id,
-        "rule_type": str(rule.get("rule_type") or algorithm_id),
+        "rule_type": behavior_rule_type_for_algorithm_id(algorithm_id)
+        or str(rule.get("rule_type") or algorithm_id),
         "enabled": bool(rule.get("enabled", True)),
         "config": _json_obj(rule.get("config")),
+        "zone_id": str(rule.get("zone_id") or ""),
+        "line_id": str(rule.get("line_id") or ""),
+        "evidence_policy": _json_obj(rule.get("evidence_policy")),
     }
 
 
@@ -303,6 +309,7 @@ def _validate_rule(
     rule: dict[str, Any],
     *,
     zone_ids: set[str],
+    polygon_zone_ids: set[str],
     line_zone_ids: set[str],
     path: str,
     errors: list[dict[str, Any]],
@@ -322,15 +329,26 @@ def _validate_rule(
         return
 
     config = rule["config"]
-    if algorithm_id in ("behavior.intrusion", "behavior.loitering", "behavior.crowd_gathering"):
-        zone_id = str(config.get("zone_id") or config.get("zone") or "")
+    if algorithm_id in (
+        "behavior.intrusion",
+        "behavior.loitering",
+        "behavior.crowd_gathering",
+        "behavior.running",
+        "behavior.chasing",
+        "behavior.fall",
+    ):
+        zone_id = str(rule.get("zone_id") or config.get("zone_id") or config.get("zone") or "")
         if not zone_id:
             _error(errors, path, "config.zone_id is required")
         elif zone_id not in zone_ids:
             _error(errors, path, f"config.zone_id references unknown zone_id: {zone_id}")
+        elif zone_id not in polygon_zone_ids:
+            _error(errors, path, f"config.zone_id must reference a polygon zone: {zone_id}")
     if algorithm_id == "behavior.wall_climb_suspicious":
-        line_id = str(config.get("line_id") or "")
-        if line_id and line_id not in line_zone_ids:
+        line_id = str(rule.get("line_id") or config.get("line_id") or "")
+        if not line_id:
+            _error(errors, path, "config.line_id is required")
+        elif line_id not in line_zone_ids:
             _error(errors, path, f"config.line_id references unknown line zone: {line_id}")
     if algorithm_id == "face.watchlist":
         threshold = config.get("threshold")
@@ -385,13 +403,26 @@ def _build_cameras_yml_doc(cameras: list[dict[str, Any]]) -> dict[str, Any]:
         for zone in camera["zones"]:
             cam_doc["zones"][zone["zone_id"]] = dict(zone)
         for rule in camera["rules"]:
+            rule_config = dict(rule["config"])
+            if rule.get("zone_id"):
+                rule_config.setdefault("zone_id", rule["zone_id"])
+                rule_config.setdefault("zone", rule["zone_id"])
+            if rule.get("line_id"):
+                rule_config.setdefault("line_id", rule["line_id"])
             cam_doc["rules"][rule["rule_id"]] = {
                 "rule_id": rule["rule_id"],
                 "algorithm_id": rule["algorithm_id"],
+                "rule_type": rule["rule_type"],
                 "enabled": rule["enabled"],
                 "rule_kind": rule["rule_kind"],
-                "config": rule["config"],
+                "config": rule_config,
             }
+            if rule.get("zone_id"):
+                cam_doc["rules"][rule["rule_id"]]["zone_id"] = rule["zone_id"]
+            if rule.get("line_id"):
+                cam_doc["rules"][rule["rule_id"]]["line_id"] = rule["line_id"]
+            if rule.get("evidence_policy"):
+                cam_doc["rules"][rule["rule_id"]]["evidence_policy"] = rule["evidence_policy"]
         out["cameras"][camera["camera_id"]] = cam_doc
     return out
 
@@ -408,13 +439,18 @@ def _build_algorithm_runtime_config(cameras: list[dict[str, Any]], generated_at:
                 "enabled": camera["enabled"],
                 "alert_policy": camera["alert_policy"],
                 "zones": camera["zones"],
+                "capabilities": _camera_capabilities(camera["rules"]),
                 "rules": [
                     {
                         "rule_id": rule["rule_id"],
                         "algorithm_id": rule["algorithm_id"],
+                        "rule_type": rule["rule_type"],
                         "rule_kind": rule["rule_kind"],
                         "enabled": rule["enabled"],
                         "config": rule["config"],
+                        "zone_id": rule.get("zone_id") or None,
+                        "line_id": rule.get("line_id") or None,
+                        "evidence_policy": rule.get("evidence_policy") or {},
                     }
                     for rule in camera["rules"]
                 ],
@@ -458,6 +494,33 @@ def _build_summary(
             for camera in cameras
         ],
         "validation_errors": [],
+    }
+
+
+def _camera_capabilities(rules: list[dict[str, Any]]) -> dict[str, bool]:
+    enabled_algorithm_ids = {
+        rule["algorithm_id"] for rule in rules if bool(rule.get("enabled", True))
+    }
+    has_behavior = any(algorithm_id in BEHAVIOR_ALGORITHM_IDS for algorithm_id in enabled_algorithm_ids)
+    return {
+        "needs_person_bbox": has_behavior,
+        "needs_pose_keypoints": bool(
+            enabled_algorithm_ids
+            & {"behavior.fall", "behavior.wall_climb_suspicious"}
+        ),
+        "needs_track_velocity": bool(
+            enabled_algorithm_ids & {"behavior.running", "behavior.chasing"}
+        ),
+        "needs_multi_track_state": bool(
+            enabled_algorithm_ids & {"behavior.crowd_gathering", "behavior.chasing"}
+        ),
+        "needs_face_detection": bool(enabled_algorithm_ids & set(FACE_RULE_ALGORITHM_IDS)),
+        "needs_face_embedding": bool(
+            enabled_algorithm_ids & {"face.watchlist", "face.live_search"}
+        ),
+        "needs_face_reid": bool(
+            enabled_algorithm_ids & {"face.watchlist", "face.live_search"}
+        ),
     }
 
 

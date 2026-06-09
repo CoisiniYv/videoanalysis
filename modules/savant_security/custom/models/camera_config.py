@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 @dataclass
@@ -23,6 +23,8 @@ class RuleConfig:
     severity: str = "medium"
     snapshot_required: bool = True
     clip_required: bool = True
+    config: Dict[str, Any] = field(default_factory=dict)
+    algorithm_id: str = ""
 
 
 @dataclass

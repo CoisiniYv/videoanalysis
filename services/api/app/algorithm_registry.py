@@ -1,4 +1,4 @@
-"""R3 algorithm registry.
+"""Algorithm activation registry.
 
 The registry is a contract layer only. It declares available algorithm
 families, expected inputs, default config, and evidence defaults; it does not
@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Dict, Iterable
 
+from app.algorithm_ids import (
+    ALGORITHM_FAMILY_IDS,
+    FACE_INTELLIGENCE_ALGORITHM_ID,
+    normalize_algorithm_id,
+)
 from app.schemas.algorithms import AlgorithmDefinition, EvidencePolicy
 
 
@@ -22,8 +27,8 @@ def _policy(snapshot: bool = True, clip: bool = True) -> EvidencePolicy:
 
 
 _REGISTRY: Dict[str, AlgorithmDefinition] = {
-    "intrusion": AlgorithmDefinition(
-        algorithm_type="intrusion",
+    "behavior.intrusion": AlgorithmDefinition(
+        algorithm_id="behavior.intrusion",
         display_name="Intrusion",
         category="behavior_rule",
         input_requirements=["person_bbox", "track_id", "roi_polygon"],
@@ -41,8 +46,8 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
         evidence_policy_schema={"pre_seconds": {"minimum": 0}, "post_seconds": {"minimum": 0}},
         enabled=True,
     ),
-    "loitering": AlgorithmDefinition(
-        algorithm_type="loitering",
+    "behavior.loitering": AlgorithmDefinition(
+        algorithm_id="behavior.loitering",
         display_name="Loitering",
         category="behavior_rule",
         input_requirements=["person_bbox", "track_id", "roi_polygon"],
@@ -55,18 +60,25 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
         },
         evidence_policy=_policy(),
     ),
-    "crowd_gathering": AlgorithmDefinition(
-        algorithm_type="crowd_gathering",
+    "behavior.crowd_gathering": AlgorithmDefinition(
+        algorithm_id="behavior.crowd_gathering",
         display_name="Crowd Gathering",
         category="behavior_rule",
         input_requirements=["person_bbox", "track_id", "roi_polygon"],
         supports_roi=True,
         supports_line=False,
-        default_config={"min_person_count": 5, "min_duration_s": 10, "cooldown_s": 60},
+        default_config={
+            "min_person_count": 5,
+            "exit_person_count": 3,
+            "min_duration_s": 2,
+            "eps_px": 180.0,
+            "require_in_zone": True,
+            "cooldown_s": 60,
+        },
         evidence_policy=_policy(),
     ),
-    "running": AlgorithmDefinition(
-        algorithm_type="running",
+    "behavior.running": AlgorithmDefinition(
+        algorithm_id="behavior.running",
         display_name="Running",
         category="behavior_rule",
         input_requirements=["person_bbox", "track_id", "track_velocity"],
@@ -75,28 +87,47 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
         default_config={"min_speed_px_s": 250, "min_duration_ms": 500, "cooldown_s": 20},
         evidence_policy=_policy(),
     ),
-    "chasing": AlgorithmDefinition(
-        algorithm_type="chasing",
+    "behavior.chasing": AlgorithmDefinition(
+        algorithm_id="behavior.chasing",
         display_name="Chasing",
         category="behavior_rule",
         input_requirements=["person_bbox", "track_id", "multi_track_motion"],
         supports_roi=True,
         supports_line=False,
-        default_config={"min_pair_duration_s": 2, "max_distance_px": 180, "cooldown_s": 30},
+        default_config={
+            "min_speed_px_s": 120.0,
+            "max_distance_px": 220.0,
+            "min_cos_alignment": 0.80,
+            "speed_ratio_tolerance": 0.60,
+            "behind_cos_min": 0.50,
+            "velocity_window_ms": 700,
+            "min_pair_duration_s": 1.5,
+            "cooldown_s": 30,
+        },
         evidence_policy=_policy(),
     ),
-    "fall": AlgorithmDefinition(
-        algorithm_type="fall",
+    "behavior.fall": AlgorithmDefinition(
+        algorithm_id="behavior.fall",
         display_name="Fall",
         category="behavior_rule",
         input_requirements=["person_bbox", "keypoints", "track_id"],
         supports_roi=True,
         supports_line=False,
-        default_config={"min_down_ms": 1500, "cooldown_s": 60},
+        default_config={
+            "min_down_ms": 1500,
+            "cooldown_s": 60,
+            "require_transition": True,
+            "lying_aspect_ratio": 0.85,
+            "upright_aspect_ratio": 0.55,
+            "torso_horizontal_deg": 45.0,
+            "head_hip_collapse_ratio": 0.22,
+            "min_visible_keypoints": 0,
+            "keypoint_threshold": 0.25,
+        },
         evidence_policy=_policy(),
     ),
-    "wall_climb": AlgorithmDefinition(
-        algorithm_type="wall_climb",
+    "behavior.wall_climb_suspicious": AlgorithmDefinition(
+        algorithm_id="behavior.wall_climb_suspicious",
         display_name="Wall Climb Suspicious",
         category="behavior_rule",
         input_requirements=["person_bbox", "keypoints", "track_id", "line"],
@@ -105,8 +136,8 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
         default_config={"min_crossing_ms": 500, "max_crossing_ms": 5000, "cooldown_s": 60},
         evidence_policy=_policy(),
     ),
-    "face_intelligence": AlgorithmDefinition(
-        algorithm_type="face_intelligence",
+    FACE_INTELLIGENCE_ALGORITHM_ID: AlgorithmDefinition(
+        algorithm_id=FACE_INTELLIGENCE_ALGORITHM_ID,
         display_name="Face Intelligence",
         category="face_intelligence",
         input_requirements=[
@@ -129,19 +160,24 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
 
 
 def list_algorithms() -> list[AlgorithmDefinition]:
-    return list(_REGISTRY.values())
+    return [_REGISTRY[algorithm_id] for algorithm_id in ALGORITHM_FAMILY_IDS]
 
 
-def get_algorithm(algorithm_type: str) -> AlgorithmDefinition | None:
-    return _REGISTRY.get(algorithm_type)
+def get_algorithm(algorithm_id: str) -> AlgorithmDefinition | None:
+    return _REGISTRY.get(normalize_algorithm_id(algorithm_id))
 
 
-def require_algorithm(algorithm_type: str) -> AlgorithmDefinition:
-    definition = get_algorithm(algorithm_type)
+def require_algorithm(algorithm_id: str) -> AlgorithmDefinition:
+    definition = get_algorithm(algorithm_id)
     if definition is None:
-        raise ValueError(f"unknown algorithm_type: {algorithm_type}")
+        raise ValueError(f"unknown algorithm_id: {algorithm_id}")
     return definition
 
 
-def known_algorithm_types() -> Iterable[str]:
+def known_algorithm_ids() -> Iterable[str]:
     return _REGISTRY.keys()
+
+
+def known_algorithm_types() -> Iterable[str]:
+    """Compatibility alias for older call sites."""
+    return known_algorithm_ids()

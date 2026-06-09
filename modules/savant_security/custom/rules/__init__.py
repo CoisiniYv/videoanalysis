@@ -21,14 +21,18 @@ The pyfunc tolerates unknown ``rule_type`` values in cameras.yml — they
 are logged and skipped — so a partial set is safe.
 """
 
-from custom.rules.base import BehaviorRule
+from custom.rules.base import BehaviorRule, FrameBehaviorRule
 from custom.rules.registry import REGISTRY, RuleRegistry, build_rules, register_rule
 
-# Importing the rule module triggers registration via @register_rule.
+# Importing rule modules triggers registration via @register_rule.
 from custom.rules import intrusion  # noqa: F401  side-effect: registers "intrusion"
+from custom.rules import fall  # noqa: F401  side-effect: registers "fall"
+from custom.rules import crowd_gathering  # noqa: F401
+from custom.rules import chasing  # noqa: F401
 
 __all__ = [
     "BehaviorRule",
+    "FrameBehaviorRule",
     "REGISTRY",
     "RuleRegistry",
     "build_rules",

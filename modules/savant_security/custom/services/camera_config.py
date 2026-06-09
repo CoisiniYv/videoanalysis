@@ -52,6 +52,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
+from custom.services.algorithm_activation import normalize_algorithm_id
+
 
 ALLOWED_ZONE_TYPES = ("polygon", "line", "direction_line")
 ALLOWED_SEVERITIES = ("low", "medium", "high")
@@ -78,9 +80,12 @@ class ZoneEntry:
 
 @dataclass
 class RuleEntry:
+    rule_id: str
+    algorithm_id: str
     rule_type: str
     enabled: bool
     config: Dict[str, Any] = field(default_factory=dict)
+    evidence_policy: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,7 +201,13 @@ def _parse_camera(camera_id: str, raw: Dict[str, Any]) -> CameraEntry:
 
     source_id = _require_str(raw, "source_id", camera_id)
     name = _require_str(raw, "name", camera_id)
-    rtsp_url = _require_str(raw, "rtsp_url", camera_id)
+    rtsp_url = raw.get("rtsp_url")
+    if rtsp_url is None and isinstance(raw.get("input"), dict):
+        rtsp_url = raw["input"].get("rtsp_url")
+    if not isinstance(rtsp_url, str) or not rtsp_url:
+        raise CameraConfigError(
+            f"cameras.{camera_id}.rtsp_url must be a non-empty string"
+        )
 
     enabled = bool(raw.get("enabled", True))
     gpu_id = raw.get("gpu_id", 0)
@@ -248,7 +259,7 @@ def _parse_zones(camera_id: str, zones_raw: Any) -> Dict[str, ZoneEntry]:
             raise CameraConfigError(
                 f"cameras.{camera_id}.zones.{zone_name} must be a mapping"
             )
-        ztype = z_raw.get("type")
+        ztype = z_raw.get("zone_type") or z_raw.get("type")
         if ztype not in ALLOWED_ZONE_TYPES:
             raise CameraConfigError(
                 f"cameras.{camera_id}.zones.{zone_name}.type must be one of "
@@ -294,8 +305,9 @@ def _parse_zones(camera_id: str, zones_raw: Any) -> Dict[str, ZoneEntry]:
                 f"mapping when provided"
             )
 
-        out[zone_name] = ZoneEntry(
-            name=zone_name, type=ztype, points=points, payload=dict(payload)
+        zone_id = z_raw.get("zone_id") or zone_name
+        out[zone_id] = ZoneEntry(
+            name=zone_id, type=ztype, points=points, payload=dict(payload)
         )
     return out
 
@@ -310,24 +322,63 @@ def _parse_rules(
             f"cameras.{camera_id}.rules must be a mapping when provided"
         )
     out: Dict[str, RuleEntry] = {}
-    for rule_type, r_raw in rules_raw.items():
-        if not rule_type:
+    for rule_key, r_raw in rules_raw.items():
+        if not rule_key:
             raise CameraConfigError(
                 f"cameras.{camera_id} has an empty rule_type"
             )
         if not isinstance(r_raw, dict):
             raise CameraConfigError(
-                f"cameras.{camera_id}.rules.{rule_type} must be a mapping"
+                f"cameras.{camera_id}.rules.{rule_key} must be a mapping"
             )
         enabled = bool(r_raw.get("enabled", True))
-        # Strip the "enabled" key from the inline config the rule sees.
-        config = {k: v for k, v in r_raw.items() if k != "enabled"}
+        algorithm_id = normalize_algorithm_id(
+            str(r_raw.get("algorithm_id") or r_raw.get("rule_type") or rule_key)
+        )
+        rule_type = str(r_raw.get("rule_type") or rule_key)
+        rule_id = str(r_raw.get("rule_id") or rule_key)
 
-        if rule_type == "intrusion":
+        if isinstance(r_raw.get("config"), dict):
+            config = dict(r_raw["config"])
+        else:
+            config = {
+                k: v
+                for k, v in r_raw.items()
+                if k
+                not in {
+                    "rule_id",
+                    "algorithm_id",
+                    "rule_type",
+                    "rule_kind",
+                    "enabled",
+                    "config",
+                    "evidence_policy",
+                }
+            }
+        if r_raw.get("zone_id"):
+            config.setdefault("zone_id", r_raw["zone_id"])
+            config.setdefault("zone", r_raw["zone_id"])
+        if r_raw.get("line_id"):
+            config.setdefault("line_id", r_raw["line_id"])
+        if config.get("zone_id"):
+            config.setdefault("zone", config["zone_id"])
+
+        evidence_policy = r_raw.get("evidence_policy") or {}
+        if not isinstance(evidence_policy, dict):
+            raise CameraConfigError(
+                f"cameras.{camera_id}.rules.{rule_key}.evidence_policy must be a mapping"
+            )
+
+        if algorithm_id == "behavior.intrusion" or rule_type == "intrusion":
             _validate_intrusion(camera_id, config, zones)
 
-        out[rule_type] = RuleEntry(
-            rule_type=rule_type, enabled=enabled, config=config
+        out[rule_id] = RuleEntry(
+            rule_id=rule_id,
+            algorithm_id=algorithm_id,
+            rule_type=rule_type,
+            enabled=enabled,
+            config=config,
+            evidence_policy=dict(evidence_policy),
         )
     return out
 

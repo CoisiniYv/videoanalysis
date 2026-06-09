@@ -14,6 +14,7 @@ import yaml
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from app.algorithm_ids import RULE_ALGORITHM_IDS, runtime_rule_type_for_algorithm_id
 from app.db import get_conn
 from app.repositories.cameras import CameraRepository
 from app.schemas.cameras import (
@@ -367,18 +368,7 @@ def cameras_create_rule(
     existing_rule_ids = {str(r.get("rule_id") or r.get("id")) for r in existing}
     existing_types = {r["rule_type"] for r in existing}
     if body.rule_id in existing_rule_ids or (
-        body.algorithm_id not in (
-            "behavior.intrusion",
-            "behavior.loitering",
-            "behavior.crowd_gathering",
-            "behavior.fall",
-            "behavior.running",
-            "behavior.wall_climb_suspicious",
-            "face.observation",
-            "face.watchlist",
-            "face.live_search",
-        )
-        and body.rule_type in existing_types
+        body.algorithm_id not in RULE_ALGORITHM_IDS and body.rule_type in existing_types
     ):
         return _err_response(
             409,
@@ -388,6 +378,8 @@ def cameras_create_rule(
 
     config = dict(body.config or {})
     if body.rule_type == "intrusion":
+        if "zone_id" in config and "zone" not in config:
+            config["zone"] = config["zone_id"]
         config = apply_intrusion_defaults(config)
         ok, err = validate_intrusion_config(config, repo.get_zone_names(camera_id))
         if not ok:
@@ -403,7 +395,9 @@ def cameras_create_rule(
         if _supports_kw(repo.create_rule, "rule_id"):
             kwargs.update({"rule_id": body.rule_id, "algorithm_id": body.algorithm_id})
         row = repo.create_rule(**kwargs)
-    except psycopg.errors.UniqueViolation as exc:
+    except Exception as exc:
+        if exc.__class__.__name__ != "UniqueViolation":
+            raise
         return _err_response(409, f"unique constraint violation: {exc}", request_id)
     return _ok(RuleResponse.from_db_row(row).model_dump(), request_id)
 
@@ -469,7 +463,9 @@ def cameras_update_rule(
         return _err_response(501, "rule update is not supported by repository", request_id)
 
     algorithm_id = body.algorithm_id
-    rule_type = body.rule_type or algorithm_id
+    rule_type = body.rule_type or (
+        runtime_rule_type_for_algorithm_id(algorithm_id) if algorithm_id else None
+    )
     row = repo.update_rule(
         camera_id=camera_id,
         rule_id=rule_id,

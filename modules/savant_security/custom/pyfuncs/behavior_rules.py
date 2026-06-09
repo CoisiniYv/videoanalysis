@@ -55,7 +55,11 @@ from custom.services.person_observation_exporter import (
     PersonObservationThrottleMap,
     create_person_observation_exporter,
 )
-from custom.services.rule_runtime import SourceRuntime, build_per_source_runtime
+from custom.services.rule_runtime import (
+    SourceRuntime,
+    build_per_source_runtime,
+    evaluate_runtime_frame,
+)
 
 
 _DEFAULT_LOG_INTERVAL = 15
@@ -138,10 +142,10 @@ def _intrusion_gate_config(rule_config: Mapping[str, Any]) -> PersonQualityGateC
 
 
 def _runtime_intrusion_config(runtime: SourceRuntime) -> Mapping[str, Any]:
-    rule_entry = runtime.camera_entry.rules.get("intrusion")
-    if rule_entry is None:
-        return {}
-    return rule_entry.config
+    for rule_entry in runtime.camera_entry.rules.values():
+        if rule_entry.algorithm_id == "behavior.intrusion" and rule_entry.enabled:
+            return rule_entry.config
+    return {}
 
 
 def _frame_dimensions(frame_meta, runtime: SourceRuntime) -> tuple[float | None, float | None]:
@@ -320,18 +324,13 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 frame_anchor=frame_anchor,
             )
         )
-        runtime.store.update(observations)
-
         events_exported = 0
-        for track in runtime.store.active_tracks:
-            for rule in runtime.rules:
-                event = rule.evaluate(track)
-                if event is not None:
-                    # Rules set last_obs.source_id (empty for adapter
-                    # observations) so re-stamp from the runtime here.
-                    event.source_id = source_id
-                    self._enrich_and_export(event, track, frame_meta, runtime)
-                    events_exported += 1
+        for evaluation in evaluate_runtime_frame(runtime, observations):
+            # Rules set last_obs.source_id (empty for adapter observations) so
+            # re-stamp from the runtime here.
+            evaluation.event.source_id = source_id
+            self._enrich_and_export(evaluation.event, evaluation.track, frame_meta, runtime)
+            events_exported += 1
 
         if self.frame_count % self.log_every_n_frames == 0:
             tracked_count = sum(
@@ -459,12 +458,16 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
     def _enrich_and_export(
         self,
         event: SecurityEvent,
-        track: TrackState,
+        track: TrackState | None,
         frame_meta,
         runtime: SourceRuntime,
     ) -> None:
         frame_id = int(getattr(frame_meta, "frame_num", 0))
-        event_ts_ms = track.last_seen_ms or int(time.time() * 1000)
+        event_ts_ms = (
+            track.last_seen_ms
+            if track is not None and track.last_seen_ms
+            else event.end_ts_ms or event.start_ts_ms or int(time.time() * 1000)
+        )
         frame_anchor = extract_frame_anchor_metadata(frame_meta)
 
         event.producer = self.producer
@@ -475,29 +478,15 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         event.keyframe_uuid = frame_anchor.get("keyframe_uuid")
         event.camera_id = runtime.camera_id
 
-        inside_ms = max(event.end_ts_ms - event.start_ts_ms, 0)
-        bbox = track.current_bbox
-
-        person_bbox = {
-            "x": bbox.x,
-            "y": bbox.y,
-            "width": bbox.width,
-            "height": bbox.height,
-        }
         gate_config = _intrusion_gate_config(_runtime_intrusion_config(runtime))
-        last_obs = track.observations[-1] if track.observations else None
+        last_obs = (
+            track.observations[-1]
+            if track is not None and track.observations
+            else None
+        )
 
-        event.payload = {
+        enrichment = {
             "zone_id": event.zone,
-            "inside_ms": inside_ms,
-            "person_bbox": person_bbox,
-            "bbox": dict(person_bbox),
-            "bbox_source": "savant_detection",
-            "person_confidence": last_obs.confidence if last_obs else None,
-            "visible_keypoint_count": visible_keypoint_count(
-                last_obs.keypoints,
-                gate_config.keypoint_threshold,
-            ) if last_obs else 0,
             "person_quality_gate": {
                 "status": "accepted",
                 "min_person_confidence": gate_config.min_confidence,
@@ -527,6 +516,40 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 "metadata_source": frame_anchor.get("metadata_source"),
             },
         }
+        if last_obs is not None:
+            bbox = track.current_bbox
+            person_bbox = {
+                "x": bbox.x,
+                "y": bbox.y,
+                "width": bbox.width,
+                "height": bbox.height,
+            }
+            enrichment.update(
+                {
+                    "person_bbox": person_bbox,
+                    "bbox": dict(person_bbox),
+                    "bbox_source": "savant_detection",
+                    "person_confidence": last_obs.confidence,
+                    "visible_keypoint_count": visible_keypoint_count(
+                        last_obs.keypoints,
+                        gate_config.keypoint_threshold,
+                    ),
+                }
+            )
+
+        if event.event_type == "intrusion" and "inside_ms" not in event.payload:
+            end_ts_ms = event.end_ts_ms if event.end_ts_ms is not None else event.start_ts_ms
+            enrichment["inside_ms"] = max(end_ts_ms - event.start_ts_ms, 0)
+
+        merged_payload = dict(event.payload or {})
+        for key, value in enrichment.items():
+            if key == "media" and isinstance(merged_payload.get("media"), dict):
+                media = dict(value)
+                media.update(merged_payload["media"])
+                merged_payload["media"] = media
+            else:
+                merged_payload.setdefault(key, value)
+        event.payload = merged_payload
 
         if os.getenv("SAVANT_EVENT_MEDIA_REQUIRED", "").lower() in ("1", "true", "yes"):
             event.snapshot_required = True

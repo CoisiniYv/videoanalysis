@@ -65,25 +65,41 @@ VALID_YAML = """
         enabled: true
         source_id: phase3h
         name: Test
-        rtsp_url: rtsp://example.local/stream
+        input:
+          type: rtsp
+          rtsp_url: rtsp://example.local/stream
+          rtsp_transport: tcp
         gpu_id: 0
         zones:
           perimeter:
-            type: polygon
+            zone_id: perimeter
+            zone_type: polygon
             points:
               - [100, 100]
               - [400, 100]
               - [400, 400]
               - [100, 400]
         rules:
-          intrusion:
+          rule_intrusion:
+            rule_id: rule_intrusion
+            algorithm_id: behavior.intrusion
+            rule_type: intrusion
             enabled: true
-            zone: perimeter
-            min_inside_ms: 500
-            cooldown_s: 60
-            severity: high
-            snapshot_required: true
-            clip_required: false
+            config:
+              zone_id: perimeter
+              min_inside_ms: 500
+              cooldown_s: 60
+              severity: high
+              snapshot_required: true
+              clip_required: false
+          rule_watchlist:
+            rule_id: rule_watchlist
+            algorithm_id: face.watchlist
+            rule_type: face.watchlist
+            enabled: true
+            config:
+              threshold: 0.75
+              cooldown_s: 60
 """
 
 
@@ -137,6 +153,7 @@ def test_intrusion_uses_yaml_perimeter_points(loader_mod, rt_mod, tmp_path):
     rule = runtimes["phase3h"].rules[0]
     polygon = rule.zone.polygon
     assert polygon == [(100.0, 100.0), (400.0, 100.0), (400.0, 400.0), (100.0, 400.0)]
+    assert [rule.config.rule_type for rule in runtimes["phase3h"].rules] == ["intrusion"]
 
 
 # ===========================================================================
@@ -150,6 +167,51 @@ def test_unknown_source_id_not_in_runtimes(loader_mod, rt_mod, tmp_path):
     from custom.services.cooldown import CooldownTracker
     runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
     assert runtimes.get("unconfigured_source") is None
+
+
+def test_behavior_enablement_is_camera_scoped(loader_mod, rt_mod, tmp_path):
+    cfg = _write_yaml(tmp_path, """
+        cameras:
+          cam_a:
+            enabled: true
+            source_id: src_a
+            name: A
+            rtsp_url: rtsp://a
+            zones:
+              perimeter:
+                type: polygon
+                points: [[0,0],[10,0],[10,10],[0,10]]
+            rules:
+              a_intrusion:
+                rule_id: a_intrusion
+                algorithm_id: behavior.intrusion
+                enabled: true
+                config:
+                  zone_id: perimeter
+                  min_inside_ms: 100
+                  cooldown_s: 1
+          cam_b:
+            enabled: true
+            source_id: src_b
+            name: B
+            rtsp_url: rtsp://b
+            zones:
+              perimeter:
+                type: polygon
+                points: [[0,0],[10,0],[10,10],[0,10]]
+            rules:
+              b_watchlist:
+                rule_id: b_watchlist
+                algorithm_id: face.watchlist
+                enabled: true
+                config:
+                  threshold: 0.75
+    """)
+    bundle = loader_mod.load_camera_config(cfg)
+    from custom.services.cooldown import CooldownTracker
+    runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
+    assert set(runtimes) == {"src_a"}
+    assert runtimes["src_a"].camera_id == "cam_a"
 
 
 # ===========================================================================
@@ -231,8 +293,12 @@ def test_severity_and_flags_flow_to_event(loader_mod, rt_mod, tmp_path):
     assert event.severity == "high"
     assert event.snapshot_required is True
     assert event.clip_required is False
-    assert event.rule_name == "intrusion"
+    assert event.algorithm_type == "behavior.intrusion"
+    assert event.rule_name == "rule_intrusion"
     assert event.zone == "perimeter"
+    assert event.payload["algorithm_id"] == "behavior.intrusion"
+    assert event.payload["rule_id"] == "rule_intrusion"
+    assert event.payload["zone_id"] == "perimeter"
 
 
 # ===========================================================================
@@ -327,7 +393,7 @@ def test_camera_entry_to_legacy_config_preserves_fields(loader_mod, rt_mod, tmp_
     cam = bundle.get_camera("cam_001")
     legacy = rt_mod.camera_entry_to_legacy_config(cam)
     assert legacy.camera_id == "cam_001"
-    rule_cfg = legacy.rules["intrusion"]
+    rule_cfg = legacy.rules["rule_intrusion"]
     assert rule_cfg.min_inside_ms == 500
     assert rule_cfg.cooldown_s == 60
     assert rule_cfg.severity == "high"

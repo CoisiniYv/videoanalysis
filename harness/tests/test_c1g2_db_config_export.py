@@ -141,6 +141,15 @@ def _rules() -> list[dict[str, Any]]:
             "enabled": False,
             "config": {"threshold": 0.8, "cooldown_s": 60},
         },
+        {
+            "id": 5,
+            "camera_id": "cam_c1e_rtsp_replay",
+            "rule_id": "rule_disabled_running",
+            "algorithm_id": "behavior.running",
+            "rule_type": "running",
+            "enabled": False,
+            "config": {"zone_id": "perimeter", "min_speed_px_s": 250, "cooldown_s": 20},
+        },
     ]
 
 
@@ -160,6 +169,7 @@ def test_classify_algorithm_rule():
     assert classify_algorithm_rule("face.watchlist") == "alert"
     assert classify_algorithm_rule("face.live_search") == "alert_config"
     assert classify_algorithm_rule("behavior.intrusion") == "alert"
+    assert classify_algorithm_rule("behavior.chasing") == "alert"
     with pytest.raises(ValueError):
         classify_algorithm_rule("unknown")
 
@@ -177,6 +187,7 @@ def test_enabled_camera_zones_rules_export_yaml(tmp_path: Path):
         "rule_watchlist",
         "rule_intrusion",
     }
+    assert cam["rules"]["rule_intrusion"]["rule_type"] == "intrusion"
 
 
 def test_face_rule_kinds_and_intrusion_zone_success(tmp_path: Path):
@@ -186,6 +197,15 @@ def test_face_rule_kinds_and_intrusion_zone_success(tmp_path: Path):
     assert rules["face.observation"]["rule_kind"] == "observation"
     assert rules["face.watchlist"]["rule_kind"] == "alert"
     assert rules["behavior.intrusion"]["config"]["zone_id"] == "perimeter"
+    assert cam["capabilities"] == {
+        "needs_person_bbox": True,
+        "needs_pose_keypoints": False,
+        "needs_track_velocity": False,
+        "needs_multi_track_state": False,
+        "needs_face_detection": True,
+        "needs_face_embedding": True,
+        "needs_face_reid": True,
+    }
 
 
 def test_intrusion_missing_zone_fails(tmp_path: Path):
@@ -221,6 +241,7 @@ def test_disabled_rule_filtered_by_default_and_included_with_flag(tmp_path: Path
     default_result = _export(tmp_path / "default", FakeCameraRepository())
     default_rules = default_result.cameras_generated_doc["cameras"]["cam_c1e_rtsp_replay"]["rules"]
     assert "rule_disabled_watchlist" not in default_rules
+    assert "rule_disabled_running" not in default_rules
 
     include_result = _export(
         tmp_path / "include", FakeCameraRepository(), include_disabled=True
@@ -228,6 +249,8 @@ def test_disabled_rule_filtered_by_default_and_included_with_flag(tmp_path: Path
     include_rules = include_result.cameras_generated_doc["cameras"]["cam_c1e_rtsp_replay"]["rules"]
     assert "rule_disabled_watchlist" in include_rules
     assert include_rules["rule_disabled_watchlist"]["enabled"] is False
+    include_runtime = include_result.algorithm_runtime_config["cameras"][0]
+    assert include_runtime["capabilities"]["needs_track_velocity"] is False
 
 
 def test_summary_redacts_rtsp_password_but_runtime_yaml_keeps_it(tmp_path: Path):
@@ -257,3 +280,33 @@ def test_apply_plan_marks_restart_future_not_executed(tmp_path: Path):
     assert future_restart["services"] == ["source-adapter", "savant-security"]
     assert future_restart["status"] == "not_executed"
     assert "C1G.3" in future_restart["reason"]
+
+
+def test_wall_climb_maps_external_algorithm_id_to_internal_rule_type(tmp_path: Path):
+    zones = [
+        _zone(),
+        _zone(
+            id=2,
+            zone_id="wall_line",
+            zone_name="wall_line",
+            zone_type="line",
+            points=[[0, 0], [10, 10]],
+        ),
+    ]
+    rules = [
+        {
+            "id": 10,
+            "camera_id": "cam_c1e_rtsp_replay",
+            "rule_id": "wall_climb_main",
+            "algorithm_id": "behavior.wall_climb_suspicious",
+            "rule_type": "behavior.wall_climb_suspicious",
+            "enabled": True,
+            "line_id": "wall_line",
+            "config": {"cooldown_s": 60},
+        }
+    ]
+    result = _export(tmp_path, FakeCameraRepository(zones=zones, rules=rules))
+    rule = result.algorithm_runtime_config["cameras"][0]["rules"][0]
+    assert rule["algorithm_id"] == "behavior.wall_climb_suspicious"
+    assert rule["rule_type"] == "wall_climb"
+    assert result.algorithm_runtime_config["cameras"][0]["capabilities"]["needs_pose_keypoints"] is True

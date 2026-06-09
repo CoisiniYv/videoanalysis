@@ -7,20 +7,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.algorithm_ids import (
+    RULE_ALGORITHM_IDS,
+    normalize_algorithm_id,
+    runtime_rule_type_for_algorithm_id,
+)
+
 
 ALLOWED_ZONE_TYPES = ("polygon", "line", "direction_line")
 ALLOWED_SEVERITIES = ("low", "medium", "high")
-ALLOWED_ALGORITHM_IDS = (
-    "behavior.intrusion",
-    "behavior.loitering",
-    "behavior.crowd_gathering",
-    "behavior.fall",
-    "behavior.running",
-    "behavior.wall_climb_suspicious",
-    "face.observation",
-    "face.watchlist",
-    "face.live_search",
-)
+ALLOWED_ALGORITHM_IDS = RULE_ALGORITHM_IDS
 OBSERVATION_ALGORITHM_IDS = ("face.observation",)
 ALERT_ALGORITHM_IDS = tuple(
     algorithm_id
@@ -137,7 +133,7 @@ class CameraResponse(BaseModel):
     @classmethod
     def from_db_row(cls, row: Dict[str, Any]) -> "CameraResponse":
         return cls(
-            id=row["id"],
+            id=str(row["id"]),
             source_id=row["source_id"],
             name=row["name"],
             rtsp_url=row["rtsp_url"],
@@ -233,7 +229,7 @@ class ZoneCreate(BaseModel):
 
 
 class ZoneResponse(BaseModel):
-    id: int
+    id: str | int
     camera_id: str
     zone_id: str
     zone_name: str
@@ -252,8 +248,8 @@ class ZoneResponse(BaseModel):
             import json
             points = json.loads(points)
         return cls(
-            id=int(row["id"]),
-            camera_id=row["camera_id"],
+            id=str(row["id"]),
+            camera_id=str(row["camera_id"]),
             zone_id=row.get("zone_id") or row["zone_name"],
             zone_name=row["zone_name"],
             zone_type=row["zone_type"],
@@ -282,12 +278,14 @@ class RuleCreate(BaseModel):
     def _normalize_rule(self) -> "RuleCreate":
         if not self.algorithm_id and not self.rule_type:
             raise ValueError("algorithm_id or rule_type must be provided")
+        if self.algorithm_id:
+            self.algorithm_id = normalize_algorithm_id(self.algorithm_id)
+        if self.rule_type and not self.algorithm_id:
+            self.algorithm_id = normalize_algorithm_id(self.rule_type)
         if self.algorithm_id and self.algorithm_id not in ALLOWED_ALGORITHM_IDS:
             raise ValueError(f"algorithm_id must be one of {list(ALLOWED_ALGORITHM_IDS)}")
-        if not self.algorithm_id:
-            self.algorithm_id = self.rule_type
         if not self.rule_type:
-            self.rule_type = self.algorithm_id
+            self.rule_type = runtime_rule_type_for_algorithm_id(self.algorithm_id)
         if not self.rule_id:
             safe = str(self.algorithm_id).replace(".", "_")
             self.rule_id = f"rule_{safe}"
@@ -311,13 +309,16 @@ class RuleUpdate(BaseModel):
     @field_validator("algorithm_id")
     @classmethod
     def _algorithm_id(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and v not in ALLOWED_ALGORITHM_IDS:
+        if v is None:
+            return None
+        normalized = normalize_algorithm_id(v)
+        if normalized not in ALLOWED_ALGORITHM_IDS:
             raise ValueError(f"algorithm_id must be one of {list(ALLOWED_ALGORITHM_IDS)}")
-        return v
+        return normalized
 
 
 class RuleResponse(BaseModel):
-    id: int
+    id: str | int
     camera_id: str
     rule_id: str
     algorithm_id: str
@@ -332,10 +333,10 @@ class RuleResponse(BaseModel):
     @classmethod
     def from_db_row(cls, row: Dict[str, Any]) -> "RuleResponse":
         config = _json_dict(row.get("config"))
-        algorithm_id = row.get("algorithm_id") or row.get("rule_type", "")
+        algorithm_id = normalize_algorithm_id(row.get("algorithm_id") or row.get("rule_type", ""))
         return cls(
-            id=int(row["id"]),
-            camera_id=row["camera_id"],
+            id=str(row["id"]),
+            camera_id=str(row["camera_id"]),
             rule_id=row.get("rule_id") or f"rule_{row['id']}",
             algorithm_id=algorithm_id,
             rule_type=row["rule_type"],
@@ -369,10 +370,12 @@ def _json_dict(value: Any) -> Dict[str, Any]:
 
 
 def is_alert_rule(algorithm_id: str) -> bool:
+    algorithm_id = normalize_algorithm_id(algorithm_id)
     return algorithm_id in ALERT_ALGORITHM_IDS
 
 
 def rule_category(algorithm_id: str) -> str:
+    algorithm_id = normalize_algorithm_id(algorithm_id)
     if algorithm_id in OBSERVATION_ALGORITHM_IDS:
         return "observation"
     if algorithm_id in ALERT_ALGORITHM_IDS:
@@ -428,6 +431,8 @@ def validate_intrusion_config(
 def apply_intrusion_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
     """Fill in intrusion rule defaults that were not supplied by the caller."""
     out = dict(config)
+    out.setdefault("min_inside_ms", 1000)
+    out.setdefault("cooldown_s", 30)
     out.setdefault("severity", "medium")
     out.setdefault("snapshot_required", True)
     out.setdefault("clip_required", True)
@@ -471,16 +476,21 @@ def build_export_doc(
             if isinstance(pts, str):
                 import json
                 pts = json.loads(pts)
-            zones_dict[z["zone_name"]] = {
+            zone_id = z.get("zone_id") or z["zone_name"]
+            zones_dict[zone_id] = {
+                "zone_id": zone_id,
+                "zone_type": z["zone_type"],
                 "type": z["zone_type"],
+                "coordinate_space": z.get("coordinate_space") or "pixel",
                 "points": [list(p) for p in pts],
+                "enabled": bool(z.get("enabled", True)),
             }
             payload = z.get("payload") or {}
             if isinstance(payload, str):
                 import json
                 payload = json.loads(payload)
             if payload:
-                zones_dict[z["zone_name"]]["payload"] = payload
+                zones_dict[zone_id]["payload"] = payload
 
         rules_dict: Dict[str, Any] = {}
         for r in cam_rules:
@@ -488,20 +498,28 @@ def build_export_doc(
             if isinstance(cfg, str):
                 import json
                 cfg = json.loads(cfg)
-            rules_dict[r["rule_type"]] = {
+            algorithm_id = normalize_algorithm_id(r.get("algorithm_id") or r["rule_type"])
+            rule_id = r.get("rule_id") or f"rule_{algorithm_id.replace('.', '_')}"
+            rules_dict[rule_id] = {
+                "rule_id": rule_id,
+                "algorithm_id": algorithm_id,
+                "rule_type": r["rule_type"],
                 "enabled": bool(r.get("enabled", True)),
-                **cfg,
+                "config": cfg,
             }
             if r.get("zone_id"):
-                rules_dict[r["rule_type"]]["zone_id"] = r["zone_id"]
+                rules_dict[rule_id]["zone_id"] = r["zone_id"]
+                rules_dict[rule_id]["config"].setdefault("zone_id", r["zone_id"])
+                rules_dict[rule_id]["config"].setdefault("zone", r["zone_id"])
             if r.get("line_id"):
-                rules_dict[r["rule_type"]]["line_id"] = r["line_id"]
+                rules_dict[rule_id]["line_id"] = r["line_id"]
+                rules_dict[rule_id]["config"].setdefault("line_id", r["line_id"])
             evidence_policy = r.get("evidence_policy") or {}
             if isinstance(evidence_policy, str):
                 import json
                 evidence_policy = json.loads(evidence_policy)
             if evidence_policy:
-                rules_dict[r["rule_type"]]["evidence_policy"] = evidence_policy
+                rules_dict[rule_id]["evidence_policy"] = evidence_policy
 
         cam_doc: Dict[str, Any] = {
             "enabled": bool(cam.get("enabled", True)),

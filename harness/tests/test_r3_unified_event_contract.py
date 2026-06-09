@@ -81,9 +81,9 @@ def test_face_events_map_to_face_intelligence_algorithm():
 def test_payload_allows_algorithm_private_fields():
     event = SecurityEvent(
         event_type="fall",
-        algorithm_type="fall",
         payload={"pose_angle_deg": 72, "private_detector_state": {"a": 1}},
     )
+    assert event.to_dict()["algorithm_type"] == "behavior.fall"
     assert event.to_dict()["payload"]["private_detector_state"] == {"a": 1}
 
 

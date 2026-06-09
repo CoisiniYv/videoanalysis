@@ -17,13 +17,13 @@ from typing import Any, Dict, Optional
 SECURITY_EVENT_SCHEMA_VERSION = "1.0"
 
 BEHAVIOR_ALGORITHM_TYPES = (
-    "intrusion",
-    "loitering",
-    "crowd_gathering",
-    "running",
-    "chasing",
-    "fall",
-    "wall_climb",
+    "behavior.intrusion",
+    "behavior.loitering",
+    "behavior.crowd_gathering",
+    "behavior.running",
+    "behavior.chasing",
+    "behavior.fall",
+    "behavior.wall_climb_suspicious",
 )
 
 FACE_INTELLIGENCE_ALGORITHM_TYPE = "face_intelligence"
@@ -108,9 +108,9 @@ class SecurityEvent:
             ):
                 self.algorithm_type = FACE_INTELLIGENCE_ALGORITHM_TYPE
             elif self.event_type == "wall_climb_suspicious":
-                self.algorithm_type = "wall_climb"
+                self.algorithm_type = "behavior.wall_climb_suspicious"
             else:
-                self.algorithm_type = self.event_type
+                self.algorithm_type = f"behavior.{self.event_type}"
 
         if self.end_ts_ms is None and self.start_ts_ms:
             self.end_ts_ms = self.start_ts_ms
