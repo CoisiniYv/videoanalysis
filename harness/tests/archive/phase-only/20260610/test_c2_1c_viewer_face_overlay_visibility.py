@@ -22,5 +22,5 @@ def test_c2_face_objects_use_existing_unknown_face_renderer() -> None:
     app_js = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
     assert "return dom.showUnknown.checked" in app_js
-    assert "Unknown face" in app_js
+    assert "未知人脸" in app_js
     assert "obj.landmarks?.points" in app_js

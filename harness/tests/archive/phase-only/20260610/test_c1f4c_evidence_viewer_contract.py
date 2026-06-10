@@ -11,11 +11,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SERVICE_ROOT = REPO_ROOT / "services" / "evidence-viewer"
 APP_ROOT = SERVICE_ROOT / "app"
 STATIC_ROOT = APP_ROOT / "static"
-COMPOSE = REPO_ROOT / "infra" / "docker-compose.c1-official-replay-dev.yml"
-SMOKE = REPO_ROOT / "scripts" / "smoke" / "check_c1f4c_evidence_viewer.sh"
+COMPOSE = REPO_ROOT / "infra" / "docker-compose.midterm.yml"
+SMOKE = REPO_ROOT / "scripts" / "smoke" / "check_c2_1_viewer_runtime_sidecar.sh"
 DOC = REPO_ROOT / "docs" / "c1f4c_unified_file_based_evidence_viewer.md"
 
+if str(SERVICE_ROOT) in sys.path:
+    sys.path.remove(str(SERVICE_ROOT))
 sys.path.insert(0, str(SERVICE_ROOT))
+
+for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
+    sys.modules.pop(_mod, None)
 
 from app.evidence_index import (  # noqa: E402
     EvidencePathError,
@@ -114,6 +119,9 @@ def test_service_file_structure_exists() -> None:
         APP_ROOT / "evidence_index.py",
         STATIC_ROOT / "index.html",
         STATIC_ROOT / "app.js",
+        STATIC_ROOT / "operator.js",
+        STATIC_ROOT / "evidence.js",
+        STATIC_ROOT / "maintenance.js",
         STATIC_ROOT / "style.css",
         SMOKE,
         DOC,
@@ -134,6 +142,8 @@ def test_main_defines_required_api_endpoints() -> None:
     for route in (
         '@app.get("/")',
         '@app.get("/health")',
+        '"/api/v1/{path:path}"',
+        '"/media/{path:path}"',
         '@app.get("/api/bundles")',
         '@app.get("/api/bundles/{event_id}/annotations")',
         '@app.get("/api/bundles/{event_id}/sink-metadata")',
@@ -145,19 +155,42 @@ def test_main_defines_required_api_endpoints() -> None:
     assert "REDIS_URL" not in content
 
 
-def test_compose_contains_read_only_evidence_viewer_service() -> None:
+def test_main_keeps_operator_proxy_separate_from_evidence_api() -> None:
+    content = _text(APP_ROOT / "main.py")
+    assert "operator_api_proxy" in content
+    assert "operator_media_proxy" in content
+    assert "OPERATOR_PROXY_ALLOWED_PREFIXES" in content
+    assert '"maintenance"' in content
+    assert "settings.operator_api_base_url" in content
+    assert 'return f"{settings.operator_api_base_url}/api/v1/{clean_path}"' in content
+    assert 'return f"{settings.operator_api_base_url}/media/{path.strip(\'/\')}"' in content
+    assert '"/api/v1/{path:path}"' in content
+    assert '"/media/{path:path}"' in content
+    assert '"/api/bundles"' in content
+    assert "api_bundles(" in content
+
+
+def test_midterm_compose_serves_operator_portal_on_8090_with_internal_api() -> None:
     content = _text(COMPOSE)
     assert "evidence-viewer:" in content
-    assert "container_name: c1-official-evidence-viewer" in content
+    assert "container_name: video-analytics-midterm-evidence-viewer" in content
     assert "../services/evidence-viewer" in content
     assert "/data/video-analytics/media/evidence:/evidence:ro" in content
     assert "8090:8090" in content
-    section = content.split("  evidence-viewer:", 1)[1]
-    assert "DATABASE_URL" not in section
-    assert "REDIS_URL" not in section
-    assert "nvidia" not in section.lower()
-    assert "privileged" not in section.lower()
-    assert "depends_on" not in section
+    assert "OPERATOR_API_BASE_URL: http://api:8000" in content
+    assert '"8000:8000"' not in content
+    viewer_section = content.split("  evidence-viewer:", 1)[1]
+    assert "DATABASE_URL" not in viewer_section
+    assert "REDIS_URL" not in viewer_section
+    assert "nvidia" not in viewer_section.lower()
+    assert "privileged" not in viewer_section.lower()
+    assert "api: { condition: service_started }" in viewer_section
+    api_section = content.split("  api:", 1)[1].split("\n  postgres:", 1)[0]
+    assert "../services/api:/app:rw" in api_section
+    assert "/data/video-analytics/media:/data/video-analytics/media:rw" in api_section
+    assert "expose:" in api_section
+    assert '"8000"' in api_section
+    assert '"8000:8000"' not in api_section
 
 
 def test_safe_bundle_dir_rejects_path_traversal(tmp_path: Path) -> None:
@@ -302,7 +335,7 @@ def test_scan_and_manifest_return_bundle_contract(tmp_path: Path) -> None:
 
 
 def test_viewer_static_uses_c1f4b_overlay_concepts() -> None:
-    app_js = _text(STATIC_ROOT / "app.js")
+    app_js = _text(STATIC_ROOT / "evidence.js")
     assert "canvas" in _text(STATIC_ROOT / "index.html")
     assert "annotationTimeSeconds" in app_js
     assert "frame_pts" in app_js
@@ -319,12 +352,83 @@ def test_viewer_static_uses_c1f4b_overlay_concepts() -> None:
     assert "showUnknown" in app_js
 
 
+def test_viewer_static_defaults_to_chinese_customer_view() -> None:
+    index_html = _text(STATIC_ROOT / "index.html")
+    evidence_js = _text(STATIC_ROOT / "evidence.js")
+    css = _text(STATIC_ROOT / "style.css")
+    assert 'lang="zh-CN"' in index_html
+    assert "视频分析操作台" in index_html
+    assert "摄像头管理" in index_html
+    assert "人员与人脸" in index_html
+    assert "告警证据" in index_html
+    assert "告警分类" in index_html
+    assert "证据列表" in index_html
+    assert "画面标注" in index_html
+    assert "事件信息" in index_html
+    assert "识别摘要" in index_html
+    assert "internal-debug" in index_html
+    assert ".internal-debug" in css
+    for token in (
+        "app-shell",
+        "brand",
+        "top-tabs",
+        "workspace-header",
+        "evidence-workspace",
+        "pane-title",
+    ):
+        assert token in index_html
+    for token in (
+        ".app-shell",
+        ".sidebar",
+        ".brand-mark",
+        ".top-tab.active",
+        ".workspace",
+        ".status-pill",
+        ".evidence-workspace",
+    ):
+        assert token in css
+    assert "服务正常" in evidence_js
+    assert "名单命中" in evidence_js
+    assert "录像需复核" in evidence_js
+    assert 'class="internal-debug" hidden>event_id</dt>' in index_html
+    assert "Evidence Viewer" not in index_html
+    assert "Overlay Controls" not in index_html
+    assert ".topbar" not in css
+    assert ".layout" not in css
+    assert "annotation file</dt>" in index_html
+
+
+def test_viewer_uses_object_level_hold_keys_for_sparse_faces() -> None:
+    app_js = _text(STATIC_ROOT / "evidence.js")
+    assert "objectTrackKey" in app_js
+    assert "per_object_hold" in app_js
+    assert "source_observation_id" in app_js
+    assert "validTrackId(obj.track_id ?? line.track_id)" in app_js
+    assert "trackPart === \"no_track\"" in app_js
+    assert "const byObject = new Map()" in app_js
+    assert "lineTrackKey" not in app_js
+    assert "mode=per_track_hold" not in app_js
+
+
+def test_viewer_dedupes_overlapping_face_hold_candidates() -> None:
+    app_js = _text(STATIC_ROOT / "evidence.js")
+    assert "OVERLAY_DEDUP_IOU_THRESHOLD" in app_js
+    assert "function bboxIou" in app_js
+    assert "function dedupeOverlayItems" in app_js
+    assert 'role !== "matched_face" && role !== "unknown_face"' in app_js
+    assert "bboxIou(candidate._dedupeBbox, existing._dedupeBbox)" in app_js
+    assert "dedupeOverlayItems(visibleItems, sourceWidth, sourceHeight, currentTime)" in app_js
+    assert "function betterOverlayItem" in app_js
+    assert "candidateMatched !== existingMatched" in app_js
+
+
 def test_viewer_static_does_not_depend_on_forbidden_runtime_paths() -> None:
     joined = "\n".join(
         _text(path)
         for path in (
             STATIC_ROOT / "index.html",
-            STATIC_ROOT / "app.js",
+            STATIC_ROOT / "operator.js",
+            STATIC_ROOT / "evidence.js",
             STATIC_ROOT / "style.css",
         )
     )
@@ -332,23 +436,20 @@ def test_viewer_static_does_not_depend_on_forbidden_runtime_paths() -> None:
     assert "ffmpeg" not in joined.lower()
     assert "annotated_clip.mp4" not in joined.lower()
     assert "https://" not in joined.lower()
-    assert "http://" not in joined.lower()
     assert "cdn" not in joined.lower()
 
 
 def test_smoke_checks_viewer_runtime_contract() -> None:
     content = _text(SMOKE)
     assert "docker compose" in content
-    assert "up -d --build" in content
+    assert "up -d evidence-viewer" in content
     assert "/health" in content
-    assert "/api/bundles" in content
     assert "/annotations" in content
-    assert "/sink-metadata" in content
-    assert "/media/raw_clip" in content
-    assert "raw_clip.mp4" in content
-    assert "path traversal" in content.lower()
-    assert "PASS_C1F4C_UNIFIED_FILE_BASED_EVIDENCE_VIEWER" in content
-    assert "PASS_CONTRACT_ONLY_REAL_BUNDLE_NOT_VERIFIED" in content
+    assert "annotations.frame_cache.identity.jsonl" in content
+    assert "summary.frame_cache.identity.json" in content
+    assert "production_sidecar" in content
+    assert "fallback_used" in content
+    assert "legacy_used_for_visual_binding" in content
 
 
 def test_doc_declares_file_based_viewer_boundary() -> None:

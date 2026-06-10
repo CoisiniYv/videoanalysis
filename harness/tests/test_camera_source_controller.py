@@ -1,4 +1,4 @@
-"""Tests for the camera source controller (Phase C1.2).
+"""Tests for the camera source controller (midterm).
 
 The controller's only side-effect is invoking ``docker`` via subprocess.
 Tests inject a fake runner so no Docker daemon, network, or container
@@ -45,14 +45,14 @@ SAMPLE_SOURCES = textwrap.dedent("""
     sources:
       cam_001:
         camera_id: cam_001
-        source_id: phase3h
+        source_id: primary_rtsp
         uri: rtsp://example.local/stream
         enabled: true
         adapter_type: gstreamer
         zmq_endpoint: dealer+connect:tcp://savant-security:5555
       cam_file:
         camera_id: cam_file
-        source_id: c1_2_test
+        source_id: file_loop
         uri: file:///testVideo/test.mp4
         enabled: true
         adapter_type: gstreamer
@@ -113,7 +113,7 @@ def test_list_redacts_uri(script_mod, sources_path):
     assert "rtsp://" not in joined
     assert "example.local/stream" not in joined
     # Safe fields should be present.
-    assert "phase3h" in joined
+    assert "primary_rtsp" in joined
     assert "scheme" in joined
 
 
@@ -128,7 +128,7 @@ def test_start_builds_docker_run(script_mod, sources_path):
         [
             "start",
             "--sources", sources_path,
-            "--source-id", "phase3h",
+            "--source-id", "primary_rtsp",
             "--network", "video-analytics-midterm_default",
         ],
         runner=runner,
@@ -138,14 +138,19 @@ def test_start_builds_docker_run(script_mod, sources_path):
     assert len(runner.calls) == 1
     cmd = runner.calls[0]
     assert cmd[:4] == ["docker", "run", "-d", "--name"]
-    assert "video-analytics-source-phase3h" in cmd
+    assert "video-analytics-source-primary_rtsp" in cmd
     # Env vars are passed via -e KEY=VALUE; verify SOURCE_ID + ZMQ_ENDPOINT.
     env_pairs = [cmd[i + 1] for i, p in enumerate(cmd) if p == "-e"]
     env_dict = dict(s.split("=", 1) for s in env_pairs)
-    assert env_dict["SOURCE_ID"] == "phase3h"
+    assert env_dict["SOURCE_ID"] == "primary_rtsp"
     assert env_dict["LOCATION"] == "rtsp://example.local/stream"
     assert env_dict["RTSP_URI"] == "rtsp://example.local/stream"
+    assert env_dict["RTSP_TRANSPORT"] == "tcp"
     assert env_dict["ZMQ_ENDPOINT"] == "dealer+connect:tcp://savant-security:5555"
+    assert env_dict["BUFFER_LEN"] == "2000"
+    assert env_dict["EOS_ON_START"] == "false"
+    assert "USE_ABSOLUTE_TIMESTAMPS" not in env_dict
+    assert env_dict["FFMPEG_TIMEOUT_MS"] == "20000"
     # rtsp scheme -> rtsp.sh entrypoint.
     assert "/opt/savant/adapters/gst/sources/rtsp.sh" in cmd
 
@@ -158,13 +163,13 @@ def test_start_builds_docker_run(script_mod, sources_path):
 def test_stop_uses_stable_container_name(script_mod):
     runner = _FakeRunner(_ok())
     rc = script_mod.main(
-        ["stop", "--source-id", "phase3h"],
+        ["stop", "--source-id", "primary_rtsp"],
         runner=runner,
         logger=lambda msg: None,
     )
     assert rc == 0
     assert runner.calls == [
-        ["docker", "rm", "-f", "video-analytics-source-phase3h"]
+        ["docker", "rm", "-f", "video-analytics-source-primary_rtsp"]
     ]
 
 
@@ -174,10 +179,10 @@ def test_stop_uses_stable_container_name(script_mod):
 
 
 def test_status_uses_stable_container_name(script_mod):
-    runner = _FakeRunner(_ok(stdout="video-analytics-source-phase3h\tUp 3 minutes"))
+    runner = _FakeRunner(_ok(stdout="video-analytics-source-primary_rtsp\tUp 3 minutes"))
     logs: List[str] = []
     rc = script_mod.main(
-        ["status", "--source-id", "phase3h"],
+        ["status", "--source-id", "primary_rtsp"],
         runner=runner,
         logger=logs.append,
     )
@@ -186,7 +191,7 @@ def test_status_uses_stable_container_name(script_mod):
     assert cmd[:3] == ["docker", "ps", "-a"]
     assert "--filter" in cmd
     filter_idx = cmd.index("--filter")
-    assert cmd[filter_idx + 1] == "name=^/video-analytics-source-phase3h$"
+    assert cmd[filter_idx + 1] == "name=^/video-analytics-source-primary_rtsp$"
     assert any("Up 3 minutes" in line for line in logs)
 
 
@@ -235,7 +240,7 @@ def test_start_docker_failure_returns_nonzero(script_mod, sources_path):
     runner = _FakeRunner(_fail(stderr="image pull failed", returncode=125))
     logs: List[str] = []
     rc = script_mod.main(
-        ["start", "--sources", sources_path, "--source-id", "phase3h"],
+        ["start", "--sources", sources_path, "--source-id", "primary_rtsp"],
         runner=runner,
         logger=logs.append,
     )
@@ -262,7 +267,7 @@ def test_stop_docker_failure_returns_nonzero(script_mod):
 def test_file_uri_uses_video_loop_entrypoint(script_mod, sources_path):
     runner = _FakeRunner(_ok())
     rc = script_mod.main(
-        ["start", "--sources", sources_path, "--source-id", "c1_2_test"],
+        ["start", "--sources", sources_path, "--source-id", "file_loop"],
         runner=runner,
         logger=lambda msg: None,
     )
@@ -273,6 +278,8 @@ def test_file_uri_uses_video_loop_entrypoint(script_mod, sources_path):
     env_dict = dict(s.split("=", 1) for s in env_pairs)
     # file:// prefix stripped so LOCATION is a plain path the script can open.
     assert env_dict["LOCATION"] == "/testVideo/test.mp4"
+    assert env_dict["EOS_ON_START"] == "false"
+    assert "USE_ABSOLUTE_TIMESTAMPS" not in env_dict
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +291,7 @@ def test_start_log_never_contains_rtsp_uri(script_mod, sources_path):
     runner = _FakeRunner(_ok(stdout="deadbeef"))
     logs: List[str] = []
     rc = script_mod.main(
-        ["start", "--sources", sources_path, "--source-id", "phase3h"],
+        ["start", "--sources", sources_path, "--source-id", "primary_rtsp"],
         runner=runner,
         logger=logs.append,
     )

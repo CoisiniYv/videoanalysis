@@ -293,6 +293,19 @@ def _message_from_frame_annotation_fields(fields: object) -> dict[str, object] |
     return payload
 
 
+def _runtime_epoch_id_from_request(req: dict) -> str:
+    return str(req.get("runtime_epoch_id") or "").strip()
+
+
+def _frame_annotation_matches_runtime_epoch(
+    message: dict[str, object],
+    runtime_epoch_id: str,
+) -> bool:
+    if not runtime_epoch_id:
+        return True
+    return str(message.get("runtime_epoch_id") or "").strip() == runtime_epoch_id
+
+
 def _frame_annotation_anchor_target_pts(req: dict, *, post_seconds: int) -> int | None:
     event_frame_pts = _int_or_none(req.get("event_frame_pts") or req.get("frame_pts"))
     if event_frame_pts is None:
@@ -316,6 +329,7 @@ def _find_frame_annotation_anchor(
     max_pts_delta_ns: int | None = None,
     min_frame_uuid_ms: int | None = None,
     require_keyframe: bool = False,
+    runtime_epoch_id: str = "",
 ) -> FrameAnnotationAnchor | None:
     entries = redis_client.xrevrange(
         stream_name,
@@ -337,6 +351,8 @@ def _find_frame_annotation_anchor(
             continue
         message = _message_from_frame_annotation_fields(entry[1])
         if not isinstance(message, dict):
+            continue
+        if not _frame_annotation_matches_runtime_epoch(message, runtime_epoch_id):
             continue
         if str(message.get("source_id") or "") != str(source_id):
             continue
@@ -424,6 +440,7 @@ def _find_anchor_keyframe_pts(
     camera_id: str,
     anchor_keyframe_uuid: str,
     count: int,
+    runtime_epoch_id: str = "",
 ) -> int | None:
     """Find PTS for the exact Replay keyframe UUID without selecting a new anchor."""
     match = _find_anchor_keyframe_pts_match(
@@ -433,6 +450,7 @@ def _find_anchor_keyframe_pts(
         camera_id=camera_id,
         anchor_keyframe_uuid=anchor_keyframe_uuid,
         count=count,
+        runtime_epoch_id=runtime_epoch_id,
     )
     return None if match is None else match[1]
 
@@ -445,6 +463,7 @@ def _find_anchor_keyframe_pts_match(
     camera_id: str,
     anchor_keyframe_uuid: str,
     count: int,
+    runtime_epoch_id: str = "",
 ) -> tuple[int, int] | None:
     """Return ``(match_rank, pts)`` for the exact Replay keyframe UUID."""
     if not anchor_keyframe_uuid:
@@ -461,6 +480,8 @@ def _find_anchor_keyframe_pts_match(
             continue
         message = _message_from_frame_annotation_fields(entry[1])
         if not isinstance(message, dict):
+            continue
+        if not _frame_annotation_matches_runtime_epoch(message, runtime_epoch_id):
             continue
         if str(message.get("source_id") or "") != str(source_id):
             continue
@@ -496,6 +517,7 @@ def _anchor_keyframe_uuid_is_proven_keyframe(
     camera_id: str,
     anchor_keyframe_uuid: str,
     count: int,
+    runtime_epoch_id: str = "",
 ) -> bool:
     if not anchor_keyframe_uuid:
         return False
@@ -510,6 +532,8 @@ def _anchor_keyframe_uuid_is_proven_keyframe(
             continue
         message = _message_from_frame_annotation_fields(entry[1])
         if not isinstance(message, dict):
+            continue
+        if not _frame_annotation_matches_runtime_epoch(message, runtime_epoch_id):
             continue
         if str(message.get("source_id") or "") != str(source_id):
             continue
@@ -586,6 +610,7 @@ def _derive_start_window_frame_from_keyframe_reference(
     max_pts_delta_ns: int | None = None,
     max_keyframe_pts_delta_ns: int | None = None,
     min_frame_uuid_ms: int | None = None,
+    runtime_epoch_id: str = "",
 ) -> FrameAnnotationAnchor | None:
     """Find a start-window coverage frame that references a known keyframe.
 
@@ -614,6 +639,8 @@ def _derive_start_window_frame_from_keyframe_reference(
             continue
         message = _message_from_frame_annotation_fields(entry[1])
         if not isinstance(message, dict):
+            continue
+        if not _frame_annotation_matches_runtime_epoch(message, runtime_epoch_id):
             continue
         if str(message.get("source_id") or "") != str(source_id):
             continue
@@ -681,6 +708,7 @@ def _find_replay_frame_domain_proofs(
     max_keyframe_pts_delta_ns: int | None = None,
     min_start_frame_uuid_ms: int | None = None,
     min_post_frame_uuid_ms: int | None = None,
+    runtime_epoch_id: str = "",
 ) -> ReplayFrameDomainProofs | None:
     post_window_frame = _find_frame_annotation_anchor(
         redis_client,
@@ -693,6 +721,7 @@ def _find_replay_frame_domain_proofs(
         min_stream_ms=min_post_stream_ms,
         max_pts_delta_ns=max_post_pts_delta_ns,
         min_frame_uuid_ms=min_post_frame_uuid_ms,
+        runtime_epoch_id=runtime_epoch_id,
     )
     if post_window_frame is None:
         return None
@@ -708,6 +737,7 @@ def _find_replay_frame_domain_proofs(
         max_pts_delta_ns=max_start_pts_delta_ns,
         min_frame_uuid_ms=min_start_frame_uuid_ms,
         require_keyframe=True,
+        runtime_epoch_id=runtime_epoch_id,
     )
     if start_window_frame is None:
         start_window_frame = _derive_start_window_frame_from_keyframe_reference(
@@ -721,6 +751,7 @@ def _find_replay_frame_domain_proofs(
             max_pts_delta_ns=max_start_pts_delta_ns,
             max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
             min_frame_uuid_ms=min_start_frame_uuid_ms,
+            runtime_epoch_id=runtime_epoch_id,
         )
     if start_window_frame is None:
         return None
@@ -928,6 +959,7 @@ def _prepare_post_savant_replay_request(
         max(float(cfg.keyframe_lookup_window_s), 0.0) * PTS_TIME_BASE
     )
     event_frame_uuid = str(req.get("event_frame_uuid") or req.get("frame_uuid") or "")
+    runtime_epoch_id = _runtime_epoch_id_from_request(req)
     lookup_ts_ms = _replay_anchor_lookup_ts_ms(
         req,
         pre_seconds=pre_seconds,
@@ -955,6 +987,7 @@ def _prepare_post_savant_replay_request(
             max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
             min_start_frame_uuid_ms=min_start_keyframe_uuid_ms,
             min_post_frame_uuid_ms=min_anchor_frame_uuid_ms,
+            runtime_epoch_id=runtime_epoch_id,
         )
         candidate_uuid = keyframe_uuid
         candidate_source = keyframe_source
@@ -999,6 +1032,7 @@ def _prepare_post_savant_replay_request(
                     camera_id=str(camera_id or source_id),
                     anchor_keyframe_uuid=candidate_uuid_text,
                     count=cfg.frame_annotation_anchor_lookback_count,
+                    runtime_epoch_id=runtime_epoch_id,
                 )
             ):
                 last_error = (
@@ -1027,6 +1061,7 @@ def _prepare_post_savant_replay_request(
                     camera_id=str(camera_id or source_id),
                     anchor_keyframe_uuid=candidate_uuid_text,
                     count=cfg.frame_annotation_anchor_lookback_count,
+                    runtime_epoch_id=runtime_epoch_id,
                 )
                 if anchor_keyframe_pts_match is not None:
                     anchor_keyframe_pts = anchor_keyframe_pts_match[1]
@@ -1161,6 +1196,7 @@ def _replay_job_labels(
         "replay_stop_strategy",
         "replay_duration_extra_slack_s",
         "replay_duration_seconds",
+        "runtime_epoch_id",
     ):
         value = req.get(key)
         if value is not None and value != "":

@@ -4,7 +4,7 @@
 
 ## 当前部署版本
 
-项目机器部署使用中期项目版本，不使用 C1/C2/phase 代号入口。
+项目机器部署使用中期项目版本，不使用历史代号入口。
 
 ```bash
 docker compose -f infra/docker-compose.midterm.yml config
@@ -34,7 +34,7 @@ RTSP source
   -> clip-worker Replay job
   -> video-file-sink raw clip
   -> media-worker JSONL sidecar evidence
-  -> evidence-viewer
+  -> 8090 operator portal (`/#evidence`)
 ```
 
 证据包默认包含：
@@ -49,8 +49,14 @@ RTSP source
 
 - Redis: `6396`
 - Replay API: `8098`
-- Evidence viewer: `8090`
+- Operator portal / evidence viewer: `8090`
+- Internal API service: compose-network port `8000` only, reached through 8090
 - Optional local PostgreSQL profile: `5439`
+
+The internal API image for the midterm compose uses
+`services/api/Dockerfile.face-runtime`, which inherits from the local
+`video-analytics-midterm-face-worker:latest` image to reuse the existing
+ONNX Runtime/OpenCV/Numpy layer for face registration.
 
 Workers 默认使用宿主 PostgreSQL：
 
@@ -80,12 +86,16 @@ postgresql://video:video@host.docker.internal:5432/video_analytics
 - 当前部署说明：`docs/midterm_deployment.md`
 - Compose 清单：`docs/compose_inventory.md`
 - 当前状态：`docs/current_mainline_status.md`
-- 历史阶段/实验文档：`docs/`
+- 历史阶段/实验文档：各目录下的 `archive/phase-only/`
 
-历史 C1/C2/phase 入口已归档到：
+历史代号入口已归档到：
 
 - `infra/archive/phase-only/20260609/`
 - `modules/savant_replay/archive/phase-only/20260609/`
 - `modules/savant_security/config/archive/phase-only/20260609/`
+- `docs/archive/phase-only/20260610/`
+- `harness/tests/archive/phase-only/20260610/`
+- `scripts/*/archive/phase-only/20260610/`
+- `services/archive/phase-only/20260610/`
 
 这些归档文件只用于追溯和历史回归，不作为项目机器部署入口。

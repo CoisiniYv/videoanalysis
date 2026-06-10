@@ -1,4 +1,4 @@
-"""Tests for the operator camera config CLI (Phase C1.3)."""
+"""Tests for the operator camera config CLI (midterm)."""
 
 from __future__ import annotations
 

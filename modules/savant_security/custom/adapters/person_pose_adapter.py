@@ -42,6 +42,28 @@ def _compute_keypoint_confidence(keypoints: List[Keypoint]) -> float:
     return sum(kp.confidence for kp in keypoints) / len(keypoints)
 
 
+def _attr_meta_value(obj_meta, element_name: str, attr_name: str):
+    try:
+        attr = obj_meta.get_attr_meta(element_name, attr_name)
+    except Exception:
+        return None
+    if attr is None:
+        return None
+    return getattr(attr, "value", None)
+
+
+def _read_track_id(obj_meta):
+    for value in (
+        getattr(obj_meta, "track_id", None),
+        getattr(obj_meta, "object_id", None),
+        _attr_meta_value(obj_meta, "tracker", "track_id"),
+        _attr_meta_value(obj_meta, "nvtracker", "track_id"),
+    ):
+        if is_valid_track_id(value):
+            return value
+    return None
+
+
 def build_person_pose_observations(
     frame_meta,
     camera_id: Optional[str] = None,
@@ -61,9 +83,7 @@ def build_person_pose_observations(
         if label != "person" and el_name != "yolo26_pose":
             continue
 
-        track_id = getattr(obj_meta, "track_id", None)
-        if track_id is None:
-            track_id = getattr(obj_meta, "object_id", None)
+        track_id = _read_track_id(obj_meta)
         tid_valid = is_valid_track_id(track_id)
         tid = int(track_id) if tid_valid else 0
         if not tid_valid:

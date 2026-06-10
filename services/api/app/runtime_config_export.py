@@ -35,6 +35,12 @@ DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/midterm/generated-config"
 ALLOWED_ALGORITHM_IDS = set(RULE_ALGORITHM_IDS)
 
 ALLOWED_ZONE_TYPES = {"polygon", "line", "direction_line"}
+DEFAULT_EVIDENCE_POLICY = {
+    "snapshot_required": True,
+    "clip_required": True,
+    "pre_seconds": 5,
+    "post_seconds": 5,
+}
 
 
 class ExportValidationError(ValueError):
@@ -291,6 +297,7 @@ def _validate_zone(zone: dict[str, Any], path: str, errors: list[dict[str, Any]]
 def _normalize_rule(rule: dict[str, Any]) -> dict[str, Any]:
     algorithm_id = normalize_algorithm_id(str(rule.get("algorithm_id") or rule.get("rule_type") or ""))
     rule_id = str(rule.get("rule_id") or f"rule_{algorithm_id.replace('.', '_')}" or rule.get("id") or "")
+    config = _json_obj(rule.get("config"))
     return {
         "id": rule.get("id"),
         "rule_id": rule_id,
@@ -298,10 +305,12 @@ def _normalize_rule(rule: dict[str, Any]) -> dict[str, Any]:
         "rule_type": behavior_rule_type_for_algorithm_id(algorithm_id)
         or str(rule.get("rule_type") or algorithm_id),
         "enabled": bool(rule.get("enabled", True)),
-        "config": _json_obj(rule.get("config")),
+        "config": config,
         "zone_id": str(rule.get("zone_id") or ""),
         "line_id": str(rule.get("line_id") or ""),
-        "evidence_policy": _json_obj(rule.get("evidence_policy")),
+        "evidence_policy": _effective_evidence_policy(
+            config, _json_obj(rule.get("evidence_policy"))
+        ),
     }
 
 
@@ -588,6 +597,22 @@ def _json_obj(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     return dict(value)
+
+
+def _effective_evidence_policy(
+    config: dict[str, Any], evidence_policy: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "snapshot_required": config.get(
+            "snapshot_required", DEFAULT_EVIDENCE_POLICY["snapshot_required"]
+        ),
+        "clip_required": config.get(
+            "clip_required", DEFAULT_EVIDENCE_POLICY["clip_required"]
+        ),
+        "pre_seconds": config.get("pre_seconds", DEFAULT_EVIDENCE_POLICY["pre_seconds"]),
+        "post_seconds": config.get("post_seconds", DEFAULT_EVIDENCE_POLICY["post_seconds"]),
+        **evidence_policy,
+    }
 
 
 def _error(errors: list[dict[str, Any]], path: str, message: str) -> None:

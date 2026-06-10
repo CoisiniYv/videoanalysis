@@ -1,6 +1,6 @@
 """Face pipeline configuration dataclass with defaults.
 
-F0 only defines the config shape.  F1 will read from cameras.generated.yml
+The midterm runtime defines the config shape and reads from cameras.midterm.yml
 or equivalent runtime config.
 """
 

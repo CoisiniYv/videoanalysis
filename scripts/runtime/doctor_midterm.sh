@@ -32,7 +32,6 @@ CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midte
 SMOKE = ROOT / "scripts" / "smoke" / "current" / "check_midterm_deployment.sh"
 
 EXPECTED_ENV = {
-    "SOURCE_ID": "primary_rtsp",
     "MAX_FPS_CONTROL": "true",
     "MAX_FPS": "8/1",
     "MIN_FPS": "2/1",
@@ -140,6 +139,7 @@ def main() -> int:
         "env_midterm_only": env_files == ["midterm.env"],
         "replay_config_midterm_only": replay_configs == ["config.midterm.json"],
         "camera_config_midterm_only": camera_configs == ["cameras.midterm.yml"],
+        "env_source_id_filter_absent": "SOURCE_ID" not in env_values,
     }
     checks.update(
         {f"env_{key.lower()}": env_values.get(key) == expected for key, expected in EXPECTED_ENV.items()}

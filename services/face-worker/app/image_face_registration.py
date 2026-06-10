@@ -146,14 +146,26 @@ class RegistrationError(Exception):
 
 
 class RealImageEmbedder(Protocol):
-    def extract(self, image_path: str) -> list[EmbeddingCandidate]:
+    def extract(
+        self,
+        image_path: str,
+        *,
+        allow_multiple_faces: bool = False,
+        quality_threshold: float = 0.65,
+    ) -> list[EmbeddingCandidate]:
         ...
 
 
 class NotImplementedRealImageEmbedder:
     """Placeholder until offline YOLOv8-Face + AdaFace Python runner exists."""
 
-    def extract(self, image_path: str) -> list[EmbeddingCandidate]:
+    def extract(
+        self,
+        image_path: str,
+        *,
+        allow_multiple_faces: bool = False,
+        quality_threshold: float = 0.65,
+    ) -> list[EmbeddingCandidate]:
         raise RegistrationError(
             ERROR_REAL_EMBEDDING_UNAVAILABLE,
             (
@@ -169,7 +181,13 @@ class DevMockEmbeddingFixtureEmbedder:
     def __init__(self, fixture_path: str) -> None:
         self._fixture_path = fixture_path
 
-    def extract(self, image_path: str) -> list[EmbeddingCandidate]:
+    def extract(
+        self,
+        image_path: str,
+        *,
+        allow_multiple_faces: bool = False,
+        quality_threshold: float = 0.65,
+    ) -> list[EmbeddingCandidate]:
         data = json.loads(Path(self._fixture_path).read_text(encoding="utf-8"))
         candidates = data.get("faces")
         if not isinstance(candidates, list) or not candidates:
@@ -405,9 +423,19 @@ class OfflineFaceEmbedderAdapter:
     def __init__(self, embedder: Any) -> None:
         self._embedder = embedder
 
-    def extract(self, image_path: str) -> list[EmbeddingCandidate]:
+    def extract(
+        self,
+        image_path: str,
+        *,
+        allow_multiple_faces: bool = False,
+        quality_threshold: float = 0.65,
+    ) -> list[EmbeddingCandidate]:
         try:
-            result = self._embedder.extract(image_path)
+            result = self._embedder.extract(
+                image_path,
+                allow_multiple_faces=allow_multiple_faces,
+                quality_threshold=quality_threshold,
+            )
         except ValueError as exc:
             raise _registration_error_from_value_error(exc) from exc
         return [
@@ -527,7 +555,11 @@ def register_external_image(
         if isinstance(active_embedder, OfflineFaceEmbedderAdapter):
             result.detector_providers = active_embedder.detector_providers
             result.embedder_providers = active_embedder.embedder_providers
-        candidates = active_embedder.extract(image_path)
+        candidates = active_embedder.extract(
+            image_path,
+            allow_multiple_faces=request.allow_multiple_faces,
+            quality_threshold=request.quality_threshold,
+        )
         candidate = _select_candidate(
             candidates,
             allow_multiple_faces=request.allow_multiple_faces,

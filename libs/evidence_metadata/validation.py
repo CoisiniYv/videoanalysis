@@ -1,4 +1,4 @@
-"""Pure validation for C1J frame annotation and identity patch payloads."""
+"""Pure validation for frame annotation and identity patch payloads."""
 
 from __future__ import annotations
 

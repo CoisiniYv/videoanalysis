@@ -1,4 +1,4 @@
-"""Polygon ROI validation tests (Phase C1.3).
+"""Polygon ROI validation tests (midterm).
 
 Covers BOTH the API ZoneCreate validator (Pydantic) and the savant_security
 camera_config loader. The two layers must agree on the 3..10 polygon bound;
@@ -29,11 +29,12 @@ MODULES_ROOT = str(REPO_ROOT / "modules")
 
 @pytest.fixture(scope="module")
 def api_schema():
-    # Drop sibling app.* caches in case a phase test loaded a different copy.
+    # Drop sibling app.* caches in case a runtime test loaded a different copy.
     for name in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
         sys.modules.pop(name, None)
-    if API_DIR not in sys.path:
-        sys.path.insert(0, API_DIR)
+    if API_DIR in sys.path:
+        sys.path.remove(API_DIR)
+    sys.path.insert(0, API_DIR)
     return importlib.import_module("app.schemas.cameras")
 
 
@@ -60,7 +61,7 @@ def loader_mod():
 
 
 def _write_yaml(tmp_path, text):
-    p = tmp_path / "cameras.generated.yml"
+    p = tmp_path / "cameras.midterm.yml"
     p.write_text(textwrap.dedent(text).strip() + "\n")
     return str(p)
 
@@ -182,7 +183,7 @@ def _yaml_with_polygon(points_yaml: str) -> str:
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: T
             rtsp_url: rtsp://x
             zones:
@@ -219,7 +220,7 @@ def test_loader_line_must_have_two_points(loader_mod, tmp_path):
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: T
             rtsp_url: rtsp://x
             zones:

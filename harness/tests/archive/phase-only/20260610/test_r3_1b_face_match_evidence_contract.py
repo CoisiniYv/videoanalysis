@@ -2,14 +2,46 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE = ROOT / "services" / "face-worker" / "app" / "face_match_event_service.py"
 CLI = ROOT / "services" / "face-worker" / "emit_face_match_events.py"
 DOC = ROOT / "docs" / "r3_1b_face_match_evidence_mvp.md"
-SMOKE = ROOT / "scripts" / "smoke" / "check_r3_1b_face_match_evidence.sh"
+SMOKE = (
+    ROOT
+    / "scripts"
+    / "smoke"
+    / "archive"
+    / "phase-only"
+    / "20260602"
+    / "check_r3_1b_face_match_evidence.sh"
+)
+
+
+def _build_watchlist_hit_event(*args, **kwargs):
+    face_worker_root = ROOT / "services" / "face-worker"
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+    previous_path = list(sys.path)
+    for name in previous_modules:
+        sys.modules.pop(name, None)
+    sys.path.insert(0, str(face_worker_root))
+    try:
+        service = importlib.import_module("app.face_match_event_service")
+        return service.build_watchlist_hit_event(*args, **kwargs)
+    finally:
+        for name in list(sys.modules):
+            if name == "app" or name.startswith("app."):
+                sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
+        sys.path[:] = previous_path
 
 
 def _text(path: Path) -> str:
@@ -70,6 +102,52 @@ def test_service_uses_idempotent_source_event_id() -> None:
     service = _text(SERVICE)
     assert "watchlist_hit:{source_observation_id}:{person_id}" in service
     assert "build_source_event_id" in service
+
+
+def test_watchlist_visual_identity_must_not_propagate_by_person_track_id() -> None:
+    annotation = _text(ROOT / "services" / "media-worker" / "app" / "continuous_annotation.py")
+    assert "def _propagate_identities_by_track" in annotation
+    assert "if _event_expects_known_face(event_context):\n        return 0" in annotation
+
+
+def test_watchlist_event_declares_source_observation_identity_join_key() -> None:
+    event = _build_watchlist_hit_event(
+        observation={
+            "source_observation_id": "face:cam1:42:1000",
+            "camera_id": "cam1",
+            "source_id": "src1",
+            "track_id": "42",
+            "person_track_id": "42",
+            "face_track_id": None,
+            "track_id_semantics": "person_track_id",
+            "timestamp_ms": 1000,
+            "face_bbox": {"format": "cxcywh", "values": [10, 20, 30, 40]},
+            "landmarks": [],
+            "quality": 0.9,
+            "face_confidence": 0.85,
+            "payload": {"media": {"frame_uuid": "frame-1"}},
+        },
+        gallery_match={
+            "person_id": 7,
+            "external_person_id": "demo:person",
+            "person_name": "Reese",
+            "id": 3,
+            "similarity": 0.92,
+        },
+        threshold=0.5,
+    )
+
+    payload = event["payload"]
+    observation = payload["observation"]
+
+    assert event["source_event_id"] == "watchlist_hit:face:cam1:42:1000:7"
+    assert payload["match"]["source_observation_id"] == "face:cam1:42:1000"
+    assert payload["primary_identity_join_key"] == "source_observation_id"
+    assert payload["track_id_join_warning"] is True
+    assert observation["track_id"] == "42"
+    assert observation["person_track_id"] == "42"
+    assert observation["face_track_id"] is None
+    assert observation["track_id_semantics"] == "person_track_id"
 
 
 def test_service_publishes_to_security_events_not_direct_events_table() -> None:

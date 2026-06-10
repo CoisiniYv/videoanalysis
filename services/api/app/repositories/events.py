@@ -77,7 +77,7 @@ class EventRepository:
             where_sql = "WHERE " + " AND ".join(where_clauses)
 
         # Count total
-        count_query = f"SELECT COUNT(*) FROM events {where_sql}"
+        count_query = f"SELECT COUNT(*) AS total FROM events {where_sql}"
         count_params = {k: v for k, v in params.items()}
 
         # Fetch page
@@ -92,7 +92,13 @@ class EventRepository:
 
         with self._conn.cursor() as cur:
             cur.execute(count_query, count_params)
-            total = cur.fetchone()[0]
+            total_row = cur.fetchone()
+            if total_row is None:
+                total = 0
+            elif isinstance(total_row, dict):
+                total = int(total_row.get("total", 0) or 0)
+            else:
+                total = int(total_row[0] or 0)
 
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(data_query, params)

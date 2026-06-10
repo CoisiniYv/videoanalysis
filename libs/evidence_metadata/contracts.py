@@ -1,4 +1,4 @@
-"""Dataclass definitions for C1J frame evidence metadata contracts.
+"""Dataclass definitions for frame evidence metadata contracts.
 
 The validation module accepts plain dictionaries because Redis, media-worker,
 and future Savant exporters will exchange JSON-compatible payloads. These
@@ -57,6 +57,7 @@ class FrameAnnotationMessage:
     timestamp_ms: int | None
     objects: list[FrameAnnotationObject]
     ttl_seconds: int
+    runtime_epoch_id: str | None = None
     keyframe_uuid: str | None = None
     previous_keyframe_uuid: str | None = None
     keyframe_pts: int | None = None

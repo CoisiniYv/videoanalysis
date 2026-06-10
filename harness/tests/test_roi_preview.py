@@ -1,4 +1,4 @@
-"""Tests for the preview-roi subcommand of camera_config_cli.py (Phase C1.3)."""
+"""Tests for the preview-roi subcommand of camera_config_cli.py (midterm)."""
 
 from __future__ import annotations
 

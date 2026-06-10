@@ -187,7 +187,7 @@ class EvidenceTaskResponse(BaseModel):
     snapshot_required: bool = False
     clip_required: bool = False
     pre_seconds: int = 5
-    post_seconds: int = 10
+    post_seconds: int = 5
     status: str = "pending"
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
@@ -217,7 +217,7 @@ class EvidenceTaskResponse(BaseModel):
             snapshot_required=bool(row.get("snapshot_required", False)),
             clip_required=bool(row.get("clip_required", False)),
             pre_seconds=int(row.get("pre_seconds", 5) or 5),
-            post_seconds=int(row.get("post_seconds", 10) or 10),
+            post_seconds=int(row.get("post_seconds", 5) or 5),
             status=row.get("status", "pending"),
             snapshot_path=row.get("snapshot_path"),
             clip_path=row.get("clip_path"),

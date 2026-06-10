@@ -134,6 +134,26 @@ class TestEventToDict:
         assert d["face_track_id"] == "face-7"
         assert d["track_id_semantics"] == "person_track_id"
 
+    def test_wire_track_id_is_person_track_compatibility_alias_not_face_track(self):
+        event = FaceObservationEventDraft(
+            source_observation_id="face:cam1:42:1000",
+            camera_id="cam1",
+            source_id="src1",
+            track_id=999,
+            person_track_id="42",
+            face_track_id="face-7",
+            track_id_semantics="person_track_id",
+            timestamp_ms=1000,
+        )
+
+        d = event.to_dict()
+
+        assert d["track_id"] == "42"
+        assert d["person_track_id"] == "42"
+        assert d["face_track_id"] == "face-7"
+        assert d["track_id"] != d["face_track_id"]
+        assert d["track_id_semantics"] == "person_track_id"
+
     def test_quality_preserved(self):
         draft = _draft(quality=0.91)
         draft.source_observation_id = "face:cam1:1:1000"

@@ -2,18 +2,25 @@
 
 ## Overview
 
-Enhanced the `/operator` configuration page from a basic prototype to a more usable
-camera/zone/rule configuration interface. Uses vanilla HTML/JS/CSS, no frontend framework.
+Enhanced the 8090 operator portal from a basic evidence viewer to a more usable
+camera, people, face-registration, and evidence-review interface. Uses vanilla
+HTML/JS/CSS, no frontend framework.
 
 ## Page Path
 
 ```
-GET /operator           → serves index.html
-GET /operator/static/app.js   → main JavaScript
-GET /operator/static/style.css → styles
+GET /                 → serves index.html from services/evidence-viewer
+GET /static/operator.js → camera and people JavaScript
+GET /static/evidence.js → evidence-review JavaScript
+GET /static/style.css   → styles
 ```
 
-All served by `services/api` on port 8000. **Not** related to evidence-viewer on port 8090.
+All customer-facing assets are served by `services/evidence-viewer` on port
+8090. Camera and people requests use same-origin `/api/v1/*` calls that the 8090
+service proxies to the internal `services/api` container on compose port 8000.
+That internal API image is built from `services/api/Dockerfile.face-runtime`,
+which reuses `video-analytics-midterm-face-worker:latest` for the existing
+ONNX Runtime/OpenCV/Numpy face-registration layer.
 
 ## Supported Configuration
 
@@ -107,10 +114,12 @@ GET  /api/v1/cameras/{camera_id}/alert-policy
 PUT  /api/v1/cameras/{camera_id}/alert-policy
 ```
 
-## 8090 Evidence Viewer
+## Evidence Review
 
-The operator page does **not** reference or interact with the evidence viewer on port 8090.
-Evidence viewing is a separate concern handled by the evidence viewer service.
+The operator page includes an **告警证据** view backed by the existing 8090
+evidence endpoints (`/api/bundles`, `/api/bundles/{event_id}/annotations`,
+`/api/bundles/{event_id}/media/raw_clip`). Alarm evidence is categorized in the
+frontend as 名单布控, 周界入侵, 行为异常, and 聚集风险.
 
 ## Current Limitations
 
@@ -125,11 +134,13 @@ Evidence viewing is a separate concern handled by the evidence viewer service.
 ## Tests
 
 ```bash
-pytest -q harness/tests/test_c1g1b_operator_frontend_static.py
+pytest -q \
+  harness/tests/test_c1g1b_operator_frontend_static.py \
+  harness/tests/test_operator_face_registration_static.py
 ```
 
 ## Smoke
 
 ```bash
-bash scripts/smoke/check_c1g1_algorithm_config_api.sh
+bash scripts/smoke/current/check_operator_camera_and_face_registration.sh
 ```

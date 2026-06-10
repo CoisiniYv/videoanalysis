@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -30,6 +31,12 @@ DEFAULT_ALERT_POLICY: Dict[str, Any] = {
     "suppress_record_request": True,
     "critical_bypass": False,
 }
+DEFAULT_EVIDENCE_POLICY: Dict[str, Any] = {
+    "snapshot_required": True,
+    "clip_required": True,
+    "pre_seconds": 5,
+    "post_seconds": 5,
+}
 
 # Polygon ROI vertex bounds. 3 keeps it a valid polygon; 10 keeps the
 # error surface manageable without ruling out reasonable site shapes.
@@ -43,6 +50,48 @@ def _iso(ts: Any) -> Optional[str]:
     if isinstance(ts, datetime):
         return ts.isoformat()
     return str(ts)
+
+
+def _export_text(value: Any) -> str:
+    return str(value)
+
+
+def _export_yaml_safe(value: Any) -> Any:
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {_export_text(k): _export_yaml_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_export_yaml_safe(v) for v in value]
+    return value
+
+
+def _export_rows_for(
+    rows_by_camera: Dict[Any, List[Dict[str, Any]]],
+    camera_id: Any,
+) -> List[Dict[str, Any]]:
+    rows = rows_by_camera.get(camera_id)
+    if rows is not None:
+        return rows
+    return rows_by_camera.get(str(camera_id), [])
+
+
+def _effective_evidence_policy(
+    config: Dict[str, Any], evidence_policy: Dict[str, Any]
+) -> Dict[str, Any]:
+    return {
+        "snapshot_required": config.get(
+            "snapshot_required", DEFAULT_EVIDENCE_POLICY["snapshot_required"]
+        ),
+        "clip_required": config.get(
+            "clip_required", DEFAULT_EVIDENCE_POLICY["clip_required"]
+        ),
+        "pre_seconds": config.get("pre_seconds", DEFAULT_EVIDENCE_POLICY["pre_seconds"]),
+        "post_seconds": config.get("post_seconds", DEFAULT_EVIDENCE_POLICY["post_seconds"]),
+        **evidence_policy,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -466,9 +515,10 @@ def build_export_doc(
     """Build a cameras.yml-compatible dict from raw DB rows."""
     root: Dict[str, Any] = {"cameras": {}}
     for cam in cameras:
-        cam_id = cam["id"]
-        cam_zones = zones_by_camera.get(cam_id, [])
-        cam_rules = rules_by_camera.get(cam_id, [])
+        raw_cam_id = cam["id"]
+        cam_id = _export_text(raw_cam_id)
+        cam_zones = _export_rows_for(zones_by_camera, raw_cam_id)
+        cam_rules = _export_rows_for(rules_by_camera, raw_cam_id)
 
         zones_dict: Dict[str, Any] = {}
         for z in cam_zones:
@@ -476,13 +526,13 @@ def build_export_doc(
             if isinstance(pts, str):
                 import json
                 pts = json.loads(pts)
-            zone_id = z.get("zone_id") or z["zone_name"]
+            zone_id = _export_text(z.get("zone_id") or z["zone_name"])
             zones_dict[zone_id] = {
                 "zone_id": zone_id,
-                "zone_type": z["zone_type"],
-                "type": z["zone_type"],
-                "coordinate_space": z.get("coordinate_space") or "pixel",
-                "points": [list(p) for p in pts],
+                "zone_type": _export_text(z["zone_type"]),
+                "type": _export_text(z["zone_type"]),
+                "coordinate_space": _export_text(z.get("coordinate_space") or "pixel"),
+                "points": _export_yaml_safe([list(p) for p in pts]),
                 "enabled": bool(z.get("enabled", True)),
             }
             payload = z.get("payload") or {}
@@ -490,7 +540,7 @@ def build_export_doc(
                 import json
                 payload = json.loads(payload)
             if payload:
-                zones_dict[zone_id]["payload"] = payload
+                zones_dict[zone_id]["payload"] = _export_yaml_safe(payload)
 
         rules_dict: Dict[str, Any] = {}
         for r in cam_rules:
@@ -499,53 +549,57 @@ def build_export_doc(
                 import json
                 cfg = json.loads(cfg)
             algorithm_id = normalize_algorithm_id(r.get("algorithm_id") or r["rule_type"])
-            rule_id = r.get("rule_id") or f"rule_{algorithm_id.replace('.', '_')}"
+            rule_id = _export_text(r.get("rule_id") or f"rule_{algorithm_id.replace('.', '_')}")
+            cfg = _export_yaml_safe(cfg)
             rules_dict[rule_id] = {
                 "rule_id": rule_id,
                 "algorithm_id": algorithm_id,
-                "rule_type": r["rule_type"],
+                "rule_type": _export_text(r["rule_type"]),
                 "enabled": bool(r.get("enabled", True)),
                 "config": cfg,
             }
             if r.get("zone_id"):
-                rules_dict[rule_id]["zone_id"] = r["zone_id"]
-                rules_dict[rule_id]["config"].setdefault("zone_id", r["zone_id"])
-                rules_dict[rule_id]["config"].setdefault("zone", r["zone_id"])
+                zone_id_ref = _export_text(r["zone_id"])
+                rules_dict[rule_id]["zone_id"] = zone_id_ref
+                rules_dict[rule_id]["config"].setdefault("zone_id", zone_id_ref)
+                rules_dict[rule_id]["config"].setdefault("zone", zone_id_ref)
             if r.get("line_id"):
-                rules_dict[rule_id]["line_id"] = r["line_id"]
-                rules_dict[rule_id]["config"].setdefault("line_id", r["line_id"])
+                line_id_ref = _export_text(r["line_id"])
+                rules_dict[rule_id]["line_id"] = line_id_ref
+                rules_dict[rule_id]["config"].setdefault("line_id", line_id_ref)
             evidence_policy = r.get("evidence_policy") or {}
             if isinstance(evidence_policy, str):
                 import json
                 evidence_policy = json.loads(evidence_policy)
-            if evidence_policy:
-                rules_dict[rule_id]["evidence_policy"] = evidence_policy
+            rules_dict[rule_id]["evidence_policy"] = _export_yaml_safe(
+                _effective_evidence_policy(cfg, evidence_policy)
+            )
 
         cam_doc: Dict[str, Any] = {
             "enabled": bool(cam.get("enabled", True)),
-            "source_id": cam["source_id"],
-            "name": cam["name"],
-            "rtsp_url": cam["rtsp_url"],
+            "source_id": _export_text(cam["source_id"]),
+            "name": _export_text(cam["name"]),
+            "rtsp_url": _export_text(cam["rtsp_url"]),
             "gpu_id": int(cam.get("gpu_id", 0)),
-            "input_type": cam.get("input_type", "rtsp"),
-            "rtsp_transport": cam.get("rtsp_transport", "tcp"),
+            "input_type": _export_text(cam.get("input_type", "rtsp")),
+            "rtsp_transport": _export_text(cam.get("rtsp_transport", "tcp")),
         }
         fps_policy = cam.get("fps_policy") or {}
         if isinstance(fps_policy, str):
             import json
             fps_policy = json.loads(fps_policy)
         if fps_policy:
-            cam_doc["fps_policy"] = fps_policy
+            cam_doc["fps_policy"] = _export_yaml_safe(fps_policy)
         alert_policy = cam.get("alert_policy") or {}
         if isinstance(alert_policy, str):
             import json
             alert_policy = json.loads(alert_policy)
         if alert_policy:
-            cam_doc["alert_policy"] = alert_policy
+            cam_doc["alert_policy"] = _export_yaml_safe(alert_policy)
         if cam.get("location"):
-            cam_doc["location"] = cam["location"]
+            cam_doc["location"] = _export_text(cam["location"])
         if cam.get("site_id"):
-            cam_doc["site_id"] = cam["site_id"]
+            cam_doc["site_id"] = _export_text(cam["site_id"])
         if zones_dict:
             cam_doc["zones"] = zones_dict
         if rules_dict:

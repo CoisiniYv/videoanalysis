@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit R3.1B face match SecurityEvents from stored face_observations."""
+"""Emit midterm face match SecurityEvents from stored face_observations."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _parse_args() -> argparse.Namespace:
         "--event-type",
         default="watchlist_hit",
         choices=["watchlist_hit"],
-        help="R3.1B implements watchlist_hit; live_search_hit is contract-only.",
+        help="Midterm emits watchlist_hit; live_search_hit is contract-only.",
     )
     parser.add_argument(
         "--external-person-id",
@@ -95,7 +95,7 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
-    print("=== R3.1B Face Match Event Emitter ===")
+    print("=== Midterm Face Match Event Emitter ===")
     print(f"source_id: {result['source_id']}")
     print(f"event_type: {result['event_type']}")
     print(f"algorithm_type: {result['algorithm_type']}")

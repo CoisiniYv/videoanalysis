@@ -1,4 +1,4 @@
-"""Camera / zone / rule configuration endpoints — /api/v1/cameras/* (Phase C1).
+"""Camera / zone / rule configuration endpoints — /api/v1/cameras/* (camera config).
 
 Reuses the {data, error, request_id} response envelope and the
 psycopg-based repository pattern from app.routers.events.
@@ -31,6 +31,11 @@ from app.schemas.cameras import (
     apply_intrusion_defaults,
     build_export_doc,
     validate_intrusion_config,
+)
+from app.services.runtime_apply import (
+    RuntimeApplyError,
+    apply_camera_runtime,
+    restart_camera_runtime,
 )
 
 
@@ -113,6 +118,50 @@ def cameras_export(
     doc = build_export_doc(cameras, zones_by_camera, rules_by_camera)
     text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
     return Response(content=text, media_type="text/yaml")
+
+
+@router.post("/runtime/apply")
+def cameras_runtime_apply(
+    include_disabled: bool = Query(
+        True, description="Include disabled cameras in exported runtime files."
+    ),
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
+    camera_ids = [c["id"] for c in cameras]
+    zones_by_camera = repo.list_zones_for_cameras(camera_ids)
+    rules_by_camera = repo.list_rules_for_cameras(camera_ids)
+    export_doc = build_export_doc(cameras, zones_by_camera, rules_by_camera)
+    try:
+        result = apply_camera_runtime(export_doc=export_doc, cameras=cameras)
+    except RuntimeApplyError as exc:
+        return _err_response(503, str(exc), request_id)
+    except OSError as exc:
+        return _err_response(503, f"runtime apply filesystem error: {exc}", request_id)
+    return _ok(result, request_id)
+
+
+@router.post("/runtime/restart")
+def cameras_runtime_restart(
+    include_disabled: bool = Query(
+        True, description="Include disabled cameras in exported runtime files."
+    ),
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
+    camera_ids = [c["id"] for c in cameras]
+    zones_by_camera = repo.list_zones_for_cameras(camera_ids)
+    rules_by_camera = repo.list_rules_for_cameras(camera_ids)
+    export_doc = build_export_doc(cameras, zones_by_camera, rules_by_camera)
+    try:
+        result = restart_camera_runtime(export_doc=export_doc, cameras=cameras)
+    except RuntimeApplyError as exc:
+        return _err_response(503, str(exc), request_id)
+    except OSError as exc:
+        return _err_response(503, f"runtime restart filesystem error: {exc}", request_id)
+    return _ok(result, request_id)
 
 
 # ---------------------------------------------------------------------------

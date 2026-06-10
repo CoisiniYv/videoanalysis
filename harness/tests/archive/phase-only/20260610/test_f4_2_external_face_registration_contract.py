@@ -150,6 +150,16 @@ def test_docs_describe_external_submitted_image_scope() -> None:
 
 def test_f35b_smoke_semantics_not_touched() -> None:
     smoke = ROOT / "scripts" / "smoke" / "check_f3_5b_one_face_recognition_e2e.sh"
+    if not smoke.exists():
+        smoke = (
+            ROOT
+            / "scripts"
+            / "smoke"
+            / "archive"
+            / "phase-only"
+            / "20260602"
+            / "check_f3_5b_one_face_recognition_e2e.sh"
+        )
     assert smoke.exists()
     content = _read(smoke)
     assert "f35b0000-0000-4000-8000-000000000001" in content
@@ -184,3 +194,11 @@ def test_provider_info_in_result() -> None:
     content = _read(SERVICE)
     assert "detector_providers" in content
     assert "embedder_providers" in content
+
+
+def test_offline_adapter_forwards_allow_multiple_faces_and_quality_threshold() -> None:
+    content = _read(SERVICE)
+    assert "allow_multiple_faces=allow_multiple_faces" in content
+    assert "quality_threshold=quality_threshold" in content
+    assert "allow_multiple_faces=request.allow_multiple_faces" in content
+    assert "quality_threshold=request.quality_threshold" in content

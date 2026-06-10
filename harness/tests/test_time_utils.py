@@ -1,4 +1,4 @@
-"""F2.4 — timestamp normalization unit tests."""
+"""midterm — timestamp normalization unit tests."""
 
 import sys
 from pathlib import Path

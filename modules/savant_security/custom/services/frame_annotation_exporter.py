@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -26,6 +27,9 @@ DEFAULT_STREAM = "security.frame_annotations"
 DEFAULT_REDIS_MAXLEN = 10000
 DEFAULT_WRITE_TIMEOUT_MS = 50
 DEFAULT_LOG_EVERY_N = 300
+DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
+    "/data/video-analytics/media/replay-sink-output/midterm/.current_epoch.json"
+)
 
 
 @dataclass(frozen=True)
@@ -204,10 +208,12 @@ class FrameAnnotationExportRuntime:
         config: FrameAnnotationExporterConfig | None = None,
         exporter: FrameAnnotationExporter | None = None,
         resolve_camera_id: Callable[[str], str] | None = None,
+        runtime_epoch_provider: Callable[[], str] | None = None,
     ) -> None:
         self.config = config or FrameAnnotationExporterConfig()
         self.exporter = exporter or DisabledFrameAnnotationExporter()
         self.resolve_camera_id = resolve_camera_id or (lambda source_id: source_id)
+        self.runtime_epoch_provider = runtime_epoch_provider or _current_runtime_epoch_id
         self.counters = FrameAnnotationExporterCounters()
         self._keyframe_pts_by_source_uuid: dict[tuple[str, str], int] = {}
         self._last_emit_pts_ns_by_source: dict[str, int] = {}
@@ -275,6 +281,7 @@ class FrameAnnotationExportRuntime:
                 time_base=time_base,
                 frame_num=frame_num,
                 timestamp_ms=timestamp_ms,
+                runtime_epoch_id=self.runtime_epoch_provider() or None,
                 frame_objects=frame_objects,
                 config=self.config.build_config(),
             )
@@ -395,6 +402,22 @@ def create_frame_annotation_exporter(
             flush=True,
         )
         return DisabledFrameAnnotationExporter(reason="redis_init_failed")
+
+
+def _current_runtime_epoch_id() -> str:
+    env_value = os.getenv("RUNTIME_EPOCH_ID") or os.getenv("VIDEO_ANALYTICS_RUNTIME_EPOCH_ID")
+    if env_value:
+        return str(env_value)
+    state_path = Path(
+        os.getenv("RUNTIME_EPOCH_STATE_PATH", DEFAULT_RUNTIME_EPOCH_STATE_PATH)
+    )
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("runtime_epoch_id") or "")
+    return ""
 
 
 def _timestamp_ms(frame_meta: Any, frame_pts: int | None, frame_count: int) -> int | None:

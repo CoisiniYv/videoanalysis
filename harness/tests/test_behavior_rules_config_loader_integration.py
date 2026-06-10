@@ -92,6 +92,11 @@ VALID_YAML = """
               severity: high
               snapshot_required: true
               clip_required: false
+            evidence_policy:
+              snapshot_required: true
+              clip_required: true
+              pre_seconds: 6
+              post_seconds: 12
           rule_watchlist:
             rule_id: rule_watchlist
             algorithm_id: face.watchlist
@@ -292,7 +297,7 @@ def test_severity_and_flags_flow_to_event(loader_mod, rt_mod, tmp_path):
     assert event is not None
     assert event.severity == "high"
     assert event.snapshot_required is True
-    assert event.clip_required is False
+    assert event.clip_required is True
     assert event.algorithm_type == "behavior.intrusion"
     assert event.rule_name == "rule_intrusion"
     assert event.zone == "perimeter"
@@ -398,4 +403,6 @@ def test_camera_entry_to_legacy_config_preserves_fields(loader_mod, rt_mod, tmp_
     assert rule_cfg.cooldown_s == 60
     assert rule_cfg.severity == "high"
     assert rule_cfg.snapshot_required is True
-    assert rule_cfg.clip_required is False
+    assert rule_cfg.clip_required is True
+    assert rule_cfg.config["evidence_policy"]["pre_seconds"] == 6
+    assert rule_cfg.config["evidence_policy"]["post_seconds"] == 12

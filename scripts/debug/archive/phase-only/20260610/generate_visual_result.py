@@ -1707,7 +1707,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--camera-config",
-        default="modules/savant_security/config/cameras.generated.yml",
+        default="modules/savant_security/config/cameras.midterm.yml",
         help="Camera YAML used to resolve ROI polygons when event payload only has zone_id",
     )
     parser.add_argument(

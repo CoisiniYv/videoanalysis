@@ -182,6 +182,11 @@ def docker_run_command(
 ) -> List[str]:
     """Construct ``docker run -d ...`` for *spec*."""
     location = _adapter_location_for(spec.uri)
+    scheme = _uri_scheme(spec.uri)
+    # Replay forwards RTSP frames to Savant immediately with relative PTS.
+    # An EOS-on-start reset closes the source before frames arrive, and absolute
+    # timestamps make replay defer forwarding for live RTSP streams.
+    eos_on_start = "false"
     cmd: List[str] = [
         "docker", "run", "-d",
         "--name", spec.container_name,
@@ -191,12 +196,16 @@ def docker_run_command(
         "-e", f"LOCATION={location}",
         "-e", f"ZMQ_ENDPOINT={spec.zmq_endpoint}",
         "-e", "SYNC_OUTPUT=true",
+        "-e", "BUFFER_LEN=2000",
+        "-e", f"EOS_ON_START={eos_on_start}",
+        "-e", "FFMPEG_TIMEOUT_MS=20000",
         "-e", "DOWNLOAD_PATH=/tmp/video-loop-cache",
         "--entrypoint", _adapter_entrypoint_for(spec.uri),
     ]
-    if _uri_scheme(spec.uri) in ("rtsp", "rtsps"):
+    if scheme in ("rtsp", "rtsps"):
         cmd[cmd.index("--entrypoint"):cmd.index("--entrypoint")] = [
             "-e", f"RTSP_URI={location}",
+            "-e", "RTSP_TRANSPORT=tcp",
         ]
     for vol in extra_volumes or []:
         cmd.extend(["-v", vol])

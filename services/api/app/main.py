@@ -14,6 +14,8 @@ from app.db import get_conn
 from app.routers.algorithms import router as algorithms_router
 from app.routers.cameras import router as cameras_router
 from app.routers.events import router as events_router
+from app.routers.maintenance import router as maintenance_router
+from app.routers.people import router as people_router
 from app.routers.ws_alerts import router as ws_alerts_router
 
 app = FastAPI(title="Video Analytics API", version="1.0.0")
@@ -21,6 +23,8 @@ app = FastAPI(title="Video Analytics API", version="1.0.0")
 app.include_router(events_router)
 app.include_router(cameras_router)
 app.include_router(algorithms_router)
+app.include_router(people_router)
+app.include_router(maintenance_router)
 app.include_router(ws_alerts_router)
 
 # Mount /media for serving clip/snapshot files

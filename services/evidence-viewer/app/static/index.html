@@ -1,128 +1,550 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Evidence Viewer</title>
-  <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-  <header class="topbar">
-    <div>
-      <h1>Evidence Viewer</h1>
-      <p>File-based raw clip and continuous annotation overlay</p>
-    </div>
-    <div class="status-row">
-      <span class="badge" id="healthStatus">health: loading</span>
-      <span class="badge" id="bundleCount">bundles: 0</span>
-      <span class="badge warning" id="clipWarning" hidden>warning</span>
-    </div>
-  </header>
-
-  <main class="layout">
-    <aside class="sidebar">
-      <section class="panel filters">
-        <h2>Filters</h2>
-        <label>event type <input id="filterEventType" type="text" placeholder="watchlist_hit"></label>
-        <label>source id <input id="filterSourceId" type="text" placeholder="primary_rtsp"></label>
-        <label>camera id <input id="filterCameraId" type="text"></label>
-        <label>person <input id="filterPerson" type="text" placeholder="Reese"></label>
-        <label>clip status <input id="filterClipStatus" type="text" placeholder="generated_corrupt"></label>
-        <label>event id <input id="filterEventId" type="text"></label>
-        <button id="refreshBundles" type="button">Refresh</button>
-      </section>
-
-      <section class="panel bundle-list-panel">
-        <h2>Bundles</h2>
-        <div id="bundleList" class="bundle-list"></div>
-      </section>
-    </aside>
-
-    <section class="viewer">
-      <div class="video-wrap" id="videoWrap">
-        <div id="annotationSourceBanner" class="source-banner source-banner--unavailable">
-          annotation_source=unavailable
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>视频分析操作台</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">视</div>
+          <div>
+            <h1>视频分析操作台</h1>
+            <p>统一接入与人脸库</p>
+          </div>
         </div>
-        <video id="video" controls preload="metadata"></video>
-        <canvas id="overlay"></canvas>
+
+        <nav class="top-tabs" aria-label="操作台模块">
+          <button class="top-tab active" data-view="cameras">
+            <span>摄像头管理</span>
+            <small>视频源配置</small>
+          </button>
+          <button class="top-tab" data-view="people">
+            <span>人员与人脸</span>
+            <small>身份图库</small>
+          </button>
+          <button class="top-tab" data-view="evidence">
+            <span>告警证据</span>
+            <small>录像复核</small>
+          </button>
+          <button class="top-tab" data-view="maintenance">
+            <span>存储维护</span>
+            <small>预览清理</small>
+          </button>
+        </nav>
+
+        <div class="runtime-panel internal-config" hidden>
+          <span>接口服务</span>
+          <code id="api-url" class="api-url"></code>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="workspace-header">
+          <div>
+            <h2>统一配置台</h2>
+            <p>接入摄像头、维护人脸库，并复核告警录像证据。</p>
+          </div>
+          <span id="status" class="status-pill">加载中</span>
+        </header>
+
+        <div id="error-box" class="message-box error-box" hidden></div>
+        <div id="success-box" class="message-box success-box" hidden></div>
+
+        <section class="dashboard-summary" aria-label="运行概览">
+          <div class="summary-card">
+            <span>摄像头</span>
+            <strong id="camera-count">--</strong>
+            <small>已登记视频源</small>
+          </div>
+          <div class="summary-card">
+            <span>启用中</span>
+            <strong id="enabled-camera-count">--</strong>
+            <small>正在参与调度</small>
+          </div>
+          <div class="summary-card">
+            <span>人员</span>
+            <strong id="people-count">--</strong>
+            <small>已登记身份</small>
+          </div>
+          <div class="summary-card">
+            <span>人脸图片</span>
+            <strong id="gallery-count">--</strong>
+            <small>已入库照片</small>
+          </div>
+          <div class="summary-card">
+            <span>告警证据</span>
+            <strong id="evidence-count">--</strong>
+            <small>可复核录像</small>
+          </div>
+        </section>
+
+        <main id="camera-view" class="operator-view camera-workspace">
+          <section class="pane camera-list">
+            <div class="pane-title">
+              <div>
+                <h2>摄像头</h2>
+                <p>视频源接入与状态</p>
+              </div>
+              <div class="button-group">
+                <button id="refresh-cameras" type="button">刷新</button>
+                <button id="new-camera" type="button" class="primary">新增</button>
+              </div>
+            </div>
+            <div id="cameras" class="scroll-list"></div>
+          </section>
+
+          <section class="pane camera-detail">
+            <div class="pane-title">
+              <div>
+                <h2>基础配置</h2>
+                <p>客户可维护的视频源信息</p>
+              </div>
+              <div class="button-group">
+                <button id="save-camera" type="button" class="primary">保存</button>
+                <button id="enable-camera" type="button">启用</button>
+                <button id="disable-camera" type="button" class="danger">停用</button>
+                <button id="open-rules-panel" type="button">算法开关</button>
+                <button id="open-recording-settings" type="button">录制设置</button>
+                <button id="apply-runtime" type="button">应用运行时</button>
+                <button id="restart-runtime" type="button" class="danger">受控重启运行时</button>
+              </div>
+            </div>
+            <form id="camera-form">
+              <input name="id" type="hidden" required />
+              <input name="source_id" type="hidden" required />
+              <input name="gpu_id" type="hidden" value="0" />
+              <input name="input_type" type="hidden" value="rtsp" />
+              <input name="rtsp_transport" type="hidden" value="tcp" />
+              <label>摄像头名称<input name="name" required /></label>
+              <label>视频地址<input name="rtsp_url" required /></label>
+              <label>站点<input name="site_id" /></label>
+              <label>位置<input name="location" /></label>
+              <label class="inline"><input name="enabled" type="checkbox" checked /> 启用</label>
+            </form>
+
+            <div class="sub-section internal-config" hidden>
+              <h3>帧率策略</h3>
+              <form id="fps-form" class="inline-form">
+                <label>最高帧率<input name="max_fps" value="8/1" /></label>
+                <label>最低帧率<input name="min_fps" value="2/1" /></label>
+              </form>
+            </div>
+
+            <div class="sub-section">
+              <h3>告警策略</h3>
+              <form id="alert-form" class="inline-form">
+                <label>告警冷却时间（秒）<input name="global_alert_cooldown_s" type="number" value="30" min="0" /></label>
+                <input name="store_suppressed_events" type="hidden" value="on" />
+                <input name="suppress_record_request" type="hidden" value="on" />
+                <input name="critical_bypass" type="hidden" value="false" />
+              </form>
+            </div>
+
+            <div class="sub-section algorithm-control-section">
+              <div class="section-title-row">
+                <div>
+                  <h3>算法开关与录像</h3>
+                  <p>按摄像头保存算法启停和证据录像窗口。</p>
+                </div>
+                <button id="save-quick-algorithms" type="button" class="primary">保存算法并应用运行时</button>
+              </div>
+              <div id="algorithm-controls" class="algorithm-control-grid"></div>
+            </div>
+
+            <div class="sub-section internal-config" hidden>
+              <h3>配置预览</h3>
+              <textarea id="full-config" readonly spellcheck="false" placeholder="选择摄像头后显示完整配置"></textarea>
+            </div>
+          </section>
+
+          <section class="pane rules">
+            <div class="tab-bar">
+              <button class="tab-btn active" data-tab="zones" type="button">区域</button>
+              <button class="tab-btn" data-tab="rules" type="button">算法规则</button>
+            </div>
+
+            <div id="tab-zones" class="tab-panel">
+              <div class="pane-title">
+              <div>
+                <h2>检测区域</h2>
+                <p>维护多边形区域与检测线</p>
+              </div>
+                <div class="button-group">
+                  <button id="add-zone-polygon" type="button">多边形</button>
+                  <button id="add-zone-line" type="button">检测线</button>
+                  <button id="save-zone" type="button" class="primary">保存区域</button>
+                </div>
+              </div>
+              <textarea id="zone-json" spellcheck="false" placeholder="区域 JSON"></textarea>
+              <div id="zones" class="scroll-list"></div>
+            </div>
+
+            <div id="tab-rules" class="tab-panel" hidden>
+              <div class="pane-title">
+                <div>
+                  <h2>算法规则</h2>
+                  <p>按摄像头启停算法，并设置录像窗口</p>
+                </div>
+                <button id="save-rule" type="button" class="primary">保存规则</button>
+              </div>
+              <div class="templates">
+                <button data-template="face.observation" type="button">人脸观察</button>
+                <button data-template="face.watchlist" type="button">名单命中</button>
+                <button data-template="face.live_search" type="button">实时检索</button>
+                <button data-template="behavior.intrusion" type="button">入侵</button>
+                <button data-template="behavior.loitering" type="button">徘徊</button>
+                <button data-template="behavior.crowd_gathering" type="button">聚集</button>
+                <button data-template="behavior.fall" type="button">跌倒</button>
+                <button data-template="behavior.running" type="button">奔跑</button>
+                <button data-template="behavior.wall_climb_suspicious" type="button">翻越</button>
+              </div>
+              <form id="rule-form" class="rule-form">
+                <label>算法<select name="algorithm_id" id="rule-algorithm"></select></label>
+                <label>规则 ID<input name="rule_id" placeholder="自动生成" /></label>
+                <label>绑定区域<select name="zone_id" id="rule-zone"></select></label>
+                <label>绑定检测线<select name="line_id" id="rule-line"></select></label>
+                <label>级别
+                  <select name="severity">
+                    <option value="medium">medium</option>
+                    <option value="low">low</option>
+                    <option value="high">high</option>
+                    <option value="critical">critical</option>
+                    <option value="info">info</option>
+                  </select>
+                </label>
+                <label class="inline"><input name="enabled" type="checkbox" checked /> 启用</label>
+                <label class="inline"><input name="snapshot_required" type="checkbox" checked /> 截图</label>
+                <label class="inline"><input name="clip_required" type="checkbox" checked /> 录像</label>
+                <label>前录秒数<input name="pre_seconds" type="number" min="0" max="300" value="5" /></label>
+                <label>后录秒数<input name="post_seconds" type="number" min="0" max="300" value="5" /></label>
+              </form>
+              <textarea id="rule-json" spellcheck="false" placeholder="算法参数 JSON"></textarea>
+              <div id="rules" class="scroll-list"></div>
+            </div>
+          </section>
+        </main>
+
+        <main id="people-view" class="operator-view people-workspace" hidden>
+          <section class="pane people-list">
+            <div class="pane-title">
+              <div>
+                <h2>人员库</h2>
+                <p>按姓名或外部 ID 检索</p>
+              </div>
+              <button id="refresh-people" type="button">刷新</button>
+            </div>
+            <label>搜索<input id="people-search" name="people-search" placeholder="输入姓名或外部 ID" /></label>
+            <div id="people" class="scroll-list"></div>
+          </section>
+
+          <section class="pane registration-detail">
+            <div class="pane-title">
+              <div>
+                <h2>人脸注册</h2>
+                <p>上传照片并写入人员图库</p>
+              </div>
+              <button id="submit-face-registration" type="button" class="primary">开始注册</button>
+            </div>
+            <form id="face-registration-form">
+              <label>图片<input name="image" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,image/*" required /></label>
+              <input name="person_id" type="hidden" />
+              <label>人员编号<input name="external_person_id" required /></label>
+              <label>姓名<input name="name" required /></label>
+              <label>描述<input name="description" /></label>
+              <input name="quality_threshold" type="hidden" value="0.65" />
+              <input name="is_primary" type="hidden" value="false" />
+              <input name="allow_multiple_faces" type="hidden" value="false" />
+              <input name="keep_crop" type="hidden" value="true" />
+              <input name="operator" type="hidden" value="operator" />
+            </form>
+          </section>
+
+          <section class="pane people-detail">
+            <div class="pane-title">
+              <div>
+                <h2>人脸图库</h2>
+                <p>查看已登记的人脸照片</p>
+              </div>
+              <button id="preview-delete-selected-person" type="button" class="danger" disabled>预览停用当前人员</button>
+            </div>
+            <div id="person-profile" class="profile-card">选择人员后显示基本信息</div>
+            <textarea id="person-detail" class="internal-config" hidden readonly spellcheck="false" placeholder="选择或注册人员后显示详情"></textarea>
+            <div id="gallery" class="gallery-grid"></div>
+            <div class="sub-section">
+              <h3>注册回执</h3>
+              <div id="face-registration-summary" class="result-card">暂无注册结果</div>
+              <textarea id="face-registration-result" class="internal-config" hidden readonly spellcheck="false" placeholder="暂无注册结果"></textarea>
+            </div>
+          </section>
+        </main>
+
+        <main id="evidence-view" class="operator-view evidence-workspace" hidden>
+          <section class="pane evidence-filters">
+            <div class="pane-title">
+              <div>
+                <h2>告警分类</h2>
+                <p>按业务类型筛选录像证据</p>
+              </div>
+              <button id="refreshBundles" type="button">刷新</button>
+            </div>
+            <div class="alert-category-tabs" role="group" aria-label="告警分类">
+              <button class="category-chip active" type="button" data-event-category="all">全部</button>
+              <button class="category-chip" type="button" data-event-category="identity">名单布控</button>
+              <button class="category-chip" type="button" data-event-category="perimeter">周界入侵</button>
+              <button class="category-chip" type="button" data-event-category="behavior">行为异常</button>
+              <button class="category-chip" type="button" data-event-category="crowd">聚集风险</button>
+            </div>
+            <div class="filter-fields">
+              <label>摄像头<input id="filterSourceId" type="text" placeholder="摄像头名称或编号" /></label>
+              <label>人员<input id="filterPerson" type="text" placeholder="姓名或人员编号" /></label>
+              <label class="internal-debug" hidden>事件类型<input id="filterEventType" type="text" /></label>
+              <label class="internal-debug" hidden>camera id<input id="filterCameraId" type="text" /></label>
+              <label class="internal-debug" hidden>clip status<input id="filterClipStatus" type="text" /></label>
+              <label class="internal-debug" hidden>event id<input id="filterEventId" type="text" /></label>
+            </div>
+          </section>
+
+          <section class="pane evidence-list-pane">
+            <div class="pane-title">
+              <div>
+                <h2>证据列表</h2>
+                <p>选择告警查看原始录像和画面标注</p>
+              </div>
+            </div>
+            <div id="bundleList" class="scroll-list evidence-list"></div>
+          </section>
+
+          <section class="pane evidence-detail-pane">
+            <div class="pane-title">
+              <div>
+                <h2>证据复核</h2>
+                <p>视频、人员框和人脸识别结果</p>
+              </div>
+              <div class="status-row">
+                <span class="status-pill" id="healthStatus">证据服务检查中</span>
+                <span class="status-pill" id="bundleCount">证据 0</span>
+                <span class="status-pill warning" id="clipWarning" hidden>录像需复核</span>
+                <button id="preview-delete-current-evidence" type="button" class="danger" disabled>预览删除当前证据</button>
+              </div>
+            </div>
+
+            <div class="video-wrap" id="videoWrap">
+              <div id="annotationSourceBanner" class="source-banner source-banner--unavailable internal-debug" hidden>
+                annotation_source=unavailable
+              </div>
+              <video id="video" controls preload="metadata"></video>
+              <canvas id="overlay"></canvas>
+            </div>
+
+            <section class="sub-section overlay-controls">
+              <div class="pane-title">
+                <div>
+                  <h3>画面标注</h3>
+                  <p>控制人脸框、关键点和标签显示</p>
+                </div>
+              </div>
+              <label class="internal-debug" hidden>annotation source
+                <select id="annotationSource">
+                  <option value="auto" selected>Auto (production sidecar)</option>
+                  <option value="sidecar">Sidecar (production)</option>
+                  <option value="sidecar_preview">Sidecar Preview (rebased)</option>
+                  <option value="legacy">Legacy</option>
+                </select>
+              </label>
+              <div class="toggle-grid">
+                <label class="inline"><input id="showPersons" type="checkbox" checked /> 显示人员框</label>
+                <label class="inline"><input id="showMatched" type="checkbox" checked /> 显示命中人脸</label>
+                <label class="inline"><input id="showUnknown" type="checkbox" checked /> 显示未识别人脸</label>
+                <label class="inline"><input id="showLandmarks" type="checkbox" checked /> 显示关键点</label>
+                <label class="inline"><input id="showLabels" type="checkbox" checked /> 显示标签</label>
+              </div>
+              <label class="internal-debug" hidden>hold ms<input id="holdMs" type="number" min="0" step="50" value="0" /></label>
+              <label class="internal-debug" hidden>time tolerance ms<input id="toleranceMs" type="number" min="0" step="25" value="150" /></label>
+            </section>
+
+            <section class="evidence-details-grid">
+              <div class="profile-card">
+                <h3>事件信息</h3>
+                <dl>
+                  <dt class="internal-debug" hidden>event_id</dt><dd class="internal-debug" hidden id="eventId">-</dd>
+                  <dt>告警类型</dt><dd id="eventType">-</dd>
+                  <dt>摄像头</dt><dd id="sourceId">-</dd>
+                  <dt class="internal-debug" hidden>camera_id</dt><dd class="internal-debug" hidden id="cameraId">-</dd>
+                  <dt>录像状态</dt><dd id="rawClipStatus">-</dd>
+                  <dt>证据状态</dt><dd id="clipValidation">-</dd>
+                </dl>
+              </div>
+
+              <div class="profile-card">
+                <h3>识别摘要</h3>
+                <dl>
+                  <dt>标注数量</dt><dd id="annotationLines">-</dd>
+                  <dt class="internal-debug" hidden>person context</dt><dd class="internal-debug" hidden id="personContextObjects">-</dd>
+                  <dt class="internal-debug" hidden>person frames</dt><dd class="internal-debug" hidden id="personContextFrames">-</dd>
+                  <dt class="internal-debug" hidden>person tracks</dt><dd class="internal-debug" hidden id="personContextTracks">-</dd>
+                  <dt>人脸数量</dt><dd id="faceObjects">-</dd>
+                  <dt>命中人脸</dt><dd id="matchedObjects">-</dd>
+                  <dt>未识别人脸</dt><dd id="unknownObjects">-</dd>
+                  <dt class="internal-debug" hidden>colors used</dt><dd class="internal-debug" hidden id="colorsUsed">-</dd>
+                </dl>
+              </div>
+
+              <div class="profile-card internal-debug" hidden>
+                <h3>Annotation</h3>
+                <dl>
+                  <dt>current time</dt><dd id="currentTime">0.000</dd>
+                  <dt>target pts</dt><dd id="targetPts">-</dd>
+                  <dt>matched pts</dt><dd id="matchedPts">-</dd>
+                  <dt>alignment</dt><dd id="alignmentMode">-</dd>
+                  <dt>render policy</dt><dd id="renderPolicy">mode=per_object_hold</dd>
+                  <dt>face policy</dt><dd id="faceOverlayPolicy">sparse_observation</dd>
+                  <dt>annotation source</dt><dd id="annotationSourceStatus">auto</dd>
+                  <dt>annotation file</dt><dd id="annotationFileStatus">-</dd>
+                  <dt>matched face ms</dt><dd id="matchedFaceWindowMs">500</dd>
+                  <dt>person context ms</dt><dd id="personContextWindowMs">1000</dd>
+                  <dt>active objects</dt><dd id="activeObjects">0</dd>
+                  <dt>person_context window</dt><dd id="activePersonContext">0</dd>
+                  <dt>matched_face window</dt><dd id="activeMatchedFaces">0</dd>
+                  <dt>behavior_event window</dt><dd id="activeBehaviorEvents">0</dd>
+                  <dt>first video pts</dt><dd id="firstVideoPts">-</dd>
+                  <dt>source size</dt><dd id="sourceSize">-</dd>
+                </dl>
+              </div>
+
+              <div class="profile-card warnings">
+                <h3>提示</h3>
+                <ul id="warningList"></ul>
+              </div>
+            </section>
+          </section>
+        </main>
+
+        <main id="maintenance-view" class="operator-view maintenance-workspace" hidden>
+          <section class="pane maintenance-summary-pane">
+            <div class="pane-title">
+              <div>
+                <h2>存储维护</h2>
+                <p>容量概览与删除预览</p>
+              </div>
+              <button id="refresh-maintenance" type="button">刷新</button>
+            </div>
+            <div class="maintenance-summary-grid">
+              <div class="profile-card">
+                <h3>媒体空间</h3>
+                <strong id="maintenance-media-free">--</strong>
+                <p id="maintenance-media-used">已用空间 --</p>
+              </div>
+              <div class="profile-card">
+                <h3>证据占用</h3>
+                <strong id="maintenance-evidence-bytes">--</strong>
+                <p id="maintenance-evidence-count">证据 0</p>
+              </div>
+              <div class="profile-card">
+                <h3>人脸图片</h3>
+                <strong id="maintenance-face-bytes">--</strong>
+                <p id="maintenance-face-count">引用 0 / 未引用 0</p>
+              </div>
+              <div class="profile-card">
+                <h3>回收站</h3>
+                <strong id="maintenance-trash-bytes">--</strong>
+                <p id="maintenance-trash-count">对象 0</p>
+              </div>
+            </div>
+            <div id="maintenance-execute-status" class="message-box maintenance-note">
+              Midterm 默认只允许统计和预览，执行删除处于关闭状态。
+            </div>
+          </section>
+
+          <section class="pane maintenance-preview-pane">
+            <div class="pane-title">
+              <div>
+                <h2>证据删除预览</h2>
+                <p>删除前必须生成预览，执行不会重新按筛选条件扫描。</p>
+              </div>
+              <button id="preview-evidence-delete" type="button" class="primary">生成预览</button>
+            </div>
+            <form id="maintenance-evidence-form" class="maintenance-form">
+              <label>事件 ID<input name="event_ids" placeholder="多个 ID 用逗号分隔" /></label>
+              <label>开始时间<input name="time_from" type="datetime-local" /></label>
+              <label>结束时间<input name="time_to" type="datetime-local" /></label>
+              <label>告警分类
+                <select name="event_category">
+                  <option value="">全部</option>
+                  <option value="identity">名单布控</option>
+                  <option value="perimeter">周界入侵</option>
+                  <option value="behavior">行为异常</option>
+                  <option value="crowd">聚集风险</option>
+                </select>
+              </label>
+              <label>摄像头<input name="camera_id" placeholder="camera_id" /></label>
+              <label>删除模式
+                <select name="delete_mode">
+                  <option value="trash">移入回收站</option>
+                  <option value="permanent">永久删除</option>
+                </select>
+              </label>
+              <label class="inline"><input name="allow_stale_pending_tasks" type="checkbox" /> 包含已生成的 pending 任务</label>
+              <input name="max_items" type="hidden" value="1000" />
+            </form>
+
+            <div id="maintenance-preview-result" class="result-card maintenance-preview-result">
+              还没有预览。删除必须先 preview，删除后不会自动重新生成证据。
+            </div>
+            <div class="maintenance-confirm">
+              <label>删除原因<input id="maintenance-delete-reason" placeholder="填写操作原因" /></label>
+              <button id="execute-evidence-delete" type="button" class="danger" disabled>确认删除</button>
+            </div>
+          </section>
+
+          <section class="pane maintenance-face-pane">
+            <div class="pane-title">
+              <div>
+                <h2>人脸清理</h2>
+                <p>人员和图库默认软删除，物理图片只预览未引用文件。</p>
+              </div>
+            </div>
+            <div class="button-group">
+              <button id="preview-people-delete" type="button">预览停用选中人员</button>
+              <button id="preview-gallery-delete" type="button">预览停用图库照片</button>
+              <button id="preview-face-orphans" type="button">预览未引用图片</button>
+            </div>
+            <form id="maintenance-face-form" class="maintenance-form maintenance-face-form">
+              <label>人员 ID<input name="person_ids" placeholder="多个 ID 用逗号分隔" /></label>
+              <label>外部人员编号<input name="external_person_ids" placeholder="多个编号用逗号分隔" /></label>
+              <label>图库 ID<input name="gallery_embedding_ids" placeholder="多个 ID 用逗号分隔" /></label>
+              <label>保留天数<input name="older_than_days" type="number" min="0" value="7" /></label>
+            </form>
+            <div id="maintenance-face-result" class="result-card">
+              人员/图库删除默认软删除；人脸物理图片清理默认任何 DB row 引用都不删。
+            </div>
+            <div class="maintenance-confirm">
+              <label>删除原因<input id="maintenance-face-delete-reason" placeholder="填写操作原因" /></label>
+              <button id="execute-face-delete" type="button" class="danger" disabled>确认删除预览对象</button>
+            </div>
+          </section>
+
+          <section class="pane maintenance-job-pane">
+            <div class="pane-title">
+              <div>
+                <h2>Job 详情</h2>
+                <p>查看冻结候选、执行状态和审计提示。</p>
+              </div>
+              <button id="load-maintenance-job" type="button">查询</button>
+            </div>
+            <label>Job ID<input id="maintenance-job-id" /></label>
+            <div id="maintenance-job-detail" class="result-card">
+              删除后不会自动重新生成证据。已删除媒体不会自动补录，除非后续单独实现恢复或重新生成。
+            </div>
+          </section>
+        </main>
       </div>
-
-      <section class="panel controls">
-        <h2>Overlay Controls</h2>
-        <label>annotation source
-          <select id="annotationSource">
-            <option value="auto" selected>Auto (production sidecar)</option>
-            <option value="sidecar">Sidecar (production)</option>
-            <option value="sidecar_preview">Sidecar Preview (rebased)</option>
-            <option value="legacy">Legacy</option>
-          </select>
-        </label>
-        <label><input id="showPersons" type="checkbox" checked> show person boxes</label>
-        <label><input id="showMatched" type="checkbox" checked> show matched</label>
-        <label><input id="showUnknown" type="checkbox" checked> show unknown</label>
-        <label><input id="showLandmarks" type="checkbox" checked> show landmarks</label>
-        <label><input id="showLabels" type="checkbox" checked> show labels</label>
-        <label>hold ms <input id="holdMs" type="number" min="0" step="50" value="0"></label>
-        <label>time tolerance ms <input id="toleranceMs" type="number" min="0" step="25" value="150"></label>
-      </section>
-
-      <section class="details-grid">
-        <div class="panel">
-          <h2>Event</h2>
-          <dl>
-            <dt>event_id</dt><dd id="eventId">-</dd>
-            <dt>event_type</dt><dd id="eventType">-</dd>
-            <dt>source_id</dt><dd id="sourceId">-</dd>
-            <dt>camera_id</dt><dd id="cameraId">-</dd>
-            <dt>raw_clip_status</dt><dd id="rawClipStatus">-</dd>
-            <dt>clip_validation</dt><dd id="clipValidation">-</dd>
-          </dl>
-        </div>
-
-        <div class="panel">
-          <h2>Annotation</h2>
-          <dl>
-            <dt>current time</dt><dd id="currentTime">0.000</dd>
-            <dt>target pts</dt><dd id="targetPts">-</dd>
-            <dt>matched pts</dt><dd id="matchedPts">-</dd>
-            <dt>alignment</dt><dd id="alignmentMode">-</dd>
-            <dt>render policy</dt><dd id="renderPolicy">mode=per_track_hold</dd>
-            <dt>face policy</dt><dd id="faceOverlayPolicy">sparse_observation</dd>
-            <dt>annotation source</dt><dd id="annotationSourceStatus">auto</dd>
-            <dt>annotation file</dt><dd id="annotationFileStatus">-</dd>
-            <dt>matched face ms</dt><dd id="matchedFaceWindowMs">500</dd>
-            <dt>person context ms</dt><dd id="personContextWindowMs">1000</dd>
-            <dt>active objects</dt><dd id="activeObjects">0</dd>
-            <dt>person_context window</dt><dd id="activePersonContext">0</dd>
-            <dt>matched_face window</dt><dd id="activeMatchedFaces">0</dd>
-            <dt>behavior_event window</dt><dd id="activeBehaviorEvents">0</dd>
-            <dt>first video pts</dt><dd id="firstVideoPts">-</dd>
-            <dt>source size</dt><dd id="sourceSize">-</dd>
-          </dl>
-        </div>
-
-        <div class="panel">
-          <h2>Summary</h2>
-          <dl>
-            <dt>annotation lines</dt><dd id="annotationLines">-</dd>
-            <dt>person context</dt><dd id="personContextObjects">-</dd>
-            <dt>person frames</dt><dd id="personContextFrames">-</dd>
-            <dt>person tracks</dt><dd id="personContextTracks">-</dd>
-            <dt>face objects</dt><dd id="faceObjects">-</dd>
-            <dt>matched objects</dt><dd id="matchedObjects">-</dd>
-            <dt>unknown objects</dt><dd id="unknownObjects">-</dd>
-            <dt>colors used</dt><dd id="colorsUsed">-</dd>
-          </dl>
-        </div>
-
-        <div class="panel warnings">
-          <h2>Warnings</h2>
-          <ul id="warningList"></ul>
-        </div>
-      </section>
-    </section>
-  </main>
-
-  <script src="/static/app.js?v=midterm-render-compat"></script>
-</body>
+    </div>
+    <script src="/static/operator.js?v=storage-maintenance-actions-20260610"></script>
+    <script src="/static/evidence.js?v=storage-maintenance-actions-20260610"></script>
+    <script src="/static/maintenance.js?v=storage-maintenance-actions-20260610"></script>
+  </body>
 </html>

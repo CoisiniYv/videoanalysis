@@ -47,7 +47,7 @@ class EvidencePolicy(BaseModel):
     snapshot_required: bool = True
     clip_required: bool = True
     pre_seconds: int = Field(default=5, ge=0, le=300)
-    post_seconds: int = Field(default=10, ge=0, le=300)
+    post_seconds: int = Field(default=5, ge=0, le=300)
 
 
 class AlgorithmDefinition(BaseModel):
@@ -187,11 +187,18 @@ class AlgorithmRuleResponse(BaseModel):
         )
         if isinstance(evidence_policy, str):
             evidence_policy = json.loads(evidence_policy)
+        effective_policy = {
+            "snapshot_required": config.get("snapshot_required", True),
+            "clip_required": config.get("clip_required", True),
+            "pre_seconds": config.get("pre_seconds", 5),
+            "post_seconds": config.get("post_seconds", 5),
+            **(evidence_policy or {}),
+        }
 
         return cls(
             id=int(row["id"]) if row.get("id") is not None else None,
             rule_id=str(row.get("rule_id") or row.get("id") or ""),
-            camera_id=row["camera_id"],
+            camera_id=str(row["camera_id"]),
             algorithm_id=normalize_algorithm_id(
                 row.get("algorithm_id") or row.get("algorithm_type") or row.get("rule_type", "")
             ),
@@ -217,7 +224,7 @@ class AlgorithmRuleResponse(BaseModel):
             line_id=row.get("line_id") or config.get("line_id"),
             severity=str(row.get("severity") or config.get("severity") or "medium"),
             config=config.get("config", config),
-            evidence_policy=EvidencePolicy(**evidence_policy),
+            evidence_policy=EvidencePolicy(**effective_policy),
             created_at=_iso(row.get("created_at")),
             updated_at=_iso(row.get("updated_at")),
         )
@@ -257,7 +264,7 @@ class EvidenceTask(BaseModel):
     snapshot_required: bool
     clip_required: bool
     pre_seconds: int = Field(default=5, ge=0)
-    post_seconds: int = Field(default=10, ge=0)
+    post_seconds: int = Field(default=5, ge=0)
     status: str = "pending"
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None

@@ -22,7 +22,7 @@ def _policy(snapshot: bool = True, clip: bool = True) -> EvidencePolicy:
         snapshot_required=snapshot,
         clip_required=clip,
         pre_seconds=5,
-        post_seconds=10,
+        post_seconds=5,
     )
 
 

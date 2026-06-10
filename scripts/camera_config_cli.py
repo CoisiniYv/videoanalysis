@@ -629,7 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export-runtime", parents=[api_parent])
     p_export.add_argument(
         "--module-config-output",
-        default="modules/savant_security/config/cameras.generated.yml",
+        default="modules/savant_security/config/cameras.midterm.yml",
     )
     p_export.add_argument(
         "--sources-output",

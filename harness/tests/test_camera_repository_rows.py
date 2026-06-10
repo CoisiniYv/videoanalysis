@@ -1,6 +1,6 @@
 """Repository-level row-shape regression tests for CameraRepository.
 
-The C1 / C1.1 / C1.2 API tests use a FakeCameraRepository — they never
+The camera API tests use a FakeCameraRepository — they never
 exercise the real psycopg cursor → dict_row → fetch shape. That gap let
 ``cameras.py:get_zone_names`` ship with positional ``row[0]`` access
 against dict rows; the real DB then raised ``KeyError: 0`` and turned
@@ -22,10 +22,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 API_DIR = str(Path(__file__).resolve().parents[2] / "services" / "api")
-if API_DIR not in sys.path:
-    sys.path.insert(0, API_DIR)
+if API_DIR in sys.path:
+    sys.path.remove(API_DIR)
+sys.path.insert(0, API_DIR)
 
-# Sibling phase tests may have cached app.* — re-import a fresh tree.
+# Sibling runtime tests may have cached app.* — re-import a fresh tree.
 for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
     sys.modules.pop(_mod, None)
 
@@ -92,7 +93,7 @@ class _FakeConnection:
 def test_get_zone_names_returns_zone_name_column():
     conn = _FakeConnection(rows=[{"zone_name": "perimeter"}])
     repo = CameraRepository(conn)
-    assert repo.get_zone_names("cam_c1_2") == ["perimeter"]
+    assert repo.get_zone_names("cam_midterm") == ["perimeter"]
 
 
 def test_get_zone_names_handles_multiple_rows():
@@ -102,7 +103,7 @@ def test_get_zone_names_handles_multiple_rows():
         {"zone_name": "parking"},
     ])
     repo = CameraRepository(conn)
-    assert repo.get_zone_names("cam_c1_2") == [
+    assert repo.get_zone_names("cam_midterm") == [
         "perimeter", "loading_dock", "parking",
     ]
 
@@ -129,7 +130,7 @@ def test_get_zone_names_does_not_use_positional_access():
     conn = _FakeConnection(rows=rows)
     repo = CameraRepository(conn)
     # Must not raise.
-    assert repo.get_zone_names("cam_c1_2") == ["perimeter"]
+    assert repo.get_zone_names("cam_midterm") == ["perimeter"]
 
 
 def test_get_zone_names_raises_keyerror_only_when_column_missing():
@@ -140,7 +141,7 @@ def test_get_zone_names_raises_keyerror_only_when_column_missing():
     conn = _FakeConnection(rows=[{"wrong_column": "perimeter"}])
     repo = CameraRepository(conn)
     with pytest.raises(KeyError):
-        repo.get_zone_names("cam_c1_2")
+        repo.get_zone_names("cam_midterm")
 
 
 # ===========================================================================
@@ -151,8 +152,8 @@ def test_get_zone_names_raises_keyerror_only_when_column_missing():
 def test_get_zone_names_uses_parameter_binding():
     conn = _FakeConnection(rows=[{"zone_name": "perimeter"}])
     repo = CameraRepository(conn)
-    repo.get_zone_names("cam_c1_2")
+    repo.get_zone_names("cam_midterm")
     assert conn.last_cursor is not None
     query, params = conn.last_cursor.executed[0]
     assert "camera_id = %(id)s" in query
-    assert params == {"id": "cam_c1_2"}
+    assert params == {"id": "cam_midterm"}

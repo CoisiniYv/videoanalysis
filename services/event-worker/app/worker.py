@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -34,6 +35,7 @@ MIDTERM_DEFAULT_EVIDENCE_POLICY = {
 RECORDING_PRIORITY_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
+DEFAULT_RUNTIME_EPOCH_REDIS_KEY = "video_analytics:midterm:runtime_epoch"
 
 
 @dataclass
@@ -164,6 +166,50 @@ def _recording_gate_ts_ms(event: dict) -> int:
     return ts_ms
 
 
+def _current_runtime_epoch_id(redis_client: Redis) -> str:
+    key = os.getenv("RUNTIME_EPOCH_REDIS_KEY", DEFAULT_RUNTIME_EPOCH_REDIS_KEY)
+    try:
+        value = redis_client.get(key)
+    except Exception:
+        logger.exception("runtime epoch redis lookup failed key=%s", key)
+        return ""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = text
+    if isinstance(parsed, dict):
+        return str(parsed.get("runtime_epoch_id") or "")
+    return str(parsed or "")
+
+
+def _apply_runtime_epoch(event: dict, runtime_epoch_id: str) -> None:
+    if not runtime_epoch_id:
+        return
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+        event["payload"] = payload
+    media = payload.get("media")
+    if not isinstance(media, dict):
+        media = {}
+        payload["media"] = media
+    event_epoch = str(
+        event.get("runtime_epoch_id")
+        or payload.get("runtime_epoch_id")
+        or media.get("runtime_epoch_id")
+        or runtime_epoch_id
+    )
+    event["runtime_epoch_id"] = event_epoch
+    payload["runtime_epoch_id"] = event_epoch
+    media["runtime_epoch_id"] = event_epoch
+
+
 def _handle_event(
     event: dict,
     msg_id: str,
@@ -180,6 +226,7 @@ def _handle_event(
     recording_cooldown_seconds: int = 0,
     recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
+    runtime_epoch_id: str = "",
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -190,6 +237,7 @@ def _handle_event(
     """
     _apply_default_evidence_policy(event)
     _apply_recording_window(event, recording_pre_seconds, recording_post_seconds)
+    _apply_runtime_epoch(event, runtime_epoch_id)
     event_id = None
     try:
         event_id = repo.insert_event(event)
@@ -448,9 +496,7 @@ def _apply_recording_window(
     pre_seconds: int,
     post_seconds: int,
 ) -> None:
-    """Apply the configured recording window to clip-required events."""
-    if pre_seconds <= 0 or post_seconds <= 0:
-        return
+    """Fill missing recording-window fields on clip-required events."""
     payload = event.get("payload")
     payload_media = payload.get("media", {}) if isinstance(payload, dict) else {}
     clip_required = bool(
@@ -466,8 +512,6 @@ def _apply_recording_window(
     policy = event.get("evidence_policy")
     if not isinstance(policy, dict):
         policy = {}
-    policy["pre_seconds"] = int(pre_seconds)
-    policy["post_seconds"] = int(post_seconds)
     event["evidence_policy"] = policy
 
     if not isinstance(payload, dict):
@@ -477,8 +521,39 @@ def _apply_recording_window(
     if not isinstance(media, dict):
         media = {}
         payload["media"] = media
-    media["pre_seconds"] = int(pre_seconds)
-    media["post_seconds"] = int(post_seconds)
+
+    def _has_value(value: object) -> bool:
+        return value is not None and str(value).strip() != ""
+
+    def _int_value(value: object) -> int | None:
+        try:
+            return max(int(float(value)), 0)
+        except (TypeError, ValueError):
+            return None
+
+    if not _has_value(policy.get("pre_seconds")):
+        if isinstance(payload_media, dict) and _has_value(payload_media.get("pre_seconds")):
+            media_pre_seconds = _int_value(payload_media["pre_seconds"])
+            if media_pre_seconds is not None:
+                policy["pre_seconds"] = media_pre_seconds
+        elif pre_seconds >= 0:
+            policy["pre_seconds"] = int(pre_seconds)
+    if not _has_value(policy.get("post_seconds")):
+        if isinstance(payload_media, dict) and _has_value(payload_media.get("post_seconds")):
+            media_post_seconds = _int_value(payload_media["post_seconds"])
+            if media_post_seconds is not None:
+                policy["post_seconds"] = media_post_seconds
+        elif post_seconds >= 0:
+            policy["post_seconds"] = int(post_seconds)
+
+    if not _has_value(media.get("pre_seconds")) and _has_value(policy.get("pre_seconds")):
+        policy_pre_seconds = _int_value(policy["pre_seconds"])
+        if policy_pre_seconds is not None:
+            media["pre_seconds"] = policy_pre_seconds
+    if not _has_value(media.get("post_seconds")) and _has_value(policy.get("post_seconds")):
+        policy_post_seconds = _int_value(policy["post_seconds"])
+        if policy_post_seconds is not None:
+            media["post_seconds"] = policy_post_seconds
 
 
 def _process_batch(
@@ -496,6 +571,7 @@ def _process_batch(
     recording_cooldown_seconds: int = 0,
     recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
+    runtime_epoch_id: str = "",
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -520,6 +596,7 @@ def _process_batch(
             recording_cooldown_seconds=recording_cooldown_seconds,
             recording_pre_seconds=recording_pre_seconds,
             recording_post_seconds=recording_post_seconds,
+            runtime_epoch_id=runtime_epoch_id,
         )
         if new:
             inserted += 1
@@ -713,6 +790,7 @@ def run_worker(
             # 1. Process pending messages (recovery)
             pending = consumer.read_pending(count=cfg.batch_size)
             if pending:
+                runtime_epoch_id = _current_runtime_epoch_id(redis_client)
                 ins, dup = _process_batch(
                     pending,
                     repo,
@@ -727,6 +805,7 @@ def run_worker(
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
                     recording_pre_seconds=cfg.recording_pre_seconds,
                     recording_post_seconds=cfg.recording_post_seconds,
+                    runtime_epoch_id=runtime_epoch_id,
                 )
                 total_inserted += ins
                 total_duplicates += dup
@@ -740,6 +819,7 @@ def run_worker(
                 count=cfg.batch_size, block_ms=cfg.poll_timeout_ms
             )
             if new_msgs:
+                runtime_epoch_id = _current_runtime_epoch_id(redis_client)
                 ins, dup = _process_batch(
                     new_msgs,
                     repo,
@@ -754,6 +834,7 @@ def run_worker(
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
                     recording_pre_seconds=cfg.recording_pre_seconds,
                     recording_post_seconds=cfg.recording_post_seconds,
+                    runtime_epoch_id=runtime_epoch_id,
                 )
                 total_inserted += ins
                 total_duplicates += dup

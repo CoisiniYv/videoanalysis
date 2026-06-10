@@ -4,7 +4,7 @@ Queries ``match_results`` with ``search_mode = 'registered_person_history'``
 joined with ``persons`` and ``face_observations`` to produce trajectory
 summaries for a registered person.
 
-F3.6: read-side harness only.  Does not write to any table.
+midterm: read-side harness only.  Does not write to any table.
 """
 
 from __future__ import annotations

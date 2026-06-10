@@ -1,4 +1,4 @@
-"""FaceReidGatePyFunc — F2.2 quality gate + throttle before Redis.
+"""FaceReidGatePyFunc — quality gate + throttle before Redis.
 
 Runs after AdaFace embedding. Evaluates face quality and per-track
 throttle to decide if the embedding is eligible for downstream Redis

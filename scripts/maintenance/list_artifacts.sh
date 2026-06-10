@@ -3,20 +3,20 @@
 #
 # Usage:
 #   bash scripts/maintenance/list_artifacts.sh
-#   bash scripts/maintenance/list_artifacts.sh --phase d1-rtsp-15min
+#   bash scripts/maintenance/list_artifacts.sh --category midterm
 #   bash scripts/maintenance/list_artifacts.sh --json
 
 set -euo pipefail
 
 ARTIFACT_ROOT="${VIDEO_ANALYTICS_ARTIFACT_ROOT:-/data/video-analytics/artifacts}"
 RUNS_DIR="${ARTIFACT_ROOT}/runs"
-PHASE_FILTER=""
+CATEGORY_FILTER=""
 JSON_OUTPUT="no"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --phase)
-      PHASE_FILTER="$2"
+    --category)
+      CATEGORY_FILTER="$2"
       shift 2
       ;;
     --json)
@@ -35,12 +35,12 @@ if [[ ! -d "$RUNS_DIR" ]]; then
   exit 0
 fi
 
-list_phase() {
-  local phase_dir="$1"
-  local phase_name
-  phase_name="$(basename "$phase_dir")"
+list_category() {
+  local category_dir="$1"
+  local category_name
+  category_name="$(basename "$category_dir")"
 
-  for run_dir in "$phase_dir"/*/; do
+  for run_dir in "$category_dir"/*/; do
     [[ -d "$run_dir" ]] || continue
     local run_id
     run_id="$(basename "$run_dir")"
@@ -65,11 +65,11 @@ except Exception:
     mtime_human="$(date -d "@$mtime" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo 'unknown')"
 
     if [[ "$JSON_OUTPUT" == "yes" ]]; then
-      printf '{"phase":"%s","run_id":"%s","files":%s,"size":"%s","created_at":"%s","mtime":"%s","path":"%s"}\n' \
-        "$phase_name" "$run_id" "$file_count" "$total_size" "$created_at" "$mtime_human" "$run_dir"
+      printf '{"category":"%s","run_id":"%s","files":%s,"size":"%s","created_at":"%s","mtime":"%s","path":"%s"}\n' \
+        "$category_name" "$run_id" "$file_count" "$total_size" "$created_at" "$mtime_human" "$run_dir"
     else
       printf "%-25s %-50s %5s files  %8s  %s  %s\n" \
-        "$phase_name" "$run_id" "$file_count" "$total_size" "$mtime_human" "$created_at"
+        "$category_name" "$run_id" "$file_count" "$total_size" "$mtime_human" "$created_at"
     fi
   done
 }
@@ -77,10 +77,10 @@ except Exception:
 if [[ "$JSON_OUTPUT" == "yes" ]]; then
   echo "["
   first="yes"
-  for phase_dir in "$RUNS_DIR"/*/; do
-    [[ -d "$phase_dir" ]] || continue
-    phase_name="$(basename "$phase_dir")"
-    [[ -n "$PHASE_FILTER" && "$phase_name" != "$PHASE_FILTER" ]] && continue
+  for category_dir in "$RUNS_DIR"/*/; do
+    [[ -d "$category_dir" ]] || continue
+    category_name="$(basename "$category_dir")"
+    [[ -n "$CATEGORY_FILTER" && "$category_name" != "$CATEGORY_FILTER" ]] && continue
     while IFS= read -r line; do
       if [[ "$first" == "yes" ]]; then
         first="no"
@@ -88,18 +88,18 @@ if [[ "$JSON_OUTPUT" == "yes" ]]; then
         echo ","
       fi
       printf "  %s" "$line"
-    done < <(list_phase "$phase_dir")
+    done < <(list_category "$category_dir")
   done
   echo ""
   echo "]"
 else
   printf "%-25s %-50s %10s  %8s  %19s  %s\n" \
-    "PHASE" "RUN_ID" "FILES" "SIZE" "MODIFIED" "CREATED_AT"
+    "CATEGORY" "RUN_ID" "FILES" "SIZE" "MODIFIED" "CREATED_AT"
   printf "%s\n" "$(printf '%.0s-' {1..130})"
-  for phase_dir in "$RUNS_DIR"/*/; do
-    [[ -d "$phase_dir" ]] || continue
-    phase_name="$(basename "$phase_dir")"
-    [[ -n "$PHASE_FILTER" && "$phase_name" != "$PHASE_FILTER" ]] && continue
-    list_phase "$phase_dir"
+  for category_dir in "$RUNS_DIR"/*/; do
+    [[ -d "$category_dir" ]] || continue
+    category_name="$(basename "$category_dir")"
+    [[ -n "$CATEGORY_FILTER" && "$category_name" != "$CATEGORY_FILTER" ]] && continue
+    list_category "$category_dir"
   done
 fi

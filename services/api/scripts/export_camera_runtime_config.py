@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export C1G.2 DB camera configuration into generated runtime config files."""
+"""Export midterm DB camera configuration into generated runtime config files."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     response = {
-        "result": "DRY_RUN_OK" if result.dry_run else "PASS_C1G2_DB_CONFIG_EXPORT",
+        "result": "DRY_RUN_OK" if result.dry_run else "PASS_MIDTERM_DB_CONFIG_EXPORT",
         "dry_run": result.dry_run,
         "paths": result.paths_dict(),
         "camera_count": result.export_summary["camera_count"],

@@ -4,7 +4,7 @@
 Usage:
     python scripts/config/export_cameras_yml.py \\
       --api-base-url http://localhost:8001 \\
-      --output modules/savant_security/config/cameras.generated.yml
+      --output modules/savant_security/config/cameras.midterm.yml
 
 The script GETs ``/api/v1/cameras/config/export`` from the API, validates
 the response with ``yaml.safe_load``, creates the output's parent
@@ -30,7 +30,7 @@ import yaml
 
 
 DEFAULT_API_BASE_URL = "http://localhost:8001"
-DEFAULT_OUTPUT = "modules/savant_security/config/cameras.generated.yml"
+DEFAULT_OUTPUT = "modules/savant_security/config/cameras.midterm.yml"
 EXPORT_PATH = "/api/v1/cameras/config/export"
 HTTP_TIMEOUT_SECONDS = 30
 

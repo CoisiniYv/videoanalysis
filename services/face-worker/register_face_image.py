@@ -28,7 +28,7 @@ def _parse_args() -> argparse.Namespace:
         "--source-type",
         default="manual_upload",
         choices=["manual_upload"],
-        help="Gallery source_type. Only manual_upload is supported in F4.2.",
+        help="Gallery source_type. Only manual_upload is supported.",
     )
     parser.add_argument(
         "--is-primary",

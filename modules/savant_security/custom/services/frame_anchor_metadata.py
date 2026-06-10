@@ -1,4 +1,4 @@
-"""Runtime frame metadata probe for R3.3A0.
+"""Runtime frame metadata probe for midterm frame anchors.
 
 The probe is environment-gated and side-effect free for event semantics. It
 only introspects the actual frame object visible to the pyfunc and writes a
@@ -15,9 +15,9 @@ from typing import Any
 
 
 TRUTHY = {"1", "true", "yes", "on"}
-DEFAULT_OUTPUT_ROOT = "/data/video-analytics/media/debug/r3_3a0_frame_uuid_probe"
+DEFAULT_OUTPUT_ROOT = "/data/video-analytics/media/debug/midterm_frame_uuid_probe"
 DEFAULT_MAX_FRAMES = 20
-DEFAULT_TRACE_OUTPUT_ROOT = "/data/video-analytics/media/debug/r3_3a2a_frame_anchor_trace"
+DEFAULT_TRACE_OUTPUT_ROOT = "/data/video-analytics/media/debug/midterm_frame_anchor_trace"
 DEFAULT_TRACE_MAX_FRAMES = 300
 
 PROBED_ATTRS = (
@@ -153,8 +153,8 @@ def extract_frame_anchor_metadata(frame_meta: Any) -> dict[str, Any]:
 
     This helper is intentionally small and non-diagnostic. It never calls
     ``dir()`` or ``repr()`` and never raises; missing fields are returned as
-    ``None``. Prefer the nested Savant ``VideoFrame`` because R3.3A0 proved it
-    exposes ``uuid`` in the current runtime.
+    ``None``. Prefer the nested Savant ``VideoFrame`` because it exposes
+    ``uuid`` in the current runtime.
     """
     anchor = {
         "frame_uuid": None,
@@ -286,7 +286,7 @@ def build_frame_anchor_trace_record(
 ) -> dict[str, Any]:
     """Build a compact per-frame anchor trace record.
 
-    This is debug-only support for R3.3A2a source-frame identity checks. It
+    This is debug-only support for source-frame identity checks. It
     records the same production-safe anchor fields that events carry, plus the
     event timestamp candidate used by behavior rules. It does not inspect image
     pixels and does not change event semantics.
@@ -331,7 +331,7 @@ def find_unique_frame_anchor_trace_match(
 
 
 class FrameAnchorTraceWriter:
-    """Environment-gated JSONL writer for R3.3A2a frame identity checks."""
+    """Environment-gated JSONL writer for frame identity checks."""
 
     def __init__(
         self,
@@ -341,19 +341,19 @@ class FrameAnchorTraceWriter:
         max_frames: int | None = None,
     ) -> None:
         self.enabled = (
-            env_flag("R3_3A2A_FRAME_ANCHOR_TRACE_ENABLED")
+            env_flag("MIDTERM_FRAME_ANCHOR_TRACE_ENABLED")
             if enabled is None
             else bool(enabled)
         )
         self.output_root = Path(
             output_root
-            or os.getenv("R3_3A2A_TRACE_OUTPUT_ROOT")
+            or os.getenv("MIDTERM_TRACE_OUTPUT_ROOT")
             or DEFAULT_TRACE_OUTPUT_ROOT
         )
         self.max_frames = int(
             max_frames
             if max_frames is not None
-            else os.getenv("R3_3A2A_TRACE_MAX_FRAMES", str(DEFAULT_TRACE_MAX_FRAMES))
+            else os.getenv("MIDTERM_TRACE_MAX_FRAMES", str(DEFAULT_TRACE_MAX_FRAMES))
         )
         self._counts: dict[str, int] = {}
 
@@ -396,7 +396,7 @@ class FrameAnchorTraceWriter:
 
         if self._counts[source_id] <= 3:
             print(
-                "stage=r3_3a2a_frame_anchor_trace "
+                "stage=midterm_frame_anchor_trace "
                 f"source_id={source_id} "
                 f"frame_num={record.get('frame_num')} "
                 f"frame_uuid={record.get('frame_uuid')} "
@@ -481,19 +481,19 @@ class FrameUuidRuntimeProbe:
         max_frames: int | None = None,
     ) -> None:
         self.enabled = (
-            env_flag("R3_3A0_FRAME_UUID_PROBE_ENABLED")
+            env_flag("MIDTERM_FRAME_UUID_PROBE_ENABLED")
             if enabled is None
             else bool(enabled)
         )
         self.output_root = Path(
             output_root
-            or os.getenv("R3_3A0_PROBE_OUTPUT_ROOT")
+            or os.getenv("MIDTERM_PROBE_OUTPUT_ROOT")
             or DEFAULT_OUTPUT_ROOT
         )
         self.max_frames = int(
             max_frames
             if max_frames is not None
-            else os.getenv("R3_3A0_PROBE_MAX_FRAMES", str(DEFAULT_MAX_FRAMES))
+            else os.getenv("MIDTERM_PROBE_MAX_FRAMES", str(DEFAULT_MAX_FRAMES))
         )
         self._counts: dict[str, int] = {}
 
@@ -574,7 +574,7 @@ class FrameUuidRuntimeProbe:
             sample["probe_write_error"] = f"{type(exc).__name__}: {_safe_str(exc, limit=240)}"
 
         print(
-            "stage=r3_3a0_frame_uuid_probe "
+            "stage=midterm_frame_uuid_probe "
             f"source_id={source_id} "
             f"frame_num={sample.get('frame_num')} "
             f"frame_object_type={sample.get('frame_object_type')} "

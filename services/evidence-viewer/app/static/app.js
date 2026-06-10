@@ -14,6 +14,7 @@ const ROLE_RENDER_WINDOW_MS = {
   unknown_face: 500,
   default: 500
 };
+const OVERLAY_DEDUP_IOU_THRESHOLD = 0.75;
 
 const state = {
   bundles: [],
@@ -84,6 +85,57 @@ function annotationSourceLabel(source) {
   return labels[source] || source || "unknown";
 }
 
+function eventTypeLabel(value) {
+  const labels = {
+    watchlist_hit: "名单命中",
+    intrusion: "入侵告警",
+    loitering: "徘徊告警",
+    crowd_gathering: "聚集告警",
+    fall: "跌倒告警",
+    running: "奔跑告警",
+    wall_climb_suspicious: "翻越告警"
+  };
+  return labels[value] || value || "-";
+}
+
+function clipStatusLabel(value) {
+  const labels = {
+    ready: "可查看",
+    generated_unverified: "待复核",
+    generated_corrupt: "录像需复核",
+    failed: "生成失败",
+    pending: "生成中",
+    not_implemented: "未生成"
+  };
+  return labels[value] || value || "-";
+}
+
+function evidenceStatusLabel(value) {
+  const labels = {
+    verified: "已验证",
+    unverified: "待复核",
+    ready: "可查看"
+  };
+  return labels[value] || value || "-";
+}
+
+function warningLabel(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  if (text.includes("health_check_failed")) return "证据服务连接异常，请稍后刷新。";
+  if (text.includes("bundle_load_failed")) return "证据列表加载失败，请稍后刷新。";
+  if (text.includes("raw_clip_missing")) return "该事件缺少可播放录像。";
+  if (text.includes("missing:")) return "部分证据文件缺失，结果可能不完整。";
+  if (text.includes("invalid_json") || text.includes("invalid_jsonl")) return "证据数据格式异常，结果需复核。";
+  if (text.includes("production_sidecar") || text.includes("legacy") || text.includes("fallback")) {
+    return "画面标注数据需复核。";
+  }
+  if (text.includes("bbox") || text.includes("frame_pts") || text.includes("annotation")) {
+    return "部分标注无法准确显示。";
+  }
+  return "证据数据需复核。";
+}
+
 function annotationSourceKind(payload = {}) {
   if (payload.annotation_source_kind) {
     return payload.annotation_source_kind;
@@ -149,9 +201,9 @@ function bundleQueryString() {
 async function loadHealth() {
   try {
     const health = await fetchJson("/health");
-    dom.healthStatus.textContent = `health: ${health.status}`;
+    dom.healthStatus.textContent = health.status === "ok" ? "服务正常" : "服务需检查";
   } catch (err) {
-    dom.healthStatus.textContent = "health: degraded";
+    dom.healthStatus.textContent = "服务需检查";
     addWarning(`health_check_failed:${err.message}`);
   }
 }
@@ -159,7 +211,7 @@ async function loadHealth() {
 async function loadBundles() {
   const data = await fetchJson(`/api/bundles?${bundleQueryString()}`);
   state.bundles = Array.isArray(data.bundles) ? data.bundles : [];
-  dom.bundleCount.textContent = `bundles: ${state.bundles.length}`;
+  dom.bundleCount.textContent = `证据 ${state.bundles.length}`;
   renderBundleList();
   if (!state.selectedEventId && state.bundles.length) {
     await selectBundle(state.bundles[0].event_id);
@@ -171,7 +223,7 @@ function renderBundleList() {
   if (!state.bundles.length) {
     const empty = document.createElement("div");
     empty.className = "bundle-sub";
-    empty.textContent = "No evidence bundles found.";
+    empty.textContent = "未找到证据。";
     dom.bundleList.appendChild(empty);
     return;
   }
@@ -184,15 +236,14 @@ function renderBundleList() {
     }
     const main = document.createElement("span");
     main.className = "bundle-main";
-    main.textContent = bundle.event_id || "unknown_event";
+    main.textContent = eventTypeLabel(bundle.event_type) || "事件";
     const sub = document.createElement("span");
     sub.className = "bundle-sub";
     sub.textContent = [
-      bundle.event_type || "event",
-      bundle.source_id || "source",
-      bundle.clip_status || "clip",
-      `ann ${bundle.default_annotation_source || "none"}`,
-      `faces ${bundle.matched_objects || 0}/${bundle.unknown_objects || 0}`
+      bundle.source_id || bundle.camera_id || "未知摄像头",
+      clipStatusLabel(bundle.clip_status),
+      evidenceStatusLabel(bundle.visual_evidence_status),
+      `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
     ].join(" | ");
     button.append(main, sub);
     button.addEventListener("click", () => selectBundle(bundle.event_id));
@@ -311,7 +362,7 @@ function annotationTimeSeconds(annotation, firstVideoFramePts, frameDurationMs =
   if (timeOffsetMs !== null) {
     return {
       timeSec: timeOffsetMs / 1000,
-      mode: "time_offset_ms"
+      mode: "time_offset_ms_fallback"
     };
   }
   const clipFrameIndex = numberOrNull(annotation.clip_frame_index);
@@ -473,15 +524,14 @@ function labelForObject(obj, line) {
     if (label.text) return String(label.text);
     const action = obj.action || {};
     const eventType = String(action.event_type || "Intrusion");
-    if (eventType === "intrusion") return "Intrusion";
-    return eventType.replace(/_/g, " ");
+    return eventTypeLabel(eventType);
   }
   if (isPersonContextObject(obj)) {
     const trackId = obj.track_id || "";
     const detection = obj.detection || {};
     const confidence = Number(detection.confidence);
     const confidenceText = Number.isFinite(confidence) ? confidence.toFixed(2) : "";
-    return ["Person", trackId ? `track ${trackId}` : "", confidenceText ? `conf ${confidenceText}` : ""]
+    return ["人员", trackId ? `轨迹 ${trackId}` : "", confidenceText ? `置信度 ${confidenceText}` : ""]
       .filter(Boolean)
       .join(" | ");
   }
@@ -490,14 +540,14 @@ function labelForObject(obj, line) {
   const trackId = obj.track_id || "";
   const timestamp = line.timestamp_ms || "";
   if (!isMatchedObject(obj)) {
-    return ["Unknown face", trackId ? `track ${trackId}` : "", timestamp ? `ts ${timestamp}` : ""]
+    return ["未知人脸", trackId ? `轨迹 ${trackId}` : "", timestamp ? `时间 ${timestamp}` : ""]
       .filter(Boolean)
       .join(" | ");
   }
-  const name = label.display_name || identity.display_name || label.external_person_id || identity.external_person_id || "Matched face";
+  const name = label.display_name || identity.display_name || label.external_person_id || identity.external_person_id || "命中人脸";
   const similarity = Number(label.similarity ?? identity.similarity);
   const similarityText = Number.isFinite(similarity) ? similarity.toFixed(3) : "n/a";
-  return [`${name} ${similarityText}`, trackId ? `track ${trackId}` : "", timestamp ? `ts ${timestamp}` : ""]
+  return [`${name} ${similarityText}`, trackId ? `轨迹 ${trackId}` : "", timestamp ? `时间 ${timestamp}` : ""]
     .filter(Boolean)
     .join(" | ");
 }
@@ -570,7 +620,7 @@ function objectsForLine(line) {
     (!line.record_type && typeof line.object_type === "string" && line.bbox);
   if (isTopLevelObject) {
     const obj = {};
-    for (const key of ["object_type", "object_id", "annotation_role", "track_id", "bbox", "identity", "label", "action", "style", "landmarks", "pose", "detection", "gate"]) {
+    for (const key of ["object_type", "object_id", "annotation_role", "track_id", "source_observation_id", "original_object_index", "bbox", "identity", "label", "action", "style", "landmarks", "pose", "detection", "gate"]) {
       if (line[key] !== undefined) obj[key] = line[key];
     }
     if (Object.keys(obj).length > 0) {
@@ -588,6 +638,10 @@ function linesAtOverlayTime(overlayTimeSec) {
 
 function lineRole(line) {
   const obj = objectsForLine(line)[0];
+  return objectRole(obj);
+}
+
+function objectRole(obj) {
   if (!obj) return "default";
   if (isBehaviorEventObject(obj)) return "behavior_event";
   if (isPersonContextObject(obj)) return "person_context";
@@ -595,53 +649,155 @@ function lineRole(line) {
   return "unknown_face";
 }
 
-function lineTrackKey(line) {
-  const obj = objectsForLine(line)[0] || {};
+function validTrackId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value).trim();
+  if (!text || text === "0" || text.toLowerCase() === "none" || text.toLowerCase() === "no_track") {
+    return null;
+  }
+  return text;
+}
+
+function parseSourceObservationId(value) {
+  if (value === null || value === undefined) return null;
+  const parts = String(value).split(":");
+  if (parts.length < 4) return null;
+  return {
+    objectType: parts[0] || "",
+    sourceId: parts[1] || "",
+    trackPart: parts[2] || "",
+    timestampMs: parts[3] || ""
+  };
+}
+
+function objectTrackKey(obj, line, objectIndex) {
   const type = obj.object_type || line.object_type || "obj";
-  const id =
-    obj.track_id ?? line.track_id ?? obj.object_id ?? line.object_id ?? line._index;
-  return `${type}:${id}`;
+  const trackId = validTrackId(obj.track_id ?? line.track_id);
+  if (trackId) return `${type}:track:${trackId}`;
+
+  const sourceObservationId = obj.source_observation_id ?? line.source_observation_id;
+  const parsed = parseSourceObservationId(sourceObservationId);
+  const observationTrack = parsed ? validTrackId(parsed.trackPart) : null;
+  if (observationTrack) return `${type}:obs_track:${parsed.sourceId}:${observationTrack}`;
+  if (parsed && parsed.trackPart === "no_track") {
+    const stableIndex = obj.original_object_index ?? objectIndex ?? 0;
+    return `${type}:no_track:${parsed.sourceId}:${stableIndex}`;
+  }
+  if (sourceObservationId) return `${type}:source_observation:${sourceObservationId}`;
+
+  const objectId = obj.object_id ?? line.object_id;
+  const parsedObjectId = parseSourceObservationId(String(objectId || "").replace(/^face:/, ""));
+  const objectTrack = parsedObjectId ? validTrackId(parsedObjectId.trackPart) : null;
+  if (objectTrack) return `${type}:object_track:${parsedObjectId.sourceId}:${objectTrack}`;
+
+  const sourceId = line.source_id || state.manifest?.metadata?.event?.source_id || "source";
+  return `${type}:untracked:${sourceId}:${objectIndex ?? 0}`;
+}
+
+function bboxArea(rect) {
+  return Math.max(0, rect.x2 - rect.x1) * Math.max(0, rect.y2 - rect.y1);
+}
+
+function bboxIou(a, b) {
+  if (!a || !b) return 0;
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  const intersection = bboxArea({ x1, y1, x2, y2 });
+  if (intersection <= 0) return 0;
+  const union = bboxArea(a) + bboxArea(b) - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function betterOverlayItem(candidate, existing, currentTime) {
+  const candidateMatched = isMatchedObject(candidate.obj) ? 1 : 0;
+  const existingMatched = isMatchedObject(existing.obj) ? 1 : 0;
+  if (candidateMatched !== existingMatched) return candidateMatched > existingMatched;
+
+  const candidateTrack = validTrackId(candidate.obj?.track_id ?? candidate.line?.track_id) ? 1 : 0;
+  const existingTrack = validTrackId(existing.obj?.track_id ?? existing.line?.track_id) ? 1 : 0;
+  if (candidateTrack !== existingTrack) return candidateTrack > existingTrack;
+
+  const candidateDelta = Math.abs((candidate.line?._overlayTimeSec ?? 0) - currentTime);
+  const existingDelta = Math.abs((existing.line?._overlayTimeSec ?? 0) - currentTime);
+  return candidateDelta < existingDelta;
+}
+
+function dedupeOverlayItems(items, sourceWidth, sourceHeight, currentTime) {
+  const kept = [];
+  for (const item of items || []) {
+    const role = objectRole(item.obj);
+    if (role !== "matched_face" && role !== "unknown_face") {
+      kept.push(item);
+      continue;
+    }
+    const bbox = normalizeBbox(item.obj?.bbox, sourceWidth, sourceHeight);
+    if (!bbox) continue;
+    const candidate = { ...item, _dedupeBbox: bbox };
+    let duplicateIndex = -1;
+    for (let index = 0; index < kept.length; index += 1) {
+      const existing = kept[index];
+      const existingRole = objectRole(existing.obj);
+      if (existingRole !== "matched_face" && existingRole !== "unknown_face") continue;
+      if (bboxIou(candidate._dedupeBbox, existing._dedupeBbox) >= OVERLAY_DEDUP_IOU_THRESHOLD) {
+        duplicateIndex = index;
+        break;
+      }
+    }
+    if (duplicateIndex < 0) {
+      kept.push(candidate);
+    } else if (betterOverlayItem(candidate, kept[duplicateIndex], currentTime)) {
+      kept[duplicateIndex] = candidate;
+    }
+  }
+  return kept;
 }
 
 function findActiveAnnotations(currentTime) {
   if (!state.preparedAnnotations.length) {
-    return { line: null, lines: [], targetMs: Math.round(currentTime * 1000), mode: "none", matchedMs: null };
+    return { line: null, lines: [], items: [], targetMs: Math.round(currentTime * 1000), mode: "none", matchedMs: null };
   }
   const userToleranceMs = Math.max(0, Number(dom.toleranceMs.value || 0));
   const userHoldMs = Math.max(0, Number(dom.holdMs.value || 0));
   const targetMs = Math.round(currentTime * 1000);
-  const byTrack = new Map();
+  const byObject = new Map();
 
   for (const line of state.preparedAnnotations) {
     if (line._overlayTimeSec === null || line._overlayTimeSec === undefined) continue;
-    const role = lineRole(line);
-    const baseWindowMs = ROLE_RENDER_WINDOW_MS[role] || ROLE_RENDER_WINDOW_MS.default;
-    const holdMs = baseWindowMs + userHoldMs;
-    const aheadMs = baseWindowMs * 0.5 + userToleranceMs;
-    const dtMs = (currentTime - line._overlayTimeSec) * 1000;
-    if (dtMs < -aheadMs || dtMs > holdMs) continue;
-    const key = lineTrackKey(line);
-    const previous = byTrack.get(key);
-    if (
-      !previous ||
-      Math.abs(line._overlayTimeSec - currentTime) <
-        Math.abs(previous._overlayTimeSec - currentTime)
-    ) {
-      byTrack.set(key, line);
+    for (const [objectIndex, obj] of objectsForLine(line).entries()) {
+      const role = objectRole(obj);
+      const baseWindowMs = ROLE_RENDER_WINDOW_MS[role] || ROLE_RENDER_WINDOW_MS.default;
+      const holdMs = baseWindowMs + userHoldMs;
+      const aheadMs = baseWindowMs * 0.5 + userToleranceMs;
+      const dtMs = (currentTime - line._overlayTimeSec) * 1000;
+      if (dtMs < -aheadMs || dtMs > holdMs) continue;
+      const key = objectTrackKey(obj, line, objectIndex);
+      const candidate = { obj, line, key };
+      const previous = byObject.get(key);
+      if (
+        !previous ||
+        Math.abs(line._overlayTimeSec - currentTime) <
+          Math.abs(previous.line._overlayTimeSec - currentTime)
+      ) {
+        byObject.set(key, candidate);
+      }
     }
   }
 
-  const lines = [...byTrack.values()].sort(
-    (a, b) => a._overlayTimeSec - b._overlayTimeSec
+  const items = [...byObject.values()].sort(
+    (a, b) => a.line._overlayTimeSec - b.line._overlayTimeSec
   );
+  const lines = items.map(item => item.line);
   if (!lines.length) {
-    return { line: null, lines: [], targetMs, mode: "none", matchedMs: null };
+    return { line: null, lines: [], items: [], targetMs, mode: "none", matchedMs: null };
   }
   return {
     line: lines[0],
     lines,
+    items,
     targetMs,
-    mode: "per_track_hold",
+    mode: "per_object_hold",
     matchedMs: Math.round(lines[0]._overlayTimeSec * 1000)
   };
 }
@@ -700,12 +856,12 @@ function drawOverlay() {
   const displayHeight = dom.canvas.clientHeight;
   ctx.clearRect(0, 0, displayWidth, displayHeight);
 
-  const active = findActiveAnnotations(dom.video.currentTime);
-  const overlayItems = active.lines.flatMap(line => (
-    objectsForLine(line).map(obj => ({ obj, line }))
-  )).filter(item => objectVisible(item.obj));
+  const currentTime = dom.video.currentTime;
+  const active = findActiveAnnotations(currentTime);
   const sourceWidth = dom.video.videoWidth || state.sourceWidth || DEFAULT_SOURCE_WIDTH;
   const sourceHeight = dom.video.videoHeight || state.sourceHeight || DEFAULT_SOURCE_HEIGHT;
+  const visibleItems = (active.items || []).filter(item => objectVisible(item.obj));
+  const overlayItems = dedupeOverlayItems(visibleItems, sourceWidth, sourceHeight, currentTime);
 
   // Use uniform scale to handle object-fit: contain letterboxing.
   // The display rect has the video's intrinsic aspect ratio, but we
@@ -741,26 +897,16 @@ function setText(id, value) {
   element.textContent = value === undefined || value === null || value === "" ? "-" : String(value);
 }
 
-function activeRoleCounts(lines) {
+function activeRoleCounts(items) {
   const counts = {
     person_context: 0,
     matched_face: 0,
     behavior_event: 0
   };
-  for (const line of lines || []) {
-    const objects = objectsForLine(line);
-    if (objects.length) {
-      for (const obj of objects) {
-        const role = lineRole({ ...line, ...obj });
-        if (counts[role] !== undefined) {
-          counts[role] += 1;
-        }
-      }
-    } else {
-      const role = lineRole(line);
-      if (counts[role] !== undefined) {
-        counts[role] += 1;
-      }
+  for (const item of items || []) {
+    const role = objectRole(item.obj);
+    if (counts[role] !== undefined) {
+      counts[role] += 1;
     }
   }
   return counts;
@@ -778,11 +924,11 @@ function renderDetails() {
   const corrupt = clipStatus === "generated_corrupt" || decodeWarnings > 0;
 
   setText("eventId", event.event_id || state.selectedEventId);
-  setText("eventType", event.event_type || summary.event_type);
+  setText("eventType", eventTypeLabel(event.event_type || summary.event_type));
   setText("sourceId", event.source_id || summary.source_id);
   setText("cameraId", event.camera_id || summary.camera_id);
-  setText("rawClipStatus", clipStatus);
-  setText("clipValidation", corrupt ? `Evidence generated, source decode warnings observed (${decodeWarnings})` : "ok");
+  setText("rawClipStatus", clipStatusLabel(clipStatus));
+  setText("clipValidation", corrupt ? `录像已生成，画面质量需复核` : "已验证");
   setText("firstVideoPts", state.firstVideoFramePts);
   setText("sourceSize", `${state.sourceWidth}x${state.sourceHeight}`);
   setText("annotationLines", summary.annotation_lines ?? state.annotations.length);
@@ -796,18 +942,18 @@ function renderDetails() {
 
   dom.clipWarning.hidden = !corrupt;
   dom.clipWarning.textContent = corrupt
-    ? "Evidence generated, source decode warnings observed"
+    ? "录像需复核"
     : "";
 }
 
 function updateDebug(active, objectCount) {
-  const counts = activeRoleCounts(active?.lines || []);
+  const counts = activeRoleCounts(active?.items || []);
   setText("currentTime", dom.video.currentTime.toFixed(3));
   setText("targetPts", active?.targetMs !== null && active?.targetMs !== undefined ? `${active.targetMs} ms` : "-");
   setText("matchedPts", active?.matchedMs !== null && active?.matchedMs !== undefined ? `${active.matchedMs} ms` : "-");
   setText("alignmentMode", active?.mode || "-");
   setText("activeObjects", objectCount);
-  setText("renderPolicy", "mode=per_track_hold");
+  setText("renderPolicy", "mode=per_object_hold");
   setText("faceOverlayPolicy", FACE_OVERLAY_POLICY);
   const annotationPayload = state.annotationPayload || {};
   setText(
@@ -833,11 +979,12 @@ function renderWarnings() {
   const warnings = Array.from(state.warnings).sort();
   if (!warnings.length) {
     const item = document.createElement("li");
-    item.textContent = "none";
+    item.textContent = "暂无提示";
     dom.warningList.appendChild(item);
     return;
   }
-  for (const warning of warnings) {
+  const visibleWarnings = [...new Set(warnings.map(warningLabel).filter(Boolean))];
+  for (const warning of visibleWarnings) {
     const item = document.createElement("li");
     item.textContent = warning;
     dom.warningList.appendChild(item);

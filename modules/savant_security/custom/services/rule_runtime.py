@@ -35,6 +35,16 @@ from custom.services.algorithm_activation import (
 from custom.services.cooldown import CooldownTracker
 
 
+def _bool_config(value, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 @dataclass
 class SourceRuntime:
     """Per-source bundle of state + rules for ``BehaviorRulesPyFunc``."""
@@ -42,6 +52,7 @@ class SourceRuntime:
     source_id: str
     camera_id: str
     camera_entry: CameraEntry
+    runtime_epoch_id: str = ""
     rules: List[BehaviorRule | FrameBehaviorRule] = field(default_factory=list)
     single_track_rules: List[BehaviorRule] = field(default_factory=list)
     frame_rules: List[FrameBehaviorRule] = field(default_factory=list)
@@ -84,7 +95,18 @@ def camera_entry_to_legacy_config(cam: CameraEntry) -> CameraConfig:
                 flush=True,
             )
             continue
-        cfg = rule_entry.config
+        cfg = dict(rule_entry.config or {})
+        if rule_entry.evidence_policy:
+            policy = dict(rule_entry.evidence_policy)
+            cfg["evidence_policy"] = policy
+            cfg["snapshot_required"] = _bool_config(
+                policy.get("snapshot_required"),
+                _bool_config(cfg.get("snapshot_required"), True),
+            )
+            cfg["clip_required"] = _bool_config(
+                policy.get("clip_required"),
+                _bool_config(cfg.get("clip_required"), True),
+            )
         zone_id = str(cfg.get("zone_id") or cfg.get("zone") or "")
         rules[rule_id] = RuleConfig(
             name=rule_id,
@@ -130,6 +152,7 @@ def build_per_source_runtime(
             source_id=cam.source_id,
             camera_id=cam.camera_id,
             camera_entry=cam,
+            runtime_epoch_id=cam.runtime_epoch_id or bundle.runtime_epoch_id,
             rules=rules,
             single_track_rules=single_track_rules,
             frame_rules=frame_rules,

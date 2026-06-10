@@ -31,7 +31,7 @@ def _make_input(**kwargs) -> ReIDGateInput:
         feature_dim=512,
         embedding_norm=1.0,
         camera_id="cam1",
-        source_id="phase3h",
+        source_id="primary_rtsp",
         timestamp_ms=1000,
     )
     defaults.update(kwargs)
@@ -60,10 +60,10 @@ class TestValidFaceAllowed:
 
     def test_throttle_key_format(self):
         inp = _make_input(
-            camera_id="cam_001", source_id="phase3h", person_track_id=391,
+            camera_id="cam_001", source_id="primary_rtsp", person_track_id=391,
         )
         result = evaluate_reid_gate(inp)
-        assert result.throttle_key == "cam_001:phase3h:391"
+        assert result.throttle_key == "cam_001:primary_rtsp:391"
 
 
 class TestMissingTrackId:

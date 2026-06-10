@@ -1,4 +1,4 @@
-"""CameraRepository — CRUD for cameras / camera_zones / camera_rules (Phase C1).
+"""CameraRepository — CRUD for cameras / camera_zones / camera_rules (camera config).
 
 Mirrors the EventRepository style: synchronous psycopg connection injected at
 construction time. JSON columns are inserted with explicit ``::jsonb`` casts so
@@ -408,7 +408,7 @@ class CameraRepository:
             return cur.fetchone()
 
     # ------------------------------------------------------------------
-    # R3 algorithm rule CRUD (reuses camera_rules)
+    # Algorithm rule CRUD (reuses camera_rules)
     # ------------------------------------------------------------------
 
     def create_algorithm_rule(

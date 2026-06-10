@@ -1,6 +1,6 @@
-"""Tests for Phase C1 camera / zone / rule configuration endpoints.
+"""Tests for midterm camera / zone / rule configuration endpoints.
 
-The tests use the same pattern as ``test_phase2f_api_events.py``: a
+The tests use the same pattern as ``test_api_events.py``: a
 FakeCameraRepository injected through ``app.dependency_overrides`` so
 no PostgreSQL is required. The fake mirrors the SQL constraints
 (UNIQUE on camera id, on (camera_id, zone_name), on (camera_id, rule_type))
@@ -21,7 +21,7 @@ API_DIR = str(Path(__file__).resolve().parents[2] / "services" / "api")
 if API_DIR not in sys.path:
     sys.path.insert(0, API_DIR)
 
-# Reset any modules pulled in by sibling phase tests so we get the
+# Reset any modules pulled in by sibling runtime tests so we get the
 # services/api copy of ``app.*``.
 for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
     sys.modules.pop(_mod, None)
@@ -41,7 +41,7 @@ NOW = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class FakeCameraRepository:
-    """In-memory mirror of CameraRepository honouring the C1 SQL constraints."""
+    """In-memory mirror of CameraRepository honouring the midterm SQL constraints."""
 
     def __init__(self) -> None:
         self.cameras: Dict[str, Dict[str, Any]] = {}
@@ -205,7 +205,7 @@ def client(repo):
 def _create_camera(client, **overrides):
     body = {
         "id": "cam_001",
-        "source_id": "phase3h",
+        "source_id": "primary_rtsp",
         "name": "Test Camera",
         "location": "Test Area",
         "rtsp_url": "rtsp://example.local/stream",
@@ -258,7 +258,7 @@ def test_create_camera(client):
     assert body["error"] is None
     cam = body["data"]
     assert cam["id"] == "cam_001"
-    assert cam["source_id"] == "phase3h"
+    assert cam["source_id"] == "primary_rtsp"
     assert cam["rtsp_url"] == "rtsp://example.local/stream"
     assert cam["enabled"] is True
     assert cam["gpu_id"] == 0
@@ -393,7 +393,7 @@ def test_duplicate_zone_name_returns_409(client):
 
 
 # ===========================================================================
-# 10. duplicate rule_type on the same camera returns 409 (C1-lite)
+# 10. duplicate rule_type on the same camera returns 409 (midterm single-rule)
 # ===========================================================================
 
 

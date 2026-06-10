@@ -82,10 +82,16 @@ class FaceObservationEventDraft:
     payload: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        track_id = _positive_track_id_text(self.track_id) or _positive_track_id_text(
-            self.person_track_id
-        )
-        person_track_id = self.person_track_id if self.person_track_id is not None else track_id
+        track_id_semantics = self.track_id_semantics or "person_track_id"
+        if track_id_semantics == "person_track_id":
+            person_track_id = (
+                _positive_track_id_text(self.person_track_id)
+                or _positive_track_id_text(self.track_id)
+            )
+            track_id = person_track_id
+        else:
+            track_id = _positive_track_id_text(self.track_id)
+            person_track_id = _positive_track_id_text(self.person_track_id)
         return {
             "schema_version": FACE_OBSERVATION_SCHEMA_VERSION,
             "source_observation_id": self.source_observation_id,
@@ -96,7 +102,7 @@ class FaceObservationEventDraft:
             "track_id": track_id,
             "person_track_id": person_track_id,
             "face_track_id": self.face_track_id,
-            "track_id_semantics": self.track_id_semantics,
+            "track_id_semantics": track_id_semantics,
             "timestamp_ms": self.timestamp_ms,
             "frame_num": self.frame_num,
             "person_bbox": self.person_bbox,

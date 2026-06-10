@@ -1,7 +1,7 @@
 """FaceVectorStore — pgvector similarity search over face_observations and gallery.
 
-F3.2: exact cosine distance search harness over face_observations.
-F3.4: gallery search over person_gallery_embeddings.
+midterm: exact cosine distance search harness over face_observations.
+midterm: gallery search over person_gallery_embeddings.
 
 Similarity metric:
   similarity = 1 - cosine_distance  (via pgvector ``<=>`` operator)
@@ -28,6 +28,17 @@ _MIN_TOP_K = 1
 _MAX_TOP_K = 100
 _MIN_SIMILARITY = 0.0
 _MAX_SIMILARITY = 1.0
+
+
+def register_vector_if_supported(conn: Any) -> None:
+    """Register pgvector adapters for real psycopg connections.
+
+    Unit tests use lightweight mocks that do not expose psycopg's system
+    catalog APIs. Skipping adapter registration for those mocks keeps query
+    construction tests pure while preserving registration for real connections.
+    """
+    if isinstance(conn, psycopg.Connection):
+        register_vector(conn)
 
 # Gallery search SELECT (no embedding vector by default).
 _GALLERY_METADATA_SELECT = """
@@ -144,12 +155,12 @@ def _validate_query_embedding(embedding: object) -> list[float]:
 class FaceVectorStore:
     """pgvector similarity search over the ``face_observations`` table.
 
-    Uses exact cosine distance (``<=>``) — no approximate index in F3.2.
+    Uses exact cosine distance (``<=>``) — no approximate index in midterm.
     """
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
-        register_vector(conn)
+        register_vector_if_supported(conn)
 
     def search_similar_faces(
         self,

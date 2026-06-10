@@ -1,4 +1,4 @@
-"""Tests for F3.2 FaceVectorStore pgvector similarity search harness.
+"""Tests for midterm FaceVectorStore pgvector similarity search harness.
 
 Test classes:
 - TestQueryEmbeddingValidation: pure Python, no DB
@@ -18,7 +18,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FACE_WORKER_ROOT = REPO_ROOT / "services" / "face-worker"
-sys.path.insert(0, str(FACE_WORKER_ROOT))
+FACE_WORKER_ROOT_STR = str(FACE_WORKER_ROOT)
+if FACE_WORKER_ROOT_STR in sys.path:
+    sys.path.remove(FACE_WORKER_ROOT_STR)
+sys.path.insert(0, FACE_WORKER_ROOT_STR)
+for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
+    sys.modules.pop(_mod, None)
 
 from app.vector_store import (
     FaceVectorStore,
@@ -156,13 +161,12 @@ class TestSearchSimilarFacesParams:
 
     @staticmethod
     def _make_store() -> FaceVectorStore:
-        with patch("app.vector_store.register_vector"):
-            conn = MagicMock()
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            conn.cursor.return_value = cursor
-            return FaceVectorStore(conn)
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = cursor
+        return FaceVectorStore(conn)
 
     def test_top_k_below_1_clamped(self):
         store = self._make_store()
@@ -253,14 +257,13 @@ class TestSearchSimilarFacesResult:
     """Result shape and embedding exclusion."""
 
     def _make_store_with_rows(self, rows: list[dict]) -> FaceVectorStore:
-        with patch("app.vector_store.register_vector"):
-            conn = MagicMock()
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            cursor.fetchall.return_value = rows
-            conn.cursor.return_value = cursor
-            return FaceVectorStore(conn)
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = rows
+        conn.cursor.return_value = cursor
+        return FaceVectorStore(conn)
 
     def test_default_excludes_embedding(self):
         rows = [{
@@ -370,7 +373,7 @@ pytestmark_integration = pytest.mark.integration
 class TestFaceVectorStoreIntegration:
     """Integration tests against a real PostgreSQL with pgvector.
 
-    All test rows use ``source_observation_id`` prefix ``test:f3_2:``.
+    All test rows use ``source_observation_id`` prefix ``test:midterm_vector:``.
     Each test uses a transaction that is rolled back, so no rows are
     permanently written to face_observations.
     """
@@ -429,7 +432,7 @@ class TestFaceVectorStoreIntegration:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM face_observations "
-                "WHERE source_observation_id LIKE 'test:f3_2:%%'"
+                "WHERE source_observation_id LIKE 'test:midterm_vector:%%'"
             )
         conn.commit()
 
@@ -439,7 +442,7 @@ class TestFaceVectorStoreIntegration:
         conn = self._connect()
         store = FaceVectorStore(conn)
         emb = _unit_embedding()
-        sid = "test:f3_2:self_1"
+        sid = "test:midterm_vector:self_1"
 
         try:
             # Begin transaction
@@ -467,8 +470,8 @@ class TestFaceVectorStoreIntegration:
         store = FaceVectorStore(conn)
         emb1 = _unit_embedding()
         emb2 = _randomlike_embedding(seed=99)
-        sid1 = "test:f3_2:two_diff_1"
-        sid2 = "test:f3_2:two_diff_2"
+        sid1 = "test:midterm_vector:two_diff_1"
+        sid2 = "test:midterm_vector:two_diff_2"
 
         try:
             with conn.cursor() as cur:
@@ -493,8 +496,8 @@ class TestFaceVectorStoreIntegration:
         store = FaceVectorStore(conn)
         emb = _unit_embedding()
         emb2 = _randomlike_embedding(seed=1)
-        sid1 = "test:f3_2:topk_1"
-        sid2 = "test:f3_2:topk_2"
+        sid1 = "test:midterm_vector:topk_1"
+        sid2 = "test:midterm_vector:topk_2"
 
         try:
             with conn.cursor() as cur:
@@ -516,8 +519,8 @@ class TestFaceVectorStoreIntegration:
         store = FaceVectorStore(conn)
         emb1 = _unit_embedding()
         emb2 = _randomlike_embedding(seed=7)
-        sid1 = "test:f3_2:min_sim_1"
-        sid2 = "test:f3_2:min_sim_2"
+        sid1 = "test:midterm_vector:min_sim_1"
+        sid2 = "test:midterm_vector:min_sim_2"
 
         try:
             with conn.cursor() as cur:
@@ -543,8 +546,8 @@ class TestFaceVectorStoreIntegration:
         conn = self._connect()
         store = FaceVectorStore(conn)
         emb = _unit_embedding()
-        sid_a = "test:f3_2:cam_scope_a"
-        sid_b = "test:f3_2:cam_scope_b"
+        sid_a = "test:midterm_vector:cam_scope_a"
+        sid_b = "test:midterm_vector:cam_scope_b"
 
         try:
             with conn.cursor() as cur:
@@ -569,7 +572,7 @@ class TestFaceVectorStoreIntegration:
         conn = self._connect()
         store = FaceVectorStore(conn)
         emb = _unit_embedding()
-        sid = "test:f3_2:no_emb_result"
+        sid = "test:midterm_vector:no_emb_result"
 
         try:
             with conn.cursor() as cur:
@@ -590,7 +593,7 @@ class TestFaceVectorStoreIntegration:
         conn = self._connect()
         store = FaceVectorStore(conn)
         emb = _unit_embedding()
-        sid = "test:f3_2:with_emb_result"
+        sid = "test:midterm_vector:with_emb_result"
 
         try:
             with conn.cursor() as cur:
@@ -616,7 +619,7 @@ class TestFaceVectorStoreIntegration:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) AS cnt FROM face_observations "
-                    "WHERE source_observation_id LIKE 'test:f3_2:%%'"
+                    "WHERE source_observation_id LIKE 'test:midterm_vector:%%'"
                 )
                 row = cur.fetchone()
             assert row[0] == 0, f"Leftover test rows: {row[0]}"

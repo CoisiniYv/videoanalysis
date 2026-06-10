@@ -83,11 +83,11 @@ def extract_evidence_event_anchor(
             keys=("face_bbox", "bbox"),
         ),
         "person_id": _first_value(
-            normalized,
             matched_person,
             person,
             payload,
-            keys=("person_id", "id"),
+            normalized,
+            keys=("person_id",),
         ),
         "external_person_id": _first_text(
             matched_person,

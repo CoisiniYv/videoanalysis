@@ -11,8 +11,10 @@ import math
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from pgvector.psycopg import Vector, register_vector
+from pgvector.psycopg import Vector
 from psycopg.rows import dict_row
+
+from app.vector_store import register_vector_if_supported
 
 _EMBEDDING_DIM = 512
 _MIN_NORM = 0.90
@@ -125,7 +127,7 @@ class GalleryRepository:
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
-        register_vector(conn)
+        register_vector_if_supported(conn)
 
     def add_embedding(
         self,

@@ -1,4 +1,4 @@
-"""Tests for F3.5 gallery match harness.
+"""Tests for midterm gallery match harness.
 
 Test classes:
 - TestMatchCliArgs: argparse validation for match_gallery.py CLI
@@ -20,7 +20,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FACE_WORKER_ROOT = REPO_ROOT / "services" / "face-worker"
-sys.path.insert(0, str(FACE_WORKER_ROOT))
+FACE_WORKER_ROOT_STR = str(FACE_WORKER_ROOT)
+if FACE_WORKER_ROOT_STR in sys.path:
+    sys.path.remove(FACE_WORKER_ROOT_STR)
+sys.path.insert(0, FACE_WORKER_ROOT_STR)
+for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
+    sys.modules.pop(_mod, None)
 
 from app.match_repository import MatchResultRepository
 from app.vector_store import _EMBEDDING_DIM
@@ -98,14 +103,14 @@ class TestMatchCliArgs:
         assert args.search_mode == "gallery_match"
 
     def test_watchlist_rejected(self):
-        """watchlist is a future phase, not allowed in F3.5."""
+        """watchlist is a future release, not allowed in midterm."""
         with pytest.raises(SystemExit):
             self._parse([
                 "--observation-id", "obs1", "--search-mode", "watchlist",
             ])
 
     def test_live_search_rejected(self):
-        """live_search is a future phase, not allowed in F3.5."""
+        """live_search is a future release, not allowed in midterm."""
         with pytest.raises(SystemExit):
             self._parse([
                 "--observation-id", "obs1", "--search-mode", "live_search",
@@ -149,13 +154,12 @@ class TestMatchResultRepositoryUnit:
 
     @staticmethod
     def _make_repo() -> tuple[MatchResultRepository, MagicMock]:
-        with patch("app.match_repository.register_vector"):
-            conn = MagicMock()
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            conn.cursor.return_value = cursor
-            return MatchResultRepository(conn), cursor
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = cursor
+        return MatchResultRepository(conn), cursor
 
     @staticmethod
     def _sample_row() -> dict:
@@ -307,7 +311,7 @@ class TestMatchResultRepositoryUnit:
 class TestMatchGalleryIntegration:
     """Integration tests against a real PostgreSQL with pgvector.
 
-    All test data uses names prefixed with ``test:f3_5:``.
+    All test data uses names prefixed with ``test:midterm_match:``.
     Helper methods create real FK-satisfying rows.  Cleanup runs in finally
     blocks with rollback-first to avoid InFailedSqlTransaction.
     """
@@ -331,19 +335,19 @@ class TestMatchGalleryIntegration:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM match_results "
-                "WHERE query_source_observation_id LIKE 'test:f3_5:%%'"
+                "WHERE query_source_observation_id LIKE 'test:midterm_match:%%'"
             )
             cur.execute(
                 "DELETE FROM person_gallery_embeddings "
                 "WHERE person_id IN "
-                "(SELECT id FROM persons WHERE name LIKE 'test:f3_5:%%')"
+                "(SELECT id FROM persons WHERE name LIKE 'test:midterm_match:%%')"
             )
             cur.execute(
-                "DELETE FROM persons WHERE name LIKE 'test:f3_5:%%'"
+                "DELETE FROM persons WHERE name LIKE 'test:midterm_match:%%'"
             )
             cur.execute(
                 "DELETE FROM face_observations "
-                "WHERE source_observation_id LIKE 'test:f3_5:%%'"
+                "WHERE source_observation_id LIKE 'test:midterm_match:%%'"
             )
         conn.commit()
 
@@ -352,7 +356,7 @@ class TestMatchGalleryIntegration:
     ) -> tuple:
         """Create a test face_observation. Returns (observation_uuid, source_observation_id)."""
         from pgvector.psycopg import Vector
-        sid = f"test:f3_5:{suffix}"
+        sid = f"test:midterm_match:{suffix}"
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -391,7 +395,7 @@ class TestMatchGalleryIntegration:
 
     def _create_person(self, conn, suffix: str) -> int:
         """Create a test person. Returns person_id."""
-        name = f"test:f3_5:{suffix}"
+        name = f"test:midterm_match:{suffix}"
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -761,12 +765,12 @@ class TestMatchGalleryIntegration:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) FROM face_observations "
-                    "WHERE source_observation_id LIKE 'test:f3_5:%%'"
+                    "WHERE source_observation_id LIKE 'test:midterm_match:%%'"
                 )
                 assert cur.fetchone()[0] == 0
                 cur.execute(
                     "SELECT count(*) FROM persons "
-                    "WHERE name LIKE 'test:f3_5:%%'"
+                    "WHERE name LIKE 'test:midterm_match:%%'"
                 )
                 assert cur.fetchone()[0] == 0
         finally:

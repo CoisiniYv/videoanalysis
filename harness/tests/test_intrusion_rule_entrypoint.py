@@ -1,9 +1,9 @@
-"""Tests for the registry-built intrusion rule (mainline entrypoint, R1.1).
+"""Tests for the registry-built intrusion rule (mainline entrypoint, Midterm).
 
 These tests exercise the rule **through** ``custom.rules.build_rules`` to
 prove the unified entrypoint produces a working IntrusionRule. They do
-not duplicate the deep coverage in ``test_phase2a_intrusion_rule.py`` —
-that test still guards the historical phase2a copy.
+not duplicate the deep coverage in ``test_intrusion_rule.py`` —
+that test still guards the core rule implementation.
 """
 
 from __future__ import annotations

@@ -42,18 +42,22 @@ RTSP source
   -> evidence-viewer
 ```
 
-The deployable version uses neutral project naming. It should not require C1,
-C2, or phase-specific filenames at runtime.
+The deployable version uses neutral project naming. It should not require
+historical codename filenames at runtime.
 
 ## Archived Stage Entrypoints
 
-Historical C1/C2/phase entrypoints were moved out of the active deploy surface:
+Historical codename entrypoints were moved out of the active deploy surface:
 
 | Archive | Contents |
 |---|---|
-| `infra/archive/phase-only/20260609/` | Former C1/C2 root compose files and env files |
-| `modules/savant_replay/archive/phase-only/20260609/` | Former C1/C2 Replay configs |
-| `modules/savant_security/config/archive/phase-only/20260609/` | Former C1/C2 camera config |
+| `infra/archive/phase-only/20260609/` | Former root compose files and env files |
+| `modules/savant_replay/archive/phase-only/20260609/` | Former Replay configs |
+| `modules/savant_security/config/archive/phase-only/20260609/` | Former camera config |
+| `docs/archive/phase-only/20260610/` | Former design and runbook docs |
+| `harness/tests/archive/phase-only/20260610/` | Former contract tests |
+| `scripts/*/archive/phase-only/20260610/` | Former smoke/debug/tool scripts |
+| `services/archive/phase-only/20260610/` | Former service prototypes |
 | `infra/archive/phase-only/20260602/` | Older historical compose files |
 
 Archived files are for traceability and historical regression only. Do not use

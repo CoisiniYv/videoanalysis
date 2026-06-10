@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Literal
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import load_settings
@@ -25,6 +29,15 @@ from app.evidence_index import (
 
 settings = load_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+OPERATOR_PROXY_TIMEOUT_SECONDS = 120.0
+OPERATOR_PROXY_ALLOWED_PREFIXES = (
+    "cameras",
+    "algorithms",
+    "events",
+    "people",
+    "maintenance",
+    "ws",
+)
 LEGACY_ANNOTATIONS_FILE = "annotations.jsonl"
 SIDECAR_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
 SIDECAR_PREVIEW_ANNOTATIONS_FILE = "annotations.frame_cache.identity.rebased.preview.jsonl"
@@ -49,9 +62,110 @@ def _http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
 
+def _proxy_headers(request: Request) -> dict[str, str]:
+    excluded = {
+        "host",
+        "connection",
+        "content-length",
+        "transfer-encoding",
+        "upgrade",
+    }
+    return {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in excluded
+    }
+
+
+def _response_headers(raw_headers) -> dict[str, str]:
+    excluded = {
+        "connection",
+        "content-encoding",
+        "content-length",
+        "transfer-encoding",
+    }
+    return {
+        key: value
+        for key, value in raw_headers.items()
+        if key.lower() not in excluded
+    }
+
+
+def _operator_proxy_url(path: str) -> str:
+    clean_path = path.strip("/")
+    first_segment = clean_path.split("/", 1)[0]
+    if first_segment not in OPERATOR_PROXY_ALLOWED_PREFIXES:
+        raise HTTPException(status_code=404, detail="operator api route not proxied")
+    return f"{settings.operator_api_base_url}/api/v1/{clean_path}"
+
+
+def _media_proxy_url(path: str) -> str:
+    return f"{settings.operator_api_base_url}/media/{path.strip('/')}"
+
+
+def _query_suffix(request: Request) -> str:
+    query = urlencode(list(request.query_params.multi_items()))
+    return f"?{query}" if query else ""
+
+
+def _proxy_request(method: str, target: str, request: Request, body: bytes) -> Response:
+    url = target + _query_suffix(request)
+    url_request = UrlRequest(
+        url,
+        data=body if method not in {"GET", "HEAD"} else None,
+        headers=_proxy_headers(request),
+        method=method,
+    )
+    try:
+        with urlopen(url_request, timeout=OPERATOR_PROXY_TIMEOUT_SECONDS) as proxied:
+            content = proxied.read()
+            headers = _response_headers(proxied.headers)
+            return Response(
+                content=content,
+                status_code=proxied.status,
+                headers=headers,
+                media_type=proxied.headers.get("content-type"),
+            )
+    except HTTPError as exc:
+        content = exc.read()
+        return Response(
+            content=content,
+            status_code=exc.code,
+            headers=_response_headers(exc.headers),
+            media_type=exc.headers.get("content-type"),
+        )
+    except URLError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "data": None,
+                "error": {
+                    "message": f"operator api unavailable: {exc.reason}",
+                    "code": 502,
+                },
+                "request_id": None,
+            },
+        )
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
+@app.api_route(
+    "/api/v1/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+)
+async def operator_api_proxy(path: str, request: Request) -> Response:
+    target = _operator_proxy_url(path)
+    body = await request.body()
+    return _proxy_request(request.method, target, request, body)
+
+
+@app.api_route("/media/{path:path}", methods=["GET", "HEAD", "OPTIONS"])
+async def operator_media_proxy(path: str, request: Request) -> Response:
+    return _proxy_request(request.method, _media_proxy_url(path), request, b"")
 
 
 @app.get("/health")

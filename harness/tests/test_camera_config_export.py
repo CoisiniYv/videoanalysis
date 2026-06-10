@@ -1,8 +1,9 @@
-"""Tests for Phase C1 camera config GET and YAML export endpoints."""
+"""Tests for camera config camera config GET and YAML export endpoints."""
 
 from __future__ import annotations
 
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.routers.cameras import _repo as cameras_repo_dep
+from app.schemas.cameras import build_export_doc
 
 # Reuse the FakeCameraRepository from the sibling test module
 SIBLING_DIR = str(Path(__file__).resolve().parent)
@@ -55,7 +57,7 @@ def _seed_cam_001(client):
     """Create cam_001 + perimeter zone + intrusion rule via the API."""
     cam_resp = client.post("/api/v1/cameras", json={
         "id": "cam_001",
-        "source_id": "phase3h",
+        "source_id": "primary_rtsp",
         "name": "Test Camera",
         "location": "Test Area",
         "rtsp_url": "rtsp://example.local/stream",
@@ -154,7 +156,7 @@ def test_export_cam_001_shape(client):
     cam = doc["cameras"]["cam_001"]
 
     assert cam["enabled"] is True
-    assert cam["source_id"] == "phase3h"
+    assert cam["source_id"] == "primary_rtsp"
     assert cam["name"] == "Test Camera"
     assert cam["rtsp_url"] == "rtsp://example.local/stream"
     assert cam["gpu_id"] == 0
@@ -179,6 +181,12 @@ def test_export_cam_001_shape(client):
     assert intr["config"]["severity"] == "medium"
     assert intr["config"]["snapshot_required"] is True
     assert intr["config"]["clip_required"] is True
+    assert intr["evidence_policy"] == {
+        "snapshot_required": True,
+        "clip_required": True,
+        "pre_seconds": 5,
+        "post_seconds": 5,
+    }
 
 
 # ===========================================================================
@@ -241,3 +249,70 @@ def test_export_with_no_cameras_is_valid_yaml(client):
     resp = client.get("/api/v1/cameras/config/export")
     doc = yaml.safe_load(resp.text)
     assert doc == {"cameras": {}}
+
+
+def test_export_doc_serializes_uuid_backed_database_rows() -> None:
+    camera_id = uuid.UUID("00000000-0000-4000-8000-000000000901")
+    zone_id = uuid.UUID("00000000-0000-4000-8000-000000000902")
+
+    doc = build_export_doc(
+        cameras=[
+            {
+                "id": camera_id,
+                "source_id": "uuid_camera_source",
+                "name": "UUID Camera",
+                "rtsp_url": "rtsp://example.local/uuid-camera",
+                "gpu_id": 0,
+                "enabled": True,
+                "input_type": "rtsp",
+                "rtsp_transport": "tcp",
+                "fps_policy": {"max_fps": "8/1"},
+                "alert_policy": {"global_alert_cooldown_s": 30},
+                "site_id": "uuid_site",
+                "location": "uuid_location",
+            }
+        ],
+        zones_by_camera={
+            camera_id: [
+                {
+                    "id": zone_id,
+                    "camera_id": camera_id,
+                    "zone_id": zone_id,
+                    "zone_name": "full_frame",
+                    "zone_type": "polygon",
+                    "coordinate_space": "pixel",
+                    "points": [[0, 0], [1920, 0], [1920, 1080], [0, 1080]],
+                    "enabled": True,
+                    "payload": {"camera_ref": camera_id},
+                }
+            ]
+        },
+        rules_by_camera={
+            camera_id: [
+                {
+                    "id": uuid.UUID("00000000-0000-4000-8000-000000000903"),
+                    "camera_id": camera_id,
+                    "rule_id": "uuid_intrusion",
+                    "algorithm_id": "behavior.intrusion",
+                    "rule_type": "intrusion",
+                    "enabled": True,
+                    "zone_id": zone_id,
+                    "line_id": None,
+                    "config": {"min_inside_ms": 1000},
+                    "evidence_policy": {"camera_ref": camera_id},
+                }
+            ]
+        },
+    )
+
+    text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+    parsed = yaml.safe_load(text)
+    cam = parsed["cameras"][str(camera_id)]
+    zone = cam["zones"][str(zone_id)]
+    rule = cam["rules"]["uuid_intrusion"]
+
+    assert zone["zone_id"] == str(zone_id)
+    assert zone["payload"]["camera_ref"] == str(camera_id)
+    assert rule["zone_id"] == str(zone_id)
+    assert rule["config"]["zone"] == str(zone_id)
+    assert rule["evidence_policy"]["camera_ref"] == str(camera_id)

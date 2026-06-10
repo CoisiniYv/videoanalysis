@@ -1,0 +1,26 @@
+ARG FACE_RUNTIME_IMAGE=video-analytics-midterm-face-worker:latest
+FROM ${FACE_RUNTIME_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# The base face-worker image already carries onnxruntime, numpy, and OpenCV.
+# This API layer only adds the HTTP/runtime pieces plus shared libraries needed
+# by the existing opencv-python wheel.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.face-runtime.txt ./requirements.face-runtime.txt
+RUN pip install --no-cache-dir -r requirements.face-runtime.txt
+
+COPY app/ ./app/
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

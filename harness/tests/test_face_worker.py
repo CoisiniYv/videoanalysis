@@ -10,10 +10,16 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FACE_WORKER_ROOT = REPO_ROOT / "services" / "face-worker"
-sys.path.insert(0, str(FACE_WORKER_ROOT))
+FACE_WORKER_ROOT_STR = str(FACE_WORKER_ROOT)
+if FACE_WORKER_ROOT_STR in sys.path:
+    sys.path.remove(FACE_WORKER_ROOT_STR)
+sys.path.insert(0, FACE_WORKER_ROOT_STR)
+for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
+    sys.modules.pop(_mod, None)
 
 from app.config import Config, load_config
-from app.worker import _parse_observation, _validate_embedding
+from app.redis_consumer import RedisStreamConsumer
+from app.worker import _parse_observation, _process_batch, _validate_embedding
 
 
 # ── Config tests ─────────────────────────────────────────────────────────────
@@ -29,6 +35,13 @@ class TestFaceWorkerConfig:
             poll_timeout_ms=5000,
             batch_size=10,
             consumer_start_id="0",
+            watchlist_match_enabled=False,
+            watchlist_event_stream="security.events",
+            watchlist_threshold=0.50,
+            watchlist_top_k=5,
+            watchlist_target_external_person_ids=(),
+            watchlist_target_names=(),
+            watchlist_target_refresh_seconds=30,
         )
         assert cfg.face_observation_stream == "security.face_observations"
         assert cfg.consumer_group == "face-workers"
@@ -97,12 +110,12 @@ def _make_redis_fields(data_dict: dict) -> dict:
 
 
 def _make_obs_dict(**kwargs) -> dict:
-    """Create a minimal valid observation dict matching F2.4 Redis payload."""
+    """Create a minimal valid observation dict matching midterm Redis payload."""
     defaults = {
         "schema_version": "1.0",
-        "source_observation_id": "face:c1_2_test:42:1000",
-        "camera_id": "cam_c1_2",
-        "source_id": "c1_2_test",
+        "source_observation_id": "face:primary_rtsp:42:1000",
+        "camera_id": "cam_midterm",
+        "source_id": "primary_rtsp",
         "track_id": "42",
         "timestamp_ms": 1000,
         "frame_num": 100,
@@ -120,7 +133,7 @@ def _make_obs_dict(**kwargs) -> dict:
         "snapshot_path": None,
         "crop_path": None,
         "reid_allowed": True,
-        "reid_throttle_key": "cam_c1_2:c1_2_test:42",
+        "reid_throttle_key": "cam_midterm:primary_rtsp:42",
         "association_score": 0.93,
         "association_method": "center_inside_upper_body",
         "payload": {"camera_config_resolved": True},
@@ -135,13 +148,13 @@ class TestObservationParsing:
         fields = _make_redis_fields(obs_dict)
         result = _parse_observation(fields)
         assert result is not None
-        assert result["source_observation_id"] == "face:c1_2_test:42:1000"
-        assert result["camera_id"] == "cam_c1_2"
+        assert result["source_observation_id"] == "face:primary_rtsp:42:1000"
+        assert result["camera_id"] == "cam_midterm"
 
     def test_missing_data_field_returns_none(self):
         fields = {
             b"type": b"face_observation",
-            b"source_observation_id": b"face:c1:42:1000",
+            b"source_observation_id": b"face:primary_rtsp:42:1000",
         }
         result = _parse_observation(fields)
         assert result is None
@@ -425,15 +438,15 @@ class TestRepositoryMapping:
             "crop_path": obs.get("crop_path"),
         }
 
-        assert params["source_observation_id"] == "face:c1_2_test:42:1000"
-        assert params["camera_id"] == "cam_c1_2"
-        assert params["source_id"] == "c1_2_test"
+        assert params["source_observation_id"] == "face:primary_rtsp:42:1000"
+        assert params["camera_id"] == "cam_midterm"
+        assert params["source_id"] == "primary_rtsp"
         assert params["track_id"] == "42"
         assert params["timestamp_ms"] == 1000
         assert params["embedding_dim"] == 512
         assert len(params["embedding"]) == 512
         assert params["embedding_norm"] == 1.0
-        assert params["reid_throttle_key"] == "cam_c1_2:c1_2_test:42"
+        assert params["reid_throttle_key"] == "cam_midterm:primary_rtsp:42"
         assert params["camera_config_resolved"] is True
         assert params["person_bbox"] is None
         assert params["snapshot_path"] is None
@@ -482,8 +495,6 @@ class TestInvalidEmbeddingSkip:
 
     def test_invalid_embedding_not_acked(self):
         """When embedding is invalid, the message should NOT be ACKed."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -492,19 +503,20 @@ class TestInvalidEmbeddingSkip:
         fields = _make_redis_fields(obs)
         messages = [("msg-1", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 0
         assert duplicates == 0
         assert skipped == 1
         assert failed == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_not_called()
         repo.insert_observation.assert_not_called()
 
     def test_nan_embedding_not_acked_not_inserted(self):
         """NaN embedding should be skipped, not inserted, not ACKed."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -515,17 +527,18 @@ class TestInvalidEmbeddingSkip:
         fields = _make_redis_fields(obs)
         messages = [("msg-nan", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 0
         assert duplicates == 0
         assert skipped == 1
         assert failed == 0
+        assert watchlist_emitted == 0
         repo.insert_observation.assert_not_called()
 
     def test_valid_embedding_inserted_and_acked(self):
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -535,18 +548,19 @@ class TestInvalidEmbeddingSkip:
         fields = _make_redis_fields(obs)
         messages = [("msg-2", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 1
         assert duplicates == 0
         assert skipped == 0
         assert failed == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_called_once_with("msg-2")
         repo.insert_observation.assert_called_once()
 
     def test_unparseable_message_still_acked(self):
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -554,11 +568,14 @@ class TestInvalidEmbeddingSkip:
         fields = {b"data": b"not valid json {{{"}
         messages = [("msg-3", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 0
         assert skipped == 0
         assert failed == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_called_once_with("msg-3")
 
 
@@ -571,8 +588,6 @@ class TestInsertOutcome:
 
     def test_repository_duplicate_returns_duplicate_not_failed(self):
         """ON CONFLICT DO NOTHING returns None → counted as duplicate, ACKed."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -582,18 +597,19 @@ class TestInsertOutcome:
         fields = _make_redis_fields(obs)
         messages = [("msg-dup", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 0
         assert duplicates == 1
         assert skipped == 0
         assert failed == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_called_once_with("msg-dup")
 
     def test_repository_exception_counted_as_failed_not_duplicate(self):
         """DB insert exception → counted as failed, NOT duplicate, NOT ACKed."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -603,18 +619,19 @@ class TestInsertOutcome:
         fields = _make_redis_fields(obs)
         messages = [("msg-fail", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 0
         assert duplicates == 0
         assert skipped == 0
         assert failed == 1
+        assert watchlist_emitted == 0
         consumer.ack.assert_not_called()
 
     def test_inserted_acked(self):
         """Successful insert is ACKed."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -624,16 +641,17 @@ class TestInsertOutcome:
         fields = _make_redis_fields(obs)
         messages = [("msg-ack", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert inserted == 1
         assert failed == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_called_once_with("msg-ack")
 
     def test_duplicate_acked(self):
         """Duplicate is ACKed — safe to remove from pending."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -643,16 +661,17 @@ class TestInsertOutcome:
         fields = _make_redis_fields(obs)
         messages = [("msg-dup-ack", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert duplicates == 1
         assert failed == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_called_once_with("msg-dup-ack")
 
     def test_failed_not_acked(self):
         """DB exception leaves message unacked."""
-        from app.worker import _process_batch
-
         consumer = MagicMock()
         consumer.ack.return_value = True
         repo = MagicMock()
@@ -662,11 +681,14 @@ class TestInsertOutcome:
         fields = _make_redis_fields(obs)
         messages = [("msg-noack", fields)]
 
-        inserted, duplicates, skipped, failed = _process_batch(messages, repo, consumer)
+        inserted, duplicates, skipped, failed, watchlist_emitted = _process_batch(
+            messages, repo, consumer
+        )
 
         assert failed == 1
         assert inserted == 0
         assert duplicates == 0
+        assert watchlist_emitted == 0
         consumer.ack.assert_not_called()
 
 
@@ -676,7 +698,6 @@ class TestConsumerStartId:
     """Verify that consumer_start_id flows from config to RedisStreamConsumer."""
 
     def test_start_id_passed_to_consumer(self):
-        from app.redis_consumer import RedisStreamConsumer
         consumer = RedisStreamConsumer(
             client=MagicMock(),
             stream="test_stream",
@@ -687,7 +708,6 @@ class TestConsumerStartId:
         assert consumer._start_id == "0"
 
     def test_start_id_dollar_for_tail_only(self):
-        from app.redis_consumer import RedisStreamConsumer
         consumer = RedisStreamConsumer(
             client=MagicMock(),
             stream="test_stream",

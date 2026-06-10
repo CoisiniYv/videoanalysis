@@ -59,6 +59,11 @@ watchlist_hit:{source_observation_id}:{person_id}
 The same face observation and matched person therefore map to the same
 `events.source_event_id`.
 
+`face_observations.track_id` is a compatibility alias for the associated
+person/pose track, not a face tracker id. Identity joins for watchlist evidence
+must use `source_observation_id`; `track_id` is only person-track context and
+must not be used to bind a known face across frames.
+
 ## SecurityEvent
 
 R3.1B emits:
@@ -86,10 +91,15 @@ The payload includes:
     "gallery_embedding_id": 267,
     "source_observation_id": "face:..."
   },
+  "primary_identity_join_key": "source_observation_id",
+  "track_id_join_warning": true,
   "observation": {
     "camera_id": "cam_001",
     "source_id": "source_001",
     "track_id": "3",
+    "person_track_id": "3",
+    "face_track_id": null,
+    "track_id_semantics": "person_track_id",
     "timestamp_ms": 12345,
     "face_bbox": [0, 0, 10, 10],
     "landmarks": [],

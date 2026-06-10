@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------ */
-/*  C1G.1b Operator Frontend — app.js                                 */
+/*  Midterm Operator Frontend — app.js                                 */
 /*  Pure vanilla JS, no framework. Uses real API endpoints only.      */
 /* ------------------------------------------------------------------ */
 
@@ -8,12 +8,19 @@ const API = "/api/v1";
 /* ---- State ---- */
 let cameras = [];
 let selectedCameraId = "";
+let people = [];
+let selectedPersonId = "";
 
 /* ---- DOM refs ---- */
 const statusEl = document.getElementById("status");
 const errorBox = document.getElementById("error-box");
 const successBox = document.getElementById("success-box");
 const apiUrlEl = document.getElementById("api-url");
+const cameraCountEl = document.getElementById("camera-count");
+const enabledCameraCountEl = document.getElementById("enabled-camera-count");
+const peopleCountEl = document.getElementById("people-count");
+const galleryCountEl = document.getElementById("gallery-count");
+const evidenceCountEl = document.getElementById("evidence-count");
 const camerasEl = document.getElementById("cameras");
 const zonesEl = document.getElementById("zones");
 const rulesEl = document.getElementById("rules");
@@ -23,6 +30,14 @@ const alertForm = document.getElementById("alert-form");
 const zoneJson = document.getElementById("zone-json");
 const ruleJson = document.getElementById("rule-json");
 const fullConfigEl = document.getElementById("full-config");
+const peopleEl = document.getElementById("people");
+const peopleSearchEl = document.getElementById("people-search");
+const faceRegistrationForm = document.getElementById("face-registration-form");
+const personProfileEl = document.getElementById("person-profile");
+const personDetailEl = document.getElementById("person-detail");
+const galleryEl = document.getElementById("gallery");
+const faceRegistrationSummaryEl = document.getElementById("face-registration-summary");
+const faceRegistrationResultEl = document.getElementById("face-registration-result");
 
 /* ---- API URL display ---- */
 apiUrlEl.textContent = window.location.origin + API;
@@ -140,7 +155,7 @@ function showError(msg) {
   errorBox.textContent = msg;
   errorBox.hidden = false;
   successBox.hidden = true;
-  setStatus("Error");
+  setStatus("错误");
 }
 
 function showSuccess(msg) {
@@ -156,8 +171,11 @@ function clearMessages() {
 }
 
 async function request(path, options = {}) {
+  const headers = options.body instanceof FormData
+    ? { ...(options.headers || {}) }
+    : { "Content-Type": "application/json", ...(options.headers || {}) };
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers,
     ...options,
   });
   const text = await response.text();
@@ -165,7 +183,7 @@ async function request(path, options = {}) {
   try {
     body = text ? JSON.parse(text) : {};
   } catch {
-    throw new Error(`Invalid JSON response: ${text.slice(0, 200)}`);
+    throw new Error(`接口返回不是有效 JSON：${text.slice(0, 200)}`);
   }
   if (!response.ok || body.error) {
     throw new Error(body.error?.message || body.error?.detail || `HTTP ${response.status}`);
@@ -177,8 +195,43 @@ function parseJsonTextarea(textarea, label) {
   try {
     return JSON.parse(textarea.value);
   } catch (e) {
-    throw new Error(`Invalid JSON in ${label}: ${e.message}`);
+    throw new Error(`${label} 不是有效 JSON：${e.message}`);
   }
+}
+
+function makeCameraId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return "00000000-0000-4000-8000-" + Date.now().toString().padStart(12, "0").slice(-12);
+}
+
+function updateSummary() {
+  if (cameraCountEl) {
+    cameraCountEl.textContent = String(cameras.length);
+  }
+  if (enabledCameraCountEl) {
+    enabledCameraCountEl.textContent = String(cameras.filter((camera) => camera.enabled !== false).length);
+  }
+  if (peopleCountEl) {
+    peopleCountEl.textContent = people.length ? String(people.length) : "--";
+  }
+  if (galleryCountEl) {
+    const total = people.reduce((sum, person) => sum + Number(person.active_gallery_count || 0), 0);
+    galleryCountEl.textContent = people.length ? String(total) : "--";
+  }
+  if (evidenceCountEl && evidenceCountEl.textContent === "") {
+    evidenceCountEl.textContent = "--";
+  }
+}
+
+function initials(name) {
+  const text = String(name || "人员").trim();
+  return text.slice(0, 2).toUpperCase();
+}
+
+function personPreviewUrl(person) {
+  return person.primary_registered_crop_url || person.primary_source_image_url || "";
 }
 
 /* ---- Camera form serialization ---- */
@@ -241,14 +294,19 @@ function renderCameras() {
   for (const camera of cameras) {
     const item = document.createElement("div");
     item.className = `camera-item ${camera.id === selectedCameraId ? "active" : ""}`;
-    const cooldown = camera.alert_policy?.global_alert_cooldown_s ?? "—";
+    const cooldown = camera.alert_policy?.global_alert_cooldown_s ?? "-";
+    const location = [camera.site_id, camera.location].filter(Boolean).join(" / ") || "未填写位置";
     item.innerHTML =
-      `<strong>${camera.id}</strong>` +
-      `<div>${camera.name || ""}</div>` +
-      `<div class="muted">${camera.enabled ? "enabled" : "disabled"} | ${camera.source_id || ""} | transport:${camera.rtsp_transport || "tcp"} | cooldown:${cooldown}s</div>`;
+      `<strong>${camera.name || "未命名摄像头"}</strong>` +
+      `<div class="muted">${location}</div>` +
+      `<div class="person-metrics">` +
+        `<span class="metric-chip">${camera.enabled ? "已启用" : "已停用"}</span>` +
+        `<span class="metric-chip">冷却 ${cooldown}s</span>` +
+      `</div>`;
     item.addEventListener("click", () => selectCamera(camera.id));
     camerasEl.appendChild(item);
   }
+  updateSummary();
 }
 
 function renderZones(zones) {
@@ -258,11 +316,11 @@ function renderZones(zones) {
     item.className = "zone-item";
     item.innerHTML =
       `<strong>${z.zone_id}</strong>` +
-      `<div>${z.zone_type} | ${z.enabled ? "enabled" : "disabled"}</div>` +
+      `<div>${z.zone_type} | ${z.enabled ? "已启用" : "已停用"}</div>` +
       `<div class="muted">${z.zone_name || ""}</div>` +
       `<div class="item-actions">` +
-        `<button class="sm" data-action="edit-zone" data-zone-id="${z.zone_id}">Edit</button>` +
-        `<button class="sm danger" data-action="delete-zone" data-zone-id="${z.zone_id}">Delete</button>` +
+        `<button class="sm" data-action="edit-zone" data-zone-id="${z.zone_id}">编辑</button>` +
+        `<button class="sm danger" data-action="delete-zone" data-zone-id="${z.zone_id}">删除</button>` +
       `</div>`;
     item.querySelector('[data-action="edit-zone"]').addEventListener("click", (e) => {
       e.stopPropagation();
@@ -290,14 +348,15 @@ function renderRules(rules) {
     item.className = "rule-item";
     const cat = rule.rule_category || (rule.is_alert_rule ? "alert" : "observation");
     const badgeClass = cat === "observation" ? "observation" : "alert";
+    const categoryText = cat === "observation" ? "观察" : cat === "alert" ? "告警" : "配置";
     item.innerHTML =
       `<strong>${rule.rule_id}</strong>` +
-      `<div>${rule.algorithm_id} <span class="badge ${badgeClass}">${cat}</span></div>` +
-      `<div class="muted">${rule.enabled ? "enabled" : "disabled"}</div>` +
+      `<div>${rule.algorithm_id} <span class="badge ${badgeClass}">${categoryText}</span></div>` +
+      `<div class="muted">${rule.enabled ? "已启用" : "已停用"}</div>` +
       `<div class="item-actions">` +
-        `<button class="sm" data-action="edit-rule" data-rule-id="${rule.rule_id}">Edit</button>` +
-        `<button class="sm" data-action="toggle-rule" data-rule-id="${rule.rule_id}" data-enabled="${rule.enabled}">${rule.enabled ? "Disable" : "Enable"}</button>` +
-        `<button class="sm danger" data-action="delete-rule" data-rule-id="${rule.rule_id}">Delete</button>` +
+        `<button class="sm" data-action="edit-rule" data-rule-id="${rule.rule_id}">编辑</button>` +
+        `<button class="sm" data-action="toggle-rule" data-rule-id="${rule.rule_id}" data-enabled="${rule.enabled}">${rule.enabled ? "停用" : "启用"}</button>` +
+        `<button class="sm danger" data-action="delete-rule" data-rule-id="${rule.rule_id}">删除</button>` +
       `</div>`;
     item.querySelector('[data-action="edit-rule"]').addEventListener("click", (e) => {
       e.stopPropagation();
@@ -332,6 +391,31 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
+document.querySelectorAll(".top-tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    activateTopView(btn.dataset.view, true);
+  });
+});
+
+function activateTopView(view, updateHash = false) {
+  const normalized = ["people", "evidence"].includes(view) ? view : "cameras";
+  document.querySelectorAll(".top-tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === normalized);
+  });
+  document.getElementById("camera-view").hidden = normalized !== "cameras";
+  document.getElementById("people-view").hidden = normalized !== "people";
+  document.getElementById("evidence-view").hidden = normalized !== "evidence";
+  if (updateHash) {
+    window.history.replaceState(null, "", `#${normalized}`);
+  }
+  if (normalized === "people") {
+    loadPeople().catch((e) => showError(e.message));
+  }
+  if (normalized === "evidence" && window.operatorEvidence) {
+    window.operatorEvidence.init().catch((e) => showError(e.message));
+  }
+}
+
 /* ---- API operations ---- */
 
 async function loadCameras() {
@@ -341,7 +425,147 @@ async function loadCameras() {
   if (!selectedCameraId && cameras[0]) selectedCameraId = cameras[0].id;
   renderCameras();
   if (selectedCameraId) await selectCamera(selectedCameraId);
-  setStatus("Ready");
+  setStatus("就绪");
+}
+
+async function loadPeople() {
+  clearMessages();
+  const params = new URLSearchParams();
+  const q = peopleSearchEl.value.trim();
+  if (q) params.set("q", q);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const data = await request(`${API}/people${suffix}`);
+  people = data.people || [];
+  const selectedStillVisible = people.some((person) => String(person.person_id) === String(selectedPersonId));
+  if (!selectedStillVisible) {
+    selectedPersonId = "";
+  }
+  if (!selectedPersonId && people[0]) {
+    const previewPerson = people.find((person) => personPreviewUrl(person));
+    selectedPersonId = String((previewPerson || people[0]).person_id);
+  }
+  renderPeople();
+  if (selectedPersonId) {
+    await selectPerson(selectedPersonId);
+  }
+  updateSummary();
+  setStatus("人员就绪");
+}
+
+function renderPeople() {
+  peopleEl.innerHTML = "";
+  for (const person of people) {
+    const item = document.createElement("div");
+    item.className = `person-item ${String(person.person_id) === String(selectedPersonId) ? "active" : ""}`;
+    const previewUrl = personPreviewUrl(person);
+    const avatar = previewUrl
+      ? `<img class="person-avatar person-avatar-img" src="${previewUrl}" alt="${person.name} 人脸图" loading="lazy" />`
+      : `<div class="person-avatar">${initials(person.name)}</div>`;
+    item.innerHTML =
+      avatar +
+      `<div class="person-copy">` +
+        `<strong>${person.name}</strong>` +
+        `<div class="muted">${person.external_person_id || "未设置人员编号"}</div>` +
+        `<div class="person-metrics">` +
+          `<span class="metric-chip">照片 ${person.active_gallery_count || 0}</span>` +
+          `<span class="metric-chip">${person.is_active ? "有效" : "停用"}</span>` +
+        `</div>` +
+      `</div>`;
+    item.addEventListener("click", () => selectPerson(person.person_id));
+    peopleEl.appendChild(item);
+  }
+  updateSummary();
+}
+
+async function selectPerson(personId) {
+  clearMessages();
+  selectedPersonId = String(personId);
+  const data = await request(`${API}/people/${encodeURIComponent(personId)}`);
+  personDetailEl.value = JSON.stringify(data.person, null, 2);
+  renderPersonProfile(data.person);
+  renderGallery(data.gallery || []);
+  fillRegistrationForPerson(data.person);
+  renderPeople();
+  setStatus(`人员 ${personId}`);
+}
+
+function renderPersonProfile(person) {
+  if (!personProfileEl || !person) return;
+  personProfileEl.innerHTML =
+    `<strong>${person.name || "未命名人员"}</strong>` +
+    `<div class="muted">人员编号：${person.external_person_id || "未设置"}</div>` +
+    `<div class="muted">状态：${person.is_active ? "有效" : "停用"}</div>` +
+    `<div class="muted">${person.description || "暂无描述"}</div>`;
+}
+
+function fillRegistrationForPerson(person) {
+  if (!person || !faceRegistrationForm) return;
+  faceRegistrationForm.elements.person_id.value = person.person_id || "";
+  faceRegistrationForm.elements.external_person_id.value = person.external_person_id || "";
+  faceRegistrationForm.elements.name.value = person.name || "";
+  faceRegistrationForm.elements.description.value = person.description || "";
+}
+
+function renderGallery(gallery) {
+  galleryEl.innerHTML = "";
+  for (const row of gallery) {
+    const item = document.createElement("div");
+    item.className = "gallery-item";
+    const previewUrl = row.registered_crop_url || row.source_image_url;
+    if (previewUrl) {
+      const image = document.createElement("img");
+      image.className = "gallery-thumb";
+      image.src = previewUrl;
+      image.alt = `图库图片 ${row.gallery_embedding_id}`;
+      image.loading = "lazy";
+      item.appendChild(image);
+    }
+    const meta = document.createElement("div");
+    meta.className = "gallery-meta";
+    meta.innerHTML =
+      `<strong>人脸照片</strong>` +
+      `<div class="gallery-meta-row">登记质量 ${row.quality ?? "-"}</div>` +
+      `<div class="gallery-meta-row">` +
+        `<span class="badge ${row.is_primary ? "success" : "neutral"}">${row.is_primary ? "主图" : "备选图"}</span> ` +
+        `<span class="badge ${row.is_active ? "success" : "neutral"}">${row.is_active ? "有效" : "停用"}</span> ` +
+      `</div>`;
+    item.appendChild(meta);
+    galleryEl.appendChild(item);
+  }
+  if (!gallery.length) {
+    galleryEl.innerHTML = `<div class="gallery-item"><div class="muted">当前人员暂无图库图片。</div></div>`;
+  }
+}
+
+async function submitFaceRegistration() {
+  clearMessages();
+  const submit = document.getElementById("submit-face-registration");
+  submit.disabled = true;
+  try {
+    const fd = new FormData(faceRegistrationForm);
+    if (!fd.get("person_id")) {
+      fd.delete("person_id");
+    }
+    const result = await request(`${API}/people/register-face`, {
+      method: "POST",
+      body: fd,
+    });
+    faceRegistrationResultEl.value = JSON.stringify(result, null, 2);
+    if (faceRegistrationSummaryEl) {
+      faceRegistrationSummaryEl.innerHTML =
+        `<strong>人脸已注册</strong>` +
+        `<div class="muted">人员编号：${result.external_person_id || "-"}</div>` +
+        `<div class="muted">姓名：${result.name || "-"}</div>`;
+    }
+    selectedPersonId = String(result.person_id || "");
+    showSuccess("人脸已注册");
+    await loadPeople();
+    if (result.person_id) {
+      await selectPerson(result.person_id);
+    }
+  } finally {
+    submit.disabled = false;
+  }
 }
 
 async function selectCamera(cameraId) {
@@ -353,7 +577,7 @@ async function selectCamera(cameraId) {
   renderZones(data.zones || []);
   renderRules(data.rules || []);
   fullConfigEl.value = JSON.stringify(data, null, 2);
-  setStatus(`Camera: ${cameraId}`);
+  setStatus(data.camera?.name || "摄像头就绪");
 }
 
 async function saveCamera() {
@@ -370,7 +594,7 @@ async function saveCamera() {
     await request(`${API}/cameras`, { method: "POST", body: JSON.stringify(camera) });
   }
   selectedCameraId = camera.id;
-  showSuccess(`Camera ${camera.id} saved`);
+  showSuccess("摄像头已保存");
   await loadCameras();
 }
 
@@ -381,16 +605,16 @@ async function setCameraEnabled(enabled) {
   await request(`${API}/cameras/${encodeURIComponent(camera.id)}/${enabled ? "enable" : "disable"}`, {
     method: "POST",
   });
-  showSuccess(`Camera ${camera.id} ${enabled ? "enabled" : "disabled"}`);
+  showSuccess(`摄像头已${enabled ? "启用" : "停用"}`);
   await loadCameras();
 }
 
 async function saveZone() {
-  if (!selectedCameraId) { showError("No camera selected"); return; }
+  if (!selectedCameraId) { showError("未选择摄像头"); return; }
   clearMessages();
   let body;
   try {
-    body = parseJsonTextarea(zoneJson, "zone JSON");
+    body = parseJsonTextarea(zoneJson, "区域配置");
   } catch (e) {
     showError(e.message);
     return;
@@ -401,7 +625,7 @@ async function saveZone() {
     ? `${API}/cameras/${selectedCameraId}/zones/${encodeURIComponent(body.zone_id)}`
     : `${API}/cameras/${selectedCameraId}/zones`;
   await request(path, { method: exists ? "PUT" : "POST", body: JSON.stringify(body) });
-  showSuccess(`Zone ${body.zone_id} saved`);
+  showSuccess(`区域 ${body.zone_id} 已保存`);
   await selectCamera(selectedCameraId);
 }
 
@@ -411,16 +635,16 @@ async function deleteZone(zoneId) {
   await request(`${API}/cameras/${selectedCameraId}/zones/${encodeURIComponent(zoneId)}`, {
     method: "DELETE",
   });
-  showSuccess(`Zone ${zoneId} deleted`);
+  showSuccess(`区域 ${zoneId} 已删除`);
   await selectCamera(selectedCameraId);
 }
 
 async function saveRule() {
-  if (!selectedCameraId) { showError("No camera selected"); return; }
+  if (!selectedCameraId) { showError("未选择摄像头"); return; }
   clearMessages();
   let body;
   try {
-    body = parseJsonTextarea(ruleJson, "rule JSON");
+    body = parseJsonTextarea(ruleJson, "规则配置");
   } catch (e) {
     showError(e.message);
     return;
@@ -431,7 +655,7 @@ async function saveRule() {
     ? `${API}/cameras/${selectedCameraId}/rules/${encodeURIComponent(body.rule_id)}`
     : `${API}/cameras/${selectedCameraId}/rules`;
   await request(path, { method: exists ? "PUT" : "POST", body: JSON.stringify(body) });
-  showSuccess(`Rule ${body.rule_id} saved`);
+  showSuccess(`规则 ${body.rule_id} 已保存`);
   await selectCamera(selectedCameraId);
 }
 
@@ -441,7 +665,7 @@ async function deleteRule(ruleId) {
   await request(`${API}/cameras/${selectedCameraId}/rules/${encodeURIComponent(ruleId)}`, {
     method: "DELETE",
   });
-  showSuccess(`Rule ${ruleId} deleted`);
+  showSuccess(`规则 ${ruleId} 已删除`);
   await selectCamera(selectedCameraId);
 }
 
@@ -451,7 +675,7 @@ async function setRuleEnabled(ruleId, enabled) {
   await request(`${API}/cameras/${selectedCameraId}/rules/${encodeURIComponent(ruleId)}/${enabled ? "enable" : "disable"}`, {
     method: "POST",
   });
-  showSuccess(`Rule ${ruleId} ${enabled ? "enabled" : "disabled"}`);
+  showSuccess(`规则 ${ruleId} 已${enabled ? "启用" : "停用"}`);
   await selectCamera(selectedCameraId);
 }
 
@@ -460,14 +684,21 @@ async function setRuleEnabled(ruleId, enabled) {
 document.getElementById("refresh-cameras").addEventListener("click", () => {
   loadCameras().catch((e) => showError(e.message));
 });
+document.getElementById("refresh-people").addEventListener("click", () => {
+  loadPeople().catch((e) => showError(e.message));
+});
+peopleSearchEl.addEventListener("input", () => {
+  loadPeople().catch((e) => showError(e.message));
+});
 
 document.getElementById("new-camera").addEventListener("click", () => {
   clearMessages();
+  const cameraId = makeCameraId();
   fillCamera({
-    id: "",
+    id: cameraId,
     name: "",
-    source_id: "",
-    rtsp_url: "rtsp://",
+    source_id: `source_${cameraId}`,
+    rtsp_url: "",
     site_id: "",
     location: "",
     gpu_id: 0,
@@ -482,7 +713,7 @@ document.getElementById("new-camera").addEventListener("click", () => {
   fullConfigEl.value = "";
   ruleJson.value = "";
   zoneJson.value = "";
-  setStatus("New camera");
+  setStatus("新建摄像头");
 });
 
 document.getElementById("save-camera").addEventListener("click", () => {
@@ -523,6 +754,9 @@ document.getElementById("save-zone").addEventListener("click", () => {
 document.getElementById("save-rule").addEventListener("click", () => {
   saveRule().catch((e) => showError(e.message));
 });
+document.getElementById("submit-face-registration").addEventListener("click", () => {
+  submitFaceRegistration().catch((e) => showError(e.message));
+});
 
 document.querySelectorAll("[data-template]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -534,4 +768,12 @@ document.querySelectorAll("[data-template]").forEach((button) => {
 });
 
 /* ---- Init ---- */
-loadCameras().catch((e) => showError(e.message));
+loadCameras()
+  .then(() => {
+    if (window.location.hash === "#people") {
+      activateTopView("people", false);
+    } else if (window.location.hash === "#evidence") {
+      activateTopView("evidence", false);
+    }
+  })
+  .catch((e) => showError(e.message));

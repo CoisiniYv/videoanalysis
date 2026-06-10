@@ -11,6 +11,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "infra" / "docker-compose.midterm.yml"
 ENV_FILE = ROOT / "infra" / "env" / "midterm.env"
+API_FACE_RUNTIME_DOCKERFILE = ROOT / "services" / "api" / "Dockerfile.face-runtime"
+API_FACE_RUNTIME_REQUIREMENTS = ROOT / "services" / "api" / "requirements.face-runtime.txt"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midterm.yml"
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
@@ -51,6 +53,8 @@ def _replay_config() -> dict:
 def test_midterm_deployment_files_exist() -> None:
     assert COMPOSE.exists()
     assert ENV_FILE.exists()
+    assert API_FACE_RUNTIME_DOCKERFILE.exists()
+    assert API_FACE_RUNTIME_REQUIREMENTS.exists()
     assert REPLAY_CONFIG.exists()
     assert CAMERA_CONFIG.exists()
     assert SAVANT_MODULE.exists()
@@ -74,8 +78,13 @@ def test_active_deploy_surface_has_only_midterm_compose_and_env_files() -> None:
 
 def test_current_smoke_surface_is_midterm_only() -> None:
     scripts = sorted(path.name for path in CURRENT_SMOKE_DIR.glob("*.sh"))
-    assert scripts == ["check_midterm_deployment.sh"]
-    assert "infra/docker-compose.midterm.yml" in _text(CURRENT_SMOKE_DIR / scripts[0])
+    assert scripts == [
+        "check_midterm_deployment.sh",
+        "check_operator_camera_and_face_registration.sh",
+    ]
+    assert "infra/docker-compose.midterm.yml" in _text(
+        CURRENT_SMOKE_DIR / "check_midterm_deployment.sh"
+    )
 
 
 def test_runtime_doctor_is_midterm_named() -> None:
@@ -117,6 +126,45 @@ def test_midterm_compose_uses_midterm_config_files() -> None:
     )
 
 
+def test_midterm_storage_maintenance_midterm_preview_flags_and_entrypoint() -> None:
+    compose = _compose()
+    env_file = _env()
+    api_env = compose["services"]["api"]["environment"]
+    viewer = compose["services"]["evidence-viewer"]
+
+    assert api_env["STORAGE_MAINTENANCE_SUMMARY_ENABLED"] == (
+        "${STORAGE_MAINTENANCE_SUMMARY_ENABLED:-true}"
+    )
+    assert api_env["STORAGE_MAINTENANCE_PREVIEW_ENABLED"] == (
+        "${STORAGE_MAINTENANCE_PREVIEW_ENABLED:-true}"
+    )
+    assert api_env["STORAGE_MAINTENANCE_EXECUTE_ENABLED"] == (
+        "${STORAGE_MAINTENANCE_EXECUTE_ENABLED:-false}"
+    )
+    assert env_file["STORAGE_MAINTENANCE_SUMMARY_ENABLED"] == "true"
+    assert env_file["STORAGE_MAINTENANCE_PREVIEW_ENABLED"] == "true"
+    assert env_file["STORAGE_MAINTENANCE_EXECUTE_ENABLED"] == "false"
+    assert viewer["ports"] == ["8090:8090"]
+    assert "/data/video-analytics/media/evidence:/evidence:ro" in viewer["volumes"]
+    assert "ports" not in compose["services"]["api"]
+    assert compose["services"]["api"]["expose"] == ["8000"]
+
+
+def test_midterm_runtime_apply_stays_behind_8090_proxy() -> None:
+    compose = _compose()
+    api = compose["services"]["api"]
+    env = api["environment"]
+
+    assert "ports" not in api
+    assert api["expose"] == ["8000"]
+    assert env["CAMERA_RUNTIME_APPLY_ENABLED"] == "${CAMERA_RUNTIME_APPLY_ENABLED:-true}"
+    assert env["CAMERA_RUNTIME_ZMQ_ENDPOINT"] == "dealer+connect:tcp://replay-service:5555"
+    assert env["CAMERA_RUNTIME_DOCKER_NETWORK"] == "video-analytics-midterm_default"
+    assert env["CAMERA_RUNTIME_REPLAY_CONTAINER"] == "video-analytics-midterm-replay-service"
+    assert "../infra/generated:/app/infra/generated:rw" in api["volumes"]
+    assert "/var/run/docker.sock:/var/run/docker.sock" in api["volumes"]
+
+
 def test_replay_first_topology_is_preserved() -> None:
     compose = _compose()
     replay = _replay_config()
@@ -136,17 +184,33 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["video-file-sink"]["environment"]["ZMQ_ENDPOINT"] == (
         "router+bind:tcp://0.0.0.0:6666"
     )
+    assert services["video-file-sink"]["entrypoint"] == ["/bin/sh", "-ec"]
+    assert "video_analytics:midterm:runtime_epoch" in services["video-file-sink"]["command"]
+    assert "/media/replay-sink-output/midterm/epochs/$${EPOCH_ID}" in services["video-file-sink"]["command"]
+    assert services["media-worker"]["environment"]["RUNTIME_EPOCH_STATE_PATH"] == (
+        "/media/replay-sink-output/midterm/.current_epoch.json"
+    )
+    assert services["media-worker"]["environment"]["EVIDENCE_RUNTIME_EPOCH_STRICT"] == (
+        "${EVIDENCE_RUNTIME_EPOCH_STRICT:-true}"
+    )
 
 
 def test_midterm_source_id_and_camera_config_are_neutral() -> None:
     compose = _compose()
     camera_config = yaml.safe_load(_text(CAMERA_CONFIG))
-    camera = camera_config["cameras"]["primary_rtsp"]
+    primary_cameras = [
+        camera
+        for camera in camera_config["cameras"].values()
+        if camera.get("source_id") == "primary_rtsp"
+    ]
 
-    assert compose["services"]["savant-security"]["environment"]["SOURCE_ID"] == "primary_rtsp"
+    assert "SOURCE_ID" not in compose["services"]["savant-security"]["environment"]
+    assert compose["services"]["savant-security"]["environment"]["MAX_PARALLEL_STREAMS"] == "2"
     assert compose["services"]["source-adapter"]["environment"]["SOURCE_ID"] == "primary_rtsp"
-    assert compose["services"]["event-worker"]["environment"]["RECORDING_SOURCE_ID"] == "primary_rtsp"
+    assert compose["services"]["event-worker"]["environment"]["RECORDING_SOURCE_ID"] == "${RECORDING_SOURCE_ID:-}"
     assert compose["services"]["event-worker"]["environment"]["DEFAULT_REPLAY_SOURCE_ID"] == "primary_rtsp"
+    assert len(primary_cameras) == 1
+    camera = primary_cameras[0]
     assert camera["source_id"] == "primary_rtsp"
     assert camera["name"] == "Primary RTSP Camera"
 
@@ -154,8 +218,14 @@ def test_midterm_source_id_and_camera_config_are_neutral() -> None:
 def test_midterm_runtime_calibration_is_explicit() -> None:
     compose = _compose()
     env_file = _env()
+    module = yaml.safe_load(_text(SAVANT_MODULE))
     savant_env = compose["services"]["savant-security"]["environment"]
     face_worker_env = compose["services"]["face-worker"]["environment"]
+    elements = {
+        element["name"]: element
+        for element in module["pipeline"]["elements"]
+        if "name" in element
+    }
 
     assert env_file["MAX_FPS_CONTROL"] == "true"
     assert env_file["MAX_FPS"] == "8/1"
@@ -168,9 +238,27 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["POSE_MIN_WIDTH"] == "60"
     assert env_file["POSE_MIN_HEIGHT"] == "100"
     assert env_file["FACE_CONFIDENCE_THRESHOLD"] == "0.50"
+    assert env_file["FACE_INFER_INTERVAL"] == "2"
+    assert env_file["FACE_EMBEDDING_INFER_INTERVAL"] == "2"
     assert env_file["WATCHLIST_THRESHOLD"] == "0.60"
     assert savant_env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-true}"
     assert savant_env["POSE_INFER_INTERVAL"] == "${POSE_INFER_INTERVAL:-1}"
+    assert savant_env["FACE_INFER_INTERVAL"] == "${FACE_INFER_INTERVAL:-2}"
+    assert savant_env["FACE_EMBEDDING_INFER_INTERVAL"] == (
+        "${FACE_EMBEDDING_INFER_INTERVAL:-2}"
+    )
+    assert module["parameters"]["face_infer_interval"] == (
+        "${oc.decode:${oc.env:FACE_INFER_INTERVAL, 0}}"
+    )
+    assert module["parameters"]["face_embedding_infer_interval"] == (
+        "${oc.decode:${oc.env:FACE_EMBEDDING_INFER_INTERVAL, 0}}"
+    )
+    assert elements["yolov8_face"]["properties"]["interval"] == (
+        "${parameters.face_infer_interval}"
+    )
+    assert elements["adaface"]["model"]["interval"] == (
+        "${parameters.face_embedding_infer_interval}"
+    )
     assert face_worker_env["WATCHLIST_THRESHOLD"] == "${WATCHLIST_THRESHOLD:-0.60}"
 
 
@@ -186,6 +274,30 @@ def test_midterm_evidence_version_is_project_named() -> None:
     assert media_env["EVIDENCE_SCHEMA_VERSION"] == "2.0-midterm"
     assert media_env["EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS"] == "false"
     assert "EVIDENCE_PHASE" not in media_env
+
+
+def test_midterm_operator_api_reuses_face_runtime_without_host_8000() -> None:
+    compose = _compose()
+    api = compose["services"]["api"]
+    viewer = compose["services"]["evidence-viewer"]
+    dockerfile = _text(API_FACE_RUNTIME_DOCKERFILE)
+    requirements = _text(API_FACE_RUNTIME_REQUIREMENTS)
+
+    assert api["build"]["dockerfile"] == "Dockerfile.face-runtime"
+    assert api["build"]["args"]["FACE_RUNTIME_IMAGE"] == (
+        "video-analytics-midterm-face-worker:latest"
+    )
+    assert api["expose"] == ["8000"]
+    assert "ports" not in api
+    assert "../libs:/app/libs:ro" in api["volumes"]
+    assert viewer["environment"]["OPERATOR_API_BASE_URL"] == "http://api:8000"
+    assert viewer["depends_on"]["api"]["condition"] == "service_started"
+
+    assert "FROM ${FACE_RUNTIME_IMAGE}" in dockerfile
+    assert "onnxruntime" not in requirements
+    assert "opencv-python" not in requirements
+    assert "opencv-python-headless" not in requirements
+    assert "numpy" not in requirements
 
 
 def test_docs_point_to_midterm_deployment_entrypoint() -> None:

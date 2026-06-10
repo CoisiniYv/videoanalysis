@@ -22,7 +22,7 @@ Usage:
 
 Requires DATABASE_URL environment variable.
 
-Semantics (F3.6):
+Semantics (midterm):
     - Read-only: queries match_results with
       search_mode = 'registered_person_history'.
     - Does NOT write to any table.

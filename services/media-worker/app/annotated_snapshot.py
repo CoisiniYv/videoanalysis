@@ -128,7 +128,7 @@ def generate_annotated_snapshot(
     annotated_output_dir: str,
     bbox_trusted: bool = False,
 ) -> Dict[str, Any]:
-    """Generate an annotated snapshot from a raw Phase 3C snapshot.
+    """Generate an annotated snapshot from a raw snapshot.
 
     Draws a text label block.  Optionally draws the event bbox (only when
     *bbox_trusted* is True) and the zone polygon (if available).

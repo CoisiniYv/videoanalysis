@@ -1,4 +1,4 @@
-"""Deterministic cache key helpers for C1J evidence metadata."""
+"""Deterministic cache key helpers for evidence metadata."""
 
 from __future__ import annotations
 

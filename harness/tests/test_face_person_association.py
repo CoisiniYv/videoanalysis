@@ -207,7 +207,7 @@ class TestScoreRange:
 
 
 class TestOneToOneGreedy:
-    """F2.4 — one-to-one greedy: each person assigned at most one face."""
+    """midterm — one-to-one greedy: each person assigned at most one face."""
 
     def test_two_faces_one_person_only_best_associated(self):
         """Two faces inside same person — only best-scoring face associated."""

@@ -1,4 +1,4 @@
-"""FaceDebugPyFunc — minimal face detector visibility probe (Phase F1.2).
+"""FaceDebugPyFunc — minimal face detector visibility probe.
 
 Logs face object count and first-few bbox/landmark values. Does NOT:
 - write to Redis security.face_observations
@@ -15,7 +15,7 @@ from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
 
 class FaceDebugPyFunc(NvDsPyFuncPlugin):
-    """Log face detections for F1.2 smoke verification."""
+    """Log face detections for smoke verification."""
 
     def __init__(self, log_every_n_frames: int = 30, **kwargs):
         super().__init__(**kwargs)

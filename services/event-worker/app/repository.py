@@ -117,13 +117,13 @@ EVIDENCE_TASK_STATUSES = (
     "not_implemented",
 )
 
-_R3_1A_NOT_IMPLEMENTED_REASON = (
-    "R3.1A behavior evidence MVP created the evidence task, but production "
+_MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON = (
+    "Midterm behavior evidence created the evidence task, but production "
     "snapshot/clip/metadata generation is not implemented in this deployment."
 )
 
-_R3_1B_NOT_IMPLEMENTED_REASON = (
-    "R3.1B face match evidence MVP created the evidence task, but production "
+_MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON = (
+    "Midterm face match evidence created the evidence task, but production "
     "snapshot/raw_clip/metadata generation is not implemented in this deployment."
 )
 
@@ -132,8 +132,8 @@ def _not_implemented_reason(event: Dict[str, Any]) -> str:
     if event.get("algorithm_type") == "face_intelligence" or event.get(
         "event_type"
     ) in ("watchlist_hit", "live_search_hit"):
-        return _R3_1B_NOT_IMPLEMENTED_REASON
-    return _R3_1A_NOT_IMPLEMENTED_REASON
+        return _MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON
+    return _MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON
 
 
 def _evidence_task_initial_status(event: Dict[str, Any]) -> tuple[str, str]:
@@ -152,7 +152,7 @@ def _evidence_task_initial_status(event: Dict[str, Any]) -> tuple[str, str]:
         "intrusion",
     ):
         return "pending", ""
-    return "not_implemented", _R3_1A_NOT_IMPLEMENTED_REASON
+    return "not_implemented", _MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON
 
 
 class EventRepository:

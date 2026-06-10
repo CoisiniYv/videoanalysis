@@ -1,4 +1,4 @@
-"""Tests for F3.4 gallery schema and enrollment harness.
+"""Tests for midterm gallery schema and enrollment harness.
 
 Test classes:
 - TestGalleryEmbeddingValidation: pure Python, no DB
@@ -20,7 +20,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FACE_WORKER_ROOT = REPO_ROOT / "services" / "face-worker"
-sys.path.insert(0, str(FACE_WORKER_ROOT))
+FACE_WORKER_ROOT_STR = str(FACE_WORKER_ROOT)
+if FACE_WORKER_ROOT_STR in sys.path:
+    sys.path.remove(FACE_WORKER_ROOT_STR)
+sys.path.insert(0, FACE_WORKER_ROOT_STR)
+for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
+    sys.modules.pop(_mod, None)
 
 from app.gallery_repository import GalleryRepository, _validate_embedding
 from app.person_repository import PersonRepository
@@ -267,13 +272,12 @@ class TestGalleryRepositoryUnit:
 
     @staticmethod
     def _make_repo() -> tuple[GalleryRepository, MagicMock]:
-        with patch("app.gallery_repository.register_vector"):
-            conn = MagicMock()
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            conn.cursor.return_value = cursor
-            return GalleryRepository(conn), cursor
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = cursor
+        return GalleryRepository(conn), cursor
 
     def test_add_embedding_returns_id(self):
         repo, cursor = self._make_repo()
@@ -345,13 +349,12 @@ class TestSearchGalleryParams:
 
     @staticmethod
     def _make_store() -> FaceVectorStore:
-        with patch("app.vector_store.register_vector"):
-            conn = MagicMock()
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            conn.cursor.return_value = cursor
-            return FaceVectorStore(conn)
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value = cursor
+        return FaceVectorStore(conn)
 
     def test_top_k_below_1_clamped(self):
         store = self._make_store()
@@ -386,34 +389,32 @@ class TestSearchGalleryParams:
     def test_sql_uses_cosine_operator(self):
         store = FaceVectorStore.__new__(FaceVectorStore)
         store._conn = MagicMock()
-        with patch("app.vector_store.register_vector"):
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            cursor.fetchall.return_value = []
-            store._conn.cursor.return_value = cursor
-            store.search_gallery(_unit_embedding(), top_k=5)
-            call_args = cursor.execute.call_args
-            sql = call_args[0][0]
-            assert "<=>" in sql
-            assert "person_gallery_embeddings" in sql
-            assert "JOIN persons" in sql
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        store._conn.cursor.return_value = cursor
+        store.search_gallery(_unit_embedding(), top_k=5)
+        call_args = cursor.execute.call_args
+        sql = call_args[0][0]
+        assert "<=>" in sql
+        assert "person_gallery_embeddings" in sql
+        assert "JOIN persons" in sql
 
     def test_sql_filters_active_person(self):
         """search_gallery SQL must include p.is_active = true."""
         store = FaceVectorStore.__new__(FaceVectorStore)
         store._conn = MagicMock()
-        with patch("app.vector_store.register_vector"):
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            cursor.fetchall.return_value = []
-            store._conn.cursor.return_value = cursor
-            store.search_gallery(_unit_embedding())
-            call_args = cursor.execute.call_args
-            sql = call_args[0][0]
-            assert "p.is_active = true" in sql
-            assert "pge.is_active = true" in sql
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = []
+        store._conn.cursor.return_value = cursor
+        store.search_gallery(_unit_embedding())
+        call_args = cursor.execute.call_args
+        sql = call_args[0][0]
+        assert "p.is_active = true" in sql
+        assert "pge.is_active = true" in sql
 
 
 # ── Class 5: search_gallery Results (mocked) ─────────────────────────────
@@ -423,14 +424,13 @@ class TestSearchGalleryResult:
 
     @staticmethod
     def _make_store_with_rows(rows: list[dict]) -> FaceVectorStore:
-        with patch("app.vector_store.register_vector"):
-            conn = MagicMock()
-            cursor = MagicMock()
-            cursor.__enter__ = MagicMock(return_value=cursor)
-            cursor.__exit__ = MagicMock(return_value=False)
-            cursor.fetchall.return_value = rows
-            conn.cursor.return_value = cursor
-            return FaceVectorStore(conn)
+        conn = MagicMock()
+        cursor = MagicMock()
+        cursor.__enter__ = MagicMock(return_value=cursor)
+        cursor.__exit__ = MagicMock(return_value=False)
+        cursor.fetchall.return_value = rows
+        conn.cursor.return_value = cursor
+        return FaceVectorStore(conn)
 
     def test_default_excludes_embedding(self):
         rows = [{
@@ -483,7 +483,7 @@ pytestmark_integration = pytest.mark.integration
 class TestGalleryIntegration:
     """Integration tests against a real PostgreSQL with pgvector.
 
-    All test data uses person names prefixed with ``test:f3_4:``.
+    All test data uses person names prefixed with ``test:midterm_gallery:``.
     Cleanup runs in finally blocks.
     """
 
@@ -507,14 +507,14 @@ class TestGalleryIntegration:
             cur.execute(
                 "DELETE FROM person_gallery_embeddings "
                 "WHERE person_id IN "
-                "(SELECT id FROM persons WHERE name LIKE 'test:f3_4:%%')"
+                "(SELECT id FROM persons WHERE name LIKE 'test:midterm_gallery:%%')"
             )
             cur.execute(
-                "DELETE FROM persons WHERE name LIKE 'test:f3_4:%%'"
+                "DELETE FROM persons WHERE name LIKE 'test:midterm_gallery:%%'"
             )
             cur.execute(
                 "DELETE FROM face_observations "
-                "WHERE source_observation_id LIKE 'test:f3_4:%%'"
+                "WHERE source_observation_id LIKE 'test:midterm_gallery:%%'"
             )
         conn.commit()
 
@@ -523,13 +523,13 @@ class TestGalleryIntegration:
         repo = PersonRepository(conn)
         try:
             pid = repo.create_person(
-                "test:f3_4:alice",
+                "test:midterm_gallery:alice",
                 description="Integration test person",
             )
             assert pid > 0
             person = repo.get_by_id(pid)
             assert person is not None
-            assert person["name"] == "test:f3_4:alice"
+            assert person["name"] == "test:midterm_gallery:alice"
             assert person["is_active"] is True
         finally:
             self._cleanup(conn)
@@ -540,11 +540,11 @@ class TestGalleryIntegration:
         repo = PersonRepository(conn)
         try:
             pid = repo.create_person(
-                "test:f3_4:ext_person",
-                external_person_id="test:f3_4:badge-999",
+                "test:midterm_gallery:ext_person",
+                external_person_id="test:midterm_gallery:badge-999",
             )
             assert pid > 0
-            person = repo.get_by_external_person_id("test:f3_4:badge-999")
+            person = repo.get_by_external_person_id("test:midterm_gallery:badge-999")
             assert person is not None
             assert person["id"] == pid
         finally:
@@ -557,13 +557,13 @@ class TestGalleryIntegration:
         repo = PersonRepository(conn)
         try:
             repo.create_person(
-                "test:f3_4:dup_ext_1",
-                external_person_id="test:f3_4:dup-ext",
+                "test:midterm_gallery:dup_ext_1",
+                external_person_id="test:midterm_gallery:dup-ext",
             )
             with pytest.raises(Exception):
                 repo.create_person(
-                    "test:f3_4:dup_ext_2",
-                    external_person_id="test:f3_4:dup-ext",
+                    "test:midterm_gallery:dup_ext_2",
+                    external_person_id="test:midterm_gallery:dup-ext",
                 )
             # Rollback the failed transaction so cleanup can proceed
             conn.rollback()
@@ -575,12 +575,12 @@ class TestGalleryIntegration:
         conn = self._connect()
         repo = PersonRepository(conn)
         try:
-            repo.create_person("test:f3_4:person_a")
-            repo.create_person("test:f3_4:person_b")
+            repo.create_person("test:midterm_gallery:person_a")
+            repo.create_person("test:midterm_gallery:person_b")
             persons = repo.list_active()
             names = [p["name"] for p in persons]
-            assert "test:f3_4:person_a" in names
-            assert "test:f3_4:person_b" in names
+            assert "test:midterm_gallery:person_a" in names
+            assert "test:midterm_gallery:person_b" in names
         finally:
             self._cleanup(conn)
             conn.close()
@@ -589,7 +589,7 @@ class TestGalleryIntegration:
         conn = self._connect()
         repo = PersonRepository(conn)
         try:
-            pid = repo.create_person("test:f3_4:deactivate_me")
+            pid = repo.create_person("test:midterm_gallery:deactivate_me")
             assert repo.deactivate(pid) is True
             person = repo.get_by_id(pid)
             assert person["is_active"] is False
@@ -605,7 +605,7 @@ class TestGalleryIntegration:
         person_repo = PersonRepository(conn)
         gallery_repo = GalleryRepository(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:gallery_add")
+            pid = person_repo.create_person("test:midterm_gallery:gallery_add")
             emb = _unit_embedding()
             gid = gallery_repo.add_embedding(
                 pid, emb, is_primary=True, quality=0.85,
@@ -626,8 +626,8 @@ class TestGalleryIntegration:
         person_repo = PersonRepository(conn)
         gallery_repo = GalleryRepository(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:provenance")
-            sid = "test:f3_4:prov_obs_1"
+            pid = person_repo.create_person("test:midterm_gallery:provenance")
+            sid = "test:midterm_gallery:prov_obs_1"
             # Insert a face_observation first (FK requirement)
             from pgvector.psycopg import Vector
             with conn.cursor() as cur:
@@ -665,7 +665,7 @@ class TestGalleryIntegration:
         person_repo = PersonRepository(conn)
         gallery_repo = GalleryRepository(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:multi_gallery")
+            pid = person_repo.create_person("test:midterm_gallery:multi_gallery")
             gid1 = gallery_repo.add_embedding(pid, _unit_embedding(), is_primary=True)
             gid2 = gallery_repo.add_embedding(
                 pid, _randomlike_embedding(seed=100),
@@ -685,7 +685,7 @@ class TestGalleryIntegration:
         person_repo = PersonRepository(conn)
         gallery_repo = GalleryRepository(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:cascade")
+            pid = person_repo.create_person("test:midterm_gallery:cascade")
             gid = gallery_repo.add_embedding(pid, _unit_embedding())
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM persons WHERE id = %s", (pid,))
@@ -701,7 +701,7 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:self_match")
+            pid = person_repo.create_person("test:midterm_gallery:self_match")
             emb = _unit_embedding()
             gallery_repo.add_embedding(pid, emb, is_primary=True)
 
@@ -720,8 +720,8 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid_a = person_repo.create_person("test:f3_4:search_a")
-            pid_b = person_repo.create_person("test:f3_4:search_b")
+            pid_a = person_repo.create_person("test:midterm_gallery:search_a")
+            pid_b = person_repo.create_person("test:midterm_gallery:search_b")
             emb1 = _unit_embedding()
             emb2 = _randomlike_embedding(seed=77)
             gallery_repo.add_embedding(pid_a, emb1, is_primary=True)
@@ -741,8 +741,8 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid_a = person_repo.create_person("test:f3_4:filter_a")
-            pid_b = person_repo.create_person("test:f3_4:filter_b")
+            pid_a = person_repo.create_person("test:midterm_gallery:filter_a")
+            pid_b = person_repo.create_person("test:midterm_gallery:filter_b")
             emb = _unit_embedding()
             gallery_repo.add_embedding(pid_a, emb)
             gallery_repo.add_embedding(pid_b, emb)
@@ -761,7 +761,7 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:min_sim")
+            pid = person_repo.create_person("test:midterm_gallery:min_sim")
             emb1 = _unit_embedding()
             emb2 = _randomlike_embedding(seed=99)
             gallery_repo.add_embedding(pid, emb1, is_primary=True)
@@ -780,7 +780,7 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:inactive_emb")
+            pid = person_repo.create_person("test:midterm_gallery:inactive_emb")
             emb = _unit_embedding()
             gid = gallery_repo.add_embedding(pid, emb)
             gallery_repo.deactivate(gid)
@@ -799,7 +799,7 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:inactive_person")
+            pid = person_repo.create_person("test:midterm_gallery:inactive_person")
             emb = _unit_embedding()
             gallery_repo.add_embedding(pid, emb, is_primary=True)
 
@@ -825,7 +825,7 @@ class TestGalleryIntegration:
         gallery_repo = GalleryRepository(conn)
         store = FaceVectorStore(conn)
         try:
-            pid = person_repo.create_person("test:f3_4:active_both")
+            pid = person_repo.create_person("test:midterm_gallery:active_both")
             emb = _unit_embedding()
             gallery_repo.add_embedding(pid, emb, is_primary=True)
 
@@ -844,7 +844,7 @@ class TestGalleryIntegration:
         store = FaceVectorStore(conn)
         try:
             emb = _randomlike_embedding(seed=123)
-            sid = "test:f3_4:e2e_obs"
+            sid = "test:midterm_gallery:e2e_obs"
             from pgvector.psycopg import Vector
             with conn.cursor() as cur:
                 cur.execute(
@@ -879,7 +879,7 @@ class TestGalleryIntegration:
 
             obs_emb = [float(x) for x in obs["embedding"]]
 
-            pid = person_repo.create_person("test:f3_4:e2e_person")
+            pid = person_repo.create_person("test:midterm_gallery:e2e_person")
             gid = gallery_repo.add_embedding(
                 pid, obs_emb,
                 source_type="snapshot_extract",
@@ -909,7 +909,7 @@ class TestGalleryIntegration:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT count(*) FROM persons "
-                    "WHERE name LIKE 'test:f3_4:%%'"
+                    "WHERE name LIKE 'test:midterm_gallery:%%'"
                 )
                 row = cur.fetchone()
             assert row[0] == 0

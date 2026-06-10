@@ -45,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 shutdown_requested = False
 DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC = 10.0
+DEFAULT_POST_SAVANT_DURATION_GUARD_SLACK_SEC = 1.0
+DEFAULT_POST_SAVANT_WINDOW_EDGE_SLACK_SEC = 0.75
+DEFAULT_POST_SAVANT_MAX_PTS_GAP_SEC = 2.0
+DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
+    "/media/replay-sink-output/midterm/.current_epoch.json"
+)
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
@@ -639,6 +645,137 @@ def _load_sink_metadata_file(metadata_file: str) -> dict:
         return {}
 
 
+def _runtime_epoch_strict_enabled() -> bool:
+    return _env_bool("EVIDENCE_RUNTIME_EPOCH_STRICT", default=True)
+
+
+def _runtime_epoch_base_dir(sink_dir: str | Path) -> Path:
+    path = Path(sink_dir)
+    for candidate in (path, *path.parents):
+        if candidate.name == "midterm":
+            return candidate
+    return path
+
+
+def _runtime_epoch_state_path(sink_dir: str | Path | None = None) -> Path:
+    configured = os.getenv("RUNTIME_EPOCH_STATE_PATH")
+    if configured:
+        return Path(configured)
+    if sink_dir is not None:
+        return _runtime_epoch_base_dir(sink_dir) / ".current_epoch.json"
+    return Path(DEFAULT_RUNTIME_EPOCH_STATE_PATH)
+
+
+def _read_current_runtime_epoch_state(sink_dir: str | Path | None = None) -> dict:
+    path = _runtime_epoch_state_path(sink_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        logger.exception("failed to read runtime epoch state path=%s", path)
+        return {}
+
+
+def _current_runtime_epoch_id(sink_dir: str | Path | None = None) -> str:
+    env_value = os.getenv("RUNTIME_EPOCH_ID") or os.getenv("VIDEO_ANALYTICS_RUNTIME_EPOCH_ID")
+    if env_value:
+        return str(env_value)
+    state = _read_current_runtime_epoch_state(sink_dir)
+    return str(state.get("runtime_epoch_id") or "")
+
+
+def _active_epoch_sink_output_dir(sink_dir: str) -> str:
+    runtime_epoch_id = _current_runtime_epoch_id(sink_dir)
+    if not runtime_epoch_id:
+        return sink_dir
+    return str(_runtime_epoch_base_dir(sink_dir) / "epochs" / runtime_epoch_id)
+
+
+def _runtime_epoch_from_path(path: str | Path) -> str:
+    parts = Path(path).parts
+    for index, part in enumerate(parts[:-1]):
+        if part == "epochs" and index + 1 < len(parts):
+            return parts[index + 1]
+    return ""
+
+
+def _metadata_labels(sink_metadata: dict) -> dict:
+    labels = sink_metadata.get("labels")
+    if isinstance(labels, dict):
+        return labels
+    configuration = sink_metadata.get("configuration")
+    if isinstance(configuration, dict):
+        labels = configuration.get("labels")
+        if isinstance(labels, dict):
+            return labels
+    return {}
+
+
+def _runtime_epoch_from_event_context(event_context: dict) -> str:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    return str(
+        event_context.get("runtime_epoch_id")
+        or payload.get("runtime_epoch_id")
+        or media.get("runtime_epoch_id")
+        or ""
+    )
+
+
+def _runtime_epoch_guard(
+    *,
+    event_context: dict,
+    replay_labels: dict,
+    sink_metadata: dict,
+    meta_dir: str,
+) -> dict:
+    labels = _metadata_labels(sink_metadata)
+    current_epoch_id = _current_runtime_epoch_id(meta_dir)
+    fields = {
+        "event_payload_runtime_epoch_id": _runtime_epoch_from_event_context(event_context),
+        "record_request_runtime_epoch_id": str(replay_labels.get("runtime_epoch_id") or ""),
+        "replay_labels_runtime_epoch_id": str(replay_labels.get("runtime_epoch_id") or ""),
+        "sink_metadata_runtime_epoch_id": str(labels.get("runtime_epoch_id") or ""),
+        "sink_path_runtime_epoch_id": _runtime_epoch_from_path(meta_dir),
+        "current_runtime_epoch_id": current_epoch_id,
+    }
+    strict = _runtime_epoch_strict_enabled()
+    required_keys = tuple(fields.keys())
+    missing = [key for key in required_keys if not fields.get(key)]
+    nonempty_values = [str(value) for value in fields.values() if value]
+    expected = current_epoch_id or (nonempty_values[0] if nonempty_values else "")
+    mismatched = [
+        key
+        for key, value in fields.items()
+        if value and expected and str(value) != expected
+    ]
+    failed = bool(mismatched) or (strict and bool(missing))
+    reason = ""
+    if mismatched:
+        reason = "missing_or_mismatched_runtime_epoch"
+    elif strict and missing:
+        reason = "missing_or_mismatched_runtime_epoch"
+    return {
+        "runtime_epoch_id": expected,
+        "epoch_guard_status": "failed" if failed else "passed",
+        "epoch_guard_failed": failed,
+        "epoch_guard_reason": reason,
+        "runtime_epoch_strict": strict,
+        "runtime_epoch_fields": fields,
+        "runtime_epoch_missing_fields": missing,
+        "runtime_epoch_mismatched_fields": mismatched,
+    }
+
+
+def _merge_runtime_epoch_guard(summary: dict, epoch_guard: dict) -> dict:
+    summary.update(epoch_guard)
+    return summary
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -916,6 +1053,29 @@ def _evidence_duration_slack_seconds() -> float:
     return max(0.0, value)
 
 
+def _post_savant_duration_guard_slack_seconds() -> float:
+    value = _to_float(os.getenv("POST_SAVANT_DURATION_GUARD_SLACK_SEC"))
+    if value is None:
+        value = _to_float(os.getenv("EVIDENCE_PRODUCTION_DURATION_SLACK_SEC"))
+    if value is None:
+        return DEFAULT_POST_SAVANT_DURATION_GUARD_SLACK_SEC
+    return max(0.0, value)
+
+
+def _post_savant_window_edge_slack_ns() -> int:
+    value = _to_float(os.getenv("POST_SAVANT_WINDOW_EDGE_SLACK_SEC"))
+    if value is None:
+        return int(DEFAULT_POST_SAVANT_WINDOW_EDGE_SLACK_SEC * 1_000_000_000)
+    return int(max(0.0, value) * 1_000_000_000)
+
+
+def _post_savant_max_pts_gap_ns() -> int:
+    value = _to_float(os.getenv("POST_SAVANT_MAX_PTS_GAP_SEC"))
+    if value is None:
+        return int(DEFAULT_POST_SAVANT_MAX_PTS_GAP_SEC * 1_000_000_000)
+    return int(max(0.0, value) * 1_000_000_000)
+
+
 def _duration_guard(
     actual: float | None,
     expected: float,
@@ -1022,18 +1182,27 @@ def _build_business_metadata(
     )
     offset = replay_job_request.get("offset") or {}
     raw_clip_size = 0
-    try:
-        raw_clip_size = Path(raw_clip_path).stat().st_size
-    except OSError:
-        raw_clip_size = 0
-    raw_clip_duration = _probe_video_duration_seconds(raw_clip_path)
+    if raw_clip_path:
+        try:
+            raw_clip_size = Path(raw_clip_path).stat().st_size
+        except OSError:
+            raw_clip_size = 0
+    raw_clip_duration = (
+        _probe_video_duration_seconds(raw_clip_path) if raw_clip_path else None
+    )
     duration_probe_status = "ok" if raw_clip_duration is not None else "failed"
     expected_duration_seconds = _expected_clip_seconds(
         stop_condition,
         configuration,
         offset.get("seconds", 0),
     )
-    decode_probe = _probe_clip_decode(raw_clip_path)
+    decode_probe = _probe_clip_decode(raw_clip_path) if raw_clip_path else {
+        "decode_error_count": 0,
+        "decode_error_sample": [],
+        "decode_ok": None,
+        "probe_tool": None,
+        "probe_error": "clip file not found",
+    }
     sanitize_info = sanitize_info or {}
     duration_guard = _duration_guard(raw_clip_duration, expected_duration_seconds)
     duration_ok = _duration_ok(
@@ -1362,12 +1531,277 @@ def _bundle_clip_status_from_post_savant_summary(summary: dict) -> str:
 
 
 def _summary_clip_status(summary: dict) -> str:
+    if (
+        summary.get("duration_guard_failed") is True
+        or summary.get("duration_guard_status") == "failed"
+        or summary.get("epoch_guard_failed") is True
+        or summary.get("epoch_guard_status") == "failed"
+        or summary.get("sink_window_guard_failed") is True
+        or summary.get("sink_window_guard_status") == "failed"
+        or (summary.get("time_window") or {}).get("time_domain_crop_failed") is True
+        or summary.get("time_domain_crop_failed") is True
+    ):
+        return BUNDLE_STATUS_DURATION_GUARD_FAILED
     if summary.get("production_ready") is True:
         return "ready"
     status = str(summary.get("annotation_status") or "")
     if status in {"complete", "partial"}:
         return "generated_unverified"
     return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
+
+
+def _path_for_metadata(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _requested_duration_from_time_window(time_window: dict | None) -> float | None:
+    time_window = time_window or {}
+    requested = _to_float(time_window.get("requested_duration_s"))
+    if requested is not None and requested > 0:
+        return requested
+    requested_start_pts = _to_int(time_window.get("requested_start_pts"))
+    requested_end_pts = _to_int(time_window.get("requested_end_pts"))
+    if requested_start_pts is None or requested_end_pts is None:
+        return None
+    if requested_end_pts <= requested_start_pts:
+        return None
+    return (requested_end_pts - requested_start_pts) / 1_000_000_000.0
+
+
+def _post_savant_duration_guard(raw_clip_path: Path | None, time_window: dict | None) -> dict:
+    expected_duration = _requested_duration_from_time_window(time_window)
+    actual_duration = (
+        _probe_video_duration_seconds(str(raw_clip_path))
+        if raw_clip_path is not None and raw_clip_path.is_file()
+        else None
+    )
+    guard = _duration_guard(
+        actual_duration,
+        expected_duration or 0.0,
+        _post_savant_duration_guard_slack_seconds(),
+    )
+    return {
+        "raw_clip_duration": actual_duration,
+        "expected_duration_seconds": (
+            round(float(expected_duration), 3)
+            if expected_duration is not None
+            else None
+        ),
+        **guard,
+    }
+
+
+def _sink_metadata_window_guard(rows: list[dict], time_window: dict | None) -> dict:
+    time_window = time_window or {}
+    requested_start_pts = _to_int(time_window.get("requested_start_pts"))
+    requested_end_pts = _to_int(time_window.get("requested_end_pts"))
+    event_frame_pts = _to_int(time_window.get("event_frame_pts"))
+    pts_values = [
+        value
+        for value in (_to_int(row.get("pts") or row.get("frame_pts")) for row in rows)
+        if value is not None
+    ]
+    summary = {
+        "sink_window_guard_status": "not_applicable",
+        "sink_window_guard_failed": False,
+        "sink_window_guard_reason": "",
+        "sink_metadata_first_pts": pts_values[0] if pts_values else None,
+        "sink_metadata_last_pts": pts_values[-1] if pts_values else None,
+        "sink_metadata_frame_count_for_guard": len(pts_values),
+        "event_pts_inside_clip": False,
+        "event_projected_t_s": None,
+        "event_centered_in_clip": False,
+        "max_sink_metadata_pts_gap_ns": None,
+    }
+    if requested_start_pts is None or requested_end_pts is None or event_frame_pts is None:
+        summary.update(
+            {
+                "sink_window_guard_status": "unavailable",
+                "sink_window_guard_reason": "requested_or_event_pts_unavailable",
+            }
+        )
+        return summary
+    if requested_end_pts <= requested_start_pts:
+        summary.update(
+            {
+                "sink_window_guard_status": "failed",
+                "sink_window_guard_failed": True,
+                "sink_window_guard_reason": "requested_pts_window_invalid",
+            }
+        )
+        return summary
+    if not pts_values:
+        summary.update(
+            {
+                "sink_window_guard_status": "failed",
+                "sink_window_guard_failed": True,
+                "sink_window_guard_reason": "sink_metadata_empty_for_requested_window",
+            }
+        )
+        return summary
+
+    first_pts = int(pts_values[0])
+    last_pts = int(pts_values[-1])
+    edge_slack_ns = _post_savant_window_edge_slack_ns()
+    max_gap_ns = _post_savant_max_pts_gap_ns()
+    gaps = [int(b) - int(a) for a, b in zip(pts_values, pts_values[1:])]
+    positive_gaps = [gap for gap in gaps if gap > 0]
+    largest_gap = max(positive_gaps) if positive_gaps else 0
+    summary["max_sink_metadata_pts_gap_ns"] = largest_gap
+    event_projected = (event_frame_pts - first_pts) / 1_000_000_000.0
+    expected_event_t = _to_float(time_window.get("expected_event_t_s"))
+    if expected_event_t is None:
+        expected_event_t = (
+            (event_frame_pts - requested_start_pts) / 1_000_000_000.0
+        )
+    event_center_tolerance = _to_float(
+        os.getenv("FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS")
+    )
+    if event_center_tolerance is None:
+        event_center_tolerance = 0.75
+
+    summary.update(
+        {
+            "event_pts_inside_clip": first_pts <= event_frame_pts <= last_pts,
+            "event_projected_t_s": round(float(event_projected), 6),
+            "event_centered_in_clip": (
+                abs(float(event_projected) - float(expected_event_t))
+                <= float(event_center_tolerance)
+            ),
+        }
+    )
+    reason = ""
+    if any(gap <= 0 for gap in gaps):
+        reason = "sink_metadata_pts_not_strictly_increasing"
+    elif largest_gap > max_gap_ns:
+        reason = "sink_metadata_pts_gap_exceeds_limit"
+    elif first_pts > requested_start_pts + edge_slack_ns:
+        reason = "sink_metadata_starts_after_requested_window"
+    elif last_pts < requested_end_pts - edge_slack_ns:
+        reason = "sink_metadata_ends_before_requested_window"
+    elif not summary["event_pts_inside_clip"]:
+        reason = "event_pts_outside_sink_metadata_window"
+    elif not summary["event_centered_in_clip"]:
+        reason = "event_not_centered_in_sink_metadata_window"
+
+    if reason:
+        summary.update(
+            {
+                "sink_window_guard_status": "failed",
+                "sink_window_guard_failed": True,
+                "sink_window_guard_reason": reason,
+            }
+        )
+    else:
+        summary["sink_window_guard_status"] = "passed"
+    return summary
+
+
+def _merge_sink_window_guard(summary: dict, sink_window_guard: dict) -> dict:
+    summary.update(sink_window_guard)
+    return summary
+
+
+def _merge_post_savant_duration_guard(summary: dict, duration_guard: dict) -> dict:
+    summary.update(
+        {
+            "raw_clip_duration": duration_guard.get("raw_clip_duration"),
+            "expected_duration_seconds": duration_guard.get(
+                "expected_duration_seconds"
+            ),
+            "duration_guard_status": duration_guard.get("duration_guard_status"),
+            "duration_guard_failed": bool(
+                duration_guard.get("duration_guard_failed")
+            ),
+            "duration_guard_reason": duration_guard.get("duration_guard_reason", ""),
+            "duration_guard_slack_seconds": duration_guard.get(
+                "duration_guard_slack_seconds"
+            ),
+            "max_allowed_duration_seconds": duration_guard.get(
+                "max_allowed_duration_seconds"
+            ),
+        }
+    )
+    return summary
+
+
+def _apply_post_savant_failure_status(
+    summary: dict,
+    *,
+    reason: str,
+    duration_guard: dict | None = None,
+) -> dict:
+    duration_guard = dict(duration_guard or {})
+    if reason in {"time_domain_crop_failed", "runtime_epoch_guard_failed"}:
+        duration_guard["duration_guard_status"] = "failed"
+        duration_guard["duration_guard_failed"] = True
+        duration_guard["duration_guard_reason"] = (
+            "time_domain_crop_failed"
+            if reason == "time_domain_crop_failed"
+            else "missing_or_mismatched_runtime_epoch"
+        )
+    failures = list(summary.get("production_ready_failures") or [])
+    if reason not in failures:
+        failures.append(reason)
+    limitations = list(summary.get("limitations") or [])
+    if reason not in limitations:
+        limitations.append(reason)
+    summary.update(
+        {
+            "production_ready": False,
+            "canonical_clip": False,
+            "visual_binding_status": "unverified",
+            "visual_binding_reason": reason,
+            "visual_evidence_status": "unverified",
+            "evidence_visual_status": "unverified",
+            "production_ready_failures": failures,
+            "limitations": limitations,
+            "raw_clip_path": None,
+        }
+    )
+    if reason == "time_domain_crop_failed":
+        summary["time_domain_crop_failed"] = True
+    if reason == "runtime_epoch_guard_failed":
+        summary["epoch_guard_failed"] = True
+        summary["epoch_guard_status"] = "failed"
+        summary["epoch_guard_reason"] = "missing_or_mismatched_runtime_epoch"
+    if duration_guard:
+        _merge_post_savant_duration_guard(summary, duration_guard)
+        summary["duration_guard_reason"] = (
+            duration_guard.get("duration_guard_reason") or reason
+        )
+    if reason == "sink_window_guard_failed":
+        summary["sink_window_guard_failed"] = True
+    return summary
+
+
+def _rewrite_post_savant_summary_files(bundle_result: object) -> None:
+    summary = getattr(bundle_result, "summary")
+    summary_path = Path(getattr(bundle_result, "summary_path"))
+    _atomic_write_json(summary_path, summary)
+    sidecar_summary_path = getattr(bundle_result, "sidecar_summary_path", None)
+    if sidecar_summary_path is None:
+        sidecar_summary_path = Path(getattr(bundle_result, "output_dir")) / SIDECAR_SUMMARY_FILE
+    _atomic_write_json(Path(sidecar_summary_path), summary)
+
+
+def _without_published_raw_clip(bundle_result: object) -> _EvidenceBundleView:
+    raw_clip_path = getattr(bundle_result, "raw_clip_path", None)
+    if raw_clip_path is not None:
+        try:
+            Path(raw_clip_path).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("failed_to_remove_invalid_raw_clip path=%s", raw_clip_path)
+    return _EvidenceBundleView(
+        output_dir=Path(getattr(bundle_result, "output_dir")),
+        raw_clip_path=None,
+        sink_metadata_path=Path(getattr(bundle_result, "sink_metadata_path")),
+        production_sidecar_path=Path(getattr(bundle_result, "production_sidecar_path")),
+        summary_path=Path(getattr(bundle_result, "summary_path")),
+        summary=getattr(bundle_result, "summary"),
+    )
 
 
 def _event_for_frame_cache_sidecar(event_context: dict) -> dict:
@@ -1626,7 +2060,7 @@ class _EvidenceBundleView:
         self,
         *,
         output_dir: Path,
-        raw_clip_path: Path,
+        raw_clip_path: Path | None,
         sink_metadata_path: Path,
         production_sidecar_path: Path,
         summary_path: Path,
@@ -1649,11 +2083,11 @@ def _build_event_metadata(
     bundle_result: object,
 ) -> dict:
     summary = getattr(bundle_result, "summary")
-    raw_clip_path = str(getattr(bundle_result, "raw_clip_path"))
-    sink_metadata_path = str(getattr(bundle_result, "sink_metadata_path"))
-    production_sidecar_path = str(getattr(bundle_result, "production_sidecar_path"))
-    summary_path = str(getattr(bundle_result, "summary_path"))
-    output_dir = str(getattr(bundle_result, "output_dir"))
+    raw_clip_path = _path_for_metadata(getattr(bundle_result, "raw_clip_path", None))
+    sink_metadata_path = _path_for_metadata(getattr(bundle_result, "sink_metadata_path", None))
+    production_sidecar_path = _path_for_metadata(getattr(bundle_result, "production_sidecar_path", None))
+    summary_path = _path_for_metadata(getattr(bundle_result, "summary_path", None))
+    output_dir = _path_for_metadata(getattr(bundle_result, "output_dir", None))
     stop_condition = replay_job_request.get("stop_condition") or {}
     configuration = replay_job_request.get("configuration") or {}
     replay_labels = configuration.get("labels") or {}
@@ -1666,10 +2100,11 @@ def _build_event_metadata(
     )
     offset = replay_job_request.get("offset") or {}
     raw_clip_size = 0
-    try:
-        raw_clip_size = Path(raw_clip_path).stat().st_size
-    except OSError:
-        raw_clip_size = 0
+    if raw_clip_path:
+        try:
+            raw_clip_size = Path(raw_clip_path).stat().st_size
+        except OSError:
+            raw_clip_size = 0
     object_counts = summary.get("object_counts") if isinstance(summary, dict) else {}
     if not isinstance(object_counts, dict):
         object_counts = {}
@@ -1679,6 +2114,7 @@ def _build_event_metadata(
         "project_version": _evidence_version("midterm"),
         **_legacy_metadata_fields("midterm"),
         "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
+        "runtime_epoch_id": summary.get("runtime_epoch_id", ""),
         "evidence_type": "security_event_post_savant_replay_clip",
         "evidence_topology": POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
         "recording_strategy": "savant_replay",
@@ -1702,9 +2138,11 @@ def _build_event_metadata(
             "event_frame_pts": anchor_metadata.get("event_frame_pts", ""),
             "keyframe_uuid": event_context.get("keyframe_uuid", ""),
             "previous_keyframe_uuid": event_context.get("previous_keyframe_uuid", ""),
+            "runtime_epoch_id": summary.get("runtime_epoch_id", ""),
         },
         "replay": {
             "replay_job_id": replay_job_id,
+            "runtime_epoch_id": replay_labels.get("runtime_epoch_id", ""),
             "replay_source_kind": (
                 replay_labels.get("replay_source_kind", "")
             ),
@@ -1735,6 +2173,36 @@ def _build_event_metadata(
             "production_sidecar_path": production_sidecar_path,
             "summary_json_path": summary_path,
             "raw_clip_size": raw_clip_size,
+            "raw_clip_duration": summary.get("raw_clip_duration"),
+            "expected_duration_seconds": summary.get("expected_duration_seconds"),
+            "duration_guard_status": summary.get("duration_guard_status"),
+            "duration_guard_failed": bool(summary.get("duration_guard_failed")),
+            "duration_guard_reason": summary.get("duration_guard_reason", ""),
+            "duration_guard_slack_seconds": summary.get(
+                "duration_guard_slack_seconds"
+            ),
+            "max_allowed_duration_seconds": summary.get(
+                "max_allowed_duration_seconds"
+            ),
+            "sink_window_guard_status": summary.get("sink_window_guard_status"),
+            "sink_window_guard_failed": bool(
+                summary.get("sink_window_guard_failed")
+            ),
+            "sink_window_guard_reason": summary.get("sink_window_guard_reason", ""),
+            "sink_metadata_first_pts": summary.get("sink_metadata_first_pts"),
+            "sink_metadata_last_pts": summary.get("sink_metadata_last_pts"),
+            "max_sink_metadata_pts_gap_ns": summary.get(
+                "max_sink_metadata_pts_gap_ns"
+            ),
+            "event_pts_inside_clip": bool(summary.get("event_pts_inside_clip")),
+            "event_projected_t_s": summary.get("event_projected_t_s"),
+            "event_centered_in_clip": bool(summary.get("event_centered_in_clip")),
+            "runtime_epoch_id": summary.get("runtime_epoch_id", ""),
+            "epoch_guard_status": summary.get("epoch_guard_status"),
+            "epoch_guard_failed": bool(summary.get("epoch_guard_failed")),
+            "epoch_guard_reason": summary.get("epoch_guard_reason", ""),
+            "runtime_epoch_strict": bool(summary.get("runtime_epoch_strict")),
+            "runtime_epoch_fields": summary.get("runtime_epoch_fields", {}),
             "annotated_clip_path": None,
             "annotated_clip_status": "not_generated",
         },
@@ -1823,6 +2291,7 @@ def _finalize_post_savant_evidence_bundle(
         "crop_video_to_time_window": False,
         "source_video_path": source_video,
     }
+    raw_clip_available = True
     metadata_has_objects = any(
         bool(row.get("objects"))
         for row in source_metadata_rows
@@ -1879,11 +2348,15 @@ def _finalize_post_savant_evidence_bundle(
                 "replay_labels": replay_labels,
                 "replay_job_request": replay_job_request,
             }
-            # ffmpeg can leave a tiny, undecodable MOV header behind when a
-            # requested PTS crop selects no frames. Replace that failed crop
-            # with the source Replay output so the bundle can still surface a
-            # fail-closed summary with time_domain_crop_failed=true.
-            shutil.copy2(source_video, raw_clip_path)
+            raw_clip_path.unlink(missing_ok=True)
+            raw_clip_available = False
+            frame_cache_video_crop = {
+                "method": "failed_time_domain_crop",
+                "crop_video_to_time_window": True,
+                "source_video_path": source_video,
+                "error": f"{type(exc).__name__}:{exc}",
+                "published_raw_clip": False,
+            }
             shutil.copy2(metadata_file, sink_metadata_path)
     else:
         if not raw_clip_path.exists():
@@ -1897,7 +2370,11 @@ def _finalize_post_savant_evidence_bundle(
     decoded_frame_count = (
         None
         if metadata_has_objects
-        else read_decoded_video_frame_count(Path(raw_clip_path))
+        else (
+            read_decoded_video_frame_count(Path(raw_clip_path))
+            if raw_clip_available and raw_clip_path.is_file()
+            else 0
+        )
     )
 
     if metadata_has_objects:
@@ -1977,14 +2454,18 @@ def _finalize_post_savant_evidence_bundle(
         sidecar_summary, sidecar_result = write_frame_cache_identity_sidecar(
             event=_event_for_frame_cache_sidecar(event_context),
             evidence_dir=str(output_dir),
-            raw_clip_path=str(raw_clip_path),
+            raw_clip_path=str(raw_clip_path) if raw_clip_available else None,
             metadata_path=str(sink_metadata_path),
             redis_client=None,
             config=sidecar_config,
             final_clip_context={
-                "raw_clip_path": str(raw_clip_path),
+                "raw_clip_path": str(raw_clip_path) if raw_clip_available else None,
                 "sink_metadata_path": str(sink_metadata_path),
-                "raw_clip_duration": _probe_video_duration_seconds(str(raw_clip_path)),
+                "raw_clip_duration": (
+                    _probe_video_duration_seconds(str(raw_clip_path))
+                    if raw_clip_available
+                    else None
+                ),
                 "expected_event_t_s": frame_cache_time_window.get("expected_event_t_s"),
                 "event_projected_t_s": None,
                 "event_pts_inside_clip": None,
@@ -2007,7 +2488,7 @@ def _finalize_post_savant_evidence_bundle(
         _atomic_write_json(sidecar_summary_path, summary)
         result = _EvidenceBundleView(
             output_dir=output_dir,
-            raw_clip_path=raw_clip_path,
+            raw_clip_path=raw_clip_path if raw_clip_available else None,
             sink_metadata_path=sink_metadata_path,
             production_sidecar_path=Path(
                 sidecar_result.get("annotations_path") or output_dir / SIDECAR_ANNOTATIONS_FILE
@@ -2015,6 +2496,61 @@ def _finalize_post_savant_evidence_bundle(
             summary_path=summary_path,
             summary=summary,
         )
+    duration_guard = _post_savant_duration_guard(
+        getattr(result, "raw_clip_path", None),
+        result.summary.get("time_window") if isinstance(result.summary, dict) else None,
+    )
+    _merge_post_savant_duration_guard(result.summary, duration_guard)
+    sink_window_guard = _sink_metadata_window_guard(
+        load_native_metadata(Path(result.sink_metadata_path)),
+        result.summary.get("time_window") if isinstance(result.summary, dict) else None,
+    )
+    _merge_sink_window_guard(result.summary, sink_window_guard)
+    epoch_guard = _runtime_epoch_guard(
+        event_context=event_context,
+        replay_labels=replay_labels,
+        sink_metadata=sink_metadata,
+        meta_dir=meta_dir,
+    )
+    _merge_runtime_epoch_guard(result.summary, epoch_guard)
+    if frame_cache_time_window.get("time_domain_crop_failed") is True:
+        _apply_post_savant_failure_status(
+            result.summary,
+            reason="time_domain_crop_failed",
+            duration_guard=duration_guard,
+        )
+        result = _without_published_raw_clip(result)
+    elif duration_guard.get("duration_guard_failed") is True:
+        _apply_post_savant_failure_status(
+            result.summary,
+            reason=duration_guard.get("duration_guard_reason")
+            or "raw_clip_duration_exceeds_requested_window",
+            duration_guard=duration_guard,
+        )
+        result = _without_published_raw_clip(result)
+    elif epoch_guard.get("epoch_guard_failed") is True:
+        _apply_post_savant_failure_status(
+            result.summary,
+            reason="runtime_epoch_guard_failed",
+            duration_guard=duration_guard,
+        )
+        result.summary["epoch_guard_reason"] = (
+            epoch_guard.get("epoch_guard_reason")
+            or "missing_or_mismatched_runtime_epoch"
+        )
+        result = _without_published_raw_clip(result)
+    elif sink_window_guard.get("sink_window_guard_failed") is True:
+        _apply_post_savant_failure_status(
+            result.summary,
+            reason="sink_window_guard_failed",
+            duration_guard=duration_guard,
+        )
+        result.summary["sink_window_guard_reason"] = (
+            sink_window_guard.get("sink_window_guard_reason")
+            or "sink_metadata_window_guard_failed"
+        )
+        result = _without_published_raw_clip(result)
+    _rewrite_post_savant_summary_files(result)
     business_metadata = _build_event_metadata(
         event_context=event_context,
         replay_job_id=replay_job_id,
@@ -2030,7 +2566,7 @@ def _finalize_post_savant_evidence_bundle(
         object_counts = {}
     return {
         "evidence_dir": str(result.output_dir),
-        "raw_clip": str(result.raw_clip_path),
+        "raw_clip": _path_for_metadata(result.raw_clip_path),
         "metadata": str(metadata_out),
         "sink_metadata": str(result.sink_metadata_path),
         "event_annotation": "",
@@ -2046,9 +2582,13 @@ def _finalize_post_savant_evidence_bundle(
         "annotation_unavailable_reason": "",
         "overlay_available": bool(summary.get("production_ready")),
         "frontend_overlay_required": bool(summary.get("production_ready")),
-        "duration_guard_status": "not_applicable",
-        "duration_guard_failed": False,
-        "max_allowed_duration_seconds": None,
+        "duration_guard_status": summary.get("duration_guard_status"),
+        "duration_guard_failed": bool(summary.get("duration_guard_failed")),
+        "max_allowed_duration_seconds": summary.get("max_allowed_duration_seconds"),
+        "runtime_epoch_id": summary.get("runtime_epoch_id", ""),
+        "epoch_guard_status": summary.get("epoch_guard_status"),
+        "epoch_guard_failed": bool(summary.get("epoch_guard_failed")),
+        "epoch_guard_reason": summary.get("epoch_guard_reason", ""),
         "raw_clip_sanitize_method": "post_savant_evidence_bundle",
         "raw_clip_sanitize_decode_ok": None,
         "raw_clip_sanitize_decode_error_count": 0,
@@ -2325,7 +2865,15 @@ def _process_sink_output(
                                         'duration_guard_failed',
                                             %(duration_guard_failed)s::boolean,
                                         'max_allowed_duration_seconds',
-                                            %(max_allowed_duration_seconds)s::float
+                                            %(max_allowed_duration_seconds)s::float,
+                                        'runtime_epoch_id',
+                                            %(runtime_epoch_id)s::text,
+                                        'epoch_guard_status',
+                                            %(epoch_guard_status)s::text,
+                                        'epoch_guard_failed',
+                                            %(epoch_guard_failed)s::boolean,
+                                        'epoch_guard_reason',
+                                            %(epoch_guard_reason)s::text
                                     )
                                 ),
                             updated_at = now()
@@ -2391,6 +2939,14 @@ def _process_sink_output(
                             ),
                             "max_allowed_duration_seconds": bundle.get(
                                 "max_allowed_duration_seconds"
+                            ),
+                            "runtime_epoch_id": bundle.get("runtime_epoch_id", ""),
+                            "epoch_guard_status": bundle.get("epoch_guard_status"),
+                            "epoch_guard_failed": bool(
+                                bundle.get("epoch_guard_failed")
+                            ),
+                            "epoch_guard_reason": bundle.get(
+                                "epoch_guard_reason", ""
                             ),
                         },
                     )
@@ -2934,9 +3490,10 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
 
     while not shutdown_requested:
         try:
+            active_sink_output_dir = _active_epoch_sink_output_dir(cfg.sink_output_dir)
             clip_updates = _process_sink_output(
                 pg_conn,
-                cfg.sink_output_dir,
+                active_sink_output_dir,
                 processed_dirs,
                 evidence_output_dir=cfg.evidence_output_dir,
                 midterm_raw_clip_finalizer_enabled=cfg.midterm_raw_clip_finalizer_enabled,

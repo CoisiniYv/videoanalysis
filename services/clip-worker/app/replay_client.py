@@ -388,6 +388,14 @@ def build_job_payload(
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
+    runtime_epoch_id = (
+        str(labels.get("runtime_epoch_id") or "").strip() if labels else ""
+    )
+    resulting_stream_id = (
+        f"replay-{runtime_epoch_id}-event-{event_id}"
+        if runtime_epoch_id
+        else f"replay-event-{event_id}"
+    )
     effective_fps = _effective_fps(fps)
     frame_duration_nanos = _frame_duration_nanos(effective_fps)
     expected_seconds = (
@@ -412,7 +420,7 @@ def build_job_payload(
         "send_eos": True,
         "stop_on_incorrect_ts": False,
         "stored_stream_id": source_id,
-        "resulting_stream_id": f"replay-event-{event_id}",
+        "resulting_stream_id": resulting_stream_id,
         "routing_labels": "bypass",
         "max_idle_duration": {"secs": 10, "nanos": 0},
         "max_delivery_duration": {"secs": 30, "nanos": 0},

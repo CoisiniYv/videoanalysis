@@ -1,4 +1,4 @@
-"""Face match event producer for R3.1B watchlist_hit MVP.
+"""Face match event producer for midterm watchlist_hit events.
 
 This module runs outside the Savant pipeline. It reads persisted
 ``face_observations``, searches active ``person_gallery_embeddings`` via
@@ -31,8 +31,8 @@ DEFAULT_EVIDENCE_POLICY = {
     "pre_seconds": 5,
     "post_seconds": 10,
 }
-R3_1B_NOT_IMPLEMENTED_REASON = (
-    "R3.1B face match evidence MVP created the evidence task, but production "
+MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON = (
+    "Midterm face match evidence created the evidence task, but production "
     "snapshot/raw_clip/metadata generation is not implemented in this deployment."
 )
 
@@ -152,10 +152,20 @@ def build_watchlist_hit_event(
             "gallery_embedding_id": int(gallery_match["id"]),
             "source_observation_id": source_observation_id,
         },
+        "primary_identity_join_key": "source_observation_id",
+        "track_id_join_warning": True,
         "observation": {
             "camera_id": observation.get("camera_id") or "",
             "source_id": observation.get("source_id") or "",
             "track_id": str(observation.get("track_id") or ""),
+            "person_track_id": str(
+                observation.get("person_track_id") or observation.get("track_id") or ""
+            ),
+            "face_track_id": observation.get("face_track_id"),
+            "track_id_semantics": observation.get(
+                "track_id_semantics",
+                "person_track_id",
+            ),
             "timestamp_ms": timestamp_ms,
             "face_bbox": face_bbox,
             "landmarks": landmarks,
@@ -191,7 +201,7 @@ def build_watchlist_hit_event(
             "ntp_timestamp": source_media.get("ntp_timestamp"),
             "time_base": source_media.get("time_base"),
             "metadata_source": source_media.get("metadata_source"),
-            "error_message": R3_1B_NOT_IMPLEMENTED_REASON,
+            "error_message": MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON,
         },
     }
 
@@ -206,7 +216,7 @@ def build_watchlist_hit_event(
         "track_id": str(observation.get("track_id") or ""),
         "person_id": person_id,
         "algorithm_type": FACE_INTELLIGENCE_ALGORITHM_TYPE,
-        "algorithm_version": "r3.1b-mvp",
+        "algorithm_version": "midterm",
         "start_ts_ms": timestamp_ms,
         "end_ts_ms": timestamp_ms,
         "event_ts_ms": timestamp_ms,

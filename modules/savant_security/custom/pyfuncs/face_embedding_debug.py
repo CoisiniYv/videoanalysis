@@ -1,7 +1,7 @@
-"""FaceEmbeddingDebugPyFunc — F2.1 AdaFace embedding smoke visibility probe.
+"""FaceEmbeddingDebugPyFunc — AdaFace embedding smoke visibility probe.
 
 Logs AdaFace feature dim, raw L2 norm, person_track_id, landmarks,
-and F2.2 reid gate metadata (reid_allowed, skip_reason, quality_score).
+and reid gate metadata (reid_allowed, skip_reason, quality_score).
 Does NOT:
 - write to Redis security.face_observations
 - normalize features
@@ -17,7 +17,7 @@ from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
 
 class FaceEmbeddingDebugPyFunc(NvDsPyFuncPlugin):
-    """Log AdaFace embedding metadata for F2.1 smoke verification."""
+    """Log AdaFace embedding metadata for smoke verification."""
 
     def __init__(self, log_every_n_frames: int = 30, **kwargs):
         super().__init__(**kwargs)
@@ -138,7 +138,7 @@ class FaceEmbeddingDebugPyFunc(NvDsPyFuncPlugin):
             pass
         parts.append(f"landmarks={lm_count}")
 
-        # F2.2 reid gate metadata
+        # ReID gate metadata
         try:
             allowed_attr = obj.get_attr_meta("face_reid_gate", "reid_allowed")
             if allowed_attr is not None:

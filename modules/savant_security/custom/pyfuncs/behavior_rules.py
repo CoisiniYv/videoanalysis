@@ -22,8 +22,10 @@ This pyfunc is wired by ``modules/savant_security/module.yml``.
 
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Mapping, Set
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
@@ -64,6 +66,9 @@ from custom.services.rule_runtime import (
 
 _DEFAULT_LOG_INTERVAL = 15
 _DEFAULT_CONFIG_PATH = "/opt/savant/src/module/config/cameras.midterm.yml"
+_DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
+    "/data/video-analytics/media/replay-sink-output/midterm/.current_epoch.json"
+)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -91,6 +96,24 @@ def _person_bbox_observation_min_interval_ms(default: int = 333) -> int:
     if value is not None and str(value).strip() != "":
         return _env_int("PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS", default)
     return _env_int("PERSON_OBSERVATION_MIN_INTERVAL_MS", default)
+
+
+def _current_runtime_epoch_id(runtime: SourceRuntime | None = None) -> str:
+    if runtime is not None and runtime.runtime_epoch_id:
+        return str(runtime.runtime_epoch_id)
+    env_value = os.getenv("RUNTIME_EPOCH_ID") or os.getenv("VIDEO_ANALYTICS_RUNTIME_EPOCH_ID")
+    if env_value:
+        return str(env_value)
+    state_path = Path(
+        os.getenv("RUNTIME_EPOCH_STATE_PATH", _DEFAULT_RUNTIME_EPOCH_STATE_PATH)
+    )
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("runtime_epoch_id") or "")
+    return ""
 
 
 def _config_float(config: Mapping[str, Any], key: str, default: float) -> float:
@@ -146,6 +169,69 @@ def _runtime_intrusion_config(runtime: SourceRuntime) -> Mapping[str, Any]:
         if rule_entry.algorithm_id == "behavior.intrusion" and rule_entry.enabled:
             return rule_entry.config
     return {}
+
+
+def _policy_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _policy_int(value: Any, default: int) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        parsed = int(float(value))
+    except Exception:
+        return default
+    return max(parsed, 0)
+
+
+def _rule_entry_for_event(event: SecurityEvent, runtime: SourceRuntime):
+    candidates = [
+        event.rule_name,
+        (event.payload or {}).get("rule_id"),
+        (event.payload or {}).get("rule"),
+    ]
+    for candidate in candidates:
+        if candidate and candidate in runtime.camera_entry.rules:
+            return runtime.camera_entry.rules[candidate]
+    for rule_entry in runtime.camera_entry.rules.values():
+        if not rule_entry.enabled:
+            continue
+        if rule_entry.algorithm_id == event.algorithm_type:
+            return rule_entry
+        if rule_entry.rule_type == event.event_type:
+            return rule_entry
+    return None
+
+
+def _evidence_policy_for_event(
+    event: SecurityEvent,
+    runtime: SourceRuntime,
+) -> Dict[str, Any]:
+    policy: Dict[str, Any] = {}
+    rule_entry = _rule_entry_for_event(event, runtime)
+    if rule_entry is not None:
+        if isinstance(rule_entry.config.get("evidence_policy"), dict):
+            policy.update(rule_entry.config["evidence_policy"])
+        if isinstance(rule_entry.evidence_policy, dict):
+            policy.update(rule_entry.evidence_policy)
+    if isinstance(event.evidence_policy, dict):
+        policy.update(event.evidence_policy)
+
+    return {
+        "snapshot_required": _policy_bool(
+            policy.get("snapshot_required"), event.snapshot_required
+        ),
+        "clip_required": _policy_bool(policy.get("clip_required"), event.clip_required),
+        "pre_seconds": _policy_int(policy.get("pre_seconds"), 5),
+        "post_seconds": _policy_int(policy.get("post_seconds"), 5),
+    }
 
 
 def _frame_dimensions(frame_meta, runtime: SourceRuntime) -> tuple[float | None, float | None]:
@@ -477,6 +563,11 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         event.frame_uuid = frame_anchor.get("frame_uuid")
         event.keyframe_uuid = frame_anchor.get("keyframe_uuid")
         event.camera_id = runtime.camera_id
+        evidence_policy = _evidence_policy_for_event(event, runtime)
+        event.snapshot_required = evidence_policy["snapshot_required"]
+        event.clip_required = evidence_policy["clip_required"]
+        event.evidence_policy = dict(evidence_policy)
+        runtime_epoch_id = _current_runtime_epoch_id(runtime)
 
         gate_config = _intrusion_gate_config(_runtime_intrusion_config(runtime))
         last_obs = (
@@ -500,8 +591,8 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 "snapshot_status": "not_implemented",
                 "clip_status": "not_implemented",
                 "recording_strategy": "reserved",
-                "pre_seconds": 5,
-                "post_seconds": 5,
+                "pre_seconds": evidence_policy["pre_seconds"],
+                "post_seconds": evidence_policy["post_seconds"],
                 "source_id": event.source_id,
                 "event_ts_ms": event_ts_ms,
                 "frame_uuid": frame_anchor.get("frame_uuid"),
@@ -516,6 +607,9 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 "metadata_source": frame_anchor.get("metadata_source"),
             },
         }
+        if runtime_epoch_id:
+            enrichment["runtime_epoch_id"] = runtime_epoch_id
+            enrichment["media"]["runtime_epoch_id"] = runtime_epoch_id
         if last_obs is not None:
             bbox = track.current_bbox
             person_bbox = {
@@ -554,6 +648,8 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
         if os.getenv("SAVANT_EVENT_MEDIA_REQUIRED", "").lower() in ("1", "true", "yes"):
             event.snapshot_required = True
             event.clip_required = True
+            event.evidence_policy["snapshot_required"] = True
+            event.evidence_policy["clip_required"] = True
             event.payload["media"]["snapshot_required"] = True
             event.payload["media"]["clip_required"] = True
             event.payload["media"]["recording_strategy"] = "savant_replay"

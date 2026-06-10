@@ -4,7 +4,7 @@ Stores gallery-match search results.  Follows the
 FaceObservationRepository / GalleryRepository pattern
 (psycopg.Connection, dict_row, pgvector).
 
-F3.5 gallery_match semantics:
+midterm gallery_match semantics:
   - query side: face_observation (query_observation_id / query_source_observation_id)
   - target side: person_gallery_embeddings (query_gallery_embedding_id)
   - matched_observation_id: NULL (no historical observation target)
@@ -17,8 +17,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
+
+from app.vector_store import register_vector_if_supported
 
 # For gallery_match: conflict target is (search_request_id, query_gallery_embedding_id).
 _INSERT_GALLERY_MATCH_SQL = """
@@ -92,7 +93,7 @@ class MatchResultRepository:
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
-        register_vector(conn)
+        register_vector_if_supported(conn)
 
     def insert_gallery_match_result(self, data: Dict[str, Any]) -> int | None:
         """Insert a gallery_match result row.

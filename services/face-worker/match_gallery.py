@@ -19,7 +19,7 @@ Usage:
 
 Requires DATABASE_URL environment variable.
 
-Semantics (F3.5):
+Semantics (midterm):
     - query side: face_observation identified by --observation-id
     - target side: person_gallery_embeddings (gallery entries)
     - match_results.query_observation_id = query observation UUID

@@ -64,27 +64,17 @@ def resolve_event_evidence_detail(event: Any) -> dict[str, Any]:
 
     bundle_dir = Path(bundle_path) if bundle_path else None
     summary = _read_json_if_exists(bundle_dir / "summary.json") if bundle_dir else {}
-    c2_6r_summary = (
-        _read_json_if_exists(bundle_dir / "c2_6r_redis_watchlist_summary.json")
-        if bundle_dir
-        else {}
-    )
     watchlist_summary = (
         _read_json_if_exists(bundle_dir / "watchlist_evidence_summary.json")
         if bundle_dir
         else {}
     )
-    selected_summary = summary or c2_6r_summary or watchlist_summary
+    selected_summary = summary or watchlist_summary
     video_integrity = _dict(
         selected_summary.get("video_integrity")
-        or c2_6r_summary.get("video_integrity")
         or watchlist_summary.get("video_integrity")
     )
     files = _evidence_files(bundle_dir)
-    c2_7_output_dir = _resolve_c2_7_output_dir(
-        explicit=_text(payload.get("c2_7_output_dir")),
-        source_event_id=_text(getattr(event, "source_event_id", "")),
-    )
 
     person = {
         "person_id": _int_or_none(
@@ -122,7 +112,7 @@ def resolve_event_evidence_detail(event: Any) -> dict[str, Any]:
         "evidence": {
             "bundle_path": bundle_path,
             "bundle_exists": bool(bundle_dir and bundle_dir.is_dir()),
-            "c2_7_output_dir": c2_7_output_dir,
+            "event_worker_output_dir": _text(payload.get("event_worker_output_dir")),
             "raw_clip_path": files["raw_clip_path"],
             "raw_clip_url": _media_url(files["raw_clip_path"]),
             "summary_path": files["summary_path"],
@@ -139,7 +129,6 @@ def resolve_event_evidence_detail(event: Any) -> dict[str, Any]:
             "video_integrity_production_gate_passed": video_integrity.get("production_gate_passed"),
             "production_ready": _first_bool(
                 selected_summary.get("production_ready"),
-                c2_6r_summary.get("production_ready"),
                 watchlist_summary.get("production_ready"),
             ),
             "known_face_count": _int_or_none(selected_summary.get("known_face_count")),
@@ -214,17 +203,6 @@ def _first_existing(root: Path, names: tuple[str, ...]) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
-
-
-def _resolve_c2_7_output_dir(*, explicit: str, source_event_id: str) -> str:
-    if explicit:
-        return explicit
-    marker = "c2_7_event_worker_persistence_"
-    if marker not in source_event_id:
-        return ""
-    run_id = marker + source_event_id.rsplit(marker, 1)[1]
-    candidate = Path("/data/video-analytics/media/evidence") / run_id
-    return str(candidate) if candidate.is_dir() else ""
 
 
 def _read_json_if_exists(path: Path) -> dict[str, Any]:

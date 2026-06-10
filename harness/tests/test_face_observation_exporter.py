@@ -200,7 +200,7 @@ class TestEmbeddingContent:
 
 
 class TestExportThrottleMap:
-    """F2.3b — defensive export throttle tests."""
+    """midterm — defensive export throttle tests."""
 
     def test_first_observation_exports(self):
         throttle = ExportThrottleMap(min_interval_ms=1000)
@@ -271,7 +271,7 @@ class TestExportThrottleMap:
 
 
 class TestNoImageBytesGuarantee:
-    """F2.3b — confirm no image bytes in any output."""
+    """midterm — confirm no image bytes in any output."""
 
     def test_to_dict_no_image_fields(self):
         obs = _make_observation()
@@ -291,7 +291,7 @@ class TestNoImageBytesGuarantee:
 
 
 class TestFromDraft:
-    """F2.4 — from_draft() schema consistency."""
+    """midterm — from_draft() schema consistency."""
 
     def test_from_draft_all_fields_present(self):
         obs = _make_observation()
@@ -347,17 +347,17 @@ class TestFromDraft:
 
 
 class TestCameraIdMapping:
-    """F2.4 — camera_id and source_id are distinct fields."""
+    """midterm — camera_id and source_id are distinct fields."""
 
     def test_camera_id_distinct_from_source_id(self):
         obs = _make_observation(
             camera_id="cam_001",
-            source_id="phase3h",
-            source_observation_id="face:phase3h:42:1000",
+            source_id="primary_rtsp",
+            source_observation_id="face:primary_rtsp:42:1000",
         )
         d = obs.to_dict()
         assert d["camera_id"] == "cam_001"
-        assert d["source_id"] == "phase3h"
+        assert d["source_id"] == "primary_rtsp"
         assert d["camera_id"] != d["source_id"]
 
     def test_camera_id_can_equal_source_id_as_fallback(self):
@@ -371,7 +371,7 @@ class TestCameraIdMapping:
 
 
 class TestIdempotencyKeyDeterministic:
-    """F2.3b — confirm idempotency key stability."""
+    """midterm — confirm idempotency key stability."""
 
     def test_key_deterministic_across_calls(self):
         key1 = build_face_source_observation_id("cam1", 42, 1000)

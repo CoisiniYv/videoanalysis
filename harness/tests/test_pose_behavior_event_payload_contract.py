@@ -95,6 +95,12 @@ def _runtime(modules):
                 rule_type="intrusion",
                 enabled=True,
                 config={"zone_id": "lobby", "min_inside_ms": 1000, "cooldown_s": 30},
+                evidence_policy={
+                    "snapshot_required": True,
+                    "clip_required": True,
+                    "pre_seconds": 4,
+                    "post_seconds": 9,
+                },
             )
         },
     )
@@ -245,3 +251,36 @@ def test_frame_level_event_enrichment_does_not_require_representative_track(modu
     assert "person_quality_gate" in exported.payload
     assert "person_bbox" not in exported.payload
     assert "inside_ms" not in exported.payload
+
+
+def test_enrichment_uses_rule_evidence_policy_for_recording_window(modules) -> None:
+    events = modules["events"]
+    plugin = _plugin(modules)
+    event = events.SecurityEvent(
+        event_type="intrusion",
+        camera_id="cam_001",
+        source_id="src_001",
+        track_id=7,
+        start_ts_ms=1000,
+        end_ts_ms=2500,
+        confidence=0.9,
+        severity="medium",
+        zone="lobby",
+        rule_name="intrusion_lobby",
+        snapshot_required=True,
+        clip_required=True,
+        payload={
+            "algorithm_id": "behavior.intrusion",
+            "rule_id": "intrusion_lobby",
+            "camera_id": "cam_001",
+            "zone_id": "lobby",
+        },
+    )
+
+    plugin._enrich_and_export(event, _track(modules), _frame_meta(), _runtime(modules))
+    exported = plugin.exporter.events[0]
+
+    assert exported.evidence_policy["pre_seconds"] == 4
+    assert exported.evidence_policy["post_seconds"] == 9
+    assert exported.payload["media"]["pre_seconds"] == 4
+    assert exported.payload["media"]["post_seconds"] == 9

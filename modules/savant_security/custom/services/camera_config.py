@@ -1,6 +1,6 @@
 """Camera configuration loader for the savant_security mainline.
 
-Reads a ``cameras.yml`` file (written in the C1 export schema) into pure
+Reads a ``cameras.yml`` file (written in the midterm camera config schema) into pure
 Python dataclasses. Validates intrusion-rule references and parameter
 shapes at load time so the runtime can fail fast on a bad config rather
 than silently dropping events.
@@ -12,12 +12,12 @@ This module is intentionally narrow:
 - It does not write any file or talk to a network.
 
 The expected file shape mirrors GET /api/v1/cameras/config/export from
-Phase C1::
+camera config::
 
     cameras:
       cam_001:
         enabled: true
-        source_id: phase3h
+        source_id: primary_rtsp
         name: Test Camera
         rtsp_url: rtsp://...
         gpu_id: 0
@@ -38,10 +38,9 @@ Phase C1::
             snapshot_required: true
             clip_required: true
 
-The historical phase3h_zmq ``cameras.yml`` (zones.<name>.polygon /
-rules.<name>.rule_type) is **not** the format this loader expects. The
-phase3h_zmq runtime keeps its own loader; this one is for the future
-savant_security entrypoint (C1.2).
+Legacy camera config files using ``zones.<name>.polygon`` and
+``rules.<name>.rule_type`` are **not** the format this loader expects.
+This loader is for the active midterm ``savant_security`` entrypoint.
 """
 
 from __future__ import annotations
@@ -100,6 +99,7 @@ class CameraEntry:
     site_id: Optional[str] = None
     zones: Dict[str, ZoneEntry] = field(default_factory=dict)
     rules: Dict[str, RuleEntry] = field(default_factory=dict)
+    runtime_epoch_id: str = ""
 
 
 @dataclass
@@ -108,6 +108,7 @@ class CameraConfigBundle:
 
     cameras: Dict[str, CameraEntry] = field(default_factory=dict)
     _by_source_id: Dict[str, str] = field(default_factory=dict)
+    runtime_epoch_id: str = ""
 
     def get_camera(self, camera_id: str) -> Optional[CameraEntry]:
         return self.cameras.get(camera_id)
@@ -147,7 +148,7 @@ class CameraConfigError(ValueError):
 
 
 def load_camera_config(path: str) -> CameraConfigBundle:
-    """Read *path*, parse it, validate the C1 schema, and return a bundle.
+    """Read *path*, parse it, validate the midterm camera config schema, and return a bundle.
 
     Raises ``CameraConfigError`` on any structural or semantic violation
     (unknown zone reference, missing required field, bad type, ...).
@@ -172,7 +173,8 @@ def load_camera_config(path: str) -> CameraConfigBundle:
             f"'cameras' must be a mapping, got {type(cameras_map).__name__}"
         )
 
-    bundle = CameraConfigBundle()
+    runtime_epoch_id = str(raw.get("runtime_epoch_id") or "").strip()
+    bundle = CameraConfigBundle(runtime_epoch_id=runtime_epoch_id)
 
     for camera_id, cam_raw in cameras_map.items():
         if not isinstance(cam_raw, dict):
@@ -180,7 +182,7 @@ def load_camera_config(path: str) -> CameraConfigBundle:
                 f"cameras.{camera_id} must be a mapping, got "
                 f"{type(cam_raw).__name__}"
             )
-        cam = _parse_camera(camera_id, cam_raw)
+        cam = _parse_camera(camera_id, cam_raw, runtime_epoch_id=runtime_epoch_id)
 
         if cam.source_id in bundle._by_source_id:
             other = bundle._by_source_id[cam.source_id]
@@ -195,7 +197,12 @@ def load_camera_config(path: str) -> CameraConfigBundle:
     return bundle
 
 
-def _parse_camera(camera_id: str, raw: Dict[str, Any]) -> CameraEntry:
+def _parse_camera(
+    camera_id: str,
+    raw: Dict[str, Any],
+    *,
+    runtime_epoch_id: str = "",
+) -> CameraEntry:
     if not camera_id:
         raise CameraConfigError("camera_id must be a non-empty string")
 
@@ -241,6 +248,7 @@ def _parse_camera(camera_id: str, raw: Dict[str, Any]) -> CameraEntry:
         site_id=site_id,
         zones=zones,
         rules=rules,
+        runtime_epoch_id=str(raw.get("runtime_epoch_id") or runtime_epoch_id or ""),
     )
 
 

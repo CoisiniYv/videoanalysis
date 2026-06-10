@@ -310,9 +310,9 @@ def _copy_or_crop_video(
         raise ValueError("crop_video_to_time_window_requires_time_domain_crop")
     if not source_frames:
         raise ValueError("source_frames_required_for_video_crop")
-    first_pts = _frame_pts(source_frames[0])
     requested_start_pts = _number_or_none(time_window.get("requested_start_pts"))
     requested_end_pts = _number_or_none(time_window.get("requested_end_pts"))
+    first_pts = _frame_pts(source_frames[0])
     if None in (first_pts, requested_start_pts, requested_end_pts):
         raise ValueError("video_crop_pts_unavailable")
     start_seconds = max(0.0, (float(requested_start_pts) - float(first_pts)) / 1_000_000_000.0)

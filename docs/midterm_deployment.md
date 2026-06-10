@@ -14,7 +14,7 @@ This is the active project-machine deployment entrypoint.
 | Camera config | `modules/savant_security/config/cameras.midterm.yml` |
 | Savant module | `modules/savant_security/module.yml` |
 
-Do not deploy from archived C1/C2/phase compose files.
+Do not deploy from archived historical compose files.
 
 ## Start
 
@@ -39,7 +39,148 @@ The stack uses these default host ports:
 
 - Redis: `6396`
 - Replay API: `8098`
-- Evidence viewer: `8090`
+- Operator portal / evidence viewer: `8090`
+- Internal API service: compose network port `8000`; not published to host and
+  reached through the 8090 portal proxy.
+
+The internal API service is built with `services/api/Dockerfile.face-runtime`.
+It inherits from `video-analytics-midterm-face-worker:latest`, so face
+registration can reuse the existing ONNX Runtime/OpenCV/Numpy image layer
+instead of reinstalling ORT during API builds. On a fresh deployment machine,
+build or provide `video-analytics-midterm-face-worker:latest` before building
+the internal API image.
+
+The 8090 operator portal, internal API proxy, face-registration runtime, and
+evidence identity semantics are documented in
+`docs/midterm_operator_portal_runtime_design.md`.
+The current implementation boundary for 8090 algorithm switches and evidence
+window fields is documented in
+`docs/midterm_operator_algorithm_controls_runtime_status.md`.
+The current `/data/video-analytics` directory inventory and cleanup record is
+documented in `docs/midterm_data_directory_inventory.md`.
+The 2026-06-10 Replay `routing_id` mismatch incident and recovery procedure are
+documented in `docs/midterm_replay_routing_id_recovery.md`.
+
+## Applying Camera Runtime Changes
+
+The 8090 camera page writes camera, zone, and algorithm-rule records to the
+internal API database. The page exposes per-rule enable/disable controls and the
+rule-level evidence window (`pre_seconds` / `post_seconds`). Event recording is
+not restricted to `primary_rtsp`; any configured source that reaches Savant and
+emits a clip-required event can publish a record request.
+
+Current support is intentionally uneven across visible algorithm switches. Treat
+`behavior.intrusion` as the end-to-end implemented behavior evidence path. Some
+behavior switches are config/export only or event-capable without default Replay
+evidence parity, and face algorithm switches are not yet true per-camera runtime
+gates. Keep `docs/midterm_operator_algorithm_controls_runtime_status.md` in sync
+when changing this boundary.
+
+The 8090 page's runtime apply action exports `cameras.midterm.yml`, stops source
+adapters and workers, recreates the Replay sink epoch, restarts Replay and
+Savant, restores workers, then starts enabled source adapters last. The default midterm
+recording window is `pre_seconds=5` and `post_seconds=5`; changing those values
+in the operator page writes them to the rule evidence policy before applying the
+runtime.
+
+The legacy primary stream is represented in the database as a UUID camera row
+with `source_id: primary_rtsp`. Keep `primary_rtsp` as the source id because it
+is what the compose-managed adapter and Savant source mapping use; do not use it
+as the database primary key. The operator smoke camera is test data and is
+created disabled by default so normal runtime exports exclude its fake RTSP URL.
+
+For a new RTSP camera to participate in inference, apply the runtime in this
+order:
+
+1. Add or update the camera from the 8090 operator portal.
+2. Add at least one zone and one enabled algorithm rule when event/evidence
+   output is expected. For alerting rules, set the rule evidence window on the
+   8090 page; those values are carried into the record request. A camera with no
+   enabled rules can still feed lower-level detections, but it will not produce
+   rule events.
+3. Use the 8090 page's `应用运行时` button, or save the camera/zone/rule and let
+   the page auto-apply runtime changes. The runtime apply endpoint remains
+   behind the 8090 evidence-viewer proxy; the API service is still only exposed
+   inside the compose network on port 8000.
+
+The runtime apply operation writes both generated config files, stops all
+source-adapter containers first, recreates dynamic RTSP source-adapter
+containers for non-primary sources, restarts Replay and Savant, restores
+workers, then starts enabled sources last. This ordering clears Replay's ZeroMQ routing
+identity cache and prevents the source adapters from continuing to send frames
+through stale connections. The config export part can be run manually with:
+
+```bash
+python scripts/config/export_runtime_configs.py \
+  --api-base-url http://localhost:8090 \
+  --module-config-output modules/savant_security/config/cameras.midterm.yml \
+  --sources-output infra/generated/sources.generated.yml \
+  --zmq-endpoint dealer+connect:tcp://replay-service:5555
+```
+
+The explicit `--zmq-endpoint dealer+connect:tcp://replay-service:5555` keeps
+the midterm replay-first path:
+
+```text
+RTSP adapter -> replay-service -> savant-security
+```
+
+The Savant service must not set a single-source `SOURCE_ID` filter. The
+compose-managed primary adapter still uses `SOURCE_ID=primary_rtsp`, but Savant
+itself accepts all replay-service sources and resolves each one through
+`cameras.midterm.yml`. `MAX_PARALLEL_STREAMS` must be at least the number of
+simultaneous RTSP sources you expect to infer; the midterm default is 2.
+Dynamic RTSP adapters started by `scripts/runtime/camera_source_controller.py`
+use `EOS_ON_START=false` and do not set `USE_ABSOLUTE_TIMESTAMPS`. In the
+midterm replay-first path, an EOS-on-start closes the new source before frames
+arrive, and absolute PTS can make replay defer forwarding live RTSP frames to
+Savant.
+
+4. If you are applying manually instead of using 8090 runtime apply, do not only
+   restart Savant. Use the 8090 controlled restart endpoint, which keeps the
+   8090 management plane online while restarting the controlled runtime:
+
+```bash
+curl --noproxy '*' -X POST http://0.0.0.0:8090/api/v1/cameras/runtime/restart
+```
+
+This controlled restart is required in the current implementation because
+Replay holds source-adapter ROUTER/DEALER connection identity, and the behavior
+rule, face, and frame-annotation runtime load camera mapping at process startup.
+Restarting is not a replacement for exporting the config; if
+`cameras.midterm.yml` does not contain the new `source_id`, Savant will still
+not route that source as a configured camera.
+
+5. Start the RTSP source adapter for the new source:
+
+```bash
+python scripts/runtime/camera_source_controller.py start \
+  --sources infra/generated/sources.generated.yml \
+  --source-id <source_id> \
+  --network video-analytics-midterm_default
+```
+
+6. Verify the adapter and Savant logs:
+
+```bash
+python scripts/runtime/camera_source_controller.py status \
+  --sources infra/generated/sources.generated.yml \
+  --source-id <source_id>
+
+docker logs --tail 200 video-analytics-midterm-savant | rg '<source_id>|unknown_source|behavior_rules_init'
+```
+
+Expected signs:
+
+- `behavior_rules_init` lists the new source in `sources=[...]`.
+- Recent Savant logs include `source_id=<source_id>`.
+- There is no `savant_security_behavior_rules_unknown_source` for the new
+  source.
+
+If `GET /api/v1/cameras/config/export` fails, fix that API/export error before
+starting the adapter. Starting an adapter without a matching exported runtime
+config can deliver frames, but the configured camera/rule pipeline will not be
+correct.
 
 Workers use the existing host PostgreSQL by default:
 
@@ -92,5 +233,9 @@ Historical files are preserved here:
 - `infra/archive/phase-only/20260609/`
 - `modules/savant_replay/archive/phase-only/20260609/`
 - `modules/savant_security/config/archive/phase-only/20260609/`
+- `docs/archive/phase-only/20260610/`
+- `harness/tests/archive/phase-only/20260610/`
+- `scripts/*/archive/phase-only/20260610/`
+- `services/archive/phase-only/20260610/`
 
 They are not deployment entrypoints.

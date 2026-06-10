@@ -1,6 +1,6 @@
-"""Tests for the savant_security camera config loader (Phase C1.1).
+"""Tests for the savant_security camera config loader (camera config.1).
 
-Loader reads a cameras.yml file (C1 export schema) and exposes lookup
+Loader reads a cameras.yml file (midterm camera config schema) and exposes lookup
 helpers. Pure Python — no Savant / DB / HTTP / Savant. The tests use
 ``tmp_path`` to write fixture YAML files on disk.
 """
@@ -19,7 +19,7 @@ MODULES_ROOT = str(Path(__file__).resolve().parents[2] / "modules")
 
 
 def _isolate_savant_security_modules():
-    """See test_rule_registry: drop sibling phase paths and cached custom.*"""
+    """See test_rule_registry: drop sibling runtime paths and cached custom.*"""
     sys.path[:] = [
         p for p in sys.path
         if not (p.startswith(MODULES_ROOT) and p != MODULE_DIR)
@@ -45,7 +45,7 @@ VALID_YAML = textwrap.dedent("""
     cameras:
       cam_001:
         enabled: true
-        source_id: phase3h
+        source_id: primary_rtsp
         name: Test Camera
         rtsp_url: rtsp://example.local/stream
         gpu_id: 0
@@ -69,7 +69,7 @@ VALID_YAML = textwrap.dedent("""
             clip_required: true
       cam_off:
         enabled: false
-        source_id: phase3h_off
+        source_id: primary_rtsp_off
         name: Disabled Cam
         rtsp_url: rtsp://example.local/off
         gpu_id: 0
@@ -86,7 +86,7 @@ def valid_yaml_file(tmp_path):
 
 
 # ===========================================================================
-# 1. loader reads the C1 export YAML
+# 1. loader reads the midterm export YAML
 # ===========================================================================
 
 
@@ -104,7 +104,7 @@ def test_get_camera_by_id(camera_config_module, valid_yaml_file):
     bundle = camera_config_module.load_camera_config(valid_yaml_file)
     cam = bundle.get_camera("cam_001")
     assert cam is not None
-    assert cam.source_id == "phase3h"
+    assert cam.source_id == "primary_rtsp"
     assert cam.rtsp_url == "rtsp://example.local/stream"
     assert cam.enabled is True
     assert cam.gpu_id == 0
@@ -123,7 +123,7 @@ def test_get_camera_missing_returns_none(camera_config_module, valid_yaml_file):
 
 def test_get_by_source_id(camera_config_module, valid_yaml_file):
     bundle = camera_config_module.load_camera_config(valid_yaml_file)
-    cam = bundle.get_by_source_id("phase3h")
+    cam = bundle.get_by_source_id("primary_rtsp")
     assert cam is not None
     assert cam.camera_id == "cam_001"
 
@@ -190,7 +190,7 @@ def test_load_generated_algorithm_rule_shape(camera_config_module, tmp_path):
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: Cam
             input:
               type: rtsp
@@ -276,7 +276,7 @@ def test_intrusion_unknown_zone_raises(camera_config_module, tmp_path):
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: Cam
             rtsp_url: rtsp://x
             zones:

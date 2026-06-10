@@ -1,6 +1,6 @@
 """Tests for the savant_security rule registry.
 
-R1.1 mainline entrypoint:
+Midterm mainline entrypoint:
 - intrusion is the only registered rule.
 - build_rules instantiates concrete rules from a CameraConfig.
 - The rules tree imports only pure Python (no ``savant`` package).
@@ -23,16 +23,16 @@ MODULES_ROOT = str(Path(__file__).resolve().parents[2] / "modules")
 
 
 def _isolate_savant_security_modules():
-    """Purge every cross-phase ``custom.*`` cache and pin sys.path to
+    """Purge every cross-runtime ``custom.*`` cache and pin sys.path to
     ``modules/savant_security`` only.
 
-    Other harness test files inject sibling ``modules/savant_phaseX``
+    Other harness test files inject sibling ``archived or alternate module``
     paths and import ``custom.models`` from there. Python caches the
     first hit in ``sys.modules`` and reuses it for our tests, so the
-    rules tree would silently bind to phase2a's copies. We purge both
+    rules tree would silently bind to sibling's copies. We purge both
     caches before every test to keep this entrypoint suite isolated.
     """
-    # Drop any sibling phase modules from sys.path.
+    # Drop any runtime sibling modules from sys.path.
     sys.path[:] = [
         p for p in sys.path
         if not (p.startswith(MODULES_ROOT) and p != MODULE_DIR)

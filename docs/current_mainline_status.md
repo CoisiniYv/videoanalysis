@@ -3,24 +3,38 @@
 ## 2026-06-09 Midterm Project Version
 
 The current deployable runtime in this checkout is the midterm project version.
-It intentionally avoids C1/C2/phase naming in the active deployment surface.
+It intentionally avoids historical codename files in the active deployment surface.
 
-- Branch: `c2/post-savant-poc`.
+- Branch: current working-tree branch.
 - Compose file: `infra/docker-compose.midterm.yml`.
 - Env file: `infra/env/midterm.env`.
 - Compose project: `video-analytics-midterm`.
 - Containers: `video-analytics-midterm-*`.
 - Source id: `primary_rtsp`.
-- Evidence viewer: host port `8090`.
+- Operator portal / evidence viewer: host port `8090`.
+- Internal API service: compose network port `8000`; not published to host and
+  reached through the 8090 portal proxy.
 - Replay API: host port `8098`.
 - Worker database default: `host.docker.internal:5432`.
+- Internal API runtime: `services/api/Dockerfile.face-runtime`, inheriting from
+  `video-analytics-midterm-face-worker:latest` to reuse the already-installed
+  ONNX Runtime/OpenCV/Numpy face-registration layer.
+- Operator portal design: `docs/midterm_operator_portal_runtime_design.md`.
+- Operator algorithm-control runtime status:
+  `docs/midterm_operator_algorithm_controls_runtime_status.md`.
+- Current Replay intrusion clip-duration diagnosis:
+  `docs/midterm_replay_intrusion_clip_duration_diagnosis.md`.
+- Replay routing-id mismatch recovery:
+  `docs/midterm_replay_routing_id_recovery.md`.
+- Current `/data/video-analytics` directory inventory and cleanup record:
+  `docs/midterm_data_directory_inventory.md`.
 
 ## Current Runtime Chain
 
 ```text
 RTSP -> Replay storage -> Savant inference -> Redis events/annotations
   -> event-worker -> clip-worker -> Replay job -> video-file-sink
-  -> media-worker evidence sidecar -> evidence-viewer
+  -> media-worker evidence sidecar -> 8090 operator portal
 ```
 
 ## Current Calibration
@@ -43,6 +57,6 @@ quality defaults:
 
 ## Archive Rule
 
-Historical C1/C2/phase files remain in archive directories for traceability.
+Historical codename files remain in archive directories for traceability.
 They are not current deployment entrypoints and should not be copied to a
 project machine unless explicitly doing historical regression.

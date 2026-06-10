@@ -1,11 +1,11 @@
-"""Tests for F3.6 registered person trajectory query harness.
+"""Tests for midterm registered person trajectory query harness.
 
 Test classes:
 - TestTrajectoryCliArgs: argparse validation for query_trajectory.py CLI
 - TestParseIso8601: ISO 8601 parsing
 - TestFormatTable: table formatting
 - TestTrajectoryRepositoryUnit: mocked DB, TrajectoryRepository
-- TestQueryRuntime: real query()/main() with monkeypatched DB (no real PostgreSQL)
+- TestQueryRuntime: real query_trajectory.query()/query_trajectory.main() with monkeypatched DB (no real PostgreSQL)
 - TestTrajectoryQueryIntegration: real PostgreSQL + pgvector (integration mark)
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
+import importlib.util
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from unittest.mock import MagicMock, patch
@@ -25,7 +26,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FACE_WORKER_ROOT = REPO_ROOT / "services" / "face-worker"
-sys.path.insert(0, str(FACE_WORKER_ROOT))
+FACE_WORKER_ROOT_STR = str(FACE_WORKER_ROOT)
+if FACE_WORKER_ROOT_STR in sys.path:
+    sys.path.remove(FACE_WORKER_ROOT_STR)
+sys.path.insert(0, FACE_WORKER_ROOT_STR)
+for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
+    sys.modules.pop(_mod, None)
 
 from app.trajectory_repository import (
     TrajectoryRepository,
@@ -33,6 +39,14 @@ from app.trajectory_repository import (
     _MAX_LIMIT,
     _MIN_LIMIT,
 )
+
+QUERY_TRAJECTORY_PATH = FACE_WORKER_ROOT / "query_trajectory.py"
+_query_spec = importlib.util.spec_from_file_location(
+    "query_trajectory_under_test", QUERY_TRAJECTORY_PATH
+)
+assert _query_spec is not None and _query_spec.loader is not None
+query_trajectory = importlib.util.module_from_spec(_query_spec)
+_query_spec.loader.exec_module(query_trajectory)
 
 
 # ── Helpers (pure Python, no DB) ───────────────────────────────────────────
@@ -126,8 +140,7 @@ class TestParseIso8601:
 
     @staticmethod
     def _call(value: str) -> int:
-        from query_trajectory import _parse_iso8601
-        return _parse_iso8601(value, "test")
+        return query_trajectory._parse_iso8601(value, "test")
 
     def test_valid_aware_datetime(self):
         result = self._call("2026-05-01T00:00:00+08:00")
@@ -142,14 +155,12 @@ class TestParseIso8601:
 
     def test_naive_datetime_rejected(self):
         """Naive datetime (no tzinfo) must be rejected."""
-        from query_trajectory import _parse_iso8601
         with pytest.raises(SystemExit):
-            _parse_iso8601("2026-05-01T00:00:00", "test")
+            query_trajectory._parse_iso8601("2026-05-01T00:00:00", "test")
 
     def test_invalid_format_rejected(self):
-        from query_trajectory import _parse_iso8601
         with pytest.raises(SystemExit):
-            _parse_iso8601("not-a-date", "test")
+            query_trajectory._parse_iso8601("not-a-date", "test")
 
 
 # ── Table Formatting Tests ─────────────────────────────────────────────────
@@ -159,8 +170,7 @@ class TestFormatTable:
 
     @staticmethod
     def _call(rows: list[dict]) -> str:
-        from query_trajectory import _format_table
-        return _format_table(rows)
+        return query_trajectory._format_table(rows)
 
     def test_empty_rows(self):
         assert self._call([]) == "(no results)"
@@ -392,11 +402,7 @@ class TestTrajectoryRepositoryUnit:
 # ── Class 3: Real CLI Runtime Tests (monkeypatched DB) ─────────────────────
 
 class TestQueryRuntime:
-    """Exercise real query()/main() with monkeypatched DB connections.
-
-    These tests call the actual query() function and verify stdout/stderr
-    behavior, not just argparse parsing.
-    """
+    """Exercise real query()/main() with monkeypatched DB connections."""
 
     @staticmethod
     def _mock_connect(mock_conn, mock_person=None, mock_rows=None):
@@ -406,7 +412,6 @@ class TestQueryRuntime:
         mock_cursor.__exit__ = MagicMock(return_value=False)
         mock_conn.cursor.return_value = mock_cursor
 
-        # PersonRepository.get_by_external_person_id uses cursor directly
         mock_cursor.fetchone.return_value = mock_person
         mock_cursor.fetchall.return_value = mock_rows or []
 
@@ -414,26 +419,29 @@ class TestQueryRuntime:
 
     def test_external_person_id_resolves_and_queries(self, capsys):
         """external-person-id resolves to person_id, queries trajectory."""
-        from query_trajectory import query
-
         mock_person = {"id": 7, "name": "Alice", "external_person_id": "EXT-7"}
         mock_rows = [
             {
-                "rank": 1, "similarity": 0.9, "matched_camera_id": "cam1",
-                "matched_timestamp_ms": 100000, "matched_track_id": "t1",
-                "person_name": "Alice", "external_person_id": "EXT-7",
-                "snapshot_path": None, "crop_path": None,
+                "rank": 1,
+                "similarity": 0.9,
+                "matched_camera_id": "cam1",
+                "matched_timestamp_ms": 100000,
+                "matched_track_id": "t1",
+                "person_name": "Alice",
+                "external_person_id": "EXT-7",
+                "snapshot_path": None,
+                "crop_path": None,
             },
         ]
 
-        with patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        with patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             self._mock_connect(mock_conn, mock_person=mock_person, mock_rows=mock_rows)
 
-            rows = query(
+            rows = query_trajectory.query(
                 person_id=None,
                 external_person_id="EXT-7",
                 time_from_ms=None,
@@ -451,26 +459,29 @@ class TestQueryRuntime:
 
     def test_external_person_id_json_clean_output(self, capsys):
         """--external-person-id --json produces pure JSON on stdout."""
-        from query_trajectory import query
-
         mock_person = {"id": 7, "name": "Alice", "external_person_id": "EXT-7"}
         mock_rows = [
             {
-                "rank": 1, "similarity": 0.9, "matched_camera_id": "cam1",
-                "matched_timestamp_ms": 100000, "matched_track_id": "t1",
-                "person_name": "Alice", "external_person_id": "EXT-7",
-                "snapshot_path": None, "crop_path": None,
+                "rank": 1,
+                "similarity": 0.9,
+                "matched_camera_id": "cam1",
+                "matched_timestamp_ms": 100000,
+                "matched_track_id": "t1",
+                "person_name": "Alice",
+                "external_person_id": "EXT-7",
+                "snapshot_path": None,
+                "crop_path": None,
             },
         ]
 
-        with patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        with patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             self._mock_connect(mock_conn, mock_person=mock_person, mock_rows=mock_rows)
 
-            query(
+            query_trajectory.query(
                 person_id=None,
                 external_person_id="EXT-7",
                 time_from_ms=None,
@@ -482,107 +493,115 @@ class TestQueryRuntime:
             )
 
         captured = capsys.readouterr()
-        # stdout must be valid JSON — no prefix pollution
         parsed = json.loads(captured.out)
         assert len(parsed) == 1
         assert parsed[0]["person_name"] == "Alice"
-        # stderr may contain diagnostic, but stdout is clean
         assert "Resolved" not in captured.out
 
     def test_external_person_id_not_found_exits(self):
-        """Missing external_person_id → SystemExit with stderr message."""
-        from query_trajectory import query
-
-        with patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        """Missing external_person_id raises SystemExit."""
+        with patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             self._mock_connect(mock_conn, mock_person=None)
 
             with pytest.raises(SystemExit):
-                query(
+                query_trajectory.query(
                     person_id=None,
                     external_person_id="NONEXISTENT",
-                    time_from_ms=None, time_to_ms=None,
-                    camera_id=None, min_similarity=None,
-                    limit=100, output_json=False,
+                    time_from_ms=None,
+                    time_to_ms=None,
+                    camera_id=None,
+                    min_similarity=None,
+                    limit=100,
+                    output_json=False,
                 )
 
     def test_json_output_no_embedding(self, capsys):
         """JSON output must not contain raw embedding vectors."""
-        from query_trajectory import query
-
         mock_rows = [
             {
-                "rank": 1, "similarity": 0.9, "matched_camera_id": "cam1",
-                "matched_timestamp_ms": 100000, "matched_track_id": "t1",
-                "person_name": "Alice", "external_person_id": None,
-                "snapshot_path": None, "crop_path": None,
+                "rank": 1,
+                "similarity": 0.9,
+                "matched_camera_id": "cam1",
+                "matched_timestamp_ms": 100000,
+                "matched_track_id": "t1",
+                "person_name": "Alice",
+                "external_person_id": None,
+                "snapshot_path": None,
+                "crop_path": None,
                 "search_request_id": "req-1",
             },
         ]
 
-        with patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        with patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             self._mock_connect(mock_conn, mock_rows=mock_rows)
 
-            query(
-                person_id=1, external_person_id=None,
-                time_from_ms=None, time_to_ms=None,
-                camera_id=None, min_similarity=None,
-                limit=100, output_json=True,
+            query_trajectory.query(
+                person_id=1,
+                external_person_id=None,
+                time_from_ms=None,
+                time_to_ms=None,
+                camera_id=None,
+                min_similarity=None,
+                limit=100,
+                output_json=True,
             )
 
-        captured = capsys.readouterr()
-        parsed = json.loads(captured.out)
-        # No embedding field in the result
+        parsed = json.loads(capsys.readouterr().out)
         for row in parsed:
             assert "embedding" not in row
 
     def test_table_output_shows_person_id(self, capsys):
         """Non-JSON output shows person_id header."""
-        from query_trajectory import query
-
         mock_rows = [
             {
-                "rank": 1, "similarity": 0.9, "matched_camera_id": "cam1",
-                "matched_timestamp_ms": 100000, "matched_track_id": "t1",
-                "person_name": "Alice", "external_person_id": None,
-                "snapshot_path": None, "crop_path": None,
+                "rank": 1,
+                "similarity": 0.9,
+                "matched_camera_id": "cam1",
+                "matched_timestamp_ms": 100000,
+                "matched_track_id": "t1",
+                "person_name": "Alice",
+                "external_person_id": None,
+                "snapshot_path": None,
+                "crop_path": None,
             },
         ]
 
-        with patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        with patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             self._mock_connect(mock_conn, mock_rows=mock_rows)
 
-            query(
-                person_id=42, external_person_id=None,
-                time_from_ms=None, time_to_ms=None,
-                camera_id=None, min_similarity=None,
-                limit=100, output_json=False,
+            query_trajectory.query(
+                person_id=42,
+                external_person_id=None,
+                time_from_ms=None,
+                time_to_ms=None,
+                camera_id=None,
+                min_similarity=None,
+                limit=100,
+                output_json=False,
             )
 
-        captured = capsys.readouterr()
-        assert "person_id=42" in captured.out
+        assert "person_id=42" in capsys.readouterr().out
 
 
 # ── Class 4: CLI main() Validation Tests ───────────────────────────────────
 
 class TestMainValidation:
-    """Test main() argument validation (reversed time, min_similarity range)."""
+    """Test main() argument validation."""
 
     def test_reversed_time_range_exits(self):
-        """--time-from after --time-to → SystemExit."""
-        from query_trajectory import main
-
+        """--time-from after --time-to raises SystemExit."""
         with patch("sys.argv", [
             "query_trajectory.py",
             "--person-id", "1",
@@ -590,43 +609,37 @@ class TestMainValidation:
             "--time-to", "2026-05-01T00:00:00+08:00",
         ]):
             with pytest.raises(SystemExit):
-                main()
+                query_trajectory.main()
 
     def test_min_similarity_below_zero_rejected(self):
-        """--min-similarity -0.1 → parser error (SystemExit)."""
-        from query_trajectory import main
-
+        """--min-similarity -0.1 raises SystemExit."""
         with patch("sys.argv", [
             "query_trajectory.py",
             "--person-id", "1",
             "--min-similarity", "-0.1",
         ]):
             with pytest.raises(SystemExit):
-                main()
+                query_trajectory.main()
 
     def test_min_similarity_above_one_rejected(self):
-        """--min-similarity 1.1 → parser error (SystemExit)."""
-        from query_trajectory import main
-
+        """--min-similarity 1.1 raises SystemExit."""
         with patch("sys.argv", [
             "query_trajectory.py",
             "--person-id", "1",
             "--min-similarity", "1.1",
         ]):
             with pytest.raises(SystemExit):
-                main()
+                query_trajectory.main()
 
     def test_min_similarity_boundary_zero_accepted(self):
-        """--min-similarity 0.0 → accepted, no error."""
-        from query_trajectory import main
-
+        """--min-similarity 0.0 is accepted."""
         with patch("sys.argv", [
             "query_trajectory.py",
             "--person-id", "1",
             "--min-similarity", "0.0",
-        ]), patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        ]), patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             mock_cursor = MagicMock()
@@ -635,19 +648,17 @@ class TestMainValidation:
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.fetchall.return_value = []
 
-            main()  # Should not raise
+            query_trajectory.main()
 
     def test_min_similarity_boundary_one_accepted(self):
-        """--min-similarity 1.0 → accepted, no error."""
-        from query_trajectory import main
-
+        """--min-similarity 1.0 is accepted."""
         with patch("sys.argv", [
             "query_trajectory.py",
             "--person-id", "1",
             "--min-similarity", "1.0",
-        ]), patch("query_trajectory.os.environ", {"DATABASE_URL": "mock://db"}), \
-             patch("query_trajectory.psycopg") as mock_psycopg, \
-             patch("query_trajectory.register_vector"):
+        ]), patch.object(query_trajectory.os, "environ", {"DATABASE_URL": "mock://db"}), \
+             patch.object(query_trajectory, "psycopg") as mock_psycopg, \
+             patch.object(query_trajectory, "register_vector"):
             mock_conn = MagicMock()
             mock_psycopg.connect.return_value = mock_conn
             mock_cursor = MagicMock()
@@ -656,7 +667,7 @@ class TestMainValidation:
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.fetchall.return_value = []
 
-            main()  # Should not raise
+            query_trajectory.main()
 
 
 # ── Class 5: Integration Tests (real PostgreSQL) ───────────────────────────
@@ -665,7 +676,7 @@ class TestMainValidation:
 class TestTrajectoryQueryIntegration:
     """Integration tests against a real PostgreSQL with pgvector.
 
-    All test data uses names prefixed with ``test:f3_6:``.
+    All test data uses names prefixed with ``test:midterm_trajectory:``.
     Helper methods create real FK-satisfying rows.  Cleanup runs in finally
     blocks with rollback-first to avoid InFailedSqlTransaction.
     """
@@ -689,26 +700,26 @@ class TestTrajectoryQueryIntegration:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM match_results "
-                "WHERE query_source_observation_id LIKE 'test:f3_6:%%' "
-                "OR matched_source_observation_id LIKE 'test:f3_6:%%'"
+                "WHERE query_source_observation_id LIKE 'test:midterm_trajectory:%%' "
+                "OR matched_source_observation_id LIKE 'test:midterm_trajectory:%%'"
             )
             cur.execute(
                 "DELETE FROM person_gallery_embeddings "
                 "WHERE person_id IN "
-                "(SELECT id FROM persons WHERE name LIKE 'test:f3_6:%%')"
+                "(SELECT id FROM persons WHERE name LIKE 'test:midterm_trajectory:%%')"
             )
             cur.execute(
-                "DELETE FROM persons WHERE name LIKE 'test:f3_6:%%'"
+                "DELETE FROM persons WHERE name LIKE 'test:midterm_trajectory:%%'"
             )
             cur.execute(
                 "DELETE FROM face_observations "
-                "WHERE source_observation_id LIKE 'test:f3_6:%%'"
+                "WHERE source_observation_id LIKE 'test:midterm_trajectory:%%'"
             )
         conn.commit()
 
     def _create_person(self, conn, suffix: str, *, external_id: str | None = None) -> int:
         """Create a test person. Returns person_id."""
-        name = f"test:f3_6:{suffix}"
+        name = f"test:midterm_trajectory:{suffix}"
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -756,7 +767,7 @@ class TestTrajectoryQueryIntegration:
     ) -> tuple:
         """Create a test face_observation. Returns (observation_uuid, source_observation_id)."""
         from pgvector.psycopg import Vector
-        sid = f"test:f3_6:{suffix}"
+        sid = f"test:midterm_trajectory:{suffix}"
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -888,7 +899,7 @@ class TestTrajectoryQueryIntegration:
             assert len(rows) == 1
             assert rows[0]["matched_camera_id"] == "cam-lobby"
             assert rows[0]["similarity"] == pytest.approx(0.92)
-            assert rows[0]["person_name"] == f"test:f3_6:basic"
+            assert rows[0]["person_name"] == f"test:midterm_trajectory:basic"
         finally:
             conn.rollback()
             self._cleanup(conn)
@@ -1142,7 +1153,7 @@ class TestTrajectoryQueryIntegration:
 
             rows = repo.get_person_trajectory(pid)
             assert len(rows) == 1
-            assert rows[0]["person_name"] == "test:f3_6:joinname"
+            assert rows[0]["person_name"] == "test:midterm_trajectory:joinname"
         finally:
             conn.rollback()
             self._cleanup(conn)
@@ -1185,11 +1196,9 @@ class TestTrajectoryQueryIntegration:
 
     def test_trajectory_external_person_id_resolution(self):
         """Query via external_person_id resolves to correct person."""
-        from query_trajectory import query
-
         conn = self._connect()
         try:
-            ext_id = f"test:f3_6:ext:{uuid.uuid4().hex[:8]}"
+            ext_id = f"test:midterm_trajectory:ext:{uuid.uuid4().hex[:8]}"
             pid = self._create_person(conn, "extrun", external_id=ext_id)
             gid = self._create_gallery_embedding(conn, pid, _unit_embedding())
             obs_id, obs_sid = self._create_observation(
@@ -1209,8 +1218,8 @@ class TestTrajectoryQueryIntegration:
             )
             conn.commit()
 
-            # query() opens its own connection, so seed data is visible
-            rows = query(
+            # query_trajectory.query() opens its own connection, so seed data is visible
+            rows = query_trajectory.query(
                 person_id=None,
                 external_person_id=ext_id,
                 time_from_ms=None, time_to_ms=None,

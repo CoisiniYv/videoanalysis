@@ -4,10 +4,10 @@
 # DEFAULT: dry-run mode. Must pass --confirm to actually delete.
 #
 # Usage:
-#   bash scripts/maintenance/cleanup_artifacts.sh                          # dry-run, all phases
-#   bash scripts/maintenance/cleanup_artifacts.sh --phase d1-rtsp-15min   # dry-run, one phase
+#   bash scripts/maintenance/cleanup_artifacts.sh                         # dry-run, all categories
+#   bash scripts/maintenance/cleanup_artifacts.sh --category midterm      # dry-run, one category
 #   bash scripts/maintenance/cleanup_artifacts.sh --older-than-days 7     # dry-run, older than 7 days
-#   bash scripts/maintenance/cleanup_artifacts.sh --keep-latest 3         # dry-run, keep latest 3 per phase
+#   bash scripts/maintenance/cleanup_artifacts.sh --keep-latest 3         # dry-run, keep latest 3 per category
 #   bash scripts/maintenance/cleanup_artifacts.sh --confirm               # ACTUALLY delete
 
 set -euo pipefail
@@ -16,7 +16,7 @@ ARTIFACT_ROOT="${VIDEO_ANALYTICS_ARTIFACT_ROOT:-/data/video-analytics/artifacts}
 RUNS_DIR="${ARTIFACT_ROOT}/runs"
 LATEST_DIR="${ARTIFACT_ROOT}/latest"
 
-PHASE_FILTER=""
+CATEGORY_FILTER=""
 OLDER_THAN_DAYS=""
 KEEP_LATEST=""
 DRY_RUN="yes"
@@ -24,8 +24,8 @@ CONFIRM="no"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --phase)
-      PHASE_FILTER="$2"
+    --category)
+      CATEGORY_FILTER="$2"
       shift 2
       ;;
     --older-than-days)
@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--phase <phase>] [--older-than-days <N>] [--keep-latest <N>] [--dry-run] [--confirm]" >&2
+      echo "Usage: $0 [--category <category>] [--older-than-days <N>] [--keep-latest <N>] [--dry-run] [--confirm]" >&2
       exit 1
       ;;
   esac
@@ -68,13 +68,13 @@ fi
 TOTAL_CLEANED=0
 TOTAL_FREED=""
 
-cleanup_phase() {
-  local phase_dir="$1"
-  local phase_name
-  phase_name="$(basename "$phase_dir")"
+cleanup_category() {
+  local category_dir="$1"
+  local category_name
+  category_name="$(basename "$category_dir")"
 
   local -a run_dirs=()
-  for run_dir in "$phase_dir"/*/; do
+  for run_dir in "$category_dir"/*/; do
     [[ -d "$run_dir" ]] || continue
     run_dirs+=("$run_dir")
   done
@@ -131,20 +131,20 @@ cleanup_phase() {
     mtime_human="$(date -d "@$(stat -c '%Y' "$run_dir" 2>/dev/null || echo 0)" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo 'unknown')"
 
     if [[ "$DRY_RUN" == "yes" ]]; then
-      echo "  [DRY-RUN] Would remove: $phase_name/$run_id ($size, $mtime_human)"
+      echo "  [DRY-RUN] Would remove: $category_name/$run_id ($size, $mtime_human)"
     else
-      echo "  Removing: $phase_name/$run_id ($size, $mtime_human)"
+      echo "  Removing: $category_name/$run_id ($size, $mtime_human)"
       rm -rf "$run_dir"
     fi
     TOTAL_CLEANED=$((TOTAL_CLEANED + 1))
   done
 }
 
-for phase_dir in "$RUNS_DIR"/*/; do
-  [[ -d "$phase_dir" ]] || continue
-  phase_name="$(basename "$phase_dir")"
-  [[ -n "$PHASE_FILTER" && "$phase_name" != "$PHASE_FILTER" ]] && continue
-  cleanup_phase "$phase_dir"
+for category_dir in "$RUNS_DIR"/*/; do
+  [[ -d "$category_dir" ]] || continue
+  category_name="$(basename "$category_dir")"
+  [[ -n "$CATEGORY_FILTER" && "$category_name" != "$CATEGORY_FILTER" ]] && continue
+  cleanup_category "$category_dir"
 done
 
 echo ""

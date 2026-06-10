@@ -1,137 +1,101 @@
-"""C1G.1b operator frontend static asset contract tests.
-
-Verifies the enhanced operator page at /operator serves correct HTML/JS
-with real API endpoint references, algorithm templates, and no 8090 references.
-"""
+"""8090 operator portal static asset contract tests."""
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-import pytest
 
-API_DIR = str(Path(__file__).resolve().parents[2] / "services" / "api")
-if API_DIR not in sys.path:
-    sys.path.insert(0, API_DIR)
-
-for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
-    sys.modules.pop(_mod, None)
-
-from fastapi.testclient import TestClient
-
-from app.main import app
+ROOT = Path(__file__).resolve().parents[2]
+STATIC_ROOT = ROOT / "services" / "evidence-viewer" / "app" / "static"
 
 
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        yield c
+def _text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
-# ---- /operator HTML tests ----
-
-def test_operator_page_returns_200(client: TestClient):
-    resp = client.get("/operator")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers.get("content-type", "")
-
-
-def test_operator_page_contains_camera_list_area(client: TestClient):
-    resp = client.get("/operator")
-    html = resp.text
-    assert "cameras" in html.lower()
-    assert "camera-list" in html or "camera_list" in html or "Cameras" in html
-
-
-def test_operator_page_contains_algorithm_rule_templates(client: TestClient):
-    resp = client.get("/operator")
-    html = resp.text
-    # Must have template buttons for algorithms
-    assert "data-template" in html
-    assert "face.observation" in html
-    assert "behavior.intrusion" in html
+def test_8090_operator_portal_contains_camera_face_and_evidence_views() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    assert 'lang="zh-CN"' in html
+    assert "视频分析操作台" in html
+    assert 'data-view="cameras"' in html
+    assert 'data-view="people"' in html
+    assert 'data-view="evidence"' in html
+    assert "摄像头管理" in html
+    assert "人员与人脸" in html
+    assert "告警证据" in html
+    assert "人脸注册" in html
+    assert "人脸图库" in html
+    assert "证据复核" in html
+    assert "/static/operator.js" in html
+    assert "/static/evidence.js" in html
+    assert "/operator/static" not in html
 
 
-def test_operator_page_contains_face_watchlist(client: TestClient):
-    resp = client.get("/operator")
-    html = resp.text
-    assert "face.watchlist" in html
+def test_operator_portal_keeps_customer_fields_simple() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    assert "摄像头ID" not in html
+    assert "数据源ID" not in html
+    assert "GPU 编号" not in html
+    assert "RTSP传输" not in html
+    assert "质量阈值" not in html
+    assert "允许多人脸" not in html
+    assert "操作员" not in html
+    assert "internal-config" in html
+    assert "internal-debug" in html
+    assert "allow_multiple_faces" in html
+    assert "quality_threshold" in html
+    assert "keep_crop" in html
 
 
-def test_operator_page_contains_global_alert_cooldown(client: TestClient):
-    resp = client.get("/operator")
-    html = resp.text
-    assert "global_alert_cooldown_s" in html
+def test_operator_js_uses_same_origin_proxy_for_camera_and_people_apis() -> None:
+    js = _text(STATIC_ROOT / "operator.js")
+    assert 'const API = "/api/v1"' in js
+    assert "`${API}/cameras`" in js
+    assert "`${API}/people" in js
+    assert "`${API}/people/register-face`" in js
+    assert "FormData(faceRegistrationForm)" in js
+    assert "dev_mock" not in js
+    assert "localhost" not in js
+    assert "127.0.0.1" not in js
 
 
-def test_operator_page_does_not_reference_8090(client: TestClient):
-    resp = client.get("/operator")
-    html = resp.text
-    assert "8090" not in html
-    assert "evidence-viewer" not in html.lower()
-    assert "evidence_viewer" not in html.lower()
+def test_operator_evidence_js_uses_8090_native_evidence_api_and_categories() -> None:
+    js = _text(STATIC_ROOT / "evidence.js")
+    assert 'const EVIDENCE_API = "/api"' in js
+    assert 'fetchJson("/health")' in js
+    assert "`${EVIDENCE_API}/bundles?${bundleQueryString()}`" in js
+    assert "categoryFilteredBundles" in js
+    assert "eventCategoryForType(bundle.event_type)" in js
+    assert "event_category" not in js
+    assert "/api/v1/evidence" not in js
+    assert "名单布控" in js
+    assert "周界入侵" in js
+    assert "行为异常" in js
+    assert "聚集风险" in js
 
 
-def test_operator_page_contains_behavior_running_and_wall_climb(client: TestClient):
-    resp = client.get("/operator")
-    html = resp.text
-    assert "behavior.running" in html
-    assert "behavior.wall_climb_suspicious" in html
+def test_operator_portal_css_matches_unified_console_layout() -> None:
+    css = _text(STATIC_ROOT / "style.css")
+    for token in (
+        ".app-shell",
+        ".sidebar",
+        ".top-tab.active",
+        ".dashboard-summary",
+        ".camera-workspace",
+        ".people-workspace",
+        ".evidence-workspace",
+        ".category-chip.active",
+        ".gallery-thumb",
+    ):
+        assert token in css
 
 
-# ---- /operator/static/app.js tests ----
-
-def test_app_js_returns_200(client: TestClient):
-    resp = client.get("/operator/static/app.js")
-    assert resp.status_code == 200
-    assert "javascript" in resp.headers.get("content-type", "") or resp.headers.get("content-type", "").startswith("text/")
-
-
-def test_app_js_contains_real_api_endpoints(client: TestClient):
-    resp = client.get("/operator/static/app.js")
-    js = resp.text
-    # Must reference real API endpoints, not mock data
-    # JS uses template literals: `${API}/cameras` where API = "/api/v1"
-    assert "/api/v1" in js
-    assert "cameras" in js
-    assert "/zones" in js or "zones" in js
-    assert "/rules" in js or "rules" in js
-    # alert_policy is saved via camera update; config endpoint returns it
-    assert "alert_policy" in js or "alert-policy" in js
-    assert "config" in js
-
-
-def test_app_js_contains_all_nine_templates(client: TestClient):
-    resp = client.get("/operator/static/app.js")
-    js = resp.text
-    expected = [
-        "face.observation",
-        "face.watchlist",
-        "face.live_search",
-        "behavior.intrusion",
-        "behavior.loitering",
-        "behavior.crowd_gathering",
-        "behavior.fall",
-        "behavior.running",
-        "behavior.wall_climb_suspicious",
-    ]
-    for algo in expected:
-        assert algo in js, f"Missing template for {algo}"
-
-
-def test_app_js_has_delete_and_enable_disable(client: TestClient):
-    resp = client.get("/operator/static/app.js")
-    js = resp.text
-    assert "deleteZone" in js or "DELETE" in js
-    assert "deleteRule" in js or "DELETE" in js
-    # JS uses template literals: `"enable"` and `"disable"` as path segments
-    assert "enable" in js
-    assert "disable" in js
-
-
-# ---- /operator/static/style.css test ----
-
-def test_style_css_returns_200(client: TestClient):
-    resp = client.get("/operator/static/style.css")
-    assert resp.status_code == 200
+def test_operator_portal_static_has_no_hardcoded_local_addresses() -> None:
+    joined = "\n".join(
+        _text(STATIC_ROOT / name)
+        for name in ("index.html", "operator.js", "evidence.js", "style.css")
+    )
+    assert "localhost" not in joined
+    assert "127.0.0.1" not in joined
+    assert "http://" not in joined
+    assert "https://" not in joined
