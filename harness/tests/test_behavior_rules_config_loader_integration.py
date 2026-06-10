@@ -1,13 +1,13 @@
-"""Integration tests for BehaviorRulesPyFunc's rule-runtime adapter (Phase C1.2).
+"""Integration tests for BehaviorRulesPyFunc's rule-runtime adapter (midterm).
 
 The Savant pyfunc itself imports ``savant.deepstream.pyfunc`` which is
 only available inside the GPU container. These tests target the pure
 adapter that the pyfunc uses — ``custom.services.rule_runtime`` — and
 verify the full path:
 
-    cameras.generated.yml
-        -> load_camera_config (C1.1)
-            -> build_per_source_runtime (C1.2)
+    cameras.midterm.yml
+        -> load_camera_config (midterm)
+            -> build_per_source_runtime (midterm)
                 -> rule.evaluate -> SecurityEvent
 
 That exercises the same code path the runtime uses, without touching
@@ -30,7 +30,7 @@ MODULES_ROOT = str(Path(__file__).resolve().parents[2] / "modules")
 
 
 def _isolate_savant_security_modules():
-    """Drop sibling phase paths from sys.path and clear cached custom.* imports."""
+    """Drop sibling runtime paths from sys.path and clear cached custom.* imports."""
     sys.path[:] = [
         p for p in sys.path
         if not (p.startswith(MODULES_ROOT) and p != MODULE_DIR)
@@ -54,7 +54,7 @@ def loader_mod():
 
 
 def _write_yaml(tmp_path, text):
-    p = tmp_path / "cameras.generated.yml"
+    p = tmp_path / "cameras.midterm.yml"
     p.write_text(textwrap.dedent(text).strip() + "\n")
     return str(p)
 
@@ -63,7 +63,7 @@ VALID_YAML = """
     cameras:
       cam_001:
         enabled: true
-        source_id: phase3h
+        source_id: primary_rtsp
         name: Test
         input:
           type: rtsp
@@ -136,8 +136,8 @@ def test_source_id_to_camera_id_mapping(loader_mod, rt_mod, tmp_path):
     bundle = loader_mod.load_camera_config(cfg)
     from custom.services.cooldown import CooldownTracker
     runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
-    assert "phase3h" in runtimes
-    assert runtimes["phase3h"].camera_id == "cam_001"
+    assert "primary_rtsp" in runtimes
+    assert runtimes["primary_rtsp"].camera_id == "cam_001"
 
 
 # ===========================================================================
@@ -150,10 +150,10 @@ def test_intrusion_uses_yaml_perimeter_points(loader_mod, rt_mod, tmp_path):
     bundle = loader_mod.load_camera_config(cfg)
     from custom.services.cooldown import CooldownTracker
     runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
-    rule = runtimes["phase3h"].rules[0]
+    rule = runtimes["primary_rtsp"].rules[0]
     polygon = rule.zone.polygon
     assert polygon == [(100.0, 100.0), (400.0, 100.0), (400.0, 400.0), (100.0, 400.0)]
-    assert [rule.config.rule_type for rule in runtimes["phase3h"].rules] == ["intrusion"]
+    assert [rule.config.rule_type for rule in runtimes["primary_rtsp"].rules] == ["intrusion"]
 
 
 # ===========================================================================
@@ -254,7 +254,7 @@ def test_disabled_rule_omitted(loader_mod, rt_mod, tmp_path):
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: Test
             rtsp_url: rtsp://x
             zones:
@@ -285,7 +285,7 @@ def test_severity_and_flags_flow_to_event(loader_mod, rt_mod, tmp_path):
     bundle = loader_mod.load_camera_config(cfg)
     from custom.services.cooldown import CooldownTracker
     runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
-    rule = runtimes["phase3h"].rules[0]
+    rule = runtimes["primary_rtsp"].rules[0]
 
     track = _make_track_inside(track_id=5, camera_id="cam_001", ts_start=0, ts_end=1000)
     event = rule.evaluate(track)
@@ -317,7 +317,7 @@ def test_roi_comes_from_yaml_not_hardcode(loader_mod, rt_mod, tmp_path):
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: Test
             rtsp_url: rtsp://x
             zones:
@@ -335,7 +335,7 @@ def test_roi_comes_from_yaml_not_hardcode(loader_mod, rt_mod, tmp_path):
     bundle = loader_mod.load_camera_config(cfg)
     from custom.services.cooldown import CooldownTracker
     runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
-    rule = runtimes["phase3h"].rules[0]
+    rule = runtimes["primary_rtsp"].rules[0]
 
     # Track foot is at ~(260, 340) — outside the (0,0)-(10,10) zone.
     track = _make_track_inside(track_id=5, camera_id="cam_001", ts_start=0, ts_end=1000)
@@ -353,7 +353,7 @@ def test_invalid_yaml_raises_at_load_time(loader_mod, tmp_path):
         cameras:
           cam_001:
             enabled: true
-            source_id: phase3h
+            source_id: primary_rtsp
             name: Test
             rtsp_url: rtsp://x
             zones:
@@ -381,9 +381,9 @@ def test_camera_id_comes_from_config(loader_mod, rt_mod, tmp_path):
     bundle = loader_mod.load_camera_config(cfg)
     from custom.services.cooldown import CooldownTracker
     runtimes = rt_mod.build_per_source_runtime(bundle, CooldownTracker())
-    rt = runtimes["phase3h"]
+    rt = runtimes["primary_rtsp"]
     # The map source_id → CameraEntry must give back the API-side camera_id.
-    assert rt.source_id == "phase3h"
+    assert rt.source_id == "primary_rtsp"
     assert rt.camera_id == "cam_001"
 
 

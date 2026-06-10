@@ -63,7 +63,7 @@ from custom.services.rule_runtime import (
 
 
 _DEFAULT_LOG_INTERVAL = 15
-_DEFAULT_CONFIG_PATH = "/opt/savant/src/module/config/cameras.generated.yml"
+_DEFAULT_CONFIG_PATH = "/opt/savant/src/module/config/cameras.midterm.yml"
 
 
 def _env_float(name: str, default: float) -> float:

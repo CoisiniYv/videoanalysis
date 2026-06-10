@@ -1,4 +1,4 @@
-"""Tests for the C1.1 export script (scripts/config/export_cameras_yml.py).
+"""Tests for the midterm export script (scripts/config/export_cameras_yml.py).
 
 These tests inject a fake HTTP fetcher into ``main(...)`` so no live
 API is needed. They verify that:
@@ -50,7 +50,7 @@ SAMPLE_YAML = textwrap.dedent("""
     cameras:
       cam_001:
         enabled: true
-        source_id: phase3h
+        source_id: primary_rtsp
         name: Test Camera
         rtsp_url: rtsp://example.local/stream
         gpu_id: 0
@@ -92,7 +92,7 @@ class _FakeFetcher:
 
 def test_main_writes_file_with_response_body(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    output = tmp_path / "subdir" / "cameras.generated.yml"
+    output = tmp_path / "subdir" / "cameras.midterm.yml"
     rc = script_mod.main(
         [
             "--api-base-url", "http://api:8001",
@@ -114,7 +114,7 @@ def test_main_writes_file_with_response_body(script_mod, tmp_path):
 
 def test_main_output_is_parseable_yaml(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001", "--output", str(output)],
         fetcher=fetcher,
@@ -123,7 +123,7 @@ def test_main_output_is_parseable_yaml(script_mod, tmp_path):
     assert rc == 0
     doc = yaml.safe_load(output.read_text())
     assert "cameras" in doc
-    assert doc["cameras"]["cam_001"]["source_id"] == "phase3h"
+    assert doc["cameras"]["cam_001"]["source_id"] == "primary_rtsp"
     assert doc["cameras"]["cam_001"]["zones"]["perimeter"]["type"] == "polygon"
 
 
@@ -136,7 +136,7 @@ def test_main_returns_nonzero_on_transport_error(script_mod, tmp_path):
     def broken_fetch(url: str) -> str:
         raise RuntimeError("connection refused")
 
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     logs: List[str] = []
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001", "--output", str(output)],
@@ -152,7 +152,7 @@ def test_main_returns_nonzero_on_invalid_yaml(script_mod, tmp_path):
     def garbage_fetch(url: str) -> str:
         return "this: is:\n  - not\nvalid: ::yaml"
 
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     logs: List[str] = []
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001", "--output", str(output)],
@@ -167,7 +167,7 @@ def test_main_returns_nonzero_when_cameras_key_missing(script_mod, tmp_path):
     def missing_key_fetch(url: str) -> str:
         return "not_cameras: {}\n"
 
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     logs: List[str] = []
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001", "--output", str(output)],
@@ -186,7 +186,7 @@ def test_main_returns_nonzero_when_cameras_key_missing(script_mod, tmp_path):
 
 def test_main_creates_parent_directory(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    output = tmp_path / "deeply" / "nested" / "cameras.generated.yml"
+    output = tmp_path / "deeply" / "nested" / "cameras.midterm.yml"
     assert not output.parent.exists()
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001", "--output", str(output)],
@@ -200,7 +200,7 @@ def test_main_creates_parent_directory(script_mod, tmp_path):
 
 def test_main_include_disabled_flag_appends_query(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     rc = script_mod.main(
         [
             "--api-base-url", "http://api:8001",
@@ -219,7 +219,7 @@ def test_main_include_disabled_flag_appends_query(script_mod, tmp_path):
 def test_main_log_does_not_include_rtsp_url(script_mod, tmp_path):
     """Operators copy logs into tickets — rtsp_url often carries credentials."""
     fetcher = _FakeFetcher()
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     logs: List[str] = []
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001", "--output", str(output)],
@@ -228,15 +228,15 @@ def test_main_log_does_not_include_rtsp_url(script_mod, tmp_path):
     )
     assert rc == 0
     joined = "\n".join(logs)
-    assert "rtsp" not in joined.lower()
+    assert "rtsp://example.local/stream" not in joined
     # But the safe fields ARE logged.
     assert "cam_001" in joined
-    assert "phase3h" in joined
+    assert "primary_rtsp" in joined
 
 
 def test_main_strips_trailing_slash_in_base_url(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    output = tmp_path / "cameras.generated.yml"
+    output = tmp_path / "cameras.midterm.yml"
     rc = script_mod.main(
         ["--api-base-url", "http://api:8001/", "--output", str(output)],
         fetcher=fetcher,

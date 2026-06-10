@@ -512,7 +512,7 @@ def _event_annotation_from_context(
     *,
     cameras_config_path: str | None = None,
 ) -> dict:
-    """Build the P1 event-frame annotation document from event context."""
+    """Build the midterm event-frame annotation document from event context."""
     payload = context["payload"]
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
     if not isinstance(media, dict):
@@ -611,7 +611,7 @@ def _event_annotation_from_context(
 
 
 def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
-    """Build the P1 event-frame annotation document from the event row."""
+    """Build the midterm event-frame annotation document from the event row."""
     return _event_annotation_from_context(
         _load_event_context(pg_conn, event_id),
         cameras_config_path=os.getenv("CAMERAS_CONFIG_PATH"),
@@ -1068,8 +1068,8 @@ def _build_business_metadata(
 
     return {
         "schema_version": "1.0",
-        "project_version": _evidence_version("P1"),
-        **_legacy_metadata_fields("P1"),
+        "project_version": _evidence_version("midterm"),
+        **_legacy_metadata_fields("midterm"),
         "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
         "evidence_type": "security_event_replay_clip",
         "recording_strategy": "savant_replay",
@@ -1169,7 +1169,7 @@ def _build_business_metadata(
     }
 
 
-def _finalize_p1_evidence_bundle(
+def _finalize_midterm_evidence_bundle(
     pg_conn: psycopg.Connection,
     *,
     event_id: str,
@@ -1178,7 +1178,7 @@ def _finalize_p1_evidence_bundle(
     metadata_file: str,
     evidence_output_dir: str,
 ) -> dict:
-    """Copy Replay sink output into the P1 raw evidence bundle."""
+    """Copy Replay sink output into the midterm raw evidence bundle."""
     evidence_dir = Path(evidence_output_dir) / event_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2072,9 +2072,9 @@ def _process_sink_output(
     processed_dirs: set[str],
     *,
     evidence_output_dir: str | None = None,
-    p1_raw_clip_finalizer_enabled: bool = False,
+    midterm_raw_clip_finalizer_enabled: bool = False,
     candidate_dirs: dict[str, tuple[int, int]] | None = None,
-    p1_sink_stability_checks: int = 2,
+    midterm_sink_stability_checks: int = 2,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
@@ -2105,7 +2105,7 @@ def _process_sink_output(
 
         post_savant_finalizer_enabled = _post_savant_finalizer_enabled()
         finalizer_enabled = (
-            p1_raw_clip_finalizer_enabled or post_savant_finalizer_enabled
+            midterm_raw_clip_finalizer_enabled or post_savant_finalizer_enabled
         )
 
         video_file = _find_video_file(meta_dir)
@@ -2122,7 +2122,7 @@ def _process_sink_output(
             previous_size, stable_count = candidate_dirs.get(meta_dir, (-1, 0))
             stable_count = stable_count + 1 if current_size == previous_size else 0
             candidate_dirs[meta_dir] = (current_size, stable_count)
-            if stable_count < max(1, p1_sink_stability_checks):
+            if stable_count < max(1, midterm_sink_stability_checks):
                 logger.debug(
                     "media_wait_for_stable_sink_output event_id=%s meta_dir=%s "
                     "size=%s previous_size=%s stable_count=%s required=%s",
@@ -2131,7 +2131,7 @@ def _process_sink_output(
                     current_size,
                     previous_size,
                     stable_count,
-                    p1_sink_stability_checks,
+                    midterm_sink_stability_checks,
                 )
                 continue
 
@@ -2181,11 +2181,11 @@ def _process_sink_output(
                 continue
             clip_path = bundle["raw_clip"]
             clip_status = bundle.get("clip_status", "generated_unverified")
-        elif p1_raw_clip_finalizer_enabled:
+        elif midterm_raw_clip_finalizer_enabled:
             if not evidence_output_dir:
-                logger.error("p1_finalizer enabled but no evidence_output_dir")
+                logger.error("midterm_finalizer enabled but no evidence_output_dir")
                 continue
-            bundle = _finalize_p1_evidence_bundle(
+            bundle = _finalize_midterm_evidence_bundle(
                 pg_conn,
                 event_id=event_id,
                 meta_dir=meta_dir,
@@ -2916,14 +2916,14 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
-        "p1_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
+        "midterm_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
         "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
         cfg.evidence_output_dir,
-        cfg.p1_raw_clip_finalizer_enabled,
-        cfg.p1_sink_stability_checks,
+        cfg.midterm_raw_clip_finalizer_enabled,
+        cfg.midterm_sink_stability_checks,
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
         cfg.evidence_max_duration_slack_sec,
@@ -2939,9 +2939,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 cfg.sink_output_dir,
                 processed_dirs,
                 evidence_output_dir=cfg.evidence_output_dir,
-                p1_raw_clip_finalizer_enabled=cfg.p1_raw_clip_finalizer_enabled,
+                midterm_raw_clip_finalizer_enabled=cfg.midterm_raw_clip_finalizer_enabled,
                 candidate_dirs=candidate_dirs,
-                p1_sink_stability_checks=cfg.p1_sink_stability_checks,
+                midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
             )
             if clip_updates:
                 logger.info("media_worker: clip updated %d events", clip_updates)

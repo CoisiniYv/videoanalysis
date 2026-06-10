@@ -37,7 +37,7 @@ def modules():
 
 
 def _write_yaml(tmp_path: Path, body: str) -> str:
-    path = tmp_path / "cameras.generated.yml"
+    path = tmp_path / "cameras.midterm.yml"
     path.write_text(textwrap.dedent(body).strip() + "\n")
     return str(path)
 

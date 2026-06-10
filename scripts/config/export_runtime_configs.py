@@ -3,7 +3,7 @@
 
 Produces:
 
-1. ``modules/savant_security/config/cameras.generated.yml``
+1. ``modules/savant_security/config/cameras.midterm.yml``
    The Savant module reads this through ``custom.services.camera_config``.
    It is byte-equivalent to the FastAPI ``/api/v1/cameras/config/export``
    response.
@@ -22,7 +22,7 @@ Usage::
 
     python scripts/config/export_runtime_configs.py \\
         --api-base-url http://localhost:8001 \\
-        --module-config-output modules/savant_security/config/cameras.generated.yml \\
+        --module-config-output modules/savant_security/config/cameras.midterm.yml \\
         --sources-output infra/generated/sources.generated.yml
 """
 
@@ -39,7 +39,7 @@ import yaml
 
 
 DEFAULT_API_BASE_URL = "http://localhost:8001"
-DEFAULT_MODULE_OUTPUT = "modules/savant_security/config/cameras.generated.yml"
+DEFAULT_MODULE_OUTPUT = "modules/savant_security/config/cameras.midterm.yml"
 DEFAULT_SOURCES_OUTPUT = "infra/generated/sources.generated.yml"
 EXPORT_PATH = "/api/v1/cameras/config/export"
 HTTP_TIMEOUT_SECONDS = 30
@@ -108,7 +108,7 @@ def main(
         _log_camera_summary(_log, cam_id, cam_doc)
 
     # ------------------------------------------------------------------
-    # File 1: module-side cameras.generated.yml (write the body verbatim)
+    # File 1: module-side cameras.midterm.yml (write the body verbatim)
     # ------------------------------------------------------------------
     module_out = os.path.abspath(args.module_config_output)
     try:
@@ -169,7 +169,7 @@ def _parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--module-config-output",
         default=DEFAULT_MODULE_OUTPUT,
-        help=f"Path for cameras.generated.yml (default: {DEFAULT_MODULE_OUTPUT})",
+        help=f"Path for cameras.midterm.yml (default: {DEFAULT_MODULE_OUTPUT})",
     )
     parser.add_argument(
         "--sources-output",

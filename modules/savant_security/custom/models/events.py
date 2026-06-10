@@ -99,7 +99,7 @@ class SecurityEvent:
     payload: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Fill R3-compatible defaults while preserving older producers."""
+        """Fill midterm-compatible defaults while preserving older producers."""
         if not self.algorithm_type and self.event_type:
             if self.event_type in (
                 "face_observed",

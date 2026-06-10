@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
-PERSON_OBSERVATION_SCHEMA_VERSION = "c1i.person_bbox_observation.v1"
+PERSON_OBSERVATION_SCHEMA_VERSION = "midterm.person_bbox_observation.v1"
 
 
 def build_person_source_observation_id(

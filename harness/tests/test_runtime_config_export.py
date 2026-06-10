@@ -1,4 +1,4 @@
-"""Tests for the combined runtime config exporter (Phase C1.2)."""
+"""Tests for the combined runtime config exporter (midterm)."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ SAMPLE_API_RESPONSE = textwrap.dedent("""
     cameras:
       cam_001:
         enabled: true
-        source_id: phase3h
+        source_id: primary_rtsp
         name: Test Camera
         rtsp_url: rtsp://example.local/stream
         gpu_id: 0
@@ -75,13 +75,13 @@ class _FakeFetcher:
 
 
 # ===========================================================================
-# 1. generates module-side cameras.generated.yml
+# 1. generates module-side cameras.midterm.yml
 # ===========================================================================
 
 
 def test_module_config_is_written_verbatim(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
 
     rc = script_mod.main(
@@ -109,7 +109,7 @@ def test_module_config_is_written_verbatim(script_mod, tmp_path):
 
 def test_sources_yaml_has_expected_shape(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
     rc = script_mod.main(
         [
@@ -128,7 +128,7 @@ def test_sources_yaml_has_expected_shape(script_mod, tmp_path):
 
     entry = doc["sources"]["cam_001"]
     assert entry["camera_id"] == "cam_001"
-    assert entry["source_id"] == "phase3h"
+    assert entry["source_id"] == "primary_rtsp"
     assert entry["uri"] == "rtsp://example.local/stream"
     assert entry["enabled"] is True
     assert entry["adapter_type"] == "gstreamer"
@@ -142,7 +142,7 @@ def test_sources_yaml_has_expected_shape(script_mod, tmp_path):
 
 def test_disabled_source_kept_with_enabled_false(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
     rc = script_mod.main(
         [
@@ -167,7 +167,7 @@ def test_disabled_source_kept_with_enabled_false(script_mod, tmp_path):
 
 def test_mapping_is_correct(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
     script_mod.main(
         [
@@ -194,7 +194,7 @@ def test_mapping_is_correct(script_mod, tmp_path):
 def test_log_does_not_include_rtsp_url(script_mod, tmp_path):
     fetcher = _FakeFetcher()
     logs: List[str] = []
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
     script_mod.main(
         [
@@ -213,7 +213,7 @@ def test_log_does_not_include_rtsp_url(script_mod, tmp_path):
     assert "example.local/stream" not in joined
     # But the safe fields ARE logged.
     assert "cam_001" in joined
-    assert "phase3h" in joined
+    assert "primary_rtsp" in joined
 
 
 # ===========================================================================
@@ -239,7 +239,7 @@ def test_multiple_enabled_cameras_in_sources(script_mod, tmp_path):
             gpu_id: 0
     """).strip() + "\n"
     fetcher = _FakeFetcher(body=multi_body)
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
     rc = script_mod.main(
         [
@@ -266,7 +266,7 @@ def test_nonzero_on_transport_error(script_mod, tmp_path):
     def broken(url: str) -> str:
         raise RuntimeError("network down")
 
-    module_out = tmp_path / "cameras.generated.yml"
+    module_out = tmp_path / "cameras.midterm.yml"
     sources_out = tmp_path / "sources.generated.yml"
     rc = script_mod.main(
         [
@@ -284,7 +284,7 @@ def test_nonzero_on_transport_error(script_mod, tmp_path):
 
 def test_parent_dirs_created_for_both_outputs(script_mod, tmp_path):
     fetcher = _FakeFetcher()
-    module_out = tmp_path / "deep" / "nested1" / "cameras.generated.yml"
+    module_out = tmp_path / "deep" / "nested1" / "cameras.midterm.yml"
     sources_out = tmp_path / "deep" / "nested2" / "sources.generated.yml"
     rc = script_mod.main(
         [

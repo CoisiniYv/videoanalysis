@@ -1,7 +1,7 @@
-"""Bundle → per-source runtime adapter (Phase C1.2).
+"""Bundle → per-source runtime adapter (midterm camera config).
 
-Maps a ``CameraConfigBundle`` (loaded from cameras.generated.yml in the
-C1 export schema) into the per-source runtime structures the Savant
+Maps a ``CameraConfigBundle`` (loaded from cameras.midterm.yml in the
+midterm camera config schema) into the per-source runtime structures the Savant
 pyfunc consumes: a ``TrackStateStore`` per source, the rule list from
 the registry, and the original ``CameraEntry`` for downstream
 enrichment.
@@ -57,7 +57,7 @@ class RuleEvaluation:
 
 
 def camera_entry_to_legacy_config(cam: CameraEntry) -> CameraConfig:
-    """Translate a C1.1 ``CameraEntry`` into the legacy ``CameraConfig``
+    """Translate a midterm ``CameraEntry`` into the legacy ``CameraConfig``
     shape that ``build_rules()`` already understands.
 
     Disabled rule entries are skipped here so the resulting

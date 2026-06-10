@@ -126,8 +126,13 @@ class SecurityEvent:
     payload: dict
 ```
 
-R3 locks this as the common event contract for all behavior algorithms and face
-intelligence events. Algorithm-specific values must be placed in `payload`.
+The midterm runtime uses this as the common event contract for all behavior
+algorithms and face intelligence events. Algorithm-specific values must be
+placed in `payload`.
+
+算法的全局 registry、每摄像头启用/停用、`algorithm_id -> rule_type`
+映射和 runtime 验证收敛见 `13_pose_behavior_algorithm_fusion.md`。本文件只定义
+行为规则本身的输入、状态和判定要求。
 
 ## 3. 通用规则机制
 

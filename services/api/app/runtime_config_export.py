@@ -1,4 +1,4 @@
-"""C1G.2 DB-backed camera runtime config export.
+"""Midterm DB-backed camera runtime config export.
 
 This module converts rows from ``cameras`` / ``camera_zones`` /
 ``camera_rules`` into generated runtime config artifacts. It is deliberately
@@ -27,10 +27,10 @@ from app.algorithm_ids import (
     normalize_algorithm_id,
 )
 
-SCHEMA_VERSION_RUNTIME = "c1g2.runtime_config.v1"
-SCHEMA_VERSION_SUMMARY = "c1g2.export_summary.v1"
-SCHEMA_VERSION_APPLY_PLAN = "c1g2.apply_plan.v1"
-DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/c1g2/generated-config"
+SCHEMA_VERSION_RUNTIME = "midterm.runtime_config.v1"
+SCHEMA_VERSION_SUMMARY = "midterm.export_summary.v1"
+SCHEMA_VERSION_APPLY_PLAN = "midterm.apply_plan.v1"
+DEFAULT_OUTPUT_DIR = "/data/video-analytics/artifacts/midterm/generated-config"
 
 ALLOWED_ALGORITHM_IDS = set(RULE_ALGORITHM_IDS)
 
@@ -101,7 +101,7 @@ def export_runtime_config(repo: Any, options: ExportOptions) -> ExportResult:
     generated_at = datetime.now(timezone.utc).isoformat()
     output_dir = Path(options.output_dir)
     paths = {
-        "cameras": output_dir / "cameras.generated.yml",
+        "cameras": output_dir / "cameras.midterm.yml",
         "runtime": output_dir / "algorithm_runtime_config.json",
         "summary": output_dir / "export_summary.json",
         "apply_plan": output_dir / "apply_plan.json",
@@ -536,14 +536,14 @@ def _build_apply_plan(generated_at: str, paths: dict[str, Path], output_dir: Pat
             {"action": "write_file", "path": str(paths["apply_plan"])},
             {
                 "action": "future_mount_or_copy",
-                "target": "modules/savant_security/config/cameras.generated.yml",
+                "target": "modules/savant_security/config/cameras.midterm.yml",
                 "status": "not_executed",
             },
             {
                 "action": "future_restart",
                 "services": ["source-adapter", "savant-security"],
                 "status": "not_executed",
-                "reason": "controlled runtime apply deferred to C1G.3",
+                "reason": "controlled runtime apply deferred to a midterm runtime apply step",
             },
         ],
     }

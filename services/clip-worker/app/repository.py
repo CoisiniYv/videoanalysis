@@ -108,7 +108,7 @@ def update_evidence_media_result(
     storage_fallback_reason: str | None = None,
     error_message: str | None = None,
 ) -> bool:
-    """Update events and evidence_tasks after R3.2A metadata/snapshot output."""
+    """Update events and evidence_tasks after midterm metadata/snapshot output."""
     if not event_id:
         return False
     try:

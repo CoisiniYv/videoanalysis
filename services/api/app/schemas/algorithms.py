@@ -73,7 +73,7 @@ class AlgorithmDefinition(BaseModel):
 
     @property
     def algorithm_type(self) -> str:
-        """Compatibility alias for older R3 tests/clients."""
+        """Compatibility alias for older tests/clients."""
         return self.algorithm_id
 
 
@@ -224,7 +224,7 @@ class AlgorithmRuleResponse(BaseModel):
 
 
 class SecurityEventContract(BaseModel):
-    """API-side mirror of the unified R3 SecurityEvent contract."""
+    """API-side mirror of the unified SecurityEvent contract."""
 
     event_type: str
     source_event_id: str

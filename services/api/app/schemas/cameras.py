@@ -1,4 +1,4 @@
-"""Pydantic request/response models for camera configuration endpoints (Phase C1)."""
+"""Pydantic request/response models for camera configuration endpoints (camera config)."""
 
 from __future__ import annotations
 
@@ -390,7 +390,7 @@ def validate_intrusion_config(
     """Validate the ``config`` payload of an intrusion rule.
 
     Returns ``(ok, error_message)``. ``error_message`` is empty when ok.
-    C1 strict-validates only intrusion. Other rule types are accepted
+    midterm strict-validates only intrusion. Other rule types are accepted
     as-is with no shape constraint.
     """
     zone = config.get("zone")

@@ -144,7 +144,7 @@ GET /api/v1/cameras/{camera_id}/config
 
 返回需可导出为 Savant `cameras.yml`。
 
-### 4.4 R3 算法 registry
+### 4.4 Midterm 算法 registry
 
 ```http
 GET /api/v1/algorithms
@@ -167,7 +167,7 @@ face_intelligence
 `face_intelligence` 统一支撑 watchlist_hit、trajectory / appearances 查询和
 live_search，不拆成三套独立算法。
 
-### 4.5 R3 摄像头算法规则
+### 4.5 Midterm 摄像头算法规则
 
 ```http
 POST /api/v1/cameras/{camera_id}/algorithm-rules
@@ -200,6 +200,9 @@ POST /api/v1/cameras/{camera_id}/algorithm-rules/{rule_id}/disable
 
 `algorithm_type` 必须来自 registry；`zone_id` / `line_id` 必须属于该
 camera；`evidence_policy` 对所有算法使用统一 schema。
+
+Midterm 版本统一使用 `algorithm_id` 表示外部算法标识；每摄像头动态启用、
+规则实例模型和 runtime 导出要求见 `13_pose_behavior_algorithm_fusion.md`。
 
 ## 5. 事件 API
 

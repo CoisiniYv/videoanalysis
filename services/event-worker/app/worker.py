@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 shutdown_requested = False
 
-R3_1A_BEHAVIOR_EVIDENCE_EVENT_TYPES = {"intrusion"}
-R3_1A_DEFAULT_EVIDENCE_POLICY = {
+MIDTERM_BEHAVIOR_EVIDENCE_EVENT_TYPES = {"intrusion"}
+MIDTERM_DEFAULT_EVIDENCE_POLICY = {
     "snapshot_required": True,
     "clip_required": True,
     "pre_seconds": 5,
@@ -178,8 +178,8 @@ def _handle_event(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
-    recording_pre_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
-    recording_post_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["post_seconds"],
+    recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
+    recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -406,9 +406,9 @@ def _requires_evidence(event: dict) -> bool:
 
 
 def _apply_default_evidence_policy(event: dict) -> None:
-    """Enable the R3.1A intrusion evidence MVP for legacy behavior events."""
+    """Enable default intrusion evidence for legacy behavior events."""
     event_type = event.get("event_type", "")
-    if event_type not in R3_1A_BEHAVIOR_EVIDENCE_EVENT_TYPES:
+    if event_type not in MIDTERM_BEHAVIOR_EVIDENCE_EVENT_TYPES:
         return
 
     if _requires_evidence(event):
@@ -420,7 +420,7 @@ def _apply_default_evidence_policy(event: dict) -> None:
     policy = event.get("evidence_policy")
     if not isinstance(policy, dict):
         policy = {}
-    event["evidence_policy"] = {**R3_1A_DEFAULT_EVIDENCE_POLICY, **policy}
+    event["evidence_policy"] = {**MIDTERM_DEFAULT_EVIDENCE_POLICY, **policy}
 
     payload = event.setdefault("payload", {})
     if not isinstance(payload, dict):
@@ -435,8 +435,8 @@ def _apply_default_evidence_policy(event: dict) -> None:
     media.setdefault("recording_strategy", "reserved")
     media["snapshot_required"] = True
     media["clip_required"] = True
-    media.setdefault("pre_seconds", R3_1A_DEFAULT_EVIDENCE_POLICY["pre_seconds"])
-    media.setdefault("post_seconds", R3_1A_DEFAULT_EVIDENCE_POLICY["post_seconds"])
+    media.setdefault("pre_seconds", MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"])
+    media.setdefault("post_seconds", MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"])
     media.setdefault("source_id", event.get("source_id", ""))
     media.setdefault("event_ts_ms", event.get("event_ts_ms", 0))
     media.setdefault("frame_uuid", event.get("frame_uuid"))
@@ -494,8 +494,8 @@ def _process_batch(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
-    recording_pre_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
-    recording_post_seconds: int = R3_1A_DEFAULT_EVIDENCE_POLICY["post_seconds"],
+    recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
+    recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0

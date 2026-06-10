@@ -22,7 +22,9 @@ parameters:
   pose_min_width: ${oc.decode:${oc.env:POSE_MIN_WIDTH, 20}}
   pose_min_height: ${oc.decode:${oc.env:POSE_MIN_HEIGHT, 40}}
   pose_coordinate_restore_mode: ${oc.env:POSE_COORDINATE_RESTORE_MODE, letterbox}
+  face_infer_interval: ${oc.decode:${oc.env:FACE_INFER_INTERVAL, 0}}
   face_detector_batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
+  face_embedding_infer_interval: ${oc.decode:${oc.env:FACE_EMBEDDING_INFER_INTERVAL, 0}}
   face_embedding_batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
   face_confidence_threshold: ${oc.decode:${oc.env:FACE_CONFIDENCE_THRESHOLD, 0.25}}
   face_nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
@@ -116,7 +118,7 @@ pipeline:
 
     # ------------------------------------------------------------------
     # BehaviorRulesPyFunc — registry-driven behavior rule adapter.
-    # Reads cameras.generated.yml at startup, routes per-source.
+    # Reads cameras.midterm.yml at startup, routes per-source.
     # ------------------------------------------------------------------
     - element: pyfunc
       name: behavior_rules
@@ -124,7 +126,7 @@ pipeline:
       class_name: BehaviorRulesPyFunc
       kwargs:
         log_every_n_frames: 15
-        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}
         producer: savant_security
         gpu_id: 0
         observation_window_s: 5.0
@@ -138,7 +140,7 @@ pipeline:
     - element: nvinfer@complex_model
       name: yolov8_face
       properties:
-        interval: 0
+        interval: ${parameters.face_infer_interval}
       model:
         format: onnx
         model_file: /models/yolov8_face.onnx
@@ -193,6 +195,7 @@ pipeline:
       model:
         format: onnx
         model_file: /models/adaface/adaface_ir50_webface4m.onnx
+        interval: ${parameters.face_embedding_infer_interval}
         batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
         precision: fp16
         input:
@@ -224,7 +227,7 @@ pipeline:
       class_name: FaceReidGatePyFunc
       kwargs:
         log_every_n_frames: 30
-        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}
         face_detector_confidence_threshold: ${parameters.face_confidence_threshold}
         face_reid_min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}
         face_reid_min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
@@ -243,7 +246,7 @@ pipeline:
       kwargs:
         log_every_n_frames: 30
         producer: savant_security
-        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}
         export_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
 
     # ------------------------------------------------------------------
@@ -260,7 +263,7 @@ pipeline:
         enabled: ${oc.decode:${oc.env:FRAME_ANNOTATION_EXPORT_ENABLED, false}}
         log_every_n_frames: ${oc.decode:${oc.env:FRAME_ANNOTATION_LOG_EVERY_N, 300}}
         producer: savant-security
-        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.generated.yml}
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}
         stream: ${oc.env:FRAME_ANNOTATION_STREAM, security.frame_annotations}
         ttl_seconds: ${oc.decode:${oc.env:FRAME_ANNOTATION_TTL_SECONDS, 120}}
         max_objects_per_frame: ${oc.decode:${oc.env:FRAME_ANNOTATION_MAX_OBJECTS_PER_FRAME, 100}}
