@@ -30,10 +30,12 @@ DEFAULT_VIDEO_SINK_CONTAINER = "video-analytics-midterm-video-file-sink"
 DEFAULT_CLIP_WORKER_CONTAINER = "video-analytics-midterm-clip-worker"
 DEFAULT_MEDIA_WORKER_CONTAINER = "video-analytics-midterm-media-worker"
 DEFAULT_VIDEO_SINK_IMAGE = "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
-DEFAULT_SAVANT_READY_TIMEOUT_S = 300.0
-DEFAULT_SAVANT_READY_POLL_INTERVAL_S = 2.0
+DEFAULT_VIDEO_SINK_NETWORK_ALIAS = "video-file-sink"
 DEFAULT_EPOCH_ROOT = "/data/video-analytics/media/replay-sink-output/midterm"
 DEFAULT_REDIS_EPOCH_KEY = "video_analytics:midterm:runtime_epoch"
+DEFAULT_EPOCH_RESET_FRAME_CACHE_STREAMS = "security.frame_annotations"
+DEFAULT_SAVANT_READY_TIMEOUT_S = 300.0
+DEFAULT_SAVANT_READY_POLL_INTERVAL_S = 2.0
 SOURCE_CONTAINER_PREFIX = "video-analytics-source-"
 RUNTIME_EPOCH_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAVANT_READY_PATTERNS = (
@@ -275,6 +277,12 @@ def _apply_camera_runtime_controlled(
         "runtime_epoch_state_path": str(_runtime_epoch_state_path()),
         "runtime_epoch_root": str(_runtime_epoch_root()),
         **savant_ready,
+        "redis_frame_cache_streams_reset": list(
+            epoch_state.get("redis_frame_cache_streams_reset") or []
+        ),
+        "redis_frame_cache_reset_count": int(
+            epoch_state.get("redis_frame_cache_reset_count") or 0
+        ),
         "video_sink_container": video_sink_container,
         "video_sink_dir_location": _video_sink_dir_location(runtime_epoch_id),
         "sources_total": len(sources_doc["sources"]),
@@ -349,14 +357,46 @@ def create_runtime_epoch_state(
     epoch_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(state_path, state)
     try:
-        Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0")).set(
+        redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        redis_client.set(
             os.getenv("RUNTIME_EPOCH_REDIS_KEY", DEFAULT_REDIS_EPOCH_KEY),
             epoch_id,
         )
         state["redis_epoch_published"] = True
+        reset_streams, reset_count = _reset_runtime_epoch_frame_cache(redis_client)
+        state["redis_frame_cache_streams_reset"] = reset_streams
+        state["redis_frame_cache_reset_count"] = reset_count
     except Exception:
         state["redis_epoch_published"] = False
+        state["redis_frame_cache_streams_reset"] = []
+        state["redis_frame_cache_reset_count"] = 0
+    _atomic_write_json(state_path, state)
     return state
+
+
+def _reset_runtime_epoch_frame_cache(redis_client: Any) -> tuple[list[str], int]:
+    streams = _runtime_epoch_frame_cache_streams()
+    if not streams:
+        return [], 0
+    deleted = redis_client.delete(*streams)
+    try:
+        deleted_count = int(deleted or 0)
+    except (TypeError, ValueError):
+        deleted_count = 0
+    return streams, deleted_count
+
+
+def _runtime_epoch_frame_cache_streams() -> list[str]:
+    raw = os.getenv(
+        "RUNTIME_EPOCH_RESET_FRAME_CACHE_STREAMS",
+        DEFAULT_EPOCH_RESET_FRAME_CACHE_STREAMS,
+    )
+    streams: list[str] = []
+    for item in str(raw or "").split(","):
+        stream = item.strip()
+        if stream and stream not in streams:
+            streams.append(stream)
+    return streams
 
 
 def _runtime_epoch_root() -> Path:
@@ -672,6 +712,10 @@ def _recreate_video_file_sink(
     network: str,
 ) -> None:
     encoded_name = quote(container_name, safe="")
+    network_alias = os.getenv(
+        "CAMERA_RUNTIME_VIDEO_SINK_NETWORK_ALIAS",
+        DEFAULT_VIDEO_SINK_NETWORK_ALIAS,
+    ) or DEFAULT_VIDEO_SINK_NETWORK_ALIAS
     client.request(
         "DELETE",
         f"/containers/{encoded_name}?force=true",
@@ -694,6 +738,13 @@ def _recreate_video_file_sink(
             "NetworkMode": network,
             "RestartPolicy": {"Name": "unless-stopped"},
         },
+        "NetworkingConfig": {
+            "EndpointsConfig": {
+                network: {
+                    "Aliases": [network_alias],
+                }
+            }
+        },
     }
     client.request(
         "POST",
@@ -712,7 +763,7 @@ def _recreate_rtsp_adapter(
     zmq_endpoint: str,
     adapter_image: str,
     network: str,
-) -> dict[str, Any]:
+) -> None:
     container_name = SOURCE_CONTAINER_PREFIX + source_id
     encoded_name = quote(container_name, safe="")
     delete_status, _ = client.request(

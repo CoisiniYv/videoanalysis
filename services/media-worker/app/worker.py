@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from ast import literal_eval
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg
@@ -744,8 +745,14 @@ def _runtime_epoch_guard(
         "current_runtime_epoch_id": current_epoch_id,
     }
     strict = _runtime_epoch_strict_enabled()
-    required_keys = tuple(fields.keys())
-    missing = [key for key in required_keys if not fields.get(key)]
+    # The official video-file-sink writes native frame metadata and does not
+    # preserve Replay labels. Treat sink metadata epoch as optional, but still
+    # fail closed when it is present and disagrees with the active epoch.
+    required_keys = tuple(
+        key for key in fields.keys() if key != "sink_metadata_runtime_epoch_id"
+    )
+    missing = [key for key in fields.keys() if not fields.get(key)]
+    required_missing = [key for key in required_keys if not fields.get(key)]
     nonempty_values = [str(value) for value in fields.values() if value]
     expected = current_epoch_id or (nonempty_values[0] if nonempty_values else "")
     mismatched = [
@@ -753,11 +760,11 @@ def _runtime_epoch_guard(
         for key, value in fields.items()
         if value and expected and str(value) != expected
     ]
-    failed = bool(mismatched) or (strict and bool(missing))
+    failed = bool(mismatched) or (strict and bool(required_missing))
     reason = ""
     if mismatched:
         reason = "missing_or_mismatched_runtime_epoch"
-    elif strict and missing:
+    elif strict and required_missing:
         reason = "missing_or_mismatched_runtime_epoch"
     return {
         "runtime_epoch_id": expected,
@@ -767,6 +774,7 @@ def _runtime_epoch_guard(
         "runtime_epoch_strict": strict,
         "runtime_epoch_fields": fields,
         "runtime_epoch_missing_fields": missing,
+        "runtime_epoch_required_missing_fields": required_missing,
         "runtime_epoch_mismatched_fields": mismatched,
     }
 
@@ -787,6 +795,17 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         tmp_path.replace(path)
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def _json_isoformat(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        normalized = value
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        return normalized.isoformat()
+    return str(value)
 
 
 def _update_summary_with_bundle_validation(
@@ -1234,6 +1253,7 @@ def _build_business_metadata(
         "probe_error": decode_probe.get("probe_error", ""),
     }
     clip_status = _clip_status_from_validation(clip_validation)
+    event_created_at = _json_isoformat(event_context.get("created_at"))
 
     return {
         "schema_version": "1.0",
@@ -1259,6 +1279,9 @@ def _build_business_metadata(
             "camera_id": event_context.get("camera_id", ""),
             "source_id": event_context.get("source_id", ""),
             "track_id": event_context.get("track_id", ""),
+            "created_at": event_created_at,
+            "alarm_machine_time": event_created_at,
+            "alarm_machine_time_source": "events.created_at" if event_created_at else "",
             "event_ts_ms": event_context.get("event_ts_ms", 0),
             "frame_uuid": (
                 anchor_metadata.get("event_frame_uuid")
@@ -2108,6 +2131,7 @@ def _build_event_metadata(
     object_counts = summary.get("object_counts") if isinstance(summary, dict) else {}
     if not isinstance(object_counts, dict):
         object_counts = {}
+    event_created_at = _json_isoformat(event_context.get("created_at"))
 
     return {
         "schema_version": _evidence_schema_version("2.0-midterm"),
@@ -2125,6 +2149,9 @@ def _build_event_metadata(
             "camera_id": event_context.get("camera_id", ""),
             "source_id": event_context.get("source_id", ""),
             "track_id": event_context.get("track_id", ""),
+            "created_at": event_created_at,
+            "alarm_machine_time": event_created_at,
+            "alarm_machine_time_source": "events.created_at" if event_created_at else "",
             "event_ts_ms": event_context.get("event_ts_ms", 0),
             "frame_uuid": (
                 anchor_metadata.get("event_frame_uuid")
@@ -2320,6 +2347,9 @@ def _finalize_post_savant_evidence_bundle(
                 requested_start_pts=_to_int(frame_cache_window.get("requested_start_pts")),
                 requested_end_pts=_to_int(frame_cache_window.get("requested_end_pts")),
                 event_frame_pts=_to_int(frame_cache_window.get("event_frame_pts")),
+                event_frame_uuid=str(replay_labels.get("event_frame_uuid") or ""),
+                start_window_frame_uuid=str(replay_labels.get("start_window_frame_uuid") or ""),
+                post_window_frame_uuid=str(replay_labels.get("post_window_frame_uuid") or ""),
                 enabled=True,
             )
             frame_cache_time_window = {**frame_cache_window, **selected_time_window}
@@ -2431,6 +2461,9 @@ def _finalize_post_savant_evidence_bundle(
             requested_start_pts=_to_int(frame_cache_time_window.get("requested_start_pts")),
             requested_end_pts=_to_int(frame_cache_time_window.get("requested_end_pts")),
             event_frame_pts=_to_int(frame_cache_time_window.get("event_frame_pts")),
+            event_frame_uuid=str(replay_labels.get("event_frame_uuid") or ""),
+            start_window_frame_uuid=str(replay_labels.get("start_window_frame_uuid") or ""),
+            post_window_frame_uuid=str(replay_labels.get("post_window_frame_uuid") or ""),
             time_domain_crop_applied=bool(
                 frame_cache_time_window.get("time_domain_crop_applied")
             ),

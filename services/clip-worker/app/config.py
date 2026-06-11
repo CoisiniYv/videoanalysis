@@ -30,6 +30,8 @@ class Config:
     allow_unbounded_keyframe_fallback: bool
     keyframe_lookup_retries: int
     keyframe_lookup_retry_sleep_s: float
+    post_savant_frame_proof_attempts: int
+    post_savant_frame_proof_retry_sleep_s: float
     frame_annotation_stream: str
     frame_annotation_anchor_lookback_count: int
     frame_annotation_anchor_wall_clock_slack_s: float
@@ -82,6 +84,15 @@ def load_config() -> Config:
         keyframe_lookup_retries=int(os.getenv("KEYFRAME_LOOKUP_RETRIES", "0")),
         keyframe_lookup_retry_sleep_s=float(
             os.getenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "1.0")
+        ),
+        post_savant_frame_proof_attempts=int(
+            os.getenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", "30")
+        ),
+        post_savant_frame_proof_retry_sleep_s=float(
+            os.getenv(
+                "POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S",
+                os.getenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "1.0"),
+            )
         ),
         frame_annotation_stream=os.getenv(
             "FRAME_ANNOTATION_STREAM", "security.frame_annotations"

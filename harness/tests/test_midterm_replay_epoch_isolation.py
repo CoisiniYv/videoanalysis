@@ -29,9 +29,14 @@ def _activate(service: str, module_name: str):
 
 class _FakeRedisClient:
     values: dict[str, str] = {}
+    deleted: list[str] = []
 
     def set(self, key: str, value: str) -> None:
         self.values[str(key)] = str(value)
+
+    def delete(self, *keys: str) -> int:
+        self.deleted.extend(str(key) for key in keys)
+        return len(keys)
 
 
 class _FakeRedis:
@@ -63,6 +68,7 @@ def test_runtime_apply_writes_epoch_state_and_redis(monkeypatch, tmp_path: Path)
     monkeypatch.setenv("RUNTIME_EPOCH_STATE_PATH", str(state_path))
     monkeypatch.setattr(runtime_apply, "Redis", _FakeRedis)
     _FakeRedisClient.values.clear()
+    _FakeRedisClient.deleted.clear()
 
     state = runtime_apply.create_runtime_epoch_state(
         reason="test",
@@ -73,6 +79,11 @@ def test_runtime_apply_writes_epoch_state_and_redis(monkeypatch, tmp_path: Path)
     assert json.loads(state_path.read_text(encoding="utf-8"))["runtime_epoch_id"] == CURRENT_EPOCH
     assert (state_path.parent / "epochs" / CURRENT_EPOCH).is_dir()
     assert _FakeRedisClient.values["video_analytics:midterm:runtime_epoch"] == CURRENT_EPOCH
+    assert _FakeRedisClient.deleted == ["security.frame_annotations"]
+    assert state["redis_frame_cache_streams_reset"] == ["security.frame_annotations"]
+    written_state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert written_state["redis_frame_cache_streams_reset"] == ["security.frame_annotations"]
+    assert written_state["redis_frame_cache_reset_count"] == 1
 
 
 def test_record_request_and_replay_job_carry_runtime_epoch() -> None:
@@ -218,6 +229,55 @@ def test_clip_worker_frame_annotation_lookup_filters_runtime_epoch() -> None:
     assert anchor.frame_uuid == "current-frame"
 
 
+def test_clip_worker_post_savant_frame_proof_wait_has_separate_config(monkeypatch) -> None:
+    config = _activate("clip-worker", "app.config")
+
+    monkeypatch.delenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", raising=False)
+    monkeypatch.delenv("POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S", raising=False)
+    monkeypatch.setenv("KEYFRAME_LOOKUP_RETRIES", "8")
+    monkeypatch.setenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "0.25")
+    cfg = config.load_config()
+
+    assert cfg.keyframe_lookup_retries == 8
+    assert cfg.post_savant_frame_proof_attempts == 30
+    assert cfg.post_savant_frame_proof_retry_sleep_s == 0.25
+
+    monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", "45")
+    monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S", "0.5")
+    cfg = config.load_config()
+
+    assert cfg.post_savant_frame_proof_attempts == 45
+    assert cfg.post_savant_frame_proof_retry_sleep_s == 0.5
+
+
+def test_media_worker_frame_cache_sidecar_filters_runtime_epoch() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    class FakeRedis:
+        def xrevrange(self, *_args: object, **_kwargs: object) -> list[tuple[str, dict[str, str]]]:
+            return [
+                ("3-0", {"data": json.dumps(_frame_annotation("missing-epoch", ""))}),
+                ("2-0", {"data": json.dumps(_frame_annotation("old-frame", OLD_EPOCH))}),
+                ("1-0", {"data": json.dumps(_frame_annotation("current-frame", CURRENT_EPOCH))}),
+            ]
+
+    messages, summary = writer._read_frame_annotations(
+        redis_client=FakeRedis(),
+        config={"stream_name": "security.frame_annotations", "lookback_count": 10},
+        event={
+            "source_id": "primary_rtsp",
+            "camera_id": "primary_rtsp",
+            "frame_uuid": "current-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {"runtime_epoch_id": CURRENT_EPOCH},
+        },
+    )
+
+    assert [message["frame_uuid"] for message in messages] == ["current-frame"]
+    assert summary["expected_runtime_epoch_id"] == CURRENT_EPOCH
+    assert summary["messages_filtered_runtime_epoch"] == 2
+
+
 def test_media_worker_uses_active_epoch_root(monkeypatch, tmp_path: Path) -> None:
     worker = _activate("media-worker", "app.worker")
     root = tmp_path / "replay-sink-output" / "midterm"
@@ -295,6 +355,67 @@ def test_media_worker_epoch_mismatch_fails_closed(monkeypatch, tmp_path: Path) -
     assert metadata["media"]["epoch_guard_failed"] is True
 
 
+def test_media_worker_allows_missing_sink_metadata_epoch(monkeypatch, tmp_path: Path) -> None:
+    worker = _activate("media-worker", "app.worker")
+    root = tmp_path / "replay-sink-output" / "midterm"
+    state_path = root / ".current_epoch.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps({"runtime_epoch_id": CURRENT_EPOCH}) + "\n",
+        encoding="utf-8",
+    )
+    sink_dir = root / "epochs" / CURRENT_EPOCH / f"replay-{CURRENT_EPOCH}-event-{EVENT_ID}"
+    sink_dir.mkdir(parents=True)
+    (sink_dir / "video.mov").write_bytes(b"cropped replay source")
+    metadata_file = sink_dir / "metadata.json"
+    metadata_file.write_text(
+        json.dumps(
+            {
+                "type": "VideoFrame",
+                "source_id": f"replay-{CURRENT_EPOCH}-event-{EVENT_ID}",
+                "pts": 95_000_000_000,
+                "attributes": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "evidence"
+
+    monkeypatch.setenv("RUNTIME_EPOCH_STATE_PATH", str(state_path))
+    monkeypatch.setenv("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", "true")
+    monkeypatch.setenv("POST_SAVANT_DURATION_GUARD_SLACK_SEC", "1")
+    monkeypatch.setenv("EVIDENCE_RUNTIME_EPOCH_STRICT", "true")
+    monkeypatch.setattr(worker, "_load_event_context", lambda _conn, _event_id: _event_context())
+    monkeypatch.setattr(worker, "load_native_metadata", lambda _path: _metadata_rows_inside_window())
+    monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 10)
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 10.0)
+    monkeypatch.setattr(worker, "_copy_or_crop_video", _write_valid_duration_crop)
+    monkeypatch.setattr(worker, "write_frame_cache_identity_sidecar", _sidecar_result)
+
+    bundle = worker._finalize_post_savant_evidence_bundle(
+        None,
+        event_id=EVENT_ID,
+        meta_dir=str(sink_dir),
+        metadata_file=str(metadata_file),
+        evidence_output_dir=str(output_root),
+    )
+
+    raw_clip = output_root / EVENT_ID / "raw_clip.mov"
+    summary = json.loads((output_root / EVENT_ID / "summary.json").read_text(encoding="utf-8"))
+    metadata = json.loads((output_root / EVENT_ID / "metadata.json").read_text(encoding="utf-8"))
+
+    assert raw_clip.exists()
+    assert bundle["raw_clip"] == str(raw_clip)
+    assert bundle["clip_status"] == "ready"
+    assert summary["epoch_guard_failed"] is False
+    assert summary["epoch_guard_status"] == "passed"
+    assert summary["runtime_epoch_missing_fields"] == ["sink_metadata_runtime_epoch_id"]
+    assert summary["duration_guard_status"] == "passed"
+    assert metadata["media"]["raw_clip_path"] == str(raw_clip)
+    assert metadata["media"]["epoch_guard_failed"] is False
+
+
 def _event_context() -> dict[str, Any]:
     return {
         "event_id": EVENT_ID,
@@ -335,9 +456,12 @@ def _event_context() -> dict[str, Any]:
 
 def _metadata_rows_inside_window() -> list[dict[str, Any]]:
     return [
-        {"type": "VideoFrame", "pts": 95_000_000_000, "frame_uuid": "start"},
-        {"type": "VideoFrame", "pts": 100_000_000_000, "frame_uuid": "event-frame"},
-        {"type": "VideoFrame", "pts": 105_000_000_000, "frame_uuid": "end"},
+        {
+            "type": "VideoFrame",
+            "pts": pts * 1_000_000_000,
+            "frame_uuid": "event-frame" if pts == 100 else f"frame-{pts}",
+        }
+        for pts in range(95, 106)
     ]
 
 

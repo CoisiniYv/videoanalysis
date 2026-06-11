@@ -74,6 +74,8 @@ def test_time_domain_crop_failure_does_not_publish_source_replay_output(
     assert summary["raw_clip_path"] is None
     assert metadata["media"]["raw_clip_path"] == ""
     assert metadata["status"]["clip_status"] == "duration_guard_failed"
+    assert metadata["event"]["alarm_machine_time"] == "2026-06-11T02:05:06+00:00"
+    assert metadata["event"]["alarm_machine_time_source"] == "events.created_at"
     assert source_video.read_bytes() == b"full replay source bytes"
 
 
@@ -185,6 +187,7 @@ def _event_context() -> dict:
         "camera_id": "primary_rtsp",
         "source_id": "primary_rtsp",
         "track_id": "track-1",
+        "created_at": "2026-06-11T02:05:06+00:00",
         "event_ts_ms": 1_780_000_000_000,
         "frame_uuid": "event-frame",
         "frame_pts": 100_000_000_000,

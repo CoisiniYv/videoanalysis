@@ -64,6 +64,9 @@ def build_post_savant_evidence_bundle(
     requested_start_pts: int | None = None,
     requested_end_pts: int | None = None,
     event_frame_pts: int | None = None,
+    event_frame_uuid: str | None = None,
+    start_window_frame_uuid: str | None = None,
+    post_window_frame_uuid: str | None = None,
     time_domain_crop_applied: bool = False,
     crop_video_to_time_window: bool = False,
     evidence_capture_mode: str | None = None,
@@ -87,6 +90,9 @@ def build_post_savant_evidence_bundle(
         requested_start_pts=requested_start_pts,
         requested_end_pts=requested_end_pts,
         event_frame_pts=event_frame_pts,
+        event_frame_uuid=event_frame_uuid,
+        start_window_frame_uuid=start_window_frame_uuid,
+        post_window_frame_uuid=post_window_frame_uuid,
         enabled=time_domain_crop_applied,
     )
 
@@ -245,33 +251,55 @@ def _select_time_domain_frames(
     requested_start_pts: int | None,
     requested_end_pts: int | None,
     event_frame_pts: int | None,
+    event_frame_uuid: str | None = None,
+    start_window_frame_uuid: str | None = None,
+    post_window_frame_uuid: str | None = None,
     enabled: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    anchor_uuids = _frame_uuid_anchors(
+        event_frame_uuid=event_frame_uuid,
+        start_window_frame_uuid=start_window_frame_uuid,
+        post_window_frame_uuid=post_window_frame_uuid,
+    )
     if not enabled:
         return frames, {
             "requested_start_pts": requested_start_pts,
             "requested_end_pts": requested_end_pts,
             "event_frame_pts": event_frame_pts,
+            "event_frame_uuid": event_frame_uuid,
+            "start_window_frame_uuid": start_window_frame_uuid,
+            "post_window_frame_uuid": post_window_frame_uuid,
             "time_domain_crop_applied": False,
         }
     if requested_start_pts is None or requested_end_pts is None:
         raise ValueError("requested_start_pts_and_requested_end_pts_required")
     if requested_end_pts <= requested_start_pts:
         raise ValueError("requested_end_pts_must_be_after_requested_start_pts")
-    selected = [
-        frame
-        for frame in frames
-        if _frame_pts(frame) is not None
-        and requested_start_pts <= int(_frame_pts(frame) or 0) <= requested_end_pts
-    ]
-    if not selected:
+    candidates = _time_domain_window_candidates(
+        frames,
+        requested_start_pts=requested_start_pts,
+        requested_end_pts=requested_end_pts,
+        event_frame_pts=event_frame_pts,
+        anchor_uuids=anchor_uuids,
+    )
+    if not candidates:
         raise ValueError("time_domain_crop_selected_zero_metadata_frames")
+    candidate = max(candidates, key=_time_domain_candidate_sort_key)
+    selected = [frame for _index, frame in candidate["selected"]]
     actual_start_pts = int(_frame_pts(selected[0]) or 0)
     actual_end_pts = int(_frame_pts(selected[-1]) or 0)
+    actual_start_index = int(candidate["selected"][0][0])
+    actual_end_index = int(candidate["selected"][-1][0])
+    matched_anchor_uuid = candidate.get("matched_anchor_uuid")
+    segment_first_pts = int(candidate["segment_first_pts"])
+    segment_last_pts = int(candidate["segment_last_pts"])
     return selected, {
         "requested_start_pts": requested_start_pts,
         "requested_end_pts": requested_end_pts,
         "event_frame_pts": event_frame_pts,
+        "event_frame_uuid": event_frame_uuid,
+        "start_window_frame_uuid": start_window_frame_uuid,
+        "post_window_frame_uuid": post_window_frame_uuid,
         "actual_start_pts": actual_start_pts,
         "actual_end_pts": actual_end_pts,
         "requested_duration_s": _pts_duration_s(requested_start_pts, requested_end_pts),
@@ -279,6 +307,22 @@ def _select_time_domain_frames(
         "time_domain_crop_applied": True,
         "source_metadata_frame_count": len(frames),
         "cropped_metadata_frame_count": len(selected),
+        "time_domain_selection_strategy": (
+            "frame_uuid_contiguous_segment"
+            if matched_anchor_uuid
+            else "latest_contiguous_pts_segment"
+        ),
+        "frame_uuid_anchor_found": bool(matched_anchor_uuid),
+        "frame_uuid_anchor_used": matched_anchor_uuid,
+        "frame_uuid_anchor_candidates": anchor_uuids,
+        "crop_segment_start_index": int(candidate["segment_start_index"]),
+        "crop_segment_end_index": int(candidate["segment_end_index"]),
+        "crop_segment_first_pts": segment_first_pts,
+        "crop_segment_last_pts": segment_last_pts,
+        "actual_start_index": actual_start_index,
+        "actual_end_index": actual_end_index,
+        "source_metadata_pts_discontinuities": max(0, len(_pts_contiguous_segments(frames)) - 1),
+        "candidate_contiguous_segments": len(candidates),
     }
 
 
@@ -312,23 +356,31 @@ def _copy_or_crop_video(
         raise ValueError("source_frames_required_for_video_crop")
     requested_start_pts = _number_or_none(time_window.get("requested_start_pts"))
     requested_end_pts = _number_or_none(time_window.get("requested_end_pts"))
-    first_pts = _frame_pts(source_frames[0])
+    actual_start_pts = _number_or_none(time_window.get("actual_start_pts"))
+    segment_first_pts = _number_or_none(time_window.get("crop_segment_first_pts"))
+    first_pts = segment_first_pts if segment_first_pts is not None else _frame_pts(source_frames[0])
     if None in (first_pts, requested_start_pts, requested_end_pts):
         raise ValueError("video_crop_pts_unavailable")
-    start_seconds = max(0.0, (float(requested_start_pts) - float(first_pts)) / 1_000_000_000.0)
+    crop_start_pts = actual_start_pts if actual_start_pts is not None else requested_start_pts
+    start_seconds = max(0.0, (float(crop_start_pts) - float(first_pts)) / 1_000_000_000.0)
     duration_seconds = max(0.0, (float(requested_end_pts) - float(requested_start_pts)) / 1_000_000_000.0)
     if duration_seconds <= 0:
         raise ValueError("video_crop_duration_must_be_positive")
     ffmpeg_exe = _ffmpeg_executable()
+    video_filter = (
+        "setpts=PTS-STARTPTS,"
+        f"trim=start={start_seconds:.9f}:duration={duration_seconds:.9f},"
+        "setpts=PTS-STARTPTS"
+    )
     command = [
         ffmpeg_exe,
         "-hide_banner",
         "-nostdin",
         "-y",
-        "-ss",
-        f"{start_seconds:.9f}",
         "-i",
         str(source_video_path),
+        "-vf",
+        video_filter,
         "-t",
         f"{duration_seconds:.9f}",
         "-an",
@@ -348,14 +400,28 @@ def _copy_or_crop_video(
     log_path.write_text(completed.stderr or "", encoding="utf-8")
     if completed.returncode != 0 or not output_video_path.is_file() or output_video_path.stat().st_size <= 0:
         raise RuntimeError(f"video_time_domain_crop_failed:{completed.returncode}")
+    try:
+        decoded_frame_count = read_decoded_video_frame_count(output_video_path)
+    except Exception as exc:
+        output_video_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "video_time_domain_crop_failed:decoded_frame_count_unavailable"
+        ) from exc
+    if decoded_frame_count <= 0:
+        output_video_path.unlink(missing_ok=True)
+        raise RuntimeError("video_time_domain_crop_failed:decoded_frame_count_zero")
     return {
-        "method": "ffmpeg_time_domain_transcode",
+        "method": "ffmpeg_segment_normalized_transcode",
         "crop_video_to_time_window": True,
         "ffmpeg_executable": ffmpeg_exe,
         "diagnostic_remux_or_transcode": False,
         "source_video_path": str(source_video_path),
         "start_seconds": start_seconds,
         "duration_seconds": duration_seconds,
+        "timeline_basis": "contiguous_metadata_segment",
+        "crop_segment_first_pts": int(first_pts),
+        "crop_start_pts": int(crop_start_pts),
+        "ffmpeg_filter": video_filter,
         "ffmpeg_log_path": str(log_path),
     }
 
@@ -390,6 +456,126 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 def _frame_pts(frame: dict[str, Any]) -> int | None:
     value = _number_or_none(frame.get("pts") if frame.get("pts") is not None else frame.get("frame_pts"))
     return int(value) if value is not None else None
+
+
+def _frame_uuid(frame: dict[str, Any]) -> str:
+    return str(frame.get("frame_uuid") or frame.get("uuid") or "").strip()
+
+
+def _frame_uuid_anchors(
+    *,
+    event_frame_uuid: str | None,
+    start_window_frame_uuid: str | None,
+    post_window_frame_uuid: str | None,
+) -> list[str]:
+    anchors: list[str] = []
+    for value in (event_frame_uuid, start_window_frame_uuid, post_window_frame_uuid):
+        text = str(value or "").strip()
+        if text and text not in anchors:
+            anchors.append(text)
+    return anchors
+
+
+def _pts_contiguous_segments(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    current: list[tuple[int, dict[str, Any]]] = []
+    current_start = 0
+    previous_pts: int | None = None
+    for index, frame in enumerate(frames):
+        pts = _frame_pts(frame)
+        if pts is None:
+            if current:
+                segments.append(
+                    {
+                        "start_index": current_start,
+                        "end_index": current[-1][0],
+                        "frames": current,
+                    }
+                )
+                current = []
+            previous_pts = None
+            continue
+        if current and previous_pts is not None and pts <= previous_pts:
+            segments.append(
+                {
+                    "start_index": current_start,
+                    "end_index": current[-1][0],
+                    "frames": current,
+                }
+            )
+            current = []
+        if not current:
+            current_start = index
+        current.append((index, frame))
+        previous_pts = pts
+    if current:
+        segments.append(
+            {
+                "start_index": current_start,
+                "end_index": current[-1][0],
+                "frames": current,
+            }
+        )
+    return segments
+
+
+def _time_domain_window_candidates(
+    frames: list[dict[str, Any]],
+    *,
+    requested_start_pts: int,
+    requested_end_pts: int,
+    event_frame_pts: int | None,
+    anchor_uuids: list[str],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    anchor_set = set(anchor_uuids)
+    for segment in _pts_contiguous_segments(frames):
+        segment_frames = segment["frames"]
+        if not segment_frames:
+            continue
+        selected = [
+            (index, frame)
+            for index, frame in segment_frames
+            if (pts := _frame_pts(frame)) is not None
+            and requested_start_pts <= int(pts) <= requested_end_pts
+        ]
+        if not selected:
+            continue
+        pts_values = [int(_frame_pts(frame) or 0) for _index, frame in segment_frames]
+        matched_anchor_uuid = ""
+        if anchor_set:
+            for _index, frame in segment_frames:
+                candidate_uuid = _frame_uuid(frame)
+                if candidate_uuid in anchor_set:
+                    matched_anchor_uuid = candidate_uuid
+                    break
+        segment_first_pts = pts_values[0]
+        segment_last_pts = pts_values[-1]
+        candidates.append(
+            {
+                "segment_start_index": int(segment["start_index"]),
+                "segment_end_index": int(segment["end_index"]),
+                "segment_first_pts": segment_first_pts,
+                "segment_last_pts": segment_last_pts,
+                "selected": selected,
+                "selected_frame_count": len(selected),
+                "matched_anchor_uuid": matched_anchor_uuid,
+                "event_pts_inside_segment": (
+                    event_frame_pts is not None
+                    and segment_first_pts <= int(event_frame_pts) <= segment_last_pts
+                ),
+            }
+        )
+    return candidates
+
+
+def _time_domain_candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
+    return (
+        1 if candidate.get("matched_anchor_uuid") else 0,
+        1 if candidate.get("event_pts_inside_segment") else 0,
+        int(candidate.get("selected_frame_count") or 0),
+        int(candidate.get("segment_start_index") or 0),
+    )
 
 
 def _pts_duration_s(start_pts: int | float, end_pts: int | float) -> float:

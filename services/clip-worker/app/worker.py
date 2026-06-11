@@ -1037,7 +1037,7 @@ def _prepare_post_savant_replay_request(
         anchor_strategy=cfg.replay_anchor_strategy,
     )
     selection = _replay_anchor_selection(cfg.replay_anchor_strategy)
-    attempts = max(1, int(cfg.keyframe_lookup_retries) + 1)
+    attempts = max(1, int(cfg.post_savant_frame_proof_attempts))
     last_error = f"{POST_SAVANT_MISSING_FRAME_TIMELINE_ERROR} source_id={source_id}"
     for attempt in range(attempts):
         proofs = _find_replay_frame_domain_proofs(
@@ -1237,7 +1237,7 @@ def _prepare_post_savant_replay_request(
             last_error,
         )
         if attempt + 1 < attempts:
-            time.sleep(max(0.0, cfg.keyframe_lookup_retry_sleep_s))
+            time.sleep(max(0.0, cfg.post_savant_frame_proof_retry_sleep_s))
 
     return None, keyframe_uuid, keyframe_source, last_error
 

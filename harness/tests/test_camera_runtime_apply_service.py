@@ -54,9 +54,14 @@ class FakeDockerClient:
 
 class FakeRedisClient:
     values: dict[str, str] = {}
+    deleted: list[str] = []
 
     def set(self, key: str, value: str) -> None:
         self.values[str(key)] = str(value)
+
+    def delete(self, *keys: str) -> int:
+        self.deleted.extend(str(key) for key in keys)
+        return len(keys)
 
 
 class FakeRedis:
@@ -80,6 +85,7 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
     monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
     FakeRedisClient.values.clear()
+    FakeRedisClient.deleted.clear()
     fake.containers = [{"Names": ["/video-analytics-source-stale"]}]
     fake.inspect_by_name["video-analytics-midterm-savant"] = {
         "State": {"StartedAt": "2026-06-11T00:00:00.000000000Z"}
@@ -151,6 +157,9 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
         )
         for item in sink_env
     )
+    assert sink_create["NetworkingConfig"]["EndpointsConfig"][
+        "video-analytics-midterm_default"
+    ]["Aliases"] == ["video-file-sink"]
     env = set(source_create["Env"])
     assert "SOURCE_ID=source_lab" in env
     assert "RTSP_URI=rtsp://lab/stream" in env
@@ -224,6 +233,9 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert worker_start_index < start_primary_index
     assert savant_restart_index < start_primary_index < source_create_index
     assert FakeRedisClient.values["video_analytics:midterm:runtime_epoch"] == result["runtime_epoch_id"]
+    assert FakeRedisClient.deleted == ["security.frame_annotations"]
+    assert result["redis_frame_cache_streams_reset"] == ["security.frame_annotations"]
+    assert result["redis_frame_cache_reset_count"] == 1
 
 
 def test_runtime_restart_uses_same_controlled_surface(monkeypatch, tmp_path: Path) -> None:
