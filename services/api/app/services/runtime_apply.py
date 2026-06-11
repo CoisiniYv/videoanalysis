@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
 import secrets
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from redis import Redis
 import yaml
@@ -28,10 +30,20 @@ DEFAULT_VIDEO_SINK_CONTAINER = "video-analytics-midterm-video-file-sink"
 DEFAULT_CLIP_WORKER_CONTAINER = "video-analytics-midterm-clip-worker"
 DEFAULT_MEDIA_WORKER_CONTAINER = "video-analytics-midterm-media-worker"
 DEFAULT_VIDEO_SINK_IMAGE = "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
+DEFAULT_SAVANT_READY_TIMEOUT_S = 300.0
+DEFAULT_SAVANT_READY_POLL_INTERVAL_S = 2.0
 DEFAULT_EPOCH_ROOT = "/data/video-analytics/media/replay-sink-output/midterm"
 DEFAULT_REDIS_EPOCH_KEY = "video_analytics:midterm:runtime_epoch"
 SOURCE_CONTAINER_PREFIX = "video-analytics-source-"
 RUNTIME_EPOCH_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+SAVANT_READY_PATTERNS = (
+    re.compile(r"\bPLAYING\b", re.IGNORECASE),
+    re.compile(r"\bmodule\b.*\bstarted\b", re.IGNORECASE),
+    re.compile(r"\bpipeline\b.*\bready\b", re.IGNORECASE),
+    re.compile(r"\bpipeline\b.*\bstarted\b", re.IGNORECASE),
+)
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RuntimeApplyError(RuntimeError):
@@ -185,28 +197,66 @@ def _apply_camera_runtime_controlled(
     )
     _restart_container(client, replay_container)
     _restart_container(client, savant_container)
+    savant_ready = _wait_for_savant_ready(
+        client,
+        savant_container,
+        timeout_s=_env_float(
+            "CAMERA_RUNTIME_SAVANT_READY_TIMEOUT_S",
+            DEFAULT_SAVANT_READY_TIMEOUT_S,
+        ),
+        poll_interval_s=_env_float(
+            "CAMERA_RUNTIME_SAVANT_READY_POLL_INTERVAL_S",
+            DEFAULT_SAVANT_READY_POLL_INTERVAL_S,
+        ),
+    )
+    if not savant_ready["savant_ready"]:
+        raise RuntimeApplyError(
+            "savant not ready after "
+            f"{savant_ready['savant_ready_wait_seconds']:.1f}s: "
+            f"{savant_ready['savant_ready_reason']}"
+        )
     _start_containers(client, worker_containers)
 
     started_sources: list[str] = []
     compose_sources_started: list[str] = []
     skipped_sources: list[str] = []
+    source_lifecycle: list[dict[str, Any]] = []
     for source in sources_doc["sources"].values():
+        source_id = str(source.get("source_id", ""))
+        base_diag = _source_lifecycle_base(source, compose_source_id=compose_source_id)
         if not source.get("enabled"):
-            skipped_sources.append(str(source.get("source_id", "")))
+            skipped_sources.append(source_id)
+            source_lifecycle.append({**base_diag, "action": "skipped", "skip_reason": "disabled"})
             continue
         if source.get("adapter_type") != "gstreamer":
-            skipped_sources.append(str(source.get("source_id", "")))
+            skipped_sources.append(source_id)
+            source_lifecycle.append(
+                {**base_diag, "action": "skipped", "skip_reason": "unsupported_adapter"}
+            )
             continue
         uri = str(source.get("uri") or "")
         if not uri.startswith(("rtsp://", "rtsps://")):
-            skipped_sources.append(str(source.get("source_id", "")))
+            skipped_sources.append(source_id)
+            source_lifecycle.append(
+                {**base_diag, "action": "skipped", "skip_reason": "non_rtsp_uri"}
+            )
             continue
-        source_id = str(source["source_id"])
         if source_id == compose_source_id:
-            _start_container(client, compose_source_container)
+            start_status = _start_container(client, compose_source_container)
             compose_sources_started.append(source_id)
+            source_lifecycle.append(
+                {
+                    **base_diag,
+                    "action": "started",
+                    "container_name": compose_source_container,
+                    "compose_source": True,
+                    "dynamic_source": False,
+                    "start_status": start_status,
+                }
+            )
+            LOGGER.info("started compose source adapter source_id=%s", source_id)
             continue
-        _recreate_rtsp_adapter(
+        dynamic_diag = _recreate_rtsp_adapter(
             client,
             source_id=source_id,
             uri=uri,
@@ -215,6 +265,8 @@ def _apply_camera_runtime_controlled(
             network=network,
         )
         started_sources.append(source_id)
+        source_lifecycle.append({**base_diag, **dynamic_diag, "action": "created_started"})
+        LOGGER.info("created dynamic source adapter source_id=%s", source_id)
     return {
         "runtime_action": action,
         "module_config_path": str(module_config_path),
@@ -222,6 +274,7 @@ def _apply_camera_runtime_controlled(
         "runtime_epoch_id": runtime_epoch_id,
         "runtime_epoch_state_path": str(_runtime_epoch_state_path()),
         "runtime_epoch_root": str(_runtime_epoch_root()),
+        **savant_ready,
         "video_sink_container": video_sink_container,
         "video_sink_dir_location": _video_sink_dir_location(runtime_epoch_id),
         "sources_total": len(sources_doc["sources"]),
@@ -229,6 +282,7 @@ def _apply_camera_runtime_controlled(
         "compose_sources_started": compose_sources_started,
         "dynamic_sources_started": started_sources,
         "sources_skipped": skipped_sources,
+        "source_lifecycle": source_lifecycle,
         "workers_restarted": worker_containers,
         "replay_restarted": replay_container,
         "savant_restarted": savant_container,
@@ -370,14 +424,15 @@ def _stop_containers(client: DockerSocketClient, container_names: list[str]) -> 
         _stop_container(client, container_name)
 
 
-def _start_container(client: DockerSocketClient, container_name: str) -> None:
+def _start_container(client: DockerSocketClient, container_name: str) -> int | None:
     if not container_name:
-        return
-    client.request(
+        return None
+    status, _body = client.request(
         "POST",
         f"/containers/{quote(container_name, safe='')}/start",
         ok_statuses={204, 304, 404},
     )
+    return status
 
 
 def _start_containers(client: DockerSocketClient, container_names: list[str]) -> None:
@@ -393,6 +448,141 @@ def _restart_container(client: DockerSocketClient, container_name: str) -> None:
         f"/containers/{quote(container_name, safe='')}/restart?t=10",
         ok_statuses={204, 304, 404},
     )
+
+
+def _wait_for_savant_ready(
+    client: DockerSocketClient,
+    container_name: str,
+    *,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> dict[str, Any]:
+    timeout_s = max(0.0, float(timeout_s))
+    poll_interval_s = max(0.0, float(poll_interval_s))
+    started = time.monotonic()
+    deadline = started + timeout_s
+    last_reason = "no readiness signal observed"
+    attempts = 0
+
+    while True:
+        attempts += 1
+        inspect_doc = _inspect_container(client, container_name)
+        logs = _container_logs(
+            client,
+            container_name,
+            since_epoch=_container_started_at_epoch(inspect_doc),
+        )
+        ready_reason = _savant_ready_reason_from_logs(logs)
+        if ready_reason:
+            return _savant_ready_result(True, started, ready_reason, attempts)
+        if logs:
+            last_reason = "logs_without_ready_marker"
+
+        health = _container_health_status(inspect_doc)
+        if health == "healthy":
+            return _savant_ready_result(
+                True,
+                started,
+                f"docker_health:{health}",
+                attempts,
+            )
+        if health:
+            last_reason = f"docker_health:{health}"
+
+        if time.monotonic() >= deadline:
+            return _savant_ready_result(False, started, last_reason, attempts)
+        time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
+
+
+def _savant_ready_result(
+    ready: bool,
+    started_monotonic: float,
+    reason: str,
+    attempts: int,
+) -> dict[str, Any]:
+    return {
+        "savant_ready": ready,
+        "savant_ready_wait_seconds": round(max(0.0, time.monotonic() - started_monotonic), 3),
+        "savant_ready_reason": reason,
+        "savant_ready_attempts": attempts,
+    }
+
+
+def _inspect_container(client: DockerSocketClient, container_name: str) -> dict[str, Any]:
+    if not container_name:
+        return {}
+    try:
+        _status, body = client.request(
+            "GET",
+            f"/containers/{quote(container_name, safe='')}/json",
+            ok_statuses={200, 404},
+        )
+        doc = json.loads(body.decode("utf-8") or "{}")
+        return doc if isinstance(doc, dict) else {}
+    except Exception as exc:
+        LOGGER.warning("failed to inspect container %s: %s", container_name, exc)
+        return {}
+
+
+def _container_health_status(inspect_doc: dict[str, Any]) -> str:
+    state = inspect_doc.get("State") if isinstance(inspect_doc, dict) else {}
+    health = state.get("Health") if isinstance(state, dict) else {}
+    status = health.get("Status") if isinstance(health, dict) else ""
+    return str(status or "")
+
+
+def _container_started_at_epoch(inspect_doc: dict[str, Any]) -> int | None:
+    state = inspect_doc.get("State") if isinstance(inspect_doc, dict) else {}
+    raw = str(state.get("StartedAt") or "") if isinstance(state, dict) else ""
+    if not raw or raw.startswith("0001-01-01"):
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        if "." in raw:
+            prefix, suffix = raw.split(".", 1)
+            fraction, zone = suffix, ""
+            for marker in ("+", "-"):
+                if marker in suffix:
+                    fraction, zone = suffix.split(marker, 1)
+                    zone = marker + zone
+                    break
+            raw = f"{prefix}.{fraction[:6]}{zone}"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0, int(parsed.timestamp()))
+    except Exception:
+        return None
+
+
+def _container_logs(
+    client: DockerSocketClient,
+    container_name: str,
+    *,
+    since_epoch: int | None = None,
+) -> str:
+    if not container_name:
+        return ""
+    since_query = f"&since={since_epoch}" if since_epoch is not None else ""
+    try:
+        _status, body = client.request(
+            "GET",
+            f"/containers/{quote(container_name, safe='')}/logs?stdout=1&stderr=1&timestamps=1&tail=200{since_query}",
+            ok_statuses={200, 404},
+        )
+        return body.decode("utf-8", errors="replace")
+    except Exception as exc:
+        LOGGER.warning("failed to read logs for container %s: %s", container_name, exc)
+        return ""
+
+
+def _savant_ready_reason_from_logs(logs: str) -> str:
+    for pattern in SAVANT_READY_PATTERNS:
+        match = pattern.search(logs or "")
+        if match:
+            return f"log:{match.group(0)[:80]}"
+    return ""
 
 
 def _source_adapter_containers(
@@ -447,6 +637,33 @@ def _video_sink_dir_location(runtime_epoch_id: str) -> str:
     )
 
 
+def _source_lifecycle_base(
+    source: dict[str, Any],
+    *,
+    compose_source_id: str,
+) -> dict[str, Any]:
+    source_id = str(source.get("source_id") or "")
+    uri = str(source.get("uri") or "")
+    return {
+        "source_id": source_id,
+        "camera_id": str(source.get("camera_id") or ""),
+        "adapter_type": str(source.get("adapter_type") or ""),
+        "enabled": bool(source.get("enabled")),
+        "uri_host": _rtsp_uri_host(uri),
+        "compose_source": source_id == compose_source_id,
+        "dynamic_source": source_id != compose_source_id,
+        "ffmpeg_timeout_ms": 20000 if uri.startswith(("rtsp://", "rtsps://")) else None,
+        "restart_policy": "unless-stopped" if uri.startswith(("rtsp://", "rtsps://")) else "",
+    }
+
+
+def _rtsp_uri_host(uri: str) -> str:
+    try:
+        return urlsplit(uri).hostname or ""
+    except Exception:
+        return ""
+
+
 def _recreate_video_file_sink(
     client: DockerSocketClient,
     *,
@@ -495,10 +712,10 @@ def _recreate_rtsp_adapter(
     zmq_endpoint: str,
     adapter_image: str,
     network: str,
-) -> None:
+) -> dict[str, Any]:
     container_name = SOURCE_CONTAINER_PREFIX + source_id
     encoded_name = quote(container_name, safe="")
-    client.request(
+    delete_status, _ = client.request(
         "DELETE",
         f"/containers/{encoded_name}?force=true",
         ok_statuses={204, 404},
@@ -523,13 +740,27 @@ def _recreate_rtsp_adapter(
             "RestartPolicy": {"Name": "unless-stopped"},
         },
     }
-    client.request(
+    create_status, _ = client.request(
         "POST",
         f"/containers/create?name={quote(container_name, safe='')}",
         body=body,
         ok_statuses={201},
     )
-    client.request("POST", f"/containers/{encoded_name}/start", ok_statuses={204, 304})
+    start_status, _ = client.request(
+        "POST",
+        f"/containers/{encoded_name}/start",
+        ok_statuses={204, 304},
+    )
+    return {
+        "container_name": container_name,
+        "compose_source": False,
+        "dynamic_source": True,
+        "delete_status": delete_status,
+        "create_status": create_status,
+        "start_status": start_status,
+        "restart_policy": "unless-stopped",
+        "ffmpeg_timeout_ms": 20000,
+    }
 
 
 def _write_yaml(path: Path, doc: dict[str, Any]) -> None:
@@ -553,3 +784,13 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)

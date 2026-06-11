@@ -23,6 +23,8 @@ class FakeDockerClient:
         self.socket_path = socket_path
         self.calls: list[tuple[str, str, dict[str, Any] | None]] = []
         self.containers: list[dict[str, Any]] = []
+        self.inspect_by_name: dict[str, dict[str, Any]] = {}
+        self.logs_by_name: dict[str, str] = {}
 
     def request(
         self,
@@ -35,6 +37,12 @@ class FakeDockerClient:
         self.calls.append((method, path, body))
         if method == "GET" and path == "/containers/json?all=true":
             return 200, json.dumps(self.containers).encode("utf-8")
+        if method == "GET" and path.startswith("/containers/") and path.endswith("/json"):
+            name = path.split("/", 3)[2]
+            return 200, json.dumps(self.inspect_by_name.get(name, {})).encode("utf-8")
+        if method == "GET" and path.startswith("/containers/") and "/logs?" in path:
+            name = path.split("/", 3)[2]
+            return 200, self.logs_by_name.get(name, "").encode("utf-8")
         if method == "POST" and path.startswith("/containers/create"):
             return 201, b"{}"
         if method == "DELETE":
@@ -73,6 +81,12 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
     FakeRedisClient.values.clear()
     fake.containers = [{"Names": ["/video-analytics-source-stale"]}]
+    fake.inspect_by_name["video-analytics-midterm-savant"] = {
+        "State": {"StartedAt": "2026-06-11T00:00:00.000000000Z"}
+    }
+    fake.logs_by_name["video-analytics-midterm-savant"] = (
+        "2026-06-11T00:00:00Z pipeline state changed to PLAYING\n"
+    )
 
     export_doc = {
         "cameras": {
@@ -103,6 +117,9 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert result["sources_skipped"] == []
     assert result["replay_restarted"] == "video-analytics-midterm-replay-service"
     assert result["savant_restarted"] == "video-analytics-midterm-savant"
+    assert result["savant_ready"] is True
+    assert result["savant_ready_reason"].startswith("log:")
+    assert result["savant_ready_attempts"] == 1
     assert result["source_containers_stopped"] == [
         "video-analytics-midterm-source-adapter",
         "video-analytics-source-source_lab",
@@ -140,6 +157,38 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert "EOS_ON_START=false" in env
     assert not any(item.startswith("USE_ABSOLUTE_TIMESTAMPS=") for item in env)
     assert source_create["HostConfig"]["NetworkMode"] == "video-analytics-midterm_default"
+    assert result["source_lifecycle"] == [
+        {
+            "source_id": "primary_rtsp",
+            "camera_id": "primary",
+            "adapter_type": "gstreamer",
+            "enabled": True,
+            "uri_host": "primary",
+            "compose_source": True,
+            "dynamic_source": False,
+            "ffmpeg_timeout_ms": 20000,
+            "restart_policy": "unless-stopped",
+            "action": "started",
+            "container_name": "video-analytics-midterm-source-adapter",
+            "start_status": 204,
+        },
+        {
+            "source_id": "source_lab",
+            "camera_id": "lab",
+            "adapter_type": "gstreamer",
+            "enabled": True,
+            "uri_host": "lab",
+            "compose_source": False,
+            "dynamic_source": True,
+            "ffmpeg_timeout_ms": 20000,
+            "restart_policy": "unless-stopped",
+            "container_name": "video-analytics-source-source_lab",
+            "delete_status": 204,
+            "create_status": 201,
+            "start_status": 204,
+            "action": "created_started",
+        },
+    ]
     stop_primary_index = next(
         i for i, (method, path, _body) in enumerate(fake.calls)
         if method == "POST" and path == "/containers/video-analytics-midterm-source-adapter/stop?t=10"
@@ -152,6 +201,16 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
         i for i, (method, path, _body) in enumerate(fake.calls)
         if method == "POST" and path == "/containers/video-analytics-midterm-savant/restart?t=10"
     )
+    savant_logs_index = next(
+        i for i, (method, path, _body) in enumerate(fake.calls)
+        if method == "GET"
+        and path.startswith("/containers/video-analytics-midterm-savant/logs?")
+        and "&since=" in path
+    )
+    worker_start_index = next(
+        i for i, (method, path, _body) in enumerate(fake.calls)
+        if method == "POST" and path == "/containers/video-analytics-midterm-event-worker/start"
+    )
     start_primary_index = next(
         i for i, (method, path, _body) in enumerate(fake.calls)
         if method == "POST" and path == "/containers/video-analytics-midterm-source-adapter/start"
@@ -161,6 +220,8 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
         if method == "POST" and path.startswith("/containers/create")
     )
     assert stop_primary_index < replay_restart_index < savant_restart_index
+    assert savant_restart_index < savant_logs_index < worker_start_index
+    assert worker_start_index < start_primary_index
     assert savant_restart_index < start_primary_index < source_create_index
     assert FakeRedisClient.values["video_analytics:midterm:runtime_epoch"] == result["runtime_epoch_id"]
 
@@ -179,6 +240,9 @@ def test_runtime_restart_uses_same_controlled_surface(monkeypatch, tmp_path: Pat
     )
     monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
     monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
+    fake.inspect_by_name["video-analytics-midterm-savant"] = {
+        "State": {"Health": {"Status": "healthy"}}
+    }
 
     result = runtime_apply.restart_camera_runtime(
         export_doc={"cameras": {"primary": {"source_id": "primary_rtsp", "enabled": True}}},
@@ -198,6 +262,51 @@ def test_runtime_restart_uses_same_controlled_surface(monkeypatch, tmp_path: Pat
     assert "/containers/video-analytics-midterm-evidence-viewer/restart?t=10" not in called_paths
     assert "/containers/video-analytics-midterm-replay-service/restart?t=10" in called_paths
     assert "/containers/video-analytics-midterm-savant/restart?t=10" in called_paths
+
+
+def test_runtime_apply_fails_before_sources_when_savant_not_ready(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", str(tmp_path / "cameras.midterm.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setenv("CAMERA_RUNTIME_SAVANT_READY_TIMEOUT_S", "0")
+    monkeypatch.setenv("CAMERA_RUNTIME_SAVANT_READY_POLL_INTERVAL_S", "0")
+    monkeypatch.setenv("RUNTIME_EPOCH_ROOT", str(tmp_path / "replay-sink-output" / "midterm"))
+    monkeypatch.setenv(
+        "RUNTIME_EPOCH_STATE_PATH",
+        str(tmp_path / "replay-sink-output" / "midterm" / ".current_epoch.json"),
+    )
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
+    fake.logs_by_name["video-analytics-midterm-savant"] = "still loading models\n"
+
+    try:
+        runtime_apply.apply_camera_runtime(
+            export_doc={"cameras": {"primary": {"source_id": "primary_rtsp", "enabled": True}}},
+            cameras=[
+                {
+                    "id": "primary",
+                    "source_id": "primary_rtsp",
+                    "rtsp_url": "rtsp://primary/stream",
+                    "enabled": True,
+                }
+            ],
+        )
+    except runtime_apply.RuntimeApplyError as exc:
+        assert "savant not ready" in str(exc)
+        assert "logs_without_ready_marker" in str(exc)
+    else:
+        raise AssertionError("runtime apply should fail when Savant never becomes ready")
+
+    called_paths = [path for _method, path, _body in fake.calls]
+    assert "/containers/video-analytics-midterm-savant/restart?t=10" in called_paths
+    assert "/containers/video-analytics-midterm-event-worker/start" not in called_paths
+    assert "/containers/video-analytics-midterm-source-adapter/start" not in called_paths
 
 
 def test_runtime_apply_is_disabled_by_default(monkeypatch) -> None:
