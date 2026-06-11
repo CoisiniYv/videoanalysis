@@ -14,10 +14,17 @@ Execution status: the plan has been implemented on branch
 - `e9f5f82 Tune midterm replay evidence duration`
 - `a15cbb9 Prefer frame identity for replay evidence alignment`
 - `cfc7059 Isolate midterm frame proofs by stream session`
+- `bcd4a0a Harden post-Savant evidence crop safety`
 
 The findings below intentionally preserve the pre-fix baseline that justified
 the work. Re-check the current tree before using any "currently has" statement
 as live state.
+
+Execution record update: implementation and targeted tests are complete. The
+remaining work is runtime acceptance with real evidence samples: verify final
+ready clips are near the requested 10 second window, bad sink windows fail
+closed, and the 31.28s/61.35s failure shape no longer publishes unsafe raw
+clips.
 
 Recommended owner: Codex process A.
 

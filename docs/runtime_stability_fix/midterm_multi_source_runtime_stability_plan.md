@@ -13,8 +13,20 @@ implemented on branch `c2/post-savant-poc` in these commits:
 - `d997e5e Fix midterm replay runtime foundations`
 - `e751c51 Gate midterm runtime sources on Savant readiness`
 
-The long-run and active source-adapter restart fault injection remains a runtime
-acceptance activity for the deployment environment.
+Runtime acceptance status:
+
+- code/config hardening phases are complete
+- one active restart fault injection of the dynamic source adapter was run after
+  a controlled runtime restart; both enabled sources resumed frame annotations,
+  Savant stayed healthy, and no new Replay send timeout or Savant pad/streammux
+  error was observed in the inspected logs
+- the full 10-15 minute two-source long-run window still needs to be executed
+  and recorded
+
+The only uncommitted runtime state observed after this work was
+`modules/savant_security/config/cameras.midterm.yml`, where controlled runtime
+restart wrote the live `runtime_epoch_id`. That file is deployment state and is
+not part of this plan commit.
 
 Recommended owner: Codex process B.
 

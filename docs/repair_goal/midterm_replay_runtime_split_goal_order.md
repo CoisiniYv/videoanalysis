@@ -23,8 +23,21 @@ Execution status: Goals 1-5 have been implemented on branch
 
 Keep this document as the audit trail for why the work was split this way. The
 remaining acceptance item that still needs a live deployment window is the
-two-source long-run plus active source-adapter restart fault injection from
-Goal 2 / runtime Phase 4.
+two-source 10-15 minute long-run from Goal 2 / runtime Phase 4. One active
+restart fault injection of the dynamic source adapter has already been run after
+a controlled runtime restart and passed the inspected checks.
+
+Current completion summary:
+
+- Replay/evidence plan: implementation and targeted tests complete; real
+  evidence-sample acceptance still needs to confirm 10 second ready clips and
+  fail-closed handling of bad sink windows.
+- multi-source runtime plan: implementation and one active reattach fault
+  injection complete; the full 10-15 minute two-source long-run still needs to
+  be executed and recorded.
+- runtime-generated `modules/savant_security/config/cameras.midterm.yml`
+  `runtime_epoch_id` changes are deployment state and should not be committed as
+  code-plan evidence.
 
 ## Non-Negotiable Invariants
 
