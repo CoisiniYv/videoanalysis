@@ -73,6 +73,7 @@ def _apply_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) -> 
         "keyframe_pts",
         "previous_keyframe_pts",
         "time_base",
+        "stream_session_id",
     ):
         value = _first_policy_value(event, key)
         if value is not None:
@@ -204,6 +205,9 @@ def build_record_request(
     runtime_epoch_id = _first_policy_value(event, "runtime_epoch_id")
     if runtime_epoch_id is not None and str(runtime_epoch_id).strip():
         record["runtime_epoch_id"] = str(runtime_epoch_id)
+    stream_session_id = _first_policy_value(event, "stream_session_id")
+    if stream_session_id is not None and str(stream_session_id).strip():
+        record["stream_session_id"] = str(stream_session_id)
     _apply_post_savant_policy(record, event)
     _normalize_anchor_keyframe_uuid(record, event)
     _apply_event_frame_timeline(record, event)

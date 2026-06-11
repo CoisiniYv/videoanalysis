@@ -20,6 +20,7 @@ from custom.services.frame_annotation_builder import (
     build_frame_annotation_message,
     count_frame_annotation_objects,
 )
+from custom.services.stream_session import stream_session_id_for_frame
 from custom.services.time_utils import normalize_pts_to_ms
 
 
@@ -166,6 +167,7 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             "camera_id": message.get("camera_id", ""),
             "frame_pts": _stream_text(message.get("frame_pts")),
             "frame_uuid": _stream_text(message.get("frame_uuid")),
+            "stream_session_id": _stream_text(message.get("stream_session_id")),
             "keyframe_uuid": _stream_text(message.get("keyframe_uuid")),
             "previous_keyframe_uuid": _stream_text(message.get("previous_keyframe_uuid")),
             "keyframe_pts": _stream_text(message.get("keyframe_pts")),
@@ -238,6 +240,7 @@ class FrameAnnotationExportRuntime:
         frame_dts = _int_or_none(frame_anchor.get("frame_dts"))
         duration = _int_or_none(frame_anchor.get("duration"))
         time_base = _text_or_none(frame_anchor.get("time_base"))
+        stream_session_id = stream_session_id_for_frame(source_id, frame_pts)
         if keyframe_uuid and keyframe_pts is not None:
             self._keyframe_pts_by_source_uuid[(source_id, keyframe_uuid)] = keyframe_pts
         elif keyframe_uuid:
@@ -282,6 +285,7 @@ class FrameAnnotationExportRuntime:
                 frame_num=frame_num,
                 timestamp_ms=timestamp_ms,
                 runtime_epoch_id=self.runtime_epoch_provider() or None,
+                stream_session_id=stream_session_id,
                 frame_objects=frame_objects,
                 config=self.config.build_config(),
             )

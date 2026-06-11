@@ -28,6 +28,7 @@ from custom.services.face_observation_exporter import (
     create_face_observation_exporter,
 )
 from custom.services.frame_anchor_metadata import extract_frame_anchor_metadata
+from custom.services.stream_session import stream_session_id_for_frame
 from custom.services.time_utils import normalize_pts_to_ms
 
 _DEFAULT_EXPORT_MIN_INTERVAL_MS = 1000
@@ -89,6 +90,10 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         pts = getattr(frame_meta, "pts", 0) or 0
         timestamp_ms = normalize_pts_to_ms(pts) if pts else self._frame_count
         frame_anchor = extract_frame_anchor_metadata(frame_meta)
+        frame_anchor["stream_session_id"] = stream_session_id_for_frame(
+            source_id,
+            frame_anchor.get("frame_pts"),
+        )
 
         objects = list(frame_meta.objects)
         face_objects = [o for o in objects if getattr(o, "label", "") == "face"]
@@ -380,6 +385,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
             "time_base",
             "source_id",
             "metadata_source",
+            "stream_session_id",
         ):
             media[key] = anchor.get(key)
 

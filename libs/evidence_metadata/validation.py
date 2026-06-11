@@ -103,6 +103,11 @@ def validate_frame_annotation_message(
             data[field_name] = _require_int(data[field_name], field_name)
     if data.get("time_base") is not None:
         data["time_base"] = _require_non_empty_string(data["time_base"], "time_base")
+    if data.get("stream_session_id") is not None:
+        data["stream_session_id"] = _require_non_empty_string(
+            data["stream_session_id"],
+            "stream_session_id",
+        )
 
     if data.get("frame_num") is not None:
         data["frame_num"] = _require_int(data["frame_num"], "frame_num")

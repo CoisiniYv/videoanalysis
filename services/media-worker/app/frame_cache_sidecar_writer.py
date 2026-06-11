@@ -671,6 +671,7 @@ def _read_frame_annotations(
     anchor, _summary = extract_evidence_event_anchor(event)
     source_id = anchor.get("source_id") if anchor else None
     camera_id = anchor.get("camera_id") if anchor else None
+    stream_session_id = _stream_session_id_from_event(event)
     stream_name = str(config.get("stream_name") or "security.frame_annotations")
     lookback_count = int(config.get("lookback_count") or 10000)
     max_scan = int(config.get("max_scan") or 20000)
@@ -683,8 +684,10 @@ def _read_frame_annotations(
         "entries_scanned": 0,
         "messages_valid": 0,
         "messages_invalid": 0,
+        "messages_filtered_stream_session": 0,
         "messages_filtered_source": 0,
         "messages_filtered_camera": 0,
+        "expected_stream_session_id": stream_session_id,
         "earliest_frame_pts": None,
         "latest_frame_pts": None,
         "duplicate_frame_uuid_messages": 0,
@@ -706,6 +709,12 @@ def _read_frame_annotations(
         message = _message_from_fields(fields)
         if not isinstance(message, dict):
             summary["messages_invalid"] += 1
+            continue
+        if (
+            stream_session_id
+            and str(message.get("stream_session_id") or "").strip() != stream_session_id
+        ):
+            summary["messages_filtered_stream_session"] += 1
             continue
         if source_id is not None and message.get("source_id") != source_id:
             summary["messages_filtered_source"] += 1
@@ -746,6 +755,26 @@ def _read_frame_annotations(
     summary["max_messages_per_frame_pts"] = max_pts
     summary["max_messages_per_frame_anchor"] = max_anchor
     return messages, summary
+
+
+def _stream_session_id_from_event(event: dict[str, Any]) -> str:
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    replay_job_request = media.get("replay_job_request")
+    replay_job_request = replay_job_request if isinstance(replay_job_request, dict) else {}
+    configuration = replay_job_request.get("configuration")
+    configuration = configuration if isinstance(configuration, dict) else {}
+    labels = configuration.get("labels")
+    labels = labels if isinstance(labels, dict) else {}
+    return str(
+        event.get("stream_session_id")
+        or payload.get("stream_session_id")
+        or media.get("stream_session_id")
+        or labels.get("stream_session_id")
+        or ""
+    ).strip()
 
 
 def _duplicate_message_count(values: list[Any]) -> tuple[int, int]:

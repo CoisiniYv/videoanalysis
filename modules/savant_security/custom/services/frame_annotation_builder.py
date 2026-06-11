@@ -74,6 +74,7 @@ def build_frame_annotation_message(
     frame_num: int | None = None,
     timestamp_ms: int | None = None,
     runtime_epoch_id: str | None = None,
+    stream_session_id: str | None = None,
     created_at: str | None = None,
     config: FrameAnnotationBuildConfig | None = None,
     validator: Callable[..., dict[str, Any]] | None = None,
@@ -126,6 +127,7 @@ def build_frame_annotation_message(
         "frame_num": frame_num,
         "timestamp_ms": timestamp_ms,
         "runtime_epoch_id": runtime_epoch_id,
+        "stream_session_id": stream_session_id,
         "objects": objects,
         "ttl_seconds": int(cfg.ttl_seconds),
         "created_at": created_at or _utc_now_iso(),
@@ -580,7 +582,12 @@ def _validate_frame_annotation_message_compat(
         raise ValueError("missing_camera_id")
     if data.get("frame_pts") is None and not _has_text(data.get("frame_uuid")):
         raise ValueError("missing_frame_anchor")
-    for field_name in ("keyframe_uuid", "previous_keyframe_uuid", "time_base"):
+    for field_name in (
+        "keyframe_uuid",
+        "previous_keyframe_uuid",
+        "time_base",
+        "stream_session_id",
+    ):
         value = data.get(field_name)
         if value is not None and not _has_text(value):
             raise ValueError(f"missing_{field_name}")

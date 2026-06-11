@@ -201,6 +201,7 @@ def build_watchlist_hit_event(
             "ntp_timestamp": source_media.get("ntp_timestamp"),
             "time_base": source_media.get("time_base"),
             "metadata_source": source_media.get("metadata_source"),
+            "stream_session_id": source_media.get("stream_session_id"),
             "error_message": MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON,
         },
     }

@@ -24,6 +24,7 @@ from custom.services.frame_annotation_exporter import (  # noqa: E402
     FrameAnnotationExporterConfig,
     FrameAnnotationExportRuntime,
 )
+from custom.services.stream_session import StreamSessionTracker  # noqa: E402
 
 
 class FakeExporter:
@@ -154,3 +155,24 @@ def test_frame_annotation_min_interval_resets_when_pts_goes_backwards() -> None:
         100_000_000,
     ]
     assert runtime.counters.frames_skipped_throttled == 0
+    assert exporter.messages[0]["stream_session_id"]
+    assert (
+        exporter.messages[1]["stream_session_id"]
+        != exporter.messages[0]["stream_session_id"]
+    )
+
+
+def test_stream_session_tracks_first_frame_rollback_and_forward_jump() -> None:
+    tracker = StreamSessionTracker(session_prefix="test")
+
+    first = tracker.session_id_for_frame("source-a", 1_000_000_000)
+    same = tracker.session_id_for_frame("source-a", 2_000_000_000)
+    forward_jump = tracker.session_id_for_frame("source-a", 30_000_000_000)
+    rollback = tracker.session_id_for_frame("source-a", 100_000_000)
+    after_rollback = tracker.session_id_for_frame("source-a", 200_000_000)
+
+    assert first
+    assert same == first
+    assert forward_jump == first
+    assert rollback != first
+    assert after_rollback == rollback

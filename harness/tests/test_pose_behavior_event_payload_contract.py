@@ -213,6 +213,7 @@ def test_enrichment_preserves_rule_payload_fields(modules, event_type, payload) 
         "height": 160.0,
     }
     assert exported.payload["person_quality_gate"]["status"] == "accepted"
+    assert exported.payload["media"]["stream_session_id"]
     assert "inside_ms" not in exported.payload
 
 
@@ -248,6 +249,7 @@ def test_frame_level_event_enrichment_does_not_require_representative_track(modu
     assert exported.payload["cluster_id"] == 3
     assert exported.payload["member_track_ids"] == [1, 2, 3, 4, 5]
     assert "media" in exported.payload
+    assert exported.payload["media"]["stream_session_id"]
     assert "person_quality_gate" in exported.payload
     assert "person_bbox" not in exported.payload
     assert "inside_ms" not in exported.payload

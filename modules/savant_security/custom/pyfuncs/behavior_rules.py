@@ -62,6 +62,7 @@ from custom.services.rule_runtime import (
     build_per_source_runtime,
     evaluate_runtime_frame,
 )
+from custom.services.stream_session import stream_session_id_for_frame
 
 
 _DEFAULT_LOG_INTERVAL = 15
@@ -391,6 +392,11 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             else None
         )
         frame_anchor = extract_frame_anchor_metadata(frame_meta)
+        stream_session_id = stream_session_id_for_frame(
+            source_id,
+            frame_anchor.get("frame_pts"),
+        )
+        frame_anchor["stream_session_id"] = stream_session_id
         self._frame_uuid_probe.probe(
             frame_meta,
             timestamp_ms_used_by_event=timestamp_ms_used_by_event,
@@ -506,6 +512,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 "time_base": frame_anchor.get("time_base"),
                 "source_id": frame_anchor.get("source_id") or source_id,
                 "metadata_source": frame_anchor.get("metadata_source"),
+                "stream_session_id": frame_anchor.get("stream_session_id"),
             }
         }
         return PersonBBoxObservationEventDraft(
@@ -555,6 +562,10 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             else event.end_ts_ms or event.start_ts_ms or int(time.time() * 1000)
         )
         frame_anchor = extract_frame_anchor_metadata(frame_meta)
+        frame_anchor["stream_session_id"] = stream_session_id_for_frame(
+            event.source_id or runtime.source_id,
+            frame_anchor.get("frame_pts"),
+        )
 
         event.producer = self.producer
         event.gpu_id = self.gpu_id
@@ -605,6 +616,7 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
                 "ntp_timestamp": frame_anchor.get("ntp_timestamp"),
                 "time_base": frame_anchor.get("time_base"),
                 "metadata_source": frame_anchor.get("metadata_source"),
+                "stream_session_id": frame_anchor.get("stream_session_id"),
             },
         }
         if runtime_epoch_id:
