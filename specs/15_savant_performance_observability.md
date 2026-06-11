@@ -296,6 +296,12 @@ restart count is stable
 no recent fatal pad/streammux/model errors
 ```
 
+The 2026-06-11 midterm failure also showed the inverse case: the Savant
+container can stay `Up` while the module status file is `stopped` and Docker
+health is `unhealthy`. Docker `restart: unless-stopped` does not restart a
+container merely because health is unhealthy. Recovery monitoring therefore
+needs module status plus frame-flow checks, not Docker state alone.
+
 ### 4.5 GPU, CPU, Memory, And IO
 
 Official Savant docs recommend `nvidia-smi`, `tegrastats`, `sar`, `nvtop`,

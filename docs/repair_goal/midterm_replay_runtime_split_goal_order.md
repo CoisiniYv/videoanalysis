@@ -35,6 +35,10 @@ Current completion summary:
 - multi-source runtime plan: implementation and one active reattach fault
   injection complete; the full 10-15 minute two-source long-run still needs to
   be executed and recorded.
+- a later two-source runtime run exposed a separate Savant v0.6.0 source-reset
+  race. Non-monotonous PTS removed a source registry entry while stale buffers
+  were still in flight, causing `KeyError` in Savant framework code and leaving
+  the container Up/unhealthy. This is now tracked as Goals 6-7 below.
 - runtime-generated `modules/savant_security/config/cameras.midterm.yml`
   `runtime_epoch_id` changes are deployment state and should not be committed as
   code-plan evidence.
@@ -200,12 +204,69 @@ Acceptance:
 - Source-adapter PTS rollback under the same runtime epoch causes a new session.
 - Missing/mismatched session fails closed rather than publishing an unsafe clip.
 
+### Goal 6: Savant Source-Reset Crash Patch
+
+Owner: runtime-stability Codex process.
+
+New evidence: `savant-crash-fix-20260611.zip` was reviewed against the current
+running `savant-deepstream:0.6.0-7.1` image. Its framework overlay patches are
+acceptable in principle because they only guard the four verified
+`self._sources.get_source(...)` call sites that can receive stale buffers after
+PTS-reset source removal:
+
+- `deepstream/buffer_processor.py`
+- `deepstream/nvinfer/processor.py`
+- `deepstream/pipeline.py` output metadata path
+- `deepstream/pipeline.py` late/duplicate muxer EOS path
+
+Steps:
+
+1. Add the pinned v0.6.0 overlay patch files under
+   `modules/savant_security/savant_patches/`.
+2. Run the patch applier from the `savant-security` entrypoint before
+   `python -m savant.entrypoint`.
+3. Keep md5 enforcement fail-loud so future Savant image changes cannot be
+   silently patched with the wrong overlay.
+4. Recreate Savant and verify patched md5 values inside the container.
+5. Validate a source reset no longer stops the Savant module.
+
+Validation:
+
+```bash
+python -m py_compile modules/savant_security/savant_patches/apply_patches.py
+docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.yml
+docker logs video-analytics-midterm-savant 2>&1 | rg 'savant_patches|video-analytics patch'
+```
+
+### Goal 7: Savant Watchdog Recovery
+
+Owner: runtime-stability Codex process.
+
+Goal 7 is a recovery net after Goal 6, not a replacement for the framework
+guard. It should restart Savant and source adapters if the module enters
+STOPPING/STOPPED or if frame annotations stall while sources are running.
+
+The reviewed zip's watchdog needs one local fix before adoption: its default
+source filter only matches `video-analytics-midterm-source...`, but the current
+runtime also uses dynamic source containers named `video-analytics-source-*`.
+The watchdog must restart both naming families.
+
+Validation:
+
+```bash
+bash -n services/savant-watchdog/watchdog.sh
+docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.yml
+docker compose -f infra/docker-compose.midterm.yml --profile savant-watchdog up -d savant-watchdog
+docker exec video-analytics-midterm-savant sh -c 'echo stopped > /opt/savant/status.txt'
+docker logs video-analytics-midterm-savant-watchdog
+```
+
 ## Recommended Sequence
 
 Use this order unless live evidence proves a later phase is now the blocker:
 
 ```text
-Goal 1 -> Goal 2 -> Goal 3 -> Goal 4 -> Goal 5
+Goal 1 -> Goal 2 -> Goal 3 -> Goal 4 -> Goal 5 -> Goal 6 -> Goal 7
 ```
 
 If using two Codex processes:
@@ -213,6 +274,9 @@ If using two Codex processes:
 - process B starts Goal 1 step 1 and then Goal 2
 - process A starts Goal 1 steps 2-3 after process B releases compose, then
   continues with Goals 3-5
+- after the source-reset crash finding, process B should resume with Goal 6
+  before re-running the two-source long-run; process B should add Goal 7 only
+  after Goal 6 validates cleanly
 
 Do not run two processes that both edit `infra/docker-compose.midterm.yml` at
 the same time.

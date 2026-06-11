@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,8 @@ API_FACE_RUNTIME_REQUIREMENTS = ROOT / "services" / "api" / "requirements.face-r
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midterm.yml"
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
+SAVANT_PATCH_DIR = ROOT / "modules" / "savant_security" / "savant_patches"
+SAVANT_WATCHDOG = ROOT / "services" / "savant-watchdog" / "watchdog.sh"
 CURRENT_SMOKE_DIR = ROOT / "scripts" / "smoke" / "current"
 RUNTIME_DOCTOR = ROOT / "scripts" / "runtime" / "doctor_midterm.sh"
 DOCS = (
@@ -30,6 +33,14 @@ DOCS = (
 
 def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _md5(path: Path) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as fobj:
+        for chunk in iter(lambda: fobj.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _compose() -> dict:
@@ -218,6 +229,49 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"]["EVIDENCE_RUNTIME_EPOCH_STRICT"] == (
         "${EVIDENCE_RUNTIME_EPOCH_STRICT:-true}"
     )
+
+
+def test_midterm_savant_source_reset_patch_is_wired() -> None:
+    compose = _compose()
+    savant = compose["services"]["savant-security"]
+    env = savant["environment"]
+    entrypoint = " ".join(savant["entrypoint"])
+    healthcheck = savant["healthcheck"]
+    patch_root = SAVANT_PATCH_DIR / "v0.6.0"
+
+    assert "savant_patches/apply_patches.py" in entrypoint
+    assert "python -m savant.entrypoint" in entrypoint
+    assert env["SAVANT_PATCH_ENABLED"] == "${SAVANT_PATCH_ENABLED:-true}"
+    assert env["SAVANT_PATCH_ENFORCE"] == "${SAVANT_PATCH_ENFORCE:-true}"
+    assert healthcheck["test"] == ["CMD", "sh", "/opt/savant/healthcheck.sh"]
+    assert healthcheck["start_period"] == "15m"
+    assert (SAVANT_PATCH_DIR / "apply_patches.py").is_file()
+    assert (patch_root / "README.md").is_file()
+    assert _md5(patch_root / "buffer_processor.py") == "556af89b356401efa1dc9d5c2c4d3c68"
+    assert _md5(patch_root / "nvinfer_processor.py") == "9615f7cd134f623a3950b65e5ad71fb1"
+    assert _md5(patch_root / "pipeline.py") == "7c5eabbe84697e591a0a31a1c3977f2c"
+
+
+def test_midterm_savant_watchdog_covers_primary_and_dynamic_sources() -> None:
+    compose = _compose()
+    watchdog = compose["services"]["savant-watchdog"]
+    env = watchdog["environment"]
+    script = _text(SAVANT_WATCHDOG)
+    source_patterns = env["WATCHDOG_SOURCE_CONTAINER_PATTERNS"]
+
+    assert watchdog["container_name"] == "video-analytics-midterm-savant-watchdog"
+    assert watchdog["profiles"] == ["savant-watchdog"]
+    assert watchdog["entrypoint"] == ["sh", "/watchdog/watchdog.sh"]
+    assert watchdog["image"] == "docker:27-cli"
+    assert "/var/run/docker.sock:/var/run/docker.sock" in watchdog["volumes"]
+    assert "../services/savant-watchdog:/watchdog:ro" in watchdog["volumes"]
+    assert env["WATCHDOG_RESTART_REPLAY"] == "${WATCHDOG_RESTART_REPLAY:-false}"
+    assert env["WATCHDOG_SAVANT_STATUS_FILE"] == "/opt/savant/status.txt"
+    assert "^video-analytics-midterm-source-adapter" in source_patterns
+    assert "^video-analytics-source-" in source_patterns
+    assert "WATCHDOG_SOURCE_CONTAINER_FILTER" not in env
+    assert "docker ps -a --format '{{.Names}}'" in script
+    assert "grep -E \"$SOURCE_PATTERNS\"" in script
 
 
 def test_midterm_source_id_and_camera_config_are_neutral() -> None:

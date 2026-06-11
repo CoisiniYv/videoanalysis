@@ -22,6 +22,11 @@ Runtime acceptance status:
   error was observed in the inspected logs
 - the full 10-15 minute two-source long-run window still needs to be executed
   and recorded
+- a later live run exposed a separate Savant v0.6.0 source-reset crash:
+  non-monotonous PTS caused source reset, stale in-flight buffers hit unguarded
+  `self._sources.get_source(...)` calls, Savant module entered STOPPED while the
+  container stayed Up/unhealthy, and Replay/source adapters then entered send
+  timeout/restart loops
 
 The only uncommitted runtime state observed after this work was
 `modules/savant_security/config/cameras.midterm.yml`, where controlled runtime
@@ -94,6 +99,76 @@ window.
 
 The plan below adds capacity headroom and a readiness gate without broadening
 the evidence pipeline changes.
+
+## 2026-06-11 Savant Source-Reset Crash Root Cause
+
+A later runtime failure froze evidence production after approximately
+2026-06-11 16:50:51 Asia/Shanghai. The containers did not all exit. Instead:
+
+- `video-analytics-midterm-savant` stayed running but became unhealthy.
+- `security.frame_annotations` stopped advancing at the failure time.
+- Replay logs repeated `Send timeout` while sending to Savant.
+- both source adapters repeatedly restarted because their ZMQ writes backed up
+  behind Replay/Savant.
+
+The first fatal error in Savant was not a pad-capacity error. It was a
+source-reset race in the Savant v0.6.0 framework:
+
+1. A source delivered non-monotonous PTS. This is expected for looping movie
+   RTSP streams such as the current `primary_rtsp` 1080movie input, and can also
+   happen on RTSP reconnects.
+2. Savant's demux/decode path resets the source on timestamp reset and removes
+   the source registry entry.
+3. Stale buffers for that source were still queued in muxer / nvinfer stages.
+4. Those stale buffers reached unguarded `self._sources.get_source(...)` calls,
+   raising `KeyError: 'source_00000000-0000-4000-8000-781078565686'`.
+5. The exception was converted into a GST bus error and the module moved to
+   STOPPING/STOPPED. The Python process did not exit, so Docker
+   `restart: unless-stopped` did not recover it.
+
+Verified unguarded call sites in the running
+`ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1` image:
+
+- `/opt/venv/lib/python3.12/site-packages/savant/deepstream/buffer_processor.py:150`
+- `/opt/venv/lib/python3.12/site-packages/savant/deepstream/nvinfer/processor.py:271`
+- `/opt/venv/lib/python3.12/site-packages/savant/deepstream/pipeline.py:952`
+- `/opt/venv/lib/python3.12/site-packages/savant/deepstream/pipeline.py:1154`
+
+Container file md5 baselines:
+
+```text
+deepstream/buffer_processor.py   ab13b915a8a7fc7acd6265d054054036
+deepstream/nvinfer/processor.py  e6a05fb0e0eb7dd04c9d01e4fc2bb80f
+deepstream/pipeline.py           5c418afd69e9d478a43cc1a123513837
+```
+
+This is not caused purely by having two streams. Two streams widen the race
+window because there are more in-flight buffers and more branch reset activity,
+but a single looping or reconnecting RTSP source can still trigger the same
+class of timestamp reset.
+
+The uploaded `savant-crash-fix-20260611.zip` was reviewed against the current
+container files. Its framework overlay patches are acceptable in principle:
+they only change the four `get_source(...)` call sites above from fatal
+`KeyError` to warning plus stale-frame skip / late-EOS ignore, and the patched
+file md5 values match the package README:
+
+```text
+deepstream/buffer_processor.py   556af89b356401efa1dc9d5c2c4d3c68
+deepstream/nvinfer/processor.py  9615f7cd134f623a3950b65e5ad71fb1
+deepstream/pipeline.py           7c5eabbe84697e591a0a31a1c3977f2c
+```
+
+The watchdog portion of the zip needs one local adjustment before adoption:
+its default `WATCHDOG_SOURCE_CONTAINER_FILTER=video-analytics-midterm-source`
+matches the compose primary adapter but does not match current dynamic source
+containers named `video-analytics-source-source_...`. The adopted watchdog must
+discover both:
+
+- `video-analytics-midterm-source-adapter`
+- `video-analytics-source-*`
+
+or accept multiple filters.
 
 ## Fix Plan
 
@@ -267,6 +342,122 @@ docker inspect --format '{{.Name}} restart={{.RestartCount}} state={{.State.Stat
 docker logs --tail 300 video-analytics-midterm-savant | \
   rg 'source_00000000-0000-4000-8000-781078565686|primary_rtsp|ERROR|Exception|Traceback|pad|streammux'
 ```
+
+### Phase 5: Patch Savant v0.6.0 Source-Reset Race
+
+Adopt the framework overlay patch from `savant-crash-fix-20260611.zip`, but do
+not blindly overwrite the repo's compose file.
+
+Implementation targets:
+
+- add `modules/savant_security/savant_patches/apply_patches.py`
+- add the pinned v0.6.0 patched framework files under
+  `modules/savant_security/savant_patches/v0.6.0/`
+- run `apply_patches.py` from the `savant-security` entrypoint before
+  `python -m savant.entrypoint`
+- keep patching fail-loud by default:
+  `SAVANT_PATCH_ENABLED=true`, `SAVANT_PATCH_ENFORCE=true`
+- refuse to patch if installed framework md5 does not match the known v0.6.0
+  baseline
+- log a stable marker such as `[video-analytics patch]` on skipped zombie frames
+
+The patch must remain narrowly scoped to these behaviours:
+
+- missing source during input preparation: skip stale frame
+- missing source during custom model output: skip stale frame and continue the
+  batch
+- missing source during output metadata update: skip stale frame
+- missing source during late/duplicate muxer peer EOS: ignore the EOS
+
+It must not change model configuration, inference intervals, source reset
+policy, Replay topology, business pyfunc semantics, or evidence contracts.
+
+Validation:
+
+```bash
+python -m py_compile \
+  modules/savant_security/savant_patches/apply_patches.py \
+  modules/savant_security/savant_patches/v0.6.0/buffer_processor.py \
+  modules/savant_security/savant_patches/v0.6.0/nvinfer_processor.py \
+  modules/savant_security/savant_patches/v0.6.0/pipeline.py
+
+docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.yml
+docker compose -f infra/docker-compose.midterm.yml up -d --force-recreate savant-security
+docker logs video-analytics-midterm-savant 2>&1 | rg 'savant_patches|video-analytics patch'
+docker exec video-analytics-midterm-savant sh -lc \
+  'md5sum /opt/venv/lib/python3.12/site-packages/savant/deepstream/buffer_processor.py \
+          /opt/venv/lib/python3.12/site-packages/savant/deepstream/nvinfer/processor.py \
+          /opt/venv/lib/python3.12/site-packages/savant/deepstream/pipeline.py'
+```
+
+Expected patched md5 values:
+
+```text
+556af89b356401efa1dc9d5c2c4d3c68  buffer_processor.py
+9615f7cd134f623a3950b65e5ad71fb1  nvinfer/processor.py
+7c5eabbe84697e591a0a31a1c3977f2c  pipeline.py
+```
+
+Runtime validation must include at least one source reset case. Accept either a
+natural loop/reset of `primary_rtsp` or an explicit source-adapter restart. The
+expected result is warning logs with `[video-analytics patch]`, continued
+Savant `running` status, and continued frame annotations for both enabled
+sources.
+
+### Phase 6: Add Savant Runtime Watchdog
+
+Add a separate watchdog only after Phase 5 is in place. The watchdog is a
+recovery safety net, not the primary fix for the source-reset race.
+It is profile-gated as `savant-watchdog` so default midterm compose starts do
+not pull or start an extra Docker CLI image.
+
+Required behaviour:
+
+- poll Savant module status from `/opt/savant/status.txt`, not Docker health
+  alone
+- optionally detect `security.frame_annotations` stalling while source adapters
+  are running
+- on STOPPING/STOPPED or prolonged stall, perform a controlled restart:
+  restart Savant, wait for module `running`, then restart source adapters
+- include cooldown to avoid restart flapping
+- preserve Replay by default unless a later diagnosis proves Replay must also
+  be restarted
+
+Local adjustment required for the reviewed zip: source adapter discovery must
+match both current container naming patterns:
+
+```text
+video-analytics-midterm-source-adapter
+video-analytics-source-*
+```
+
+Do not use only `WATCHDOG_SOURCE_CONTAINER_FILTER=video-analytics-midterm-source`
+because that misses dynamic source adapters in the current runtime.
+
+Also override the Savant healthcheck `start_period` from the image's 30 minutes
+to a shorter but still cold-start-safe value. Use 15 minutes initially because
+TensorRT engines are cached under `/models` and non-first starts should be much
+faster, but cold builds can still take minutes.
+
+Validation:
+
+```bash
+bash -n services/savant-watchdog/watchdog.sh
+docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.yml
+docker compose -f infra/docker-compose.midterm.yml --profile savant-watchdog up -d savant-watchdog
+docker logs video-analytics-midterm-savant-watchdog
+```
+
+Optional watchdog drill:
+
+```bash
+docker exec video-analytics-midterm-savant sh -c 'echo stopped > /opt/savant/status.txt'
+docker logs -f video-analytics-midterm-savant-watchdog
+```
+
+Expected result: watchdog triggers one controlled recovery, Savant returns to
+running/healthy, both source adapters are restarted, and
+`security.frame_annotations` resumes for both source ids.
 
 ## Do Not Treat As Proven Yet
 

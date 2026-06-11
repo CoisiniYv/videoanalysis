@@ -115,7 +115,7 @@ services:
     entrypoint:
       [
         "bash", "-c",
-        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; python /opt/savant/src/module/savant_patches/apply_patches.py || exit 1; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
       ]
     working_dir: /opt/savant/src/module
     env_file:
@@ -169,6 +169,8 @@ services:
       REPLAY_SAVANT_FRAME_DUMP_ROOT: "${REPLAY_SAVANT_FRAME_DUMP_ROOT:-/data/video-analytics/media/debug/runtime_frame_dump}"
       REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES: "${REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES:-20}"
       SAVANT_MODULE_FILE: module.yml
+      SAVANT_PATCH_ENABLED: "${SAVANT_PATCH_ENABLED:-true}"
+      SAVANT_PATCH_ENFORCE: "${SAVANT_PATCH_ENFORCE:-true}"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis
@@ -193,6 +195,39 @@ services:
               capabilities: [gpu]
     depends_on:
       redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "sh", "/opt/savant/healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+    restart: unless-stopped
+
+  savant-watchdog:
+    image: docker:27-cli
+    container_name: video-analytics-midterm-savant-watchdog
+    profiles: ["savant-watchdog"]
+    entrypoint: ["sh", "/watchdog/watchdog.sh"]
+    environment:
+      WATCHDOG_SAVANT_CONTAINER: video-analytics-midterm-savant
+      WATCHDOG_REDIS_CONTAINER: video-analytics-midterm-redis
+      WATCHDOG_REPLAY_CONTAINER: video-analytics-midterm-replay-service
+      WATCHDOG_SOURCE_CONTAINER_PATTERNS: "${WATCHDOG_SOURCE_CONTAINER_PATTERNS:-^video-analytics-midterm-source-adapter$$|^video-analytics-source-}"
+      WATCHDOG_SAVANT_STATUS_FILE: /opt/savant/status.txt
+      WATCHDOG_ANNOTATION_STREAM: security.frame_annotations
+      WATCHDOG_POLL_INTERVAL_S: "${WATCHDOG_POLL_INTERVAL_S:-10}"
+      WATCHDOG_STOPPED_GRACE_S: "${WATCHDOG_STOPPED_GRACE_S:-20}"
+      WATCHDOG_STARTUP_GRACE_S: "${WATCHDOG_STARTUP_GRACE_S:-1800}"
+      WATCHDOG_STALL_SECONDS: "${WATCHDOG_STALL_SECONDS:-120}"
+      WATCHDOG_STALL_CHECK_ENABLED: "${WATCHDOG_STALL_CHECK_ENABLED:-true}"
+      WATCHDOG_RESTART_COOLDOWN_S: "${WATCHDOG_RESTART_COOLDOWN_S:-300}"
+      WATCHDOG_RESTART_WAIT_S: "${WATCHDOG_RESTART_WAIT_S:-1800}"
+      WATCHDOG_RESTART_REPLAY: "${WATCHDOG_RESTART_REPLAY:-false}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../services/savant-watchdog:/watchdog:ro
+    depends_on:
+      - savant-security
     restart: unless-stopped
 
   source-adapter:
