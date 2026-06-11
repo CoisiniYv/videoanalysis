@@ -1,6 +1,6 @@
 # Midterm 8090 端口功能与程序对接现状
 
-更新时间：2026-06-10
+更新时间：2026-06-11
 
 ## 总结
 
@@ -35,6 +35,11 @@ http://0.0.0.0:8090/
 - 完整人脸注册正常：使用真实 `reese.jpg`、YOLOv8 face ONNX、AdaFace ONNX
   注册 `operator:smoke:face` 成功。
 - 告警证据列表、证据详情、生产 sidecar 标注、sink metadata 正常。
+- 告警证据列表和详情页显示“报警机器时间”。该时间来自 bundle
+  `metadata.json` / `summary.json` 中的事件机器时间字段；新证据由
+  media-worker 写入 `event.created_at` 和 `event.alarm_machine_time`。
+  历史 intrusion bundle 若没有 `created_at`，8090 会仅在 `event_ts_ms` 或
+  `source_event_id` 中的值看起来像 Unix epoch 毫秒时作为兼容 fallback。
 - raw clip 支持 Range 读取，返回 `206` 和 `video/quicktime`。
 - 事件 API 可通过 8090 proxy 查询。
 - 存储维护 summary、证据删除 preview、job detail、人员删除 preview、图库删除
@@ -97,8 +102,8 @@ http://0.0.0.0:8090/
 | `/` | `services/evidence-viewer/app/main.py` | 返回 `services/evidence-viewer/app/static/index.html` | 已接通 |
 | `/static/*` | `services/evidence-viewer/app/main.py` | 8090 静态资源，加载 `operator.js`、`evidence.js`、`maintenance.js` | 已接通 |
 | `/health` | `services/evidence-viewer/app/main.py` | 检查 `/evidence` 是否存在，返回 `read_only=true` | 已接通 |
-| `/api/bundles` | `services/evidence-viewer/app/main.py` | 扫描文件证据 bundle，支持事件类型、摄像头、人员、录像状态等过滤 | 已接通 |
-| `/api/bundles/{event_id}` | `services/evidence-viewer/app/main.py` | 返回单个证据 bundle manifest | 已接通 |
+| `/api/bundles` | `services/evidence-viewer/app/main.py` | 扫描文件证据 bundle，支持事件类型、摄像头、人员、录像状态等过滤，并返回 `alarm_machine_time` | 已接通 |
+| `/api/bundles/{event_id}` | `services/evidence-viewer/app/main.py` | 返回单个证据 bundle manifest，并返回 `alarm_machine_time` | 已接通 |
 | `/api/bundles/{event_id}/annotations` | `services/evidence-viewer/app/main.py` | 读取生产 sidecar 标注；legacy/preview 仅显式调试使用 | 已接通 |
 | `/api/bundles/{event_id}/sink-metadata` | `services/evidence-viewer/app/main.py` | 读取 `sink_metadata.json` | 已接通 |
 | `/api/bundles/{event_id}/media/raw_clip` | `services/evidence-viewer/app/main.py` | 从证据 bundle 中发现并返回 `raw_clip.*` | 已接通 |
@@ -204,6 +209,23 @@ POST /api/v1/cameras/runtime/restart
 evidence。该问题记录和诊断命令见
 `docs/midterm_replay_routing_id_recovery.md`。
 
+2026-06-11 复核播放问题后确认：8090 播放不是前端根因。证据链路必须用
+frame UUID 作为主对齐锚，并用 runtime epoch 隔离 frame cache。当前 runtime
+apply/restart 会创建新 epoch、重建 sink，并清掉 Redis
+`security.frame_annotations`；media-worker 也会按 `runtime_epoch_id` 过滤该
+stream。Replay job 的 `offset.seconds` 仍保持正值 rewind 语义，不应改成负数。
+
+实测恢复样本：
+
+- `f208b550-6b34-44ff-a847-3219041349ea`：`clip_status=ready`，
+  `raw_clip.mov` 10 秒、250 个 H.264 packet，8090 Range 读取返回 HTTP `206`。
+- 8090 `/api/bundles?limit=1` 已能返回更新的 ready bundle
+  `3acfac74-6c54-4045-820b-b659df3894da`。
+
+如果 Replay sink 已生成 `video.mov`/`metadata.json`，但 8090 暂时还没出现新
+bundle，先等 media-worker 完成 sink 稳定检查和长源文件探测；现场 f208 样本
+从 Replay job 到 evidence ready 存在约 1 到 2 分钟延迟，这不等同于 8090 卡死。
+
 ### 人员与人脸
 
 页面入口：`8090 /` 的“人员与人脸”。
@@ -262,6 +284,92 @@ evidence。该问题记录和诊断命令见
 - `annotations.jsonl` legacy 文件被标记为 debug-only；默认自动模式要求生产
   sidecar ready。
 - 页面分类包括名单布控、周界入侵、行为异常、聚集风险。
+- 页面证据列表会在摄像头和录像状态之间显示 `报警 YYYY-MM-DD HH:mm:ss`；
+  详情页“事件信息”中显示“报警机器时间”。
+- `alarm_machine_time_source` 用于审计来源。优先级为
+  `event.alarm_machine_time`、`event.created_at`、顶层 `metadata` 字段、
+  `summary` 字段；再兼容 epoch 毫秒格式的 `event.event_ts_ms` /
+  `event.timestamp_ms` / `event.source_event_id`。非 epoch 的视频内时间戳不
+  会被当成机器时间，避免误显示 1970 年附近的时间。
+- 新生成的 post-Savant Replay bundle 由 `services/media-worker/app/worker.py`
+  将数据库 `events.created_at` 写入 `metadata.json` 的 `event.created_at`、
+  `event.alarm_machine_time` 和 `event.alarm_machine_time_source`。
+- 如果 8090 显示事件继续产生但没有新的 evidence bundle，先区分两类问题：
+  `security.frame_annotations` 不刷新且 Replay 有 `mismatched routing_id` 时是
+  Replay routing identity 卡住；`frame_annotations`、事件、Replay job 都刷新但
+  sink epoch 目录无新文件时，检查 `video-file-sink` 容器是否保留
+  `video-file-sink` 网络别名。8090 runtime apply/restart 重建 sink 时必须保留
+  该别名，否则 Replay job 的
+  `dealer+connect:tcp://video-file-sink:6666` 无法解析到 sink。
+- evidence 目录出现还不等于 raw clip 已发布。8090 侧最终应看到
+  `raw_clip_url` 非空；数据库事件 `payload.media.clip_status` 应为 `ready`，
+  `payload.media.epoch_guard_status` 应为 `passed`。官方 `video-file-sink`
+  metadata 不保留 Replay labels，所以 `sink_metadata_runtime_epoch_id` 缺失不能
+  单独判定失败。
+
+2026-06-11 追加播放故障记录：
+
+- 症状：8090 告警证据页打开后不能播放，实际是页面默认选中了最新 bundle
+  `83f0d677-9555-40d4-ae28-d2b70c4db523`。该 bundle 的 `raw_clip.mov`
+  只有 184 字节，`ffprobe` 没有视频流；而较早的 `991704f0-...` 和
+  `91175619-...` 都是约 10 秒 H.264，`GET .../media/raw_clip` Range 请求返回
+  HTTP `206` 和 `video/quicktime`。
+- 直接原因：post-Savant time-domain crop 的 ffmpeg 命令退出码为 0，但日志为
+  `Output file is empty, nothing was encoded`，只留下 MOV 空壳。旧逻辑只检查
+  文件存在且大小大于 0，后续读帧失败时没有完成 failure metadata，导致 8090
+  把目录当作最新证据展示。
+- 修复：`services/media-worker/app/post_savant_evidence_bundle.py` 在裁剪后调用
+  `read_decoded_video_frame_count()`，读不到大于 0 的帧即删除产物并抛出
+  `video_time_domain_crop_failed:decoded_frame_count_unavailable`。media-worker
+  finalizer 会把 bundle 标为 `duration_guard_failed` /
+  `time_domain_crop_failed`，`raw_clip_path` 置空，不再发布空视频。
+- 8090 侧补强：`/api/bundles` 列表在存在 raw clip 时也返回 `raw_clip_url`；
+  前端默认选择第一条 `raw_clip_available=true` 的证据，避免最新失败 bundle
+  阻塞历史可播放证据。
+- 运行验证：83f0 bundle 现在 `raw_clip_url=null`、`raw_clip_missing`、
+  `clip_status=duration_guard_failed`；8090 `/#evidence` 浏览器验证默认选中
+  `991704f0-...`，video src 指向
+  `/api/bundles/991704f0-bec0-4d84-b670-da7bdd2e30d1/media/raw_clip`。
+
+2026-06-11 追加根因修正：
+
+- 8090 不能播放不是前端根因。前端只暴露了最新失败 bundle 被选中的表象；
+  后端根因是 post-Savant Replay sink 的 metadata/video 时间轴在新 epoch 后仍
+  出现重复 PTS 段，media-worker 旧裁剪逻辑把全文件第一个 PTS 当作连续秒表。
+- 83f0 现场证据：
+  - runtime epoch guard passed：
+    `midterm-20260610T172541Z-949ea460` 在事件、Replay labels、sink path、
+    当前 `.current_epoch.json` 中一致。
+  - sink metadata PTS 不严格递增：row 46 从 `86404866666` 回落到
+    `4848555555`，row 2800 从 `119671600000` 回落到 `1004522222`。
+  - 源 `video.mov` 第一包 PTS 为 `118.667084`；旧命令按
+    `requested_start_pts - first_metadata_pts` 得到错误 seek 点，ffmpeg 退出码
+    0 但输出空壳 MOV。
+- 固化后的后端规则：
+  - frame identity 以 UUID 优先。若 sink metadata 中的 `uuid/frame_uuid` 能和
+    `event_frame_uuid`、`start_window_frame_uuid`、`post_window_frame_uuid`
+    匹配，优先选该 UUID 所在的连续 PTS 段。
+  - 当前官方 Replay sink 不保证保留原始事件 `frame_uuid`，因此 UUID 缺失时不
+    再把所有匹配 PTS 混在一起，而是选择最新的严格递增连续 PTS 段，并在
+    `time_window` 记录 `frame_uuid_anchor_found=false`、
+    `time_domain_selection_strategy=latest_contiguous_pts_segment`。
+  - raw clip 裁剪使用该连续段的 `crop_segment_first_pts` 作为时间基准，并用
+    `setpts=PTS-STARTPTS,trim=...` 的归一化 filter 裁剪，不再用输入前 `-ss`
+    依赖容器 packet PTS 起点。
+  - media-worker 读取 `security.frame_annotations` 时按事件/replay labels 的
+    `runtime_epoch_id` 过滤；旧 epoch 或缺 epoch 的 frame annotation cache 不
+    再参与 sidecar 对齐。
+  - 8090 的受控 runtime apply/restart 创建新 epoch 时会删除
+    `security.frame_annotations` Redis stream。该 stream 是 frame cache，不是
+    事件或 evidence 审计数据；返回体和 `.current_epoch.json` 记录
+    `redis_frame_cache_streams_reset` / `redis_frame_cache_reset_count`，旧
+    evidence 文件仍保留在 `/data` 用于追溯。
+  - 受控重启后若事件已产生但仍无新 evidence，检查 clip-worker 是否出现
+    `missing_post_savant_frame_pts_window`。本次新事件 `72424794-...` 证明
+    routing id 已恢复、Savant frame annotations 已带新 epoch，但 9 秒默认等待
+    仍可能早于 post-window frame annotation 到达；post-Savant frame proof 已
+    改为独立配置 `POST_SAVANT_FRAME_PROOF_ATTEMPTS=30` /
+    `POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S=1.0`。
 
 ### 存储维护
 
@@ -335,6 +443,8 @@ evidence。该问题记录和诊断命令见
 ```bash
 curl --noproxy '*' http://0.0.0.0:8090/health
 curl --noproxy '*' http://0.0.0.0:8090/ | grep -q camera-form
+curl --noproxy '*' 'http://0.0.0.0:8090/api/bundles?limit=5' \
+  | jq '.bundles[] | {event_id,event_type,alarm_machine_time,alarm_machine_time_source}'
 ```
 
 当前 smoke：
@@ -359,9 +469,11 @@ bash scripts/smoke/current/check_operator_camera_and_face_registration.sh
 - 8090 compose 入口：`infra/docker-compose.midterm.yml`
 - 8090 服务配置：`services/evidence-viewer/app/config.py`
 - 8090 路由与代理：`services/evidence-viewer/app/main.py`
+- 8090 文件证据索引：`services/evidence-viewer/app/evidence_index.py`
 - 8090 页面：`services/evidence-viewer/app/static/index.html`
 - 摄像头/人员前端：`services/evidence-viewer/app/static/operator.js`
 - 证据前端：`services/evidence-viewer/app/static/evidence.js`
+- 新证据 metadata 写入：`services/media-worker/app/worker.py`
 - 维护前端：`services/evidence-viewer/app/static/maintenance.js`
 - 内部 API 路由注册：`services/api/app/main.py`
 - 摄像头 API：`services/api/app/routers/cameras.py`

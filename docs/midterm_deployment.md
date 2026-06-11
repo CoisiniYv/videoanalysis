@@ -1,6 +1,6 @@
 # Midterm Deployment
 
-Date: 2026-06-09
+Date: 2026-06-11
 
 This is the active project-machine deployment entrypoint.
 
@@ -108,7 +108,17 @@ source-adapter containers first, recreates dynamic RTSP source-adapter
 containers for non-primary sources, restarts Replay and Savant, restores
 workers, then starts enabled sources last. This ordering clears Replay's ZeroMQ routing
 identity cache and prevents the source adapters from continuing to send frames
-through stale connections. The config export part can be run manually with:
+through stale connections. When the operation recreates `video-file-sink`, it
+must also preserve the Docker network alias `video-file-sink`, because
+clip-worker Replay jobs use
+`dealer+connect:tcp://video-file-sink:6666` as their sink URL. A manually
+recreated sink container without that alias will keep listening on port 6666
+but Replay will not resolve the peer, so no raw clip or evidence bundle will be
+written. The official `video-file-sink` native metadata does not preserve
+Replay labels, so media-worker treats `sink_metadata_runtime_epoch_id` as
+optional evidence: it fails only when the field is present and mismatched, while
+event payload, record request, Replay labels, sink path, and current epoch remain
+required. The config export part can be run manually with:
 
 ```bash
 python scripts/config/export_runtime_configs.py \
@@ -210,6 +220,24 @@ Evidence bundles contain:
 
 The media-worker writes `project_version=midterm` and `schema_version=2.0-midterm`
 for this deployment. Legacy metadata fields are disabled in the midterm compose.
+
+New evidence metadata must carry the alarm machine time in `metadata.json`:
+
+```json
+{
+  "event": {
+    "created_at": "<events.created_at>",
+    "alarm_machine_time": "<events.created_at>",
+    "alarm_machine_time_source": "events.created_at"
+  }
+}
+```
+
+The 8090 evidence viewer also returns `alarm_machine_time` and
+`alarm_machine_time_source` from `/api/bundles` and `/api/bundles/{event_id}`.
+For old bundles without `created_at`, it may derive a display value only from
+epoch-millisecond-looking fields. Frame-relative or video-relative timestamps
+are not accepted as machine time.
 
 ## Runtime Calibration
 

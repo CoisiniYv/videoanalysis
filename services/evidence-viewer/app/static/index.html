@@ -4,7 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>视频分析操作台</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <script>
+      try {
+        if (window.localStorage.getItem("operator-theme") === "dark") {
+          document.documentElement.dataset.theme = "dark";
+        }
+      } catch (_err) {}
+    </script>
+    <link rel="stylesheet" href="/static/style.css?v=dark-mode-20260611" />
   </head>
   <body>
     <div class="app-shell">
@@ -48,7 +55,13 @@
             <h2>统一配置台</h2>
             <p>接入摄像头、维护人脸库，并复核告警录像证据。</p>
           </div>
-          <span id="status" class="status-pill">加载中</span>
+          <div class="workspace-actions">
+            <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="切换黑夜模式" title="切换黑夜模式">
+              <span id="theme-toggle-icon" aria-hidden="true">☾</span>
+              <span id="theme-toggle-label">黑夜</span>
+            </button>
+            <span id="status" class="status-pill">加载中</span>
+          </div>
         </header>
 
         <div id="error-box" class="message-box error-box" hidden></div>
@@ -374,6 +387,7 @@
                   <dt>告警类型</dt><dd id="eventType">-</dd>
                   <dt>摄像头</dt><dd id="sourceId">-</dd>
                   <dt class="internal-debug" hidden>camera_id</dt><dd class="internal-debug" hidden id="cameraId">-</dd>
+                  <dt>报警机器时间</dt><dd id="alarmMachineTime">-</dd>
                   <dt>录像状态</dt><dd id="rawClipStatus">-</dd>
                   <dt>证据状态</dt><dd id="clipValidation">-</dd>
                 </dl>
@@ -543,8 +557,8 @@
         </main>
       </div>
     </div>
-    <script src="/static/operator.js?v=storage-maintenance-actions-20260610"></script>
-    <script src="/static/evidence.js?v=storage-maintenance-actions-20260610"></script>
+    <script src="/static/operator.js?v=dark-mode-20260611"></script>
+    <script src="/static/evidence.js?v=playback-empty-crop-20260611"></script>
     <script src="/static/maintenance.js?v=storage-maintenance-actions-20260610"></script>
   </body>
 </html>

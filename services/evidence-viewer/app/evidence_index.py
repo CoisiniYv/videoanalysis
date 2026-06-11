@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ RAW_CLIP_PREFERRED_NAMES = (
     "raw_clip.webm",
     "raw_clip.mkv",
 )
+EPOCH_MS_MIN = 946684800000
+EPOCH_MS_MAX = 4102444800000
 
 
 class EvidencePathError(ValueError):
@@ -241,6 +244,61 @@ def _matches_filters(
     return True
 
 
+def _iso_from_epoch_ms(value: Any) -> str | None:
+    try:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        epoch_ms = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    if EPOCH_MS_MIN <= epoch_ms <= EPOCH_MS_MAX:
+        return (
+            datetime.fromtimestamp(epoch_ms / 1000, timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    return None
+
+
+def _first_epoch_ms_from_text(value: Any) -> tuple[str | None, str | None]:
+    text = str(value or "")
+    for match in reversed(re.findall(r"\d{10,13}", text)):
+        iso_value = _iso_from_epoch_ms(match)
+        if iso_value:
+            return iso_value, match
+    return None, None
+
+
+def alarm_machine_time(metadata: dict[str, Any], summary: dict[str, Any]) -> tuple[str | None, str | None]:
+    event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
+    candidates = (
+        ("event.alarm_machine_time", event.get("alarm_machine_time")),
+        ("event.created_at", event.get("created_at")),
+        ("metadata.alarm_machine_time", metadata.get("alarm_machine_time")),
+        ("metadata.created_at", metadata.get("created_at")),
+        ("summary.alarm_machine_time", summary.get("alarm_machine_time")),
+        ("summary.event_created_at", summary.get("event_created_at")),
+    )
+    for source, value in candidates:
+        if value:
+            return str(value), source
+
+    for source, value in (
+        ("event.event_ts_ms", event.get("event_ts_ms")),
+        ("event.timestamp_ms", event.get("timestamp_ms")),
+    ):
+        iso_value = _iso_from_epoch_ms(value)
+        if iso_value:
+            return iso_value, source
+
+    iso_value, _raw = _first_epoch_ms_from_text(event.get("source_event_id"))
+    if iso_value:
+        return iso_value, "event.source_event_id"
+
+    return None, None
+
+
 def bundle_summary(bundle_dir: Path) -> dict[str, Any]:
     metadata, metadata_warnings = load_json_object(bundle_dir / "metadata.json")
     summary, summary_warnings = load_json_object(bundle_dir / "summary.json")
@@ -253,13 +311,20 @@ def bundle_summary(bundle_dir: Path) -> dict[str, Any]:
     )
     raw_clip = discover_raw_clip(bundle_dir, metadata)
     annotations_path = bundle_dir / "annotations.jsonl"
+    alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
+    event_id = event.get("event_id") or summary.get("event_id") or bundle_dir.name
     return {
-        "event_id": event.get("event_id") or summary.get("event_id") or bundle_dir.name,
+        "event_id": event_id,
         "event_type": event.get("event_type") or summary.get("event_type"),
         "source_id": event.get("source_id") or summary.get("source_id"),
         "camera_id": event.get("camera_id") or summary.get("camera_id"),
+        "alarm_machine_time": alarm_time,
+        "alarm_machine_time_source": alarm_time_source,
         "raw_clip_available": raw_clip is not None,
         "raw_clip_name": raw_clip.name if raw_clip else None,
+        "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip"
+        if raw_clip is not None
+        else None,
         "annotations_available": annotations_path.is_file(),
         "annotation_lines": summary.get("annotation_lines"),
         "clip_status": status.get("clip_status") or summary.get("clip_status"),
@@ -330,8 +395,11 @@ def bundle_manifest(evidence_root: Path, event_id: str) -> dict[str, Any]:
     warnings = metadata_warnings + summary_warnings
     if raw_clip is None:
         warnings.append("raw_clip_missing")
+    alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
     return {
         "event_id": event_id,
+        "alarm_machine_time": alarm_time,
+        "alarm_machine_time_source": alarm_time_source,
         "metadata": metadata,
         "summary": summary,
         "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip"

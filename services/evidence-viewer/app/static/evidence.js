@@ -80,6 +80,43 @@ function textOrNull(value) {
   return text ? text : null;
 }
 
+function epochMsOrNull(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed >= 946684800000 && parsed <= 4102444800000) {
+    return parsed;
+  }
+  return null;
+}
+
+function dateFromAlarmMachineTime(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const epochMs = epochMsOrNull(value);
+  if (epochMs !== null) {
+    return new Date(epochMs);
+  }
+  const parsed = Date.parse(String(value));
+  if (!Number.isNaN(parsed)) {
+    return new Date(parsed);
+  }
+  return null;
+}
+
+function formatAlarmMachineTime(value) {
+  const date = dateFromAlarmMachineTime(value);
+  if (!date) return "";
+  const pad = number => String(number).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join("-") + " " + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds())
+  ].join(":");
+}
+
 function addWarning(message) {
   if (message) {
     state.warnings.add(message);
@@ -238,6 +275,10 @@ function categoryFilteredBundles(bundles) {
   return bundles.filter(bundle => eventCategoryForType(bundle.event_type) === state.activeCategory);
 }
 
+function defaultSelectedBundle(bundles) {
+  return bundles.find(bundle => bundle.raw_clip_available) || bundles[0];
+}
+
 async function loadHealth() {
   try {
     const health = await fetchJson("/health");
@@ -257,7 +298,7 @@ async function loadBundles() {
   }
   renderBundleList();
   if (!state.selectedEventId && state.bundles.length) {
-    await selectBundle(state.bundles[0].event_id);
+    await selectBundle(defaultSelectedBundle(state.bundles).event_id);
   }
 }
 
@@ -282,13 +323,15 @@ function renderBundleList() {
     main.textContent = eventTypeLabel(bundle.event_type) || "事件";
     const sub = document.createElement("span");
     sub.className = "bundle-sub";
+    const alarmTime = formatAlarmMachineTime(bundle.alarm_machine_time);
     sub.textContent = [
       eventCategoryLabel(bundle.event_type),
       bundle.source_id || bundle.camera_id || "未知摄像头",
+      alarmTime ? `报警 ${alarmTime}` : "",
       clipStatusLabel(bundle.clip_status),
       evidenceStatusLabel(bundle.visual_evidence_status),
       `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
-    ].join(" | ");
+    ].filter(Boolean).join(" | ");
     button.append(main, sub);
     button.addEventListener("click", () => selectBundle(bundle.event_id));
     dom.bundleList.appendChild(button);
@@ -1055,6 +1098,15 @@ function renderDetails() {
   setText("eventType", eventTypeLabel(event.event_type || summary.event_type));
   setText("sourceId", event.source_id || summary.source_id);
   setText("cameraId", event.camera_id || summary.camera_id);
+  setText("alarmMachineTime", formatAlarmMachineTime(
+    state.manifest?.alarm_machine_time ||
+    event.alarm_machine_time ||
+    event.created_at ||
+    metadata.alarm_machine_time ||
+    metadata.created_at ||
+    summary.alarm_machine_time ||
+    summary.event_created_at
+  ));
   setText("rawClipStatus", clipStatusLabel(clipStatus));
   setText("clipValidation", corrupt ? `录像已生成，画面质量需复核` : "已验证");
   setText("firstVideoPts", state.firstVideoFramePts);

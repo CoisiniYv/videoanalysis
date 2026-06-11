@@ -16,6 +16,9 @@ let currentRules = [];
 
 /* ---- DOM refs ---- */
 const statusEl = document.getElementById("status");
+const themeToggleBtn = document.getElementById("theme-toggle");
+const themeToggleIconEl = document.getElementById("theme-toggle-icon");
+const themeToggleLabelEl = document.getElementById("theme-toggle-label");
 const errorBox = document.getElementById("error-box");
 const successBox = document.getElementById("success-box");
 const apiUrlEl = document.getElementById("api-url");
@@ -48,6 +51,7 @@ const galleryEl = document.getElementById("gallery");
 const faceRegistrationSummaryEl = document.getElementById("face-registration-summary");
 const faceRegistrationResultEl = document.getElementById("face-registration-result");
 const previewDeleteSelectedPersonBtn = document.getElementById("preview-delete-selected-person");
+const THEME_STORAGE_KEY = "operator-theme";
 
 /* ---- API URL display ---- */
 apiUrlEl.textContent = window.location.origin + API;
@@ -275,6 +279,38 @@ function showSuccess(msg) {
 function clearMessages() {
   errorBox.hidden = true;
   successBox.hidden = true;
+}
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme, options = {}) {
+  const normalized = theme === "dark" ? "dark" : "light";
+  if (normalized === "dark") {
+    document.documentElement.dataset.theme = "dark";
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+  if (themeToggleBtn) {
+    themeToggleBtn.setAttribute("aria-pressed", normalized === "dark" ? "true" : "false");
+    themeToggleBtn.setAttribute(
+      "aria-label",
+      normalized === "dark" ? "切换浅色模式" : "切换黑夜模式"
+    );
+    themeToggleBtn.title = normalized === "dark" ? "切换浅色模式" : "切换黑夜模式";
+  }
+  if (themeToggleIconEl) {
+    themeToggleIconEl.textContent = normalized === "dark" ? "☀" : "☾";
+  }
+  if (themeToggleLabelEl) {
+    themeToggleLabelEl.textContent = normalized === "dark" ? "浅色" : "黑夜";
+  }
+  if (options.persist) {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch (_err) {}
+  }
 }
 
 async function request(path, options = {}) {
@@ -1265,6 +1301,9 @@ document.getElementById("restart-runtime").addEventListener("click", () => {
   clearMessages();
   restartRuntime().catch((e) => showError(`运行时受控重启失败：${e.message}`));
 });
+themeToggleBtn?.addEventListener("click", () => {
+  applyTheme(currentTheme() === "dark" ? "light" : "dark", { persist: true });
+});
 saveQuickAlgorithmsBtn?.addEventListener("click", () => {
   saveQuickAlgorithmControls().catch((e) => showError(e.message));
 });
@@ -1321,6 +1360,7 @@ document.querySelectorAll("[data-template]").forEach((button) => {
 });
 
 /* ---- Init ---- */
+applyTheme(currentTheme());
 loadCameras()
   .then(() => {
     if (window.location.hash === "#people") {

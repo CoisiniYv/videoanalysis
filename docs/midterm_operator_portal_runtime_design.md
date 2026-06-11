@@ -1,6 +1,6 @@
 # Midterm Operator Portal Runtime Design
 
-Date: 2026-06-10
+Date: 2026-06-11
 
 This document records the current midterm operator portal design and the changes
 landed for the 8090 single-entry operator workflow.
@@ -36,7 +36,8 @@ The 8090 portal provides four customer-facing work areas:
 - 人员与人脸: list people/gallery rows and upload still images for face
   registration through `/api/v1/people/register-face`.
 - 告警证据: browse file-based evidence bundles through the existing 8090
-  `/api/bundles` APIs, with front-end alarm category grouping.
+  `/api/bundles` APIs, with front-end alarm category grouping and an
+  operator-visible alarm machine time.
 - 存储维护: preview storage cleanup jobs through the internal API proxy.
 
 Camera and people calls are same-origin `/api/v1/*` requests from the browser.
@@ -49,6 +50,48 @@ current stage boundary is documented in
 fully implemented behavior evidence path, some behavior rules are partial or
 config-only, and face algorithm switches are currently saved/exported but not
 per-camera runtime gates.
+
+## Alarm Machine Time
+
+The 8090 evidence page must show when the alarm happened according to the
+machine clock. This is intentionally separate from the video playback time and
+from frame-relative PTS values.
+
+The operator-visible fields are:
+
+- evidence list: `报警 YYYY-MM-DD HH:mm:ss`
+- evidence detail, 事件信息: `报警机器时间`
+
+The native 8090 evidence API exposes the raw value and its source:
+
+```json
+{
+  "alarm_machine_time": "2026-06-10T16:27:47.960000Z",
+  "alarm_machine_time_source": "event.event_ts_ms"
+}
+```
+
+Preferred source for new bundles is `metadata.json`:
+
+```json
+{
+  "event": {
+    "created_at": "2026-06-11T02:05:06+00:00",
+    "alarm_machine_time": "2026-06-11T02:05:06+00:00",
+    "alarm_machine_time_source": "events.created_at"
+  }
+}
+```
+
+For historical bundles, `services/evidence-viewer/app/evidence_index.py` falls
+back only to values that look like real Unix epoch milliseconds. It may use
+`event.event_ts_ms`, `event.timestamp_ms`, or a timestamp embedded in
+`event.source_event_id`. Small video-relative timestamps are deliberately not
+treated as machine time.
+
+The browser formats the value in local time as `YYYY-MM-DD HH:mm:ss`. If no
+trusted value exists, the detail field remains `-` and the list omits the alarm
+time fragment.
 
 ## Face Registration Runtime
 
@@ -181,6 +224,7 @@ The current verified checks for this design are:
 
 ```bash
 python -m pytest \
+  harness/tests/test_evidence_viewer_alarm_machine_time.py \
   harness/tests/test_c1g1b_operator_frontend_static.py \
   harness/tests/test_operator_face_registration_static.py \
   harness/tests/test_c1f4c_evidence_viewer_contract.py \
@@ -193,6 +237,8 @@ python -m pytest \
 python -m py_compile \
   services/evidence-viewer/app/main.py \
   services/evidence-viewer/app/config.py \
+  services/evidence-viewer/app/evidence_index.py \
+  services/media-worker/app/worker.py \
   services/api/app/main.py \
   services/api/app/routers/people.py \
   services/api/app/repositories/people.py \

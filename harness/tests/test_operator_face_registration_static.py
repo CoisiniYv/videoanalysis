@@ -48,10 +48,13 @@ def test_operator_page_is_chinese_console_ui() -> None:
     assert "摄像头管理" in html
     assert "人员与人脸" in html
     assert "告警证据" in html
+    assert "报警机器时间" in html
     assert "人脸注册" in html
     assert "人脸图库" in html
     assert "人脸图片" in html
     assert "开始注册" in html
+    assert "theme-toggle" in html
+    assert "黑夜" in html
 
 
 def test_operator_customer_view_hides_internal_debug_fields() -> None:
@@ -144,3 +147,26 @@ def test_operator_portal_is_served_by_evidence_viewer_8090() -> None:
     assert "/static/evidence.js" in html
     assert "/operator/static" not in html
     assert "evidence-viewer" not in (html + js).lower()
+
+
+def test_operator_theme_toggle_is_frontend_only_and_persistent() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    js = _text(STATIC_ROOT / "operator.js")
+    css = _text(STATIC_ROOT / "style.css")
+    assert "style.css?v=dark-mode-20260611" in html
+    assert "operator.js?v=dark-mode-20260611" in html
+    assert "operator-theme" in html
+    assert "operator-theme" in js
+    assert "theme-toggle" in js
+    assert 'data-theme="dark"' not in html
+    assert ':root[data-theme="dark"]' in css
+
+
+def test_operator_evidence_page_shows_alarm_machine_time() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    evidence_js = _text(STATIC_ROOT / "evidence.js")
+    assert 'id="alarmMachineTime"' in html
+    assert "/static/evidence.js?v=" in html
+    assert "formatAlarmMachineTime" in evidence_js
+    assert "alarm_machine_time" in evidence_js
+    assert "报警" in evidence_js
