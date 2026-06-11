@@ -303,6 +303,15 @@ def test_midterm_replay_storage_retention_covers_proof_wait() -> None:
     assert rocksdb["compaction_period"]["secs"] >= 120
 
 
+def test_midterm_replay_duration_extra_slack_default_is_bounded() -> None:
+    compose = _compose()
+    clip_env = compose["services"]["clip-worker"]["environment"]
+
+    slack = clip_env["REPLAY_DURATION_EXTRA_SLACK_S"]
+    assert slack == "${REPLAY_DURATION_EXTRA_SLACK_S:-5}"
+    assert _compose_env_default_int(slack, "REPLAY_DURATION_EXTRA_SLACK_S") <= 5
+
+
 def test_midterm_evidence_version_is_project_named() -> None:
     compose = _compose()
     env_file = _env()

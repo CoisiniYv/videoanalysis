@@ -818,24 +818,42 @@ def _apply_replay_anchor_to_request(
                 int(requested_start_pts),
                 int(decodable_start_pts),
             )
-            replay_duration_seconds = max(
+            replay_duration_base_seconds = max(
                 (int(requested_end_pts) - job_start_pts)
                 / PTS_TIME_BASE,
                 float(pre_seconds + post_seconds),
             )
+            replay_duration_seconds = replay_duration_base_seconds
+            anchor_before_start_guard_s = 0.0
             if int(anchor_keyframe_pts) <= int(requested_start_pts):
                 # Replay may emit from the decoder keyframe before the requested
                 # anchor while the stop condition counts from that first emitted
                 # frame. Add a guard so the emitted stream still reaches
                 # requested_end_pts before media-worker crops the final bundle.
-                replay_duration_seconds += max(float(pre_seconds + post_seconds), 1.0) + 1.0
+                anchor_before_start_guard_s = max(
+                    float(pre_seconds + post_seconds),
+                    1.0,
+                ) + 1.0
+                replay_duration_seconds += anchor_before_start_guard_s
             extra_slack_s = max(float(replay_duration_extra_slack_s), 0.0)
+            updated["replay_duration_base_seconds"] = replay_duration_base_seconds
+            updated["replay_duration_anchor_before_start_guard_used"] = (
+                anchor_before_start_guard_s > 0
+            )
+            updated["replay_duration_anchor_before_start_guard_s"] = (
+                anchor_before_start_guard_s
+            )
+            updated["replay_duration_before_slack_s"] = replay_duration_seconds
             if extra_slack_s:
                 replay_duration_seconds += extra_slack_s
                 updated["replay_duration_extra_slack_s"] = extra_slack_s
             updated["replay_duration_seconds"] = replay_duration_seconds
         else:
             extra_slack_s = max(float(replay_duration_extra_slack_s), 0.0)
+            updated["replay_duration_base_seconds"] = float(pre_seconds + post_seconds)
+            updated["replay_duration_anchor_before_start_guard_used"] = False
+            updated["replay_duration_anchor_before_start_guard_s"] = 0.0
+            updated["replay_duration_before_slack_s"] = float(pre_seconds + post_seconds)
             if extra_slack_s:
                 updated["replay_duration_extra_slack_s"] = extra_slack_s
             updated["replay_duration_seconds"] = (
@@ -1112,7 +1130,10 @@ def _prepare_post_savant_replay_request(
                     "post_window_frame_pts=%s post_window_frame_uuid=%s "
                     "post_window_stream_id=%s "
                     "post_window_proof_only=true start_window_coverage_only=true "
-                    "replay_offset_seconds=%s replay_duration_seconds=%s "
+                    "replay_offset_seconds=%s replay_duration_base_seconds=%s "
+                    "replay_duration_anchor_before_start_guard_used=%s "
+                    "replay_duration_anchor_before_start_guard_s=%s "
+                    "replay_duration_before_slack_s=%s replay_duration_seconds=%s "
                     "replay_duration_extra_slack_s=%s",
                     req.get("request_id"),
                     source_id,
@@ -1128,6 +1149,10 @@ def _prepare_post_savant_replay_request(
                     proofs.post_window_frame.frame_uuid,
                     proofs.post_window_frame.stream_id,
                     updated_req.get("replay_offset_seconds"),
+                    updated_req.get("replay_duration_base_seconds"),
+                    updated_req.get("replay_duration_anchor_before_start_guard_used"),
+                    updated_req.get("replay_duration_anchor_before_start_guard_s"),
+                    updated_req.get("replay_duration_before_slack_s"),
                     updated_req.get("replay_duration_seconds"),
                     updated_req.get("replay_duration_extra_slack_s"),
                 )
@@ -1194,6 +1219,10 @@ def _replay_job_labels(
         "post_window_frame_annotation_stream_id",
         "frame_domain_proof_method",
         "replay_stop_strategy",
+        "replay_duration_base_seconds",
+        "replay_duration_anchor_before_start_guard_used",
+        "replay_duration_anchor_before_start_guard_s",
+        "replay_duration_before_slack_s",
         "replay_duration_extra_slack_s",
         "replay_duration_seconds",
         "runtime_epoch_id",
