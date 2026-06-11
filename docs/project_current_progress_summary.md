@@ -13,6 +13,10 @@
 `behavior.intrusion` 入侵检测证据链路为当前最完整基线；其他算法开关仍按不同
 成熟度分层管理。
 
+2026-06-11 的运行态、算法齐全度、未实现项和下一步实现计划已固化到
+`docs/midterm_progress_snapshot_2026-06-11.md`，后续继续计划应以该快照作为
+对比基线。
+
 ```text
 RTSP -> Replay storage -> Savant inference -> Redis/PostgreSQL
   -> event-worker -> clip-worker -> Replay job -> video-file-sink
@@ -203,6 +207,7 @@ sink path 和 current epoch 一致时允许发布 evidence。
 ## 详细文档索引
 
 - 当前主线：`docs/current_mainline_status.md`
+- 当前进度快照：`docs/midterm_progress_snapshot_2026-06-11.md`
 - 部署说明：`docs/midterm_deployment.md`
 - 8090 对接：`docs/midterm_8090_port_integration.md`
 - 算法开关状态：`docs/midterm_operator_algorithm_controls_runtime_status.md`

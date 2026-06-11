@@ -34,6 +34,8 @@ It intentionally avoids historical codename files in the active deployment surfa
   8090 listing `3acfac74-6c54-4045-820b-b659df3894da`.
 - Operator algorithm-control runtime status:
   `docs/midterm_operator_algorithm_controls_runtime_status.md`.
+- 2026-06-11 progress snapshot and next-plan baseline:
+  `docs/midterm_progress_snapshot_2026-06-11.md`.
 - Current Replay intrusion clip-duration diagnosis:
   `docs/midterm_replay_intrusion_clip_duration_diagnosis.md`.
 - Replay routing-id mismatch recovery:
