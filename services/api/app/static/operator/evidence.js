@@ -33,7 +33,8 @@ const state = {
   sourceHeight: DEFAULT_SOURCE_HEIGHT,
   warnings: new Set(),
   timeOffsetFallbackUsed: false,
-  frameDurationMs: null
+  frameDurationMs: null,
+  frameLookup: null
 };
 
 const dom = {
@@ -70,6 +71,12 @@ const ctx = dom.canvas.getContext("2d");
 function numberOrNull(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function textOrNull(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text ? text : null;
 }
 
 function addWarning(message) {
@@ -322,6 +329,7 @@ async function selectBundle(eventId, options = {}) {
   const first = firstFrameWithPts(state.sinkRecords);
   state.firstVideoFramePts = first ? Number(first.pts) : null;
   state.frameDurationMs = inferFrameDurationMs(state.sinkRecords);
+  state.frameLookup = buildSinkFrameLookup(state.sinkRecords);
   state.sourceWidth = Number(first?.width || dom.video.videoWidth || DEFAULT_SOURCE_WIDTH);
   state.sourceHeight = Number(first?.height || dom.video.videoHeight || DEFAULT_SOURCE_HEIGHT);
   if (state.firstVideoFramePts === null) {
@@ -348,6 +356,30 @@ function firstFrameWithPts(records) {
   return records.find(record => Number.isFinite(Number(record.pts))) || null;
 }
 
+function buildSinkFrameLookup(records) {
+  const lookup = {
+    byUuid: new Map(),
+    byPts: new Map(),
+    byIndex: new Map()
+  };
+  (records || []).forEach((record, index) => {
+    if (!record || typeof record !== "object") return;
+    const frameUuid = textOrNull(record.frame_uuid ?? record.uuid);
+    const framePts = numberOrNull(record.pts ?? record.frame_pts);
+    const frameIndex = numberOrNull(record.clip_frame_index ?? record.frame_num ?? index);
+    if (frameUuid && !lookup.byUuid.has(frameUuid)) {
+      lookup.byUuid.set(frameUuid, record);
+    }
+    if (framePts !== null && !lookup.byPts.has(String(framePts))) {
+      lookup.byPts.set(String(framePts), record);
+    }
+    if (frameIndex !== null && !lookup.byIndex.has(String(frameIndex))) {
+      lookup.byIndex.set(String(frameIndex), record);
+    }
+  });
+  return lookup;
+}
+
 function inferFrameDurationMs(records) {
   const ptsValues = (records || [])
     .map(record => numberOrNull(record.pts ?? record.frame_pts))
@@ -364,40 +396,69 @@ function inferFrameDurationMs(records) {
   return deltas.length % 2 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
 }
 
-function annotationTimeSeconds(annotation, firstVideoFramePts, frameDurationMs = null) {
+function timeSecondsFromSinkFrame(record, firstVideoFramePts) {
+  if (!record) return null;
+  const framePts = numberOrNull(record.pts ?? record.frame_pts);
+  if (framePts !== null && firstVideoFramePts !== null) {
+    return (framePts - firstVideoFramePts) / NS_PER_SECOND;
+  }
+  return null;
+}
+
+function warnIfTimeDisagrees(candidateSeconds, fallbackSeconds, warning) {
+  if (
+    candidateSeconds !== null &&
+    fallbackSeconds !== null &&
+    Math.abs(candidateSeconds - fallbackSeconds) > 0.5
+  ) {
+    addWarning(warning);
+  }
+}
+
+function annotationTimeSeconds(annotation, firstVideoFramePts, frameDurationMs = null, frameLookup = null) {
   const tMs = numberOrNull(annotation.t_ms);
   const tS = numberOrNull(annotation.t_s);
-  const framePts = numberOrNull(annotation.frame_pts);
+  const explicitTimeSec = tMs !== null ? tMs / 1000 : tS;
+  const frameUuid = textOrNull(annotation.frame_uuid ?? annotation.uuid);
+  const framePts = numberOrNull(annotation.frame_pts ?? annotation.pts);
   let framePtsTimeSec = null;
   if (framePts !== null && firstVideoFramePts !== null) {
     framePtsTimeSec = (framePts - firstVideoFramePts) / NS_PER_SECOND;
   }
-  if (tMs !== null) {
-    if (framePtsTimeSec !== null && Math.abs((tMs / 1000) - framePtsTimeSec) > 0.5) {
-      addWarning("t_ms_frame_pts_disagreement");
+
+  if (frameUuid && frameLookup?.byUuid?.has(frameUuid)) {
+    const uuidTimeSec = timeSecondsFromSinkFrame(
+      frameLookup.byUuid.get(frameUuid),
+      firstVideoFramePts
+    );
+    if (uuidTimeSec !== null) {
+      warnIfTimeDisagrees(uuidTimeSec, explicitTimeSec, "time_offset_frame_uuid_disagreement");
+      return {
+        timeSec: uuidTimeSec,
+        mode: "frame_uuid"
+      };
     }
-    return {
-      timeSec: tMs / 1000,
-      mode: "t_ms"
-    };
   }
-  if (tS !== null) {
-    if (framePtsTimeSec !== null && Math.abs(tS - framePtsTimeSec) > 0.5) {
-      addWarning("t_ms_frame_pts_disagreement");
+  if (framePts !== null) {
+    const ptsRecord = frameLookup?.byPts?.get(String(framePts));
+    const ptsTimeSec = timeSecondsFromSinkFrame(ptsRecord, firstVideoFramePts) ?? framePtsTimeSec;
+    if (ptsTimeSec !== null) {
+      warnIfTimeDisagrees(ptsTimeSec, explicitTimeSec, "time_offset_frame_pts_disagreement");
+      return {
+        timeSec: ptsTimeSec,
+        mode: ptsRecord ? "frame_pts" : "frame_pts_fallback"
+      };
     }
-    return {
-      timeSec: tS,
-      mode: "t_s"
-    };
-  }
-  const timeOffsetMs = numberOrNull(annotation.time_offset_ms);
-  if (timeOffsetMs !== null) {
-    return {
-      timeSec: timeOffsetMs / 1000,
-      mode: "time_offset_ms_fallback"
-    };
   }
   const clipFrameIndex = numberOrNull(annotation.clip_frame_index);
+  const indexRecord = clipFrameIndex !== null ? frameLookup?.byIndex?.get(String(clipFrameIndex)) : null;
+  const indexTimeSec = timeSecondsFromSinkFrame(indexRecord, firstVideoFramePts);
+  if (indexTimeSec !== null) {
+    return {
+      timeSec: indexTimeSec,
+      mode: "clip_frame_index"
+    };
+  }
   const safeFrameDurationMs = numberOrNull(annotation.clip_frame_duration_ms || annotation.frame_duration_ms || frameDurationMs);
   if (clipFrameIndex !== null && safeFrameDurationMs !== null && safeFrameDurationMs > 0) {
     return {
@@ -405,12 +466,31 @@ function annotationTimeSeconds(annotation, firstVideoFramePts, frameDurationMs =
       mode: "clip_frame_index"
     };
   }
-  if (framePtsTimeSec !== null) {
+  if (tMs !== null) {
     state.timeOffsetFallbackUsed = true;
-    addWarning("frame_pts_fallback");
+    addWarning("time_offset_ms_fallback");
+    warnIfTimeDisagrees(tMs / 1000, framePtsTimeSec, "time_offset_frame_pts_disagreement");
     return {
-      timeSec: framePtsTimeSec,
-      mode: "frame_pts_fallback"
+      timeSec: tMs / 1000,
+      mode: "t_ms_fallback"
+    };
+  }
+  if (tS !== null) {
+    state.timeOffsetFallbackUsed = true;
+    addWarning("time_offset_s_fallback");
+    warnIfTimeDisagrees(tS, framePtsTimeSec, "time_offset_frame_pts_disagreement");
+    return {
+      timeSec: tS,
+      mode: "t_s_fallback"
+    };
+  }
+  const timeOffsetMs = numberOrNull(annotation.time_offset_ms);
+  if (timeOffsetMs !== null) {
+    state.timeOffsetFallbackUsed = true;
+    addWarning("time_offset_ms_fallback");
+    return {
+      timeSec: timeOffsetMs / 1000,
+      mode: "time_offset_ms_fallback"
     };
   }
   addWarning("annotation_missing_frame_pts_and_time_offset_ms");
@@ -422,7 +502,12 @@ function prepareAnnotations() {
   state.preparedAnnotations = state.annotations
     .filter(line => line && line.displayable !== false)
     .map((line, index) => {
-      const timing = annotationTimeSeconds(line, state.firstVideoFramePts, state.frameDurationMs);
+      const timing = annotationTimeSeconds(
+        line,
+        state.firstVideoFramePts,
+        state.frameDurationMs,
+        state.frameLookup
+      );
       return {
         ...line,
         _index: index,

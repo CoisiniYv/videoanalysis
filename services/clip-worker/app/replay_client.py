@@ -170,6 +170,7 @@ class ReplayClient:
             stop_condition_mode=stop_condition_mode,
             fallback_reason=fallback_reason,
             fps=fps,
+            force_constant_cadence=_env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True),
             offset_seconds_override=offset_seconds_override,
             duration_seconds_override=duration_seconds_override,
         )
@@ -188,24 +189,8 @@ class ReplayClient:
             )
 
             fallback_payloads: list[Dict[str, Any]] = []
-            if stop_condition_mode == "ts_delta_sec":
-                fallback_payloads.append(
-                    build_job_payload(
-                        source_id=source_id,
-                        keyframe_uuid=keyframe_uuid,
-                        pre_seconds=pre_seconds,
-                        post_seconds=post_seconds,
-                        sink_endpoint=sink_endpoint,
-                        labels=labels,
-                        stop_condition_mode="frame_count",
-                        fallback_reason="replay_api_rejected_ts_delta_sec",
-                        fps=fps,
-                        offset_seconds_override=offset_seconds_override,
-                        duration_seconds_override=duration_seconds_override,
-                    )
-                )
-
-            if not _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True):
+            primary_constant_cadence = _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True)
+            if not primary_constant_cadence:
                 fallback_payloads.append(
                     build_job_payload(
                         source_id=source_id,
@@ -219,6 +204,7 @@ class ReplayClient:
                             "replay_api_rejected_without_constant_cadence"
                         ),
                         fps=fps,
+                        force_constant_cadence=True,
                         offset_seconds_override=offset_seconds_override,
                         duration_seconds_override=duration_seconds_override,
                     )
@@ -237,10 +223,28 @@ class ReplayClient:
                                 "replay_api_rejected_ts_delta_sec_constant_cadence"
                             ),
                             fps=fps,
+                            force_constant_cadence=True,
                             offset_seconds_override=offset_seconds_override,
                             duration_seconds_override=duration_seconds_override,
                         )
                     )
+            elif stop_condition_mode == "ts_delta_sec":
+                fallback_payloads.append(
+                    build_job_payload(
+                        source_id=source_id,
+                        keyframe_uuid=keyframe_uuid,
+                        pre_seconds=pre_seconds,
+                        post_seconds=post_seconds,
+                        sink_endpoint=sink_endpoint,
+                        labels=labels,
+                        stop_condition_mode="frame_count",
+                        fallback_reason="replay_api_rejected_ts_delta_sec",
+                        fps=fps,
+                        force_constant_cadence=True,
+                        offset_seconds_override=offset_seconds_override,
+                        duration_seconds_override=duration_seconds_override,
+                    )
+                )
 
             seen_payloads: set[str] = set()
             for fallback_payload in fallback_payloads:
@@ -428,6 +432,11 @@ def build_job_payload(
         stop_condition = {"frame_count": total_frames}
     frame_duration = {"secs": 0, "nanos": frame_duration_nanos}
     max_delivery_duration_s = _max_delivery_duration_seconds(expected_seconds)
+    use_constant_cadence = (
+        _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True)
+        if force_constant_cadence is None
+        else bool(force_constant_cadence)
+    )
     configuration: Dict[str, Any] = {
         "ts_sync": True,
         "skip_intermediary_eos": False,
@@ -440,13 +449,18 @@ def build_job_payload(
         "max_delivery_duration": {"secs": max_delivery_duration_s, "nanos": 0},
         "send_metadata_only": False,
         "labels": labels or {},
-        # Current Replay API requires these timing fields with ts_sync. The
-        # evidence window is still bounded by stop_condition, preferably
-        # ts_delta_sec; frame_count must not be treated as the evidence clock.
-        "ts_discrepancy_fix_duration": frame_duration,
-        "min_duration": frame_duration,
-        "max_duration": frame_duration,
     }
+    if use_constant_cadence:
+        configuration.update(
+            {
+                # Constant cadence is kept as an API-compatibility fallback. The
+                # evidence window is still bounded by stop_condition, preferably
+                # ts_delta_sec; frame_count must not be treated as the evidence clock.
+                "ts_discrepancy_fix_duration": frame_duration,
+                "min_duration": frame_duration,
+                "max_duration": frame_duration,
+            }
+        )
     payload = {
         "sink": {
             "url": sink_endpoint,
