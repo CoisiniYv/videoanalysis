@@ -11,6 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "infra" / "docker-compose.midterm.yml"
 ENV_FILE = ROOT / "infra" / "env" / "midterm.env"
+SOURCES_CONFIG = ROOT / "infra" / "generated" / "sources.generated.yml"
 API_FACE_RUNTIME_DOCKERFILE = ROOT / "services" / "api" / "Dockerfile.face-runtime"
 API_FACE_RUNTIME_REQUIREMENTS = ROOT / "services" / "api" / "requirements.face-runtime.txt"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
@@ -48,6 +49,28 @@ def _env() -> dict[str, str]:
 
 def _replay_config() -> dict:
     return json.loads(_text(REPLAY_CONFIG))
+
+
+def _sources_config() -> dict:
+    return yaml.safe_load(_text(SOURCES_CONFIG))
+
+
+def _enabled_rtsp_source_count() -> int:
+    sources = _sources_config()["sources"]
+    return sum(
+        1
+        for source in sources.values()
+        if source.get("enabled") is True
+        and source.get("adapter_type") == "gstreamer"
+        and str(source.get("uri") or "").startswith(("rtsp://", "rtsps://"))
+    )
+
+
+def _compose_env_default_int(value: str, env_name: str) -> int:
+    prefix = "${" + env_name + ":-"
+    assert value.startswith(prefix)
+    assert value.endswith("}")
+    return int(value[len(prefix):-1])
 
 
 def test_midterm_deployment_files_exist() -> None:
@@ -94,6 +117,8 @@ def test_runtime_doctor_is_midterm_named() -> None:
     assert "docker-compose.midterm.yml" in text
     assert "config.midterm.json" in text
     assert "cameras.midterm.yml" in text
+    assert "enabled_rtsp_source_count" in text
+    assert "recommended_max_parallel_streams" in text
     assert "video-analytics-midterm" in text
 
 
@@ -205,7 +230,15 @@ def test_midterm_source_id_and_camera_config_are_neutral() -> None:
     ]
 
     assert "SOURCE_ID" not in compose["services"]["savant-security"]["environment"]
-    assert compose["services"]["savant-security"]["environment"]["MAX_PARALLEL_STREAMS"] == "2"
+    max_parallel_streams = compose["services"]["savant-security"]["environment"][
+        "MAX_PARALLEL_STREAMS"
+    ]
+    assert max_parallel_streams == "${MAX_PARALLEL_STREAMS:-4}"
+    assert compose["services"]["savant-security"]["environment"]["BATCH_SIZE"] == "1"
+    assert _compose_env_default_int(max_parallel_streams, "MAX_PARALLEL_STREAMS") >= max(
+        2,
+        _enabled_rtsp_source_count() * 2,
+    )
     assert compose["services"]["source-adapter"]["environment"]["SOURCE_ID"] == "primary_rtsp"
     assert compose["services"]["event-worker"]["environment"]["RECORDING_SOURCE_ID"] == "${RECORDING_SOURCE_ID:-}"
     assert compose["services"]["event-worker"]["environment"]["DEFAULT_REPLAY_SOURCE_ID"] == "primary_rtsp"
@@ -260,6 +293,14 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
         "${parameters.face_embedding_infer_interval}"
     )
     assert face_worker_env["WATCHLIST_THRESHOLD"] == "${WATCHLIST_THRESHOLD:-0.60}"
+
+
+def test_midterm_replay_storage_retention_covers_proof_wait() -> None:
+    replay = _replay_config()
+    rocksdb = replay["storage"]["rocksdb"]
+
+    assert rocksdb["data_expiration_ttl"]["secs"] >= 300
+    assert rocksdb["compaction_period"]["secs"] >= 120
 
 
 def test_midterm_evidence_version_is_project_named() -> None:

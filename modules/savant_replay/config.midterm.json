@@ -41,8 +41,8 @@
   "storage": {
     "rocksdb": {
       "path": "/opt/rocksdb",
-      "data_expiration_ttl": {"secs": 30, "nanos": 0},
-      "compaction_period": {"secs": 30, "nanos": 0}
+      "data_expiration_ttl": {"secs": 300, "nanos": 0},
+      "compaction_period": {"secs": 120, "nanos": 0}
     }
   }
 }

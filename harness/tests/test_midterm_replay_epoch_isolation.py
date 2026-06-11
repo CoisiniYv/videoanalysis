@@ -40,6 +40,10 @@ class _FakeRedis:
         return _FakeRedisClient()
 
 
+def _delivery_duration_seconds(payload: dict[str, Any]) -> int:
+    return int(payload["configuration"]["max_delivery_duration"]["secs"])
+
+
 def test_runtime_epoch_id_rejects_unsafe_segments() -> None:
     runtime_apply = _activate("api", "app.services.runtime_apply")
 
@@ -110,6 +114,84 @@ def test_record_request_and_replay_job_carry_runtime_epoch() -> None:
     assert payload["configuration"]["resulting_stream_id"] == (
         f"replay-{CURRENT_EPOCH}-event-{EVENT_ID}"
     )
+
+
+def test_replay_job_default_delivery_duration_keeps_minimum() -> None:
+    replay_client = _activate("clip-worker", "app.replay_client")
+
+    payload = replay_client.build_job_payload(
+        source_id="primary_rtsp",
+        keyframe_uuid="keyframe-1",
+        pre_seconds=5,
+        post_seconds=5,
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
+        stop_condition_mode="ts_delta_sec",
+        fps=24,
+    )
+
+    assert payload["configuration"]["max_delivery_duration"] == {"secs": 30, "nanos": 0}
+
+
+def test_replay_job_delivery_duration_follows_duration_override() -> None:
+    replay_client = _activate("clip-worker", "app.replay_client")
+
+    payload = replay_client.build_job_payload(
+        source_id="primary_rtsp",
+        keyframe_uuid="keyframe-1",
+        pre_seconds=5,
+        post_seconds=5,
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
+        stop_condition_mode="ts_delta_sec",
+        fps=24,
+        duration_seconds_override=36.0,
+    )
+
+    assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 36.0}}
+    assert _delivery_duration_seconds(payload) == 46
+    assert _delivery_duration_seconds(payload) > 36
+
+
+def test_replay_job_fallback_preserves_dynamic_delivery_duration(monkeypatch) -> None:
+    replay_client = _activate("clip-worker", "app.replay_client")
+    client = replay_client.ReplayClient("http://replay-service:8080")
+    submitted: list[dict[str, Any]] = []
+
+    def fake_submit(payload: dict[str, Any]) -> str:
+        submitted.append(payload)
+        if len(submitted) == 1:
+            request = replay_client.httpx.Request(
+                "PUT",
+                "http://replay-service:8080/api/v1/job",
+            )
+            response = replay_client.httpx.Response(
+                400,
+                request=request,
+                text="bad payload",
+            )
+            raise replay_client.httpx.HTTPStatusError(
+                "bad payload",
+                request=request,
+                response=response,
+            )
+        return "job-2"
+
+    monkeypatch.setattr(client, "_submit_job_payload", fake_submit)
+
+    job_id = client.create_job(
+        source_id="primary_rtsp",
+        keyframe_uuid="keyframe-1",
+        pre_seconds=5,
+        post_seconds=5,
+        sink_endpoint="dealer+connect:tcp://video-file-sink:6666",
+        stop_condition_mode="ts_delta_sec",
+        fps=24,
+        duration_seconds_override=36.0,
+    )
+
+    assert job_id == "job-2"
+    assert len(submitted) == 2
+    assert [_delivery_duration_seconds(payload) for payload in submitted] == [46, 46]
+    assert submitted[1]["fallback_reason"] == "replay_api_rejected_ts_delta_sec"
 
 
 def test_clip_worker_frame_annotation_lookup_filters_runtime_epoch() -> None:

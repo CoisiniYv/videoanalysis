@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from uuid import UUID
 from typing import Any, Dict, Optional
@@ -370,6 +371,18 @@ RELIABLE_SINK_OPTIONS: Dict[str, Any] = {
     "inflight_ops": 100,
 }
 
+MIN_DELIVERY_DURATION_S = 30
+DELIVERY_DURATION_EXTRA_SLACK_S = 10
+
+
+def _max_delivery_duration_seconds(expected_seconds: float) -> int:
+    # Replay delivery is real-time paced under ts_sync. The extra slack covers
+    # anchor_wait_duration plus one idle pause near the current max_idle_duration.
+    return max(
+        MIN_DELIVERY_DURATION_S,
+        int(math.ceil(max(float(expected_seconds), 0.0) + DELIVERY_DURATION_EXTRA_SLACK_S)),
+    )
+
 
 def build_job_payload(
     *,
@@ -414,6 +427,7 @@ def build_job_payload(
     else:
         stop_condition = {"frame_count": total_frames}
     frame_duration = {"secs": 0, "nanos": frame_duration_nanos}
+    max_delivery_duration_s = _max_delivery_duration_seconds(expected_seconds)
     configuration: Dict[str, Any] = {
         "ts_sync": True,
         "skip_intermediary_eos": False,
@@ -423,7 +437,7 @@ def build_job_payload(
         "resulting_stream_id": resulting_stream_id,
         "routing_labels": "bypass",
         "max_idle_duration": {"secs": 10, "nanos": 0},
-        "max_delivery_duration": {"secs": 30, "nanos": 0},
+        "max_delivery_duration": {"secs": max_delivery_duration_s, "nanos": 0},
         "send_metadata_only": False,
         "labels": labels or {},
         # Current Replay API requires these timing fields with ts_sync. The
