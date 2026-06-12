@@ -52,6 +52,12 @@ DEFAULT_POST_SAVANT_MAX_PTS_GAP_SEC = 2.0
 DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
     "/media/replay-sink-output/midterm/.current_epoch.json"
 )
+DEFAULT_MEDIA_WORKER_STATE_PATH = (
+    "/media/replay-sink-output/midterm/.media-worker.processed.json"
+)
+DEFAULT_SINK_SCAN_MAX_METADATA_FILES = 2000
+DEFAULT_MEDIA_PROBE_TIMEOUT_S = 30.0
+DEFAULT_MEDIA_DECODE_TIMEOUT_S = 120.0
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 INVALID_SINK_OUTPUT_MARKER = ".media-worker.invalid.json"
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
@@ -64,6 +70,14 @@ SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
     BUNDLE_STATUS_DURATION_GUARD_FAILED,
 )
 PERMANENT_INVALID_SINK_OUTPUT_REASONS = {"video_duration_unavailable"}
+_PROBE_METRICS = {
+    "ffprobe_invocation_count": 0,
+    "ffprobe_duration_ms": 0,
+    "ffmpeg_invocation_count": 0,
+    "ffmpeg_duration_ms": 0,
+    "imageio_ffmpeg_fallback_count": 0,
+    "imageio_ffmpeg_fallback_duration_ms": 0,
+}
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -96,34 +110,153 @@ def _parse_ndjson(filepath: Path) -> dict | None:
     return None
 
 
-def _find_metadata_files(sink_dir: str) -> list[dict]:
-    """Scan *sink_dir* for metadata.json files and return parsed contents."""
-    results = []
-    sink_path = Path(sink_dir)
-    if not sink_path.exists():
-        return results
+def _metadata_scan_limit(limit: int | None = None) -> int:
+    if limit is not None:
+        return max(int(limit), 1)
+    try:
+        return max(int(os.getenv("MEDIA_SINK_SCAN_MAX_METADATA_FILES", "")), 1)
+    except ValueError:
+        return DEFAULT_SINK_SCAN_MAX_METADATA_FILES
 
-    for meta_file in sink_path.rglob("metadata.json"):
-        data = _parse_ndjson(meta_file)
+
+def _load_scan_metadata_payload(meta_file: Path) -> dict | None:
+    data = _parse_ndjson(meta_file)
+    if isinstance(data, dict):
+        return data
+    try:
+        with open(meta_file, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        logger.debug("metadata file not finalized yet path=%s", meta_file)
+    except Exception:
+        logger.exception("failed to parse %s", meta_file)
+    return None
+
+
+def _incremental_metadata_paths(
+    sink_path: Path,
+    *,
+    processed_dirs: set[str] | None,
+) -> tuple[list[Path], bool]:
+    paths: list[Path] = []
+    root_metadata = sink_path / "metadata.json"
+    if root_metadata.is_file():
+        paths.append(root_metadata)
+    try:
+        children = sorted(sink_path.iterdir(), key=lambda path: path.name)
+    except FileNotFoundError:
+        return [], False
+    except OSError:
+        logger.exception("failed to list sink output dir path=%s", sink_path)
+        return [], False
+
+    direct_child_candidates_seen = False
+    for child in children:
+        if not child.is_dir():
+            continue
+        meta_file = child / "metadata.json"
+        if not meta_file.is_file():
+            continue
+        direct_child_candidates_seen = True
+        if processed_dirs is not None and str(child) in processed_dirs:
+            continue
+        paths.append(meta_file)
+    return paths, bool(paths or direct_child_candidates_seen)
+
+
+def _scan_metadata_files(
+    sink_dir: str,
+    *,
+    processed_dirs: set[str] | None = None,
+    max_metadata_files: int | None = None,
+) -> tuple[list[dict], dict]:
+    """Scan active sink output for metadata files with bounded fallback."""
+    started = time.monotonic()
+    sink_path = Path(sink_dir)
+    limit = _metadata_scan_limit(max_metadata_files)
+    stats = {
+        "sink_dir": str(sink_path),
+        "scan_mode": "missing",
+        "scan_duration_ms": 0,
+        "metadata_files_visited": 0,
+        "metadata_rows_loaded": 0,
+        "metadata_files_parsed": 0,
+        "metadata_files_truncated": False,
+        "rglob_fallback_used": False,
+        "processed_dirs_known": len(processed_dirs or set()),
+        "active_runtime_epoch_id": _current_runtime_epoch_id(sink_path),
+    }
+    results: list[dict] = []
+    if not sink_path.exists():
+        stats["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "media_sink_scan sink_dir=%s scan_mode=%s duration_ms=%s "
+            "metadata_files_visited=0 metadata_files_parsed=0 "
+            "rglob_fallback_used=false",
+            stats["sink_dir"],
+            stats["scan_mode"],
+            stats["scan_duration_ms"],
+        )
+        return results, stats
+
+    paths, incremental_available = _incremental_metadata_paths(
+        sink_path,
+        processed_dirs=processed_dirs,
+    )
+    if incremental_available:
+        stats["scan_mode"] = "active_epoch_incremental"
+    else:
+        stats["scan_mode"] = "fallback_rglob"
+        stats["rglob_fallback_used"] = True
+        paths = [
+            path
+            for path in sink_path.rglob("metadata.json")
+            if processed_dirs is None or str(path.parent) not in processed_dirs
+        ]
+
+    if len(paths) > limit:
+        stats["metadata_files_truncated"] = True
+        paths = paths[:limit]
+
+    stats["metadata_files_visited"] = len(paths)
+    for meta_file in paths:
+        data = _load_scan_metadata_payload(meta_file)
         if data is None:
-            # Try single JSON object as fallback
-            try:
-                with open(meta_file, "r") as f:
-                    data = json.load(f)
-            except json.JSONDecodeError:
-                logger.debug("metadata file not finalized yet path=%s", meta_file)
-                continue
-            except Exception:
-                logger.exception("failed to parse %s", meta_file)
-                continue
+            continue
         data["_meta_dir"] = str(meta_file.parent)
         results.append(data)
+        stats["metadata_files_parsed"] += 1
+        stats["metadata_rows_loaded"] += 1
         logger.info(
             "media_metadata_parsed path=%s source_id=%s event_id=%s",
             str(meta_file.parent),
             data.get("source_id", ""),
             data.get("labels", {}).get("event_id", data.get("event_id", "")),
         )
+
+    stats["scan_duration_ms"] = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "media_sink_scan sink_dir=%s scan_mode=%s active_runtime_epoch_id=%s "
+        "duration_ms=%s metadata_files_visited=%s metadata_files_parsed=%s "
+        "metadata_files_truncated=%s rglob_fallback_used=%s "
+        "processed_dirs_known=%s",
+        stats["sink_dir"],
+        stats["scan_mode"],
+        stats["active_runtime_epoch_id"],
+        stats["scan_duration_ms"],
+        stats["metadata_files_visited"],
+        stats["metadata_files_parsed"],
+        stats["metadata_files_truncated"],
+        stats["rglob_fallback_used"],
+        stats["processed_dirs_known"],
+    )
+    return results, stats
+
+
+def _find_metadata_files(sink_dir: str) -> list[dict]:
+    """Scan *sink_dir* for metadata.json files and return parsed contents."""
+    results, _stats = _scan_metadata_files(sink_dir)
     return results
 
 
@@ -289,6 +422,45 @@ def _to_int(value: object) -> int | None:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    value = _to_float(os.getenv(name))
+    if value is None or value <= 0:
+        return float(default)
+    return float(value)
+
+
+def _media_probe_timeout_s() -> float:
+    return _env_positive_float("MEDIA_PROBE_TIMEOUT_S", DEFAULT_MEDIA_PROBE_TIMEOUT_S)
+
+
+def _media_decode_timeout_s() -> float:
+    return _env_positive_float("MEDIA_DECODE_TIMEOUT_S", DEFAULT_MEDIA_DECODE_TIMEOUT_S)
+
+
+def _probe_metrics_snapshot() -> dict[str, int]:
+    return dict(_PROBE_METRICS)
+
+
+def _probe_metrics_delta(before: dict[str, int]) -> dict[str, int]:
+    return {
+        key: int(_PROBE_METRICS.get(key, 0)) - int(before.get(key, 0))
+        for key in _PROBE_METRICS
+    }
+
+
+def _record_probe_metric(tool: str, duration_s: float) -> None:
+    duration_ms = int(max(duration_s, 0.0) * 1000)
+    if tool == "ffprobe":
+        _PROBE_METRICS["ffprobe_invocation_count"] += 1
+        _PROBE_METRICS["ffprobe_duration_ms"] += duration_ms
+    elif tool == "imageio_ffmpeg":
+        _PROBE_METRICS["imageio_ffmpeg_fallback_count"] += 1
+        _PROBE_METRICS["imageio_ffmpeg_fallback_duration_ms"] += duration_ms
+    else:
+        _PROBE_METRICS["ffmpeg_invocation_count"] += 1
+        _PROBE_METRICS["ffmpeg_duration_ms"] += duration_ms
 
 
 def _parse_simple_camera_yaml(path: str) -> dict:
@@ -833,6 +1005,53 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
+def _media_worker_state_path(sink_dir: str | Path, configured: str | None = None) -> Path:
+    if configured:
+        return Path(configured)
+    env_value = os.getenv("MEDIA_WORKER_STATE_PATH")
+    if env_value:
+        return Path(env_value)
+    if sink_dir:
+        return _runtime_epoch_base_dir(sink_dir) / ".media-worker.processed.json"
+    return Path(DEFAULT_MEDIA_WORKER_STATE_PATH)
+
+
+def _load_processed_sink_state(path: str | Path | None) -> set[str]:
+    if path is None:
+        return set()
+    state_path = Path(path)
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except Exception:
+        logger.exception("failed to read media worker state path=%s", state_path)
+        return set()
+    raw_dirs = data.get("processed_dirs") if isinstance(data, dict) else data
+    if not isinstance(raw_dirs, list):
+        return set()
+    return {str(item) for item in raw_dirs if item}
+
+
+def _save_processed_sink_state(path: str | Path | None, processed_dirs: set[str]) -> None:
+    if path is None:
+        return
+    state_path = Path(path)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(
+            state_path,
+            {
+                "schema_version": "1.0",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "processed_dir_count": len(processed_dirs),
+                "processed_dirs": sorted(processed_dirs),
+            },
+        )
+    except Exception:
+        logger.exception("failed to write media worker state path=%s", state_path)
+
+
 def _json_isoformat(value: object) -> str:
     if value is None or value == "":
         return ""
@@ -904,13 +1123,15 @@ def _probe_duration_with_imageio_ffmpeg(path: str) -> float | None:
         import imageio_ffmpeg  # type: ignore
 
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        started = time.monotonic()
         result = subprocess.run(
             [ffmpeg, "-i", path],
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_media_probe_timeout_s(),
         )
+        _record_probe_metric("imageio_ffmpeg", time.monotonic() - started)
         match = re.search(
             r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
             result.stderr or "",
@@ -929,16 +1150,12 @@ def _probe_duration_with_imageio_ffmpeg(path: str) -> float | None:
                 )
                 return duration_value
 
-        _frames, duration = imageio_ffmpeg.count_frames_and_secs(path)
-        duration_value = float(duration)
-        if duration_value > 0:
-            logger.warning(
-                "ffprobe unavailable; duration probed via imageio_ffmpeg frame "
-                "count path=%s duration=%.6f",
-                path,
-                duration_value,
-            )
-            return duration_value
+        logger.warning(
+            "ffprobe unavailable; bounded imageio_ffmpeg duration fallback "
+            "did not return duration path=%s timeout_s=%.1f",
+            path,
+            _media_probe_timeout_s(),
+        )
     except Exception:
         logger.exception("imageio_ffmpeg duration fallback failed path=%s", path)
     return None
@@ -949,6 +1166,7 @@ def _probe_video_duration_seconds(path: str) -> float | None:
     ffprobe = shutil.which("ffprobe")
     if ffprobe:
         try:
+            started = time.monotonic()
             result = subprocess.run(
                 [
                     ffprobe,
@@ -963,8 +1181,9 @@ def _probe_video_duration_seconds(path: str) -> float | None:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_media_probe_timeout_s(),
             )
+            _record_probe_metric("ffprobe", time.monotonic() - started)
             if result.returncode == 0:
                 data = json.loads(result.stdout or "{}")
                 duration = _to_float((data.get("format") or {}).get("duration"))
@@ -1034,13 +1253,15 @@ def _probe_clip_decode(path: str) -> dict:
     result["probe_tool"] = ffmpeg
 
     try:
+        started = time.monotonic()
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-i", path, "-f", "null", "-"],
             check=False,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_media_decode_timeout_s(),
         )
+        _record_probe_metric("ffmpeg", time.monotonic() - started)
     except Exception as exc:
         logger.warning("clip decode validation failed path=%s error=%s", path, exc)
         result["probe_error"] = str(exc)
@@ -1629,12 +1850,21 @@ def _requested_duration_from_time_window(time_window: dict | None) -> float | No
     return (requested_end_pts - requested_start_pts) / 1_000_000_000.0
 
 
-def _post_savant_duration_guard(raw_clip_path: Path | None, time_window: dict | None) -> dict:
+def _post_savant_duration_guard(
+    raw_clip_path: Path | None,
+    time_window: dict | None,
+    *,
+    actual_duration: float | None = None,
+) -> dict:
     expected_duration = _requested_duration_from_time_window(time_window)
     actual_duration = (
-        _probe_video_duration_seconds(str(raw_clip_path))
-        if raw_clip_path is not None and raw_clip_path.is_file()
-        else None
+        actual_duration
+        if actual_duration is not None
+        else (
+            _probe_video_duration_seconds(str(raw_clip_path))
+            if raw_clip_path is not None and raw_clip_path.is_file()
+            else None
+        )
     )
     guard = _duration_guard(
         actual_duration,
@@ -2306,6 +2536,10 @@ def _finalize_post_savant_evidence_bundle(
     evidence_output_dir: str,
 ) -> dict:
     """Package post-Savant sink output as a production evidence bundle."""
+    finalize_started = time.monotonic()
+    probe_before = _probe_metrics_snapshot()
+    metadata_rows_loaded = 0
+    decoded_frame_count_duration_ms = 0
     event_context = _load_event_context(pg_conn, event_id)
     payload = event_context.get("payload", {})
     media = payload.get("media", {}) if isinstance(payload, dict) else {}
@@ -2343,6 +2577,8 @@ def _finalize_post_savant_evidence_bundle(
         for row in load_native_metadata(Path(metadata_file))
         if isinstance(row, dict) and _is_sink_video_frame(row)
     ]
+    metadata_rows_loaded += len(source_metadata_rows)
+    sink_metadata_rows_for_guard: list[dict] | None = None
     frame_cache_time_window = {
         "time_domain_crop_applied": False,
         **frame_cache_window,
@@ -2400,6 +2636,7 @@ def _finalize_post_savant_evidence_bundle(
                 crop_video_to_time_window=True,
             )
             _write_metadata_jsonl(sink_metadata_path, selected_rows)
+            sink_metadata_rows_for_guard = selected_rows
         except Exception as exc:
             logger.warning(
                 "frame_cache_time_domain_crop_failed event_id=%s error=%s",
@@ -2424,24 +2661,28 @@ def _finalize_post_savant_evidence_bundle(
                 "published_raw_clip": False,
             }
             shutil.copy2(metadata_file, sink_metadata_path)
+            sink_metadata_rows_for_guard = source_metadata_rows
     else:
         if not raw_clip_path.exists():
             shutil.copy2(source_video, raw_clip_path)
         shutil.copy2(metadata_file, sink_metadata_path)
+        sink_metadata_rows_for_guard = source_metadata_rows
     sink_metadata_rows = (
         []
         if metadata_has_objects
-        else load_native_metadata(sink_metadata_path)
+        else list(sink_metadata_rows_for_guard or load_native_metadata(sink_metadata_path))
     )
-    decoded_frame_count = (
-        None
-        if metadata_has_objects
-        else (
+    decoded_frame_count = None
+    if not metadata_has_objects:
+        decoded_started = time.monotonic()
+        decoded_frame_count = (
             read_decoded_video_frame_count(Path(raw_clip_path))
             if raw_clip_available and raw_clip_path.is_file()
             else 0
         )
-    )
+        decoded_frame_count_duration_ms = int(
+            (time.monotonic() - decoded_started) * 1000
+        )
 
     if metadata_has_objects:
         builder_event_metadata = {
@@ -2520,6 +2761,11 @@ def _finalize_post_savant_evidence_bundle(
                 "post_seconds": float(os.getenv("DEFAULT_POST_SECONDS", "5")),
             }
         )
+        raw_clip_duration = (
+            _probe_video_duration_seconds(str(raw_clip_path))
+            if raw_clip_available
+            else None
+        )
         sidecar_summary, sidecar_result = write_frame_cache_identity_sidecar(
             event=_event_for_frame_cache_sidecar(event_context),
             evidence_dir=str(output_dir),
@@ -2530,11 +2776,7 @@ def _finalize_post_savant_evidence_bundle(
             final_clip_context={
                 "raw_clip_path": str(raw_clip_path) if raw_clip_available else None,
                 "sink_metadata_path": str(sink_metadata_path),
-                "raw_clip_duration": (
-                    _probe_video_duration_seconds(str(raw_clip_path))
-                    if raw_clip_available
-                    else None
-                ),
+                "raw_clip_duration": raw_clip_duration,
                 "expected_event_t_s": frame_cache_time_window.get("expected_event_t_s"),
                 "event_projected_t_s": None,
                 "event_pts_inside_clip": None,
@@ -2565,13 +2807,21 @@ def _finalize_post_savant_evidence_bundle(
             summary_path=summary_path,
             summary=summary,
         )
+    if metadata_has_objects:
+        raw_clip_duration = None
     duration_guard = _post_savant_duration_guard(
         getattr(result, "raw_clip_path", None),
         result.summary.get("time_window") if isinstance(result.summary, dict) else None,
+        actual_duration=raw_clip_duration,
     )
     _merge_post_savant_duration_guard(result.summary, duration_guard)
+    sink_window_rows = (
+        sink_metadata_rows_for_guard
+        if sink_metadata_rows_for_guard is not None
+        else load_native_metadata(Path(result.sink_metadata_path))
+    )
     sink_window_guard = _sink_metadata_window_guard(
-        load_native_metadata(Path(result.sink_metadata_path)),
+        sink_window_rows,
         result.summary.get("time_window") if isinstance(result.summary, dict) else None,
     )
     _merge_sink_window_guard(result.summary, sink_window_guard)
@@ -2619,6 +2869,13 @@ def _finalize_post_savant_evidence_bundle(
             or "sink_metadata_window_guard_failed"
         )
         result = _without_published_raw_clip(result)
+    result.summary["media_worker_perf"] = {
+        "finalization_duration_ms": int((time.monotonic() - finalize_started) * 1000),
+        "metadata_rows_loaded": metadata_rows_loaded,
+        "sink_metadata_rows_for_guard": len(sink_window_rows),
+        "decoded_frame_count_duration_ms": decoded_frame_count_duration_ms,
+        **_probe_metrics_delta(probe_before),
+    }
     _rewrite_post_savant_summary_files(result)
     business_metadata = _build_event_metadata(
         event_context=event_context,
@@ -2685,10 +2942,20 @@ def _process_sink_output(
     candidate_dirs: dict[str, tuple[int, int]] | None = None,
     invalid_output_failures: dict[str, int] | None = None,
     midterm_sink_stability_checks: int = 2,
+    processed_state_path: str | Path | None = None,
+    sink_scan_max_metadata_files: int | None = None,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
-    for meta in _find_metadata_files(sink_dir):
+    if processed_state_path is not None:
+        processed_dirs.update(_load_processed_sink_state(processed_state_path))
+    processed_dirs_before = set(processed_dirs)
+    metadata_files, scan_stats = _scan_metadata_files(
+        sink_dir,
+        processed_dirs=processed_dirs,
+        max_metadata_files=sink_scan_max_metadata_files,
+    )
+    for meta in metadata_files:
         meta_dir = meta.get("_meta_dir", "")
 
         # Idempotency: skip already-processed directories
@@ -2802,6 +3069,8 @@ def _process_sink_output(
                 continue
 
         bundle = None
+        finalize_started = time.monotonic()
+        probe_before = _probe_metrics_snapshot()
         if post_savant_finalizer_enabled:
             if not evidence_output_dir:
                 logger.error("post_savant_finalizer enabled but no evidence_output_dir")
@@ -2848,6 +3117,26 @@ def _process_sink_output(
         else:
             clip_path = video_file
             clip_status = "ready"
+        finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
+        probe_delta = _probe_metrics_delta(probe_before)
+        logger.info(
+            "media_event_finalized event_id=%s meta_dir=%s "
+            "finalization_duration_ms=%s scan_duration_ms=%s "
+            "metadata_files_visited=%s ffprobe_invocations=%s "
+            "ffprobe_duration_ms=%s ffmpeg_invocations=%s ffmpeg_duration_ms=%s "
+            "imageio_ffmpeg_fallback_count=%s imageio_ffmpeg_fallback_duration_ms=%s",
+            event_id,
+            meta_dir,
+            finalize_duration_ms,
+            scan_stats.get("scan_duration_ms"),
+            scan_stats.get("metadata_files_visited"),
+            probe_delta["ffprobe_invocation_count"],
+            probe_delta["ffprobe_duration_ms"],
+            probe_delta["ffmpeg_invocation_count"],
+            probe_delta["ffmpeg_duration_ms"],
+            probe_delta["imageio_ffmpeg_fallback_count"],
+            probe_delta["imageio_ffmpeg_fallback_duration_ms"],
+        )
         replay_job_id = meta.get("job_id", "") or meta.get("new_job", "") or ""
         sink_path = meta_dir
 
@@ -3073,6 +3362,8 @@ def _process_sink_output(
         except Exception:
             logger.exception("failed to update event_id=%s", event_id)
 
+    if processed_state_path is not None and processed_dirs != processed_dirs_before:
+        _save_processed_sink_state(processed_state_path, processed_dirs)
     return updated
 
 
@@ -3313,6 +3604,7 @@ def _process_pending_snapshots(
     _mark_not_required(pg_conn)
 
     events = _snapshot_needed(pg_conn)
+    logger.info("media_snapshot_queue snapshot_queue_size=%s", len(events))
     if not events:
         return 0
 
@@ -3343,11 +3635,19 @@ def _process_pending_snapshots(
             event_id, clip_path, pre_seconds,
         )
 
+        snapshot_started = time.monotonic()
         result = generate_snapshot(
             event_id=event_id,
             clip_path=clip_path,
             pre_seconds=pre_seconds,
             output_dir=snapshot_output_dir,
+        )
+        logger.info(
+            "media_snapshot_extracted event_id=%s snapshot_status=%s "
+            "extraction_duration_ms=%s",
+            event_id,
+            result.get("snapshot_status"),
+            int((time.monotonic() - snapshot_started) * 1000),
         )
 
         _update_snapshot_status(
@@ -3583,7 +3883,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
         "midterm_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
-        "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f",
+        "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f "
+        "state_path=%s sink_scan_max_metadata_files=%d "
+        "media_probe_timeout_s=%.1f media_decode_timeout_s=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
@@ -3593,9 +3895,17 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
         cfg.evidence_max_duration_slack_sec,
+        cfg.media_worker_state_path,
+        cfg.sink_scan_max_metadata_files,
+        cfg.media_probe_timeout_s,
+        cfg.media_decode_timeout_s,
     )
 
-    processed_dirs: set[str] = set()
+    processed_state_path = _media_worker_state_path(
+        cfg.sink_output_dir,
+        cfg.media_worker_state_path,
+    )
+    processed_dirs: set[str] = _load_processed_sink_state(processed_state_path)
     candidate_dirs: dict[str, tuple[int, int]] = {}
     invalid_output_failures: dict[str, int] = {}
 
@@ -3611,6 +3921,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 candidate_dirs=candidate_dirs,
                 invalid_output_failures=invalid_output_failures,
                 midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
+                processed_state_path=processed_state_path,
+                sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
             )
             if clip_updates:
                 logger.info("media_worker: clip updated %d events", clip_updates)

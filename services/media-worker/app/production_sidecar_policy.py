@@ -18,6 +18,7 @@ DEFAULT_SIDECAR_CONFIG = {
     "write_mode": "sidecar_only",
     "fail_open": True,
     "lookback_count": 10000,
+    "range_count": 2000,
     "max_scan": 20000,
     "max_events_per_run": 5,
     "annotations_filename": "annotations.frame_cache.identity.jsonl",
@@ -100,6 +101,10 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
             "lookback_count": _positive_int(
                 source.get("FRAME_CACHE_SIDECAR_LOOKBACK_COUNT"),
                 int(config["lookback_count"]),
+            ),
+            "range_count": _positive_int(
+                source.get("FRAME_CACHE_SIDECAR_RANGE_COUNT"),
+                int(config["range_count"]),
             ),
             "max_scan": _positive_int(
                 source.get("FRAME_CACHE_SIDECAR_MAX_SCAN"),

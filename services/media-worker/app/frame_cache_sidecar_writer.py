@@ -676,14 +676,24 @@ def _read_frame_annotations(
     stream_name = str(config.get("stream_name") or "security.frame_annotations")
     lookback_count = int(config.get("lookback_count") or 10000)
     max_scan = int(config.get("max_scan") or 20000)
-    count = min(lookback_count, max_scan)
+    range_count = int(config.get("range_count") or 2000)
+    range_max, range_min, read_mode = _frame_cache_stream_range(event, config)
+    if read_mode == "bounded_stream_id_range":
+        count = min(max(range_count, 1), max_scan)
+    else:
+        count = min(lookback_count, max_scan)
     client = redis_client or RedisStreamReadClient(str(config.get("redis_url") or "redis://redis:6379/0"))
-    entries = client.xrevrange(stream_name, max="+", min="-", count=count)
+    entries = client.xrevrange(stream_name, max=range_max, min=range_min, count=count)
     messages: list[dict[str, Any]] = []
     summary = {
         "stream_name": stream_name,
+        "read_mode": read_mode,
+        "bounded_range_used": read_mode == "bounded_stream_id_range",
+        "range_max": range_max,
+        "range_min": range_min,
         "entries_scanned": 0,
         "messages_valid": 0,
+        "messages_retained": 0,
         "messages_invalid": 0,
         "messages_filtered_runtime_epoch": 0,
         "messages_filtered_stream_session": 0,
@@ -700,6 +710,8 @@ def _read_frame_annotations(
         "max_messages_per_frame_pts": 0,
         "max_messages_per_frame_anchor": 0,
         "lookback_count": lookback_count,
+        "range_count": range_count,
+        "read_count": count,
         "max_scan": max_scan,
         "consumer_group_used": False,
         "stream_mutated": False,
@@ -739,6 +751,7 @@ def _read_frame_annotations(
     messages.sort(key=lambda item: (item.get("frame_pts") is None, int(item.get("frame_pts") or 0), str(item.get("frame_uuid") or "")))
     pts_values = [int(item["frame_pts"]) for item in messages if isinstance(item.get("frame_pts"), int)]
     summary["messages_valid"] = len(messages)
+    summary["messages_retained"] = len(messages)
     if pts_values:
         summary["earliest_frame_pts"] = min(pts_values)
         summary["latest_frame_pts"] = max(pts_values)
@@ -764,6 +777,27 @@ def _read_frame_annotations(
     summary["max_messages_per_frame_pts"] = max_pts
     summary["max_messages_per_frame_anchor"] = max_anchor
     return messages, summary
+
+
+def _frame_cache_stream_range(
+    event: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[str, str, str]:
+    event_ms = _event_wall_clock_epoch_ms(event)
+    if event_ms is None:
+        return "+", "-", "lookback_fallback"
+    pre_seconds = _float_or_none(config.get("pre_seconds"))
+    if pre_seconds is None:
+        pre_seconds = 5.0
+    post_seconds = _float_or_none(config.get("post_seconds"))
+    if post_seconds is None:
+        post_seconds = 5.0
+    lower_ms = max(
+        0,
+        int(event_ms - _freshness_before_seconds(config, pre_seconds) * 1000),
+    )
+    upper_ms = int(event_ms + _freshness_after_seconds(config, post_seconds) * 1000)
+    return f"{upper_ms}-999999", f"{lower_ms}-0", "bounded_stream_id_range"
 
 
 def _runtime_epoch_id_from_event(event: dict[str, Any]) -> str:

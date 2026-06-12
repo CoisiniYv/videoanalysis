@@ -18,6 +18,10 @@ class Config:
     poll_interval_s: int
     default_pre_seconds: float
     evidence_max_duration_slack_sec: float
+    media_worker_state_path: str
+    sink_scan_max_metadata_files: int
+    media_probe_timeout_s: float
+    media_decode_timeout_s: float
 
 
 def load_config() -> Config:
@@ -47,4 +51,13 @@ def load_config() -> Config:
         evidence_max_duration_slack_sec=float(
             os.getenv("EVIDENCE_MAX_DURATION_SLACK_SEC", "10")
         ),
+        media_worker_state_path=os.getenv(
+            "MEDIA_WORKER_STATE_PATH",
+            "/media/replay-sink-output/midterm/.media-worker.processed.json",
+        ),
+        sink_scan_max_metadata_files=int(
+            os.getenv("MEDIA_SINK_SCAN_MAX_METADATA_FILES", "2000")
+        ),
+        media_probe_timeout_s=float(os.getenv("MEDIA_PROBE_TIMEOUT_S", "30")),
+        media_decode_timeout_s=float(os.getenv("MEDIA_DECODE_TIMEOUT_S", "120")),
     )

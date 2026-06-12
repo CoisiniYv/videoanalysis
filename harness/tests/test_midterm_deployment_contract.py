@@ -15,6 +15,7 @@ ENV_FILE = ROOT / "infra" / "env" / "midterm.env"
 SOURCES_CONFIG = ROOT / "infra" / "generated" / "sources.generated.yml"
 API_FACE_RUNTIME_DOCKERFILE = ROOT / "services" / "api" / "Dockerfile.face-runtime"
 API_FACE_RUNTIME_REQUIREMENTS = ROOT / "services" / "api" / "requirements.face-runtime.txt"
+MEDIA_WORKER_DOCKERFILE = ROOT / "services" / "media-worker" / "Dockerfile"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midterm.yml"
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
@@ -245,6 +246,18 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"]["MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES"] == (
         "${MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES:-3}"
     )
+    assert services["media-worker"]["environment"]["MEDIA_WORKER_STATE_PATH"] == (
+        "${MEDIA_WORKER_STATE_PATH:-/media/replay-sink-output/midterm/.media-worker.processed.json}"
+    )
+    assert services["media-worker"]["environment"]["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == (
+        "${MEDIA_SINK_SCAN_MAX_METADATA_FILES:-2000}"
+    )
+    assert services["media-worker"]["environment"]["MEDIA_PROBE_TIMEOUT_S"] == (
+        "${MEDIA_PROBE_TIMEOUT_S:-30}"
+    )
+    assert services["media-worker"]["environment"]["MEDIA_DECODE_TIMEOUT_S"] == (
+        "${MEDIA_DECODE_TIMEOUT_S:-120}"
+    )
     assert services["media-worker"]["environment"]["EVIDENCE_RUNTIME_EPOCH_STRICT"] == (
         "${EVIDENCE_RUNTIME_EPOCH_STRICT:-true}"
     )
@@ -459,6 +472,31 @@ def test_midterm_evidence_version_is_project_named() -> None:
     assert media_env["EVIDENCE_SCHEMA_VERSION"] == "2.0-midterm"
     assert media_env["EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS"] == "false"
     assert "EVIDENCE_PHASE" not in media_env
+
+
+def test_midterm_media_worker_perf_controls_are_wired() -> None:
+    compose = _compose()
+    env_file = _env()
+    media_env = compose["services"]["media-worker"]["environment"]
+    dockerfile = _text(MEDIA_WORKER_DOCKERFILE)
+
+    assert "apt-get install -y --no-install-recommends ffmpeg" in dockerfile
+    assert media_env["FRAME_CACHE_SIDECAR_RANGE_COUNT"] == (
+        "${FRAME_CACHE_SIDECAR_RANGE_COUNT:-2000}"
+    )
+    assert media_env["FRAME_CACHE_SIDECAR_LOOKBACK_COUNT"] == (
+        "${FRAME_CACHE_SIDECAR_LOOKBACK_COUNT:-20000}"
+    )
+    assert media_env["FRAME_CACHE_SIDECAR_MAX_SCAN"] == (
+        "${FRAME_CACHE_SIDECAR_MAX_SCAN:-20000}"
+    )
+    assert env_file["MEDIA_WORKER_STATE_PATH"] == (
+        "/media/replay-sink-output/midterm/.media-worker.processed.json"
+    )
+    assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "2000"
+    assert env_file["MEDIA_PROBE_TIMEOUT_S"] == "30"
+    assert env_file["MEDIA_DECODE_TIMEOUT_S"] == "120"
+    assert env_file["FRAME_CACHE_SIDECAR_RANGE_COUNT"] == "2000"
 
 
 def test_midterm_operator_api_reuses_face_runtime_without_host_8000() -> None:
