@@ -238,7 +238,7 @@ docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.
 docker logs video-analytics-midterm-savant 2>&1 | rg 'savant_patches|video-analytics patch'
 ```
 
-### Goal 7: Savant Watchdog Recovery
+### Goal 7: API-Owned Savant Recovery Supervisor
 
 Owner: runtime-stability Codex process.
 
@@ -246,19 +246,19 @@ Goal 7 is a recovery net after Goal 6, not a replacement for the framework
 guard. It should restart Savant and source adapters if the module enters
 STOPPING/STOPPED or if frame annotations stall while sources are running.
 
-The reviewed zip's watchdog needs one local fix before adoption: its default
-source filter only matches `video-analytics-midterm-source...`, but the current
-runtime also uses dynamic source containers named `video-analytics-source-*`.
-The watchdog must restart both naming families.
+The reviewed zip's standalone `docker:27-cli` watchdog is not the final
+deployment shape. Recovery belongs in the API service behind the 8090 management
+plane, using the existing Docker socket client and Redis client. Source adapter
+discovery must restart both naming families:
+`video-analytics-midterm-source-adapter` and `video-analytics-source-*`.
 
 Validation:
 
 ```bash
-bash -n services/savant-watchdog/watchdog.sh
+python -m py_compile services/api/app/services/savant_supervisor.py
 docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.yml
-docker compose -f infra/docker-compose.midterm.yml --profile savant-watchdog up -d savant-watchdog
 docker exec video-analytics-midterm-savant sh -c 'echo stopped > /opt/savant/status.txt'
-docker logs video-analytics-midterm-savant-watchdog
+curl --noproxy '*' -X POST http://127.0.0.1:8090/api/v1/cameras/runtime/supervisor/recover
 ```
 
 ## Recommended Sequence

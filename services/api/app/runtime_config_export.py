@@ -370,6 +370,7 @@ def _validate_rule(
 def _normalize_alert_policy(value: Any) -> dict[str, Any]:
     policy = {
         "global_alert_cooldown_s": 0,
+        "cooldown_scope": "algorithm",
         "store_suppressed_events": True,
         "suppress_record_request": True,
         "critical_bypass": False,
@@ -382,6 +383,8 @@ def _validate_alert_policy(policy: dict[str, Any], path: str, errors: list[dict[
     cooldown = policy.get("global_alert_cooldown_s")
     if not isinstance(cooldown, int) or isinstance(cooldown, bool) or cooldown < 0:
         _error(errors, path, "global_alert_cooldown_s must be an integer >= 0")
+    if policy.get("cooldown_scope") not in {"algorithm", "event_type", "global"}:
+        _error(errors, path, "cooldown_scope must be algorithm, event_type, or global")
     for field in ("store_suppressed_events", "suppress_record_request", "critical_bypass"):
         if not isinstance(policy.get(field), bool):
             _error(errors, path, f"{field} must be boolean")

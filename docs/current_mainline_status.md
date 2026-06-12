@@ -21,8 +21,9 @@ It intentionally avoids historical codename files in the active deployment surfa
   ONNX Runtime/OpenCV/Numpy face-registration layer.
 - Savant v0.6.0 PTS-reset crash hardening: `savant-security` applies the
   md5-pinned overlay in `modules/savant_security/savant_patches/` before module
-  startup, and the optional `savant-watchdog` profile provides STOPPED/stall
-  recovery for Savant plus primary and dynamic source adapters.
+  startup, and the API service behind the 8090 management plane runs the
+  STOPPED/stall supervisor for Savant plus primary and dynamic source adapters.
+  The previous `docker:27-cli` watchdog profile has been removed.
 - Operator portal design: `docs/midterm_operator_portal_runtime_design.md`.
 - 8090 evidence list/detail displays alarm machine time from bundle metadata;
   new bundles write `event.alarm_machine_time` from `events.created_at`.

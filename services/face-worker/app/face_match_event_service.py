@@ -29,7 +29,7 @@ DEFAULT_EVIDENCE_POLICY = {
     "snapshot_required": True,
     "clip_required": True,
     "pre_seconds": 5,
-    "post_seconds": 10,
+    "post_seconds": 5,
 }
 MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON = (
     "Midterm face match evidence created the evidence task, but production "
@@ -118,6 +118,20 @@ def _observation_media(observation: dict[str, Any]) -> dict[str, Any]:
     return media if isinstance(media, dict) else {}
 
 
+def _event_ts_ms_from_observation(
+    observation: dict[str, Any],
+    media: dict[str, Any],
+) -> int:
+    """Return business/cooldown event time without using frame PTS when possible."""
+    try:
+        ntp_timestamp_ns = int(media.get("ntp_timestamp") or 0)
+    except (TypeError, ValueError):
+        ntp_timestamp_ns = 0
+    if ntp_timestamp_ns > 0:
+        return ntp_timestamp_ns // 1_000_000
+    return int(observation.get("timestamp_ms") or 0)
+
+
 def build_watchlist_hit_event(
     *,
     observation: dict[str, Any],
@@ -127,6 +141,8 @@ def build_watchlist_hit_event(
 ) -> dict[str, Any]:
     """Build a unified SecurityEvent dict for one watchlist hit."""
     timestamp_ms = int(observation.get("timestamp_ms") or 0)
+    source_media = _observation_media(observation)
+    event_ts_ms = _event_ts_ms_from_observation(observation, source_media)
     person_id = int(gallery_match["person_id"])
     similarity = float(gallery_match["similarity"])
     source_observation_id = str(observation["source_observation_id"])
@@ -135,7 +151,6 @@ def build_watchlist_hit_event(
     landmarks = _jsonable(observation.get("landmarks"))
     person_name = gallery_match.get("person_name") or ""
     label = f"{person_name} {similarity:.2f}".strip()
-    source_media = _observation_media(observation)
     frame_uuid = source_media.get("frame_uuid")
     keyframe_uuid = source_media.get("keyframe_uuid")
     previous_keyframe_uuid = source_media.get("previous_keyframe_uuid")
@@ -218,9 +233,9 @@ def build_watchlist_hit_event(
         "person_id": person_id,
         "algorithm_type": FACE_INTELLIGENCE_ALGORITHM_TYPE,
         "algorithm_version": "midterm",
-        "start_ts_ms": timestamp_ms,
-        "end_ts_ms": timestamp_ms,
-        "event_ts_ms": timestamp_ms,
+        "start_ts_ms": event_ts_ms,
+        "end_ts_ms": event_ts_ms,
+        "event_ts_ms": event_ts_ms,
         "frame_id": 0,
         "frame_uuid": frame_uuid,
         "keyframe_uuid": keyframe_uuid,

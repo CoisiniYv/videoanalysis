@@ -389,31 +389,84 @@ class EventRepository:
         *,
         exclude_source_event_id: str,
         current_event_ts_ms: int,
+        event_type: str = "",
+        algorithm_type: str = "",
+        cooldown_scope: str = "algorithm",
     ) -> int | None:
-        """Return the most recent non-suppressed event timestamp for a camera."""
+        """Return the most recent non-suppressed event timestamp for a scope."""
+        row = self.get_last_unsuppressed_alert(
+            camera_id,
+            exclude_source_event_id=exclude_source_event_id,
+            current_event_ts_ms=current_event_ts_ms,
+            event_type=event_type,
+            algorithm_type=algorithm_type,
+            cooldown_scope=cooldown_scope,
+        )
+        if not row:
+            return None
+        value = row.get("event_ts_ms")
+        return int(value) if value is not None else None
+
+    def get_last_unsuppressed_alert(
+        self,
+        camera_id: str,
+        *,
+        exclude_source_event_id: str,
+        current_event_ts_ms: int,
+        event_type: str = "",
+        algorithm_type: str = "",
+        cooldown_scope: str = "algorithm",
+    ) -> dict[str, Any] | None:
+        """Return the most recent non-suppressed event row for a scope."""
         if not camera_id:
             return None
+        scope = str(cooldown_scope or "algorithm").strip().lower()
+        if scope in {"global", "camera", "camera_global"}:
+            scope_filter = ""
+            scope_params: dict[str, object] = {}
+        elif scope in {"event", "event_type"}:
+            if not event_type:
+                return None
+            scope_filter = "AND event_type = %(event_type)s"
+            scope_params = {"event_type": event_type}
+        else:
+            key = algorithm_type or event_type
+            if not key:
+                return None
+            scope_filter = (
+                "AND COALESCE(NULLIF(algorithm_type, ''), event_type) = "
+                "%(algorithm_key)s"
+            )
+            scope_params = {"algorithm_key": key}
         with self._conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT event_ts_ms
+                f"""
+                SELECT event_ts_ms, event_type, algorithm_type
                 FROM events
-                WHERE camera_id = %s
-                  AND source_event_id <> %s
+                WHERE camera_id = %(camera_id)s
+                  AND source_event_id <> %(exclude_source_event_id)s
                   AND COALESCE(status, 'new') <> 'suppressed'
-                  AND (%s <= 0 OR event_ts_ms <= %s)
+                  AND (%(current_event_ts_ms)s <= 0
+                       OR event_ts_ms <= %(current_event_ts_ms)s)
+                  {scope_filter}
                 ORDER BY event_ts_ms DESC
                 LIMIT 1
                 """,
-                (
-                    camera_id,
-                    exclude_source_event_id,
-                    current_event_ts_ms,
-                    current_event_ts_ms,
-                ),
+                {
+                    "camera_id": camera_id,
+                    "exclude_source_event_id": exclude_source_event_id,
+                    "current_event_ts_ms": current_event_ts_ms,
+                    **scope_params,
+                },
             )
             row = cur.fetchone()
-        return int(row[0]) if row and row[0] is not None else None
+        if not row:
+            return None
+        return {
+            "event_ts_ms": row[0],
+            "event_type": row[1],
+            "algorithm_type": row[2],
+        }
 
     def has_event_type_since_ts_ms(
         self,
@@ -447,6 +500,10 @@ class EventRepository:
         reason: str,
         policy: dict[str, Any],
         last_alert_ts_ms: int | None,
+        cooldown_scope: str = "algorithm",
+        cooldown_key: str = "",
+        last_alert_event_type: str | None = None,
+        last_alert_algorithm_type: str | None = None,
     ) -> bool:
         """Mark an already-inserted event as suppressed by alert policy."""
         payload = {
@@ -454,6 +511,10 @@ class EventRepository:
             "reason": reason,
             "policy": policy or {},
             "last_alert_ts_ms": last_alert_ts_ms,
+            "cooldown_scope": cooldown_scope,
+            "cooldown_key": cooldown_key,
+            "last_alert_event_type": last_alert_event_type,
+            "last_alert_algorithm_type": last_alert_algorithm_type,
         }
         with self._conn.cursor() as cur:
             cur.execute(

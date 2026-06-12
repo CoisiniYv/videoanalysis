@@ -9,8 +9,9 @@ import yaml
 
 
 API_DIR = str(Path(__file__).resolve().parents[2] / "services" / "api")
-if API_DIR not in sys.path:
-    sys.path.insert(0, API_DIR)
+if API_DIR in sys.path:
+    sys.path.remove(API_DIR)
+sys.path.insert(0, API_DIR)
 
 for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
     sys.modules.pop(_mod, None)
@@ -68,6 +69,30 @@ class FakeRedis:
     @classmethod
     def from_url(cls, _url: str) -> FakeRedisClient:
         return FakeRedisClient()
+
+
+def test_docker_socket_response_parser_decodes_chunked_json() -> None:
+    body = b'{"State":{"Status":"running"}}'
+    chunked_body = (
+        b"a\r\n"
+        + body[:10]
+        + b"\r\n"
+        + f"{len(body[10:]):x}\r\n".encode("ascii")
+        + body[10:]
+        + b"\r\n0\r\n\r\n"
+    )
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+        + chunked_body
+    )
+
+    status, content = runtime_apply._parse_http_response(response)
+
+    assert status == 200
+    assert json.loads(content) == {"State": {"Status": "running"}}
 
 
 def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tmp_path: Path) -> None:

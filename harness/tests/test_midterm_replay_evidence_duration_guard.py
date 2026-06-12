@@ -179,6 +179,76 @@ def test_sink_metadata_pts_gap_fails_closed_even_when_duration_is_valid(
     assert metadata["status"]["clip_status"] == "duration_guard_failed"
 
 
+def test_stable_invalid_sink_output_is_marked_failed_and_not_retried(
+    monkeypatch, tmp_path: Path
+) -> None:
+    event_id = "22222222-2222-4222-8222-222222222222"
+    meta_dir = tmp_path / "sink" / f"replay-event-{event_id}"
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "video.mov").write_bytes(b"not a valid mov")
+    (meta_dir / "metadata.json").write_text(
+        json.dumps({"labels": {"event_id": event_id}}) + "\n",
+        encoding="utf-8",
+    )
+    failures: list[dict[str, str]] = []
+
+    monkeypatch.setenv("MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES", "2")
+    monkeypatch.setattr(worker, "_is_already_ready", lambda _conn, _event_id: False)
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: None)
+    monkeypatch.setattr(
+        worker,
+        "_mark_media_finalize_failed",
+        lambda _conn, **kwargs: failures.append(kwargs),
+    )
+
+    processed: set[str] = set()
+    candidate_dirs: dict[str, tuple[int, int]] = {}
+    invalid_failures: dict[str, int] = {}
+
+    first = worker._process_sink_output(
+        None,
+        str(tmp_path / "sink"),
+        processed,
+        midterm_raw_clip_finalizer_enabled=True,
+        candidate_dirs=candidate_dirs,
+        invalid_output_failures=invalid_failures,
+        midterm_sink_stability_checks=1,
+    )
+    second = worker._process_sink_output(
+        None,
+        str(tmp_path / "sink"),
+        processed,
+        midterm_raw_clip_finalizer_enabled=True,
+        candidate_dirs=candidate_dirs,
+        invalid_output_failures=invalid_failures,
+        midterm_sink_stability_checks=1,
+    )
+    third = worker._process_sink_output(
+        None,
+        str(tmp_path / "sink"),
+        processed,
+        midterm_raw_clip_finalizer_enabled=True,
+        candidate_dirs=candidate_dirs,
+        invalid_output_failures=invalid_failures,
+        midterm_sink_stability_checks=1,
+    )
+
+    assert (first, second, third) == (0, 0, 0)
+    assert failures == [
+        {
+            "event_id": event_id,
+            "sink_path": str(meta_dir),
+            "error_message": "sink_output_invalid:video_duration_unavailable",
+        }
+    ]
+    assert str(meta_dir) in processed
+    marker = meta_dir / worker.INVALID_SINK_OUTPUT_MARKER
+    assert marker.exists()
+    assert json.loads(marker.read_text(encoding="utf-8"))["reason"] == (
+        "video_duration_unavailable"
+    )
+
+
 def _event_context() -> dict:
     return {
         "event_id": EVENT_ID,

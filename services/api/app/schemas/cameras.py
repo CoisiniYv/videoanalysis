@@ -27,6 +27,7 @@ ALERT_ALGORITHM_IDS = tuple(
 
 DEFAULT_ALERT_POLICY: Dict[str, Any] = {
     "global_alert_cooldown_s": 30,
+    "cooldown_scope": "algorithm",
     "store_suppressed_events": True,
     "suppress_record_request": True,
     "critical_bypass": False,
@@ -400,6 +401,7 @@ class RuleResponse(BaseModel):
 
 class AlertPolicy(BaseModel):
     global_alert_cooldown_s: int = Field(default=30, ge=0)
+    cooldown_scope: str = Field(default="algorithm", pattern="^(algorithm|event_type|global)$")
     store_suppressed_events: bool = True
     suppress_record_request: bool = True
     critical_bypass: bool = False

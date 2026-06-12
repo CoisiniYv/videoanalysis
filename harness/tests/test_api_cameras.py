@@ -18,8 +18,9 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 API_DIR = str(Path(__file__).resolve().parents[2] / "services" / "api")
-if API_DIR not in sys.path:
-    sys.path.insert(0, API_DIR)
+if API_DIR in sys.path:
+    sys.path.remove(API_DIR)
+sys.path.insert(0, API_DIR)
 
 # Reset any modules pulled in by sibling runtime tests so we get the
 # services/api copy of ``app.*``.
@@ -28,6 +29,7 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
 
 from fastapi.testclient import TestClient
 
+import app.routers.cameras as cameras_router_module
 from app.main import app
 from app.routers.cameras import _repo as cameras_repo_dep
 
@@ -429,6 +431,25 @@ def test_get_missing_camera_404(client):
     resp = client.get("/api/v1/cameras/does_not_exist")
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == 404
+
+
+def test_runtime_supervisor_status_route_is_under_cameras_prefix(client, monkeypatch):
+    monkeypatch.setattr(
+        cameras_router_module,
+        "get_savant_supervisor_snapshot",
+        lambda: {
+            "enabled": True,
+            "savant_module_status": "running",
+            "source_adapters": ["video-analytics-midterm-source-adapter"],
+        },
+    )
+
+    resp = client.get("/api/v1/cameras/runtime/supervisor")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["error"] is None
+    assert body["data"]["savant_module_status"] == "running"
 
 
 # ===========================================================================

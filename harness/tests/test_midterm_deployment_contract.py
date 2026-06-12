@@ -19,7 +19,8 @@ REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midterm.yml"
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
 SAVANT_PATCH_DIR = ROOT / "modules" / "savant_security" / "savant_patches"
-SAVANT_WATCHDOG = ROOT / "services" / "savant-watchdog" / "watchdog.sh"
+API_SAVANT_SUPERVISOR = ROOT / "services" / "api" / "app" / "services" / "savant_supervisor.py"
+VIDEO_FILE_SINK_ENTRYPOINT = ROOT / "scripts" / "runtime" / "video_file_sink_entrypoint.sh"
 CURRENT_SMOKE_DIR = ROOT / "scripts" / "smoke" / "current"
 RUNTIME_DOCTOR = ROOT / "scripts" / "runtime" / "doctor_midterm.sh"
 DOCS = (
@@ -92,6 +93,7 @@ def test_midterm_deployment_files_exist() -> None:
     assert REPLAY_CONFIG.exists()
     assert CAMERA_CONFIG.exists()
     assert SAVANT_MODULE.exists()
+    assert VIDEO_FILE_SINK_ENTRYPOINT.exists()
     for doc in DOCS:
         assert doc.exists()
 
@@ -123,7 +125,10 @@ def test_current_smoke_surface_is_midterm_only() -> None:
 
 def test_runtime_doctor_is_midterm_named() -> None:
     runtime_scripts = sorted(path.name for path in (ROOT / "scripts" / "runtime").glob("*.sh"))
-    assert runtime_scripts == ["doctor_midterm.sh"]
+    assert runtime_scripts == [
+        "doctor_midterm.sh",
+        "video_file_sink_entrypoint.sh",
+    ]
     text = _text(RUNTIME_DOCTOR)
     assert "docker-compose.midterm.yml" in text
     assert "config.midterm.json" in text
@@ -220,11 +225,24 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["video-file-sink"]["environment"]["ZMQ_ENDPOINT"] == (
         "router+bind:tcp://0.0.0.0:6666"
     )
-    assert services["video-file-sink"]["entrypoint"] == ["/bin/sh", "-ec"]
-    assert "video_analytics:midterm:runtime_epoch" in services["video-file-sink"]["command"]
-    assert "/media/replay-sink-output/midterm/epochs/$${EPOCH_ID}" in services["video-file-sink"]["command"]
+    assert services["video-file-sink"]["entrypoint"] == [
+        "/bin/sh",
+        "/opt/video-file-sink-entrypoint.sh",
+    ]
+    assert (
+        "../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro"
+        in services["video-file-sink"]["volumes"]
+    )
+    assert "video_analytics:midterm:runtime_epoch" in _text(VIDEO_FILE_SINK_ENTRYPOINT)
+    assert "/media/replay-sink-output/midterm/epochs/${EPOCH_ID}" in _text(
+        VIDEO_FILE_SINK_ENTRYPOINT
+    )
+    assert services["replay-service"]["environment"]["RUST_LOG"] == "${RUST_LOG:-info}"
     assert services["media-worker"]["environment"]["RUNTIME_EPOCH_STATE_PATH"] == (
         "/media/replay-sink-output/midterm/.current_epoch.json"
+    )
+    assert services["media-worker"]["environment"]["MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES"] == (
+        "${MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES:-3}"
     )
     assert services["media-worker"]["environment"]["EVIDENCE_RUNTIME_EPOCH_STRICT"] == (
         "${EVIDENCE_RUNTIME_EPOCH_STRICT:-true}"
@@ -252,26 +270,32 @@ def test_midterm_savant_source_reset_patch_is_wired() -> None:
     assert _md5(patch_root / "pipeline.py") == "7c5eabbe84697e591a0a31a1c3977f2c"
 
 
-def test_midterm_savant_watchdog_covers_primary_and_dynamic_sources() -> None:
+def test_midterm_savant_supervisor_is_owned_by_api() -> None:
     compose = _compose()
-    watchdog = compose["services"]["savant-watchdog"]
-    env = watchdog["environment"]
-    script = _text(SAVANT_WATCHDOG)
-    source_patterns = env["WATCHDOG_SOURCE_CONTAINER_PATTERNS"]
+    services = compose["services"]
+    api = services["api"]
+    env = api["environment"]
+    supervisor = _text(API_SAVANT_SUPERVISOR)
 
-    assert watchdog["container_name"] == "video-analytics-midterm-savant-watchdog"
-    assert watchdog["profiles"] == ["savant-watchdog"]
-    assert watchdog["entrypoint"] == ["sh", "/watchdog/watchdog.sh"]
-    assert watchdog["image"] == "docker:27-cli"
-    assert "/var/run/docker.sock:/var/run/docker.sock" in watchdog["volumes"]
-    assert "../services/savant-watchdog:/watchdog:ro" in watchdog["volumes"]
-    assert env["WATCHDOG_RESTART_REPLAY"] == "${WATCHDOG_RESTART_REPLAY:-false}"
-    assert env["WATCHDOG_SAVANT_STATUS_FILE"] == "/opt/savant/status.txt"
-    assert "^video-analytics-midterm-source-adapter" in source_patterns
-    assert "^video-analytics-source-" in source_patterns
-    assert "WATCHDOG_SOURCE_CONTAINER_FILTER" not in env
-    assert "docker ps -a --format '{{.Names}}'" in script
-    assert "grep -E \"$SOURCE_PATTERNS\"" in script
+    assert "savant-watchdog" not in services
+    assert "docker:27-cli" not in _text(COMPOSE)
+    assert env["SAVANT_SUPERVISOR_ENABLED"] == "${SAVANT_SUPERVISOR_ENABLED:-true}"
+    assert env["SAVANT_SUPERVISOR_DOCKER_SOCKET"] == "/var/run/docker.sock"
+    assert env["SAVANT_SUPERVISOR_RESTART_REPLAY"] == (
+        "${SAVANT_SUPERVISOR_RESTART_REPLAY:-false}"
+    )
+    assert env["SAVANT_SUPERVISOR_STATUS_FILE"] == "/opt/savant/status.txt"
+    assert env["SAVANT_SUPERVISOR_ANNOTATION_STREAM"] == "security.frame_annotations"
+    assert env["SAVANT_SUPERVISOR_COMPOSE_SOURCE_CONTAINER"] == (
+        "video-analytics-midterm-source-adapter"
+    )
+    assert env["SAVANT_SUPERVISOR_DYNAMIC_SOURCE_PREFIX"] == "video-analytics-source-"
+    assert "/var/run/docker.sock:/var/run/docker.sock" in api["volumes"]
+    assert "DockerSocketClient" in supervisor
+    assert "Redis.from_url" in supervisor
+    assert "video-analytics-midterm-source-adapter" in supervisor
+    assert "video-analytics-source-" in supervisor
+    assert "docker restart" not in supervisor
 
 
 def test_midterm_source_id_and_camera_config_are_neutral() -> None:

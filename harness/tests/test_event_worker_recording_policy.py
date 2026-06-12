@@ -9,8 +9,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 EVENT_WORKER_DIR = str(ROOT / "services" / "event-worker")
-if EVENT_WORKER_DIR not in sys.path:
-    sys.path.insert(0, EVENT_WORKER_DIR)
+if EVENT_WORKER_DIR in sys.path:
+    sys.path.remove(EVENT_WORKER_DIR)
+sys.path.insert(0, EVENT_WORKER_DIR)
 
 for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
     sys.modules.pop(_mod, None)
@@ -155,3 +156,55 @@ def test_blank_recording_source_id_allows_8090_added_camera_source() -> None:
     assert publisher.records[0]["source_id"] == "source_lab"
     assert publisher.records[0]["pre_seconds"] == 4
     assert publisher.records[0]["post_seconds"] == 9
+
+
+def test_current_runtime_epoch_overrides_stale_event_epoch() -> None:
+    event = {
+        "event_type": "intrusion",
+        "source_event_id": "lab:intrusion:epoch",
+        "camera_id": "cam_lab",
+        "source_id": "source_lab",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "runtime_epoch_id": "midterm-old",
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "runtime_epoch_id": "midterm-old",
+            "media": {
+                "runtime_epoch_id": "midterm-old",
+                "clip_required": True,
+                "source_id": "source_lab",
+            }
+        },
+    }
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+
+    inserted, event_id = _handle_event(
+        event,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=RecordingPolicyState(),
+        recording_event_types=("intrusion",),
+        recording_source_id="",
+        recording_cooldown_seconds=0,
+        runtime_epoch_id="midterm-current",
+    )
+
+    assert inserted is True
+    assert event_id == "event-1"
+    assert repo.inserted_events[0]["runtime_epoch_id"] == "midterm-current"
+    assert repo.inserted_events[0]["payload"]["runtime_epoch_id"] == "midterm-current"
+    assert repo.inserted_events[0]["payload"]["media"]["runtime_epoch_id"] == (
+        "midterm-current"
+    )
+    assert publisher.records[0]["runtime_epoch_id"] == "midterm-current"

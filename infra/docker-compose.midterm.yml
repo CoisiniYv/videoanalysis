@@ -60,6 +60,22 @@ services:
       CAMERA_RUNTIME_CLIP_WORKER_CONTAINER: video-analytics-midterm-clip-worker
       CAMERA_RUNTIME_MEDIA_WORKER_CONTAINER: video-analytics-midterm-media-worker
       CAMERA_RUNTIME_VIDEO_SINK_CONTAINER: video-analytics-midterm-video-file-sink
+      SAVANT_SUPERVISOR_ENABLED: "${SAVANT_SUPERVISOR_ENABLED:-true}"
+      SAVANT_SUPERVISOR_DOCKER_SOCKET: /var/run/docker.sock
+      SAVANT_SUPERVISOR_SAVANT_CONTAINER: video-analytics-midterm-savant
+      SAVANT_SUPERVISOR_REPLAY_CONTAINER: video-analytics-midterm-replay-service
+      SAVANT_SUPERVISOR_COMPOSE_SOURCE_CONTAINER: video-analytics-midterm-source-adapter
+      SAVANT_SUPERVISOR_DYNAMIC_SOURCE_PREFIX: video-analytics-source-
+      SAVANT_SUPERVISOR_STATUS_FILE: /opt/savant/status.txt
+      SAVANT_SUPERVISOR_ANNOTATION_STREAM: security.frame_annotations
+      SAVANT_SUPERVISOR_POLL_INTERVAL_S: "${SAVANT_SUPERVISOR_POLL_INTERVAL_S:-10}"
+      SAVANT_SUPERVISOR_STOPPED_GRACE_S: "${SAVANT_SUPERVISOR_STOPPED_GRACE_S:-20}"
+      SAVANT_SUPERVISOR_STARTUP_GRACE_S: "${SAVANT_SUPERVISOR_STARTUP_GRACE_S:-1800}"
+      SAVANT_SUPERVISOR_STALL_SECONDS: "${SAVANT_SUPERVISOR_STALL_SECONDS:-120}"
+      SAVANT_SUPERVISOR_STALL_CHECK_ENABLED: "${SAVANT_SUPERVISOR_STALL_CHECK_ENABLED:-true}"
+      SAVANT_SUPERVISOR_RESTART_COOLDOWN_S: "${SAVANT_SUPERVISOR_RESTART_COOLDOWN_S:-300}"
+      SAVANT_SUPERVISOR_RESTART_WAIT_S: "${SAVANT_SUPERVISOR_RESTART_WAIT_S:-1800}"
+      SAVANT_SUPERVISOR_RESTART_REPLAY: "${SAVANT_SUPERVISOR_RESTART_REPLAY:-false}"
     volumes:
       - ../services/api:/app:rw
       - ../libs:/app/libs:ro
@@ -102,7 +118,7 @@ services:
     ports:
       - "8098:8080"
     environment:
-      RUST_LOG: ${RUST_LOG:-debug,replaydb=trace}
+      RUST_LOG: ${RUST_LOG:-info}
       DB_PATH: /opt/rocksdb
     volumes:
       - ../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro
@@ -201,33 +217,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15m
-    restart: unless-stopped
-
-  savant-watchdog:
-    image: docker:27-cli
-    container_name: video-analytics-midterm-savant-watchdog
-    profiles: ["savant-watchdog"]
-    entrypoint: ["sh", "/watchdog/watchdog.sh"]
-    environment:
-      WATCHDOG_SAVANT_CONTAINER: video-analytics-midterm-savant
-      WATCHDOG_REDIS_CONTAINER: video-analytics-midterm-redis
-      WATCHDOG_REPLAY_CONTAINER: video-analytics-midterm-replay-service
-      WATCHDOG_SOURCE_CONTAINER_PATTERNS: "${WATCHDOG_SOURCE_CONTAINER_PATTERNS:-^video-analytics-midterm-source-adapter$$|^video-analytics-source-}"
-      WATCHDOG_SAVANT_STATUS_FILE: /opt/savant/status.txt
-      WATCHDOG_ANNOTATION_STREAM: security.frame_annotations
-      WATCHDOG_POLL_INTERVAL_S: "${WATCHDOG_POLL_INTERVAL_S:-10}"
-      WATCHDOG_STOPPED_GRACE_S: "${WATCHDOG_STOPPED_GRACE_S:-20}"
-      WATCHDOG_STARTUP_GRACE_S: "${WATCHDOG_STARTUP_GRACE_S:-1800}"
-      WATCHDOG_STALL_SECONDS: "${WATCHDOG_STALL_SECONDS:-120}"
-      WATCHDOG_STALL_CHECK_ENABLED: "${WATCHDOG_STALL_CHECK_ENABLED:-true}"
-      WATCHDOG_RESTART_COOLDOWN_S: "${WATCHDOG_RESTART_COOLDOWN_S:-300}"
-      WATCHDOG_RESTART_WAIT_S: "${WATCHDOG_RESTART_WAIT_S:-1800}"
-      WATCHDOG_RESTART_REPLAY: "${WATCHDOG_RESTART_REPLAY:-false}"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ../services/savant-watchdog:/watchdog:ro
-    depends_on:
-      - savant-security
     restart: unless-stopped
 
   source-adapter:
@@ -390,52 +379,7 @@ services:
   video-file-sink:
     image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
     container_name: video-analytics-midterm-video-file-sink
-    entrypoint: ["/bin/sh", "-ec"]
-    command: |
-      EPOCH_ID="$$(python - <<'PY'
-      import datetime
-      import json
-      import os
-      import secrets
-      import socket
-
-      root = "/media/replay-sink-output/midterm"
-      epoch_id = "midterm-" + datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(4)
-      epochs_dir = os.path.join(root, "epochs", epoch_id)
-      os.makedirs(epochs_dir, exist_ok=True)
-      state_path = os.path.join(root, ".current_epoch.json")
-      previous = ""
-      try:
-          with open(state_path, "r", encoding="utf-8") as f:
-              previous = str((json.load(f) or {}).get("runtime_epoch_id") or "")
-      except Exception:
-          previous = ""
-      state = {
-          "runtime_epoch_id": epoch_id,
-          "created_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-          "created_by": "video-file-sink.startup",
-          "reason": "container_start",
-          "previous_runtime_epoch_id": previous,
-      }
-      tmp_path = state_path + ".tmp"
-      with open(tmp_path, "w", encoding="utf-8") as f:
-          json.dump(state, f, indent=2)
-          f.write("\n")
-      os.replace(tmp_path, state_path)
-      try:
-          value = epoch_id.encode("utf-8")
-          key = b"video_analytics:midterm:runtime_epoch"
-          payload = b"*3\r\n$3\r\nSET\r\n$" + str(len(key)).encode() + b"\r\n" + key + b"\r\n$" + str(len(value)).encode() + b"\r\n" + value + b"\r\n"
-          with socket.create_connection(("redis", 6379), timeout=1.0) as sock:
-              sock.sendall(payload)
-              sock.recv(256)
-      except Exception:
-          pass
-      print(epoch_id)
-      PY
-      )"
-      export DIR_LOCATION="/media/replay-sink-output/midterm/epochs/$${EPOCH_ID}/%source_id%/%src_filename%/"
-      exec python /opt/savant/adapters/gst/sinks/video_files.py
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
@@ -443,6 +387,7 @@ services:
       METADATA_JSON_FORMAT: native
     volumes:
       - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
     depends_on:
       redis: { condition: service_healthy }
     restart: unless-stopped
@@ -467,6 +412,7 @@ services:
       EVIDENCE_OUTPUT_DIR: /media/evidence
       MIDTERM_RAW_CLIP_FINALIZER_ENABLED: "true"
       MIDTERM_SINK_STABILITY_CHECKS: "2"
+      MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES: "${MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES:-3}"
       MEDIA_POLL_INTERVAL_S: "5"
       DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
       DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"

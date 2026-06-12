@@ -14,7 +14,7 @@ This is the active project-machine deployment entrypoint.
 | Camera config | `modules/savant_security/config/cameras.midterm.yml` |
 | Savant module | `modules/savant_security/module.yml` |
 | Savant v0.6.0 patch overlay | `modules/savant_security/savant_patches/` |
-| Savant watchdog | `services/savant-watchdog/watchdog.sh` |
+| Savant supervisor | `services/api/app/services/savant_supervisor.py` |
 
 Do not deploy from archived historical compose files.
 
@@ -79,14 +79,25 @@ framework files and fails loud by default on mismatch. It only changes stale
 source-buffer handling from fatal `KeyError` to warning plus frame skip or
 late-EOS ignore.
 
-The optional `savant-watchdog` profile is a recovery net. It reads
-`/opt/savant/status.txt` and checks `security.frame_annotations` flow; if Savant
-is STOPPING/STOPPED or annotations stall while sources are running, it restarts
-Savant, waits for module `running`, then restarts both the compose primary
-adapter and dynamic `video-analytics-source-*` adapters. It does not restart
-Replay by default. It is profile-gated so a normal compose start does not pull
-the Docker CLI image; enable it explicitly with
-`docker compose -f infra/docker-compose.midterm.yml --profile savant-watchdog up -d savant-watchdog`.
+The API service behind the 8090 management plane owns the recovery supervisor.
+It reads `/opt/savant/status.txt` through the Docker Engine API and checks
+`security.frame_annotations` through Redis; if Savant is STOPPING/STOPPED or
+annotations stall while sources are running, it restarts Savant, waits for
+module `running`, then restarts both the compose primary adapter and dynamic
+`video-analytics-source-*` adapters. It does not restart Replay by default,
+unless `SAVANT_SUPERVISOR_RESTART_REPLAY=true` is set.
+
+The reviewed `savant-crash-fix-20260611.zip` proposed a standalone watchdog
+container based on `docker:27-cli`. That image is not required in the current
+deployment. The standalone service has been removed; the API process reuses the
+existing Docker socket mount and Docker Engine client already needed for camera
+runtime apply. 8090 remains the operator-facing surface through the evidence
+viewer proxy.
+
+Supervisor routes exposed through 8090:
+
+- `GET /api/v1/cameras/runtime/supervisor`
+- `POST /api/v1/cameras/runtime/supervisor/recover`
 
 ## Applying Camera Runtime Changes
 

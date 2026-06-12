@@ -37,6 +37,11 @@ from app.services.runtime_apply import (
     apply_camera_runtime,
     restart_camera_runtime,
 )
+from app.services.savant_supervisor import (
+    SavantSupervisorError,
+    get_savant_supervisor_snapshot,
+    trigger_savant_recovery,
+)
 
 
 router = APIRouter(prefix="/api/v1/cameras", tags=["cameras"])
@@ -162,6 +167,26 @@ def cameras_runtime_restart(
     except OSError as exc:
         return _err_response(503, f"runtime restart filesystem error: {exc}", request_id)
     return _ok(result, request_id)
+
+
+@router.get("/runtime/supervisor")
+def cameras_runtime_supervisor_status(
+    request_id: str = Depends(_request_id),
+):
+    try:
+        return _ok(get_savant_supervisor_snapshot(), request_id)
+    except (RuntimeApplyError, SavantSupervisorError) as exc:
+        return _err_response(503, str(exc), request_id)
+
+
+@router.post("/runtime/supervisor/recover")
+def cameras_runtime_supervisor_recover(
+    request_id: str = Depends(_request_id),
+):
+    try:
+        return _ok(trigger_savant_recovery(), request_id)
+    except (RuntimeApplyError, SavantSupervisorError) as exc:
+        return _err_response(503, str(exc), request_id)
 
 
 # ---------------------------------------------------------------------------

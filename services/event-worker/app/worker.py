@@ -189,8 +189,6 @@ def _current_runtime_epoch_id(redis_client: Redis) -> str:
 
 
 def _apply_runtime_epoch(event: dict, runtime_epoch_id: str) -> None:
-    if not runtime_epoch_id:
-        return
     payload = event.get("payload")
     if not isinstance(payload, dict):
         payload = {}
@@ -199,12 +197,23 @@ def _apply_runtime_epoch(event: dict, runtime_epoch_id: str) -> None:
     if not isinstance(media, dict):
         media = {}
         payload["media"] = media
-    event_epoch = str(
+    existing_epoch = str(
         event.get("runtime_epoch_id")
         or payload.get("runtime_epoch_id")
         or media.get("runtime_epoch_id")
-        or runtime_epoch_id
+        or ""
     )
+    event_epoch = str(runtime_epoch_id or existing_epoch or "")
+    if not event_epoch:
+        return
+    if runtime_epoch_id and existing_epoch and existing_epoch != runtime_epoch_id:
+        logger.warning(
+            "runtime_epoch_overridden source_event_id=%s old_runtime_epoch_id=%s "
+            "current_runtime_epoch_id=%s",
+            event.get("source_event_id", ""),
+            existing_epoch,
+            runtime_epoch_id,
+        )
     event["runtime_epoch_id"] = event_epoch
     payload["runtime_epoch_id"] = event_epoch
     media["runtime_epoch_id"] = event_epoch

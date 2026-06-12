@@ -100,8 +100,6 @@ def _person_bbox_observation_min_interval_ms(default: int = 333) -> int:
 
 
 def _current_runtime_epoch_id(runtime: SourceRuntime | None = None) -> str:
-    if runtime is not None and runtime.runtime_epoch_id:
-        return str(runtime.runtime_epoch_id)
     env_value = os.getenv("RUNTIME_EPOCH_ID") or os.getenv("VIDEO_ANALYTICS_RUNTIME_EPOCH_ID")
     if env_value:
         return str(env_value)
@@ -113,7 +111,11 @@ def _current_runtime_epoch_id(runtime: SourceRuntime | None = None) -> str:
     except Exception:
         return ""
     if isinstance(data, dict):
-        return str(data.get("runtime_epoch_id") or "")
+        state_epoch = str(data.get("runtime_epoch_id") or "")
+        if state_epoch:
+            return state_epoch
+    if runtime is not None and runtime.runtime_epoch_id:
+        return str(runtime.runtime_epoch_id)
     return ""
 
 

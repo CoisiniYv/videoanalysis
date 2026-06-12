@@ -822,12 +822,55 @@ def _write_yaml(path: Path, doc: dict[str, Any]) -> None:
 
 
 def _parse_http_response(response: bytes) -> tuple[int, bytes]:
-    header, _, content = response.partition(b"\r\n\r\n")
+    header, separator, content = response.partition(b"\r\n\r\n")
+    if not separator:
+        raise RuntimeApplyError("invalid docker api response: missing header terminator")
     status_line = header.splitlines()[0].decode("ascii", errors="replace")
     parts = status_line.split(" ", 2)
     if len(parts) < 2 or not parts[1].isdigit():
         raise RuntimeApplyError(f"invalid docker api response: {status_line}")
+    headers: dict[str, list[str]] = {}
+    for line in header.splitlines()[1:]:
+        if b":" not in line:
+            continue
+        name, value = line.split(b":", 1)
+        key = name.decode("ascii", errors="replace").strip().lower()
+        headers.setdefault(key, []).append(value.decode("ascii", errors="replace").strip())
+    transfer_encoding = ",".join(headers.get("transfer-encoding", [])).lower()
+    if "chunked" in transfer_encoding:
+        content = _decode_http_chunked_body(content)
+    elif headers.get("content-length"):
+        try:
+            content_length = int(headers["content-length"][-1])
+        except ValueError as exc:
+            raise RuntimeApplyError("invalid docker api response: bad content-length") from exc
+        content = content[:content_length]
     return int(parts[1]), content
+
+
+def _decode_http_chunked_body(content: bytes) -> bytes:
+    output = bytearray()
+    position = 0
+    while True:
+        line_end = content.find(b"\r\n", position)
+        if line_end < 0:
+            raise RuntimeApplyError("invalid docker api response: bad chunk header")
+        size_text = content[position:line_end].split(b";", 1)[0].strip()
+        try:
+            chunk_size = int(size_text, 16)
+        except ValueError as exc:
+            raise RuntimeApplyError("invalid docker api response: bad chunk size") from exc
+        position = line_end + 2
+        if chunk_size == 0:
+            return bytes(output)
+        chunk_end = position + chunk_size
+        if chunk_end > len(content):
+            raise RuntimeApplyError("invalid docker api response: truncated chunk")
+        output.extend(content[position:chunk_end])
+        position = chunk_end
+        if content[position:position + 2] != b"\r\n":
+            raise RuntimeApplyError("invalid docker api response: missing chunk terminator")
+        position += 2
 
 
 def _env_bool(name: str, *, default: bool) -> bool:

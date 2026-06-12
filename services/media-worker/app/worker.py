@@ -52,6 +52,8 @@ DEFAULT_POST_SAVANT_MAX_PTS_GAP_SEC = 2.0
 DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
     "/media/replay-sink-output/midterm/.current_epoch.json"
 )
+DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
+INVALID_SINK_OUTPUT_MARKER = ".media-worker.invalid.json"
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
@@ -61,6 +63,7 @@ SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
     "generated_corrupt",
     BUNDLE_STATUS_DURATION_GUARD_FAILED,
 )
+PERMANENT_INVALID_SINK_OUTPUT_REASONS = {"video_duration_unavailable"}
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -154,6 +157,39 @@ def _sink_output_ready_for_finalizer(
     if _probe_video_duration_seconds(video_file) is None:
         return False, "video_duration_unavailable"
     return True, "ready"
+
+
+def _invalid_sink_output_max_retries() -> int:
+    value = _to_int(os.getenv("MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES"))
+    if value is None:
+        return DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES
+    return max(int(value), 1)
+
+
+def _invalid_sink_output_marker_path(meta_dir: str) -> Path:
+    return Path(meta_dir) / INVALID_SINK_OUTPUT_MARKER
+
+
+def _write_invalid_sink_output_marker(
+    *,
+    meta_dir: str,
+    event_id: str,
+    video_file: str,
+    reason: str,
+    attempts: int,
+) -> None:
+    marker = _invalid_sink_output_marker_path(meta_dir)
+    payload = {
+        "event_id": event_id,
+        "video_file": video_file,
+        "reason": reason,
+        "attempts": attempts,
+        "marked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _atomic_write_json(marker, payload)
+    except Exception:
+        logger.exception("failed to write invalid sink output marker path=%s", marker)
 
 
 _UUID_RE = re.compile(
@@ -2647,6 +2683,7 @@ def _process_sink_output(
     evidence_output_dir: str | None = None,
     midterm_raw_clip_finalizer_enabled: bool = False,
     candidate_dirs: dict[str, tuple[int, int]] | None = None,
+    invalid_output_failures: dict[str, int] | None = None,
     midterm_sink_stability_checks: int = 2,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
@@ -2656,6 +2693,10 @@ def _process_sink_output(
 
         # Idempotency: skip already-processed directories
         if meta_dir and meta_dir in processed_dirs:
+            continue
+        if meta_dir and _invalid_sink_output_marker_path(meta_dir).exists():
+            processed_dirs.add(meta_dir)
+            logger.debug("media_skip: sink output marked invalid meta_dir=%s", meta_dir)
             continue
 
         event_id = _extract_event_id(meta)
@@ -2687,6 +2728,7 @@ def _process_sink_output(
 
         metadata_file = str(Path(meta_dir) / "metadata.json")
 
+        stable_count = 0
         if finalizer_enabled and candidate_dirs is not None:
             try:
                 current_size = Path(video_file).stat().st_size
@@ -2714,13 +2756,48 @@ def _process_sink_output(
                 metadata_file=metadata_file,
             )
             if not ready:
+                invalid_attempts = 0
+                if (
+                    reason in PERMANENT_INVALID_SINK_OUTPUT_REASONS
+                    and invalid_output_failures is not None
+                    and stable_count >= max(1, midterm_sink_stability_checks)
+                ):
+                    invalid_attempts = invalid_output_failures.get(meta_dir, 0) + 1
+                    invalid_output_failures[meta_dir] = invalid_attempts
+                    if invalid_attempts >= _invalid_sink_output_max_retries():
+                        error_message = f"sink_output_invalid:{reason}"
+                        logger.warning(
+                            "media_sink_output_marked_invalid event_id=%s "
+                            "meta_dir=%s video_file=%s reason=%s attempts=%s",
+                            event_id,
+                            meta_dir,
+                            video_file,
+                            reason,
+                            invalid_attempts,
+                        )
+                        _write_invalid_sink_output_marker(
+                            meta_dir=meta_dir,
+                            event_id=event_id,
+                            video_file=video_file,
+                            reason=reason,
+                            attempts=invalid_attempts,
+                        )
+                        _mark_media_finalize_failed(
+                            pg_conn,
+                            event_id=event_id,
+                            sink_path=meta_dir,
+                            error_message=error_message,
+                        )
+                        processed_dirs.add(meta_dir)
+                        continue
                 logger.info(
                     "media_wait_for_finalized_sink_output event_id=%s meta_dir=%s "
-                    "video_file=%s reason=%s",
+                    "video_file=%s reason=%s invalid_attempts=%s",
                     event_id,
                     meta_dir,
                     video_file,
                     reason,
+                    invalid_attempts,
                 )
                 continue
 
@@ -3520,6 +3597,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
 
     processed_dirs: set[str] = set()
     candidate_dirs: dict[str, tuple[int, int]] = {}
+    invalid_output_failures: dict[str, int] = {}
 
     while not shutdown_requested:
         try:
@@ -3531,6 +3609,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 evidence_output_dir=cfg.evidence_output_dir,
                 midterm_raw_clip_finalizer_enabled=cfg.midterm_raw_clip_finalizer_enabled,
                 candidate_dirs=candidate_dirs,
+                invalid_output_failures=invalid_output_failures,
                 midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
             )
             if clip_updates:

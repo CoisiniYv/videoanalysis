@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -17,8 +18,19 @@ from app.routers.events import router as events_router
 from app.routers.maintenance import router as maintenance_router
 from app.routers.people import router as people_router
 from app.routers.ws_alerts import router as ws_alerts_router
+from app.services.savant_supervisor import start_savant_supervisor, stop_savant_supervisor
 
-app = FastAPI(title="Video Analytics API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    start_savant_supervisor()
+    try:
+        yield
+    finally:
+        stop_savant_supervisor()
+
+
+app = FastAPI(title="Video Analytics API", version="1.0.0", lifespan=lifespan)
 
 app.include_router(events_router)
 app.include_router(cameras_router)

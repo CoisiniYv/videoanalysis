@@ -159,16 +159,18 @@ deepstream/nvinfer/processor.py  9615f7cd134f623a3950b65e5ad71fb1
 deepstream/pipeline.py           7c5eabbe84697e591a0a31a1c3977f2c
 ```
 
-The watchdog portion of the zip needs one local adjustment before adoption:
+The watchdog portion of the zip needed one local adjustment before adoption:
 its default `WATCHDOG_SOURCE_CONTAINER_FILTER=video-analytics-midterm-source`
-matches the compose primary adapter but does not match current dynamic source
-containers named `video-analytics-source-source_...`. The adopted watchdog must
-discover both:
+matched the compose primary adapter but did not match current dynamic source
+containers named `video-analytics-source-source_...`. The adopted API
+supervisor discovers both:
 
 - `video-analytics-midterm-source-adapter`
 - `video-analytics-source-*`
 
-or accept multiple filters.
+The final implementation uses exact-name matching for the compose source and
+prefix matching for dynamic source containers, so it avoids compose `$` regex
+escaping entirely.
 
 ## Fix Plan
 
@@ -404,12 +406,16 @@ expected result is warning logs with `[video-analytics patch]`, continued
 Savant `running` status, and continued frame annotations for both enabled
 sources.
 
-### Phase 6: Add Savant Runtime Watchdog
+### Phase 6: Add API-Owned Savant Runtime Supervisor
 
-Add a separate watchdog only after Phase 5 is in place. The watchdog is a
+Add the recovery supervisor after Phase 5 is in place. The supervisor is a
 recovery safety net, not the primary fix for the source-reset race.
-It is profile-gated as `savant-watchdog` so default midterm compose starts do
-not pull or start an extra Docker CLI image.
+
+Placement decision: do not keep the reviewed zip's standalone `docker:27-cli`
+watchdog. The 8090 management plane should own this operational control through
+its API backend. The `api` service already has Docker socket access and runtime
+apply logic, so it replaces shell-based `docker inspect` / `docker exec` /
+`docker restart` calls with the existing Docker socket client and Redis checks.
 
 Required behaviour:
 
@@ -423,16 +429,17 @@ Required behaviour:
 - preserve Replay by default unless a later diagnosis proves Replay must also
   be restarted
 
-Local adjustment required for the reviewed zip: source adapter discovery must
-match both current container naming patterns:
+Source adapter discovery must match both current container naming patterns:
 
 ```text
 video-analytics-midterm-source-adapter
 video-analytics-source-*
 ```
 
-Do not use only `WATCHDOG_SOURCE_CONTAINER_FILTER=video-analytics-midterm-source`
-because that misses dynamic source adapters in the current runtime.
+Do not use only a `video-analytics-midterm-source` filter because that misses
+dynamic source adapters in the current runtime. The API supervisor uses exact
+matching for `video-analytics-midterm-source-adapter` and prefix matching for
+`video-analytics-source-`.
 
 Also override the Savant healthcheck `start_period` from the image's 30 minutes
 to a shorter but still cold-start-safe value. Use 15 minutes initially because
@@ -442,22 +449,31 @@ faster, but cold builds can still take minutes.
 Validation:
 
 ```bash
-bash -n services/savant-watchdog/watchdog.sh
+python -m py_compile services/api/app/services/savant_supervisor.py
 docker compose -f infra/docker-compose.midterm.yml config >/tmp/midterm.compose.yml
-docker compose -f infra/docker-compose.midterm.yml --profile savant-watchdog up -d savant-watchdog
-docker logs video-analytics-midterm-savant-watchdog
+curl --noproxy '*' http://127.0.0.1:8090/api/v1/cameras/runtime/supervisor
 ```
 
 Optional watchdog drill:
 
 ```bash
 docker exec video-analytics-midterm-savant sh -c 'echo stopped > /opt/savant/status.txt'
-docker logs -f video-analytics-midterm-savant-watchdog
+curl --noproxy '*' -X POST http://127.0.0.1:8090/api/v1/cameras/runtime/supervisor/recover
 ```
 
-Expected result: watchdog triggers one controlled recovery, Savant returns to
+Expected result: the API supervisor triggers one controlled recovery, Savant returns to
 running/healthy, both source adapters are restarted, and
 `security.frame_annotations` resumes for both source ids.
+
+Acceptance:
+
+- default midterm compose has no Docker CLI watchdog image
+- 8090 can show Savant module status, annotation-flow freshness, and last
+  controlled recovery reason/time
+- a STOPPED status drill and an annotation-stall drill both recover through the
+  API-owned supervisor
+- dynamic and compose-managed source adapters are both restarted
+- existing camera runtime apply behaviour remains unchanged
 
 ## Do Not Treat As Proven Yet
 
