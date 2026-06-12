@@ -2,6 +2,9 @@
 
 Date: 2026-06-12
 
+Status: completed on 2026-06-12. 中文完成记录见
+`docs/repair_goal/midterm_recent_24h_goal_completion_2026-06-12.md`。
+
 Use this file as the next goal prompt for repairing the current midterm runtime.
 It consolidates the markdown findings created or updated in the last 24 hours,
 plus the same-window performance observability spec.
@@ -516,4 +519,3 @@ Final response for the implementation run must include:
 - evidence ready/fail-closed sample summary;
 - performance bottleneck classification;
 - any remaining blocked item with concrete reason.
-

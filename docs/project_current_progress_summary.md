@@ -1,6 +1,6 @@
 # Project Current Progress Summary
 
-更新时间：2026-06-11
+更新时间：2026-06-12
 
 ## 总体结论
 
@@ -16,6 +16,12 @@
 2026-06-11 的运行态、算法齐全度、未实现项和下一步实现计划已固化到
 `docs/midterm_progress_snapshot_2026-06-11.md`，后续继续计划应以该快照作为
 对比基线。
+
+2026-06-12 已完成最近 24 小时性能和运行态修复 goal：多源 source-adapter
+收敛、证据 camera_name 展示、Savant 性能可观测性、clip-worker pending 恢复、
+media-worker 扫描/probe 降本、worker 查询索引均已落地并完成 10 分钟双源验收。
+中文完成记录见
+`docs/repair_goal/midterm_recent_24h_goal_completion_2026-06-12.md`。
 
 ```text
 RTSP -> Replay storage -> Savant inference -> Redis/PostgreSQL
@@ -118,6 +124,29 @@ deferred/contract 状态。
 算法控制边界见 `docs/midterm_operator_algorithm_controls_runtime_status.md`。
 
 ## 最近固化的问题修复
+
+### 2026-06-12 最近 24 小时性能修复
+
+问题：最近 docs 和 `specs/15_savant_performance_observability.md` 暴露了多源
+运行态、证据展示、Savant metrics、clip-worker 队列恢复、media-worker 扫描
+probe、worker 查询索引等性能和可观测性缺口。
+
+当前状态：已完成修复并通过静态测试、doctor/smoke 和 10 分钟双源运行验收。
+验收 artifact 位于：
+
+```text
+/data/video-analytics/artifacts/perf/midterm-perf-20260612T070006Z-cd58154
+```
+
+关键结果：
+
+- source convergence healthy；
+- `primary_rtsp` 与 `lab` 双源 evidence 均有 ready/verified 样本；
+- `PASS_SAVANT_PERF_OBSERVABILITY_READY` 通过；
+- 10 分钟窗口内 worker restart count 无变化；
+- bottleneck classification 为 `no bottleneck observed in the run window`。
+
+详细记录：`docs/repair_goal/midterm_recent_24h_goal_completion_2026-06-12.md`。
 
 ### Replay routing_id 拒帧
 
