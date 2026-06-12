@@ -4,14 +4,26 @@
 
 Date: 2026-06-12
 
-This note freezes the read-only runtime diagnosis for two questions:
+This note freezes the read-only runtime diagnosis for these questions:
 
 - whether `clip-worker` or `media-worker` can stall the current program flow;
 - whether the current Savant 8 FPS limit is frame skipping, and how it relates
   to batching and TensorRT model execution.
+- how the official Savant model handles multiple streams, batching, Replay,
+  external storage boundaries, and per-stream state isolation;
+- whether this project should use one Redis/PostgreSQL table per camera, and
+  whether `clip-worker` and `media-worker` share a cache in a way that can
+  collide across cameras.
+- why a newly saved enabled camera can still have no output when its
+  source-adapter is not converged into the running topology.
 
 No code change is implied by this note. It records current behavior and repair
 priorities for later implementation.
+
+Companion note for the current `lab` camera output and `source_id` naming
+diagnosis:
+
+- `docs/midterm_camera_runtime_source_identity_findings_2026-06-12.md`
 
 ## Runtime Chain Boundary
 
@@ -29,6 +41,106 @@ block RTSP ingest, Replay storage, or Savant's main inference path directly.
 They can block or degrade the evidence path. User-visible symptoms include
 events stuck in `replay_job_created`, failed clips, missing evidence media,
 delayed sidecars, and 8090 evidence detail pages showing incomplete media.
+
+## Official Savant Pattern
+
+Official Savant's production pattern is not "one pipeline process per camera"
+and not "one database table per camera".
+
+The official streaming model decouples sources and sinks from the module with
+adapters. A Savant module receives many video streams through one ZeroMQ source
+socket, multiplexes and de-multiplexes them internally, and sends multiplexed
+output to sink adapters. Official docs explicitly call out that code holding
+per-stream state must key that state by stream `source_id`.
+
+Official source adapters require a unique `SOURCE_ID` for each stream. If
+identifiers collide, processing can become unpredictable. Sink adapters can then
+filter or route by `SOURCE_ID` or source-id prefix, and file sink adapters allow
+`%source_id` in output paths. This is the official isolation primitive: one
+shared module and shared transport, with every record/frame/event carrying a
+unique stream identity.
+
+Official batching also follows this shared-stream model. Savant documents two
+batching layers:
+
+- stream multiplexing batch: frames from one or more streams are batched by
+  pipeline parameters such as `batch_size`, `max_same_source_frames`, and
+  `batched_push_timeout`;
+- model batch: primary models batch frames, while secondary/object models batch
+  detected objects or ROIs.
+
+Official Replay is a separate service, not an in-module per-camera table. It
+keeps a recent video window in RocksDB and exposes a REST API for replay jobs.
+Official message buffering similarly uses a dedicated Buffer NG service backed
+by RocksDB when reliable buffering is needed. The embedded Savant KVS is for
+small pipeline data exchange and is explicitly not a Redis replacement.
+
+For external systems, official guidance separates real-time and capacity
+circuits: use backpressure-capable sockets/queues for capacity paths, use
+low-latency systems and hard timeouts for real-time paths, and add queues to
+decouple slow non-real-time systems. In this project, Redis Streams,
+PostgreSQL, Replay, `clip-worker`, and `media-worker` are application-level
+pieces around Savant, not replacements for Savant's stream identity model.
+
+## Project Data-Plane Isolation
+
+This project currently follows the same logical direction: shared storage with
+per-record stream identity, not one physical table per camera.
+
+PostgreSQL tables are shared business tables:
+
+- `events` contains `camera_id` and `source_id` columns and indexes.
+- `face_observations` contains `camera_id` and `source_id` columns and indexes.
+- `person_bbox_observations` contains `camera_id` and `source_id` columns and
+  source/camera timestamp indexes.
+- `evidence_tasks` contains `camera_id` and `source_id` columns.
+
+Splitting these into one table per camera is not the right first fix. It would
+increase schema churn, cross-camera query cost, and worker complexity. If scale
+later requires physical isolation, use normal database partitioning or retention
+policies behind the same logical schema, still keyed by `source_id`/`camera_id`.
+
+Redis is also shared by stream purpose, not by camera table:
+
+- Savant emits events and observations into shared streams such as
+  `security.events`, `security.face_observations`,
+  `security.person_observations`, and `security.frame_annotations`.
+- `event-worker` emits recording requests to `security.record_requests`.
+- Messages carry `source_id`, `camera_id`, and where relevant
+  `runtime_epoch_id`.
+
+`clip-worker` and `media-worker` are both used in the evidence path, but they
+do not represent the same cache:
+
+```text
+event-worker -> security.record_requests -> clip-worker
+  -> Replay REST job -> video-file-sink output directory
+  -> media-worker -> evidence sidecars + events/evidence_tasks updates
+```
+
+The shared contract is the event identity and stream identity:
+`event_id`, `source_event_id`, `source_id`, `camera_id`, frame UUID/PTS, and
+`runtime_epoch_id`. A correct multi-camera path requires those fields to stay
+unique and consistently propagated. With unique `source_id` values, the design
+should not create a camera-to-camera cache collision merely because Redis or
+PostgreSQL are shared.
+
+The real risks are narrower:
+
+- duplicate or reused `source_id` values;
+- stale active sink-output directories being rescanned after restart;
+- Redis consumer-group messages left pending without recovery;
+- frame annotation lookups that omit `source_id`, `camera_id`, or
+  `runtime_epoch_id`;
+- record requests whose Replay job labels cannot be matched back to the DB
+  event.
+
+The current code already includes several protections in this direction:
+camera config loading rejects duplicate `source_id`; runtime rule state is
+built as a `source_id -> SourceRuntime` map; frame annotation selection filters
+by `source_id` and `camera_id`; and newer post-Savant paths filter by
+`runtime_epoch_id`. The repair target should therefore be stronger lifecycle
+and pending-message handling, not per-camera Redis/PostgreSQL tables.
 
 ## Clip-Worker Findings
 
@@ -180,6 +292,58 @@ AdaFace opportunity depends on face detections and ~= face crops every third
 eligible detector frame
 ```
 
+## Savant Throttling Decision
+
+Official Savant has three different mechanisms that are easy to mix together:
+
+| Mechanism | Layer | What it limits | Recommended role here |
+| --- | --- | --- | --- |
+| `max_fps_control`, `max_fps`, `min_fps` | Savant / DeepStream muxer | Per-source frame scheduling through the pipeline muxer | Keep enabled as an official guardrail. |
+| `ingress_frame_filter` or top-level ROI removal | Source / frame admission or model ROI | Whether a frame, stream, or ROI enters downstream processing | Use as the project-visible throttling contract. |
+| `nvinfer` `interval` | Individual model | Consecutive batches skipped by that model | Use only as secondary per-model load shedding. |
+
+The current `PtsFpsGate` is a project implementation of Savant's official
+ingress frame-filter pattern. It is more explicit than relying only on
+`max_fps_control` because it records `seen` and `accepted` counts per
+`source_id`, uses frame PTS instead of wall-clock time, and drops frames before
+they enter the inference graph. This is a good fit for the current topology:
+
+```text
+RTSP -> Replay stores full stream -> Savant accepts sparse PTS-selected frames
+```
+
+That separation matters. Replay can still produce full-window evidence later,
+while Savant inference remains bounded to the configured 5-8 FPS target.
+
+Do not replace this with model `interval` as the only limiter. Official Savant
+documents `model.interval` as consecutive-batch inference skipping and
+recommends top-level ROI reset instead when a frame must be skipped. In this
+project, relying only on `interval` would still admit frames into the pipeline,
+would make pose/face/embedding cadence diverge in a less obvious way, and could
+confuse behavior-rule timing, tracker behavior, and evidence diagnostics.
+
+Recommended steady-state policy:
+
+```text
+1. Replay remains before Savant and stores the original stream.
+2. `PtsFpsGate` remains the auditable business limiter for frames admitted to
+   Savant, configured by `MAX_FPS_CONTROL` and `MAX_FPS`.
+3. Official `max_fps_control` remains enabled as the muxer-level safety rail.
+4. Model intervals remain model-specific cost controls:
+   - pose interval should stay conservative because behavior rules and tracker
+     quality depend on stable person observations;
+   - face detector and AdaFace intervals can be more aggressive because they
+     are not the only source of motion/behavior state.
+5. Metrics must distinguish source FPS, Savant-admitted FPS, model opportunity
+   FPS, object-output FPS, and Redis metadata/export FPS.
+```
+
+Current follow-up gap: `MIN_FPS` is passed into `PtsFpsGate`, but the gate does
+not currently implement a real minimum-FPS guarantee. It should either gain a
+well-defined meaning, such as a lower-bound admission target during sparse or
+irregular PTS streams, or be removed from the custom gate configuration to avoid
+suggesting a guarantee that does not exist.
+
 ## Savant Batching Model
 
 Savant batching has two relevant layers:
@@ -270,13 +434,20 @@ Current compatibility assessment:
    across restart or constrain scanning to new active-epoch outputs.
 5. Install `ffprobe` in the media-worker image or make the fallback cost and
    timeout explicit.
-6. Keep `MAX_FPS=8/1` documented as intentional frame dropping before inference.
-   Do not treat Redis frame annotation rate as source FPS; it is downstream of
-   ingress filtering and model intervals.
+6. Keep `MAX_FPS=8/1` documented as intentional PTS-domain frame dropping
+   before inference. Do not treat Redis frame annotation rate as source FPS; it
+   is downstream of ingress filtering and model intervals. Clarify or remove
+   the custom gate's `MIN_FPS` setting because it is not a real guarantee today.
 7. Treat detector multi-batch as a separate throughput task. Start with
    controlled benchmarks and engine generation for pose/face bN; do not change
    `BATCH_SIZE`, detector `model.batch_size`, and intervals in one unmeasured
    runtime change.
+8. Keep Redis/PostgreSQL as shared logical stores keyed by `source_id` and
+   `camera_id`. Do not introduce one table per camera unless it is implemented
+   as transparent database partitioning for scale/retention.
+9. Keep `clip-worker` and `media-worker` as separate evidence-path stages, but
+   harden their handoff: unique Replay job labels, source/camera/epoch filtering,
+   persisted processed sink outputs, and Redis pending-message recovery.
 
 ## References
 
@@ -292,6 +463,17 @@ Current repo files:
 
 Official Savant documentation checked on 2026-06-12:
 
+- `https://savant-ai.io/docs/latest/savant_101/00_streaming_model.html`
+- `https://savant-ai.io/docs/latest/savant_101/10_adapters.html`
+- `https://savant-ai.io/docs/latest/savant_101/12_module_definition.html`
+- `https://savant-ai.io/docs/latest/savant_101/25_top_level_roi.html`
+- `https://savant-ai.io/docs/latest/savant_101/54_additional_nvinfer_parameters.html`
+- `https://savant-ai.io/docs/latest/advanced_topics/0_batching.html`
+- `https://savant-ai.io/docs/latest/advanced_topics/3_frame_filtering.html`
+- `https://savant-ai.io/docs/latest/advanced_topics/8_ext_systems.html`
+- `https://savant-ai.io/docs/latest/advanced_topics/15_embedded_kvs.html`
+- `https://savant-ai.io/docs/latest/advanced_topics/17_restreaming.html`
+- `https://savant-ai.io/docs/latest/advanced_topics/19_message_buffering.html`
 - `https://savant-ai.io/docs/v0.6.0/advanced_topics/0_batching.html`
 - `https://savant-ai.io/docs/v0.6.0/advanced_topics/3_skipping_frames.html`
 - `https://savant-ai.io/docs/v0.6.0/savant_101/26_nvinfer.html`
