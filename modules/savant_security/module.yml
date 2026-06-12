@@ -33,6 +33,12 @@ parameters:
   max_same_source_frames: 1
   batched_push_timeout: ${oc.decode:${oc.env:BATCHED_PUSH_TIMEOUT, 40000}}
   queue_maxsize: 10
+  telemetry:
+    metrics:
+      frame_period: ${oc.decode:${oc.env:METRICS_FRAME_PERIOD, 1000}}
+      time_period: ${oc.decode:${oc.env:METRICS_TIME_PERIOD, 5}}
+      history: ${oc.decode:${oc.env:METRICS_HISTORY, 100}}
+      extra_labels: ${json:${oc.env:METRICS_EXTRA_LABELS, null}}
 
 pipeline:
   source:

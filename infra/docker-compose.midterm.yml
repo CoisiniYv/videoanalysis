@@ -142,6 +142,11 @@ services:
       ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
       MODEL_PATH: /models
       DOWNLOAD_PATH: /downloads
+      WEBSERVER_PORT: "8080"
+      METRICS_FRAME_PERIOD: "1000"
+      METRICS_TIME_PERIOD: "5"
+      METRICS_HISTORY: "100"
+      METRICS_EXTRA_LABELS: '{"service":"savant-security","profile":"midterm"}'
       BATCH_SIZE: "1"
       MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-4}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-true}"
@@ -202,6 +207,8 @@ services:
       - /data/video-analytics/downloads:/downloads:rw
       - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
       - /data/video-analytics/media:/data/video-analytics/media:rw
+    ports:
+      - "${SAVANT_METRICS_HOST_PORT:-18080}:8080"
     deploy:
       resources:
         reservations:

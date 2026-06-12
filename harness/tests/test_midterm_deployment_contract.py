@@ -117,6 +117,7 @@ def test_current_smoke_surface_is_midterm_only() -> None:
     assert scripts == [
         "check_midterm_deployment.sh",
         "check_operator_camera_and_face_registration.sh",
+        "check_savant_perf_observability.sh",
     ]
     assert "infra/docker-compose.midterm.yml" in _text(
         CURRENT_SMOKE_DIR / "check_midterm_deployment.sh"
@@ -371,6 +372,35 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
         "${parameters.face_embedding_infer_interval}"
     )
     assert face_worker_env["WATCHLIST_THRESHOLD"] == "${WATCHLIST_THRESHOLD:-0.60}"
+
+
+def test_midterm_savant_performance_observability_is_wired() -> None:
+    compose = _compose()
+    env_file = _env()
+    module = yaml.safe_load(_text(SAVANT_MODULE))
+    savant = compose["services"]["savant-security"]
+    savant_env = savant["environment"]
+    telemetry = module["parameters"]["telemetry"]["metrics"]
+    smoke = _text(CURRENT_SMOKE_DIR / "check_savant_perf_observability.sh")
+
+    assert savant_env["WEBSERVER_PORT"] == "8080"
+    assert savant_env["METRICS_FRAME_PERIOD"] == "1000"
+    assert savant_env["METRICS_TIME_PERIOD"] == "5"
+    assert savant_env["METRICS_HISTORY"] == "100"
+    assert savant_env["METRICS_EXTRA_LABELS"] == '{"service":"savant-security","profile":"midterm"}'
+    assert savant["ports"] == ["${SAVANT_METRICS_HOST_PORT:-18080}:8080"]
+    assert env_file["WEBSERVER_PORT"] == "8080"
+    assert env_file["METRICS_FRAME_PERIOD"] == "1000"
+    assert env_file["METRICS_TIME_PERIOD"] == "5"
+    assert env_file["METRICS_HISTORY"] == "100"
+    assert env_file["METRICS_EXTRA_LABELS"] == '{"service":"savant-security","profile":"midterm"}'
+    assert telemetry["frame_period"] == "${oc.decode:${oc.env:METRICS_FRAME_PERIOD, 1000}}"
+    assert telemetry["time_period"] == "${oc.decode:${oc.env:METRICS_TIME_PERIOD, 5}}"
+    assert telemetry["history"] == "${oc.decode:${oc.env:METRICS_HISTORY, 100}}"
+    assert telemetry["extra_labels"] == "${json:${oc.env:METRICS_EXTRA_LABELS, null}}"
+    assert "PASS_SAVANT_PERF_OBSERVABILITY_READY" in smoke
+    assert "XREVRANGE" in smoke
+    assert "nvidia-smi" in smoke
 
 
 def test_midterm_replay_storage_retention_covers_proof_wait() -> None:
