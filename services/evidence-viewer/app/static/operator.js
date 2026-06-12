@@ -1002,6 +1002,21 @@ function runtimeApplyMessage(data) {
   return `运行时已应用：${composeStarted.length} 个固定源、${started.length} 个动态源，${replay} / ${restarted} 已重启`;
 }
 
+function sourceApplyMessage(data) {
+  const started = data.dynamic_sources_started || [];
+  const recreated = data.dynamic_sources_recreated || [];
+  const stopped = data.dynamic_sources_stopped || [];
+  const kept = data.dynamic_sources_kept || [];
+  return `摄像头源已应用：启动 ${started.length} 个、重建 ${recreated.length} 个、停止 ${stopped.length} 个、保持 ${kept.length} 个`;
+}
+
+async function applyCameraSources({ context = "" } = {}) {
+  const data = await request(`${API}/cameras/runtime/sources/apply`, { method: "POST" });
+  const message = sourceApplyMessage(data);
+  showSuccess(context ? `${context}；${message}` : message);
+  return data;
+}
+
 async function applyRuntime({ context = "" } = {}) {
   const data = await request(`${API}/cameras/runtime/apply`, { method: "POST" });
   const message = runtimeApplyMessage(data);
@@ -1023,6 +1038,14 @@ async function restartRuntime() {
   const data = await request(`${API}/cameras/runtime/restart`, { method: "POST" });
   showSuccess(runtimeRestartMessage(data));
   return data;
+}
+
+async function applyCameraSourcesAfterChange(context) {
+  try {
+    await applyCameraSources({ context });
+  } catch (e) {
+    showError(`${context}，但摄像头源应用失败：${e.message}`);
+  }
 }
 
 async function applyRuntimeAfterChange(context) {
@@ -1049,7 +1072,7 @@ async function saveCamera() {
   selectedCameraId = camera.id;
   showSuccess("摄像头已保存；配置并启用算法规则后才会产生告警和证据");
   await loadCameras();
-  await applyRuntimeAfterChange("摄像头已保存");
+  await applyCameraSourcesAfterChange("摄像头已保存");
 }
 
 async function setCameraEnabled(enabled) {
@@ -1060,7 +1083,7 @@ async function setCameraEnabled(enabled) {
     method: "POST",
   });
   await loadCameras();
-  await applyRuntimeAfterChange(`摄像头已${enabled ? "启用" : "停用"}`);
+  await applyCameraSourcesAfterChange(`摄像头已${enabled ? "启用" : "停用"}`);
 }
 
 async function saveZone() {
@@ -1295,7 +1318,7 @@ document.getElementById("open-recording-settings").addEventListener("click", () 
 });
 document.getElementById("apply-runtime").addEventListener("click", () => {
   clearMessages();
-  applyRuntime().catch((e) => showError(`运行时应用失败：${e.message}`));
+  applyCameraSources().catch((e) => showError(`摄像头源应用失败：${e.message}`));
 });
 document.getElementById("restart-runtime").addEventListener("click", () => {
   clearMessages();

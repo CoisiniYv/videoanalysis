@@ -38,6 +38,8 @@ DEFAULT_SAVANT_READY_TIMEOUT_S = 300.0
 DEFAULT_SAVANT_READY_POLL_INTERVAL_S = 2.0
 SOURCE_CONTAINER_PREFIX = "video-analytics-source-"
 RUNTIME_EPOCH_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+SOURCE_ID_MAX_LENGTH = 96
 SAVANT_READY_PATTERNS = (
     re.compile(r"\bPLAYING\b", re.IGNORECASE),
     re.compile(r"\bmodule\b.*\bstarted\b", re.IGNORECASE),
@@ -439,9 +441,10 @@ def _build_sources_doc(cameras: list[dict[str, Any]], *, zmq_endpoint: str) -> d
     sources: dict[str, dict[str, Any]] = {}
     for camera in cameras:
         camera_id = str(camera["id"])
+        source_id = validate_source_id(str(camera["source_id"]))
         source = {
             "camera_id": camera_id,
-            "source_id": str(camera["source_id"]),
+            "source_id": source_id,
             "uri": str(camera["rtsp_url"]),
             "enabled": bool(camera.get("enabled", True)),
             "adapter_type": "gstreamer",
@@ -452,6 +455,17 @@ def _build_sources_doc(cameras: list[dict[str, Any]], *, zmq_endpoint: str) -> d
             source["camera_name"] = camera_name
         sources[camera_id] = source
     return {"sources": sources}
+
+
+def validate_source_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or text in {".", ".."}:
+        raise RuntimeApplyError(f"unsafe source_id: {value!r}")
+    if len(text) > SOURCE_ID_MAX_LENGTH:
+        raise RuntimeApplyError(f"unsafe source_id length: {value!r}")
+    if not SOURCE_ID_RE.fullmatch(text):
+        raise RuntimeApplyError(f"unsafe source_id: {value!r}")
+    return text
 
 
 def generate_runtime_epoch_id(now: datetime | None = None) -> str:

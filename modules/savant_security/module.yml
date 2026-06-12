@@ -281,6 +281,17 @@ pipeline:
         min_interval_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_EXPORT_MIN_INTERVAL_MS, 0}}
 
     # ------------------------------------------------------------------
+    # SavantPerfMetricsPyFunc — stable project-level va_savant_* metrics.
+    # Does not mutate metadata or emit events/evidence.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: savant_perf_metrics
+      module: custom.pyfuncs.savant_perf_metrics
+      class_name: SavantPerfMetricsPyFunc
+      kwargs:
+        fps_window_s: ${oc.decode:${oc.env:SAVANT_PERF_METRICS_FPS_WINDOW_S, 10}}
+
+    # ------------------------------------------------------------------
     # FaceEmbeddingDebugPyFunc — embedding visibility probe.
     # Logs feature dim, raw L2 norm, person_track_id, landmarks.
     # Does NOT emit face observations to Redis.

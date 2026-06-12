@@ -477,3 +477,32 @@ def test_runtime_apply_is_disabled_by_default(monkeypatch) -> None:
         assert "disabled" in str(exc)
     else:
         raise AssertionError("runtime apply should be disabled by default")
+
+
+def test_source_only_converge_rejects_unsafe_source_id_before_docker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+
+    try:
+        runtime_apply.converge_camera_sources(
+            cameras=[
+                {
+                    "id": "bad",
+                    "source_id": "bad/source",
+                    "rtsp_url": "rtsp://bad/stream",
+                    "enabled": True,
+                }
+            ],
+        )
+    except runtime_apply.RuntimeApplyError as exc:
+        assert "unsafe source_id" in str(exc)
+    else:
+        raise AssertionError("unsafe source_id should be rejected before Docker calls")
+
+    assert fake.calls == []

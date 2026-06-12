@@ -31,54 +31,6 @@ if [[ "${restart_before}" != "${restart_after}" ]]; then
 fi
 echo "savant_restart_count=${restart_after}"
 
-python - "$TMP_DIR/metrics.before" "$TMP_DIR/metrics.after" <<'PY'
-from __future__ import annotations
-
-import math
-import re
-import sys
-from pathlib import Path
-
-metric_re = re.compile(r"(frame|fps|object|queue|latenc|savant)", re.IGNORECASE)
-
-
-def parse(path: str) -> dict[str, float]:
-    values: dict[str, float] = {}
-    for raw in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        sample = parts[0]
-        metric_name = sample.split("{", 1)[0]
-        if not metric_re.search(metric_name):
-            continue
-        try:
-            value = float(parts[1])
-        except ValueError:
-            continue
-        if math.isfinite(value):
-            values[sample] = value
-    return values
-
-
-before = parse(sys.argv[1])
-after = parse(sys.argv[2])
-changed = [
-    (key, before[key], after[key])
-    for key in sorted(before.keys() & after.keys())
-    if after[key] != before[key]
-]
-if not changed:
-    print("ERROR: no frame/fps/object/queue/latency metric changed between scrapes", file=sys.stderr)
-    print(f"metrics_before_candidates={len(before)} metrics_after_candidates={len(after)}", file=sys.stderr)
-    raise SystemExit(1)
-key, old, new = changed[0]
-print(f"advancing_metric={key} before={old} after={new}")
-PY
-
 python - "${SOURCES_CONFIG}" >"${TMP_DIR}/enabled_sources" <<'PY'
 from __future__ import annotations
 
@@ -107,6 +59,103 @@ if [[ ! -s "${TMP_DIR}/enabled_sources" ]]; then
   echo "ERROR: no enabled RTSP sources found in ${SOURCES_CONFIG}" >&2
   exit 1
 fi
+
+python - "$TMP_DIR/metrics.before" "$TMP_DIR/metrics.after" "$TMP_DIR/enabled_sources" <<'PY'
+from __future__ import annotations
+
+import math
+import re
+import sys
+from pathlib import Path
+
+REQUIRED_BY_SOURCE = [
+    "va_savant_frames_seen_total",
+    "va_savant_frame_annotations_exported_total",
+    "va_savant_effective_fps",
+    "va_savant_last_frame_age_seconds",
+    "va_savant_pose_stage_frames_total",
+    "va_savant_pose_frames_with_person_total",
+    "va_savant_pose_objects_total",
+    "va_savant_face_stage_frames_total",
+    "va_savant_face_frames_with_face_total",
+    "va_savant_face_objects_total",
+    "va_savant_adaface_embeddings_total",
+    "va_savant_person_observations_exported_total",
+    "va_savant_face_observations_exported_total",
+]
+MUST_ADVANCE = [
+    "va_savant_frames_seen_total",
+    "va_savant_frame_annotations_exported_total",
+    "va_savant_pose_stage_frames_total",
+    "va_savant_face_stage_frames_total",
+]
+GLOBAL_REQUIRED = ["va_savant_sources_active"]
+SAMPLE_RE = re.compile(r"^(?P<name>[A-Za-z_:][A-Za-z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?$")
+LABEL_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)"')
+
+
+def parse(path: str) -> dict[tuple[str, str], float]:
+    values: dict[tuple[str, str], float] = {}
+    for raw in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        sample = parts[0]
+        match = SAMPLE_RE.match(sample)
+        if match is None:
+            continue
+        try:
+            value = float(parts[1])
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            labels = {key: value for key, value in LABEL_RE.findall(match.group("labels") or "")}
+            values[(match.group("name"), labels.get("source_id", ""))] = value
+    return values
+
+
+before = parse(sys.argv[1])
+after = parse(sys.argv[2])
+sources = [
+    line.strip()
+    for line in Path(sys.argv[3]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+missing: list[str] = []
+not_advancing: list[str] = []
+for source_id in sources:
+    for metric in REQUIRED_BY_SOURCE:
+        if (metric, source_id) not in after:
+            missing.append(f"{metric}{{source_id={source_id}}}")
+    for metric in MUST_ADVANCE:
+        key = (metric, source_id)
+        if key in before and key in after and after[key] <= before[key]:
+            not_advancing.append(
+                f"{metric}{{source_id={source_id}}} before={before[key]} after={after[key]}"
+            )
+for metric in GLOBAL_REQUIRED:
+    if (metric, "") not in after:
+        missing.append(metric)
+if missing:
+    print("ERROR: missing required va_savant metrics:", file=sys.stderr)
+    for item in missing:
+        print(f"  {item}", file=sys.stderr)
+    raise SystemExit(1)
+if not_advancing:
+    print("ERROR: required va_savant counters did not advance:", file=sys.stderr)
+    for item in not_advancing:
+        print(f"  {item}", file=sys.stderr)
+    raise SystemExit(1)
+for source_id in sources:
+    frames = after[("va_savant_frames_seen_total", source_id)] - before.get(
+        ("va_savant_frames_seen_total", source_id),
+        0.0,
+    )
+    print(f"va_savant_source={source_id} frames_seen_delta={frames:g}")
+PY
 
 docker exec "${REDIS_CONTAINER}" \
   redis-cli --raw XREVRANGE "${ANNOTATION_STREAM}" + - COUNT 5000 \

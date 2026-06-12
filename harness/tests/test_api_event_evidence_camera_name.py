@@ -43,3 +43,11 @@ def test_event_evidence_response_exposes_camera_name_without_losing_ids() -> Non
     assert payload["event"]["camera_id"] == "camera-1"
     assert payload["evidence_detail"]["camera_name"] == "lab"
     assert payload["evidence_detail"]["source_id"] == "source-1"
+
+
+def test_event_response_exposes_camera_name_for_list_recent_and_detail_routes() -> None:
+    payload = _event().model_dump()
+
+    assert payload["camera_name"] == "lab"
+    assert payload["source_id"] == "source-1"
+    assert payload["camera_id"] == "camera-1"

@@ -7,6 +7,7 @@ psycopg-based repository pattern from app.routers.events.
 from __future__ import annotations
 
 import uuid
+import os
 from typing import Any, Dict, List
 
 import psycopg
@@ -84,6 +85,24 @@ def _err_response(status_code: int, message: str, request_id: str) -> JSONRespon
     )
 
 
+def _runtime_source_apply_payload(repo: CameraRepository) -> dict[str, Any]:
+    if not _env_bool("CAMERA_RUNTIME_APPLY_ENABLED", default=False):
+        return {"ok": False, "skipped": "camera runtime control is disabled"}
+    cameras = repo.list_cameras()
+    try:
+        return {"ok": True, "result": converge_camera_sources(cameras=cameras)}
+    except RuntimeApplyError as exc:
+        return {"ok": False, "error": str(exc)}
+    except OSError as exc:
+        return {"ok": False, "error": f"runtime source apply filesystem error: {exc}"}
+
+
+def _camera_response_with_runtime(row: dict[str, Any], runtime_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = CameraResponse.from_db_row(row).model_dump()
+    payload["runtime_source_apply"] = runtime_payload
+    return payload
+
+
 def _supports_kw(callable_obj: object, name: str) -> bool:
     import inspect
 
@@ -94,6 +113,13 @@ def _supports_kw(callable_obj: object, name: str) -> bool:
     return name in params or any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
     )
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +270,8 @@ def cameras_create(
         row = repo.create_camera(**kwargs)
     except psycopg.errors.UniqueViolation as exc:
         return _err_response(409, f"unique constraint violation: {exc}", request_id)
-    return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
+    runtime_payload = _runtime_source_apply_payload(repo)
+    return _ok(_camera_response_with_runtime(row, runtime_payload), request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +317,12 @@ def cameras_update(
         return _err_response(404, f"camera not found: {camera_id}", request_id)
     if not hasattr(repo, "update_camera"):
         return _err_response(501, "camera update is not supported by repository", request_id)
-    row = repo.update_camera(camera_id, **body.model_dump(exclude_unset=True))
-    return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
+    try:
+        row = repo.update_camera(camera_id, **body.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        return _err_response(409, str(exc), request_id)
+    runtime_payload = _runtime_source_apply_payload(repo)
+    return _ok(_camera_response_with_runtime(row, runtime_payload), request_id)
 
 
 def _set_camera_enabled(
@@ -307,7 +338,8 @@ def _set_camera_enabled(
     else:
         row = repo.get_camera(camera_id)
         row["enabled"] = enabled
-    return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
+    runtime_payload = _runtime_source_apply_payload(repo)
+    return _ok(_camera_response_with_runtime(row, runtime_payload), request_id)
 
 
 @router.post("/{camera_id}/enable")

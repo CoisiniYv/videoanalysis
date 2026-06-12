@@ -14,6 +14,14 @@ import psycopg
 from psycopg.rows import dict_row
 
 
+SOURCE_ACTIVITY_TABLES = (
+    "events",
+    "evidence_tasks",
+    "face_observations",
+    "person_bbox_observations",
+)
+
+
 class CameraRepository:
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
@@ -74,6 +82,15 @@ class CameraRepository:
         current = self.get_camera(camera_id)
         if current is None:
             return None
+        current_source_id = str(current.get("source_id") or "")
+        if (
+            source_id is not None
+            and str(source_id) != current_source_id
+            and self.source_id_has_activity(current_source_id)
+        ):
+            raise ValueError(
+                "source_id cannot be changed after events, evidence, or observations exist"
+            )
 
         next_row = {
             "source_id": current.get("source_id") if source_id is None else source_id,
@@ -116,6 +133,23 @@ class CameraRepository:
                 },
             )
             return cur.fetchone()
+
+    def source_id_has_activity(self, source_id: str) -> bool:
+        if not source_id:
+            return False
+        with self._conn.cursor() as cur:
+            for table in SOURCE_ACTIVITY_TABLES:
+                try:
+                    cur.execute(
+                        f"SELECT 1 FROM {table} WHERE source_id = %(source_id)s LIMIT 1",
+                        {"source_id": source_id},
+                    )
+                except psycopg.errors.UndefinedTable:
+                    self._conn.rollback()
+                    continue
+                if cur.fetchone() is not None:
+                    return True
+        return False
 
     def set_camera_enabled(self, camera_id: str, enabled: bool) -> Optional[Dict[str, Any]]:
         with self._conn.cursor(row_factory=dict_row) as cur:

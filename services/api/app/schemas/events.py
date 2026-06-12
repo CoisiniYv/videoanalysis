@@ -64,6 +64,7 @@ class EventResponse(BaseModel):
     source_event_id: str
     event_type: str
     camera_id: str
+    camera_name: str = ""
     source_id: str = ""
     track_id: str = ""
     person_id: Optional[int] = None
@@ -145,6 +146,7 @@ class EventResponse(BaseModel):
             source_event_id=row.get("source_event_id", ""),
             event_type=row.get("event_type", ""),
             camera_id=row.get("camera_id", ""),
+            camera_name=_camera_name_from_payload(payload, media),
             source_id=row.get("source_id", ""),
             track_id=str(row.get("track_id", "")),
             person_id=row.get("person_id"),

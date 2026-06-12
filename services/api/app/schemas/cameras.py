@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -43,6 +44,8 @@ DEFAULT_EVIDENCE_POLICY: Dict[str, Any] = {
 # error surface manageable without ruling out reasonable site shapes.
 POLYGON_MIN_POINTS = 3
 POLYGON_MAX_POINTS = 10
+SOURCE_ID_MAX_LENGTH = 96
+SOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _iso(ts: Any) -> Optional[str]:
@@ -67,6 +70,19 @@ def _export_yaml_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_export_yaml_safe(v) for v in value]
     return value
+
+
+def validate_source_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("source_id must be non-empty")
+    if len(text) > SOURCE_ID_MAX_LENGTH:
+        raise ValueError(f"source_id must be at most {SOURCE_ID_MAX_LENGTH} characters")
+    if text in {".", ".."}:
+        raise ValueError("source_id cannot be '.' or '..'")
+    if not SOURCE_ID_PATTERN.fullmatch(text):
+        raise ValueError("source_id must match ^[A-Za-z0-9_.-]+$")
+    return text
 
 
 def _export_rows_for(
@@ -119,7 +135,12 @@ class CameraCreate(BaseModel):
     def _non_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("must be non-empty")
-        return v
+        return v.strip()
+
+    @field_validator("source_id")
+    @classmethod
+    def _source_id(cls, v: str) -> str:
+        return validate_source_id(v)
 
     @field_validator("input_type")
     @classmethod
@@ -155,6 +176,13 @@ class CameraUpdate(BaseModel):
         if v is not None and v != "rtsp":
             raise ValueError("input_type currently supports only 'rtsp'")
         return v
+
+    @field_validator("source_id")
+    @classmethod
+    def _source_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return validate_source_id(v)
 
     @field_validator("rtsp_transport")
     @classmethod

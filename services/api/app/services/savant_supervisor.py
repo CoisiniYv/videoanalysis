@@ -22,7 +22,11 @@ from urllib.parse import urlsplit
 from redis import Redis
 import yaml
 
-from app.services.runtime_apply import DockerSocketClient, RuntimeApplyError
+from app.services.runtime_apply import (
+    DockerSocketClient,
+    RuntimeApplyError,
+    converge_camera_sources,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +70,7 @@ class SavantSupervisorConfig:
     restart_cooldown_s: float = 300.0
     restart_wait_s: float = 1800.0
     restart_replay: bool = False
+    source_convergence_cooldown_s: float = 60.0
 
 
 def config_from_env() -> SavantSupervisorConfig:
@@ -117,6 +122,10 @@ def config_from_env() -> SavantSupervisorConfig:
         restart_cooldown_s=_env_float("SAVANT_SUPERVISOR_RESTART_COOLDOWN_S", 300.0),
         restart_wait_s=_env_float("SAVANT_SUPERVISOR_RESTART_WAIT_S", 1800.0),
         restart_replay=_env_bool("SAVANT_SUPERVISOR_RESTART_REPLAY", default=False),
+        source_convergence_cooldown_s=_env_float(
+            "SAVANT_SUPERVISOR_SOURCE_CONVERGENCE_COOLDOWN_S",
+            60.0,
+        ),
     )
 
 
@@ -135,10 +144,13 @@ class SavantSupervisor:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._last_restart_at = 0.0
+        self._last_source_convergence_at = 0.0
         self._stopped_since: float | None = None
         self._starting_since: float | None = None
         self._boot_marker = self._savant_boot_marker() if config.enabled else ""
         self._last_recovery: dict[str, Any] | None = None
+        self._last_source_convergence: dict[str, Any] | None = None
+        self._last_source_convergence_error: str = ""
         self._last_status: dict[str, Any] = {}
 
     def start(self) -> bool:
@@ -179,6 +191,9 @@ class SavantSupervisor:
         module_status = self.savant_status()
         annotation_age = self.annotation_age_s()
         in_cooldown = (time.time() - self._last_restart_at) < self.config.restart_cooldown_s
+        source_convergence_in_cooldown = (
+            time.time() - self._last_source_convergence_at
+        ) < self.config.source_convergence_cooldown_s
         state = {
             "enabled": self.config.enabled,
             "savant_container": self.config.savant_container,
@@ -196,6 +211,9 @@ class SavantSupervisor:
             "stall_check_enabled": self.config.stall_check_enabled,
             "restart_replay": self.config.restart_replay,
             "in_cooldown": in_cooldown,
+            "source_convergence_in_cooldown": source_convergence_in_cooldown,
+            "last_source_convergence": self._last_source_convergence,
+            "last_source_convergence_error": self._last_source_convergence_error,
             "last_recovery": self._last_recovery,
             "last_loop": self._last_status,
         }
@@ -225,6 +243,13 @@ class SavantSupervisor:
         if module_status == "running":
             self._stopped_since = None
             self._starting_since = None
+            convergence = self.source_convergence()
+            status["source_convergence"] = convergence
+            if not convergence.get("healthy", True):
+                repair = self.converge_sources("source_adapter_convergence", now=now)
+                status.update(action="source_converged", source_convergence_repair=repair)
+                self._last_status = status
+                return status
             if (
                 self.config.stall_check_enabled
                 and not in_cooldown
@@ -309,6 +334,54 @@ class SavantSupervisor:
             }
             return dict(self._last_recovery)
 
+    def converge_sources(
+        self,
+        reason: str,
+        *,
+        now: float | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        now = time.time() if now is None else float(now)
+        if (
+            not force
+            and (now - self._last_source_convergence_at)
+            < self.config.source_convergence_cooldown_s
+        ):
+            return {
+                "converged": False,
+                "reason": reason,
+                "skipped": "cooldown",
+                "last_source_convergence": self._last_source_convergence,
+                "last_error": self._last_source_convergence_error,
+            }
+        try:
+            result = converge_camera_sources(cameras=self._desired_sources_as_cameras())
+        except Exception as exc:
+            self._last_source_convergence_at = now
+            self._last_source_convergence_error = f"{type(exc).__name__}: {exc}"
+            self._last_source_convergence = {
+                "converged": False,
+                "reason": reason,
+                "at_epoch_s": now,
+                "error": self._last_source_convergence_error,
+            }
+            LOGGER.warning(
+                "savant supervisor source convergence failed reason=%s error=%s",
+                reason,
+                self._last_source_convergence_error,
+            )
+            return dict(self._last_source_convergence)
+        self._last_source_convergence_at = now
+        self._last_source_convergence_error = ""
+        self._last_source_convergence = {
+            "converged": True,
+            "reason": reason,
+            "at_epoch_s": now,
+            "result": result,
+        }
+        LOGGER.info("savant supervisor source convergence completed reason=%s", reason)
+        return dict(self._last_source_convergence)
+
     def container_running(self, container_name: str) -> bool:
         state = self._inspect_container(container_name).get("State")
         return isinstance(state, dict) and state.get("Status") == "running"
@@ -364,12 +437,27 @@ class SavantSupervisor:
                     "adapter_type": str(entry.get("adapter_type") or ""),
                     "uri_scheme": _uri_scheme(uri),
                     "uri_host": _uri_host(uri),
+                    "rtsp_url": uri,
                     "compose_source": source_id == self.config.compose_source_id,
                     "dynamic_source": source_id != self.config.compose_source_id,
                     "expected_container_name": expected_container,
                 }
             )
         return desired
+
+    def _desired_sources_as_cameras(self) -> list[dict[str, Any]]:
+        cameras: list[dict[str, Any]] = []
+        for source in self.desired_sources():
+            cameras.append(
+                {
+                    "id": source.get("camera_id") or source.get("source_id") or "",
+                    "source_id": source.get("source_id") or "",
+                    "name": source.get("camera_name") or "",
+                    "rtsp_url": source.get("rtsp_url") or "",
+                    "enabled": bool(source.get("enabled", True)),
+                }
+            )
+        return cameras
 
     def source_convergence(
         self,
@@ -378,6 +466,20 @@ class SavantSupervisor:
     ) -> dict[str, Any]:
         desired_sources = desired_sources if desired_sources is not None else self.desired_sources()
         actual = self._actual_source_adapters()
+        if not desired_sources:
+            return {
+                "sources_config_path": self.config.sources_config_path,
+                "module_config_path": self.config.module_config_path,
+                "expected_source_adapters": [],
+                "running_adapters": [],
+                "missing_adapters": [],
+                "stopped_adapters": [],
+                "stale_adapters": [],
+                "actual_source_adapters": actual,
+                "source_states": [],
+                "healthy": True,
+                "skip_reason": "no_desired_sources",
+            }
         actual_by_name = {item["container_name"]: item for item in actual}
         expected_enabled = [
             source

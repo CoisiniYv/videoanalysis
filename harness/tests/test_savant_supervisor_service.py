@@ -18,6 +18,7 @@ from app.services.savant_supervisor import (  # noqa: E402
     SavantSupervisor,
     SavantSupervisorConfig,
 )
+import app.services.savant_supervisor as savant_supervisor_module  # noqa: E402
 
 
 class FakeDockerClient:
@@ -168,6 +169,66 @@ def test_supervisor_run_once_recovers_annotation_stall() -> None:
     assert "/containers/video-analytics-midterm-savant/restart?t=30" in called_paths
     assert "/containers/video-analytics-midterm-source-adapter/restart?t=15" in called_paths
     assert "/containers/video-analytics-source-source_lab/restart?t=15" in called_paths
+
+
+def test_supervisor_run_once_converges_unhealthy_sources_without_savant_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sources_path = tmp_path / "sources.generated.yml"
+    module_path = tmp_path / "cameras.midterm.yml"
+    sources_path.write_text(
+        """
+sources:
+  lab:
+    camera_id: lab
+    source_id: source_lab
+    camera_name: lab
+    uri: rtsp://lab/stream
+    enabled: true
+    adapter_type: gstreamer
+    zmq_endpoint: dealer+connect:tcp://replay-service:5555
+""".lstrip(),
+        encoding="utf-8",
+    )
+    module_path.write_text("cameras: {}\n", encoding="utf-8")
+    fake = FakeDockerClient()
+    fake.containers = [
+        {"Names": ["/video-analytics-source-stale"], "State": "running"},
+    ]
+    captured: dict[str, Any] = {}
+
+    def fake_converge(*, cameras):
+        captured["cameras"] = cameras
+        return {"runtime_action": "source_converge", "dynamic_sources_started": ["source_lab"]}
+
+    monkeypatch.setattr(savant_supervisor_module, "converge_camera_sources", fake_converge)
+    supervisor = SavantSupervisor(
+        config=_config(
+            module_config_path=str(module_path),
+            sources_config_path=str(sources_path),
+            source_convergence_cooldown_s=0.0,
+        ),
+        docker_client=fake,  # type: ignore[arg-type]
+        redis_client=FakeRedis(last_generated_id="119000-0", now_s=120),
+    )
+
+    result = supervisor.run_once(now=1000.0)
+
+    called_paths = [path for method, path, _body in fake.calls if method == "POST"]
+    assert result["action"] == "source_converged"
+    assert result["source_convergence_repair"]["converged"] is True
+    assert captured["cameras"] == [
+        {
+            "id": "lab",
+            "source_id": "source_lab",
+            "name": "lab",
+            "rtsp_url": "rtsp://lab/stream",
+            "enabled": True,
+        }
+    ]
+    assert "/containers/video-analytics-midterm-savant/restart?t=30" not in called_paths
+    assert "/containers/video-analytics-midterm-replay-service/restart?t=30" not in called_paths
 
 
 def test_supervisor_reports_desired_and_missing_dynamic_sources(tmp_path: Path) -> None:
