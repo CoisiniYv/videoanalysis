@@ -40,6 +40,25 @@ def _safe_media(payload: dict | None) -> dict:
     return fallback
 
 
+def _camera_name_from_payload(payload: dict | None, media: dict | None = None) -> str:
+    if not isinstance(payload, dict):
+        payload = {}
+    if not isinstance(media, dict):
+        media = {}
+    camera = payload.get("camera") if isinstance(payload.get("camera"), dict) else {}
+    for value in (
+        payload.get("camera_name"),
+        media.get("camera_name"),
+        camera.get("name"),
+    ):
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 class EventResponse(BaseModel):
     id: str
     source_event_id: str
@@ -239,6 +258,7 @@ class EventEvidenceResponse(BaseModel):
     event_id: str
     source_event_id: str
     event_type: str
+    camera_name: str = ""
     media_status: str = "not_implemented"
     snapshot_status: str = "not_implemented"
     clip_status: str = "not_implemented"
@@ -285,11 +305,13 @@ class EventEvidenceResponse(BaseModel):
         clip_error_message = event.media.get("clip_error_message") if event.media else None
         raw_clip_path = event.media.get("raw_clip_path") if event.media else None
         annotated_clip_path = event.media.get("annotated_clip_path") if event.media else None
+        camera_name = _camera_name_from_payload(event.payload, event.media)
 
         return cls(
             event_id=event.id,
             source_event_id=event.source_event_id,
             event_type=event.event_type,
+            camera_name=camera_name,
             media_status=event.media_status,
             snapshot_status=event.media.get("snapshot_status", "not_implemented"),
             clip_status=event.media.get("clip_status", "not_implemented"),

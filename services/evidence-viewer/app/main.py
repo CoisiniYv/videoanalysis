@@ -19,6 +19,7 @@ from app.evidence_index import (
     bundle_manifest,
     discover_raw_clip,
     ensure_bundle_dir,
+    load_camera_name_lookup,
     load_json_object,
     media_type_for_path,
     parse_json_or_jsonl_records,
@@ -52,6 +53,13 @@ PRODUCTION_TIMELINE_DOMAIN = "final_canonical_clip"
 
 app = FastAPI(title="Evidence Viewer", version="1.0.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _camera_name_lookup() -> dict[str, str]:
+    return load_camera_name_lookup(
+        camera_config_path=settings.camera_config_path,
+        sources_config_path=settings.sources_config_path,
+    )
 
 
 def _http_error(exc: Exception) -> HTTPException:
@@ -194,6 +202,7 @@ def api_bundles(
     offset: int = Query(default=0, ge=0),
 ) -> dict:
     capped_limit = min(limit, settings.max_bundles)
+    camera_name_lookup = _camera_name_lookup()
     result = scan_bundles(
         settings.evidence_root,
         filters={
@@ -206,6 +215,7 @@ def api_bundles(
         },
         limit=settings.max_bundles if person else capped_limit,
         offset=0 if person else offset,
+        camera_name_lookup=camera_name_lookup,
     )
     if person:
         matched = [
@@ -371,7 +381,11 @@ def api_raw_clip(event_id: str) -> FileResponse:
 @app.get("/api/bundles/{event_id:path}")
 def api_bundle_manifest(event_id: str) -> JSONResponse:
     try:
-        manifest = bundle_manifest(settings.evidence_root, event_id)
+        manifest = bundle_manifest(
+            settings.evidence_root,
+            event_id,
+            camera_name_lookup=_camera_name_lookup(),
+        )
         manifest.update(annotation_source_summary(settings.evidence_root / event_id))
         return JSONResponse(manifest)
     except Exception as exc:

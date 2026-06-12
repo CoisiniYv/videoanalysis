@@ -17,7 +17,11 @@ for name in list(sys.modules):
     if name == "app" or name.startswith("app."):
         del sys.modules[name]
 
-from app.evidence_index import bundle_manifest, scan_bundles  # noqa: E402
+from app.evidence_index import (  # noqa: E402
+    bundle_manifest,
+    load_camera_name_lookup,
+    scan_bundles,
+)
 
 
 def _write_bundle(root: Path, event_id: str, event: dict) -> None:
@@ -61,6 +65,45 @@ def test_bundle_listing_and_manifest_expose_alarm_machine_time(tmp_path: Path) -
     manifest = bundle_manifest(root, "event-1")
     assert manifest["alarm_machine_time"] == "2026-06-11T02:05:06+00:00"
     assert manifest["alarm_machine_time_source"] == "event.created_at"
+
+
+def test_bundle_listing_and_manifest_resolve_camera_name_from_config(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    config = tmp_path / "cameras.midterm.yml"
+    sources = tmp_path / "sources.generated.yml"
+    _write_bundle(root, "event-1", {})
+    config.write_text(
+        """
+cameras:
+  camera-1:
+    source_id: source-1
+    name: lab
+""".lstrip(),
+        encoding="utf-8",
+    )
+    sources.write_text(
+        """
+sources:
+  camera-1:
+    camera_id: camera-1
+    source_id: source-1
+    camera_name: lab
+""".lstrip(),
+        encoding="utf-8",
+    )
+    lookup = load_camera_name_lookup(
+        camera_config_path=config,
+        sources_config_path=sources,
+    )
+
+    bundle = scan_bundles(root, limit=10, offset=0, camera_name_lookup=lookup)["bundles"][0]
+    manifest = bundle_manifest(root, "event-1", camera_name_lookup=lookup)
+
+    assert bundle["camera_name"] == "lab"
+    assert bundle["source_id"] == "source-1"
+    assert bundle["camera_id"] == "camera-1"
+    assert manifest["camera_name"] == "lab"
+    assert manifest["metadata"]["event"]["source_id"] == "source-1"
 
 
 def test_legacy_bundle_uses_only_epoch_like_event_time(tmp_path: Path) -> None:

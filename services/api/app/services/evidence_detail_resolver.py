@@ -104,6 +104,7 @@ def resolve_event_evidence_detail(event: Any) -> dict[str, Any]:
         "event_type": _text(getattr(event, "event_type", "")),
         "status": _text(getattr(event, "status", "")),
         "camera_id": _text(getattr(event, "camera_id", "")),
+        "camera_name": _camera_name(payload, media),
         "source_id": _text(getattr(event, "source_id", "")),
         "track_id": _text(getattr(event, "track_id", "")),
         "source_observation_id": source_observation_id,
@@ -195,6 +196,19 @@ def _evidence_files(bundle_dir: Path | None) -> dict[str, str]:
         "watchlist_event_path": str(watchlist_event) if watchlist_event else "",
         "report_path": str(report) if report else "",
     }
+
+
+def _camera_name(payload: dict[str, Any], media: dict[str, Any]) -> str:
+    camera = payload.get("camera") if isinstance(payload.get("camera"), dict) else {}
+    for value in (
+        payload.get("camera_name"),
+        media.get("camera_name"),
+        camera.get("name"),
+    ):
+        text = _text(value)
+        if text:
+            return text
+    return ""
 
 
 def _first_existing(root: Path, names: tuple[str, ...]) -> Path | None:

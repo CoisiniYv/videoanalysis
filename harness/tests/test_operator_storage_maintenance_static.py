@@ -83,7 +83,15 @@ def test_midterm_keeps_8090_only_and_no_8000_host_port() -> None:
     assert api["expose"] == ["8000"]
     assert "ports" not in api
     assert "/data/video-analytics/media/evidence:/evidence:ro" in viewer["volumes"]
+    assert "../modules/savant_security/config:/app/modules/savant_security/config:ro" in viewer["volumes"]
+    assert "../infra/generated:/app/infra/generated:ro" in viewer["volumes"]
     assert viewer["environment"]["OPERATOR_API_BASE_URL"] == "http://api:8000"
+    assert viewer["environment"]["EVIDENCE_CAMERA_CONFIG_PATH"] == (
+        "/app/modules/savant_security/config/cameras.midterm.yml"
+    )
+    assert viewer["environment"]["EVIDENCE_SOURCES_CONFIG_PATH"] == (
+        "/app/infra/generated/sources.generated.yml"
+    )
 
 
 def test_midterm_preview_maintenance_flags_are_explicit_defaults() -> None:

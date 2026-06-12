@@ -80,6 +80,14 @@ function textOrNull(value) {
   return text ? text : null;
 }
 
+function cameraDisplayName(value = {}) {
+  return textOrNull(value.camera_name)
+    || textOrNull(value.cameraName)
+    || textOrNull(value.source_id)
+    || textOrNull(value.camera_id)
+    || "未知摄像头";
+}
+
 function epochMsOrNull(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return null;
@@ -326,7 +334,7 @@ function renderBundleList() {
     const alarmTime = formatAlarmMachineTime(bundle.alarm_machine_time);
     sub.textContent = [
       eventCategoryLabel(bundle.event_type),
-      bundle.source_id || bundle.camera_id || "未知摄像头",
+      cameraDisplayName(bundle),
       alarmTime ? `报警 ${alarmTime}` : "",
       clipStatusLabel(bundle.clip_status),
       evidenceStatusLabel(bundle.visual_evidence_status),
@@ -1096,7 +1104,12 @@ function renderDetails() {
 
   setText("eventId", event.event_id || state.selectedEventId);
   setText("eventType", eventTypeLabel(event.event_type || summary.event_type));
-  setText("sourceId", event.source_id || summary.source_id);
+  setText("sourceId", cameraDisplayName({
+    camera_name: state.manifest?.camera_name || event.camera_name || metadata.camera_name || summary.camera_name,
+    source_id: event.source_id || summary.source_id,
+    camera_id: event.camera_id || summary.camera_id
+  }));
+  setText("sourceRawId", event.source_id || summary.source_id);
   setText("cameraId", event.camera_id || summary.camera_id);
   setText("alarmMachineTime", formatAlarmMachineTime(
     state.manifest?.alarm_machine_time ||

@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 STATIC_ROOT = ROOT / "services" / "evidence-viewer" / "app" / "static"
+API_OPERATOR_STATIC_ROOT = ROOT / "services" / "api" / "app" / "static" / "operator"
 
 
 def _text(path: Path) -> str:
@@ -170,3 +171,13 @@ def test_operator_evidence_page_shows_alarm_machine_time() -> None:
     assert "formatAlarmMachineTime" in evidence_js
     assert "alarm_machine_time" in evidence_js
     assert "报警" in evidence_js
+
+
+def test_operator_evidence_prefers_camera_name_and_keeps_source_id_detail() -> None:
+    for static_root in (STATIC_ROOT, API_OPERATOR_STATIC_ROOT):
+        html = _text(static_root / "index.html")
+        evidence_js = _text(static_root / "evidence.js")
+        assert 'id="sourceRawId"' in html
+        assert "function cameraDisplayName" in evidence_js
+        assert "camera_name" in evidence_js
+        assert "setText(\"sourceRawId\"" in evidence_js

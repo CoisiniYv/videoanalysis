@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 SAFE_EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 RAW_CLIP_PREFERRED_NAMES = (
@@ -86,6 +88,23 @@ def load_json_object(path: Path) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(data, dict):
         return {}, [f"not_object:{path.name}"]
     return data, warnings
+
+
+def _read_yaml_doc(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, OSError, yaml.YAMLError):
+        return {}
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def parse_jsonl_records(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
@@ -299,7 +318,75 @@ def alarm_machine_time(metadata: dict[str, Any], summary: dict[str, Any]) -> tup
     return None, None
 
 
-def bundle_summary(bundle_dir: Path) -> dict[str, Any]:
+def load_camera_name_lookup(
+    *,
+    camera_config_path: Path | None = None,
+    sources_config_path: Path | None = None,
+) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    cameras_doc = _read_yaml_doc(camera_config_path)
+    cameras = cameras_doc.get("cameras") if isinstance(cameras_doc, dict) else {}
+    if isinstance(cameras, dict):
+        for camera_id, camera in cameras.items():
+            if not isinstance(camera, dict):
+                continue
+            name = _text_or_none(camera.get("name"))
+            if not name:
+                continue
+            camera_id_text = str(camera_id)
+            source_id = _text_or_none(camera.get("source_id"))
+            lookup[f"camera_id:{camera_id_text}"] = name
+            if source_id:
+                lookup[f"source_id:{source_id}"] = name
+
+    sources_doc = _read_yaml_doc(sources_config_path)
+    sources = sources_doc.get("sources") if isinstance(sources_doc, dict) else {}
+    if isinstance(sources, dict):
+        for camera_key, source in sources.items():
+            if not isinstance(source, dict):
+                continue
+            camera_name = _text_or_none(source.get("camera_name"))
+            camera_id = _text_or_none(source.get("camera_id")) or str(camera_key)
+            source_id = _text_or_none(source.get("source_id"))
+            if camera_name:
+                lookup.setdefault(f"camera_id:{camera_id}", camera_name)
+                if source_id:
+                    lookup.setdefault(f"source_id:{source_id}", camera_name)
+            elif camera_id and source_id and f"camera_id:{camera_id}" in lookup:
+                lookup.setdefault(f"source_id:{source_id}", lookup[f"camera_id:{camera_id}"])
+    return lookup
+
+
+def camera_name_for_bundle(
+    metadata: dict[str, Any],
+    summary: dict[str, Any],
+    camera_name_lookup: dict[str, str] | None = None,
+) -> str | None:
+    event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
+    camera = metadata.get("camera") if isinstance(metadata.get("camera"), dict) else {}
+    direct = (
+        _text_or_none(event.get("camera_name"))
+        or _text_or_none(metadata.get("camera_name"))
+        or _text_or_none(summary.get("camera_name"))
+        or _text_or_none(camera.get("name"))
+    )
+    if direct:
+        return direct
+    lookup = camera_name_lookup or {}
+    camera_id = _text_or_none(event.get("camera_id")) or _text_or_none(summary.get("camera_id"))
+    source_id = _text_or_none(event.get("source_id")) or _text_or_none(summary.get("source_id"))
+    if camera_id and lookup.get(f"camera_id:{camera_id}"):
+        return lookup[f"camera_id:{camera_id}"]
+    if source_id and lookup.get(f"source_id:{source_id}"):
+        return lookup[f"source_id:{source_id}"]
+    return None
+
+
+def bundle_summary(
+    bundle_dir: Path,
+    *,
+    camera_name_lookup: dict[str, str] | None = None,
+) -> dict[str, Any]:
     metadata, metadata_warnings = load_json_object(bundle_dir / "metadata.json")
     summary, summary_warnings = load_json_object(bundle_dir / "summary.json")
     event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
@@ -313,11 +400,13 @@ def bundle_summary(bundle_dir: Path) -> dict[str, Any]:
     annotations_path = bundle_dir / "annotations.jsonl"
     alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
     event_id = event.get("event_id") or summary.get("event_id") or bundle_dir.name
+    camera_name = camera_name_for_bundle(metadata, summary, camera_name_lookup)
     return {
         "event_id": event_id,
         "event_type": event.get("event_type") or summary.get("event_type"),
         "source_id": event.get("source_id") or summary.get("source_id"),
         "camera_id": event.get("camera_id") or summary.get("camera_id"),
+        "camera_name": camera_name,
         "alarm_machine_time": alarm_time,
         "alarm_machine_time_source": alarm_time_source,
         "raw_clip_available": raw_clip is not None,
@@ -344,6 +433,7 @@ def scan_bundles(
     filters: dict[str, str | None] | None = None,
     limit: int = 200,
     offset: int = 0,
+    camera_name_lookup: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     root = resolve_root(evidence_root)
     if not root.is_dir():
@@ -369,7 +459,7 @@ def scan_bundles(
         summary, summary_warnings = load_json_object(bundle_dir / "summary.json")
         if not _matches_filters(bundle_dir, metadata, summary, filters):
             continue
-        item = bundle_summary(bundle_dir)
+        item = bundle_summary(bundle_dir, camera_name_lookup=camera_name_lookup)
         item["warnings"] = sorted(
             set(item.get("warnings", []) + metadata_warnings + summary_warnings)
         )
@@ -386,7 +476,12 @@ def scan_bundles(
     }
 
 
-def bundle_manifest(evidence_root: Path, event_id: str) -> dict[str, Any]:
+def bundle_manifest(
+    evidence_root: Path,
+    event_id: str,
+    *,
+    camera_name_lookup: dict[str, str] | None = None,
+) -> dict[str, Any]:
     bundle_dir = ensure_bundle_dir(evidence_root, event_id)
     metadata, metadata_warnings = load_json_object(bundle_dir / "metadata.json")
     summary, summary_warnings = load_json_object(bundle_dir / "summary.json")
@@ -396,8 +491,10 @@ def bundle_manifest(evidence_root: Path, event_id: str) -> dict[str, Any]:
     if raw_clip is None:
         warnings.append("raw_clip_missing")
     alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
+    camera_name = camera_name_for_bundle(metadata, summary, camera_name_lookup)
     return {
         "event_id": event_id,
+        "camera_name": camera_name,
         "alarm_machine_time": alarm_time,
         "alarm_machine_time_source": alarm_time_source,
         "metadata": metadata,
