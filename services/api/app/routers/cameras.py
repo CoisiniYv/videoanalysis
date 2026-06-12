@@ -35,6 +35,7 @@ from app.schemas.cameras import (
 from app.services.runtime_apply import (
     RuntimeApplyError,
     apply_camera_runtime,
+    converge_camera_sources,
     restart_camera_runtime,
 )
 from app.services.savant_supervisor import (
@@ -166,6 +167,24 @@ def cameras_runtime_restart(
         return _err_response(503, str(exc), request_id)
     except OSError as exc:
         return _err_response(503, f"runtime restart filesystem error: {exc}", request_id)
+    return _ok(result, request_id)
+
+
+@router.post("/runtime/sources/apply")
+def cameras_runtime_sources_apply(
+    include_disabled: bool = Query(
+        True, description="Include disabled cameras so stale source adapters are stopped."
+    ),
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
+    try:
+        result = converge_camera_sources(cameras=cameras)
+    except RuntimeApplyError as exc:
+        return _err_response(503, str(exc), request_id)
+    except OSError as exc:
+        return _err_response(503, f"runtime source apply filesystem error: {exc}", request_id)
     return _ok(result, request_id)
 
 

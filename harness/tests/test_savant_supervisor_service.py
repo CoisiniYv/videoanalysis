@@ -168,3 +168,72 @@ def test_supervisor_run_once_recovers_annotation_stall() -> None:
     assert "/containers/video-analytics-midterm-savant/restart?t=30" in called_paths
     assert "/containers/video-analytics-midterm-source-adapter/restart?t=15" in called_paths
     assert "/containers/video-analytics-source-source_lab/restart?t=15" in called_paths
+
+
+def test_supervisor_reports_desired_and_missing_dynamic_sources(tmp_path: Path) -> None:
+    sources_path = tmp_path / "sources.generated.yml"
+    module_path = tmp_path / "cameras.midterm.yml"
+    sources_path.write_text(
+        """
+sources:
+  primary:
+    camera_id: primary
+    source_id: primary_rtsp
+    uri: rtsp://primary/stream
+    enabled: true
+    adapter_type: gstreamer
+    zmq_endpoint: dealer+connect:tcp://replay-service:5555
+  lab:
+    camera_id: lab
+    source_id: source_lab
+    uri: rtsp://lab/stream
+    enabled: true
+    adapter_type: gstreamer
+    zmq_endpoint: dealer+connect:tcp://replay-service:5555
+  disabled:
+    camera_id: disabled
+    source_id: source_disabled
+    uri: rtsp://disabled/stream
+    enabled: false
+    adapter_type: gstreamer
+    zmq_endpoint: dealer+connect:tcp://replay-service:5555
+""".lstrip(),
+        encoding="utf-8",
+    )
+    module_path.write_text(
+        """
+cameras:
+  primary:
+    name: Primary RTSP Camera
+  lab:
+    name: lab
+  disabled:
+    name: Disabled Camera
+""".lstrip(),
+        encoding="utf-8",
+    )
+    fake = FakeDockerClient()
+    fake.containers = [
+        {"Names": ["/video-analytics-midterm-source-adapter"], "State": "running"},
+        {"Names": ["/video-analytics-source-source_disabled"], "State": "running"},
+    ]
+    supervisor = SavantSupervisor(
+        config=_config(
+            module_config_path=str(module_path),
+            sources_config_path=str(sources_path),
+        ),
+        docker_client=fake,  # type: ignore[arg-type]
+        redis_client=FakeRedis(),
+    )
+
+    snapshot = supervisor.snapshot()
+
+    desired_lab = next(
+        source for source in snapshot["desired_sources"] if source["source_id"] == "source_lab"
+    )
+    convergence = snapshot["source_convergence"]
+    assert desired_lab["camera_name"] == "lab"
+    assert desired_lab["expected_container_name"] == "video-analytics-source-source_lab"
+    assert "video-analytics-source-source_lab" in convergence["missing_adapters"]
+    assert "video-analytics-source-source_disabled" in convergence["stale_adapters"]
+    assert convergence["healthy"] is False

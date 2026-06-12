@@ -452,6 +452,28 @@ def test_runtime_supervisor_status_route_is_under_cameras_prefix(client, monkeyp
     assert body["data"]["savant_module_status"] == "running"
 
 
+def test_runtime_sources_apply_route_is_under_cameras_prefix(client, monkeypatch):
+    _create_camera(client)
+    captured: dict[str, Any] = {}
+
+    def fake_converge(*, cameras):
+        captured["cameras"] = cameras
+        return {
+            "runtime_action": "source_converge",
+            "dynamic_sources_started": ["test_source"],
+        }
+
+    monkeypatch.setattr(cameras_router_module, "converge_camera_sources", fake_converge)
+
+    resp = client.post("/api/v1/cameras/runtime/sources/apply")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["error"] is None
+    assert body["data"]["runtime_action"] == "source_converge"
+    assert captured["cameras"][0]["id"] == "cam_001"
+
+
 # ===========================================================================
 # Bonus guards on validation
 # ===========================================================================

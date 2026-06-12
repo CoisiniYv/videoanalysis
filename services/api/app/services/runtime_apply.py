@@ -117,6 +117,137 @@ def restart_camera_runtime(
     )
 
 
+def converge_camera_sources(
+    *,
+    cameras: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Converge dynamic source-adapter containers without restarting Savant.
+
+    This path is intentionally narrower than ``apply_camera_runtime``: it
+    updates ``sources.generated.yml`` and reconciles per-source adapter
+    containers. Compose-owned ``primary_rtsp`` remains outside this lifecycle.
+    """
+    if not _env_bool("CAMERA_RUNTIME_APPLY_ENABLED", default=False):
+        raise RuntimeApplyError("camera runtime control is disabled")
+
+    sources_config_path = Path(
+        os.getenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", DEFAULT_SOURCES_CONFIG_PATH)
+    )
+    zmq_endpoint = os.getenv("CAMERA_RUNTIME_ZMQ_ENDPOINT", DEFAULT_ZMQ_ENDPOINT)
+    adapter_image = os.getenv("CAMERA_RUNTIME_ADAPTER_IMAGE", DEFAULT_ADAPTER_IMAGE)
+    network = os.getenv("CAMERA_RUNTIME_DOCKER_NETWORK", DEFAULT_NETWORK)
+    savant_container = os.getenv("CAMERA_RUNTIME_SAVANT_CONTAINER", DEFAULT_SAVANT_CONTAINER)
+    compose_source_id = os.getenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    compose_source_container = os.getenv(
+        "CAMERA_RUNTIME_COMPOSE_SOURCE_CONTAINER",
+        DEFAULT_COMPOSE_SOURCE_CONTAINER,
+    )
+    docker_socket = os.getenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/var/run/docker.sock")
+
+    client = DockerSocketClient(docker_socket)
+    sources_doc = _build_sources_doc(cameras, zmq_endpoint=zmq_endpoint)
+    _write_yaml(sources_config_path, sources_doc)
+
+    plan = _source_only_convergence_plan(
+        client,
+        sources_doc=sources_doc,
+        compose_source_id=compose_source_id,
+        compose_source_container=compose_source_container,
+    )
+    starts_required = any(
+        item["planned_action"] in {"create_start", "recreate_start", "start"}
+        for item in plan
+    )
+    savant_ready: dict[str, Any] = {
+        "savant_ready": None,
+        "savant_ready_wait_seconds": 0.0,
+        "savant_ready_reason": "not_required",
+        "savant_ready_attempts": 0,
+    }
+    if starts_required:
+        savant_ready = _wait_for_savant_ready(
+            client,
+            savant_container,
+            timeout_s=_env_float(
+                "CAMERA_RUNTIME_SAVANT_READY_TIMEOUT_S",
+                DEFAULT_SAVANT_READY_TIMEOUT_S,
+            ),
+            poll_interval_s=_env_float(
+                "CAMERA_RUNTIME_SAVANT_READY_POLL_INTERVAL_S",
+                DEFAULT_SAVANT_READY_POLL_INTERVAL_S,
+            ),
+        )
+        if not savant_ready["savant_ready"]:
+            raise RuntimeApplyError(
+                "savant not ready for source convergence after "
+                f"{savant_ready['savant_ready_wait_seconds']:.1f}s: "
+                f"{savant_ready['savant_ready_reason']}"
+            )
+
+    lifecycle: list[dict[str, Any]] = []
+    dynamic_sources_started: list[str] = []
+    dynamic_sources_recreated: list[str] = []
+    dynamic_sources_stopped: list[str] = []
+    dynamic_sources_kept: list[str] = []
+    sources_skipped: list[str] = []
+
+    for item in plan:
+        source = item.get("source") if isinstance(item.get("source"), dict) else {}
+        source_id = str(item.get("source_id") or source.get("source_id") or "")
+        action = str(item["planned_action"])
+        diag = dict(item)
+        diag.pop("source", None)
+
+        if action in {"remove_disabled", "remove_stale"}:
+            container_name = str(item.get("container_name") or "")
+            delete_status, _ = client.request(
+                "DELETE",
+                f"/containers/{quote(container_name, safe='')}?force=true",
+                ok_statuses={204, 404},
+            )
+            diag.update(action="removed", delete_status=delete_status)
+            dynamic_sources_stopped.append(source_id or container_name)
+        elif action == "start":
+            start_status = _start_container(client, str(item["container_name"]))
+            diag.update(action="started", start_status=start_status)
+            dynamic_sources_started.append(source_id)
+        elif action in {"create_start", "recreate_start"}:
+            dynamic_diag = _recreate_rtsp_adapter(
+                client,
+                source_id=source_id,
+                uri=str(source["uri"]),
+                zmq_endpoint=str(source["zmq_endpoint"]),
+                adapter_image=adapter_image,
+                network=network,
+            )
+            diag.update(dynamic_diag, action="created_started")
+            dynamic_sources_started.append(source_id)
+            if action == "recreate_start":
+                dynamic_sources_recreated.append(source_id)
+        elif action == "keep":
+            diag.update(action="kept")
+            dynamic_sources_kept.append(source_id)
+        else:
+            diag.update(action="skipped")
+            if source_id:
+                sources_skipped.append(source_id)
+        lifecycle.append(diag)
+
+    return {
+        "runtime_action": "source_converge",
+        "sources_config_path": str(sources_config_path),
+        "savant_container": savant_container,
+        **savant_ready,
+        "sources_total": len(sources_doc["sources"]),
+        "dynamic_sources_started": dynamic_sources_started,
+        "dynamic_sources_recreated": dynamic_sources_recreated,
+        "dynamic_sources_stopped": dynamic_sources_stopped,
+        "dynamic_sources_kept": dynamic_sources_kept,
+        "sources_skipped": sources_skipped,
+        "source_lifecycle": lifecycle,
+    }
+
+
 def _apply_camera_runtime_controlled(
     *,
     export_doc: dict[str, Any],
@@ -308,7 +439,7 @@ def _build_sources_doc(cameras: list[dict[str, Any]], *, zmq_endpoint: str) -> d
     sources: dict[str, dict[str, Any]] = {}
     for camera in cameras:
         camera_id = str(camera["id"])
-        sources[camera_id] = {
+        source = {
             "camera_id": camera_id,
             "source_id": str(camera["source_id"]),
             "uri": str(camera["rtsp_url"]),
@@ -316,6 +447,10 @@ def _build_sources_doc(cameras: list[dict[str, Any]], *, zmq_endpoint: str) -> d
             "adapter_type": "gstreamer",
             "zmq_endpoint": zmq_endpoint,
         }
+        camera_name = str(camera.get("name") or "")
+        if camera_name:
+            source["camera_name"] = camera_name
+        sources[camera_id] = source
     return {"sources": sources}
 
 
@@ -684,7 +819,7 @@ def _source_lifecycle_base(
 ) -> dict[str, Any]:
     source_id = str(source.get("source_id") or "")
     uri = str(source.get("uri") or "")
-    return {
+    base = {
         "source_id": source_id,
         "camera_id": str(source.get("camera_id") or ""),
         "adapter_type": str(source.get("adapter_type") or ""),
@@ -695,6 +830,10 @@ def _source_lifecycle_base(
         "ffmpeg_timeout_ms": 20000 if uri.startswith(("rtsp://", "rtsps://")) else None,
         "restart_policy": "unless-stopped" if uri.startswith(("rtsp://", "rtsps://")) else "",
     }
+    camera_name = str(source.get("camera_name") or "")
+    if camera_name:
+        base["camera_name"] = camera_name
+    return base
 
 
 def _rtsp_uri_host(uri: str) -> str:
@@ -763,7 +902,7 @@ def _recreate_rtsp_adapter(
     zmq_endpoint: str,
     adapter_image: str,
     network: str,
-) -> None:
+) -> dict[str, Any]:
     container_name = SOURCE_CONTAINER_PREFIX + source_id
     encoded_name = quote(container_name, safe="")
     delete_status, _ = client.request(
@@ -812,6 +951,140 @@ def _recreate_rtsp_adapter(
         "restart_policy": "unless-stopped",
         "ffmpeg_timeout_ms": 20000,
     }
+
+
+def _source_only_convergence_plan(
+    client: DockerSocketClient,
+    *,
+    sources_doc: dict[str, Any],
+    compose_source_id: str,
+    compose_source_container: str,
+) -> list[dict[str, Any]]:
+    actual_dynamic = _source_adapter_state_by_name(client)
+    configured_dynamic_names: set[str] = set()
+    plan: list[dict[str, Any]] = []
+
+    for source in sources_doc.get("sources", {}).values():
+        if not isinstance(source, dict):
+            continue
+        base = _source_lifecycle_base(source, compose_source_id=compose_source_id)
+        source_id = str(source.get("source_id") or "")
+        if not source_id:
+            plan.append({**base, "planned_action": "skip", "skip_reason": "missing_source_id"})
+            continue
+        if source_id == compose_source_id:
+            plan.append(
+                {
+                    **base,
+                    "planned_action": "skip",
+                    "skip_reason": "compose_managed_source",
+                    "container_name": compose_source_container,
+                }
+            )
+            continue
+
+        container_name = SOURCE_CONTAINER_PREFIX + source_id
+        configured_dynamic_names.add(container_name)
+        actual = actual_dynamic.get(container_name)
+        actual_state = str((actual or {}).get("state") or "")
+        diag = {
+            **base,
+            "source": source,
+            "container_name": container_name,
+            "actual_state": actual_state,
+            "actual_present": actual is not None,
+        }
+
+        if not source.get("enabled"):
+            if actual is None:
+                plan.append({**diag, "planned_action": "skip", "skip_reason": "disabled_absent"})
+            else:
+                plan.append({**diag, "planned_action": "remove_disabled"})
+            continue
+
+        if source.get("adapter_type") != "gstreamer":
+            plan.append({**diag, "planned_action": "skip", "skip_reason": "unsupported_adapter"})
+            continue
+        uri = str(source.get("uri") or "")
+        if not uri.startswith(("rtsp://", "rtsps://")):
+            plan.append({**diag, "planned_action": "skip", "skip_reason": "non_rtsp_uri"})
+            continue
+
+        if actual is None:
+            plan.append({**diag, "planned_action": "create_start"})
+            continue
+
+        inspect_doc = _inspect_container(client, container_name)
+        if not _rtsp_adapter_container_matches(inspect_doc, source):
+            plan.append({**diag, "planned_action": "recreate_start"})
+        elif actual_state == "running":
+            plan.append({**diag, "planned_action": "keep"})
+        else:
+            plan.append({**diag, "planned_action": "start"})
+
+    for container_name, actual in actual_dynamic.items():
+        if container_name in configured_dynamic_names:
+            continue
+        plan.append(
+            {
+                "source_id": "",
+                "camera_id": "",
+                "adapter_type": "",
+                "enabled": False,
+                "uri_host": "",
+                "compose_source": False,
+                "dynamic_source": True,
+                "ffmpeg_timeout_ms": None,
+                "restart_policy": "",
+                "container_name": container_name,
+                "actual_state": str(actual.get("state") or ""),
+                "actual_present": True,
+                "planned_action": "remove_stale",
+                "skip_reason": "not_configured",
+            }
+        )
+    return plan
+
+
+def _source_adapter_state_by_name(client: DockerSocketClient) -> dict[str, dict[str, Any]]:
+    try:
+        _, body = client.request("GET", "/containers/json?all=true", ok_statuses={200})
+        containers = json.loads(body.decode("utf-8") or "[]")
+    except Exception:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for container in containers if isinstance(containers, list) else []:
+        for raw_name in container.get("Names") or []:
+            name = str(raw_name).lstrip("/")
+            if name.startswith(SOURCE_CONTAINER_PREFIX):
+                out[name] = {
+                    "name": name,
+                    "state": str(container.get("State") or ""),
+                }
+    return out
+
+
+def _rtsp_adapter_container_matches(inspect_doc: dict[str, Any], source: dict[str, Any]) -> bool:
+    env = _container_env_map(inspect_doc)
+    uri = str(source.get("uri") or "")
+    return (
+        env.get("SOURCE_ID") == str(source.get("source_id") or "")
+        and env.get("ZMQ_ENDPOINT") == str(source.get("zmq_endpoint") or "")
+        and env.get("RTSP_URI", env.get("LOCATION", "")) == uri
+        and env.get("EOS_ON_START") == "false"
+        and env.get("FFMPEG_TIMEOUT_MS") == "20000"
+    )
+
+
+def _container_env_map(inspect_doc: dict[str, Any]) -> dict[str, str]:
+    config = inspect_doc.get("Config") if isinstance(inspect_doc, dict) else {}
+    values = config.get("Env") if isinstance(config, dict) else []
+    env: dict[str, str] = {}
+    for item in values or []:
+        key, sep, value = str(item).partition("=")
+        if sep:
+            env[key] = value
+    return env
 
 
 def _write_yaml(path: Path, doc: dict[str, Any]) -> None:

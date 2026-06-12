@@ -14,10 +14,13 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from urllib.parse import urlsplit
 
 from redis import Redis
+import yaml
 
 from app.services.runtime_apply import DockerSocketClient, RuntimeApplyError
 
@@ -32,6 +35,9 @@ DEFAULT_DYNAMIC_SOURCE_PREFIX = "video-analytics-source-"
 DEFAULT_STATUS_FILE = "/opt/savant/status.txt"
 DEFAULT_ANNOTATION_STREAM = "security.frame_annotations"
 DEFAULT_REDIS_URL = "redis://redis:6379/0"
+DEFAULT_MODULE_CONFIG_PATH = "/app/modules/savant_security/config/cameras.midterm.yml"
+DEFAULT_SOURCES_CONFIG_PATH = "/app/infra/generated/sources.generated.yml"
+DEFAULT_COMPOSE_SOURCE_ID = "primary_rtsp"
 
 
 class SavantSupervisorError(RuntimeError):
@@ -47,6 +53,9 @@ class SavantSupervisorConfig:
     replay_container: str = DEFAULT_REPLAY_CONTAINER
     compose_source_container: str = DEFAULT_COMPOSE_SOURCE_CONTAINER
     dynamic_source_prefix: str = DEFAULT_DYNAMIC_SOURCE_PREFIX
+    compose_source_id: str = DEFAULT_COMPOSE_SOURCE_ID
+    module_config_path: str = DEFAULT_MODULE_CONFIG_PATH
+    sources_config_path: str = DEFAULT_SOURCES_CONFIG_PATH
     status_file: str = DEFAULT_STATUS_FILE
     annotation_stream: str = DEFAULT_ANNOTATION_STREAM
     poll_interval_s: float = 10.0
@@ -82,6 +91,18 @@ def config_from_env() -> SavantSupervisorConfig:
         dynamic_source_prefix=os.getenv(
             "SAVANT_SUPERVISOR_DYNAMIC_SOURCE_PREFIX",
             DEFAULT_DYNAMIC_SOURCE_PREFIX,
+        ),
+        compose_source_id=os.getenv(
+            "SAVANT_SUPERVISOR_COMPOSE_SOURCE_ID",
+            os.getenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", DEFAULT_COMPOSE_SOURCE_ID),
+        ),
+        module_config_path=os.getenv(
+            "SAVANT_SUPERVISOR_MODULE_CONFIG_PATH",
+            os.getenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", DEFAULT_MODULE_CONFIG_PATH),
+        ),
+        sources_config_path=os.getenv(
+            "SAVANT_SUPERVISOR_SOURCES_CONFIG_PATH",
+            os.getenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", DEFAULT_SOURCES_CONFIG_PATH),
         ),
         status_file=os.getenv("SAVANT_SUPERVISOR_STATUS_FILE", DEFAULT_STATUS_FILE),
         annotation_stream=os.getenv(
@@ -153,6 +174,8 @@ class SavantSupervisor:
             }
         source_adapters = self.source_adapter_names()
         running_sources = self.source_adapter_names(running_only=True)
+        desired_sources = self.desired_sources()
+        source_convergence = self.source_convergence(desired_sources=desired_sources)
         module_status = self.savant_status()
         annotation_age = self.annotation_age_s()
         in_cooldown = (time.time() - self._last_restart_at) < self.config.restart_cooldown_s
@@ -163,6 +186,11 @@ class SavantSupervisor:
             "savant_module_status": module_status,
             "source_adapters": source_adapters,
             "running_source_adapters": running_sources,
+            "desired_sources": desired_sources,
+            "desired_enabled_sources": [
+                source for source in desired_sources if source.get("enabled")
+            ],
+            "source_convergence": source_convergence,
             "annotation_stream": self.config.annotation_stream,
             "annotation_age_s": annotation_age,
             "stall_check_enabled": self.config.stall_check_enabled,
@@ -306,6 +334,102 @@ class SavantSupervisor:
                     names.append(name)
         return names
 
+    def desired_sources(self) -> list[dict[str, Any]]:
+        sources_doc = _read_yaml_doc(Path(self.config.sources_config_path))
+        source_entries = sources_doc.get("sources") if isinstance(sources_doc, dict) else {}
+        if not isinstance(source_entries, dict):
+            return []
+        camera_names = _camera_names_by_id(Path(self.config.module_config_path))
+        desired: list[dict[str, Any]] = []
+        for camera_key, entry in source_entries.items():
+            if not isinstance(entry, dict):
+                continue
+            camera_id = str(entry.get("camera_id") or camera_key)
+            source_id = str(entry.get("source_id") or "")
+            if not source_id:
+                continue
+            uri = str(entry.get("uri") or "")
+            camera_name = str(entry.get("camera_name") or camera_names.get(camera_id) or "")
+            expected_container = (
+                self.config.compose_source_container
+                if source_id == self.config.compose_source_id
+                else self.config.dynamic_source_prefix + source_id
+            )
+            desired.append(
+                {
+                    "camera_id": camera_id,
+                    "camera_name": camera_name,
+                    "source_id": source_id,
+                    "enabled": bool(entry.get("enabled", True)),
+                    "adapter_type": str(entry.get("adapter_type") or ""),
+                    "uri_scheme": _uri_scheme(uri),
+                    "uri_host": _uri_host(uri),
+                    "compose_source": source_id == self.config.compose_source_id,
+                    "dynamic_source": source_id != self.config.compose_source_id,
+                    "expected_container_name": expected_container,
+                }
+            )
+        return desired
+
+    def source_convergence(
+        self,
+        *,
+        desired_sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        desired_sources = desired_sources if desired_sources is not None else self.desired_sources()
+        actual = self._actual_source_adapters()
+        actual_by_name = {item["container_name"]: item for item in actual}
+        expected_enabled = [
+            source
+            for source in desired_sources
+            if source.get("enabled") and source.get("adapter_type") == "gstreamer"
+        ]
+        expected_names = {
+            str(source["expected_container_name"])
+            for source in expected_enabled
+            if source.get("expected_container_name")
+        }
+        source_states: list[dict[str, Any]] = []
+        running_adapters: list[str] = []
+        missing_adapters: list[str] = []
+        stopped_adapters: list[str] = []
+        for source in expected_enabled:
+            container_name = str(source["expected_container_name"])
+            actual_state = actual_by_name.get(container_name)
+            state = str((actual_state or {}).get("state") or "")
+            row = {
+                **source,
+                "container_name": container_name,
+                "actual_present": actual_state is not None,
+                "actual_state": state,
+                "running": state == "running",
+            }
+            source_states.append(row)
+            if actual_state is None:
+                missing_adapters.append(container_name)
+            elif state == "running":
+                running_adapters.append(container_name)
+            else:
+                stopped_adapters.append(container_name)
+        stale_adapters = [
+            item["container_name"]
+            for item in actual
+            if item["container_name"].startswith(self.config.dynamic_source_prefix)
+            and item["container_name"] not in expected_names
+        ]
+        return {
+            "sources_config_path": self.config.sources_config_path,
+            "module_config_path": self.config.module_config_path,
+            "expected_source_adapters": sorted(expected_names),
+            "running_adapters": running_adapters,
+            "missing_adapters": missing_adapters,
+            "stopped_adapters": stopped_adapters,
+            "stale_adapters": stale_adapters,
+            "actual_source_adapters": actual,
+            "source_states": source_states,
+            "healthy": not missing_adapters and not stopped_adapters and not stale_adapters,
+        }
+
     def annotation_age_s(self) -> int | None:
         try:
             info = self.redis.xinfo_stream(self.config.annotation_stream)
@@ -396,6 +520,25 @@ class SavantSupervisor:
             LOGGER.warning("failed to list containers: %s", exc)
             return []
 
+    def _actual_source_adapters(self) -> list[dict[str, Any]]:
+        actual: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for container in self._list_containers():
+            state = str(container.get("State") or "")
+            for raw_name in container.get("Names") or []:
+                name = str(raw_name).lstrip("/")
+                if not self._is_source_adapter_name(name) or name in seen:
+                    continue
+                seen.add(name)
+                actual.append(
+                    {
+                        "container_name": name,
+                        "state": state,
+                        "running": state == "running",
+                    }
+                )
+        return actual
+
     def _docker_exec_text(self, container_name: str, command: list[str]) -> str:
         if not container_name:
             return ""
@@ -464,6 +607,46 @@ def _redis_mapping_get(mapping: Any, key: str) -> Any:
     if not isinstance(mapping, dict):
         return None
     return mapping.get(key) or mapping.get(key.encode("utf-8"))
+
+
+def _read_yaml_doc(path: Path) -> dict[str, Any]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        LOGGER.warning("failed to read yaml %s: %s", path, exc)
+        return {}
+
+
+def _camera_names_by_id(path: Path) -> dict[str, str]:
+    doc = _read_yaml_doc(path)
+    cameras = doc.get("cameras") if isinstance(doc, dict) else {}
+    if not isinstance(cameras, dict):
+        return {}
+    names: dict[str, str] = {}
+    for camera_id, camera in cameras.items():
+        if not isinstance(camera, dict):
+            continue
+        name = str(camera.get("name") or "")
+        if name:
+            names[str(camera_id)] = name
+    return names
+
+
+def _uri_scheme(uri: str) -> str:
+    try:
+        return urlsplit(uri).scheme.lower()
+    except Exception:
+        return ""
+
+
+def _uri_host(uri: str) -> str:
+    try:
+        return urlsplit(uri).hostname or ""
+    except Exception:
+        return ""
 
 
 def _stream_id_ms(value: Any) -> int | None:

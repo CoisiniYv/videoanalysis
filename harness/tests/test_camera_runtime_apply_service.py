@@ -346,6 +346,129 @@ def test_runtime_apply_fails_before_sources_when_savant_not_ready(
     assert "/containers/video-analytics-midterm-source-adapter/start" not in called_paths
 
 
+def test_source_only_converge_recreates_changed_dynamic_and_removes_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setenv("RUNTIME_EPOCH_ROOT", str(tmp_path / "replay-sink-output" / "midterm"))
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    fake.containers = [
+        {"Names": ["/video-analytics-source-source_lab"], "State": "running"},
+        {"Names": ["/video-analytics-source-source_disabled"], "State": "running"},
+        {"Names": ["/video-analytics-source-stale"], "State": "exited"},
+    ]
+    fake.inspect_by_name["video-analytics-midterm-savant"] = {
+        "State": {"StartedAt": "2026-06-11T00:00:00.000000000Z"}
+    }
+    fake.logs_by_name["video-analytics-midterm-savant"] = (
+        "2026-06-11T00:00:00Z pipeline state changed to PLAYING\n"
+    )
+    fake.inspect_by_name["video-analytics-source-source_lab"] = {
+        "Config": {
+            "Env": [
+                "SOURCE_ID=source_lab",
+                "RTSP_URI=rtsp://old-lab/stream",
+                "ZMQ_ENDPOINT=dealer+connect:tcp://replay-service:5555",
+                "EOS_ON_START=false",
+                "FFMPEG_TIMEOUT_MS=20000",
+            ]
+        }
+    }
+
+    result = runtime_apply.converge_camera_sources(
+        cameras=[
+            {
+                "id": "primary",
+                "source_id": "primary_rtsp",
+                "name": "Primary",
+                "rtsp_url": "rtsp://primary/stream",
+                "enabled": True,
+            },
+            {
+                "id": "lab",
+                "source_id": "source_lab",
+                "name": "lab",
+                "rtsp_url": "rtsp://new-lab/stream",
+                "enabled": True,
+            },
+            {
+                "id": "disabled",
+                "source_id": "source_disabled",
+                "name": "Disabled",
+                "rtsp_url": "rtsp://disabled/stream",
+                "enabled": False,
+            },
+        ],
+    )
+
+    called_paths = [path for _method, path, _body in fake.calls]
+    assert result["runtime_action"] == "source_converge"
+    assert result["savant_ready"] is True
+    assert result["dynamic_sources_started"] == ["source_lab"]
+    assert result["dynamic_sources_recreated"] == ["source_lab"]
+    assert result["dynamic_sources_stopped"] == [
+        "source_disabled",
+        "video-analytics-source-stale",
+    ]
+    assert "/containers/video-analytics-midterm-replay-service/restart?t=10" not in called_paths
+    assert "/containers/video-analytics-midterm-savant/restart?t=10" not in called_paths
+    assert "/containers/video-analytics-source-source_disabled?force=true" in called_paths
+    assert "/containers/video-analytics-source-stale?force=true" in called_paths
+    create_calls = [
+        body for method, path, body in fake.calls
+        if method == "POST" and path.startswith("/containers/create")
+    ]
+    assert len(create_calls) == 1
+    env = set(create_calls[0]["Env"])
+    assert "SOURCE_ID=source_lab" in env
+    assert "RTSP_URI=rtsp://new-lab/stream" in env
+    sources_doc = yaml.safe_load((tmp_path / "sources.generated.yml").read_text())
+    assert sources_doc["sources"]["lab"]["camera_name"] == "lab"
+
+
+def test_source_only_converge_fails_before_starting_sources_when_savant_not_ready(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setenv("CAMERA_RUNTIME_SAVANT_READY_TIMEOUT_S", "0")
+    monkeypatch.setenv("CAMERA_RUNTIME_SAVANT_READY_POLL_INTERVAL_S", "0")
+    monkeypatch.setenv("RUNTIME_EPOCH_ROOT", str(tmp_path / "replay-sink-output" / "midterm"))
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    fake.logs_by_name["video-analytics-midterm-savant"] = "still loading models\n"
+
+    try:
+        runtime_apply.converge_camera_sources(
+            cameras=[
+                {
+                    "id": "lab",
+                    "source_id": "source_lab",
+                    "name": "lab",
+                    "rtsp_url": "rtsp://lab/stream",
+                    "enabled": True,
+                }
+            ],
+        )
+    except runtime_apply.RuntimeApplyError as exc:
+        assert "savant not ready for source convergence" in str(exc)
+        assert "logs_without_ready_marker" in str(exc)
+    else:
+        raise AssertionError("source-only convergence should fail when Savant is not ready")
+
+    called_paths = [path for _method, path, _body in fake.calls]
+    assert not any(path.startswith("/containers/create") for path in called_paths)
+    assert "/containers/video-analytics-source-source_lab/start" not in called_paths
+
+
 def test_runtime_apply_is_disabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("CAMERA_RUNTIME_APPLY_ENABLED", raising=False)
     try:
