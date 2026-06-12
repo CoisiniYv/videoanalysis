@@ -22,6 +22,10 @@ class Config:
     max_jobs_per_run: int
     run_once: bool
     max_concurrent_jobs: int
+    pending_claim_min_idle_ms: int
+    pending_claim_count: int
+    pending_claim_interval_s: float
+    deferred_retry_max_attempts: int
     per_camera_cooldown_seconds: int
     replay_stop_condition_mode: str
     replay_fps: int
@@ -65,6 +69,16 @@ def load_config() -> Config:
         max_concurrent_jobs=int(
             os.getenv("CLIP_WORKER_MAX_CONCURRENT_JOBS", "0")
         ),
+        pending_claim_min_idle_ms=int(
+            os.getenv("CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS", "5000")
+        ),
+        pending_claim_count=int(os.getenv("CLIP_WORKER_PENDING_CLAIM_COUNT", "10")),
+        pending_claim_interval_s=float(
+            os.getenv("CLIP_WORKER_PENDING_CLAIM_INTERVAL_S", "5")
+        ),
+        deferred_retry_max_attempts=int(
+            os.getenv("CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS", "12")
+        ),
         per_camera_cooldown_seconds=int(
             os.getenv("CLIP_WORKER_PER_CAMERA_COOLDOWN_SECONDS", "0")
         ),
@@ -86,7 +100,7 @@ def load_config() -> Config:
             os.getenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "1.0")
         ),
         post_savant_frame_proof_attempts=int(
-            os.getenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", "30")
+            os.getenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", "1")
         ),
         post_savant_frame_proof_retry_sleep_s=float(
             os.getenv(

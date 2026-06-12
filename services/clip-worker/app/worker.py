@@ -630,6 +630,269 @@ def _fail_clip_request(
     redis_client.xack(stream, group, msg_id)
 
 
+def _message_id_text(msg_id: object) -> str:
+    return _decode_text(msg_id)
+
+
+def _message_age_seconds(msg_id: object) -> float | None:
+    stream_ms = _redis_stream_id_ms(msg_id)
+    if stream_ms is None:
+        return None
+    return max(0.0, time.time() - (stream_ms / 1000.0))
+
+
+def _pending_delivery_counts(
+    redis_client: Redis,
+    *,
+    stream: str,
+    group: str,
+    count: int,
+) -> dict[str, int]:
+    try:
+        pending = redis_client.xpending_range(
+            stream,
+            group,
+            min="-",
+            max="+",
+            count=max(1, int(count)),
+        )
+    except Exception as exc:
+        logger.warning("clip_worker_pending_inspect_failed stream=%s group=%s error=%s", stream, group, exc)
+        return {}
+    counts: dict[str, int] = {}
+    for item in pending or []:
+        if not isinstance(item, dict):
+            continue
+        msg_id = (
+            item.get("message_id")
+            or item.get("message-id")
+            or item.get("id")
+        )
+        deliveries = (
+            item.get("times_delivered")
+            or item.get("times-delivered")
+            or item.get("delivery_count")
+            or 1
+        )
+        try:
+            counts[_message_id_text(msg_id)] = int(deliveries)
+        except (TypeError, ValueError):
+            counts[_message_id_text(msg_id)] = 1
+    return counts
+
+
+def _claim_pending_entries(
+    redis_client: Redis,
+    cfg: Config,
+    *,
+    stream: str,
+    group: str,
+    consumer: str,
+) -> tuple[list[tuple[object, object]], dict[str, int]]:
+    if cfg.pending_claim_count <= 0 or cfg.pending_claim_min_idle_ms < 0:
+        return [], {}
+    delivery_counts = _pending_delivery_counts(
+        redis_client,
+        stream=stream,
+        group=group,
+        count=cfg.pending_claim_count,
+    )
+    try:
+        result = redis_client.xautoclaim(
+            stream,
+            group,
+            consumer,
+            cfg.pending_claim_min_idle_ms,
+            start_id="0-0",
+            count=cfg.pending_claim_count,
+        )
+        entries = result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else []
+    except AttributeError:
+        entries = _claim_pending_entries_fallback(
+            redis_client,
+            cfg,
+            stream=stream,
+            group=group,
+            consumer=consumer,
+            delivery_counts=delivery_counts,
+        )
+    except Exception as exc:
+        logger.warning(
+            "clip_worker_pending_claim_failed stream=%s group=%s consumer=%s error=%s",
+            stream,
+            group,
+            consumer,
+            exc,
+        )
+        return [], delivery_counts
+    claimed = list(entries or [])
+    if claimed:
+        logger.info(
+            "clip_worker_pending_claimed pending_claimed=%s stream=%s group=%s "
+            "consumer=%s min_idle_ms=%s",
+            len(claimed),
+            stream,
+            group,
+            consumer,
+            cfg.pending_claim_min_idle_ms,
+        )
+    return claimed, delivery_counts
+
+
+def _claim_pending_entries_fallback(
+    redis_client: Redis,
+    cfg: Config,
+    *,
+    stream: str,
+    group: str,
+    consumer: str,
+    delivery_counts: dict[str, int],
+) -> list[tuple[object, object]]:
+    if not delivery_counts:
+        return []
+    message_ids = list(delivery_counts)[: max(1, int(cfg.pending_claim_count))]
+    try:
+        return list(
+            redis_client.xclaim(
+                stream,
+                group,
+                consumer,
+                min_idle_time=cfg.pending_claim_min_idle_ms,
+                message_ids=message_ids,
+            )
+            or []
+        )
+    except Exception as exc:
+        logger.warning(
+            "clip_worker_pending_claim_fallback_failed stream=%s group=%s "
+            "consumer=%s error=%s",
+            stream,
+            group,
+            consumer,
+            exc,
+        )
+        return []
+
+
+def _retry_count_for_msg(
+    msg_id: object,
+    pending_delivery_counts: dict[str, int],
+) -> int:
+    deliveries = pending_delivery_counts.get(_message_id_text(msg_id), 1)
+    try:
+        return max(0, int(deliveries) - 1)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _redis_stream_group_diagnostics(
+    redis_client: Redis,
+    *,
+    stream: str,
+    group: str,
+) -> dict[str, object]:
+    diagnostics: dict[str, object] = {"pending": None, "lag": None}
+    try:
+        pending = redis_client.xpending(stream, group)
+        if isinstance(pending, dict):
+            diagnostics["pending"] = pending.get("pending")
+        elif isinstance(pending, (list, tuple)) and pending:
+            diagnostics["pending"] = pending[0]
+    except Exception:
+        pass
+    try:
+        for item in redis_client.xinfo_groups(stream) or []:
+            name = item.get("name") if isinstance(item, dict) else None
+            if _decode_text(name) != group:
+                continue
+            diagnostics["lag"] = item.get("lag")
+            diagnostics["pending"] = item.get("pending", diagnostics["pending"])
+            break
+    except Exception:
+        pass
+    return diagnostics
+
+
+def _post_savant_anchor_error_retryable(req: dict, error_message: str) -> bool:
+    if "missing_stream_session_id" in error_message:
+        return False
+    if not req.get("source_id"):
+        return False
+    if _frame_annotation_anchor_target_pts(
+        req,
+        post_seconds=int(req.get("post_seconds", 0) or 0),
+    ) is None:
+        return False
+    retryable_tokens = (
+        POST_SAVANT_MISSING_FRAME_TIMELINE_ERROR,
+        MISSING_ANCHOR_KEYFRAME_PTS_ERROR,
+        ANCHOR_KEYFRAME_PTS_OUTSIDE_WINDOW_ERROR,
+        EVENT_FRAME_ANCHOR_NOT_KEYFRAME_ERROR,
+        LOOKUP_RETURNED_PROOF_KEYFRAME_ERROR,
+        "keyframes_find_missing_exact_anchor_annotation",
+    )
+    return any(token in error_message for token in retryable_tokens)
+
+
+def _defer_clip_request(
+    redis_client: Redis,
+    pg_conn: psycopg.Connection,
+    *,
+    stream: str,
+    group: str,
+    msg_id: object,
+    event_id: str,
+    request_id: str,
+    reason: str,
+    error_message: str,
+    retry_count: int,
+    max_retries: int,
+    seen_requests: set[str],
+) -> bool:
+    retry_age_s = _message_age_seconds(msg_id)
+    if retry_count >= max(0, int(max_retries)):
+        final_error = (
+            f"retry_budget_exhausted reason={reason} retries={retry_count} "
+            f"error={error_message}"
+        )
+        logger.warning(
+            "clip_worker_final_failed request_id=%s event_id=%s reason=%s "
+            "retry_count=%s retry_age_s=%s final_fail_reason=%s",
+            request_id,
+            event_id,
+            reason,
+            retry_count,
+            retry_age_s,
+            final_error,
+        )
+        update_clip_status(pg_conn, event_id, "failed", error_message=final_error)
+        seen_requests.add(request_id)
+        redis_client.xack(stream, group, msg_id)
+        return True
+
+    logger.info(
+        "clip_worker_deferred request_id=%s event_id=%s reason=%s "
+        "deferred_retry_count=%s retry_age_s=%s max_retries=%s error=%s",
+        request_id,
+        event_id,
+        reason,
+        retry_count + 1,
+        retry_age_s,
+        max_retries,
+        error_message,
+    )
+    update_clip_status(
+        pg_conn,
+        event_id,
+        "pending",
+        error_message=(
+            f"deferred_retry reason={reason} "
+            f"retry_count={retry_count + 1} error={error_message}"
+        ),
+    )
+    return False
+
+
 def _derive_start_window_frame_from_keyframe_reference(
     redis_client: Redis,
     *,
@@ -1401,11 +1664,14 @@ def run_worker(
     active_jobs_until: list[float] = []
     last_job_by_camera: dict[str, int] = defaultdict(int)
     seen_requests: set[str] = set()
+    last_pending_claim_at = 0.0
 
     logger.info(
         "clip-worker started stream=%s group=%s replay=%s "
         "max_jobs_per_run=%s run_once=%s max_jobs_per_run_effective=%s "
         "max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
+        "pending_claim_min_idle_ms=%s pending_claim_count=%s "
+        "pending_claim_interval_s=%s deferred_retry_max_attempts=%s "
         "stop_condition_mode=%s replay_fps=%s replay_duration_extra_slack_s=%s "
         "allow_unbounded_keyframe_fallback=%s",
         stream, group, cfg.replay_api_url,
@@ -1414,6 +1680,10 @@ def run_worker(
         "enabled" if _max_jobs_limit_enabled(cfg) else "disabled",
         cfg.max_concurrent_jobs,
         cfg.per_camera_cooldown_seconds,
+        cfg.pending_claim_min_idle_ms,
+        cfg.pending_claim_count,
+        cfg.pending_claim_interval_s,
+        cfg.deferred_retry_max_attempts,
         cfg.replay_stop_condition_mode,
         cfg.replay_fps,
         cfg.replay_duration_extra_slack_s,
@@ -1425,11 +1695,32 @@ def run_worker(
 
     while not shutdown_requested:
         try:
-            # Read new record requests
-            result = redis_client.xreadgroup(
-                group, consumer, {stream: ">"},
-                count=10, block=cfg.poll_timeout_ms,
-            )
+            pending_delivery_counts: dict[str, int] = {}
+            pending_entries: list[tuple[object, object]] = []
+            now_for_claim = time.monotonic()
+            if (
+                cfg.pending_claim_count > 0
+                and now_for_claim - last_pending_claim_at
+                >= max(0.0, cfg.pending_claim_interval_s)
+            ):
+                pending_entries, pending_delivery_counts = _claim_pending_entries(
+                    redis_client,
+                    cfg,
+                    stream=stream,
+                    group=group,
+                    consumer=consumer,
+                )
+                last_pending_claim_at = now_for_claim
+
+            if pending_entries:
+                result = [(stream, pending_entries)]
+            else:
+                # Read new record requests. Pending messages are handled by the
+                # claim path above so one blocked request does not hide later ones.
+                result = redis_client.xreadgroup(
+                    group, consumer, {stream: ">"},
+                    count=10, block=cfg.poll_timeout_ms,
+                )
             if not result:
                 if cfg.run_once:
                     logger.info("clip-worker run_once completed with no messages")
@@ -1438,6 +1729,7 @@ def run_worker(
 
             for _stream_name, entries in result:
                 for msg_id, fields in entries:
+                    retry_count = _retry_count_for_msg(msg_id, pending_delivery_counts)
                     req = _parse_request(fields)
                     if req is None:
                         redis_client.xack(stream, group, msg_id)
@@ -1481,6 +1773,23 @@ def run_worker(
                         event_type=event_type,
                     )
                     if not gate.allowed:
+                        if gate.reason in {"max_concurrent_reached", "cooldown"}:
+                            _defer_clip_request(
+                                redis_client,
+                                pg_conn,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason=gate.reason,
+                                error_message=gate.error_message,
+                                retry_count=retry_count,
+                                max_retries=cfg.deferred_retry_max_attempts,
+                                seen_requests=seen_requests,
+                            )
+                            total_processed += 1
+                            continue
                         logger.info(
                             "clip_worker_skipped %s event_id=%s source_event_id=%s "
                             "event_type=%s camera_id=%s jobs_created=%s run_once=%s",
@@ -1504,6 +1813,7 @@ def run_worker(
                         continue
 
                     if post_savant_media_request:
+                        frame_proof_wait_started = time.monotonic()
                         (
                             replay_anchor_req,
                             keyframe_uuid,
@@ -1521,7 +1831,33 @@ def run_worker(
                             pre_seconds=pre_seconds,
                             post_seconds=post_seconds,
                         )
+                        frame_proof_wait_seconds = time.monotonic() - frame_proof_wait_started
+                        logger.info(
+                            "clip_worker_frame_proof_wait request_id=%s event_id=%s "
+                            "frame_proof_wait_seconds=%.3f anchor_ready=%s",
+                            req.get("request_id"),
+                            event_id,
+                            frame_proof_wait_seconds,
+                            anchor_error is None and replay_anchor_req is not None,
+                        )
                         if anchor_error is not None or replay_anchor_req is None:
+                            if _post_savant_anchor_error_retryable(req, str(anchor_error)):
+                                _defer_clip_request(
+                                    redis_client,
+                                    pg_conn,
+                                    stream=stream,
+                                    group=group,
+                                    msg_id=msg_id,
+                                    event_id=event_id,
+                                    request_id=request_id,
+                                    reason="post_savant_frame_proof",
+                                    error_message=str(anchor_error),
+                                    retry_count=retry_count,
+                                    max_retries=cfg.deferred_retry_max_attempts,
+                                    seen_requests=seen_requests,
+                                )
+                                total_processed += 1
+                                continue
                             logger.warning(
                                 "clip_worker_blocked post_savant_anchor_failed "
                                 "request_id=%s source_event_id=%s source_id=%s "
@@ -1744,7 +2080,18 @@ def run_worker(
 
             now = time.monotonic()
             if now - last_report >= 60:
-                logger.info("clip-worker summary: total_processed=%d", total_processed)
+                diag = _redis_stream_group_diagnostics(
+                    redis_client,
+                    stream=stream,
+                    group=group,
+                )
+                logger.info(
+                    "clip-worker summary: total_processed=%d redis_pending=%s "
+                    "redis_lag=%s",
+                    total_processed,
+                    diag.get("pending"),
+                    diag.get("lag"),
+                )
                 last_report = now
             if cfg.run_once:
                 logger.info(

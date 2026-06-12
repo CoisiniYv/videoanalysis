@@ -420,6 +420,33 @@ def test_midterm_replay_duration_extra_slack_default_is_bounded() -> None:
     assert _compose_env_default_int(slack, "REPLAY_DURATION_EXTRA_SLACK_S") <= 5
 
 
+def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
+    compose = _compose()
+    env_file = _env()
+    clip_env = compose["services"]["clip-worker"]["environment"]
+
+    assert clip_env["CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS"] == (
+        "${CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS:-5000}"
+    )
+    assert clip_env["CLIP_WORKER_PENDING_CLAIM_COUNT"] == (
+        "${CLIP_WORKER_PENDING_CLAIM_COUNT:-10}"
+    )
+    assert clip_env["CLIP_WORKER_PENDING_CLAIM_INTERVAL_S"] == (
+        "${CLIP_WORKER_PENDING_CLAIM_INTERVAL_S:-5}"
+    )
+    assert clip_env["CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS"] == (
+        "${CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS:-12}"
+    )
+    assert clip_env["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == (
+        "${POST_SAVANT_FRAME_PROOF_ATTEMPTS:-1}"
+    )
+    assert env_file["CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS"] == "5000"
+    assert env_file["CLIP_WORKER_PENDING_CLAIM_COUNT"] == "10"
+    assert env_file["CLIP_WORKER_PENDING_CLAIM_INTERVAL_S"] == "5"
+    assert env_file["CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS"] == "12"
+    assert env_file["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == "1"
+
+
 def test_midterm_evidence_version_is_project_named() -> None:
     compose = _compose()
     env_file = _env()

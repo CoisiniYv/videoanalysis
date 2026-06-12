@@ -239,7 +239,7 @@ def test_clip_worker_post_savant_frame_proof_wait_has_separate_config(monkeypatc
     cfg = config.load_config()
 
     assert cfg.keyframe_lookup_retries == 8
-    assert cfg.post_savant_frame_proof_attempts == 30
+    assert cfg.post_savant_frame_proof_attempts == 1
     assert cfg.post_savant_frame_proof_retry_sleep_s == 0.25
 
     monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", "45")
