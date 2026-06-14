@@ -17,6 +17,7 @@ from app.routers.cameras import router as cameras_router
 from app.routers.events import router as events_router
 from app.routers.maintenance import router as maintenance_router
 from app.routers.people import router as people_router
+from app.routers.runtime import router as runtime_router
 from app.routers.ws_alerts import router as ws_alerts_router
 from app.services.savant_supervisor import start_savant_supervisor, stop_savant_supervisor
 
@@ -37,6 +38,7 @@ app.include_router(cameras_router)
 app.include_router(algorithms_router)
 app.include_router(people_router)
 app.include_router(maintenance_router)
+app.include_router(runtime_router)
 app.include_router(ws_alerts_router)
 
 # Mount /media for serving clip/snapshot files
