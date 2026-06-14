@@ -242,7 +242,7 @@ services:
       LOCATION: ${VIDEO_ANALYTICS_RTSP_URI:-rtsp://192.168.1.105:8554/live/1080movie}
       RTSP_TRANSPORT: ${RTSP_TRANSPORT:-tcp}
       ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
-      SYNC_OUTPUT: "true"
+      SYNC_OUTPUT: "false"
       BUFFER_LEN: "2000"
       EOS_ON_START: "false"
       FFMPEG_TIMEOUT_MS: "20000"

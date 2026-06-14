@@ -933,7 +933,7 @@ def _recreate_rtsp_adapter(
             f"RTSP_URI={uri}",
             "RTSP_TRANSPORT=tcp",
             f"ZMQ_ENDPOINT={zmq_endpoint}",
-            "SYNC_OUTPUT=true",
+            "SYNC_OUTPUT=false",
             "BUFFER_LEN=2000",
             "EOS_ON_START=false",
             "FFMPEG_TIMEOUT_MS=20000",

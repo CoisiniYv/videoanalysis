@@ -147,6 +147,7 @@ def test_start_builds_docker_run(script_mod, sources_path):
     assert env_dict["RTSP_URI"] == "rtsp://example.local/stream"
     assert env_dict["RTSP_TRANSPORT"] == "tcp"
     assert env_dict["ZMQ_ENDPOINT"] == "dealer+connect:tcp://savant-security:5555"
+    assert env_dict["SYNC_OUTPUT"] == "false"
     assert env_dict["BUFFER_LEN"] == "2000"
     assert env_dict["EOS_ON_START"] == "false"
     assert "USE_ABSOLUTE_TIMESTAMPS" not in env_dict

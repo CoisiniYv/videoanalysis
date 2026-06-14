@@ -195,7 +195,7 @@ def docker_run_command(
         "-e", f"SOURCE_ID={spec.source_id}",
         "-e", f"LOCATION={location}",
         "-e", f"ZMQ_ENDPOINT={spec.zmq_endpoint}",
-        "-e", "SYNC_OUTPUT=true",
+        "-e", "SYNC_OUTPUT=false",
         "-e", "BUFFER_LEN=2000",
         "-e", f"EOS_ON_START={eos_on_start}",
         "-e", "FFMPEG_TIMEOUT_MS=20000",

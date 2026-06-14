@@ -334,6 +334,7 @@ def test_midterm_source_id_and_camera_config_are_neutral() -> None:
         _enabled_rtsp_source_count() * 2,
     )
     assert compose["services"]["source-adapter"]["environment"]["SOURCE_ID"] == "primary_rtsp"
+    assert compose["services"]["source-adapter"]["environment"]["SYNC_OUTPUT"] == "false"
     assert compose["services"]["event-worker"]["environment"]["RECORDING_SOURCE_ID"] == "${RECORDING_SOURCE_ID:-}"
     assert compose["services"]["event-worker"]["environment"]["DEFAULT_REPLAY_SOURCE_ID"] == "primary_rtsp"
     assert len(primary_cameras) == 1

@@ -188,6 +188,7 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     env = set(source_create["Env"])
     assert "SOURCE_ID=source_lab" in env
     assert "RTSP_URI=rtsp://lab/stream" in env
+    assert "SYNC_OUTPUT=false" in env
     assert "EOS_ON_START=false" in env
     assert not any(item.startswith("USE_ABSOLUTE_TIMESTAMPS=") for item in env)
     assert source_create["HostConfig"]["NetworkMode"] == "video-analytics-midterm_default"
