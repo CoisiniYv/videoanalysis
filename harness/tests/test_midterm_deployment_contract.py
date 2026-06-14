@@ -352,7 +352,7 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
         if "name" in element
     }
 
-    assert env_file["MAX_FPS_CONTROL"] == "true"
+    assert env_file["MAX_FPS_CONTROL"] == "false"
     assert env_file["INGRESS_FPS_GATE_ENABLED"] == "true"
     assert env_file["MAX_FPS"] == "8/1"
     assert env_file["MIN_FPS"] == "2/1"
@@ -367,7 +367,7 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["FACE_INFER_INTERVAL"] == "2"
     assert env_file["FACE_EMBEDDING_INFER_INTERVAL"] == "2"
     assert env_file["WATCHLIST_THRESHOLD"] == "0.60"
-    assert savant_env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-true}"
+    assert savant_env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-false}"
     assert savant_env["INGRESS_FPS_GATE_ENABLED"] == "${INGRESS_FPS_GATE_ENABLED:-true}"
     assert savant_env["POSE_INFER_INTERVAL"] == "${POSE_INFER_INTERVAL:-1}"
     assert savant_env["FACE_INFER_INTERVAL"] == "${FACE_INFER_INTERVAL:-2}"
