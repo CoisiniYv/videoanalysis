@@ -382,6 +382,11 @@ shard.
   It must pass with `PASS_PHASE2_SINGLE_T4_READY` on the target machine before
   starting the 30-minute pressure run. This is not the Phase 2 acceptance token;
   it only proves the machine/topology/input preconditions are present.
+- **Acceptance runner:** after the entry gate passes, run
+  `scripts/runtime/check_phase2_single_t4_pressure.py --report-path /data/video-analytics/artifacts/phase2_single_t4_pressure.json`.
+  It performs the default 30-minute sampling window and emits
+  `PASS_PHASE2_SINGLE_T4_30` only if FPS, restart, GPU/NVDEC/memory, annotation
+  flow, forwarder, and evidence checks all pass.
 - P5.1 decode-location measurement; P5.2 derive `(batch_size, ANALYSIS_FPS)`;
   P5.3 disable unused output encoding; P5.5 memory validation.
 - Generate the chosen TensorRT engines; set `max_parallel_streams ≥ 30+headroom`,
