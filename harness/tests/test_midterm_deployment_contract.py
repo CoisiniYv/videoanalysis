@@ -218,6 +218,8 @@ def test_replay_first_topology_is_preserved() -> None:
     )
     assert replay["in_stream"]["url"] == "router+bind:tcp://0.0.0.0:5555"
     assert replay["out_stream"]["url"] == "dealer+connect:tcp://savant-security:5557"
+    assert replay["out_stream"]["options"]["send_timeout"] == {"secs": 1, "nanos": 0}
+    assert replay["out_stream"]["options"]["send_retries"] == 2
     assert services["savant-security"]["environment"]["ZMQ_SRC_ENDPOINT"] == (
         "router+bind:tcp://0.0.0.0:5557"
     )

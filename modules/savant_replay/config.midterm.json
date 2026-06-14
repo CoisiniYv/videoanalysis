@@ -29,8 +29,8 @@
   "out_stream": {
     "url": "dealer+connect:tcp://savant-security:5557",
     "options": {
-      "send_timeout": {"secs": 5, "nanos": 0},
-      "send_retries": 10,
+      "send_timeout": {"secs": 1, "nanos": 0},
+      "send_retries": 2,
       "receive_timeout": {"secs": 5, "nanos": 0},
       "receive_retries": 10,
       "send_hwm": 10000,
