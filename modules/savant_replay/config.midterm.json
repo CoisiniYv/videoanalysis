@@ -27,7 +27,7 @@
     }
   },
   "out_stream": {
-    "url": "dealer+connect:tcp://savant-security:5557",
+    "url": "dealer+connect:tcp://analysis-forwarder:5557",
     "options": {
       "send_timeout": {"secs": 1, "nanos": 0},
       "send_retries": 2,

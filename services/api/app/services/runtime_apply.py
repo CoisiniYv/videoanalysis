@@ -23,6 +23,7 @@ DEFAULT_NETWORK = "video-analytics-midterm_default"
 DEFAULT_ADAPTER_IMAGE = "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
 DEFAULT_SAVANT_CONTAINER = "video-analytics-midterm-savant"
 DEFAULT_REPLAY_CONTAINER = "video-analytics-midterm-replay-service"
+DEFAULT_FORWARDER_CONTAINER = "video-analytics-midterm-analysis-forwarder"
 DEFAULT_COMPOSE_SOURCE_CONTAINER = "video-analytics-midterm-source-adapter"
 DEFAULT_EVENT_WORKER_CONTAINER = "video-analytics-midterm-event-worker"
 DEFAULT_FACE_WORKER_CONTAINER = "video-analytics-midterm-face-worker"
@@ -271,6 +272,10 @@ def _apply_camera_runtime_controlled(
     network = os.getenv("CAMERA_RUNTIME_DOCKER_NETWORK", DEFAULT_NETWORK)
     savant_container = os.getenv("CAMERA_RUNTIME_SAVANT_CONTAINER", DEFAULT_SAVANT_CONTAINER)
     replay_container = os.getenv("CAMERA_RUNTIME_REPLAY_CONTAINER", DEFAULT_REPLAY_CONTAINER)
+    forwarder_container = os.getenv(
+        "CAMERA_RUNTIME_FORWARDER_CONTAINER",
+        DEFAULT_FORWARDER_CONTAINER,
+    )
     compose_source_id = os.getenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
     compose_source_container = os.getenv(
         "CAMERA_RUNTIME_COMPOSE_SOURCE_CONTAINER",
@@ -331,6 +336,7 @@ def _apply_camera_runtime_controlled(
         network=network,
     )
     _restart_container(client, replay_container)
+    _restart_container(client, forwarder_container)
     _restart_container(client, savant_container)
     savant_ready = _wait_for_savant_ready(
         client,
@@ -426,6 +432,7 @@ def _apply_camera_runtime_controlled(
         "source_lifecycle": source_lifecycle,
         "workers_restarted": worker_containers,
         "replay_restarted": replay_container,
+        "forwarder_restarted": forwarder_container,
         "savant_restarted": savant_container,
         "management_containers_preserved": [
             os.getenv("CAMERA_RUNTIME_API_CONTAINER", "video-analytics-midterm-api"),

@@ -18,6 +18,7 @@ from app.services.runtime_overview import (
     RuntimeOverviewConfig,
     _reset_restart_rate_cache_for_tests,
     build_runtime_overview,
+    parse_forwarder_metrics,
     parse_savant_metrics,
 )
 
@@ -36,6 +37,15 @@ va_savant_adaface_embeddings_total{source_id="primary_rtsp"} 9
 va_savant_frames_seen_total{source_id="secondary_rtsp"} 80
 va_savant_effective_fps{source_id="secondary_rtsp"} 5
 va_savant_last_frame_age_seconds{source_id="secondary_rtsp"} 35
+"""
+
+FORWARDER_METRICS_TEXT = """
+va_forwarder_queue_depth 0
+va_forwarder_running 1
+va_forwarder_frames_seen_total{source_id="primary_rtsp"} 240
+va_forwarder_frames_forwarded_total{source_id="primary_rtsp"} 80
+va_forwarder_frames_dropped_total{source_id="primary_rtsp"} 160
+va_forwarder_savant_send_failures_total{source_id="primary_rtsp"} 0
 """
 
 
@@ -89,6 +99,16 @@ class FakeDockerClient:
                     "FinishedAt": "0001-01-01T00:00:00Z",
                 },
             },
+            "video-analytics-midterm-analysis-forwarder": {
+                "Id": "forwarder1234567890",
+                "RestartCount": 0,
+                "State": {
+                    "Status": "running",
+                    "Running": True,
+                    "StartedAt": "2026-06-14T01:02:30Z",
+                    "FinishedAt": "0001-01-01T00:00:00Z",
+                },
+            },
             "video-analytics-source-secondary_rtsp": {
                 "Id": "dynamic1234567890",
                 "RestartCount": self.dynamic_restart_count,
@@ -120,6 +140,23 @@ def test_parse_savant_metrics_returns_per_source_summary() -> None:
     assert primary["face_objects_total"] == 18
 
 
+def test_parse_forwarder_metrics_returns_queue_and_per_source_summary() -> None:
+    parsed = parse_forwarder_metrics(FORWARDER_METRICS_TEXT)
+
+    assert parsed["available"] is True
+    assert parsed["global"]["queue_depth"] == 0
+    assert parsed["global"]["running"] == 1
+    assert parsed["sources"] == [
+        {
+            "source_id": "primary_rtsp",
+            "frames_seen_total": 240,
+            "frames_forwarded_total": 80,
+            "frames_dropped_total": 160,
+            "savant_send_failures_total": 0,
+        }
+    ]
+
+
 def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None:
     _reset_restart_rate_cache_for_tests()
 
@@ -127,6 +164,7 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
         config=RuntimeOverviewConfig(metrics_url="http://savant-security:8080/metrics"),
         docker_client=FakeDockerClient(),
         metrics_text=METRICS_TEXT,
+        forwarder_metrics_text=FORWARDER_METRICS_TEXT,
         supervisor_snapshot={
             "enabled": True,
             "savant_container_running": True,
@@ -135,7 +173,9 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
     )
 
     assert overview["metrics"]["sources"][1]["source_id"] == "secondary_rtsp"
+    assert overview["forwarder"]["sources"][0]["frames_dropped_total"] == 160
     assert overview["containers"]["fixed"]["savant"]["restart_count"] == 1
+    assert overview["containers"]["fixed"]["analysis_forwarder"]["restart_count"] == 0
     assert overview["containers"]["fixed"]["compose_source"]["restart_count"] == 3
     dynamic_source = overview["containers"]["dynamic_sources"][0]
     assert dynamic_source["name"] == "video-analytics-source-secondary_rtsp"
@@ -162,6 +202,7 @@ def test_runtime_overview_computes_short_window_restart_rate() -> None:
         config=config,
         docker_client=FakeDockerClient(dynamic_restart_count=12),
         metrics_text=METRICS_TEXT.replace("35", "0.5"),
+        forwarder_metrics_text=FORWARDER_METRICS_TEXT,
         supervisor_snapshot={"enabled": True, "savant_container_running": True},
         now_epoch_s=1000.0,
     )
@@ -169,6 +210,7 @@ def test_runtime_overview_computes_short_window_restart_rate() -> None:
         config=config,
         docker_client=FakeDockerClient(dynamic_restart_count=14),
         metrics_text=METRICS_TEXT.replace("35", "0.5"),
+        forwarder_metrics_text=FORWARDER_METRICS_TEXT,
         supervisor_snapshot={"enabled": True, "savant_container_running": True},
         now_epoch_s=1060.0,
     )

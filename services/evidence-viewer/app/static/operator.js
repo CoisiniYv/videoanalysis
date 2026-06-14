@@ -31,6 +31,7 @@ const evidenceCountEl = document.getElementById("evidence-count");
 const runtimeHealthSummaryEl = document.getElementById("runtime-health-summary");
 const runtimeSupervisorSummaryEl = document.getElementById("runtime-supervisor-summary");
 const runtimeSourceTableEl = document.getElementById("runtime-source-table");
+const runtimeForwarderTableEl = document.getElementById("runtime-forwarder-table");
 const runtimeContainerTableEl = document.getElementById("runtime-container-table");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
 const camerasEl = document.getElementById("cameras");
@@ -775,6 +776,7 @@ function renderRuntimeOverview() {
   if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
   const overview = runtimeOverview || {};
   const metrics = overview.metrics || {};
+  const forwarder = overview.forwarder || {};
   const health = overview.health || {};
   const containers = overview.containers || {};
   const supervisor = overview.supervisor || {};
@@ -813,6 +815,7 @@ function renderRuntimeOverview() {
     `</div>`;
 
   renderRuntimeSourceTable(metrics.sources || []);
+  renderRuntimeForwarderTable(forwarder);
   renderRuntimeContainerTable(containers);
 }
 
@@ -841,6 +844,44 @@ function renderRuntimeSourceTable(sources) {
       `<thead><tr>` +
         `<th>source</th><th>FPS</th><th>frame age(s)</th><th>frames</th>` +
         `<th>annotations</th><th>person</th><th>face</th><th>AdaFace</th>` +
+      `</tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+    `</table>`;
+}
+
+function renderRuntimeForwarderTable(forwarder) {
+  if (!runtimeForwarderTableEl) return;
+  const sources = forwarder.sources || [];
+  if (!forwarder.available) {
+    runtimeForwarderTableEl.innerHTML = `<div class="empty-state">暂无 analysis-forwarder 指标。</div>`;
+    return;
+  }
+  const global = forwarder.global || {};
+  const rows = sources.map((source) => {
+    const seen = Number(source.frames_seen_total);
+    const dropped = Number(source.frames_dropped_total);
+    const dropRatio = Number.isFinite(seen) && seen > 0 && Number.isFinite(dropped)
+      ? `${formatNumber((dropped / seen) * 100)}%`
+      : "--";
+    const failed = Number(source.savant_send_failures_total);
+    const warn = Number.isFinite(failed) && failed > 0;
+    return `<tr class="${warn ? "warn-row" : ""}">` +
+      `<td>${escapeHtml(source.source_id)}</td>` +
+      `<td>${formatInteger(source.frames_seen_total)}</td>` +
+      `<td>${formatInteger(source.frames_forwarded_total)}</td>` +
+      `<td>${formatInteger(source.frames_dropped_total)}</td>` +
+      `<td>${dropRatio}</td>` +
+      `<td>${formatInteger(source.savant_send_failures_total)}</td>` +
+    `</tr>`;
+  }).join("");
+  runtimeForwarderTableEl.innerHTML =
+    `<div class="runtime-kv-grid">` +
+      `<div><span>queue depth</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
+      `<div><span>running</span><strong>${global.running === 1 ? "是" : "否"}</strong></div>` +
+    `</div>` +
+    `<table class="runtime-table">` +
+      `<thead><tr>` +
+        `<th>source</th><th>seen</th><th>forwarded</th><th>dropped</th><th>drop %</th><th>send failures</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>`;

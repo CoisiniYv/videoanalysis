@@ -18,6 +18,7 @@ from app.services.runtime_apply import (
     DEFAULT_COMPOSE_SOURCE_CONTAINER,
     DEFAULT_EVENT_WORKER_CONTAINER,
     DEFAULT_FACE_WORKER_CONTAINER,
+    DEFAULT_FORWARDER_CONTAINER,
     DEFAULT_MEDIA_WORKER_CONTAINER,
     DEFAULT_REPLAY_CONTAINER,
     DEFAULT_SAVANT_CONTAINER,
@@ -35,6 +36,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock"
 DEFAULT_SAVANT_METRICS_URL = "http://savant-security:8080/metrics"
+DEFAULT_FORWARDER_METRICS_URL = "http://analysis-forwarder:8081/metrics"
 DEFAULT_METRICS_TIMEOUT_S = 2.0
 DEFAULT_RESTART_RATE_WARN_PER_MIN = 1.0
 DEFAULT_RESTART_COUNT_WARN_THRESHOLD = 10
@@ -70,10 +72,12 @@ class RuntimeOverviewError(RuntimeError):
 @dataclass(frozen=True)
 class RuntimeOverviewConfig:
     metrics_url: str = DEFAULT_SAVANT_METRICS_URL
+    forwarder_metrics_url: str = DEFAULT_FORWARDER_METRICS_URL
     metrics_timeout_s: float = DEFAULT_METRICS_TIMEOUT_S
     docker_socket: str = DEFAULT_DOCKER_SOCKET
     savant_container: str = DEFAULT_SAVANT_CONTAINER
     replay_container: str = DEFAULT_REPLAY_CONTAINER
+    forwarder_container: str = DEFAULT_FORWARDER_CONTAINER
     compose_source_container: str = DEFAULT_COMPOSE_SOURCE_CONTAINER
     event_worker_container: str = DEFAULT_EVENT_WORKER_CONTAINER
     face_worker_container: str = DEFAULT_FACE_WORKER_CONTAINER
@@ -88,6 +92,10 @@ class RuntimeOverviewConfig:
 def config_from_env() -> RuntimeOverviewConfig:
     return RuntimeOverviewConfig(
         metrics_url=os.getenv("RUNTIME_OVERVIEW_SAVANT_METRICS_URL", DEFAULT_SAVANT_METRICS_URL),
+        forwarder_metrics_url=os.getenv(
+            "RUNTIME_OVERVIEW_FORWARDER_METRICS_URL",
+            DEFAULT_FORWARDER_METRICS_URL,
+        ),
         metrics_timeout_s=_env_float("RUNTIME_OVERVIEW_METRICS_TIMEOUT_S", DEFAULT_METRICS_TIMEOUT_S),
         docker_socket=os.getenv(
             "RUNTIME_OVERVIEW_DOCKER_SOCKET",
@@ -100,6 +108,10 @@ def config_from_env() -> RuntimeOverviewConfig:
         replay_container=os.getenv(
             "RUNTIME_OVERVIEW_REPLAY_CONTAINER",
             os.getenv("CAMERA_RUNTIME_REPLAY_CONTAINER", DEFAULT_REPLAY_CONTAINER),
+        ),
+        forwarder_container=os.getenv(
+            "RUNTIME_OVERVIEW_FORWARDER_CONTAINER",
+            os.getenv("CAMERA_RUNTIME_FORWARDER_CONTAINER", DEFAULT_FORWARDER_CONTAINER),
         ),
         compose_source_container=os.getenv(
             "RUNTIME_OVERVIEW_COMPOSE_SOURCE_CONTAINER",
@@ -142,6 +154,7 @@ def build_runtime_overview(
     config: RuntimeOverviewConfig | None = None,
     docker_client: DockerSocketClient | None = None,
     metrics_text: str | None = None,
+    forwarder_metrics_text: str | None = None,
     supervisor_snapshot: dict[str, Any] | None = None,
     now_epoch_s: float | None = None,
 ) -> dict[str, Any]:
@@ -151,6 +164,14 @@ def build_runtime_overview(
         parse_savant_metrics(metrics_text)
         if metrics_text is not None
         else fetch_savant_metrics(cfg.metrics_url, timeout_s=cfg.metrics_timeout_s)
+    )
+    forwarder = (
+        parse_forwarder_metrics(forwarder_metrics_text)
+        if forwarder_metrics_text is not None
+        else fetch_forwarder_metrics(
+            cfg.forwarder_metrics_url,
+            timeout_s=cfg.metrics_timeout_s,
+        )
     )
     client = docker_client or DockerSocketClient(cfg.docker_socket)
     containers = inspect_runtime_containers(client, cfg)
@@ -165,7 +186,9 @@ def build_runtime_overview(
     return {
         "generated_at_epoch_s": int(now),
         "metrics_url": _safe_metrics_url(cfg.metrics_url),
+        "forwarder_metrics_url": _safe_metrics_url(cfg.forwarder_metrics_url),
         "metrics": metrics,
+        "forwarder": forwarder,
         "containers": containers,
         "supervisor": supervisor,
         "health": health,
@@ -188,6 +211,77 @@ def fetch_savant_metrics(url: str, *, timeout_s: float) -> dict[str, Any]:
     parsed = parse_savant_metrics(body)
     parsed["fetch_seconds"] = round(time.monotonic() - started, 3)
     return parsed
+
+
+def fetch_forwarder_metrics(url: str, *, timeout_s: float) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        with urlopen(url, timeout=max(0.1, timeout_s)) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except (OSError, URLError) as exc:
+        return {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "fetch_seconds": round(time.monotonic() - started, 3),
+            "sources": [],
+            "global": {},
+        }
+    parsed = parse_forwarder_metrics(body)
+    parsed["fetch_seconds"] = round(time.monotonic() - started, 3)
+    return parsed
+
+
+def parse_forwarder_metrics(text: str) -> dict[str, Any]:
+    samples: list[dict[str, Any]] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PROM_SAMPLE_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name")
+        if not name.startswith("va_forwarder_"):
+            continue
+        labels = _parse_prom_labels(match.group("labels") or "")
+        try:
+            value = float(match.group("value"))
+        except ValueError:
+            continue
+        samples.append({"name": name, "labels": labels, "value": value})
+
+    by_source: dict[str, dict[str, float]] = {}
+    global_metrics: dict[str, float] = {}
+    for sample in samples:
+        name = str(sample["name"])
+        value = float(sample["value"])
+        source_id = str(sample["labels"].get("source_id") or "")
+        if source_id:
+            by_source.setdefault(source_id, {})[name] = value
+        else:
+            global_metrics[name] = value
+
+    sources = [
+        {
+            "source_id": source_id,
+            "frames_seen_total": values.get("va_forwarder_frames_seen_total"),
+            "frames_forwarded_total": values.get("va_forwarder_frames_forwarded_total"),
+            "frames_dropped_total": values.get("va_forwarder_frames_dropped_total"),
+            "savant_send_failures_total": values.get(
+                "va_forwarder_savant_send_failures_total"
+            ),
+        }
+        for source_id, values in sorted(by_source.items())
+    ]
+    return {
+        "available": bool(samples),
+        "sample_count": len(samples),
+        "global": {
+            "queue_depth": global_metrics.get("va_forwarder_queue_depth"),
+            "running": global_metrics.get("va_forwarder_running"),
+        },
+        "sources": sources,
+    }
 
 
 def parse_savant_metrics(text: str) -> dict[str, Any]:
@@ -286,6 +380,7 @@ def inspect_runtime_containers(
     fixed = {
         "savant": config.savant_container,
         "replay": config.replay_container,
+        "analysis_forwarder": config.forwarder_container,
         "compose_source": config.compose_source_container,
         "event_worker": config.event_worker_container,
         "face_worker": config.face_worker_container,

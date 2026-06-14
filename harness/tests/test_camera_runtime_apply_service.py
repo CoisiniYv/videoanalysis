@@ -147,6 +147,7 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert result["compose_sources_started"] == ["primary_rtsp"]
     assert result["sources_skipped"] == []
     assert result["replay_restarted"] == "video-analytics-midterm-replay-service"
+    assert result["forwarder_restarted"] == "video-analytics-midterm-analysis-forwarder"
     assert result["savant_restarted"] == "video-analytics-midterm-savant"
     assert result["savant_ready"] is True
     assert result["savant_ready_reason"].startswith("log:")
@@ -232,6 +233,11 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
         i for i, (method, path, _body) in enumerate(fake.calls)
         if method == "POST" and path == "/containers/video-analytics-midterm-replay-service/restart?t=10"
     )
+    forwarder_restart_index = next(
+        i for i, (method, path, _body) in enumerate(fake.calls)
+        if method == "POST"
+        and path == "/containers/video-analytics-midterm-analysis-forwarder/restart?t=10"
+    )
     savant_restart_index = next(
         i for i, (method, path, _body) in enumerate(fake.calls)
         if method == "POST" and path == "/containers/video-analytics-midterm-savant/restart?t=10"
@@ -254,7 +260,7 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
         i for i, (method, path, _body) in enumerate(fake.calls)
         if method == "POST" and path.startswith("/containers/create")
     )
-    assert stop_primary_index < replay_restart_index < savant_restart_index
+    assert stop_primary_index < replay_restart_index < forwarder_restart_index < savant_restart_index
     assert savant_restart_index < savant_logs_index < worker_start_index
     assert worker_start_index < start_primary_index
     assert savant_restart_index < start_primary_index < source_create_index

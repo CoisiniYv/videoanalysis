@@ -18,6 +18,7 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert 'id="runtime-view"' in html
     assert 'id="runtime-health-summary"' in html
     assert 'id="runtime-source-table"' in html
+    assert 'id="runtime-forwarder-table"' in html
     assert 'id="runtime-container-table"' in html
     assert "运行控制" in html
     assert "摄像头性能" in html
@@ -31,6 +32,8 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "loadRuntimeOverview" in js
     assert "`${API}/runtime/overview`" in js
     assert "renderRuntimeOverview" in js
+    assert "renderRuntimeForwarderTable" in js
+    assert "frames_dropped_total" in js
     assert "restart_rate_per_min" in js
     assert "restart_warning" in js
     assert "restarts/min" in js

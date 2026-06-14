@@ -53,6 +53,7 @@ services:
       CAMERA_RUNTIME_ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       CAMERA_RUNTIME_DOCKER_NETWORK: video-analytics-midterm_default
       CAMERA_RUNTIME_REPLAY_CONTAINER: video-analytics-midterm-replay-service
+      CAMERA_RUNTIME_FORWARDER_CONTAINER: video-analytics-midterm-analysis-forwarder
       CAMERA_RUNTIME_SAVANT_CONTAINER: video-analytics-midterm-savant
       CAMERA_RUNTIME_COMPOSE_SOURCE_CONTAINER: video-analytics-midterm-source-adapter
       CAMERA_RUNTIME_EVENT_WORKER_CONTAINER: video-analytics-midterm-event-worker
@@ -76,6 +77,8 @@ services:
       SAVANT_SUPERVISOR_RESTART_COOLDOWN_S: "${SAVANT_SUPERVISOR_RESTART_COOLDOWN_S:-300}"
       SAVANT_SUPERVISOR_RESTART_WAIT_S: "${SAVANT_SUPERVISOR_RESTART_WAIT_S:-1800}"
       SAVANT_SUPERVISOR_RESTART_REPLAY: "${SAVANT_SUPERVISOR_RESTART_REPLAY:-false}"
+      RUNTIME_OVERVIEW_FORWARDER_CONTAINER: video-analytics-midterm-analysis-forwarder
+      RUNTIME_OVERVIEW_FORWARDER_METRICS_URL: http://analysis-forwarder:8081/metrics
     volumes:
       - ../services/api:/app:rw
       - ../libs:/app/libs:ro
@@ -123,6 +126,46 @@ services:
     volumes:
       - ../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro
       - /data/video-analytics/replay-midterm:/opt/rocksdb:rw
+    restart: unless-stopped
+
+  analysis-forwarder:
+    build:
+      context: ../services/analysis-forwarder
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-analysis-forwarder:latest
+    container_name: video-analytics-midterm-analysis-forwarder
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-security:5557
+      ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
+      ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
+      FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"
+      FORWARDER_QUEUE_MAX_SIZE: "${FORWARDER_QUEUE_MAX_SIZE:-256}"
+      FORWARDER_RECEIVE_TIMEOUT_MS: "${FORWARDER_RECEIVE_TIMEOUT_MS:-1000}"
+      FORWARDER_RECEIVE_HWM: "${FORWARDER_RECEIVE_HWM:-1000}"
+      FORWARDER_SEND_TIMEOUT_MS: "${FORWARDER_SEND_TIMEOUT_MS:-100}"
+      FORWARDER_SEND_RETRIES: "${FORWARDER_SEND_RETRIES:-0}"
+      FORWARDER_SEND_HWM: "${FORWARDER_SEND_HWM:-50}"
+      FORWARDER_METRICS_PORT: "8081"
+    ports:
+      - "${FORWARDER_METRICS_HOST_PORT:-18081}:8081"
+    depends_on:
+      - replay-service
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   savant-security:
@@ -219,6 +262,7 @@ services:
               capabilities: [gpu]
     depends_on:
       redis: { condition: service_healthy }
+      analysis-forwarder: { condition: service_started }
     healthcheck:
       test: ["CMD", "sh", "/opt/savant/healthcheck.sh"]
       interval: 5s
@@ -250,6 +294,7 @@ services:
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
     depends_on:
       - replay-service
+      - analysis-forwarder
       - savant-security
     restart: unless-stopped
 

@@ -1,0 +1,295 @@
+"""Replay-to-Savant analysis forwarder."""
+
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import threading
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+from savant_rs.py.utils.zeromq import ZeroMQSource
+from savant_rs.zmq import BlockingWriter, WriterConfigBuilder
+
+from .queueing import BoundedDropQueue, ForwarderMessage
+from .sampler import AnalysisFrameSampler
+
+
+LOGGER = logging.getLogger("analysis_forwarder")
+SUCCESS_RESULTS = {"WriterResultSuccess", "WriterResultAck"}
+
+
+@dataclass(frozen=True)
+class ForwarderConfig:
+    in_endpoint: str
+    out_endpoint: str
+    analysis_fps: str
+    min_fps: str
+    sampler_enabled: bool
+    queue_max_size: int
+    receive_timeout_ms: int
+    receive_hwm: int
+    send_timeout_ms: int
+    send_retries: int
+    send_hwm: int
+    metrics_port: int
+
+    @classmethod
+    def from_env(cls) -> "ForwarderConfig":
+        return cls(
+            in_endpoint=os.getenv("FORWARDER_IN_ENDPOINT", "router+bind:tcp://0.0.0.0:5557"),
+            out_endpoint=os.getenv("FORWARDER_OUT_ENDPOINT", "dealer+connect:tcp://savant-security:5557"),
+            analysis_fps=os.getenv("ANALYSIS_FPS", os.getenv("MAX_FPS", "8/1")),
+            min_fps=os.getenv("ANALYSIS_MIN_FPS", os.getenv("MIN_FPS", "2/1")),
+            sampler_enabled=_bool_env("FORWARDER_SAMPLER_ENABLED", True),
+            queue_max_size=_int_env("FORWARDER_QUEUE_MAX_SIZE", 256),
+            receive_timeout_ms=_int_env("FORWARDER_RECEIVE_TIMEOUT_MS", 1000),
+            receive_hwm=_int_env("FORWARDER_RECEIVE_HWM", 1000),
+            send_timeout_ms=_int_env("FORWARDER_SEND_TIMEOUT_MS", 100),
+            send_retries=_int_env("FORWARDER_SEND_RETRIES", 0),
+            send_hwm=_int_env("FORWARDER_SEND_HWM", 50),
+            metrics_port=_int_env("FORWARDER_METRICS_PORT", 8081),
+        )
+
+
+class ForwarderMetrics:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_source: dict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.queue_depth = 0
+        self.running = 1
+
+    def inc(self, source_id: str, name: str, amount: int = 1) -> None:
+        with self._lock:
+            self._by_source[source_id or "_unknown_source"][name] += amount
+
+    def set_queue_depth(self, value: int) -> None:
+        with self._lock:
+            self.queue_depth = max(int(value), 0)
+
+    def render_prometheus(self) -> str:
+        with self._lock:
+            lines = [
+                "# HELP va_forwarder_queue_depth Current analysis-forwarder queue depth.",
+                "# TYPE va_forwarder_queue_depth gauge",
+                f"va_forwarder_queue_depth {self.queue_depth}",
+                "# HELP va_forwarder_running Whether the analysis-forwarder main process is running.",
+                "# TYPE va_forwarder_running gauge",
+                f"va_forwarder_running {self.running}",
+            ]
+            metric_names = {
+                "seen": "va_forwarder_frames_seen_total",
+                "forwarded": "va_forwarder_frames_forwarded_total",
+                "dropped": "va_forwarder_frames_dropped_total",
+                "send_failures": "va_forwarder_savant_send_failures_total",
+            }
+            for key, prom_name in metric_names.items():
+                lines.append(f"# TYPE {prom_name} counter")
+                for source_id, counters in sorted(self._by_source.items()):
+                    value = counters.get(key, 0)
+                    lines.append(f'{prom_name}{{source_id="{_escape_label(source_id)}"}} {value}')
+            return "\n".join(lines) + "\n"
+
+
+class MetricsHandler(BaseHTTPRequestHandler):
+    metrics: ForwarderMetrics | None = None
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/healthz":
+            self._write(200, b"ok\n", "text/plain; charset=utf-8")
+            return
+        if self.path == "/metrics" and self.metrics is not None:
+            self._write(
+                200,
+                self.metrics.render_prometheus().encode("utf-8"),
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
+            return
+        self._write(404, b"not found\n", "text/plain; charset=utf-8")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        LOGGER.debug("metrics_http " + fmt, *args)
+
+    def _write(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class AnalysisForwarder:
+    def __init__(self, config: ForwarderConfig) -> None:
+        self.config = config
+        self.metrics = ForwarderMetrics()
+        self.queue = BoundedDropQueue(config.queue_max_size)
+        self.sampler = AnalysisFrameSampler(
+            enabled=config.sampler_enabled,
+            max_fps=config.analysis_fps,
+            min_fps=config.min_fps,
+        )
+        self.stop_event = threading.Event()
+        self.reader = ZeroMQSource(
+            config.in_endpoint,
+            receive_timeout=config.receive_timeout_ms,
+            receive_hwm=config.receive_hwm,
+        )
+        writer_config = WriterConfigBuilder(config.out_endpoint)
+        writer_config.with_send_timeout(config.send_timeout_ms)
+        writer_config.with_send_retries(config.send_retries)
+        writer_config.with_send_hwm(config.send_hwm)
+        self.writer = BlockingWriter(writer_config.build())
+
+    def run(self) -> None:
+        LOGGER.info("starting forwarder in=%s out=%s", self.config.in_endpoint, self.config.out_endpoint)
+        self.reader.start()
+        self.writer.start()
+        writer_thread = threading.Thread(target=self._write_loop, name="forwarder-writer", daemon=True)
+        writer_thread.start()
+        self._read_loop()
+        writer_thread.join(timeout=5)
+        self._shutdown()
+
+    def _read_loop(self) -> None:
+        while not self.stop_event.is_set():
+            zmq_message = self.reader.next_message()
+            if zmq_message is None:
+                continue
+            item = self._build_queue_item(zmq_message)
+            if item is None:
+                continue
+            result = self.queue.push(item)
+            if result.dropped is not None:
+                self.metrics.inc(result.dropped.source_id, "dropped")
+                LOGGER.debug("dropped source_id=%s reason=%s", result.dropped.source_id, result.reason)
+            if not result.accepted:
+                self.metrics.set_queue_depth(len(self.queue))
+                continue
+            self.metrics.set_queue_depth(len(self.queue))
+
+    def _build_queue_item(self, zmq_message: Any) -> ForwarderMessage | None:
+        message = zmq_message.message
+        if message.is_video_frame():
+            video_frame = message.as_video_frame()
+            source_id = str(video_frame.source_id or "")
+            self.metrics.inc(source_id, "seen")
+            if not self.sampler.admit(video_frame):
+                self.metrics.inc(source_id, "dropped")
+                return None
+            return ForwarderMessage(
+                topic=source_id,
+                message=message,
+                content=zmq_message.content or b"",
+                source_id=source_id,
+                keyframe=bool(video_frame.keyframe),
+                video_frame=True,
+            )
+        if message.is_end_of_stream():
+            eos = message.as_end_of_stream()
+            source_id = str(eos.source_id or "")
+            return ForwarderMessage(
+                topic=source_id,
+                message=message,
+                content=zmq_message.content or b"",
+                source_id=source_id,
+                keyframe=True,
+                video_frame=False,
+            )
+        if message.is_shutdown():
+            return ForwarderMessage(
+                topic="shutdown",
+                message=message,
+                content=zmq_message.content or b"",
+                source_id="_control",
+                keyframe=True,
+                video_frame=False,
+            )
+        LOGGER.warning("dropping unsupported message type: %r", message)
+        self.metrics.inc("_unsupported", "dropped")
+        return None
+
+    def _write_loop(self) -> None:
+        while not self.stop_event.is_set():
+            item = self.queue.pop(timeout_s=0.2)
+            if item is None:
+                self.metrics.set_queue_depth(len(self.queue))
+                continue
+            self.metrics.set_queue_depth(len(self.queue))
+            try:
+                result = self.writer.send_message(item.topic, item.message, item.content)
+            except Exception as exc:
+                LOGGER.warning("failed to send to Savant source_id=%s: %s", item.source_id, exc)
+                self.metrics.inc(item.source_id, "send_failures")
+                self.metrics.inc(item.source_id, "dropped")
+                continue
+            if type(result).__name__ not in SUCCESS_RESULTS:
+                LOGGER.warning("Savant send was not successful source_id=%s result=%r", item.source_id, result)
+                self.metrics.inc(item.source_id, "send_failures")
+                self.metrics.inc(item.source_id, "dropped")
+                continue
+            if item.video_frame:
+                self.metrics.inc(item.source_id, "forwarded")
+
+    def _shutdown(self) -> None:
+        self.metrics.running = 0
+        for endpoint in (self.writer, self.reader):
+            try:
+                endpoint.shutdown()
+            except AttributeError:
+                endpoint.terminate()
+            except Exception:
+                LOGGER.exception("failed to shut down endpoint")
+
+
+def run_metrics_server(metrics: ForwarderMetrics, port: int) -> ThreadingHTTPServer:
+    MetricsHandler.metrics = metrics
+    server = ThreadingHTTPServer(("0.0.0.0", int(port)), MetricsHandler)
+    thread = threading.Thread(target=server.serve_forever, name="metrics-http", daemon=True)
+    thread.start()
+    return server
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=os.getenv("LOGLEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    config = ForwarderConfig.from_env()
+    forwarder = AnalysisForwarder(config)
+    server = run_metrics_server(forwarder.metrics, config.metrics_port)
+
+    def stop(_signum: int, _frame: Any) -> None:
+        forwarder.stop_event.set()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        forwarder.run()
+    finally:
+        server.shutdown()
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _escape_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+if __name__ == "__main__":
+    main()
