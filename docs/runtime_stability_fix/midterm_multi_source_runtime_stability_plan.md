@@ -27,6 +27,12 @@ Runtime acceptance status:
   `self._sources.get_source(...)` calls, Savant module entered STOPPED while the
   container stayed Up/unhealthy, and Replay/source adapters then entered send
   timeout/restart loops
+- a later 2026-06-14 read-only diagnosis confirmed a separate throughput
+  issue: source adapters still push full RTSP cadence into Replay while
+  `MAX_FPS=8/1` is applied only inside Savant's ingress frame filter. Replay
+  out_stream/source-adapter ZeroMQ backpressure is now a proven production
+  blocker, not just a hypothesis. Details are in
+  `docs/repair_goal/midterm_alarm_frequency_backpressure_findings_2026-06-13.md`.
 
 The only uncommitted runtime state observed after this work was
 `modules/savant_security/config/cameras.midterm.yml`, where controlled runtime
@@ -481,12 +487,38 @@ These are not proven by the current code inspection alone:
 
 - `MAX_PARALLEL_STREAMS=2` is the direct cause of a reported stop.
 - old streammux pads remain occupied long enough to block new sessions.
-- Replay out_stream backpressure is currently causing source-adapter self
-  restarts.
 - TensorRT engine build time is currently long enough to trigger adapter
   restart loops.
 
 They are good hypotheses to verify with logs from the stop window.
+
+## Proven Follow-Up Gap: Replay-To-Savant Analysis Throttling
+
+The 2026-06-14 runtime diagnosis moved this item out of the hypothesis list.
+Both fixed and dynamic source adapters were observed restarting repeatedly with
+`WriterResultSendTimeout`, while their logs still showed full RTSP cadence
+(`primary_rtsp` about 23.98 FPS and the dynamic lab source about 30 FPS).
+
+`MAX_FPS=8/1` is currently enforced in Savant's `PtsFpsGate` after Replay has
+already accepted and forwarded frames. This protects model inference, but it
+does not protect:
+
+- source-adapter -> Replay ingress
+- Replay RocksDB/storage ingestion
+- Replay out_stream -> Savant transport
+
+The repair must not solve this by dropping frames before the evidence authority
+path. Evidence clips must continue to come from full retained stream data. The
+needed boundary is:
+
+```text
+full evidence path: RTSP -> Replay/storage -> evidence clip
+analysis path:      Replay/storage -> sampled analysis stream -> Savant
+```
+
+Savant-side `PtsFpsGate` may remain as a secondary guardrail, but the primary
+throughput control for the analysis branch needs to sit before Savant transport
+or in Replay's analysis out_stream.
 
 ## Separation From Replay Evidence Fixes
 

@@ -121,6 +121,129 @@ Failed to send message to ZeroMQ: WriterResultSendTimeout
 - 这会造成 source adapter 重启、帧流间歇中断，并放大报警 gap。
 - 这不是“报警规则没有触发”单一问题，也不是 Savant 主进程频繁重启；实际不稳定点更靠近 source adapter 输出和下游 ingestion。
 
+## 2026-06-14 补充：跳帧位置与 Replay 背压根因确认
+
+本次补充只做只读排查，未改运行容器、未重启服务。8090 runtime overview 显示
+`compose_source.restart_count=823` 后，进一步确认该值来自 Docker
+`RestartCount`，不是前端误算，也不是 API/evidence-viewer 受控重启造成。
+
+### 重启计数与直接错误
+
+采样时固定源状态：
+
+```text
+container: video-analytics-midterm-source-adapter
+RestartCount: 823
+StartedAt: 2026-06-14T01:44:07Z
+FinishedAt: 2026-06-14T01:44:06Z
+ExitCode: 0
+OOMKilled: false
+```
+
+动态源也存在同类问题：
+
+```text
+container: video-analytics-source-source_00000000-0000-4000-8000-781078565686
+RestartCount: 1105
+StartedAt: 2026-06-14T01:47:25Z
+ExitCode: 0
+OOMKilled: false
+```
+
+两路 source adapter 的退出前日志均为 ZeroMQ 发送背压：
+
+```text
+Failed to send message to ZeroMQ socket. Error is [11] Resource temporarily unavailable
+Failed to send message to ZeroMQ: WriterResultSendTimeout
+```
+
+固定源 source adapter 日志显示它仍按原始 RTSP 帧率推送：
+
+```text
+primary_rtsp: 1920x1080, framerate=24000/1001, Processed ... 23.98 FPS
+dynamic lab: 1280x720, framerate=30/1, Processed ... about 30 FPS
+```
+
+Replay 侧同时观察到 `send timeout` 和大量 `mismatched routing_id` warning。
+Savant 侧仍能维持约 `8.00 FPS` 的推理入口节奏，但 source queue 和 decode queue
+存在堆积。这说明问题不是 Savant 模型完全停止，而是 Replay/source-adapter 共享
+链路承受了高于分析帧率的完整流压力。
+
+### 关键语义：当前跳帧发生在 Savant 内部
+
+当前 `MAX_FPS_CONTROL=true`、`MAX_FPS=8/1` 并不是 source-adapter 或 Replay
+入口限流。它配置在 `modules/savant_security/module.yml` 的
+`pipeline.source.ingress_frame_filter`：
+
+```yaml
+pipeline:
+  source:
+    element: zeromq_source_bin
+    ingress_frame_filter:
+      module: custom.filters.pts_fps_gate
+      class_name: PtsFpsGate
+```
+
+`modules/savant_security/custom/filters/pts_fps_gate.py` 的语义是：
+
+```text
+Replay remains the media authority and stores every RTSP frame before Savant.
+This filter only throttles frames admitted into the Savant inference graph.
+```
+
+而固定源 source-adapter 实际执行 `/opt/savant/adapters/gst/sources/rtsp.sh`，
+该脚本未读取 `MAX_FPS`，pipeline 为：
+
+```text
+ffmpeg_src -> savant_parse_bin -> fps_meter -> zeromq_sink
+```
+
+因此当前链路不是“Replay 只给 Savant 发送抽帧后的分析流”，而是：
+
+```text
+RTSP
+  -> source-adapter 原始帧率推送
+  -> Replay in_stream 完整接收/存储
+  -> Replay out_stream 继续转发给 Savant
+  -> Savant PtsFpsGate 再丢弃未被采纳的分析帧
+```
+
+这解释了为什么“已经有跳帧检测”仍会发生背压：跳帧降低了模型推理负载，但没有
+降低 source-adapter 到 Replay、Replay 写入 RocksDB、Replay out_stream 到 Savant
+这几段的传输和缓存压力。
+
+### Evidence clip 不能依赖入库前丢帧
+
+不能把“Replay 入库前丢帧”作为最终修复。若在 Replay 存储前或 evidence
+authority 路径上丢帧，生成的 `raw_clip` 会天然缺帧，和生产证据语义冲突。
+
+目标架构应拆清两条流：
+
+```text
+完整证据路径:
+  RTSP -> Replay/环形存储完整保留 -> evidence clip 生成
+
+分析推理路径:
+  Replay/存储后的分析分支 -> 可配置抽帧 -> Savant 推理
+```
+
+因此修复方向应是让 Replay 到 Savant 的分析分支可控抽帧，或引入独立的分析分支
+抽帧器；Savant 内部 `PtsFpsGate` 可保留为二级保护，但不应是第一道吞吐保护。
+
+### 修复边界
+
+本问题是生产阻塞项。修复时应满足：
+
+- evidence clip 仍从完整流或完整环形存储生成，不能从抽帧分析流生成。
+- source-adapter 不应因下游分析分支慢而反复退出重启。
+- Replay 到 Savant 的分析流需要有 per-source 可配置 FPS，例如沿用
+  `MAX_FPS=8/1` 的语义，但位置前移到 Savant 之前。
+- 8090 runtime overview 应继续展示累计 restart count，并补充短窗口重启率、
+  最近重启时间和 ZeroMQ timeout 摘要，避免容器 `running` 掩盖重启风暴。
+- 修复验收应包含至少 10-15 分钟双源运行窗口：source-adapter restart count 不再
+  增长，Replay 无持续 send timeout，Savant per-source FPS 维持目标分析帧率，
+  新 evidence clip 通过连续性/时长检查。
+
 ## 前端能力现状
 
 ### 重启入口
