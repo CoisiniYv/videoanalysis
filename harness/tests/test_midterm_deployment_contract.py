@@ -186,7 +186,7 @@ def test_midterm_storage_maintenance_midterm_preview_flags_and_entrypoint() -> N
     )
     assert env_file["STORAGE_MAINTENANCE_SUMMARY_ENABLED"] == "true"
     assert env_file["STORAGE_MAINTENANCE_PREVIEW_ENABLED"] == "true"
-    assert env_file["STORAGE_MAINTENANCE_EXECUTE_ENABLED"] == "false"
+    assert env_file["STORAGE_MAINTENANCE_EXECUTE_ENABLED"] == "true"
     assert viewer["ports"] == ["8090:8090"]
     assert "/data/video-analytics/media/evidence:/evidence:ro" in viewer["volumes"]
     assert "ports" not in compose["services"]["api"]
