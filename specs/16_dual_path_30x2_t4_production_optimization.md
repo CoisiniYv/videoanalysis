@@ -377,6 +377,11 @@ forwarder from compose. Single-hop Phase-0 behavior restored.
 Execute the §5 measurement tasks and lock the operating point on one T4 / one
 shard.
 
+- **Entry gate:** run
+  `scripts/runtime/check_phase2_single_t4_readiness.py --runtime-overview-url http://127.0.0.1:8090/api/v1/runtime/overview`.
+  It must pass with `PASS_PHASE2_SINGLE_T4_READY` on the target machine before
+  starting the 30-minute pressure run. This is not the Phase 2 acceptance token;
+  it only proves the machine/topology/input preconditions are present.
 - P5.1 decode-location measurement; P5.2 derive `(batch_size, ANALYSIS_FPS)`;
   P5.3 disable unused output encoding; P5.5 memory validation.
 - Generate the chosen TensorRT engines; set `max_parallel_streams ≥ 30+headroom`,
