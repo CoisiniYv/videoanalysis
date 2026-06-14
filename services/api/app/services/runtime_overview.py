@@ -36,6 +36,8 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock"
 DEFAULT_SAVANT_METRICS_URL = "http://savant-security:8080/metrics"
 DEFAULT_METRICS_TIMEOUT_S = 2.0
+DEFAULT_RESTART_RATE_WARN_PER_MIN = 1.0
+DEFAULT_RESTART_COUNT_WARN_THRESHOLD = 10
 PROM_SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+"
     r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$"
@@ -58,6 +60,7 @@ GAUGE_METRICS = {
     "va_savant_effective_fps",
     "va_savant_last_frame_age_seconds",
 }
+_RESTART_RATE_CACHE: dict[str, dict[str, float]] = {}
 
 
 class RuntimeOverviewError(RuntimeError):
@@ -78,6 +81,8 @@ class RuntimeOverviewConfig:
     clip_worker_container: str = DEFAULT_CLIP_WORKER_CONTAINER
     media_worker_container: str = DEFAULT_MEDIA_WORKER_CONTAINER
     dynamic_source_prefix: str = DEFAULT_DYNAMIC_SOURCE_PREFIX
+    restart_rate_warn_per_min: float = DEFAULT_RESTART_RATE_WARN_PER_MIN
+    restart_count_warn_threshold: int = DEFAULT_RESTART_COUNT_WARN_THRESHOLD
 
 
 def config_from_env() -> RuntimeOverviewConfig:
@@ -121,6 +126,14 @@ def config_from_env() -> RuntimeOverviewConfig:
             os.getenv("CAMERA_RUNTIME_MEDIA_WORKER_CONTAINER", DEFAULT_MEDIA_WORKER_CONTAINER),
         ),
         dynamic_source_prefix=os.getenv("RUNTIME_OVERVIEW_DYNAMIC_SOURCE_PREFIX", DEFAULT_DYNAMIC_SOURCE_PREFIX),
+        restart_rate_warn_per_min=_env_float(
+            "RUNTIME_OVERVIEW_RESTART_RATE_WARN_PER_MIN",
+            DEFAULT_RESTART_RATE_WARN_PER_MIN,
+        ),
+        restart_count_warn_threshold=_env_int(
+            "RUNTIME_OVERVIEW_RESTART_COUNT_WARN_THRESHOLD",
+            DEFAULT_RESTART_COUNT_WARN_THRESHOLD,
+        ),
     )
 
 
@@ -130,7 +143,9 @@ def build_runtime_overview(
     docker_client: DockerSocketClient | None = None,
     metrics_text: str | None = None,
     supervisor_snapshot: dict[str, Any] | None = None,
+    now_epoch_s: float | None = None,
 ) -> dict[str, Any]:
+    now = time.time() if now_epoch_s is None else float(now_epoch_s)
     cfg = config or config_from_env()
     metrics = (
         parse_savant_metrics(metrics_text)
@@ -139,10 +154,16 @@ def build_runtime_overview(
     )
     client = docker_client or DockerSocketClient(cfg.docker_socket)
     containers = inspect_runtime_containers(client, cfg)
+    annotate_container_restart_rates(
+        containers,
+        now_epoch_s=now,
+        rate_warn_per_min=cfg.restart_rate_warn_per_min,
+        count_warn_threshold=cfg.restart_count_warn_threshold,
+    )
     supervisor = supervisor_snapshot if supervisor_snapshot is not None else _safe_supervisor_snapshot()
     health = summarize_runtime_health(metrics=metrics, containers=containers, supervisor=supervisor)
     return {
-        "generated_at_epoch_s": int(time.time()),
+        "generated_at_epoch_s": int(now),
         "metrics_url": _safe_metrics_url(cfg.metrics_url),
         "metrics": metrics,
         "containers": containers,
@@ -304,11 +325,18 @@ def summarize_runtime_health(
         issues.append("source_frame_age_high")
     if supervisor.get("enabled") and not supervisor.get("savant_container_running", True):
         issues.append("savant_container_not_running")
+    restart_count_high, restart_rate_high = _restart_warning_containers(containers)
+    if restart_count_high:
+        issues.append("container_restart_count_high")
+    if restart_rate_high:
+        issues.append("container_restart_rate_high")
     return {
         "ok": not issues,
         "issues": issues,
         "source_count": len(source_rows),
         "stale_sources": stale_sources,
+        "restart_count_high_containers": restart_count_high,
+        "restart_rate_high_containers": restart_rate_high,
     }
 
 
@@ -360,15 +388,121 @@ def _list_dynamic_source_containers(
         name = next((item for item in names if item.startswith(dynamic_source_prefix)), "")
         if not name:
             continue
-        rows.append(
-            {
-                "name": name,
-                "source_id": name[len(dynamic_source_prefix):],
-                "state": str(container.get("State") or ""),
-                "status": str(container.get("Status") or ""),
-            }
-        )
+        rows.append(_dynamic_source_summary(client, name, dynamic_source_prefix, container))
     return sorted(rows, key=lambda row: row["name"])
+
+
+def annotate_container_restart_rates(
+    containers: dict[str, Any],
+    *,
+    now_epoch_s: float,
+    rate_warn_per_min: float,
+    count_warn_threshold: int,
+) -> None:
+    for row in (containers.get("fixed") or {}).values():
+        _annotate_restart_row(
+            row,
+            now_epoch_s=now_epoch_s,
+            rate_warn_per_min=rate_warn_per_min,
+            count_warn_threshold=count_warn_threshold,
+        )
+    for row in containers.get("dynamic_sources") or []:
+        _annotate_restart_row(
+            row,
+            now_epoch_s=now_epoch_s,
+            rate_warn_per_min=rate_warn_per_min,
+            count_warn_threshold=count_warn_threshold,
+        )
+
+
+def _dynamic_source_summary(
+    client: DockerSocketClient,
+    name: str,
+    dynamic_source_prefix: str,
+    list_row: dict[str, Any],
+) -> dict[str, Any]:
+    summary = _inspect_container_summary(client, name)
+    if summary.get("present"):
+        row = summary
+    else:
+        row = {
+            "name": name,
+            "present": True,
+            "state": str(list_row.get("State") or ""),
+            "status": str(list_row.get("Status") or ""),
+        }
+        if summary.get("error"):
+            row["error"] = summary["error"]
+    row["source_id"] = name[len(dynamic_source_prefix):] if name.startswith(dynamic_source_prefix) else name
+    row["status"] = str(list_row.get("Status") or row.get("status") or "")
+    return row
+
+
+def _annotate_restart_row(
+    row: dict[str, Any],
+    *,
+    now_epoch_s: float,
+    rate_warn_per_min: float,
+    count_warn_threshold: int,
+) -> None:
+    restart_count = _int_or_none(row.get("restart_count"))
+    row["restart_rate_per_min"] = None
+    row["restart_count_delta"] = None
+    row["restart_rate_window_seconds"] = None
+    row["restart_count_warning"] = False
+    row["restart_rate_warning"] = False
+    row["restart_warning"] = False
+    if restart_count is None:
+        return
+
+    key = str(row.get("name") or row.get("id") or "")
+    previous = _RESTART_RATE_CACHE.get(key) if key else None
+    if previous:
+        elapsed = max(0.0, now_epoch_s - float(previous.get("observed_at", 0.0)))
+        previous_count = int(previous.get("restart_count", restart_count))
+        if elapsed > 0 and restart_count >= previous_count:
+            delta = restart_count - previous_count
+            rate = (delta * 60.0) / elapsed
+            row["restart_count_delta"] = delta
+            row["restart_rate_window_seconds"] = round(elapsed, 3)
+            row["restart_rate_per_min"] = round(rate, 3)
+            row["restart_rate_warning"] = delta > 0 and rate >= rate_warn_per_min
+
+    if key:
+        _RESTART_RATE_CACHE[key] = {
+            "restart_count": float(restart_count),
+            "observed_at": float(now_epoch_s),
+        }
+    row["restart_count_warning"] = (
+        count_warn_threshold > 0 and restart_count >= count_warn_threshold
+    )
+    row["restart_warning"] = bool(row["restart_count_warning"] or row["restart_rate_warning"])
+
+
+def _restart_warning_containers(containers: dict[str, Any]) -> tuple[list[str], list[str]]:
+    count_high: list[str] = []
+    rate_high: list[str] = []
+    rows = list((containers.get("fixed") or {}).values()) + list(containers.get("dynamic_sources") or [])
+    for row in rows:
+        name = str(row.get("name") or "")
+        if not name:
+            continue
+        if row.get("restart_count_warning"):
+            count_high.append(name)
+        if row.get("restart_rate_warning"):
+            rate_high.append(name)
+    return sorted(count_high), sorted(rate_high)
+
+
+def _reset_restart_rate_cache_for_tests() -> None:
+    _RESTART_RATE_CACHE.clear()
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_supervisor_snapshot() -> dict[str, Any]:
@@ -399,6 +533,16 @@ def _env_float(name: str, default: float) -> float:
         return default
     try:
         return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
     except ValueError:
         return default
 

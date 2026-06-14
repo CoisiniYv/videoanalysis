@@ -16,6 +16,7 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
 import app.routers.runtime as runtime_router
 from app.services.runtime_overview import (
     RuntimeOverviewConfig,
+    _reset_restart_rate_cache_for_tests,
     build_runtime_overview,
     parse_savant_metrics,
 )
@@ -39,6 +40,15 @@ va_savant_last_frame_age_seconds{source_id="secondary_rtsp"} 35
 
 
 class FakeDockerClient:
+    def __init__(
+        self,
+        *,
+        compose_source_restart_count: int = 3,
+        dynamic_restart_count: int = 12,
+    ) -> None:
+        self.compose_source_restart_count = compose_source_restart_count
+        self.dynamic_restart_count = dynamic_restart_count
+
     def request(
         self,
         method: str,
@@ -71,11 +81,21 @@ class FakeDockerClient:
             },
             "video-analytics-midterm-source-adapter": {
                 "Id": "source1234567890",
-                "RestartCount": 3,
+                "RestartCount": self.compose_source_restart_count,
                 "State": {
                     "Status": "running",
                     "Running": True,
                     "StartedAt": "2026-06-14T01:03:03Z",
+                    "FinishedAt": "0001-01-01T00:00:00Z",
+                },
+            },
+            "video-analytics-source-secondary_rtsp": {
+                "Id": "dynamic1234567890",
+                "RestartCount": self.dynamic_restart_count,
+                "State": {
+                    "Status": "running",
+                    "Running": True,
+                    "StartedAt": "2026-06-14T01:04:03Z",
                     "FinishedAt": "0001-01-01T00:00:00Z",
                 },
             },
@@ -101,6 +121,8 @@ def test_parse_savant_metrics_returns_per_source_summary() -> None:
 
 
 def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None:
+    _reset_restart_rate_cache_for_tests()
+
     overview = build_runtime_overview(
         config=RuntimeOverviewConfig(metrics_url="http://savant-security:8080/metrics"),
         docker_client=FakeDockerClient(),
@@ -115,16 +137,52 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
     assert overview["metrics"]["sources"][1]["source_id"] == "secondary_rtsp"
     assert overview["containers"]["fixed"]["savant"]["restart_count"] == 1
     assert overview["containers"]["fixed"]["compose_source"]["restart_count"] == 3
-    assert overview["containers"]["dynamic_sources"] == [
-        {
-            "name": "video-analytics-source-secondary_rtsp",
-            "source_id": "secondary_rtsp",
-            "state": "running",
-            "status": "Up 2 minutes",
-        }
-    ]
+    dynamic_source = overview["containers"]["dynamic_sources"][0]
+    assert dynamic_source["name"] == "video-analytics-source-secondary_rtsp"
+    assert dynamic_source["source_id"] == "secondary_rtsp"
+    assert dynamic_source["state"] == "running"
+    assert dynamic_source["status"] == "Up 2 minutes"
+    assert dynamic_source["restart_count"] == 12
+    assert dynamic_source["restart_count_warning"] is True
+    assert dynamic_source["restart_rate_per_min"] is None
     assert overview["health"]["ok"] is False
     assert "source_frame_age_high" in overview["health"]["issues"]
+    assert "container_restart_count_high" in overview["health"]["issues"]
+
+
+def test_runtime_overview_computes_short_window_restart_rate() -> None:
+    _reset_restart_rate_cache_for_tests()
+
+    config = RuntimeOverviewConfig(
+        metrics_url="http://savant-security:8080/metrics",
+        restart_count_warn_threshold=0,
+        restart_rate_warn_per_min=1.0,
+    )
+    first = build_runtime_overview(
+        config=config,
+        docker_client=FakeDockerClient(dynamic_restart_count=12),
+        metrics_text=METRICS_TEXT.replace("35", "0.5"),
+        supervisor_snapshot={"enabled": True, "savant_container_running": True},
+        now_epoch_s=1000.0,
+    )
+    second = build_runtime_overview(
+        config=config,
+        docker_client=FakeDockerClient(dynamic_restart_count=14),
+        metrics_text=METRICS_TEXT.replace("35", "0.5"),
+        supervisor_snapshot={"enabled": True, "savant_container_running": True},
+        now_epoch_s=1060.0,
+    )
+
+    assert first["containers"]["dynamic_sources"][0]["restart_rate_per_min"] is None
+    dynamic_source = second["containers"]["dynamic_sources"][0]
+    assert dynamic_source["restart_count_delta"] == 2
+    assert dynamic_source["restart_rate_window_seconds"] == 60
+    assert dynamic_source["restart_rate_per_min"] == 2
+    assert dynamic_source["restart_rate_warning"] is True
+    assert "container_restart_rate_high" in second["health"]["issues"]
+    assert second["health"]["restart_rate_high_containers"] == [
+        "video-analytics-source-secondary_rtsp"
+    ]
 
 
 def test_runtime_overview_route_uses_api_envelope(monkeypatch) -> None:

@@ -849,29 +849,33 @@ function renderRuntimeSourceTable(sources) {
 function renderRuntimeContainerTable(containers) {
   if (!runtimeContainerTableEl) return;
   const fixed = containers.fixed || {};
-  const rows = Object.entries(fixed).map(([role, item]) => (
-    `<tr class="${item.present && item.state !== "running" ? "warn-row" : ""}">` +
+  const rows = Object.entries(fixed).map(([role, item]) => {
+    const warn = (item.present && item.state !== "running") || item.restart_warning === true;
+    return `<tr class="${warn ? "warn-row" : ""}">` +
       `<td>${escapeHtml(role)}</td>` +
       `<td>${escapeHtml(item.name || "--")}</td>` +
       `<td>${item.present ? escapeHtml(item.state || "--") : "missing"}</td>` +
       `<td>${escapeHtml(item.health || "--")}</td>` +
       `<td>${formatInteger(item.restart_count)}</td>` +
-    `</tr>`
-  ));
+      `<td>${formatNumber(item.restart_rate_per_min)}</td>` +
+    `</tr>`;
+  });
   for (const source of containers.dynamic_sources || []) {
+    const warn = source.state !== "running" || source.restart_warning === true;
     rows.push(
-      `<tr class="${source.state !== "running" ? "warn-row" : ""}">` +
+      `<tr class="${warn ? "warn-row" : ""}">` +
         `<td>dynamic_source</td>` +
         `<td>${escapeHtml(source.name || "--")}</td>` +
         `<td>${escapeHtml(source.state || "--")}</td>` +
         `<td>--</td>` +
-        `<td>--</td>` +
+        `<td>${formatInteger(source.restart_count)}</td>` +
+        `<td>${formatNumber(source.restart_rate_per_min)}</td>` +
       `</tr>`
     );
   }
   runtimeContainerTableEl.innerHTML =
     `<table class="runtime-table">` +
-      `<thead><tr><th>role</th><th>container</th><th>state</th><th>health</th><th>restarts</th></tr></thead>` +
+      `<thead><tr><th>role</th><th>container</th><th>state</th><th>health</th><th>restarts</th><th>restarts/min</th></tr></thead>` +
       `<tbody>${rows.join("")}</tbody>` +
     `</table>`;
 }

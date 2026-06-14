@@ -31,6 +31,9 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "loadRuntimeOverview" in js
     assert "`${API}/runtime/overview`" in js
     assert "renderRuntimeOverview" in js
+    assert "restart_rate_per_min" in js
+    assert "restart_warning" in js
+    assert "restarts/min" in js
     assert '"runtime"' in viewer_main
     assert "18080" not in js
     assert "savant-security:8080" not in js
