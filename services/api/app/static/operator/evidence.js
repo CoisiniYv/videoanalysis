@@ -16,10 +16,14 @@ const ROLE_RENDER_WINDOW_MS = {
 };
 const OVERLAY_DEDUP_IOU_THRESHOLD = 0.75;
 const EVIDENCE_API = "/api/v1/evidence";
+const BUNDLE_PAGE_SIZE = 200;
 
 const state = {
   bundles: [],
   selectedEventId: null,
+  bundleLimit: BUNDLE_PAGE_SIZE,
+  bundleOffset: 0,
+  bundleTotal: 0,
   initialized: false,
   activeCategory: "all",
   manifest: null,
@@ -42,6 +46,9 @@ const dom = {
   bundleCount: document.getElementById("bundleCount"),
   clipWarning: document.getElementById("clipWarning"),
   bundleList: document.getElementById("bundleList"),
+  previousBundles: document.getElementById("previousBundles"),
+  nextBundles: document.getElementById("nextBundles"),
+  bundlePageStatus: document.getElementById("bundlePageStatus"),
   refreshBundles: document.getElementById("refreshBundles"),
   evidenceCount: document.getElementById("evidence-count"),
   categoryButtons: document.querySelectorAll("[data-event-category]"),
@@ -274,12 +281,32 @@ function bundleQueryString() {
   if (state.activeCategory && state.activeCategory !== "all") {
     params.set("event_category", state.activeCategory);
   }
-  params.set("limit", "200");
+  params.set("limit", String(state.bundleLimit));
+  params.set("offset", String(state.bundleOffset));
   return params.toString();
 }
 
 function defaultSelectedBundle(bundles) {
   return bundles.find(bundle => bundle.raw_clip_available) || bundles[0];
+}
+
+function currentPageEnd() {
+  return state.bundleOffset + state.bundles.length;
+}
+
+function updateBundlePagination() {
+  const total = Number(state.bundleTotal || 0);
+  const start = state.bundles.length ? state.bundleOffset + 1 : 0;
+  const end = state.bundles.length ? currentPageEnd() : 0;
+  if (dom.bundlePageStatus) {
+    dom.bundlePageStatus.textContent = `第 ${start}-${end} 条 / 共 ${total} 条`;
+  }
+  if (dom.previousBundles) {
+    dom.previousBundles.disabled = state.bundleOffset <= 0;
+  }
+  if (dom.nextBundles) {
+    dom.nextBundles.disabled = currentPageEnd() >= total;
+  }
 }
 
 async function loadHealth() {
@@ -295,11 +322,15 @@ async function loadHealth() {
 async function loadBundles() {
   const data = await fetchJson(`${EVIDENCE_API}/bundles?${bundleQueryString()}`);
   state.bundles = Array.isArray(data.bundles) ? data.bundles : [];
-  dom.bundleCount.textContent = `证据 ${state.bundles.length}`;
+  state.bundleTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : state.bundles.length;
+  state.bundleOffset = Number.isFinite(Number(data.offset)) ? Number(data.offset) : state.bundleOffset;
+  state.bundleLimit = Number.isFinite(Number(data.limit)) ? Number(data.limit) : BUNDLE_PAGE_SIZE;
+  dom.bundleCount.textContent = `证据 ${state.bundleTotal}`;
   if (dom.evidenceCount) {
-    dom.evidenceCount.textContent = String(state.bundles.length);
+    dom.evidenceCount.textContent = String(state.bundleTotal);
   }
   renderBundleList();
+  updateBundlePagination();
   if (!state.selectedEventId && state.bundles.length) {
     await selectBundle(defaultSelectedBundle(state.bundles).event_id);
   }
@@ -339,6 +370,57 @@ function renderBundleList() {
     button.addEventListener("click", () => selectBundle(bundle.event_id));
     dom.bundleList.appendChild(button);
   }
+}
+
+function resetBundleSelection() {
+  state.selectedEventId = null;
+  state.manifest = null;
+  state.annotations = [];
+  state.sinkRecords = [];
+  state.preparedAnnotations = [];
+  state.annotationPayload = null;
+  state.firstVideoFramePts = null;
+  state.frameLookup = null;
+  state.warnings = new Set();
+  dom.video.removeAttribute("src");
+  dom.video.load();
+  if (ctx) {
+    ctx.clearRect(0, 0, dom.canvas.width || 0, dom.canvas.height || 0);
+  }
+  for (const id of [
+    "eventId",
+    "eventType",
+    "sourceId",
+    "sourceRawId",
+    "cameraId",
+    "alarmMachineTime",
+    "rawClipStatus",
+    "clipValidation",
+    "firstVideoPts",
+    "sourceSize",
+    "annotationLines",
+    "personContextObjects",
+    "personContextFrames",
+    "personContextTracks",
+    "faceObjects",
+    "matchedObjects",
+    "unknownObjects",
+    "colorsUsed",
+    "currentTime",
+    "targetPts",
+    "matchedPts",
+    "alignmentMode",
+    "activeObjects",
+    "annotationSourceStatus",
+    "annotationFileStatus",
+    "activePersonContext",
+    "activeMatchedFaces",
+    "activeBehaviorEvents"
+  ]) {
+    setText(id, "-");
+  }
+  dom.clipWarning.hidden = true;
+  renderWarnings();
 }
 
 async function selectBundle(eventId, options = {}) {
@@ -1196,7 +1278,18 @@ dom.annotationSource?.addEventListener("change", () => {
 });
 
 dom.refreshBundles?.addEventListener("click", () => {
-  state.selectedEventId = null;
+  state.bundleOffset = 0;
+  resetBundleSelection();
+  loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
+});
+dom.previousBundles?.addEventListener("click", () => {
+  state.bundleOffset = Math.max(0, state.bundleOffset - state.bundleLimit);
+  resetBundleSelection();
+  loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
+});
+dom.nextBundles?.addEventListener("click", () => {
+  state.bundleOffset += state.bundleLimit;
+  resetBundleSelection();
   loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
 });
 for (const button of dom.categoryButtons || []) {
@@ -1205,7 +1298,8 @@ for (const button of dom.categoryButtons || []) {
     for (const item of dom.categoryButtons) {
       item.classList.toggle("active", item === button);
     }
-    state.selectedEventId = null;
+    state.bundleOffset = 0;
+    resetBundleSelection();
     loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
   });
 }
@@ -1242,4 +1336,10 @@ async function init() {
 
 window.operatorEvidence = {
   init,
+  reload: async function reload() {
+    state.bundleOffset = 0;
+    resetBundleSelection();
+    await loadHealth();
+    await loadBundles();
+  },
 };

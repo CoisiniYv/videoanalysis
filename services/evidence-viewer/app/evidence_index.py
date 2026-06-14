@@ -25,6 +25,12 @@ RAW_CLIP_PREFERRED_NAMES = (
 )
 EPOCH_MS_MIN = 946684800000
 EPOCH_MS_MAX = 4102444800000
+EVENT_CATEGORY_TYPES = {
+    "identity": {"watchlist_hit", "live_search_hit"},
+    "perimeter": {"intrusion", "wall_climb_suspicious"},
+    "behavior": {"loitering", "running", "fall"},
+    "crowd": {"crowd_gathering"},
+}
 
 
 class EvidencePathError(ValueError):
@@ -255,6 +261,13 @@ def _matches_filters(
             continue
         if key == "person":
             if not _contains_person(bundle_dir, metadata, expected):
+                return False
+            continue
+        if key == "event_category":
+            if expected == "all":
+                continue
+            actual_type = values.get("event_type")
+            if not actual_type or str(actual_type) not in EVENT_CATEGORY_TYPES.get(expected, set()):
                 return False
             continue
         actual = values.get(key)

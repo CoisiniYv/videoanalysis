@@ -194,6 +194,7 @@ def health() -> JSONResponse:
 @app.get("/api/bundles")
 def api_bundles(
     event_type: str | None = None,
+    event_category: str | None = None,
     source_id: str | None = None,
     camera_id: str | None = None,
     event_id: str | None = None,
@@ -208,6 +209,7 @@ def api_bundles(
         settings.evidence_root,
         filters={
             "event_type": event_type,
+            "event_category": event_category,
             "source_id": source_id,
             "camera_id": camera_id,
             "event_id": event_id,

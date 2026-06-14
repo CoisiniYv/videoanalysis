@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,16 +25,17 @@ from app.evidence_index import (  # noqa: E402
 )
 
 
-def _write_bundle(root: Path, event_id: str, event: dict) -> None:
+def _write_bundle(root: Path, event_id: str, event: dict) -> Path:
     bundle_dir = root / event_id
     bundle_dir.mkdir(parents=True)
+    event_type = event.get("event_type", "intrusion")
     (bundle_dir / "raw_clip.mp4").write_bytes(b"video")
     (bundle_dir / "metadata.json").write_text(
         json.dumps(
             {
                 "event": {
                     "event_id": event_id,
-                    "event_type": "intrusion",
+                    "event_type": event_type,
                     "source_id": "source-1",
                     "camera_id": "camera-1",
                     **event,
@@ -44,9 +46,10 @@ def _write_bundle(root: Path, event_id: str, event: dict) -> None:
         encoding="utf-8",
     )
     (bundle_dir / "summary.json").write_text(
-        json.dumps({"event_type": "intrusion", "source_id": "source-1"}),
+        json.dumps({"event_type": event_type, "source_id": "source-1"}),
         encoding="utf-8",
     )
+    return bundle_dir
 
 
 def test_bundle_listing_and_manifest_expose_alarm_machine_time(tmp_path: Path) -> None:
@@ -126,3 +129,25 @@ def test_legacy_bundle_uses_only_epoch_like_event_time(tmp_path: Path) -> None:
     bundle = scan_bundles(root, limit=10, offset=0)["bundles"][0]
     assert bundle["alarm_machine_time"] == expected
     assert bundle["alarm_machine_time_source"] == "event.source_event_id"
+
+
+def test_bundle_listing_filters_event_category_before_pagination(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    event_1 = _write_bundle(root, "event-1", {"event_type": "watchlist_hit"})
+    event_2 = _write_bundle(root, "event-2", {"event_type": "intrusion"})
+    event_3 = _write_bundle(root, "event-3", {"event_type": "wall_climb_suspicious"})
+    os.utime(event_1, (1, 1))
+    os.utime(event_2, (2, 2))
+    os.utime(event_3, (3, 3))
+
+    result = scan_bundles(
+        root,
+        filters={"event_category": "perimeter"},
+        limit=1,
+        offset=1,
+    )
+
+    assert result["total"] == 2
+    assert result["limit"] == 1
+    assert result["offset"] == 1
+    assert [bundle["event_id"] for bundle in result["bundles"]] == ["event-2"]

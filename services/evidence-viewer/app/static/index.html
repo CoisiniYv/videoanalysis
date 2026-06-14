@@ -368,6 +368,11 @@
                 <p>选择告警查看原始录像和画面标注</p>
               </div>
             </div>
+            <div class="pagination-bar" aria-label="证据分页">
+              <button id="previousBundles" type="button" disabled>上一页</button>
+              <span id="bundlePageStatus">第 0-0 条 / 共 0 条</span>
+              <button id="nextBundles" type="button" disabled>下一页</button>
+            </div>
             <div id="bundleList" class="scroll-list evidence-list"></div>
           </section>
 
@@ -599,7 +604,7 @@
       </div>
     </div>
     <script src="/static/operator.js?v=runtime-overview-20260614"></script>
-    <script src="/static/evidence.js?v=playback-empty-crop-20260611"></script>
-    <script src="/static/maintenance.js?v=storage-maintenance-actions-20260610"></script>
+    <script src="/static/evidence.js?v=evidence-pagination-delete-20260614"></script>
+    <script src="/static/maintenance.js?v=evidence-delete-usability-20260614"></script>
   </body>
 </html>

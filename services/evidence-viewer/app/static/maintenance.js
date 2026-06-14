@@ -76,6 +76,29 @@ function positiveNumberOrNull(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function setButtonBusy(button, busy, busyText) {
+  if (!button) return () => {};
+  const previousText = button.textContent;
+  const previousDisabled = button.disabled;
+  button.disabled = Boolean(busy);
+  if (busy && busyText) {
+    button.textContent = busyText;
+  }
+  return () => {
+    button.textContent = previousText;
+    button.disabled = previousDisabled;
+  };
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 async function maintenanceRequest(path, options = {}) {
   if (typeof request === "function") {
     return request(`${MAINTENANCE_API}${path}`, options);
@@ -125,13 +148,20 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
   const expiresAt = preview.preview_expires_at ? new Date(preview.preview_expires_at) : null;
   const expired = expiresAt && expiresAt.getTime() <= Date.now();
   const deletableCount = Number(preview.deletable_count || 0);
+  const skipped = Array.isArray(preview.skipped) ? preview.skipped : [];
+  const skippedLines = skipped.slice(0, 5).map(item => {
+    const targetId = escapeHtml(item.target_id || "-");
+    const reason = escapeHtml(item.reason || "skipped");
+    return `<li>${targetId}：${reason}</li>`;
+  });
   const lines = [
     `<strong>预览已生成</strong>`,
     `<div>候选 ${preview.candidate_count || 0}，可删除 ${preview.deletable_count || 0}，跳过 ${preview.skipped_count || 0}</div>`,
     `<div>预计释放空间：${formatBytes(preview.estimated_bytes)}</div>`,
     `<div>过期时间：${expiresAt ? expiresAt.toLocaleString() : "-"}</div>`,
     `<div>${NO_AUTO_REGENERATE}</div>`,
-    `<div>candidate_hash：${preview.candidate_hash || "-"}</div>`
+    `<div>预览 ID：${escapeHtml(preview.preview_id || "-")}</div>`,
+    skippedLines.length ? `<ul>${skippedLines.join("")}</ul>` : ""
   ];
   target.innerHTML = lines.join("");
   if (target === maintenanceDom.previewResult) {
@@ -159,13 +189,19 @@ async function loadMaintenanceSummary() {
 async function previewEvidenceDelete() {
   maintenanceState.preview = null;
   maintenanceDom.executeEvidenceDelete.disabled = true;
-  const preview = await maintenanceRequest("/evidence/delete-preview", {
-    method: "POST",
-    body: JSON.stringify(evidencePreviewBody())
-  });
-  maintenanceState.preview = preview;
-  maintenanceDom.jobId.value = preview.preview_id || "";
-  renderPreview(preview);
+  maintenanceDom.previewResult.innerHTML = "<strong>正在生成预览</strong>";
+  const restore = setButtonBusy(maintenanceDom.previewEvidenceDelete, true, "预览中");
+  try {
+    const preview = await maintenanceRequest("/evidence/delete-preview", {
+      method: "POST",
+      body: JSON.stringify(evidencePreviewBody())
+    });
+    maintenanceState.preview = preview;
+    maintenanceDom.jobId.value = preview.preview_id || "";
+    renderPreview(preview);
+  } finally {
+    restore();
+  }
 }
 
 async function executeEvidenceDelete() {
@@ -179,20 +215,36 @@ async function executeEvidenceDelete() {
   }
   const confirmed = window.confirm(`确认删除预览中的证据？${NO_AUTO_REGENERATE}`);
   if (!confirmed) return;
-  const result = await maintenanceRequest("/evidence/delete", {
-    method: "POST",
-    body: JSON.stringify({
-      preview_id: preview.preview_id,
-      confirm_token: preview.confirm_token,
-      candidate_hash: preview.candidate_hash,
-      delete_mode: preview.delete_mode || evidencePreviewBody().delete_mode,
-      reason,
-      operator: "operator"
-    })
-  });
-  maintenanceDom.previewResult.innerHTML =
-    `<strong>执行结果：${result.status}</strong><div>${NO_AUTO_REGENERATE}</div>`;
-  maintenanceDom.executeEvidenceDelete.disabled = true;
+  const restore = setButtonBusy(maintenanceDom.executeEvidenceDelete, true, "删除中");
+  try {
+    const result = await maintenanceRequest("/evidence/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        preview_id: preview.preview_id,
+        confirm_token: preview.confirm_token,
+        candidate_hash: preview.candidate_hash,
+        delete_mode: preview.delete_mode || evidencePreviewBody().delete_mode,
+        reason,
+        operator: "operator"
+      })
+    });
+    const resultPayload = result.result || {};
+    maintenanceDom.previewResult.innerHTML = [
+      `<strong>执行结果：${escapeHtml(result.status || "-")}</strong>`,
+      `<div>已处理 ${resultPayload.completed_count ?? "-"}，跳过 ${resultPayload.skipped_count ?? "-"}，失败 ${resultPayload.failed_count ?? "-"}</div>`,
+      `<div>Job ID：${escapeHtml(result.job_id || preview.preview_id || "-")}</div>`,
+      `<div>${NO_AUTO_REGENERATE}</div>`
+    ].join("");
+    maintenanceDom.executeEvidenceDelete.disabled = true;
+    maintenanceState.preview = null;
+    await loadMaintenanceSummary();
+    if (window.operatorEvidence?.reload) {
+      await window.operatorEvidence.reload();
+    }
+  } finally {
+    restore();
+    maintenanceDom.executeEvidenceDelete.disabled = true;
+  }
 }
 
 async function previewPeopleDelete() {

@@ -525,6 +525,23 @@ button.sm {
   gap: 8px;
 }
 
+.pagination-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.pagination-bar span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 .evidence-detail-pane {
   max-height: calc(100vh - 198px);
 }
