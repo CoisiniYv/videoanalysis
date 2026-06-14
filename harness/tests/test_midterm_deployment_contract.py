@@ -353,6 +353,7 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     }
 
     assert env_file["MAX_FPS_CONTROL"] == "true"
+    assert env_file["INGRESS_FPS_GATE_ENABLED"] == "true"
     assert env_file["MAX_FPS"] == "8/1"
     assert env_file["MIN_FPS"] == "2/1"
     assert env_file["POSE_INFER_INTERVAL"] == "1"
@@ -367,6 +368,7 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["FACE_EMBEDDING_INFER_INTERVAL"] == "2"
     assert env_file["WATCHLIST_THRESHOLD"] == "0.60"
     assert savant_env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-true}"
+    assert savant_env["INGRESS_FPS_GATE_ENABLED"] == "${INGRESS_FPS_GATE_ENABLED:-true}"
     assert savant_env["POSE_INFER_INTERVAL"] == "${POSE_INFER_INTERVAL:-1}"
     assert savant_env["FACE_INFER_INTERVAL"] == "${FACE_INFER_INTERVAL:-2}"
     assert savant_env["FACE_EMBEDDING_INFER_INTERVAL"] == (
@@ -377,6 +379,15 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     )
     assert module["parameters"]["face_embedding_infer_interval"] == (
         "${oc.decode:${oc.env:FACE_EMBEDDING_INFER_INTERVAL, 0}}"
+    )
+    assert module["parameters"]["max_fps_control"] == (
+        "${oc.decode:${oc.env:MAX_FPS_CONTROL, false}}"
+    )
+    assert module["parameters"]["ingress_fps_gate_enabled"] == (
+        "${oc.decode:${oc.env:INGRESS_FPS_GATE_ENABLED, true}}"
+    )
+    assert module["pipeline"]["source"]["ingress_frame_filter"]["kwargs"]["enabled"] == (
+        "${parameters.ingress_fps_gate_enabled}"
     )
     assert elements["yolov8_face"]["properties"]["interval"] == (
         "${parameters.face_infer_interval}"

@@ -10,6 +10,7 @@ parameters:
   batch_size: ${oc.decode:${oc.env:BATCH_SIZE, 1}}
   max_parallel_streams: ${oc.decode:${oc.env:MAX_PARALLEL_STREAMS, 1}}
   max_fps_control: ${oc.decode:${oc.env:MAX_FPS_CONTROL, false}}
+  ingress_fps_gate_enabled: ${oc.decode:${oc.env:INGRESS_FPS_GATE_ENABLED, true}}
   max_fps: ${oc.env:MAX_FPS, 8/1}
   min_fps: ${oc.env:MIN_FPS, 2/1}
   pose_batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
@@ -47,7 +48,7 @@ pipeline:
       module: custom.filters.pts_fps_gate
       class_name: PtsFpsGate
       kwargs:
-        enabled: ${parameters.max_fps_control}
+        enabled: ${parameters.ingress_fps_gate_enabled}
         max_fps: ${parameters.max_fps}
         min_fps: ${parameters.min_fps}
         log_every_n_frames: ${oc.decode:${oc.env:INGRESS_FPS_GATE_LOG_EVERY_N, 300}}

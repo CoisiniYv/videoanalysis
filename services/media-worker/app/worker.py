@@ -1796,6 +1796,8 @@ def _post_savant_finalizer_enabled() -> bool:
 def _post_savant_fps_gating_applied() -> bool | None:
     value = os.getenv("POST_SAVANT_FPS_GATING_APPLIED")
     if value is None:
+        value = os.getenv("INGRESS_FPS_GATE_ENABLED")
+    if value is None:
         value = os.getenv("MAX_FPS_CONTROL")
     if value is None:
         return None

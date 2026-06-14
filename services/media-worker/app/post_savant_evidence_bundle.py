@@ -931,7 +931,10 @@ def _fps_summary(
     if source_input_fps_estimate is None:
         source_input_fps_estimate = metadata_fps or decoded_fps
     if fps_gating_applied is None:
-        fps_gating_applied = _env_bool("MAX_FPS_CONTROL", default=False)
+        fps_gating_applied = _env_bool(
+            "INGRESS_FPS_GATE_ENABLED",
+            default=_env_bool("MAX_FPS_CONTROL", default=False),
+        )
     return {
         "source_input_fps_estimate": source_input_fps_estimate,
         "metadata_fps_estimate": metadata_fps,
