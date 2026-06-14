@@ -387,6 +387,9 @@ shard.
   It performs the default 30-minute sampling window and emits
   `PASS_PHASE2_SINGLE_T4_30` only if FPS, restart, GPU/NVDEC/memory, annotation
   flow, forwarder, and evidence checks all pass.
+- **Appendix update:** after `PASS_PHASE2_SINGLE_T4_30`, run
+  `scripts/runtime/update_phase2_operating_point.py --report-path /data/video-analytics/artifacts/phase2_single_t4_pressure.json`
+  and commit the Appendix A update.
 - P5.1 decode-location measurement; P5.2 derive `(batch_size, ANALYSIS_FPS)`;
   P5.3 disable unused output encoding; P5.5 memory validation.
 - Generate the chosen TensorRT engines; set `max_parallel_streams ≥ 30+headroom`,

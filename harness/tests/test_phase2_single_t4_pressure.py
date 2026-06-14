@@ -191,6 +191,28 @@ def test_parse_gpu_samples_handles_nvidia_smi_csv() -> None:
     ]
 
 
+def test_build_report_includes_operating_point_summary() -> None:
+    samples = [
+        _sample(_overview(frames=1000, annotations=1000), observed_at=1000),
+        _sample(_overview(frames=1300, annotations=1300), observed_at=1030),
+    ]
+    checks = phase2_pressure.evaluate_pressure_run(samples, evidence_count_delta=2)
+
+    report = phase2_pressure.build_report(
+        checks,
+        samples,
+        evidence_count_delta=2,
+        target_fps=8.0,
+        fps_tolerance=0.1,
+    )
+
+    assert report["pass_token"] == "PASS_PHASE2_SINGLE_T4_30"
+    assert report["operating_point"]["source_count"] == 30
+    assert report["operating_point"]["duration_seconds"] == 30
+    assert report["operating_point"]["per_source_effective_fps_avg_mean"] == 8.0
+    assert report["operating_point"]["gpu_names"] == ["NVIDIA T4"]
+
+
 def test_run_pressure_preserves_readiness_pass_fail_status(monkeypatch) -> None:
     readiness_result = SimpleNamespace
     monkeypatch.setattr(phase2_pressure, "fetch_runtime_overview", lambda *_args, **_kwargs: {})

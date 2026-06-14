@@ -507,10 +507,13 @@ def build_report(
     samples: list[PressureSample],
     *,
     evidence_count_delta: int | None,
+    target_fps: float | None = None,
+    fps_tolerance: float | None = None,
 ) -> dict[str, Any]:
+    passed = all(check.ok for check in checks)
     return {
-        "passed": all(check.ok for check in checks),
-        "pass_token": PASS_TOKEN if all(check.ok for check in checks) else None,
+        "passed": passed,
+        "pass_token": PASS_TOKEN if passed else None,
         "checks": [
             {"name": check.name, "ok": check.ok, "detail": check.detail}
             for check in checks
@@ -518,6 +521,64 @@ def build_report(
         "sample_count": len(samples),
         "started_at_epoch_s": samples[0].observed_at_epoch_s if samples else None,
         "finished_at_epoch_s": samples[-1].observed_at_epoch_s if samples else None,
+        "evidence_count_delta": evidence_count_delta,
+        "operating_point": summarize_operating_point(
+            samples,
+            target_fps=target_fps,
+            fps_tolerance=fps_tolerance,
+            evidence_count_delta=evidence_count_delta,
+        ),
+    }
+
+
+def summarize_operating_point(
+    samples: list[PressureSample],
+    *,
+    target_fps: float | None,
+    fps_tolerance: float | None,
+    evidence_count_delta: int | None,
+) -> dict[str, Any]:
+    if not samples:
+        return {
+            "source_count": 0,
+            "target_fps": target_fps,
+            "fps_tolerance": fps_tolerance,
+            "evidence_count_delta": evidence_count_delta,
+        }
+    first = samples[0]
+    last = samples[-1]
+    per_source_fps: dict[str, float] = {}
+    for source_id in sorted(_source_rows(last.runtime_overview)):
+        values = [
+            _float_or_none(_source_rows(sample.runtime_overview).get(source_id, {}).get("effective_fps"))
+            for sample in samples
+        ]
+        finite = [value for value in values if value is not None]
+        if finite:
+            per_source_fps[source_id] = round(sum(finite) / len(finite), 3)
+    gpu_values = [gpu for sample in samples for gpu in sample.gpu_samples]
+    memory_peak_mib = _max_present(gpu.memory_used_mib for gpu in gpu_values)
+    return {
+        "source_count": len(_source_rows(last.runtime_overview)),
+        "duration_seconds": round(max(0.0, last.observed_at_epoch_s - first.observed_at_epoch_s), 3),
+        "sample_count": len(samples),
+        "target_fps": target_fps,
+        "fps_tolerance": fps_tolerance,
+        "per_source_effective_fps_avg_min": _min_present(per_source_fps.values()),
+        "per_source_effective_fps_avg_mean": (
+            round(sum(per_source_fps.values()) / len(per_source_fps), 3)
+            if per_source_fps
+            else None
+        ),
+        "per_source_effective_fps_avg_max": _max_present(per_source_fps.values()),
+        "gpu_names": sorted({gpu.name for gpu in gpu_values if gpu.name}),
+        "max_gpu_util_pct": _max_present(gpu.gpu_util_pct for gpu in gpu_values),
+        "max_decoder_util_pct": _max_present(gpu.decoder_util_pct for gpu in gpu_values),
+        "memory_peak_mib": memory_peak_mib,
+        "min_gpu_memory_headroom_pct": _min_present(
+            _memory_headroom_pct(gpu.memory_used_mib, gpu.memory_total_mib)
+            for gpu in gpu_values
+        ),
         "evidence_count_delta": evidence_count_delta,
     }
 
@@ -556,7 +617,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     checks, samples, evidence_delta = run_pressure(args)
-    report = build_report(checks, samples, evidence_count_delta=evidence_delta)
+    report = build_report(
+        checks,
+        samples,
+        evidence_count_delta=evidence_delta,
+        target_fps=args.target_fps,
+        fps_tolerance=args.fps_tolerance,
+    )
     if args.report_path is not None:
         args.report_path.parent.mkdir(parents=True, exist_ok=True)
         args.report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
