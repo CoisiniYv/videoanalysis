@@ -13,6 +13,7 @@ let selectedPersonId = "";
 let algorithms = [];
 let currentZones = [];
 let currentRules = [];
+let runtimeOverview = null;
 
 /* ---- DOM refs ---- */
 const statusEl = document.getElementById("status");
@@ -27,6 +28,11 @@ const enabledCameraCountEl = document.getElementById("enabled-camera-count");
 const peopleCountEl = document.getElementById("people-count");
 const galleryCountEl = document.getElementById("gallery-count");
 const evidenceCountEl = document.getElementById("evidence-count");
+const runtimeHealthSummaryEl = document.getElementById("runtime-health-summary");
+const runtimeSupervisorSummaryEl = document.getElementById("runtime-supervisor-summary");
+const runtimeSourceTableEl = document.getElementById("runtime-source-table");
+const runtimeContainerTableEl = document.getElementById("runtime-container-table");
+const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
 const camerasEl = document.getElementById("cameras");
 const zonesEl = document.getElementById("zones");
 const rulesEl = document.getElementById("rules");
@@ -749,6 +755,127 @@ function renderQuickAlgorithmControls() {
   }
 }
 
+function statusText(ok) {
+  return ok ? "正常" : "异常";
+}
+
+function formatNumber(value, digits = 1) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "--";
+  return num.toFixed(digits).replace(/\.0+$/, "");
+}
+
+function formatInteger(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "--";
+  return String(Math.trunc(num));
+}
+
+function renderRuntimeOverview() {
+  if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
+  const overview = runtimeOverview || {};
+  const metrics = overview.metrics || {};
+  const health = overview.health || {};
+  const containers = overview.containers || {};
+  const supervisor = overview.supervisor || {};
+  const issues = Array.isArray(health.issues) ? health.issues : [];
+  const supervisorEnabled = supervisor.enabled === true;
+  const annotationAge = supervisor.annotation_age_s;
+
+  runtimeHealthSummaryEl.innerHTML =
+    `<div class="summary-card runtime-health-card ${health.ok ? "ok" : "warn"}">` +
+      `<span>整体状态</span>` +
+      `<strong>${statusText(health.ok)}</strong>` +
+      `<small>${issues.length ? escapeHtml(issues.join(", ")) : "无已知异常"}</small>` +
+    `</div>` +
+    `<div class="summary-card">` +
+      `<span>Savant metrics</span>` +
+      `<strong>${metrics.available ? "可用" : "不可用"}</strong>` +
+      `<small>${escapeHtml(overview.metrics_url || "")}</small>` +
+    `</div>` +
+    `<div class="summary-card">` +
+      `<span>活跃 source</span>` +
+      `<strong>${formatInteger(metrics.sources_active ?? health.source_count)}</strong>` +
+      `<small>per-source 指标 ${formatInteger((metrics.sources || []).length)} 路</small>` +
+    `</div>` +
+    `<div class="summary-card">` +
+      `<span>annotation age</span>` +
+      `<strong>${annotationAge == null ? "--" : `${formatInteger(annotationAge)}s`}</strong>` +
+      `<small>${supervisorEnabled ? "supervisor 已启用" : "supervisor 未启用"}</small>` +
+    `</div>`;
+
+  runtimeSupervisorSummaryEl.innerHTML =
+    `<div class="runtime-kv-grid">` +
+      `<div><span>Savant 容器</span><strong>${escapeHtml(supervisor.savant_container || "--")}</strong></div>` +
+      `<div><span>模块状态</span><strong>${escapeHtml(supervisor.savant_module_status || "--")}</strong></div>` +
+      `<div><span>冷却中</span><strong>${supervisor.in_cooldown ? "是" : "否"}</strong></div>` +
+      `<div><span>source convergence</span><strong>${supervisor.source_convergence?.healthy === false ? "异常" : "正常"}</strong></div>` +
+    `</div>`;
+
+  renderRuntimeSourceTable(metrics.sources || []);
+  renderRuntimeContainerTable(containers);
+}
+
+function renderRuntimeSourceTable(sources) {
+  if (!runtimeSourceTableEl) return;
+  if (!sources.length) {
+    runtimeSourceTableEl.innerHTML = `<div class="empty-state">暂无 per-source 性能指标。</div>`;
+    return;
+  }
+  const rows = sources.map((source) => {
+    const age = Number(source.last_frame_age_seconds);
+    const stale = Number.isFinite(age) && age > 30;
+    return `<tr class="${stale ? "warn-row" : ""}">` +
+      `<td>${escapeHtml(source.source_id)}</td>` +
+      `<td>${formatNumber(source.effective_fps)}</td>` +
+      `<td>${formatNumber(source.last_frame_age_seconds)}</td>` +
+      `<td>${formatInteger(source.frames_seen_total)}</td>` +
+      `<td>${formatInteger(source.frame_annotations_exported_total)}</td>` +
+      `<td>${formatInteger(source.pose_objects_total)}</td>` +
+      `<td>${formatInteger(source.face_objects_total)}</td>` +
+      `<td>${formatInteger(source.adaface_embeddings_total)}</td>` +
+    `</tr>`;
+  }).join("");
+  runtimeSourceTableEl.innerHTML =
+    `<table class="runtime-table">` +
+      `<thead><tr>` +
+        `<th>source</th><th>FPS</th><th>frame age(s)</th><th>frames</th>` +
+        `<th>annotations</th><th>person</th><th>face</th><th>AdaFace</th>` +
+      `</tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+    `</table>`;
+}
+
+function renderRuntimeContainerTable(containers) {
+  if (!runtimeContainerTableEl) return;
+  const fixed = containers.fixed || {};
+  const rows = Object.entries(fixed).map(([role, item]) => (
+    `<tr class="${item.present && item.state !== "running" ? "warn-row" : ""}">` +
+      `<td>${escapeHtml(role)}</td>` +
+      `<td>${escapeHtml(item.name || "--")}</td>` +
+      `<td>${item.present ? escapeHtml(item.state || "--") : "missing"}</td>` +
+      `<td>${escapeHtml(item.health || "--")}</td>` +
+      `<td>${formatInteger(item.restart_count)}</td>` +
+    `</tr>`
+  ));
+  for (const source of containers.dynamic_sources || []) {
+    rows.push(
+      `<tr class="${source.state !== "running" ? "warn-row" : ""}">` +
+        `<td>dynamic_source</td>` +
+        `<td>${escapeHtml(source.name || "--")}</td>` +
+        `<td>${escapeHtml(source.state || "--")}</td>` +
+        `<td>--</td>` +
+        `<td>--</td>` +
+      `</tr>`
+    );
+  }
+  runtimeContainerTableEl.innerHTML =
+    `<table class="runtime-table">` +
+      `<thead><tr><th>role</th><th>container</th><th>state</th><th>health</th><th>restarts</th></tr></thead>` +
+      `<tbody>${rows.join("")}</tbody>` +
+    `</table>`;
+}
+
 function switchCameraTab(tab) {
   const normalized = tab === "rules" ? "rules" : "zones";
   document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -773,12 +900,13 @@ document.querySelectorAll(".top-tab").forEach((btn) => {
 });
 
 function activateTopView(view, updateHash = false) {
-  const normalized = ["people", "evidence", "maintenance"].includes(view) ? view : "cameras";
+  const normalized = ["people", "evidence", "maintenance", "runtime"].includes(view) ? view : "cameras";
   document.querySelectorAll(".top-tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.view === normalized);
   });
   document.getElementById("camera-view").hidden = normalized !== "cameras";
   document.getElementById("people-view").hidden = normalized !== "people";
+  document.getElementById("runtime-view").hidden = normalized !== "runtime";
   document.getElementById("evidence-view").hidden = normalized !== "evidence";
   document.getElementById("maintenance-view").hidden = normalized !== "maintenance";
   if (updateHash) {
@@ -789,6 +917,9 @@ function activateTopView(view, updateHash = false) {
   }
   if (normalized === "evidence" && window.operatorEvidence) {
     window.operatorEvidence.init().catch((e) => showError(e.message));
+  }
+  if (normalized === "runtime") {
+    loadRuntimeOverview().catch((e) => showError(e.message));
   }
   if (normalized === "maintenance" && window.operatorMaintenance) {
     window.operatorMaintenance.init().catch((e) => showError(e.message));
@@ -851,6 +982,13 @@ async function loadPeople() {
   }
   updateSummary();
   setStatus("人员就绪");
+}
+
+async function loadRuntimeOverview() {
+  const data = await request(`${API}/runtime/overview`);
+  runtimeOverview = data || {};
+  renderRuntimeOverview();
+  setStatus("运行状态已刷新");
 }
 
 function renderPeople() {
@@ -1372,6 +1510,10 @@ previewDeleteSelectedPersonBtn?.addEventListener("click", () => {
   }
   openMaintenanceWithRequest({ kind: "person", person_ids: [selectedPersonId] });
 });
+refreshRuntimeOverviewBtn?.addEventListener("click", () => {
+  clearMessages();
+  loadRuntimeOverview().catch((e) => showError(`运行状态刷新失败：${e.message}`));
+});
 
 document.querySelectorAll("[data-template]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -1388,6 +1530,8 @@ loadCameras()
   .then(() => {
     if (window.location.hash === "#people") {
       activateTopView("people", false);
+    } else if (window.location.hash === "#runtime") {
+      activateTopView("runtime", false);
     } else if (window.location.hash === "#evidence") {
       activateTopView("evidence", false);
     } else if (window.location.hash === "#maintenance") {

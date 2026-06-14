@@ -388,6 +388,10 @@ p {
   grid-template-columns: minmax(320px, 0.9fr) minmax(440px, 1.1fr);
 }
 
+.runtime-workspace {
+  grid-template-columns: minmax(320px, 0.95fr) minmax(520px, 1.4fr);
+}
+
 .operator-view[hidden] {
   display: none;
 }
@@ -440,6 +444,90 @@ p {
 
 .maintenance-job-pane {
   grid-column: 1 / -1;
+}
+
+.runtime-container-pane {
+  grid-column: 1 / -1;
+}
+
+.runtime-health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.runtime-health-card.ok strong {
+  color: var(--success);
+}
+
+.runtime-health-card.warn strong {
+  color: var(--amber);
+}
+
+.runtime-supervisor-summary {
+  margin-top: 12px;
+}
+
+.runtime-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.runtime-kv-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runtime-kv-grid strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.runtime-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.runtime-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.runtime-table th,
+.runtime-table td {
+  padding: 8px 9px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.runtime-table th {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.runtime-table td {
+  overflow-wrap: anywhere;
+}
+
+.runtime-table .warn-row td,
+.runtime-table tr.warn-row td {
+  background: var(--amber-soft);
+}
+
+.empty-state {
+  padding: 14px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
 }
 
 .internal-config,

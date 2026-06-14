@@ -37,6 +37,10 @@
             <span>告警证据</span>
             <small>录像复核</small>
           </button>
+          <button class="top-tab" data-view="runtime">
+            <span>运行控制</span>
+            <small>性能状态</small>
+          </button>
           <button class="top-tab" data-view="maintenance">
             <span>存储维护</span>
             <small>预览清理</small>
@@ -292,6 +296,42 @@
               <div id="face-registration-summary" class="result-card">暂无注册结果</div>
               <textarea id="face-registration-result" class="internal-config" hidden readonly spellcheck="false" placeholder="暂无注册结果"></textarea>
             </div>
+          </section>
+        </main>
+
+        <main id="runtime-view" class="operator-view runtime-workspace" hidden>
+          <section class="pane runtime-overview-pane">
+            <div class="pane-title">
+              <div>
+                <h2>运行总览</h2>
+                <p>Savant、source adapter、worker 与 watchdog 状态。</p>
+              </div>
+              <div class="button-group">
+                <button id="refresh-runtime-overview" type="button">刷新</button>
+              </div>
+            </div>
+            <div id="runtime-health-summary" class="runtime-health-grid"></div>
+            <div id="runtime-supervisor-summary" class="result-card runtime-supervisor-summary"></div>
+          </section>
+
+          <section class="pane runtime-source-pane">
+            <div class="pane-title">
+              <div>
+                <h2>摄像头性能</h2>
+                <p>通过 API 聚合 Savant metrics，不直接暴露 18080。</p>
+              </div>
+            </div>
+            <div id="runtime-source-table" class="runtime-table-wrap"></div>
+          </section>
+
+          <section class="pane runtime-container-pane">
+            <div class="pane-title">
+              <div>
+                <h2>容器状态</h2>
+                <p>只读展示运行容器、重启次数和健康状态。</p>
+              </div>
+            </div>
+            <div id="runtime-container-table" class="runtime-table-wrap"></div>
           </section>
         </main>
 
@@ -558,7 +598,7 @@
         </main>
       </div>
     </div>
-    <script src="/static/operator.js?v=dark-mode-20260611"></script>
+    <script src="/static/operator.js?v=runtime-overview-20260614"></script>
     <script src="/static/evidence.js?v=playback-empty-crop-20260611"></script>
     <script src="/static/maintenance.js?v=storage-maintenance-actions-20260610"></script>
   </body>

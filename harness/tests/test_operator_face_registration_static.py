@@ -155,7 +155,7 @@ def test_operator_theme_toggle_is_frontend_only_and_persistent() -> None:
     js = _text(STATIC_ROOT / "operator.js")
     css = _text(STATIC_ROOT / "style.css")
     assert "style.css?v=dark-mode-20260611" in html
-    assert "operator.js?v=dark-mode-20260611" in html
+    assert "operator.js?v=runtime-overview-20260614" in html
     assert "operator-theme" in html
     assert "operator-theme" in js
     assert "theme-toggle" in js
