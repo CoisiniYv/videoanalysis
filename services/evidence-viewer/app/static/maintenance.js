@@ -183,7 +183,10 @@ async function loadMaintenanceSummary() {
   maintenanceDom.faceCount.textContent = `引用 ${summary.face_media?.referenced_file_count || 0} / 未引用 ${summary.face_media?.orphan_file_count || 0}`;
   maintenanceDom.trashBytes.textContent = formatBytes(summary.trash?.bytes);
   maintenanceDom.trashCount.textContent = `对象 ${summary.trash?.item_count || 0}`;
-  maintenanceDom.executeStatus.textContent = "Midterm 默认 summary enabled、preview enabled、execute disabled。";
+  const executeEnabled = summary.contract?.execute_enabled === true;
+  maintenanceDom.executeStatus.textContent = executeEnabled
+    ? "删除执行已开启。请先生成预览，确认候选对象后再执行删除。"
+    : "Midterm 当前只允许统计和预览，执行删除处于关闭状态。";
 }
 
 async function previewEvidenceDelete() {

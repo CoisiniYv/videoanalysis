@@ -100,6 +100,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -410,6 +417,7 @@ class StorageMaintenanceService:
                 "entrypoint": "8090",
                 "evidence_layout": "flat_bundle",
                 "execute_default_enabled": False,
+                "execute_enabled": _bool_env("STORAGE_MAINTENANCE_EXECUTE_ENABLED", False),
                 "no_auto_regenerate_message": NO_AUTO_REGENERATE_MESSAGE,
             },
         }
