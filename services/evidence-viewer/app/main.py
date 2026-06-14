@@ -37,6 +37,7 @@ OPERATOR_PROXY_ALLOWED_PREFIXES = (
     "events",
     "people",
     "maintenance",
+    "runtime",
     "ws",
 )
 LEGACY_ANNOTATIONS_FILE = "annotations.jsonl"

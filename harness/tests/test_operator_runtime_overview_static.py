@@ -26,10 +26,12 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
 def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     js = _text(STATIC_ROOT / "operator.js")
     html = _text(STATIC_ROOT / "index.html")
+    viewer_main = _text(ROOT / "services" / "evidence-viewer" / "app" / "main.py")
 
     assert "loadRuntimeOverview" in js
     assert "`${API}/runtime/overview`" in js
     assert "renderRuntimeOverview" in js
+    assert '"runtime"' in viewer_main
     assert "18080" not in js
     assert "savant-security:8080" not in js
     assert "docker" not in html.lower()
