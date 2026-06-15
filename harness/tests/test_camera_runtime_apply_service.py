@@ -438,6 +438,98 @@ def test_source_only_converge_recreates_changed_dynamic_and_removes_disabled(
     assert sources_doc["sources"]["lab"]["camera_name"] == "lab"
 
 
+def test_source_only_converge_stops_disabled_compose_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    fake.inspect_by_name["video-analytics-midterm-source-adapter"] = {
+        "State": {"Status": "running"}
+    }
+
+    result = runtime_apply.converge_camera_sources(
+        cameras=[
+            {
+                "id": "primary",
+                "source_id": "primary_rtsp",
+                "name": "Primary",
+                "rtsp_url": "rtsp://primary/stream",
+                "enabled": False,
+            },
+        ],
+    )
+
+    called_paths = [path for _method, path, _body in fake.calls]
+    assert result["runtime_action"] == "source_converge"
+    assert result["compose_sources_stopped"] == ["primary_rtsp"]
+    assert result["dynamic_sources_stopped"] == []
+    assert result["source_lifecycle"] == [
+        {
+            "source_id": "primary_rtsp",
+            "camera_id": "primary",
+            "adapter_type": "gstreamer",
+            "enabled": False,
+            "uri_host": "primary",
+            "compose_source": True,
+            "dynamic_source": False,
+            "ffmpeg_timeout_ms": 20000,
+            "restart_policy": "unless-stopped",
+            "camera_name": "Primary",
+            "container_name": "video-analytics-midterm-source-adapter",
+            "actual_state": "running",
+            "actual_present": True,
+            "planned_action": "stop_compose_disabled",
+            "action": "stopped",
+        }
+    ]
+    assert "/containers/video-analytics-midterm-source-adapter/stop?t=10" in called_paths
+    sources_doc = yaml.safe_load((tmp_path / "sources.generated.yml").read_text())
+    assert sources_doc["sources"]["primary"]["enabled"] is False
+
+
+def test_source_only_converge_starts_enabled_compose_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    fake.inspect_by_name["video-analytics-midterm-source-adapter"] = {
+        "State": {"Status": "exited"}
+    }
+    fake.inspect_by_name["video-analytics-midterm-savant"] = {
+        "State": {"StartedAt": "2026-06-11T00:00:00.000000000Z"}
+    }
+    fake.logs_by_name["video-analytics-midterm-savant"] = (
+        "2026-06-11T00:00:00Z pipeline state changed to PLAYING\n"
+    )
+
+    result = runtime_apply.converge_camera_sources(
+        cameras=[
+            {
+                "id": "primary",
+                "source_id": "primary_rtsp",
+                "name": "Primary",
+                "rtsp_url": "rtsp://primary/stream",
+                "enabled": True,
+            },
+        ],
+    )
+
+    called_paths = [path for _method, path, _body in fake.calls]
+    assert result["compose_sources_started"] == ["primary_rtsp"]
+    assert result["dynamic_sources_started"] == []
+    assert "/containers/video-analytics-midterm-source-adapter/start" in called_paths
+
+
 def test_source_only_converge_fails_before_starting_sources_when_savant_not_ready(
     monkeypatch,
     tmp_path: Path,

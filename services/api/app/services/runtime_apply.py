@@ -128,7 +128,8 @@ def converge_camera_sources(
 
     This path is intentionally narrower than ``apply_camera_runtime``: it
     updates ``sources.generated.yml`` and reconciles per-source adapter
-    containers. Compose-owned ``primary_rtsp`` remains outside this lifecycle.
+    containers. The compose-owned source is still reconciled by starting or
+    stopping its fixed container when the matching camera is enabled/disabled.
     """
     if not _env_bool("CAMERA_RUNTIME_APPLY_ENABLED", default=False):
         raise RuntimeApplyError("camera runtime control is disabled")
@@ -158,7 +159,12 @@ def converge_camera_sources(
         compose_source_container=compose_source_container,
     )
     starts_required = any(
-        item["planned_action"] in {"create_start", "recreate_start", "start"}
+        item["planned_action"] in {
+            "create_start",
+            "recreate_start",
+            "start",
+            "start_compose_enabled",
+        }
         for item in plan
     )
     savant_ready: dict[str, Any] = {
@@ -192,6 +198,9 @@ def converge_camera_sources(
     dynamic_sources_recreated: list[str] = []
     dynamic_sources_stopped: list[str] = []
     dynamic_sources_kept: list[str] = []
+    compose_sources_started: list[str] = []
+    compose_sources_stopped: list[str] = []
+    compose_sources_kept: list[str] = []
     sources_skipped: list[str] = []
 
     for item in plan:
@@ -210,6 +219,15 @@ def converge_camera_sources(
             )
             diag.update(action="removed", delete_status=delete_status)
             dynamic_sources_stopped.append(source_id or container_name)
+        elif action == "stop_compose_disabled":
+            container_name = str(item.get("container_name") or "")
+            _stop_container(client, container_name)
+            diag.update(action="stopped", container_name=container_name)
+            compose_sources_stopped.append(source_id or container_name)
+        elif action == "start_compose_enabled":
+            start_status = _start_container(client, str(item["container_name"]))
+            diag.update(action="started", start_status=start_status)
+            compose_sources_started.append(source_id)
         elif action == "start":
             start_status = _start_container(client, str(item["container_name"]))
             diag.update(action="started", start_status=start_status)
@@ -229,7 +247,10 @@ def converge_camera_sources(
                 dynamic_sources_recreated.append(source_id)
         elif action == "keep":
             diag.update(action="kept")
-            dynamic_sources_kept.append(source_id)
+            if item.get("compose_source"):
+                compose_sources_kept.append(source_id)
+            else:
+                dynamic_sources_kept.append(source_id)
         else:
             diag.update(action="skipped")
             if source_id:
@@ -246,6 +267,9 @@ def converge_camera_sources(
         "dynamic_sources_recreated": dynamic_sources_recreated,
         "dynamic_sources_stopped": dynamic_sources_stopped,
         "dynamic_sources_kept": dynamic_sources_kept,
+        "compose_sources_started": compose_sources_started,
+        "compose_sources_stopped": compose_sources_stopped,
+        "compose_sources_kept": compose_sources_kept,
         "sources_skipped": sources_skipped,
         "source_lifecycle": lifecycle,
     }
@@ -994,14 +1018,22 @@ def _source_only_convergence_plan(
             plan.append({**base, "planned_action": "skip", "skip_reason": "missing_source_id"})
             continue
         if source_id == compose_source_id:
-            plan.append(
-                {
-                    **base,
-                    "planned_action": "skip",
-                    "skip_reason": "compose_managed_source",
-                    "container_name": compose_source_container,
-                }
-            )
+            actual = _inspect_container(client, compose_source_container)
+            actual_state = str(((actual.get("State") or {}) if isinstance(actual, dict) else {}).get("Status") or "")
+            diag = {
+                **base,
+                "source": source,
+                "container_name": compose_source_container,
+                "actual_state": actual_state,
+                "actual_present": bool(actual),
+            }
+            if source.get("enabled"):
+                if actual_state == "running":
+                    plan.append({**diag, "planned_action": "keep"})
+                else:
+                    plan.append({**diag, "planned_action": "start_compose_enabled"})
+            else:
+                plan.append({**diag, "planned_action": "stop_compose_disabled"})
             continue
 
         container_name = SOURCE_CONTAINER_PREFIX + source_id
