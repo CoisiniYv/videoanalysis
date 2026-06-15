@@ -38,7 +38,10 @@ def test_maintenance_delete_requires_preview_in_frontend() -> None:
     assert "包含已生成的 pending 任务" in html
     assert "allow_stale_pending_tasks" in js
     assert 'id="preview-delete-current-evidence"' in html
-    assert "预览删除当前证据" in html
+    assert "删除当前证据" in html
+    assert 'id="maintenance-active-delete-pane"' in html
+    assert 'id="execute-active-delete"' in html
+    assert "executeActiveDelete" in js
     assert 'disabled>确认删除' in html
     assert 'id="execute-face-delete"' in html
     assert "确认删除预览对象" in html
@@ -59,14 +62,18 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     evidence_js = _text(STATIC_ROOT / "evidence.js")
     maintenance_js = _text(STATIC_ROOT / "maintenance.js")
     assert 'id="preview-delete-selected-person"' in html
-    assert "预览停用当前人员" in html
+    assert "删除当前人员" in html
     assert "openMaintenanceWithRequest" in operator_js
-    assert "{ kind: \"person\", person_ids: [selectedPersonId] }" in operator_js
+    assert "selectedPersonDeleteRequest" in operator_js
+    assert "galleryDeleteRequest" in operator_js
+    assert "删除照片" in operator_js
+    assert "系统 ID" in operator_js
+    assert "图库 ID" in operator_js
     assert "previewDeleteCurrentEvidence" in evidence_js
-    assert "{ kind: \"evidence\", event_ids: [state.selectedEventId] }" in evidence_js
+    assert "currentEvidenceDeleteRequest" in evidence_js
     assert "prepareDelete" in maintenance_js
-    assert "await previewEvidenceDelete()" in maintenance_js
-    assert "await previewPeopleDelete()" in maintenance_js
+    assert "showActiveDelete(request)" in maintenance_js
+    assert "maintenanceDom.activeResult" in maintenance_js
 
 
 def test_viewer_proxy_allowlist_includes_maintenance() -> None:
@@ -103,7 +110,7 @@ def test_midterm_preview_maintenance_flags_are_explicit_defaults() -> None:
     assert api_env["STORAGE_MAINTENANCE_EXECUTE_ENABLED"] == "${STORAGE_MAINTENANCE_EXECUTE_ENABLED:-false}"
     assert "STORAGE_MAINTENANCE_SUMMARY_ENABLED=true" in env_text
     assert "STORAGE_MAINTENANCE_PREVIEW_ENABLED=true" in env_text
-    assert "STORAGE_MAINTENANCE_EXECUTE_ENABLED=false" in env_text
+    assert "STORAGE_MAINTENANCE_EXECUTE_ENABLED=true" in env_text
 
 
 def test_maintenance_schema_has_explicit_candidate_hash_and_preview_expiry() -> None:

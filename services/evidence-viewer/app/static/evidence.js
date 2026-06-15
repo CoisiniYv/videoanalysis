@@ -385,6 +385,41 @@ function updateEvidenceDeleteButton() {
   dom.previewDeleteCurrentEvidence.disabled = !state.selectedEventId;
 }
 
+function currentEvidenceDeleteRequest() {
+  const metadata = state.manifest?.metadata || {};
+  const summary = state.manifest?.summary || {};
+  const event = metadata.event || {};
+  const eventId = state.selectedEventId || event.event_id || summary.event_id || "";
+  const eventType = eventTypeLabel(event.event_type || summary.event_type) || "证据";
+  const alarmTime = formatAlarmMachineTime(
+    state.manifest?.alarm_machine_time ||
+    event.alarm_machine_time ||
+    event.created_at ||
+    metadata.alarm_machine_time ||
+    metadata.created_at ||
+    summary.alarm_machine_time ||
+    summary.event_created_at
+  );
+  const cameraName = cameraDisplayName({
+    camera_name: state.manifest?.camera_name || event.camera_name || metadata.camera_name || summary.camera_name,
+    source_id: event.source_id || summary.source_id,
+    camera_id: event.camera_id || summary.camera_id
+  });
+  return {
+    kind: "evidence",
+    event_ids: [eventId],
+    default_reason: `operator_delete_evidence:${eventId}`,
+    target: {
+      title: `证据：${eventType}`,
+      fields: [
+        { label: "事件 ID", value: eventId },
+        { label: "摄像头", value: cameraName },
+        { label: "报警时间", value: alarmTime || "-" }
+      ]
+    }
+  };
+}
+
 function resetBundleSelection() {
   state.selectedEventId = null;
   state.manifest = null;
@@ -1324,7 +1359,7 @@ dom.previewDeleteCurrentEvidence?.addEventListener("click", () => {
     return;
   }
   if (typeof openMaintenanceWithRequest === "function") {
-    openMaintenanceWithRequest({ kind: "evidence", event_ids: [state.selectedEventId] });
+    openMaintenanceWithRequest(currentEvidenceDeleteRequest());
   }
 });
 window.addEventListener("resize", resizeCanvas);

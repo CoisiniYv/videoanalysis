@@ -10,6 +10,7 @@ let cameras = [];
 let selectedCameraId = "";
 let people = [];
 let selectedPersonId = "";
+let selectedPerson = null;
 let algorithms = [];
 let currentZones = [];
 let currentRules = [];
@@ -1013,6 +1014,7 @@ async function loadPeople() {
   const selectedStillVisible = people.some((person) => String(person.person_id) === String(selectedPersonId));
   if (!selectedStillVisible) {
     selectedPersonId = "";
+    selectedPerson = null;
   }
   if (!selectedPersonId && people[0]) {
     const previewPerson = people.find((person) => personPreviewUrl(person));
@@ -1051,6 +1053,7 @@ function renderPeople() {
         `<strong>${person.name}</strong>` +
         `<div class="muted">${person.external_person_id || "未设置人员编号"}</div>` +
         `<div class="person-metrics">` +
+          `<span class="metric-chip">ID ${escapeHtml(person.person_id)}</span>` +
           `<span class="metric-chip">照片 ${person.active_gallery_count || 0}</span>` +
           `<span class="metric-chip">${person.is_active ? "有效" : "停用"}</span>` +
         `</div>` +
@@ -1065,6 +1068,7 @@ async function selectPerson(personId) {
   clearMessages();
   selectedPersonId = String(personId);
   const data = await request(`${API}/people/${encodeURIComponent(personId)}`);
+  selectedPerson = data.person || null;
   personDetailEl.value = JSON.stringify(data.person, null, 2);
   renderPersonProfile(data.person);
   renderGallery(data.gallery || []);
@@ -1080,9 +1084,50 @@ function renderPersonProfile(person) {
   if (!personProfileEl || !person) return;
   personProfileEl.innerHTML =
     `<strong>${person.name || "未命名人员"}</strong>` +
+    `<div class="muted">系统 ID：${person.person_id || selectedPersonId || "-"}</div>` +
     `<div class="muted">人员编号：${person.external_person_id || "未设置"}</div>` +
     `<div class="muted">状态：${person.is_active ? "有效" : "停用"}</div>` +
     `<div class="muted">${person.description || "暂无描述"}</div>`;
+}
+
+function selectedPersonDeleteRequest() {
+  const person = selectedPerson || people.find((item) => String(item.person_id) === String(selectedPersonId)) || {};
+  const personId = String(person.person_id || selectedPersonId || "");
+  const name = person.name || "未命名人员";
+  const externalId = person.external_person_id || "未设置";
+  return {
+    kind: "person",
+    person_ids: [personId],
+    default_reason: `operator_delete_person:${personId}`,
+    target: {
+      title: `人员：${name}`,
+      fields: [
+        { label: "系统 ID", value: personId },
+        { label: "人员编号", value: externalId },
+        { label: "图库照片", value: String(person.active_gallery_count ?? "-") }
+      ]
+    }
+  };
+}
+
+function galleryDeleteRequest(row = {}) {
+  const person = selectedPerson || people.find((item) => String(item.person_id) === String(selectedPersonId)) || {};
+  const personId = String(person.person_id || selectedPersonId || "");
+  const galleryId = String(row.gallery_embedding_id || "");
+  return {
+    kind: "gallery",
+    person_ids: personId ? [personId] : [],
+    gallery_embedding_ids: galleryId ? [galleryId] : [],
+    default_reason: `operator_delete_gallery:${galleryId}`,
+    target: {
+      title: `人脸照片：${person.name || "未命名人员"}`,
+      fields: [
+        { label: "图库 ID", value: galleryId },
+        { label: "系统 ID", value: personId || "-" },
+        { label: "人员编号", value: person.external_person_id || "未设置" }
+      ]
+    }
+  };
 }
 
 function fillRegistrationForPerson(person) {
@@ -1111,11 +1156,22 @@ function renderGallery(gallery) {
     meta.className = "gallery-meta";
     meta.innerHTML =
       `<strong>人脸照片</strong>` +
+      `<div class="gallery-meta-row">图库 ID ${row.gallery_embedding_id}</div>` +
       `<div class="gallery-meta-row">登记质量 ${row.quality ?? "-"}</div>` +
       `<div class="gallery-meta-row">` +
         `<span class="badge ${row.is_primary ? "success" : "neutral"}">${row.is_primary ? "主图" : "备选图"}</span> ` +
         `<span class="badge ${row.is_active ? "success" : "neutral"}">${row.is_active ? "有效" : "停用"}</span> ` +
       `</div>`;
+    const actions = document.createElement("div");
+    actions.className = "gallery-actions";
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "sm danger";
+    deleteButton.textContent = "删除照片";
+    deleteButton.disabled = !row.gallery_embedding_id;
+    deleteButton.addEventListener("click", () => openMaintenanceWithRequest(galleryDeleteRequest(row)));
+    actions.appendChild(deleteButton);
+    meta.appendChild(actions);
     item.appendChild(meta);
     galleryEl.appendChild(item);
   }
@@ -1553,7 +1609,7 @@ previewDeleteSelectedPersonBtn?.addEventListener("click", () => {
     showError("未选择人员");
     return;
   }
-  openMaintenanceWithRequest({ kind: "person", person_ids: [selectedPersonId] });
+  openMaintenanceWithRequest(selectedPersonDeleteRequest());
 });
 refreshRuntimeOverviewBtn?.addEventListener("click", () => {
   clearMessages();

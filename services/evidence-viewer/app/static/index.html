@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=dark-mode-20260611" />
+    <link rel="stylesheet" href="/static/style.css?v=delete-usability-20260615" />
   </head>
   <body>
     <div class="app-shell">
@@ -286,7 +286,7 @@
                 <h2>人脸图库</h2>
                 <p>查看已登记的人脸照片</p>
               </div>
-              <button id="preview-delete-selected-person" type="button" class="danger" disabled>预览停用当前人员</button>
+              <button id="preview-delete-selected-person" type="button" class="danger" disabled>删除当前人员</button>
             </div>
             <div id="person-profile" class="profile-card">选择人员后显示基本信息</div>
             <textarea id="person-detail" class="internal-config" hidden readonly spellcheck="false" placeholder="选择或注册人员后显示详情"></textarea>
@@ -396,7 +396,7 @@
                 <span class="status-pill" id="healthStatus">证据服务检查中</span>
                 <span class="status-pill" id="bundleCount">证据 0</span>
                 <span class="status-pill warning" id="clipWarning" hidden>录像需复核</span>
-                <button id="preview-delete-current-evidence" type="button" class="danger" disabled>预览删除当前证据</button>
+                <button id="preview-delete-current-evidence" type="button" class="danger" disabled>删除当前证据</button>
               </div>
             </div>
 
@@ -494,6 +494,24 @@
         </main>
 
         <main id="maintenance-view" class="operator-view maintenance-workspace" hidden>
+          <section id="maintenance-active-delete-pane" class="pane maintenance-active-delete-pane" hidden>
+            <div class="pane-title">
+              <div>
+                <h2 id="maintenance-active-delete-title">确认删除</h2>
+                <p id="maintenance-active-delete-subtitle">已根据你刚才选择的对象生成删除预览。</p>
+              </div>
+              <button id="maintenance-active-delete-cancel" type="button">取消</button>
+            </div>
+            <div id="maintenance-active-delete-target" class="maintenance-target"></div>
+            <div id="maintenance-active-delete-result" class="result-card maintenance-preview-result">
+              正在生成删除预览。
+            </div>
+            <div class="maintenance-confirm maintenance-active-confirm">
+              <label>删除原因<input id="maintenance-active-delete-reason" placeholder="填写操作原因" /></label>
+              <button id="execute-active-delete" type="button" class="danger" disabled>确认删除</button>
+            </div>
+          </section>
+
           <section class="pane maintenance-summary-pane">
             <div class="pane-title">
               <div>
@@ -578,7 +596,7 @@
               </div>
             </div>
             <div class="button-group">
-              <button id="preview-people-delete" type="button">预览停用选中人员</button>
+              <button id="preview-people-delete" type="button">预览停用人员</button>
               <button id="preview-gallery-delete" type="button">预览停用图库照片</button>
               <button id="preview-face-orphans" type="button">预览未引用图片</button>
             </div>
@@ -613,8 +631,8 @@
         </main>
       </div>
     </div>
-    <script src="/static/operator.js?v=runtime-overview-20260614"></script>
-    <script src="/static/evidence.js?v=evidence-pagination-delete-20260614"></script>
-    <script src="/static/maintenance.js?v=evidence-delete-usability-20260614"></script>
+    <script src="/static/operator.js?v=delete-usability-20260615"></script>
+    <script src="/static/evidence.js?v=delete-usability-20260615"></script>
+    <script src="/static/maintenance.js?v=delete-usability-20260615"></script>
   </body>
 </html>

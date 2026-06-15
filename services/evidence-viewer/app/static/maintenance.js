@@ -7,7 +7,8 @@ const maintenanceState = {
   initialized: false,
   preview: null,
   facePreview: null,
-  facePreviewKind: null
+  facePreviewKind: null,
+  activeDelete: null
 };
 
 const maintenanceDom = {
@@ -21,6 +22,14 @@ const maintenanceDom = {
   trashBytes: document.getElementById("maintenance-trash-bytes"),
   trashCount: document.getElementById("maintenance-trash-count"),
   executeStatus: document.getElementById("maintenance-execute-status"),
+  activePane: document.getElementById("maintenance-active-delete-pane"),
+  activeTitle: document.getElementById("maintenance-active-delete-title"),
+  activeSubtitle: document.getElementById("maintenance-active-delete-subtitle"),
+  activeTarget: document.getElementById("maintenance-active-delete-target"),
+  activeResult: document.getElementById("maintenance-active-delete-result"),
+  activeReason: document.getElementById("maintenance-active-delete-reason"),
+  activeExecute: document.getElementById("execute-active-delete"),
+  activeCancel: document.getElementById("maintenance-active-delete-cancel"),
   evidenceForm: document.getElementById("maintenance-evidence-form"),
   previewEvidenceDelete: document.getElementById("preview-evidence-delete"),
   previewResult: document.getElementById("maintenance-preview-result"),
@@ -99,6 +108,67 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function setDeleteButtonDisabled(button, disabled, reason = "") {
+  if (!button) return;
+  button.disabled = Boolean(disabled);
+  button.title = disabled && reason ? reason : "";
+}
+
+function deleteKindLabel(request = {}) {
+  if (request.kind === "evidence") return "证据";
+  if (request.kind === "person") return "人员";
+  if (request.kind === "gallery") return "图库照片";
+  return "对象";
+}
+
+function defaultDeleteReason(request = {}) {
+  if (request.default_reason) return request.default_reason;
+  if (request.kind === "evidence") return `operator_delete_evidence:${csvValues(request.event_ids || []).join(",")}`;
+  if (request.kind === "person") return `operator_delete_person:${csvValues(request.person_ids || []).join(",")}`;
+  if (request.kind === "gallery") return `operator_delete_gallery:${csvValues(request.gallery_embedding_ids || []).join(",")}`;
+  return "operator_delete";
+}
+
+function renderTargetSummary(request = {}) {
+  const target = request.target || {};
+  const title = target.title || `删除${deleteKindLabel(request)}`;
+  const fields = Array.isArray(target.fields) ? target.fields : [];
+  const fallbackFields = [];
+  if (request.event_ids?.length) fallbackFields.push({ label: "事件 ID", value: csvValues(request.event_ids).join(", ") });
+  if (request.person_ids?.length) fallbackFields.push({ label: "人员 ID", value: csvValues(request.person_ids).join(", ") });
+  if (request.external_person_ids?.length) fallbackFields.push({ label: "人员编号", value: csvValues(request.external_person_ids).join(", ") });
+  if (request.gallery_embedding_ids?.length) fallbackFields.push({ label: "图库 ID", value: csvValues(request.gallery_embedding_ids).join(", ") });
+  const displayFields = fields.length ? fields : fallbackFields;
+  const fieldHtml = displayFields.map((field) => {
+    const tag = /id|编号/i.test(String(field.label || "")) ? "code" : "b";
+    return `<div><span>${escapeHtml(field.label || "目标")}</span><${tag}>${escapeHtml(field.value || "-")}</${tag}></div>`;
+  }).join("");
+  maintenanceDom.activeTarget.innerHTML = [
+    `<strong>${escapeHtml(title)}</strong>`,
+    fieldHtml ? `<div class="maintenance-target-grid">${fieldHtml}</div>` : ""
+  ].join("");
+}
+
+function showActiveDelete(request = {}) {
+  maintenanceState.activeDelete = request;
+  maintenanceDom.activePane.hidden = false;
+  maintenanceDom.activeTitle.textContent = `确认删除${deleteKindLabel(request)}`;
+  maintenanceDom.activeSubtitle.textContent = `${deleteKindLabel(request)}已生成预览，确认后才会执行删除。`;
+  renderTargetSummary(request);
+  maintenanceDom.activeReason.value = defaultDeleteReason(request);
+  maintenanceDom.activeResult.innerHTML = "<strong>正在生成预览</strong>";
+  setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
+  maintenanceDom.activePane.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function hideActiveDelete() {
+  maintenanceState.activeDelete = null;
+  maintenanceDom.activePane.hidden = true;
+  maintenanceDom.activeResult.innerHTML = "正在生成删除预览。";
+  maintenanceDom.activeReason.value = "";
+  setDeleteButtonDisabled(maintenanceDom.activeExecute, true);
+}
+
 async function maintenanceRequest(path, options = {}) {
   if (typeof request === "function") {
     return request(`${MAINTENANCE_API}${path}`, options);
@@ -164,11 +234,21 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
     skippedLines.length ? `<ul>${skippedLines.join("")}</ul>` : ""
   ];
   target.innerHTML = lines.join("");
+  const disabledReason = expired
+    ? "预览已过期，请重新生成"
+    : !preview.preview_id
+      ? "预览缺少 ID"
+      : deletableCount <= 0
+        ? "本次预览没有可删除对象"
+        : "";
   if (target === maintenanceDom.previewResult) {
-    maintenanceDom.executeEvidenceDelete.disabled = Boolean(expired || !preview.preview_id || deletableCount <= 0);
+    setDeleteButtonDisabled(maintenanceDom.executeEvidenceDelete, Boolean(disabledReason), disabledReason);
   }
   if (target === maintenanceDom.faceResult) {
-    maintenanceDom.executeFaceDelete.disabled = Boolean(expired || !preview.preview_id || deletableCount <= 0);
+    setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, Boolean(disabledReason), disabledReason);
+  }
+  if (target === maintenanceDom.activeResult) {
+    setDeleteButtonDisabled(maintenanceDom.activeExecute, Boolean(disabledReason), disabledReason);
   }
 }
 
@@ -189,11 +269,18 @@ async function loadMaintenanceSummary() {
     : "Midterm 当前只允许统计和预览，执行删除处于关闭状态。";
 }
 
-async function previewEvidenceDelete() {
+async function previewEvidenceDelete(options = {}) {
+  const target = options.target || maintenanceDom.previewResult;
+  const previewButton = options.button === undefined ? maintenanceDom.previewEvidenceDelete : options.button;
   maintenanceState.preview = null;
-  maintenanceDom.executeEvidenceDelete.disabled = true;
-  maintenanceDom.previewResult.innerHTML = "<strong>正在生成预览</strong>";
-  const restore = setButtonBusy(maintenanceDom.previewEvidenceDelete, true, "预览中");
+  if (target === maintenanceDom.previewResult) {
+    setDeleteButtonDisabled(maintenanceDom.executeEvidenceDelete, true, "正在生成预览");
+  }
+  if (target === maintenanceDom.activeResult) {
+    setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
+  }
+  target.innerHTML = "<strong>正在生成预览</strong>";
+  const restore = setButtonBusy(previewButton, true, "预览中");
   try {
     const preview = await maintenanceRequest("/evidence/delete-preview", {
       method: "POST",
@@ -201,24 +288,29 @@ async function previewEvidenceDelete() {
     });
     maintenanceState.preview = preview;
     maintenanceDom.jobId.value = preview.preview_id || "";
-    renderPreview(preview);
+    renderPreview(preview, target);
   } finally {
     restore();
   }
 }
 
-async function executeEvidenceDelete() {
+async function executeEvidenceDelete(options = {}) {
   const preview = maintenanceState.preview;
   if (!preview?.preview_id) {
     throw new Error("删除必须先 preview");
   }
-  const reason = maintenanceDom.reason.value.trim();
+  const reasonInput = options.reasonInput || maintenanceDom.reason;
+  const resultTarget = options.resultTarget || maintenanceDom.previewResult;
+  const executeButton = options.executeButton || maintenanceDom.executeEvidenceDelete;
+  const reason = reasonInput.value.trim();
   if (!reason) {
     throw new Error("请填写删除原因");
   }
-  const confirmed = window.confirm(`确认删除预览中的证据？${NO_AUTO_REGENERATE}`);
-  if (!confirmed) return;
-  const restore = setButtonBusy(maintenanceDom.executeEvidenceDelete, true, "删除中");
+  if (options.confirm !== false) {
+    const confirmed = window.confirm(`确认删除预览中的证据？${NO_AUTO_REGENERATE}`);
+    if (!confirmed) return;
+  }
+  const restore = setButtonBusy(executeButton, true, "删除中");
   try {
     const result = await maintenanceRequest("/evidence/delete", {
       method: "POST",
@@ -232,13 +324,13 @@ async function executeEvidenceDelete() {
       })
     });
     const resultPayload = result.result || {};
-    maintenanceDom.previewResult.innerHTML = [
+    resultTarget.innerHTML = [
       `<strong>执行结果：${escapeHtml(result.status || "-")}</strong>`,
       `<div>已处理 ${resultPayload.completed_count ?? "-"}，跳过 ${resultPayload.skipped_count ?? "-"}，失败 ${resultPayload.failed_count ?? "-"}</div>`,
       `<div>Job ID：${escapeHtml(result.job_id || preview.preview_id || "-")}</div>`,
       `<div>${NO_AUTO_REGENERATE}</div>`
     ].join("");
-    maintenanceDom.executeEvidenceDelete.disabled = true;
+    setDeleteButtonDisabled(executeButton, true);
     maintenanceState.preview = null;
     await loadMaintenanceSummary();
     if (window.operatorEvidence?.reload) {
@@ -246,14 +338,21 @@ async function executeEvidenceDelete() {
     }
   } finally {
     restore();
-    maintenanceDom.executeEvidenceDelete.disabled = true;
+    setDeleteButtonDisabled(executeButton, true);
   }
 }
 
-async function previewPeopleDelete() {
+async function previewPeopleDelete(options = {}) {
+  const target = options.target || maintenanceDom.faceResult;
   maintenanceState.facePreview = null;
   maintenanceState.facePreviewKind = "people";
-  maintenanceDom.executeFaceDelete.disabled = true;
+  if (target === maintenanceDom.faceResult) {
+    setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, true, "正在生成预览");
+  }
+  if (target === maintenanceDom.activeResult) {
+    setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
+  }
+  target.innerHTML = "<strong>正在生成预览</strong>";
   const body = faceFormBody();
   const preview = await maintenanceRequest("/people/delete-preview", {
     method: "POST",
@@ -266,13 +365,20 @@ async function previewPeopleDelete() {
     })
   });
   maintenanceState.facePreview = preview;
-  renderPreview(preview, maintenanceDom.faceResult);
+  renderPreview(preview, target);
 }
 
-async function previewGalleryDelete() {
+async function previewGalleryDelete(options = {}) {
+  const target = options.target || maintenanceDom.faceResult;
   maintenanceState.facePreview = null;
   maintenanceState.facePreviewKind = "gallery";
-  maintenanceDom.executeFaceDelete.disabled = true;
+  if (target === maintenanceDom.faceResult) {
+    setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, true, "正在生成预览");
+  }
+  if (target === maintenanceDom.activeResult) {
+    setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
+  }
+  target.innerHTML = "<strong>正在生成预览</strong>";
   const body = faceFormBody();
   const preview = await maintenanceRequest("/people/gallery-delete-preview", {
     method: "POST",
@@ -284,13 +390,14 @@ async function previewGalleryDelete() {
     })
   });
   maintenanceState.facePreview = preview;
-  renderPreview(preview, maintenanceDom.faceResult);
+  renderPreview(preview, target);
 }
 
 async function previewFaceOrphans() {
   maintenanceState.facePreview = null;
   maintenanceState.facePreviewKind = "face_orphans";
-  maintenanceDom.executeFaceDelete.disabled = true;
+  setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, true, "正在生成预览");
+  maintenanceDom.faceResult.innerHTML = "<strong>正在生成预览</strong>";
   const body = faceFormBody();
   const preview = await maintenanceRequest("/face-media/orphans-preview", {
     method: "POST",
@@ -304,17 +411,22 @@ async function previewFaceOrphans() {
   renderPreview(preview, maintenanceDom.faceResult);
 }
 
-async function executeFaceDelete() {
+async function executeFaceDelete(options = {}) {
   const preview = maintenanceState.facePreview;
   if (!preview?.preview_id || !maintenanceState.facePreviewKind) {
     throw new Error("删除必须先 preview");
   }
-  const reason = maintenanceDom.faceReason.value.trim();
+  const reasonInput = options.reasonInput || maintenanceDom.faceReason;
+  const resultTarget = options.resultTarget || maintenanceDom.faceResult;
+  const executeButton = options.executeButton || maintenanceDom.executeFaceDelete;
+  const reason = reasonInput.value.trim();
   if (!reason) {
     throw new Error("请填写删除原因");
   }
-  const confirmed = window.confirm(`确认删除预览中的对象？${NO_AUTO_REGENERATE}`);
-  if (!confirmed) return;
+  if (options.confirm !== false) {
+    const confirmed = window.confirm(`确认删除预览中的对象？${NO_AUTO_REGENERATE}`);
+    if (!confirmed) return;
+  }
 
   const commonBody = {
     preview_id: preview.preview_id,
@@ -331,13 +443,50 @@ async function executeFaceDelete() {
   const body = maintenanceState.facePreviewKind === "face_orphans"
     ? { ...commonBody, delete_mode: preview.delete_mode || "trash" }
     : commonBody;
-  const result = await maintenanceRequest(endpoints[maintenanceState.facePreviewKind], {
-    method: "POST",
-    body: JSON.stringify(body)
-  });
-  maintenanceDom.faceResult.innerHTML =
-    `<strong>执行结果：${result.status}</strong><div>${NO_AUTO_REGENERATE}</div>`;
-  maintenanceDom.executeFaceDelete.disabled = true;
+  const restore = setButtonBusy(executeButton, true, "删除中");
+  try {
+    const result = await maintenanceRequest(endpoints[maintenanceState.facePreviewKind], {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    resultTarget.innerHTML =
+      `<strong>执行结果：${escapeHtml(result.status)}</strong><div>${NO_AUTO_REGENERATE}</div>`;
+    setDeleteButtonDisabled(executeButton, true);
+    maintenanceState.facePreview = null;
+    await loadMaintenanceSummary();
+    if (typeof loadPeople === "function") {
+      await loadPeople();
+    }
+  } finally {
+    restore();
+    setDeleteButtonDisabled(executeButton, true);
+  }
+}
+
+async function executeActiveDelete() {
+  const request = maintenanceState.activeDelete;
+  if (!request) {
+    throw new Error("没有待确认的删除对象");
+  }
+  if (request.kind === "evidence") {
+    await executeEvidenceDelete({
+      reasonInput: maintenanceDom.activeReason,
+      resultTarget: maintenanceDom.activeResult,
+      executeButton: maintenanceDom.activeExecute,
+      confirm: false
+    });
+    return;
+  }
+  if (request.kind === "person" || request.kind === "gallery") {
+    await executeFaceDelete({
+      reasonInput: maintenanceDom.activeReason,
+      resultTarget: maintenanceDom.activeResult,
+      executeButton: maintenanceDom.activeExecute,
+      confirm: false
+    });
+    return;
+  }
+  throw new Error(`不支持的删除类型：${request.kind}`);
 }
 
 async function loadJobDetail() {
@@ -355,12 +504,26 @@ async function loadJobDetail() {
 
 function bindMaintenanceEvents() {
   maintenanceDom.refresh?.addEventListener("click", () => loadMaintenanceSummary().catch((e) => showError(e.message)));
-  maintenanceDom.previewEvidenceDelete?.addEventListener("click", () => previewEvidenceDelete().catch((e) => showError(e.message)));
+  maintenanceDom.previewEvidenceDelete?.addEventListener("click", () => {
+    hideActiveDelete();
+    previewEvidenceDelete().catch((e) => showError(e.message));
+  });
   maintenanceDom.executeEvidenceDelete?.addEventListener("click", () => executeEvidenceDelete().catch((e) => showError(e.message)));
-  maintenanceDom.previewPeopleDelete?.addEventListener("click", () => previewPeopleDelete().catch((e) => showError(e.message)));
-  maintenanceDom.previewGalleryDelete?.addEventListener("click", () => previewGalleryDelete().catch((e) => showError(e.message)));
-  maintenanceDom.previewFaceOrphans?.addEventListener("click", () => previewFaceOrphans().catch((e) => showError(e.message)));
+  maintenanceDom.previewPeopleDelete?.addEventListener("click", () => {
+    hideActiveDelete();
+    previewPeopleDelete().catch((e) => showError(e.message));
+  });
+  maintenanceDom.previewGalleryDelete?.addEventListener("click", () => {
+    hideActiveDelete();
+    previewGalleryDelete().catch((e) => showError(e.message));
+  });
+  maintenanceDom.previewFaceOrphans?.addEventListener("click", () => {
+    hideActiveDelete();
+    previewFaceOrphans().catch((e) => showError(e.message));
+  });
   maintenanceDom.executeFaceDelete?.addEventListener("click", () => executeFaceDelete().catch((e) => showError(e.message)));
+  maintenanceDom.activeExecute?.addEventListener("click", () => executeActiveDelete().catch((e) => showError(e.message)));
+  maintenanceDom.activeCancel?.addEventListener("click", hideActiveDelete);
   maintenanceDom.loadJob?.addEventListener("click", () => loadJobDetail().catch((e) => showError(e.message)));
 }
 
@@ -374,17 +537,27 @@ async function initMaintenance() {
 
 async function prepareDelete(request = {}) {
   await initMaintenance();
+  showActiveDelete(request);
   if (request.kind === "evidence") {
     maintenanceDom.evidenceForm.elements.event_ids.value = csvValues(request.event_ids || []).join(",");
-    maintenanceDom.reason.value = "";
-    await previewEvidenceDelete();
+    maintenanceDom.reason.value = defaultDeleteReason(request);
+    await previewEvidenceDelete({ target: maintenanceDom.activeResult, button: null });
     return;
   }
   if (request.kind === "person") {
     maintenanceDom.faceForm.elements.person_ids.value = csvValues(request.person_ids || []).join(",");
     maintenanceDom.faceForm.elements.external_person_ids.value = csvValues(request.external_person_ids || []).join(",");
-    maintenanceDom.faceReason.value = "";
-    await previewPeopleDelete();
+    maintenanceDom.faceForm.elements.gallery_embedding_ids.value = "";
+    maintenanceDom.faceReason.value = defaultDeleteReason(request);
+    await previewPeopleDelete({ target: maintenanceDom.activeResult });
+    return;
+  }
+  if (request.kind === "gallery") {
+    maintenanceDom.faceForm.elements.person_ids.value = csvValues(request.person_ids || []).join(",");
+    maintenanceDom.faceForm.elements.external_person_ids.value = "";
+    maintenanceDom.faceForm.elements.gallery_embedding_ids.value = csvValues(request.gallery_embedding_ids || []).join(",");
+    maintenanceDom.faceReason.value = defaultDeleteReason(request);
+    await previewGalleryDelete({ target: maintenanceDom.activeResult });
   }
 }
 
