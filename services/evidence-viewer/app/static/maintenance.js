@@ -30,6 +30,9 @@ const maintenanceDom = {
   activeReason: document.getElementById("maintenance-active-delete-reason"),
   activeExecute: document.getElementById("execute-active-delete"),
   activeCancel: document.getElementById("maintenance-active-delete-cancel"),
+  evidencePane: document.querySelector(".maintenance-preview-pane"),
+  facePane: document.querySelector(".maintenance-face-pane"),
+  jobPane: document.querySelector(".maintenance-job-pane"),
   evidenceForm: document.getElementById("maintenance-evidence-form"),
   previewEvidenceDelete: document.getElementById("preview-evidence-delete"),
   previewResult: document.getElementById("maintenance-preview-result"),
@@ -152,8 +155,12 @@ function renderTargetSummary(request = {}) {
 function showActiveDelete(request = {}) {
   maintenanceState.activeDelete = request;
   maintenanceDom.activePane.hidden = false;
-  maintenanceDom.activeTitle.textContent = `确认删除${deleteKindLabel(request)}`;
-  maintenanceDom.activeSubtitle.textContent = `${deleteKindLabel(request)}已生成预览，确认后才会执行删除。`;
+  maintenanceDom.evidencePane.hidden = true;
+  maintenanceDom.facePane.hidden = true;
+  maintenanceDom.jobPane.hidden = true;
+  maintenanceDom.activeTitle.textContent = `删除${deleteKindLabel(request)}`;
+  maintenanceDom.activeSubtitle.textContent = "系统已自动带入你刚才选择的对象，不需要再填写人员 ID 或图库 ID。";
+  maintenanceDom.activeExecute.textContent = `删除${deleteKindLabel(request)}`;
   renderTargetSummary(request);
   maintenanceDom.activeReason.value = defaultDeleteReason(request);
   maintenanceDom.activeResult.innerHTML = "<strong>正在生成预览</strong>";
@@ -164,9 +171,98 @@ function showActiveDelete(request = {}) {
 function hideActiveDelete() {
   maintenanceState.activeDelete = null;
   maintenanceDom.activePane.hidden = true;
+  maintenanceDom.evidencePane.hidden = false;
+  maintenanceDom.facePane.hidden = false;
+  maintenanceDom.jobPane.hidden = false;
   maintenanceDom.activeResult.innerHTML = "正在生成删除预览。";
   maintenanceDom.activeReason.value = "";
+  maintenanceDom.activeExecute.textContent = "确认删除";
   setDeleteButtonDisabled(maintenanceDom.activeExecute, true);
+}
+
+function previewDisabledReason(preview = {}) {
+  const expiresAt = preview.preview_expires_at ? new Date(preview.preview_expires_at) : null;
+  const expired = expiresAt && expiresAt.getTime() <= Date.now();
+  const deletableCount = Number(preview.deletable_count || 0);
+  if (expired) return "预览已过期，请重新生成";
+  if (!preview.preview_id) return "预览缺少 ID";
+  if (deletableCount <= 0) return "本次预览没有可删除对象";
+  return "";
+}
+
+function requireDeleteTargets(values, label) {
+  if (values.length) return values;
+  throw new Error(`没有拿到${label}，请刷新人员页后重试`);
+}
+
+function activePreviewBody(deleteRequest = {}) {
+  if (deleteRequest.kind === "evidence") {
+    return {
+      event_ids: requireDeleteTargets(csvValues(deleteRequest.event_ids || []), "事件 ID"),
+      delete_mode: deleteRequest.delete_mode || "trash",
+      allow_stale_pending_tasks: Boolean(deleteRequest.allow_stale_pending_tasks),
+      max_items: Number(deleteRequest.max_items || 1000),
+      operator: "operator"
+    };
+  }
+  if (deleteRequest.kind === "person") {
+    return {
+      person_ids: csvNumbers(deleteRequest.person_ids || []),
+      external_person_ids: csvValues(deleteRequest.external_person_ids || []),
+      include_gallery: true,
+      older_than_days: positiveNumberOrNull(deleteRequest.older_than_days),
+      operator: "operator"
+    };
+  }
+  if (deleteRequest.kind === "gallery") {
+    return {
+      gallery_embedding_ids: requireDeleteTargets(
+        csvNumbers(deleteRequest.gallery_embedding_ids || []),
+        "图库 ID"
+      ),
+      person_ids: csvNumbers(deleteRequest.person_ids || []),
+      older_than_days: positiveNumberOrNull(deleteRequest.older_than_days),
+      operator: "operator"
+    };
+  }
+  throw new Error(`不支持的删除类型：${deleteRequest.kind}`);
+}
+
+async function previewActiveDelete(deleteRequest = {}) {
+  maintenanceState.preview = null;
+  maintenanceState.facePreview = null;
+  maintenanceState.facePreviewKind = null;
+  setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
+  maintenanceDom.activeResult.innerHTML = "<strong>正在生成预览</strong>";
+  if (deleteRequest.kind === "evidence") {
+    const preview = await maintenanceRequest("/evidence/delete-preview", {
+      method: "POST",
+      body: JSON.stringify(activePreviewBody(deleteRequest))
+    });
+    maintenanceState.preview = preview;
+    maintenanceDom.jobId.value = preview.preview_id || "";
+    renderPreview(preview, maintenanceDom.activeResult);
+    return;
+  }
+  if (deleteRequest.kind === "person") {
+    const preview = await maintenanceRequest("/people/delete-preview", {
+      method: "POST",
+      body: JSON.stringify(activePreviewBody(deleteRequest))
+    });
+    maintenanceState.facePreview = preview;
+    maintenanceState.facePreviewKind = "people";
+    renderPreview(preview, maintenanceDom.activeResult);
+    return;
+  }
+  if (deleteRequest.kind === "gallery") {
+    const preview = await maintenanceRequest("/people/gallery-delete-preview", {
+      method: "POST",
+      body: JSON.stringify(activePreviewBody(deleteRequest))
+    });
+    maintenanceState.facePreview = preview;
+    maintenanceState.facePreviewKind = "gallery";
+    renderPreview(preview, maintenanceDom.activeResult);
+  }
 }
 
 async function maintenanceRequest(path, options = {}) {
@@ -216,8 +312,7 @@ function faceFormBody() {
 
 function renderPreview(preview, target = maintenanceDom.previewResult) {
   const expiresAt = preview.preview_expires_at ? new Date(preview.preview_expires_at) : null;
-  const expired = expiresAt && expiresAt.getTime() <= Date.now();
-  const deletableCount = Number(preview.deletable_count || 0);
+  const disabledReason = previewDisabledReason(preview);
   const skipped = Array.isArray(preview.skipped) ? preview.skipped : [];
   const skippedLines = skipped.slice(0, 5).map(item => {
     const targetId = escapeHtml(item.target_id || "-");
@@ -227,6 +322,7 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
   const lines = [
     `<strong>预览已生成</strong>`,
     `<div>候选 ${preview.candidate_count || 0}，可删除 ${preview.deletable_count || 0}，跳过 ${preview.skipped_count || 0}</div>`,
+    disabledReason ? `<div class="delete-disabled-reason">无法删除：${escapeHtml(disabledReason)}</div>` : "",
     `<div>预计释放空间：${formatBytes(preview.estimated_bytes)}</div>`,
     `<div>过期时间：${expiresAt ? expiresAt.toLocaleString() : "-"}</div>`,
     `<div>${NO_AUTO_REGENERATE}</div>`,
@@ -234,13 +330,6 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
     skippedLines.length ? `<ul>${skippedLines.join("")}</ul>` : ""
   ];
   target.innerHTML = lines.join("");
-  const disabledReason = expired
-    ? "预览已过期，请重新生成"
-    : !preview.preview_id
-      ? "预览缺少 ID"
-      : deletableCount <= 0
-        ? "本次预览没有可删除对象"
-        : "";
   if (target === maintenanceDom.previewResult) {
     setDeleteButtonDisabled(maintenanceDom.executeEvidenceDelete, Boolean(disabledReason), disabledReason);
   }
@@ -541,7 +630,7 @@ async function prepareDelete(request = {}) {
   if (request.kind === "evidence") {
     maintenanceDom.evidenceForm.elements.event_ids.value = csvValues(request.event_ids || []).join(",");
     maintenanceDom.reason.value = defaultDeleteReason(request);
-    await previewEvidenceDelete({ target: maintenanceDom.activeResult, button: null });
+    await previewActiveDelete(request);
     return;
   }
   if (request.kind === "person") {
@@ -549,7 +638,7 @@ async function prepareDelete(request = {}) {
     maintenanceDom.faceForm.elements.external_person_ids.value = csvValues(request.external_person_ids || []).join(",");
     maintenanceDom.faceForm.elements.gallery_embedding_ids.value = "";
     maintenanceDom.faceReason.value = defaultDeleteReason(request);
-    await previewPeopleDelete({ target: maintenanceDom.activeResult });
+    await previewActiveDelete(request);
     return;
   }
   if (request.kind === "gallery") {
@@ -557,7 +646,7 @@ async function prepareDelete(request = {}) {
     maintenanceDom.faceForm.elements.external_person_ids.value = "";
     maintenanceDom.faceForm.elements.gallery_embedding_ids.value = csvValues(request.gallery_embedding_ids || []).join(",");
     maintenanceDom.faceReason.value = defaultDeleteReason(request);
-    await previewGalleryDelete({ target: maintenanceDom.activeResult });
+    await previewActiveDelete(request);
   }
 }
 

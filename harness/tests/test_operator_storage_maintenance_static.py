@@ -73,6 +73,8 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     assert "currentEvidenceDeleteRequest" in evidence_js
     assert "prepareDelete" in maintenance_js
     assert "showActiveDelete(request)" in maintenance_js
+    assert "previewActiveDelete(request)" in maintenance_js
+    assert "activePreviewBody" in maintenance_js
     assert "maintenanceDom.activeResult" in maintenance_js
 
 
