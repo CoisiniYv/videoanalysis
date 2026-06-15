@@ -483,6 +483,12 @@ function updateSummary() {
   }
 }
 
+function setEvidenceCount(value) {
+  if (!evidenceCountEl) return;
+  const count = Number(value);
+  evidenceCountEl.textContent = Number.isFinite(count) ? String(count) : "--";
+}
+
 function initials(name) {
   const text = String(name || "人员").trim();
   return text.slice(0, 2).toUpperCase();
@@ -991,6 +997,15 @@ async function loadCameras() {
   renderCameras();
   if (selectedCameraId) await selectCamera(selectedCameraId);
   setStatus("就绪");
+}
+
+async function loadEvidenceCount() {
+  try {
+    const data = await request(`${API}/maintenance/storage/summary`);
+    setEvidenceCount(data.evidence?.bundle_count);
+  } catch (_err) {
+    setEvidenceCount(null);
+  }
 }
 
 async function loadAlgorithms() {
@@ -1626,6 +1641,7 @@ document.querySelectorAll("[data-template]").forEach((button) => {
 
 /* ---- Init ---- */
 applyTheme(currentTheme());
+loadEvidenceCount();
 loadCameras()
   .then(() => {
     if (window.location.hash === "#people") {
