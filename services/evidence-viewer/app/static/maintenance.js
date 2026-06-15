@@ -539,17 +539,22 @@ function bindMaintenanceEvents() {
   });
 }
 
-async function initMaintenance() {
+function ensureMaintenanceEventsBound() {
   if (!maintenanceState.initialized) {
     bindMaintenanceEvents();
     maintenanceState.initialized = true;
   }
+}
+
+async function initMaintenance() {
+  ensureMaintenanceEventsBound();
   await loadMaintenanceSummary();
 }
 
 async function openDeleteDialog(request = {}) {
-  await initMaintenance();
+  ensureMaintenanceEventsBound();
   showActiveDelete(request);
+  void loadMaintenanceSummary().catch((e) => showError(e.message));
   if (request.kind === "evidence") {
     maintenanceDom.reason.value = defaultDeleteReason(request);
     await previewActiveDelete(request);

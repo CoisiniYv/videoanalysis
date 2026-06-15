@@ -23,6 +23,8 @@ def test_operator_has_chinese_storage_maintenance_entry() -> None:
     assert 'data-view="maintenance"' in html
     assert "存储维护" in html
     assert "/static/maintenance.js" in html
+    assert "evidence-init-fix-20260615" in html
+    assert "delete-dialog-fast-20260615" in html
     assert "删除后不会自动重新生成证据" in html
     assert "删除必须先 preview" in html
     assert "删除必须先 preview" in js
@@ -82,7 +84,13 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     assert "图库 ID" in operator_js
     assert "previewDeleteCurrentEvidence" in evidence_js
     assert "currentEvidenceDeleteRequest" in evidence_js
+    assert "initPromise" in evidence_js
+    assert "selectFirstAvailableBundle" in evidence_js
+    assert "bundle_detail_load_failed" in evidence_js
+    assert 'window.location.hash === "#evidence"' in evidence_js
     assert "openDeleteDialog" in maintenance_js
+    assert "ensureMaintenanceEventsBound" in maintenance_js
+    assert "void loadMaintenanceSummary()" in maintenance_js
     assert "showActiveDelete(request)" in maintenance_js
     assert "previewActiveDelete(request)" in maintenance_js
     assert "activePreviewBody" in maintenance_js

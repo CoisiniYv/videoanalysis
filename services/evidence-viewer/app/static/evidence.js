@@ -25,6 +25,7 @@ const state = {
   bundleOffset: 0,
   bundleTotal: 0,
   initialized: false,
+  initPromise: null,
   activeCategory: "all",
   manifest: null,
   annotations: [],
@@ -209,6 +210,7 @@ function warningLabel(value) {
   if (!text) return "";
   if (text.includes("health_check_failed")) return "证据服务连接异常，请稍后刷新。";
   if (text.includes("bundle_load_failed")) return "证据列表加载失败，请稍后刷新。";
+  if (text.includes("bundle_detail_load_failed")) return "证据详情加载失败，已尝试切换到其他证据。";
   if (text.includes("raw_clip_missing")) return "该事件缺少可播放录像。";
   if (text.includes("missing:")) return "部分证据文件缺失，结果可能不完整。";
   if (text.includes("invalid_json") || text.includes("invalid_jsonl")) return "证据数据格式异常，结果需复核。";
@@ -298,6 +300,38 @@ function defaultSelectedBundle(bundles) {
   return bundles.find(bundle => bundle.raw_clip_available) || bundles[0];
 }
 
+function bundleByEventId(eventId) {
+  return state.bundles.find(bundle => bundle.event_id === eventId) || null;
+}
+
+function bundleCandidateIds(preferredEventId) {
+  const ids = [];
+  const push = (eventId) => {
+    if (eventId && !ids.includes(eventId)) ids.push(eventId);
+  };
+  push(preferredEventId);
+  push(defaultSelectedBundle(state.bundles)?.event_id);
+  for (const bundle of state.bundles) {
+    push(bundle.event_id);
+  }
+  return ids;
+}
+
+function clearFailedBundleSelection() {
+  state.selectedEventId = null;
+  state.manifest = null;
+  state.annotations = [];
+  state.sinkRecords = [];
+  state.preparedAnnotations = [];
+  state.annotationPayload = null;
+  state.firstVideoFramePts = null;
+  state.frameLookup = null;
+  dom.video.removeAttribute("src");
+  dom.video.load();
+  updateEvidenceDeleteButton();
+  renderBundleList();
+}
+
 function currentPageEnd() {
   return state.bundleOffset + state.bundles.length;
 }
@@ -339,8 +373,10 @@ async function loadBundles() {
   }
   renderBundleList();
   updateBundlePagination();
-  if (!state.selectedEventId && state.bundles.length) {
-    await selectBundle(defaultSelectedBundle(state.bundles).event_id);
+  const selectionStillVisible = Boolean(bundleByEventId(state.selectedEventId));
+  if (state.bundles.length && (!state.selectedEventId || !selectionStillVisible || !state.manifest)) {
+    const preferred = selectionStillVisible ? state.selectedEventId : defaultSelectedBundle(state.bundles).event_id;
+    await selectFirstAvailableBundle(preferred);
   }
 }
 
@@ -533,6 +569,23 @@ async function selectBundle(eventId, options = {}) {
   drawOverlay();
   renderWarnings();
   updateEvidenceDeleteButton();
+}
+
+async function selectFirstAvailableBundle(preferredEventId) {
+  let lastError = null;
+  for (const eventId of bundleCandidateIds(preferredEventId)) {
+    try {
+      await selectBundle(eventId);
+      return;
+    } catch (err) {
+      lastError = err;
+      addWarning(`bundle_detail_load_failed:${eventId}:${err.message}`);
+    }
+  }
+  clearFailedBundleSelection();
+  if (lastError) {
+    addWarning(`bundle_detail_load_failed:${lastError.message}`);
+  }
 }
 
 function firstFrameWithPts(records) {
@@ -1378,6 +1431,16 @@ function applyOverlayDefaults() {
 }
 
 async function init() {
+  if (state.initPromise) {
+    return state.initPromise;
+  }
+  state.initPromise = runInit().finally(() => {
+    state.initPromise = null;
+  });
+  return state.initPromise;
+}
+
+async function runInit() {
   if (state.initialized) {
     await loadHealth();
     await loadBundles();
@@ -1402,3 +1465,7 @@ window.operatorEvidence = {
     await loadBundles();
   },
 };
+
+if (window.location.hash === "#evidence" || document.getElementById("evidence-view")?.hidden === false) {
+  init().catch(err => addWarning(`bundle_load_failed:${err.message}`));
+}
