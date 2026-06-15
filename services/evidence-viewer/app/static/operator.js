@@ -973,9 +973,8 @@ function activateTopView(view, updateHash = false) {
 }
 
 function openMaintenanceWithRequest(request = {}) {
-  activateTopView("maintenance", true);
-  if (window.operatorMaintenance?.prepareDelete) {
-    window.operatorMaintenance.prepareDelete(request).catch((e) => showError(e.message));
+  if (window.operatorMaintenance?.openDeleteDialog) {
+    window.operatorMaintenance.openDeleteDialog(request).catch((e) => showError(e.message));
   }
 }
 
@@ -1167,8 +1166,8 @@ function renderGallery(gallery) {
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
     deleteButton.className = "sm danger";
-    deleteButton.textContent = "删除照片";
-    deleteButton.disabled = !row.gallery_embedding_id;
+    deleteButton.textContent = row.is_active ? "删除照片" : "已删除";
+    deleteButton.disabled = !row.gallery_embedding_id || !row.is_active;
     deleteButton.addEventListener("click", () => openMaintenanceWithRequest(galleryDeleteRequest(row)));
     actions.appendChild(deleteButton);
     meta.appendChild(actions);

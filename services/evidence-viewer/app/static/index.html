@@ -494,29 +494,11 @@
         </main>
 
         <main id="maintenance-view" class="operator-view maintenance-workspace" hidden>
-          <section id="maintenance-active-delete-pane" class="pane maintenance-active-delete-pane" hidden>
-            <div class="pane-title">
-              <div>
-                <h2 id="maintenance-active-delete-title">确认删除</h2>
-                <p id="maintenance-active-delete-subtitle">已根据你刚才选择的对象生成删除预览。</p>
-              </div>
-              <button id="maintenance-active-delete-cancel" type="button">取消</button>
-            </div>
-            <div id="maintenance-active-delete-target" class="maintenance-target"></div>
-            <div id="maintenance-active-delete-result" class="result-card maintenance-preview-result">
-              正在生成删除预览。
-            </div>
-            <div class="maintenance-confirm maintenance-active-confirm">
-              <label>删除原因<input id="maintenance-active-delete-reason" placeholder="填写操作原因" /></label>
-              <button id="execute-active-delete" type="button" class="danger" disabled>确认删除</button>
-            </div>
-          </section>
-
           <section class="pane maintenance-summary-pane">
             <div class="pane-title">
               <div>
                 <h2>存储维护</h2>
-                <p>容量概览与删除预览</p>
+                <p>容量概览</p>
               </div>
               <button id="refresh-maintenance" type="button">刷新</button>
             </div>
@@ -550,32 +532,16 @@
           <section class="pane maintenance-preview-pane">
             <div class="pane-title">
               <div>
-                <h2>证据删除预览</h2>
-                <p>删除前必须生成预览，执行不会重新按筛选条件扫描。</p>
+                <h2>按时间删除证据</h2>
+                <p>选择时间范围后生成预览，确认后只删除该范围内的 evidence。</p>
               </div>
               <button id="preview-evidence-delete" type="button" class="primary">生成预览</button>
             </div>
             <form id="maintenance-evidence-form" class="maintenance-form">
-              <label>事件 ID<input name="event_ids" placeholder="多个 ID 用逗号分隔" /></label>
               <label>开始时间<input name="time_from" type="datetime-local" /></label>
               <label>结束时间<input name="time_to" type="datetime-local" /></label>
-              <label>告警分类
-                <select name="event_category">
-                  <option value="">全部</option>
-                  <option value="identity">名单布控</option>
-                  <option value="perimeter">周界入侵</option>
-                  <option value="behavior">行为异常</option>
-                  <option value="crowd">聚集风险</option>
-                </select>
-              </label>
-              <label>摄像头<input name="camera_id" placeholder="camera_id" /></label>
-              <label>删除模式
-                <select name="delete_mode">
-                  <option value="trash">移入回收站</option>
-                  <option value="permanent">永久删除</option>
-                </select>
-              </label>
-              <label class="inline"><input name="allow_stale_pending_tasks" type="checkbox" /> 包含已生成的 pending 任务</label>
+              <input name="delete_mode" type="hidden" value="trash" />
+              <input name="allow_stale_pending_tasks" type="hidden" value="" />
               <input name="max_items" type="hidden" value="1000" />
             </form>
 
@@ -587,49 +553,28 @@
               <button id="execute-evidence-delete" type="button" class="danger" disabled>确认删除</button>
             </div>
           </section>
-
-          <section class="pane maintenance-face-pane">
-            <div class="pane-title">
-              <div>
-                <h2>人脸清理</h2>
-                <p>人员和图库默认软删除，物理图片只预览未引用文件。</p>
-              </div>
-            </div>
-            <div class="button-group">
-              <button id="preview-people-delete" type="button">预览停用人员</button>
-              <button id="preview-gallery-delete" type="button">预览停用图库照片</button>
-              <button id="preview-face-orphans" type="button">预览未引用图片</button>
-            </div>
-            <form id="maintenance-face-form" class="maintenance-form maintenance-face-form">
-              <label>人员 ID<input name="person_ids" placeholder="多个 ID 用逗号分隔" /></label>
-              <label>外部人员编号<input name="external_person_ids" placeholder="多个编号用逗号分隔" /></label>
-              <label>图库 ID<input name="gallery_embedding_ids" placeholder="多个 ID 用逗号分隔" /></label>
-              <label>保留天数<input name="older_than_days" type="number" min="0" value="7" /></label>
-            </form>
-            <div id="maintenance-face-result" class="result-card">
-              人员/图库删除默认软删除；人脸物理图片清理默认任何 DB row 引用都不删。
-            </div>
-            <div class="maintenance-confirm">
-              <label>删除原因<input id="maintenance-face-delete-reason" placeholder="填写操作原因" /></label>
-              <button id="execute-face-delete" type="button" class="danger" disabled>确认删除预览对象</button>
-            </div>
-          </section>
-
-          <section class="pane maintenance-job-pane">
-            <div class="pane-title">
-              <div>
-                <h2>Job 详情</h2>
-                <p>查看冻结候选、执行状态和审计提示。</p>
-              </div>
-              <button id="load-maintenance-job" type="button">查询</button>
-            </div>
-            <label>Job ID<input id="maintenance-job-id" /></label>
-            <div id="maintenance-job-detail" class="result-card">
-              删除后不会自动重新生成证据。已删除媒体不会自动补录，除非后续单独实现恢复或重新生成。
-            </div>
-          </section>
         </main>
       </div>
+    </div>
+
+    <div id="delete-dialog" class="modal-backdrop" hidden>
+      <section class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+        <div class="pane-title">
+          <div>
+            <h2 id="delete-dialog-title">确认删除</h2>
+            <p id="delete-dialog-subtitle">系统已自动带入你刚才选择的对象。</p>
+          </div>
+          <button id="delete-dialog-close" type="button" aria-label="关闭">关闭</button>
+        </div>
+        <div id="delete-dialog-target" class="maintenance-target"></div>
+        <div id="delete-dialog-result" class="result-card maintenance-preview-result">
+          正在生成删除预览。
+        </div>
+        <div class="maintenance-confirm">
+          <label>删除原因<input id="delete-dialog-reason" placeholder="填写操作原因" /></label>
+          <button id="execute-delete-dialog" type="button" class="danger" disabled>确认删除</button>
+        </div>
+      </section>
     </div>
     <script src="/static/operator.js?v=delete-usability-20260615"></script>
     <script src="/static/evidence.js?v=delete-usability-20260615"></script>

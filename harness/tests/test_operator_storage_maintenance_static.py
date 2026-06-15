@@ -34,17 +34,19 @@ def test_maintenance_delete_requires_preview_in_frontend() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "maintenance.js")
     assert 'id="execute-evidence-delete"' in html
-    assert 'name="allow_stale_pending_tasks"' in html
-    assert "包含已生成的 pending 任务" in html
+    assert 'name="time_from"' in html
+    assert 'name="time_to"' in html
+    assert "按时间删除证据" in html
+    assert "人脸清理" not in html
+    assert "Job 详情" not in html
     assert "allow_stale_pending_tasks" in js
     assert 'id="preview-delete-current-evidence"' in html
     assert "删除当前证据" in html
-    assert 'id="maintenance-active-delete-pane"' in html
-    assert 'id="execute-active-delete"' in html
+    assert 'id="delete-dialog"' in html
+    assert 'id="execute-delete-dialog"' in html
     assert "executeActiveDelete" in js
     assert 'disabled>确认删除' in html
-    assert 'id="execute-face-delete"' in html
-    assert "确认删除预览对象" in html
+    assert "确认删除预览对象" not in html
     assert "maintenanceState.preview" in js
     assert "maintenanceState.facePreview" in js
     assert "preview_id" in js
@@ -53,7 +55,7 @@ def test_maintenance_delete_requires_preview_in_frontend() -> None:
     assert "window.confirm" in js
     assert '"/people/delete"' in js
     assert '"/people/gallery-delete"' in js
-    assert '"/face-media/orphans-cleanup"' in js
+    assert '"/face-media/orphans-cleanup"' not in js
 
 
 def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
@@ -63,7 +65,7 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     maintenance_js = _text(STATIC_ROOT / "maintenance.js")
     assert 'id="preview-delete-selected-person"' in html
     assert "删除当前人员" in html
-    assert "openMaintenanceWithRequest" in operator_js
+    assert "openDeleteDialog" in operator_js
     assert "selectedPersonDeleteRequest" in operator_js
     assert "galleryDeleteRequest" in operator_js
     assert "删除照片" in operator_js
@@ -71,11 +73,12 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     assert "图库 ID" in operator_js
     assert "previewDeleteCurrentEvidence" in evidence_js
     assert "currentEvidenceDeleteRequest" in evidence_js
-    assert "prepareDelete" in maintenance_js
+    assert "openDeleteDialog" in maintenance_js
     assert "showActiveDelete(request)" in maintenance_js
     assert "previewActiveDelete(request)" in maintenance_js
     assert "activePreviewBody" in maintenance_js
     assert "maintenanceDom.activeResult" in maintenance_js
+    assert "activateTopView(\"maintenance\", true)" not in operator_js
 
 
 def test_viewer_proxy_allowlist_includes_maintenance() -> None:

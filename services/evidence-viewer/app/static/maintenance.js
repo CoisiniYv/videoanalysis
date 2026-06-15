@@ -22,32 +22,20 @@ const maintenanceDom = {
   trashBytes: document.getElementById("maintenance-trash-bytes"),
   trashCount: document.getElementById("maintenance-trash-count"),
   executeStatus: document.getElementById("maintenance-execute-status"),
-  activePane: document.getElementById("maintenance-active-delete-pane"),
-  activeTitle: document.getElementById("maintenance-active-delete-title"),
-  activeSubtitle: document.getElementById("maintenance-active-delete-subtitle"),
-  activeTarget: document.getElementById("maintenance-active-delete-target"),
-  activeResult: document.getElementById("maintenance-active-delete-result"),
-  activeReason: document.getElementById("maintenance-active-delete-reason"),
-  activeExecute: document.getElementById("execute-active-delete"),
-  activeCancel: document.getElementById("maintenance-active-delete-cancel"),
-  evidencePane: document.querySelector(".maintenance-preview-pane"),
-  facePane: document.querySelector(".maintenance-face-pane"),
-  jobPane: document.querySelector(".maintenance-job-pane"),
+  activePane: document.getElementById("delete-dialog"),
+  activeTitle: document.getElementById("delete-dialog-title"),
+  activeSubtitle: document.getElementById("delete-dialog-subtitle"),
+  activeTarget: document.getElementById("delete-dialog-target"),
+  activeResult: document.getElementById("delete-dialog-result"),
+  activeReason: document.getElementById("delete-dialog-reason"),
+  activeExecute: document.getElementById("execute-delete-dialog"),
+  activeCancel: document.getElementById("delete-dialog-close"),
   evidenceForm: document.getElementById("maintenance-evidence-form"),
   previewEvidenceDelete: document.getElementById("preview-evidence-delete"),
   previewResult: document.getElementById("maintenance-preview-result"),
   reason: document.getElementById("maintenance-delete-reason"),
   executeEvidenceDelete: document.getElementById("execute-evidence-delete"),
-  previewPeopleDelete: document.getElementById("preview-people-delete"),
-  previewGalleryDelete: document.getElementById("preview-gallery-delete"),
-  previewFaceOrphans: document.getElementById("preview-face-orphans"),
-  faceForm: document.getElementById("maintenance-face-form"),
-  faceResult: document.getElementById("maintenance-face-result"),
-  faceReason: document.getElementById("maintenance-face-delete-reason"),
-  executeFaceDelete: document.getElementById("execute-face-delete"),
-  jobId: document.getElementById("maintenance-job-id"),
-  loadJob: document.getElementById("load-maintenance-job"),
-  jobDetail: document.getElementById("maintenance-job-detail")
+  faceReason: document.getElementById("delete-dialog-reason")
 };
 
 function formatBytes(value) {
@@ -155,25 +143,19 @@ function renderTargetSummary(request = {}) {
 function showActiveDelete(request = {}) {
   maintenanceState.activeDelete = request;
   maintenanceDom.activePane.hidden = false;
-  maintenanceDom.evidencePane.hidden = true;
-  maintenanceDom.facePane.hidden = true;
-  maintenanceDom.jobPane.hidden = true;
   maintenanceDom.activeTitle.textContent = `删除${deleteKindLabel(request)}`;
-  maintenanceDom.activeSubtitle.textContent = "系统已自动带入你刚才选择的对象，不需要再填写人员 ID 或图库 ID。";
+  maintenanceDom.activeSubtitle.textContent = "系统已自动带入你刚才选择的对象。";
   maintenanceDom.activeExecute.textContent = `删除${deleteKindLabel(request)}`;
   renderTargetSummary(request);
   maintenanceDom.activeReason.value = defaultDeleteReason(request);
   maintenanceDom.activeResult.innerHTML = "<strong>正在生成预览</strong>";
   setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
-  maintenanceDom.activePane.scrollIntoView({ block: "start", behavior: "smooth" });
+  maintenanceDom.activeExecute.focus();
 }
 
 function hideActiveDelete() {
   maintenanceState.activeDelete = null;
   maintenanceDom.activePane.hidden = true;
-  maintenanceDom.evidencePane.hidden = false;
-  maintenanceDom.facePane.hidden = false;
-  maintenanceDom.jobPane.hidden = false;
   maintenanceDom.activeResult.innerHTML = "正在生成删除预览。";
   maintenanceDom.activeReason.value = "";
   maintenanceDom.activeExecute.textContent = "确认删除";
@@ -240,7 +222,6 @@ async function previewActiveDelete(deleteRequest = {}) {
       body: JSON.stringify(activePreviewBody(deleteRequest))
     });
     maintenanceState.preview = preview;
-    maintenanceDom.jobId.value = preview.preview_id || "";
     renderPreview(preview, maintenanceDom.activeResult);
     return;
   }
@@ -282,13 +263,9 @@ async function maintenanceRequest(path, options = {}) {
 
 function evidencePreviewBody() {
   const fd = new FormData(maintenanceDom.evidenceForm);
-  const eventIds = csvValues(fd.get("event_ids"));
   const body = {
-    event_ids: eventIds,
     time_from: localIso(fd.get("time_from")),
     time_to: localIso(fd.get("time_to")),
-    event_category: fd.get("event_category") || null,
-    camera_id: fd.get("camera_id") || null,
     allow_stale_pending_tasks: fd.get("allow_stale_pending_tasks") === "on",
     delete_mode: fd.get("delete_mode") || "trash",
     max_items: Number(fd.get("max_items") || 1000),
@@ -298,16 +275,6 @@ function evidencePreviewBody() {
     if (body[key] === null || body[key] === "") delete body[key];
   });
   return body;
-}
-
-function faceFormBody() {
-  const fd = new FormData(maintenanceDom.faceForm);
-  return {
-    person_ids: csvNumbers(fd.get("person_ids")),
-    external_person_ids: csvValues(fd.get("external_person_ids")),
-    gallery_embedding_ids: csvNumbers(fd.get("gallery_embedding_ids")),
-    older_than_days: positiveNumberOrNull(fd.get("older_than_days"))
-  };
 }
 
 function renderPreview(preview, target = maintenanceDom.previewResult) {
@@ -332,9 +299,6 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
   target.innerHTML = lines.join("");
   if (target === maintenanceDom.previewResult) {
     setDeleteButtonDisabled(maintenanceDom.executeEvidenceDelete, Boolean(disabledReason), disabledReason);
-  }
-  if (target === maintenanceDom.faceResult) {
-    setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, Boolean(disabledReason), disabledReason);
   }
   if (target === maintenanceDom.activeResult) {
     setDeleteButtonDisabled(maintenanceDom.activeExecute, Boolean(disabledReason), disabledReason);
@@ -376,7 +340,6 @@ async function previewEvidenceDelete(options = {}) {
       body: JSON.stringify(evidencePreviewBody())
     });
     maintenanceState.preview = preview;
-    maintenanceDom.jobId.value = preview.preview_id || "";
     renderPreview(preview, target);
   } finally {
     restore();
@@ -431,83 +394,14 @@ async function executeEvidenceDelete(options = {}) {
   }
 }
 
-async function previewPeopleDelete(options = {}) {
-  const target = options.target || maintenanceDom.faceResult;
-  maintenanceState.facePreview = null;
-  maintenanceState.facePreviewKind = "people";
-  if (target === maintenanceDom.faceResult) {
-    setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, true, "正在生成预览");
-  }
-  if (target === maintenanceDom.activeResult) {
-    setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
-  }
-  target.innerHTML = "<strong>正在生成预览</strong>";
-  const body = faceFormBody();
-  const preview = await maintenanceRequest("/people/delete-preview", {
-    method: "POST",
-    body: JSON.stringify({
-      person_ids: body.person_ids,
-      external_person_ids: body.external_person_ids,
-      include_gallery: true,
-      older_than_days: body.older_than_days,
-      operator: "operator"
-    })
-  });
-  maintenanceState.facePreview = preview;
-  renderPreview(preview, target);
-}
-
-async function previewGalleryDelete(options = {}) {
-  const target = options.target || maintenanceDom.faceResult;
-  maintenanceState.facePreview = null;
-  maintenanceState.facePreviewKind = "gallery";
-  if (target === maintenanceDom.faceResult) {
-    setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, true, "正在生成预览");
-  }
-  if (target === maintenanceDom.activeResult) {
-    setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
-  }
-  target.innerHTML = "<strong>正在生成预览</strong>";
-  const body = faceFormBody();
-  const preview = await maintenanceRequest("/people/gallery-delete-preview", {
-    method: "POST",
-    body: JSON.stringify({
-      gallery_embedding_ids: body.gallery_embedding_ids,
-      person_ids: body.person_ids,
-      older_than_days: body.older_than_days,
-      operator: "operator"
-    })
-  });
-  maintenanceState.facePreview = preview;
-  renderPreview(preview, target);
-}
-
-async function previewFaceOrphans() {
-  maintenanceState.facePreview = null;
-  maintenanceState.facePreviewKind = "face_orphans";
-  setDeleteButtonDisabled(maintenanceDom.executeFaceDelete, true, "正在生成预览");
-  maintenanceDom.faceResult.innerHTML = "<strong>正在生成预览</strong>";
-  const body = faceFormBody();
-  const preview = await maintenanceRequest("/face-media/orphans-preview", {
-    method: "POST",
-    body: JSON.stringify({
-      older_than_days: body.older_than_days ?? 7,
-      allow_inactive_reference_cleanup: false,
-      delete_mode: "trash"
-    })
-  });
-  maintenanceState.facePreview = preview;
-  renderPreview(preview, maintenanceDom.faceResult);
-}
-
 async function executeFaceDelete(options = {}) {
   const preview = maintenanceState.facePreview;
   if (!preview?.preview_id || !maintenanceState.facePreviewKind) {
     throw new Error("删除必须先 preview");
   }
   const reasonInput = options.reasonInput || maintenanceDom.faceReason;
-  const resultTarget = options.resultTarget || maintenanceDom.faceResult;
-  const executeButton = options.executeButton || maintenanceDom.executeFaceDelete;
+  const resultTarget = options.resultTarget || maintenanceDom.activeResult;
+  const executeButton = options.executeButton || maintenanceDom.activeExecute;
   const reason = reasonInput.value.trim();
   if (!reason) {
     throw new Error("请填写删除原因");
@@ -526,17 +420,13 @@ async function executeFaceDelete(options = {}) {
   };
   const endpoints = {
     people: "/people/delete",
-    gallery: "/people/gallery-delete",
-    face_orphans: "/face-media/orphans-cleanup"
+    gallery: "/people/gallery-delete"
   };
-  const body = maintenanceState.facePreviewKind === "face_orphans"
-    ? { ...commonBody, delete_mode: preview.delete_mode || "trash" }
-    : commonBody;
   const restore = setButtonBusy(executeButton, true, "删除中");
   try {
     const result = await maintenanceRequest(endpoints[maintenanceState.facePreviewKind], {
       method: "POST",
-      body: JSON.stringify(body)
+      body: JSON.stringify(commonBody)
     });
     resultTarget.innerHTML =
       `<strong>执行结果：${escapeHtml(result.status)}</strong><div>${NO_AUTO_REGENERATE}</div>`;
@@ -578,42 +468,12 @@ async function executeActiveDelete() {
   throw new Error(`不支持的删除类型：${request.kind}`);
 }
 
-async function loadJobDetail() {
-  const jobId = maintenanceDom.jobId.value.trim();
-  if (!jobId) throw new Error("请输入 Job ID");
-  const detail = await maintenanceRequest(`/jobs/${encodeURIComponent(jobId)}`);
-  const job = detail.job || {};
-  maintenanceDom.jobDetail.innerHTML = [
-    `<strong>${job.job_type || "job"}：${job.status || "-"}</strong>`,
-    `<div>候选 hash：${job.candidate_hash || "-"}</div>`,
-    `<div>预览过期：${job.preview_expires_at || "-"}</div>`,
-    `<div>${detail.no_auto_regenerate_message || NO_AUTO_REGENERATE}</div>`
-  ].join("");
-}
-
 function bindMaintenanceEvents() {
   maintenanceDom.refresh?.addEventListener("click", () => loadMaintenanceSummary().catch((e) => showError(e.message)));
-  maintenanceDom.previewEvidenceDelete?.addEventListener("click", () => {
-    hideActiveDelete();
-    previewEvidenceDelete().catch((e) => showError(e.message));
-  });
+  maintenanceDom.previewEvidenceDelete?.addEventListener("click", () => previewEvidenceDelete().catch((e) => showError(e.message)));
   maintenanceDom.executeEvidenceDelete?.addEventListener("click", () => executeEvidenceDelete().catch((e) => showError(e.message)));
-  maintenanceDom.previewPeopleDelete?.addEventListener("click", () => {
-    hideActiveDelete();
-    previewPeopleDelete().catch((e) => showError(e.message));
-  });
-  maintenanceDom.previewGalleryDelete?.addEventListener("click", () => {
-    hideActiveDelete();
-    previewGalleryDelete().catch((e) => showError(e.message));
-  });
-  maintenanceDom.previewFaceOrphans?.addEventListener("click", () => {
-    hideActiveDelete();
-    previewFaceOrphans().catch((e) => showError(e.message));
-  });
-  maintenanceDom.executeFaceDelete?.addEventListener("click", () => executeFaceDelete().catch((e) => showError(e.message)));
   maintenanceDom.activeExecute?.addEventListener("click", () => executeActiveDelete().catch((e) => showError(e.message)));
   maintenanceDom.activeCancel?.addEventListener("click", hideActiveDelete);
-  maintenanceDom.loadJob?.addEventListener("click", () => loadJobDetail().catch((e) => showError(e.message)));
 }
 
 async function initMaintenance() {
@@ -624,28 +484,19 @@ async function initMaintenance() {
   await loadMaintenanceSummary();
 }
 
-async function prepareDelete(request = {}) {
+async function openDeleteDialog(request = {}) {
   await initMaintenance();
   showActiveDelete(request);
   if (request.kind === "evidence") {
-    maintenanceDom.evidenceForm.elements.event_ids.value = csvValues(request.event_ids || []).join(",");
     maintenanceDom.reason.value = defaultDeleteReason(request);
     await previewActiveDelete(request);
     return;
   }
   if (request.kind === "person") {
-    maintenanceDom.faceForm.elements.person_ids.value = csvValues(request.person_ids || []).join(",");
-    maintenanceDom.faceForm.elements.external_person_ids.value = csvValues(request.external_person_ids || []).join(",");
-    maintenanceDom.faceForm.elements.gallery_embedding_ids.value = "";
-    maintenanceDom.faceReason.value = defaultDeleteReason(request);
     await previewActiveDelete(request);
     return;
   }
   if (request.kind === "gallery") {
-    maintenanceDom.faceForm.elements.person_ids.value = csvValues(request.person_ids || []).join(",");
-    maintenanceDom.faceForm.elements.external_person_ids.value = "";
-    maintenanceDom.faceForm.elements.gallery_embedding_ids.value = csvValues(request.gallery_embedding_ids || []).join(",");
-    maintenanceDom.faceReason.value = defaultDeleteReason(request);
     await previewActiveDelete(request);
   }
 }
@@ -653,6 +504,7 @@ async function prepareDelete(request = {}) {
 window.operatorMaintenance = {
   init: initMaintenance,
   previewEvidenceDelete,
-  prepareDelete,
+  openDeleteDialog,
+  prepareDelete: openDeleteDialog,
   loadMaintenanceSummary
 };
