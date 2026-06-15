@@ -481,6 +481,59 @@ def test_post_savant_missing_frame_proof_fails_with_diagnostics(monkeypatch) -> 
     )
 
 
+def test_post_savant_frame_proof_wait_respects_deadline(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("011"),
+        "replay_source_kind": "post_savant",
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "stream_session_id": "session-1",
+        "runtime_epoch_id": "epoch-1",
+    }
+
+    class SlowRedis(_FakeRedis):
+        def xrevrange(self, *_args, **_kwargs):
+            worker.time.sleep(0.015)
+            return super().xrevrange(*_args, **_kwargs)
+
+    redis_client = SlowRedis([request])
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    started = worker.time.monotonic()
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.02,
+            post_savant_frame_proof_poll_interval_s=0.01,
+        ),
+        redis_client,
+        object(),
+    )
+    elapsed_s = worker.time.monotonic() - started
+
+    waiting_updates = [
+        update for update in updates if update.get("evidence_state") == "waiting_proof"
+    ]
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["evidence_state"] == "failed"
+    assert len(waiting_updates) <= 2
+    assert elapsed_s < 0.08
+
+
 def test_post_savant_frame_proof_succeeds_after_local_poll(monkeypatch) -> None:
     _activate()
     import app.worker as worker

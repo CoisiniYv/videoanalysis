@@ -1472,6 +1472,8 @@ def _prepare_post_savant_replay_request(
         attempts = max(1, int(wait_budget_s / poll_interval_s) + 1)
     else:
         attempts = legacy_attempts
+    wait_started_at = time.monotonic()
+    wait_deadline_at = wait_started_at + wait_budget_s if wait_budget_s > 0.0 else None
     last_error = f"{POST_SAVANT_MISSING_FRAME_TIMELINE_ERROR} source_id={source_id}"
     for attempt in range(attempts):
         proofs = _find_replay_frame_domain_proofs(
@@ -1673,25 +1675,44 @@ def _prepare_post_savant_replay_request(
             last_error,
         )
         if on_wait is not None:
-            diagnostics = _post_savant_frame_proof_diagnostics(
-                redis_client,
-                cfg,
-                req,
-                source_id=str(source_id),
-                camera_id=str(camera_id or source_id),
-                target_pts=target_pts,
-                requested_start_pts=requested_start_pts,
-                requested_end_pts=requested_end_pts,
-                runtime_epoch_id=runtime_epoch_id,
-                stream_session_id=stream_session_id,
+            now_after_lookup = time.monotonic()
+            is_first_wait = attempt == 0
+            is_last_wait = attempt + 1 >= attempts
+            deadline_reached = (
+                wait_deadline_at is not None and now_after_lookup >= wait_deadline_at
+            )
+            diagnostics = (
+                _post_savant_frame_proof_diagnostics(
+                    redis_client,
+                    cfg,
+                    req,
+                    source_id=str(source_id),
+                    camera_id=str(camera_id or source_id),
+                    target_pts=target_pts,
+                    requested_start_pts=requested_start_pts,
+                    requested_end_pts=requested_end_pts,
+                    runtime_epoch_id=runtime_epoch_id,
+                    stream_session_id=stream_session_id,
+                )
+                if is_first_wait or is_last_wait or deadline_reached
+                else {}
             )
             diagnostics["proof_attempt"] = attempt + 1
             diagnostics["proof_attempts"] = attempts
             diagnostics["proof_wait_budget_s"] = wait_budget_s
             diagnostics["proof_poll_interval_s"] = poll_interval_s
+            diagnostics["proof_elapsed_s"] = now_after_lookup - wait_started_at
+            diagnostics["proof_deadline_reached"] = deadline_reached
             on_wait(attempt + 1, attempts, last_error, diagnostics)
+        now_after_wait_update = time.monotonic()
+        if wait_deadline_at is not None and now_after_wait_update >= wait_deadline_at:
+            break
         if attempt + 1 < attempts:
-            time.sleep(poll_interval_s)
+            sleep_s = poll_interval_s
+            if wait_deadline_at is not None:
+                sleep_s = min(sleep_s, max(0.0, wait_deadline_at - time.monotonic()))
+            if sleep_s > 0.0:
+                time.sleep(sleep_s)
 
     return None, keyframe_uuid, keyframe_source, last_error
 
