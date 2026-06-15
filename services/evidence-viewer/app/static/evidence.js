@@ -16,7 +16,7 @@ const ROLE_RENDER_WINDOW_MS = {
 };
 const OVERLAY_DEDUP_IOU_THRESHOLD = 0.75;
 const EVIDENCE_API = "/api";
-const BUNDLE_PAGE_SIZE = 200;
+const BUNDLE_PAGE_SIZE = 50;
 const EVIDENCE_STATE_STORAGE_KEY = "operator-evidence-view-state";
 const FILTER_INPUT_IDS = [
   "filterEventType",
@@ -48,7 +48,9 @@ const state = {
   warnings: new Set(),
   timeOffsetFallbackUsed: false,
   frameDurationMs: null,
-  frameLookup: null
+  frameLookup: null,
+  overlayFrameRequest: null,
+  overlayRunning: false
 };
 
 const dom = {
@@ -303,7 +305,7 @@ function filterSnapshot() {
 function persistEvidenceState() {
   const payload = {
     bundleOffset: Math.max(0, Number(state.bundleOffset) || 0),
-    bundleLimit: Math.max(1, Number(state.bundleLimit) || BUNDLE_PAGE_SIZE),
+    bundleLimit: BUNDLE_PAGE_SIZE,
     activeCategory: state.activeCategory || "all",
     selectedEventId: state.selectedEventId || "",
     filters: filterSnapshot()
@@ -325,9 +327,7 @@ function restoreEvidenceState() {
   if (Number.isFinite(offset) && offset >= 0) {
     state.bundleOffset = Math.floor(offset);
   }
-  if (Number.isFinite(limit) && limit > 0) {
-    state.bundleLimit = Math.floor(limit);
-  }
+  state.bundleLimit = BUNDLE_PAGE_SIZE;
   if (payload.activeCategory) {
     state.activeCategory = String(payload.activeCategory);
   }
@@ -1289,6 +1289,10 @@ function drawLabel(text, x, y, color) {
 }
 
 function drawOverlay() {
+  if (!state.overlayRunning) {
+    state.overlayFrameRequest = null;
+    return;
+  }
   resizeCanvas();
   const displayWidth = dom.canvas.clientWidth;
   const displayHeight = dom.canvas.clientHeight;
@@ -1326,7 +1330,21 @@ function drawOverlay() {
     drawLabel(labelForObject(obj, line), x, y, style.labelColor);
   }
   updateDebug(active, overlayItems.length);
-  requestAnimationFrame(drawOverlay);
+  state.overlayFrameRequest = requestAnimationFrame(drawOverlay);
+}
+
+function startOverlayLoop() {
+  if (state.overlayRunning) return;
+  state.overlayRunning = true;
+  state.overlayFrameRequest = requestAnimationFrame(drawOverlay);
+}
+
+function stopOverlayLoop() {
+  state.overlayRunning = false;
+  if (state.overlayFrameRequest !== null) {
+    cancelAnimationFrame(state.overlayFrameRequest);
+    state.overlayFrameRequest = null;
+  }
 }
 
 function setText(id, value) {
@@ -1539,10 +1557,8 @@ async function init() {
 
 async function runInit() {
   if (state.initialized) {
-    await loadHealth();
-    await loadBundles();
     resizeCanvas();
-    requestAnimationFrame(drawOverlay);
+    startOverlayLoop();
     return;
   }
   state.initialized = true;
@@ -1551,11 +1567,12 @@ async function runInit() {
   await loadHealth();
   await loadBundles();
   resizeCanvas();
-  requestAnimationFrame(drawOverlay);
+  startOverlayLoop();
 }
 
 window.operatorEvidence = {
   init,
+  pause: stopOverlayLoop,
   reload: async function reload() {
     state.bundleOffset = 0;
     resetBundleSelection();

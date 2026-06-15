@@ -31,6 +31,11 @@ EVENT_CATEGORY_TYPES = {
     "behavior": {"loitering", "running", "fall"},
     "crowd": {"crowd_gathering"},
 }
+_BUNDLE_DOC_CACHE_MAX = 20000
+_BUNDLE_DOC_CACHE: dict[
+    str,
+    tuple[tuple[int, int, int, int], dict[str, Any], dict[str, Any], list[str]],
+] = {}
 
 
 class EvidencePathError(ValueError):
@@ -94,6 +99,34 @@ def load_json_object(path: Path) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(data, dict):
         return {}, [f"not_object:{path.name}"]
     return data, warnings
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (-1, -1)
+    except OSError:
+        return (-2, -2)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def load_bundle_index_docs(bundle_dir: Path) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    metadata_path = bundle_dir / "metadata.json"
+    summary_path = bundle_dir / "summary.json"
+    signature = (*_file_signature(metadata_path), *_file_signature(summary_path))
+    cache_key = str(bundle_dir)
+    cached = _BUNDLE_DOC_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1], cached[2], cached[3]
+
+    metadata, metadata_warnings = load_json_object(metadata_path)
+    summary, summary_warnings = load_json_object(summary_path)
+    warnings = metadata_warnings + summary_warnings
+    if len(_BUNDLE_DOC_CACHE) > _BUNDLE_DOC_CACHE_MAX:
+        _BUNDLE_DOC_CACHE.clear()
+    _BUNDLE_DOC_CACHE[cache_key] = (signature, metadata, summary, warnings)
+    return metadata, summary, warnings
 
 
 def _read_yaml_doc(path: Path | None) -> dict[str, Any]:
@@ -447,6 +480,7 @@ def scan_bundles(
     limit: int = 200,
     offset: int = 0,
     camera_name_lookup: dict[str, str] | None = None,
+    materialize_all_matches: bool = False,
 ) -> dict[str, Any]:
     root = resolve_root(evidence_root)
     if not root.is_dir():
@@ -459,30 +493,63 @@ def scan_bundles(
         }
 
     filters = filters or {}
+    active_filters = {key: value for key, value in filters.items() if value and not (key == "event_category" and value == "all")}
     candidates = [path for path in root.iterdir() if path.is_dir()]
     candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
 
+    if not active_filters and not materialize_all_matches:
+        safe_candidates: list[Path] = []
+        warnings: list[str] = []
+        for bundle_dir in candidates:
+            if SAFE_EVENT_ID_RE.fullmatch(bundle_dir.name):
+                safe_candidates.append(bundle_dir)
+            else:
+                warnings.append(f"skipped_unsafe_bundle_name:{bundle_dir.name}")
+        start = max(0, offset)
+        end = start + max(1, limit)
+        return {
+            "bundles": [
+                bundle_summary(bundle_dir, camera_name_lookup=camera_name_lookup)
+                for bundle_dir in safe_candidates[start:end]
+            ],
+            "total": len(safe_candidates),
+            "limit": limit,
+            "offset": start,
+            "warnings": warnings,
+        }
+
+    page_dirs: list[tuple[Path, dict[str, Any], dict[str, Any], list[str]]] = []
     matched: list[dict[str, Any]] = []
     warnings: list[str] = []
+    matched_count = 0
+    start = max(0, offset)
+    end = start + max(1, limit)
     for bundle_dir in candidates:
         if not SAFE_EVENT_ID_RE.fullmatch(bundle_dir.name):
             warnings.append(f"skipped_unsafe_bundle_name:{bundle_dir.name}")
             continue
-        metadata, metadata_warnings = load_json_object(bundle_dir / "metadata.json")
-        summary, summary_warnings = load_json_object(bundle_dir / "summary.json")
+        metadata, summary, load_warnings = load_bundle_index_docs(bundle_dir)
         if not _matches_filters(bundle_dir, metadata, summary, filters):
             continue
+        if materialize_all_matches or start <= matched_count < end:
+            page_dirs.append(
+                (
+                    bundle_dir,
+                    metadata,
+                    summary,
+                    load_warnings,
+                )
+            )
+        matched_count += 1
+
+    for bundle_dir, _metadata, _summary, load_warnings in page_dirs:
         item = bundle_summary(bundle_dir, camera_name_lookup=camera_name_lookup)
-        item["warnings"] = sorted(
-            set(item.get("warnings", []) + metadata_warnings + summary_warnings)
-        )
+        item["warnings"] = sorted(set(item.get("warnings", []) + load_warnings))
         matched.append(item)
 
-    start = max(0, offset)
-    end = start + max(1, limit)
     return {
-        "bundles": matched[start:end],
-        "total": len(matched),
+        "bundles": matched if materialize_all_matches else matched[: max(1, limit)],
+        "total": matched_count,
         "limit": limit,
         "offset": start,
         "warnings": warnings,

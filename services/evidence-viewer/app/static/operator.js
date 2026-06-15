@@ -1092,6 +1092,8 @@ function activateTopView(view, updateHash = false) {
   }
   if (normalized === "evidence" && window.operatorEvidence) {
     window.operatorEvidence.init().catch((e) => showError(e.message));
+  } else if (window.operatorEvidence?.pause) {
+    window.operatorEvidence.pause();
   }
   if (normalized === "runtime") {
     loadRuntimeOverview().catch((e) => showError(e.message));

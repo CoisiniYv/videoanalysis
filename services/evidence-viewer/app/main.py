@@ -219,6 +219,7 @@ def api_bundles(
         limit=settings.max_bundles if person else capped_limit,
         offset=0 if person else offset,
         camera_name_lookup=camera_name_lookup,
+        materialize_all_matches=bool(person),
     )
     if person:
         matched = [

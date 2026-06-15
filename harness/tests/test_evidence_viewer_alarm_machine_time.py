@@ -151,3 +151,34 @@ def test_bundle_listing_filters_event_category_before_pagination(tmp_path: Path)
     assert result["limit"] == 1
     assert result["offset"] == 1
     assert [bundle["event_id"] for bundle in result["bundles"]] == ["event-2"]
+
+
+def test_bundle_listing_materializes_only_current_page(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    event_1 = _write_bundle(root, "event-1", {"created_at": "2026-06-11T02:05:06+00:00"})
+    event_2 = _write_bundle(root, "event-2", {"created_at": "2026-06-11T02:06:06+00:00"})
+    event_3 = _write_bundle(root, "event-3", {"created_at": "2026-06-11T02:07:06+00:00"})
+    os.utime(event_1, (1, 1))
+    os.utime(event_2, (2, 2))
+    os.utime(event_3, (3, 3))
+
+    (event_1 / "metadata.json").write_text("{not json", encoding="utf-8")
+
+    result = scan_bundles(root, limit=1, offset=0)
+
+    assert result["total"] == 3
+    assert [bundle["event_id"] for bundle in result["bundles"]] == ["event-3"]
+    assert all("invalid_json:metadata.json" not in warning for warning in result["bundles"][0]["warnings"])
+
+
+def test_bundle_listing_can_materialize_all_matches_for_person_filter(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    event_1 = _write_bundle(root, "event-1", {"created_at": "2026-06-11T02:05:06+00:00"})
+    event_2 = _write_bundle(root, "event-2", {"created_at": "2026-06-11T02:06:06+00:00"})
+    os.utime(event_1, (1, 1))
+    os.utime(event_2, (2, 2))
+
+    result = scan_bundles(root, limit=1, offset=0, materialize_all_matches=True)
+
+    assert result["total"] == 2
+    assert [bundle["event_id"] for bundle in result["bundles"]] == ["event-2", "event-1"]
