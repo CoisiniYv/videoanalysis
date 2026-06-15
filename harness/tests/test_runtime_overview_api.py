@@ -48,6 +48,26 @@ va_forwarder_frames_dropped_total{source_id="primary_rtsp"} 160
 va_forwarder_savant_send_failures_total{source_id="primary_rtsp"} 0
 """
 
+EVIDENCE_SUMMARY = {
+    "available": True,
+    "state_counts": [
+        {"state": "waiting_proof", "count": 2},
+        {"state": "ready", "count": 3},
+    ],
+    "recent": [
+        {
+            "event_id": "event-1",
+            "source_id": "lab",
+            "event_type": "intrusion",
+            "evidence_state": "waiting_proof",
+            "evidence_reason": "missing_post_savant_frame_pts_window",
+            "task_status": "waiting_proof",
+            "age_seconds": 4,
+        }
+    ],
+    "recent_failures": [],
+}
+
 
 class FakeDockerClient:
     def __init__(
@@ -165,6 +185,7 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
         docker_client=FakeDockerClient(),
         metrics_text=METRICS_TEXT,
         forwarder_metrics_text=FORWARDER_METRICS_TEXT,
+        evidence_summary=EVIDENCE_SUMMARY,
         supervisor_snapshot={
             "enabled": True,
             "savant_container_running": True,
@@ -173,6 +194,10 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
     )
 
     assert overview["metrics"]["sources"][1]["source_id"] == "secondary_rtsp"
+    assert overview["evidence"]["state_counts"][0]["state"] == "waiting_proof"
+    assert overview["evidence"]["recent"][0]["evidence_reason"] == (
+        "missing_post_savant_frame_pts_window"
+    )
     assert overview["forwarder"]["sources"][0]["frames_dropped_total"] == 160
     assert overview["containers"]["fixed"]["savant"]["restart_count"] == 1
     assert overview["containers"]["fixed"]["analysis_forwarder"]["restart_count"] == 0
@@ -203,6 +228,7 @@ def test_runtime_overview_computes_short_window_restart_rate() -> None:
         docker_client=FakeDockerClient(dynamic_restart_count=12),
         metrics_text=METRICS_TEXT.replace("35", "0.5"),
         forwarder_metrics_text=FORWARDER_METRICS_TEXT,
+        evidence_summary=EVIDENCE_SUMMARY,
         supervisor_snapshot={"enabled": True, "savant_container_running": True},
         now_epoch_s=1000.0,
     )
@@ -211,6 +237,7 @@ def test_runtime_overview_computes_short_window_restart_rate() -> None:
         docker_client=FakeDockerClient(dynamic_restart_count=14),
         metrics_text=METRICS_TEXT.replace("35", "0.5"),
         forwarder_metrics_text=FORWARDER_METRICS_TEXT,
+        evidence_summary=EVIDENCE_SUMMARY,
         supervisor_snapshot={"enabled": True, "savant_container_running": True},
         now_epoch_s=1060.0,
     )
@@ -231,7 +258,11 @@ def test_runtime_overview_route_uses_api_envelope(monkeypatch) -> None:
     monkeypatch.setattr(
         runtime_router,
         "build_runtime_overview",
-        lambda: {"metrics": {"available": True}, "health": {"ok": True}},
+        lambda: {
+            "metrics": {"available": True},
+            "evidence": {"available": True, "state_counts": []},
+            "health": {"ok": True},
+        },
     )
 
     payload = runtime_router.runtime_overview(request_id="req-test")
@@ -239,4 +270,5 @@ def test_runtime_overview_route_uses_api_envelope(monkeypatch) -> None:
     assert payload["request_id"] == "req-test"
     assert payload["error"] is None
     assert payload["data"]["metrics"]["available"] is True
+    assert payload["data"]["evidence"]["available"] is True
     assert payload["data"]["health"]["ok"] is True

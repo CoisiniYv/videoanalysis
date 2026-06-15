@@ -24,7 +24,14 @@ def _event() -> EventResponse:
             "event_type": "intrusion",
             "camera_id": "camera-1",
             "source_id": "source-1",
-            "payload": {"camera_name": "lab"},
+            "media_status": "waiting_proof",
+            "payload": {
+                "camera_name": "lab",
+                "media": {
+                    "evidence_state": "waiting_proof",
+                    "evidence_reason": "missing_post_savant_frame_pts_window",
+                },
+            },
         }
     )
 
@@ -39,6 +46,8 @@ def test_event_evidence_response_exposes_camera_name_without_losing_ids() -> Non
     ).model_dump()
 
     assert payload["camera_name"] == "lab"
+    assert payload["evidence_state"] == "waiting_proof"
+    assert payload["evidence_reason"] == "missing_post_savant_frame_pts_window"
     assert payload["event"]["source_id"] == "source-1"
     assert payload["event"]["camera_id"] == "camera-1"
     assert payload["evidence_detail"]["camera_name"] == "lab"
@@ -49,5 +58,6 @@ def test_event_response_exposes_camera_name_for_list_recent_and_detail_routes() 
     payload = _event().model_dump()
 
     assert payload["camera_name"] == "lab"
+    assert payload["evidence_state"] == "waiting_proof"
     assert payload["source_id"] == "source-1"
     assert payload["camera_id"] == "camera-1"

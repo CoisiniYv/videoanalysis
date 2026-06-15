@@ -535,6 +535,7 @@ p {
   margin-top: 12px;
 }
 
+.runtime-evidence-pane,
 .runtime-container-pane {
   grid-column: 1 / -1;
 }
@@ -609,6 +610,29 @@ p {
 .runtime-table .warn-row td,
 .runtime-table tr.warn-row td {
   background: var(--amber-soft);
+}
+
+.evidence-state-grid {
+  margin-bottom: 10px;
+}
+
+.runtime-failure-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  color: var(--error);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.runtime-failure-list li {
+  padding: 8px 9px;
+  overflow-wrap: anywhere;
+  background: var(--error-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 7px;
 }
 
 .empty-state {

@@ -8,11 +8,16 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
+import psycopg
+from psycopg.rows import dict_row
+
+from app.config import get_settings
 from app.services.runtime_apply import (
     DEFAULT_CLIP_WORKER_CONTAINER,
     DEFAULT_COMPOSE_SOURCE_CONTAINER,
@@ -87,6 +92,7 @@ class RuntimeOverviewConfig:
     dynamic_source_prefix: str = DEFAULT_DYNAMIC_SOURCE_PREFIX
     restart_rate_warn_per_min: float = DEFAULT_RESTART_RATE_WARN_PER_MIN
     restart_count_warn_threshold: int = DEFAULT_RESTART_COUNT_WARN_THRESHOLD
+    evidence_recent_limit: int = 12
 
 
 def config_from_env() -> RuntimeOverviewConfig:
@@ -146,6 +152,7 @@ def config_from_env() -> RuntimeOverviewConfig:
             "RUNTIME_OVERVIEW_RESTART_COUNT_WARN_THRESHOLD",
             DEFAULT_RESTART_COUNT_WARN_THRESHOLD,
         ),
+        evidence_recent_limit=_env_int("RUNTIME_OVERVIEW_EVIDENCE_RECENT_LIMIT", 12),
     )
 
 
@@ -155,6 +162,7 @@ def build_runtime_overview(
     docker_client: DockerSocketClient | None = None,
     metrics_text: str | None = None,
     forwarder_metrics_text: str | None = None,
+    evidence_summary: dict[str, Any] | None = None,
     supervisor_snapshot: dict[str, Any] | None = None,
     now_epoch_s: float | None = None,
 ) -> dict[str, Any]:
@@ -182,6 +190,11 @@ def build_runtime_overview(
         count_warn_threshold=cfg.restart_count_warn_threshold,
     )
     supervisor = supervisor_snapshot if supervisor_snapshot is not None else _safe_supervisor_snapshot()
+    evidence = (
+        evidence_summary
+        if evidence_summary is not None
+        else summarize_evidence_runtime(limit=cfg.evidence_recent_limit)
+    )
     health = summarize_runtime_health(metrics=metrics, containers=containers, supervisor=supervisor)
     return {
         "generated_at_epoch_s": int(now),
@@ -191,7 +204,187 @@ def build_runtime_overview(
         "forwarder": forwarder,
         "containers": containers,
         "supervisor": supervisor,
+        "evidence": evidence,
         "health": health,
+    }
+
+
+def summarize_evidence_runtime(*, limit: int = 12) -> dict[str, Any]:
+    """Return recent evidence state aggregates for the operator runtime page."""
+    started = time.monotonic()
+    try:
+        conn = psycopg.connect(
+            get_settings().database_url,
+            row_factory=dict_row,
+            autocommit=True,
+            connect_timeout=1,
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "fetch_seconds": round(time.monotonic() - started, 3),
+            "state_counts": [],
+            "recent": [],
+            "recent_failures": [],
+        }
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(
+                            payload->'media'->>'evidence_state',
+                            media_status,
+                            payload->'media'->>'clip_status',
+                            'not_implemented'
+                        ) AS evidence_state,
+                        COUNT(*) AS count
+                    FROM events
+                    WHERE created_at >= now() - interval '3 hours'
+                      AND (
+                        clip_required = true
+                        OR snapshot_required = true
+                        OR payload->'media'->>'clip_required' = 'true'
+                      )
+                    GROUP BY evidence_state
+                    ORDER BY evidence_state
+                    """
+                )
+                state_counts = [
+                    {"state": str(row["evidence_state"]), "count": int(row["count"])}
+                    for row in cur.fetchall()
+                ]
+
+                cur.execute(
+                    """
+                    SELECT
+                        e.id,
+                        e.source_event_id,
+                        e.source_id,
+                        e.camera_id,
+                        e.event_type,
+                        e.created_at,
+                        e.updated_at,
+                        COALESCE(
+                            e.payload->'media'->>'evidence_state',
+                            e.media_status,
+                            e.payload->'media'->>'clip_status',
+                            'not_implemented'
+                        ) AS evidence_state,
+                        COALESCE(
+                            e.payload->'media'->>'evidence_reason',
+                            e.payload->'media'->>'error_message',
+                            t.error_message,
+                            ''
+                        ) AS evidence_reason,
+                        e.payload->'media'->>'replay_job_id' AS replay_job_id,
+                        t.status AS task_status,
+                        t.updated_at AS task_updated_at
+                    FROM events e
+                    LEFT JOIN LATERAL (
+                        SELECT status, error_message, updated_at
+                        FROM evidence_tasks
+                        WHERE event_id = e.id
+                        ORDER BY created_at DESC, task_id DESC
+                        LIMIT 1
+                    ) t ON true
+                    WHERE e.created_at >= now() - interval '3 hours'
+                      AND (
+                        e.clip_required = true
+                        OR e.snapshot_required = true
+                        OR e.payload->'media'->>'clip_required' = 'true'
+                      )
+                    ORDER BY e.created_at DESC
+                    LIMIT %(limit)s
+                    """,
+                    {"limit": max(1, int(limit))},
+                )
+                recent = [_evidence_row(row) for row in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT
+                        e.id,
+                        e.source_event_id,
+                        e.source_id,
+                        e.camera_id,
+                        e.event_type,
+                        e.created_at,
+                        e.updated_at,
+                        COALESCE(
+                            e.payload->'media'->>'evidence_state',
+                            e.media_status,
+                            e.payload->'media'->>'clip_status',
+                            'failed'
+                        ) AS evidence_state,
+                        COALESCE(
+                            e.payload->'media'->>'evidence_reason',
+                            e.payload->'media'->>'error_message',
+                            t.error_message,
+                            ''
+                        ) AS evidence_reason,
+                        e.payload->'media'->>'replay_job_id' AS replay_job_id,
+                        t.status AS task_status,
+                        t.updated_at AS task_updated_at
+                    FROM events e
+                    LEFT JOIN LATERAL (
+                        SELECT status, error_message, updated_at
+                        FROM evidence_tasks
+                        WHERE event_id = e.id
+                        ORDER BY created_at DESC, task_id DESC
+                        LIMIT 1
+                    ) t ON true
+                    WHERE e.created_at >= now() - interval '3 hours'
+                      AND COALESCE(
+                        e.payload->'media'->>'evidence_state',
+                        e.media_status,
+                        e.payload->'media'->>'clip_status'
+                      ) = 'failed'
+                    ORDER BY e.updated_at DESC
+                    LIMIT %(limit)s
+                    """,
+                    {"limit": max(1, int(limit))},
+                )
+                failures = [_evidence_row(row) for row in cur.fetchall()]
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "fetch_seconds": round(time.monotonic() - started, 3),
+            "state_counts": [],
+            "recent": [],
+            "recent_failures": [],
+        }
+    finally:
+        conn.close()
+
+    return {
+        "available": True,
+        "fetch_seconds": round(time.monotonic() - started, 3),
+        "state_counts": state_counts,
+        "recent": recent,
+        "recent_failures": failures,
+    }
+
+
+def _evidence_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": str(row.get("id") or ""),
+        "source_event_id": str(row.get("source_event_id") or ""),
+        "source_id": str(row.get("source_id") or ""),
+        "camera_id": str(row.get("camera_id") or ""),
+        "event_type": str(row.get("event_type") or ""),
+        "created_at": _iso_or_none(row.get("created_at")),
+        "updated_at": _iso_or_none(row.get("updated_at")),
+        "age_seconds": _age_seconds(row.get("created_at")),
+        "evidence_state": str(row.get("evidence_state") or "not_implemented"),
+        "evidence_reason": str(row.get("evidence_reason") or ""),
+        "replay_job_id": str(row.get("replay_job_id") or ""),
+        "task_status": str(row.get("task_status") or ""),
+        "task_updated_at": _iso_or_none(row.get("task_updated_at")),
     }
 
 
@@ -598,6 +791,29 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _age_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        observed = value
+    else:
+        try:
+            observed = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return round(max(0.0, (datetime.now(timezone.utc) - observed).total_seconds()), 1)
 
 
 def _safe_supervisor_snapshot() -> dict[str, Any]:

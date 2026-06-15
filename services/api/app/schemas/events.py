@@ -32,6 +32,12 @@ def _safe_media(payload: dict | None) -> dict:
         "recording_strategy": "reserved",
         "replay_job_id": None,
         "sink_output_path": None,
+        "evidence_state": None,
+        "evidence_reason": None,
+        "evidence_state_updated_at": None,
+        "evidence_request_id": None,
+        "evidence_attempt_count": None,
+        "evidence_diagnostics": None,
         "error_message": None,
     }
     if payload and isinstance(payload.get("media"), dict):
@@ -92,6 +98,9 @@ class EventResponse(BaseModel):
     metadata_url: Optional[str] = None
     recording_strategy: str = "reserved"
     media_status: str = "not_implemented"
+    evidence_state: str = "not_implemented"
+    evidence_reason: Optional[str] = None
+    evidence_state_updated_at: Optional[str] = None
     snapshot_required: bool = False
     clip_required: bool = False
     evidence_policy: Dict[str, Any] = Field(default_factory=dict)
@@ -141,6 +150,13 @@ class EventResponse(BaseModel):
         annotated_snapshot_url = _media_url(annotated_snapshot_path)
         metadata_url = _media_url(metadata_path)
 
+        evidence_state = (
+            media.get("evidence_state")
+            or row.get("media_status")
+            or media.get("clip_status")
+            or "not_implemented"
+        )
+
         return cls(
             id=str(row.get("id", "")),
             source_event_id=row.get("source_event_id", ""),
@@ -174,6 +190,9 @@ class EventResponse(BaseModel):
             metadata_url=metadata_url,
             recording_strategy=row.get("recording_strategy", "reserved"),
             media_status=row.get("media_status", "not_implemented"),
+            evidence_state=str(evidence_state),
+            evidence_reason=media.get("evidence_reason") or media.get("error_message"),
+            evidence_state_updated_at=_iso(media.get("evidence_state_updated_at")),
             snapshot_required=bool(row.get("snapshot_required", False)),
             clip_required=bool(row.get("clip_required", False)),
             evidence_policy=row.get("evidence_policy") or payload.get("evidence_policy", {}),
@@ -262,6 +281,9 @@ class EventEvidenceResponse(BaseModel):
     event_type: str
     camera_name: str = ""
     media_status: str = "not_implemented"
+    evidence_state: str = "not_implemented"
+    evidence_reason: Optional[str] = None
+    evidence_state_updated_at: Optional[str] = None
     snapshot_status: str = "not_implemented"
     clip_status: str = "not_implemented"
     metadata_status: str = "not_implemented"
@@ -315,6 +337,9 @@ class EventEvidenceResponse(BaseModel):
             event_type=event.event_type,
             camera_name=camera_name,
             media_status=event.media_status,
+            evidence_state=event.evidence_state,
+            evidence_reason=event.evidence_reason,
+            evidence_state_updated_at=event.evidence_state_updated_at,
             snapshot_status=event.media.get("snapshot_status", "not_implemented"),
             clip_status=event.media.get("clip_status", "not_implemented"),
             metadata_status=event.media.get("metadata_status", "not_implemented"),

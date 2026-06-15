@@ -33,6 +33,7 @@ const runtimeHealthSummaryEl = document.getElementById("runtime-health-summary")
 const runtimeSupervisorSummaryEl = document.getElementById("runtime-supervisor-summary");
 const runtimeSourceTableEl = document.getElementById("runtime-source-table");
 const runtimeForwarderTableEl = document.getElementById("runtime-forwarder-table");
+const runtimeEvidenceTableEl = document.getElementById("runtime-evidence-table");
 const runtimeContainerTableEl = document.getElementById("runtime-container-table");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
 const camerasEl = document.getElementById("cameras");
@@ -837,6 +838,27 @@ function formatInteger(value) {
   return String(Math.trunc(num));
 }
 
+function formatAge(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "--";
+  if (num < 60) return `${formatInteger(num)}s`;
+  return `${formatNumber(num / 60)}m`;
+}
+
+function evidenceStateLabel(state) {
+  const labels = {
+    pending: "待处理",
+    waiting_proof: "等待帧证明",
+    queued: "排队",
+    replaying: "Replay 中",
+    finalizing: "生成中",
+    ready: "完成",
+    failed: "失败",
+    not_implemented: "未实现",
+  };
+  return labels[state] || state || "--";
+}
+
 function renderRuntimeOverview() {
   if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
   const overview = runtimeOverview || {};
@@ -881,6 +903,7 @@ function renderRuntimeOverview() {
 
   renderRuntimeSourceTable(metrics.sources || []);
   renderRuntimeForwarderTable(forwarder);
+  renderRuntimeEvidenceTable(overview.evidence || {});
   renderRuntimeContainerTable(containers);
 }
 
@@ -949,6 +972,47 @@ function renderRuntimeForwarderTable(forwarder) {
         `<th>source</th><th>seen</th><th>forwarded</th><th>dropped</th><th>drop %</th><th>send failures</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
+    `</table>`;
+}
+
+function renderRuntimeEvidenceTable(evidence) {
+  if (!runtimeEvidenceTableEl) return;
+  if (!evidence.available) {
+    runtimeEvidenceTableEl.innerHTML =
+      `<div class="empty-state">暂无证据状态指标。${escapeHtml(evidence.error || "")}</div>`;
+    return;
+  }
+  const counts = evidence.state_counts || [];
+  const recent = evidence.recent || [];
+  const failures = evidence.recent_failures || [];
+  const countHtml = counts.length
+    ? counts.map((row) =>
+        `<div><span>${escapeHtml(evidenceStateLabel(row.state))}</span><strong>${formatInteger(row.count)}</strong></div>`
+      ).join("")
+    : `<div><span>最近 3 小时</span><strong>0</strong></div>`;
+  const rows = recent.map((row) => {
+    const warn = row.evidence_state === "failed" || row.task_status && row.task_status !== row.evidence_state;
+    return `<tr class="${warn ? "warn-row" : ""}">` +
+      `<td>${escapeHtml(row.event_type || "--")}</td>` +
+      `<td>${escapeHtml(row.source_id || "--")}</td>` +
+      `<td>${escapeHtml(evidenceStateLabel(row.evidence_state))}</td>` +
+      `<td>${escapeHtml(row.task_status || "--")}</td>` +
+      `<td>${formatAge(row.age_seconds)}</td>` +
+      `<td>${escapeHtml(row.evidence_reason || "--")}</td>` +
+    `</tr>`;
+  }).join("");
+  const failureRows = failures.slice(0, 5).map((row) =>
+    `<li><strong>${escapeHtml(row.source_id || "--")}</strong> ` +
+    `${escapeHtml(row.event_type || "--")} / ${escapeHtml(row.evidence_reason || "failed")}</li>`
+  ).join("");
+  runtimeEvidenceTableEl.innerHTML =
+    `<div class="runtime-kv-grid evidence-state-grid">${countHtml}</div>` +
+    (failureRows ? `<ul class="runtime-failure-list">${failureRows}</ul>` : "") +
+    `<table class="runtime-table">` +
+      `<thead><tr>` +
+        `<th>event</th><th>source</th><th>evidence</th><th>task</th><th>age</th><th>reason</th>` +
+      `</tr></thead>` +
+      `<tbody>${rows || `<tr><td colspan="6">暂无最近证据事件。</td></tr>`}</tbody>` +
     `</table>`;
 }
 

@@ -258,6 +258,54 @@ def test_deferred_retry_budget_exhaustion_fails_closed(monkeypatch) -> None:
     assert "retry_budget_exhausted" in updates[-1]["error_message"]
 
 
+class _RepoCursor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.rowcount = 1
+
+    def __enter__(self) -> "_RepoCursor":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: dict[str, Any]) -> None:
+        self.calls.append((sql, params))
+
+
+class _RepoConn:
+    def __init__(self) -> None:
+        self.cursor_obj = _RepoCursor()
+
+    def cursor(self) -> _RepoCursor:
+        return self.cursor_obj
+
+
+def test_update_clip_status_writes_operator_evidence_state() -> None:
+    _activate()
+    from app.repository import update_clip_status
+
+    conn = _RepoConn()
+
+    assert update_clip_status(
+        conn,
+        "00000000-0000-4000-8000-000000000099",
+        "replay_job_created",
+        replay_job_id="job-1",
+        request_id="req-1",
+        attempt_count=2,
+    )
+
+    event_update = conn.cursor_obj.calls[0][1]
+    task_update = conn.cursor_obj.calls[-1][1]
+    assert event_update["evidence_state"] == "replaying"
+    assert event_update["evidence_reason"] == "replay_job_created"
+    assert event_update["request_id"] == "req-1"
+    assert event_update["attempt_count"] == 2
+    assert task_update["evidence_state"] == "replaying"
+    assert task_update["attempt_count"] == 2
+
+
 def test_post_savant_missing_frame_proof_is_deferred(monkeypatch) -> None:
     _activate()
     import app.worker as worker

@@ -410,6 +410,72 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
         return False
 
 
+def _evidence_state_for_clip_status(clip_status: str) -> str:
+    if clip_status in {"ready", "generated"}:
+        return "ready"
+    if clip_status in {
+        BUNDLE_STATUS_DURATION_GUARD_FAILED,
+        BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
+        "generated_corrupt",
+        "generated_unverified",
+        "failed",
+    }:
+        return "failed"
+    if clip_status == "replay_job_created":
+        return "replaying"
+    return "finalizing"
+
+
+def _set_event_evidence_state(
+    pg_conn: psycopg.Connection,
+    event_id: str,
+    *,
+    state: str,
+    reason: str = "",
+) -> None:
+    if not event_id:
+        return
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET media_status = %(state)s,
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'evidence_state', %(state)s::text,
+                                'evidence_reason', NULLIF(%(reason)s::text, ''),
+                                'evidence_state_updated_at', now()
+                            ))
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {"event_id": event_id, "state": state, "reason": reason},
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = %(state)s,
+                        error_message = CASE
+                            WHEN %(reason)s::text != '' THEN %(reason)s::text
+                            ELSE error_message
+                        END,
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                    """,
+                    {"event_id": event_id, "state": state, "reason": reason},
+                )
+    except Exception:
+        logger.exception(
+            "failed to set evidence state event_id=%s state=%s", event_id, state
+        )
+
+
 def _to_float(value: object) -> float | None:
     try:
         return float(value)  # type: ignore[arg-type]
@@ -3073,6 +3139,7 @@ def _process_sink_output(
         bundle = None
         finalize_started = time.monotonic()
         probe_before = _probe_metrics_snapshot()
+        _set_event_evidence_state(pg_conn, event_id, state="finalizing")
         if post_savant_finalizer_enabled:
             if not evidence_output_dir:
                 logger.error("post_savant_finalizer enabled but no evidence_output_dir")
@@ -3352,6 +3419,58 @@ def _process_sink_output(
                         },
                     )
                 if cur.rowcount and cur.rowcount > 0:
+                    evidence_state = _evidence_state_for_clip_status(clip_status)
+                    evidence_reason = "" if evidence_state == "ready" else clip_status
+                    cur.execute(
+                        """
+                        UPDATE events
+                        SET media_status = %(evidence_state)s,
+                            payload = COALESCE(payload, '{}'::jsonb)
+                                || jsonb_build_object(
+                                    'media',
+                                    COALESCE(payload->'media', '{}'::jsonb)
+                                    || jsonb_strip_nulls(jsonb_build_object(
+                                        'evidence_state', %(evidence_state)s::text,
+                                        'evidence_reason',
+                                            NULLIF(%(evidence_reason)s::text, ''),
+                                        'evidence_state_updated_at', now()
+                                    ))
+                                ),
+                            updated_at = now()
+                        WHERE id = %(event_id)s::uuid
+                        """,
+                        {
+                            "event_id": event_id,
+                            "evidence_state": evidence_state,
+                            "evidence_reason": evidence_reason,
+                        },
+                    )
+                    cur.execute(
+                        """
+                        UPDATE evidence_tasks
+                        SET status = %(evidence_state)s,
+                            clip_path = COALESCE(%(clip_path)s, clip_path),
+                            metadata_path = COALESCE(%(metadata_path)s, metadata_path),
+                            output_root = COALESCE(%(output_root)s, output_root),
+                            error_message = CASE
+                                WHEN %(evidence_reason)s::text != ''
+                                    THEN %(evidence_reason)s::text
+                                ELSE error_message
+                            END,
+                            updated_at = now()
+                        WHERE event_id = %(event_id)s::uuid
+                        """,
+                        {
+                            "event_id": event_id,
+                            "evidence_state": evidence_state,
+                            "clip_path": clip_path,
+                            "metadata_path": (
+                                bundle.get("metadata") if bundle else metadata_file
+                            ),
+                            "output_root": bundle.get("evidence_dir") if bundle else None,
+                            "evidence_reason": evidence_reason,
+                        },
+                    )
                     logger.info(
                         "media_event_updated event_id=%s clip_path=%s sink_path=%s",
                         event_id,
@@ -3381,31 +3500,41 @@ def _mark_media_finalize_failed(
             cur.execute(
                 """
                 UPDATE events
-                SET media_status = %(clip_status_text)s,
-                    payload = jsonb_set(
-                        jsonb_set(
-                            jsonb_set(
-                                COALESCE(payload, '{}'::jsonb),
-                                '{media,clip_status}',
-                                %(clip_status)s::jsonb
-                            ),
-                            '{media,sink_output_path}',
-                            %(sink_path)s::jsonb
+                SET media_status = 'failed',
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'clip_status', %(clip_status_text)s::text,
+                                'sink_output_path', %(sink_path)s::text,
+                                'finalizer_error', %(error_message)s::text,
+                                'evidence_state', 'failed',
+                                'evidence_reason', %(error_message)s::text,
+                                'evidence_state_updated_at', now()
+                            )
                         ),
-                        '{media,finalizer_error}',
-                        %(error_message)s::jsonb
-                    ),
                     updated_at = now()
                 WHERE id = %(event_id)s::uuid
                 """,
                 {
                     "event_id": event_id,
                     "clip_status_text": BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
-                    "clip_status": json.dumps(BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED),
-                    "sink_path": json.dumps(sink_path),
-                    "error_message": json.dumps(error_message),
+                    "sink_path": sink_path,
+                    "error_message": error_message,
                 },
             )
+            if cur.rowcount and cur.rowcount > 0:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = 'failed',
+                        error_message = %(error_message)s,
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                    """,
+                    {"event_id": event_id, "error_message": error_message},
+                )
     except Exception:
         logger.exception("failed to mark media finalizer failure event_id=%s", event_id)
 
@@ -3418,18 +3547,38 @@ def _promote_generated_clips_to_ready(pg_conn: psycopg.Connection) -> int:
                 """
                 UPDATE events
                 SET media_status = 'ready',
-                    payload = jsonb_set(
-                        COALESCE(payload, '{}'::jsonb),
-                        '{media,clip_status}',
-                        '"ready"'::jsonb
-                    ),
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'clip_status', 'ready',
+                                'evidence_state', 'ready',
+                                'evidence_reason', NULL,
+                                'evidence_state_updated_at', now()
+                            )
+                        ),
                     updated_at = now()
                 WHERE payload -> 'media' ->> 'clip_status' = 'generated'
                   AND clip_path IS NOT NULL
                   AND clip_path != ''
                 """
             )
-            return cur.rowcount or 0
+            updated = cur.rowcount or 0
+            if updated:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks t
+                    SET status = 'ready',
+                        clip_path = COALESCE(e.clip_path, t.clip_path),
+                        updated_at = now()
+                    FROM events e
+                    WHERE t.event_id = e.id
+                      AND e.payload -> 'media' ->> 'evidence_state' = 'ready'
+                      AND t.status <> 'ready'
+                    """
+                )
+            return updated
     except Exception:
         logger.exception("_promote_generated_clips_to_ready failed")
         return 0

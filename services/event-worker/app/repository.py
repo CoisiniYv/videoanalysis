@@ -110,12 +110,42 @@ RETURNING id
 
 EVIDENCE_TASK_STATUSES = (
     "pending",
+    "waiting_proof",
+    "queued",
+    "replaying",
+    "finalizing",
     "processing",
     "ready",
     "partial",
     "failed",
     "not_implemented",
 )
+
+OPERATOR_EVIDENCE_STATES = {
+    "pending",
+    "waiting_proof",
+    "queued",
+    "replaying",
+    "finalizing",
+    "ready",
+    "failed",
+    "not_implemented",
+}
+
+_STATUS_TO_EVIDENCE_STATE = {
+    "replay_job_created": "replaying",
+    "generated": "ready",
+    "generated_corrupt": "failed",
+    "generated_unverified": "failed",
+    "duration_guard_failed": "failed",
+    "generated_annotation_failed": "failed",
+    "skipped_by_poc_limit": "failed",
+}
+
+
+def _evidence_state_for_status(status: str) -> str:
+    state = _STATUS_TO_EVIDENCE_STATE.get(str(status), str(status))
+    return state if state in OPERATOR_EVIDENCE_STATES else "failed"
 
 _MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON = (
     "Midterm behavior evidence created the evidence task, but production "
@@ -316,6 +346,7 @@ class EventRepository:
         if status not in EVIDENCE_TASK_STATUSES:
             raise ValueError(f"unsupported evidence status: {status}")
 
+        evidence_state = _evidence_state_for_status(status)
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -332,6 +363,9 @@ class EventRepository:
                                 'clip_status', %(status)s::text,
                                 'metadata_status', %(status)s::text,
                                 'metadata_path', %(metadata_path)s::text,
+                                'evidence_state', %(evidence_state)s::text,
+                                'evidence_reason', NULLIF(%(error_message)s::text, ''),
+                                'evidence_state_updated_at', now(),
                                 'error_message', %(error_message)s::text
                             )
                         ),
@@ -341,13 +375,34 @@ class EventRepository:
                 {
                     "event_id": event_id,
                     "status": status,
+                    "evidence_state": evidence_state,
                     "error_message": error_message,
                     "snapshot_path": snapshot_path,
                     "clip_path": clip_path,
                     "metadata_path": metadata_path,
                 },
             )
-            return cur.rowcount is not None and cur.rowcount > 0
+            updated = cur.rowcount is not None and cur.rowcount > 0
+            if updated:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = %(status)s,
+                        error_message = CASE
+                            WHEN %(error_message)s::text != ''
+                                THEN %(error_message)s::text
+                            ELSE error_message
+                        END,
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                    """,
+                    {
+                        "event_id": event_id,
+                        "status": evidence_state,
+                        "error_message": error_message,
+                    },
+                )
+            return updated
 
     def count_by_source_event_id(self, source_event_id: str) -> int:
         """Return the number of rows with the given *source_event_id*."""
@@ -571,48 +626,57 @@ class EventRepository:
 
         Returns True if a row was updated.
         """
+        evidence_state = _evidence_state_for_status(status)
+        evidence_reason = error_message or (status if status != evidence_state else "")
         with self._conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE events
-                SET payload = jsonb_set(
-                        jsonb_set(
-                            jsonb_set(
-                                COALESCE(payload, '{}'::jsonb),
-                                '{media,clip_status}',
-                                %(status)s::jsonb
-                            ),
-                            '{media,recording_strategy}',
-                            '"savant_replay"'::jsonb
+                SET payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'clip_status', %(status_text)s::text,
+                                'recording_strategy', 'savant_replay',
+                                'replay_job_id', NULLIF(%(replay_job_id)s::text, ''),
+                                'evidence_state', %(evidence_state)s::text,
+                                'evidence_reason', NULLIF(%(evidence_reason)s::text, ''),
+                                'evidence_state_updated_at', now(),
+                                'error_message', NULLIF(%(error_message)s::text, '')
+                            ))
                         ),
-                        '{media,replay_job_id}',
-                        %(replay_job_id)s::jsonb
-                    ),
-                    media_status = %(status_text)s,
+                    media_status = %(evidence_state)s,
                     updated_at = now()
                 WHERE id = %(event_id)s::uuid
                 """,
                 {
-                    "status": json.dumps(status),
                     "status_text": status,
-                    "replay_job_id": json.dumps(replay_job_id),
+                    "replay_job_id": replay_job_id,
+                    "evidence_state": evidence_state,
+                    "evidence_reason": evidence_reason,
+                    "error_message": error_message,
                     "event_id": event_id,
                 },
             )
-            if error_message:
+            updated = cur.rowcount is not None and cur.rowcount > 0
+            if updated:
                 cur.execute(
                     """
-                    UPDATE events
-                    SET payload = jsonb_set(
-                        COALESCE(payload, '{}'::jsonb),
-                        '{media,error_message}',
-                        %(error)s::jsonb
-                    )
-                    WHERE id = %(event_id)s::uuid
+                    UPDATE evidence_tasks
+                    SET status = %(evidence_state)s,
+                        error_message = CASE
+                            WHEN %(evidence_reason)s::text != ''
+                                THEN %(evidence_reason)s::text
+                            ELSE error_message
+                        END,
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
                     """,
                     {
-                        "error": json.dumps(error_message),
+                        "evidence_state": evidence_state,
+                        "evidence_reason": evidence_reason,
                         "event_id": event_id,
                     },
                 )
-            return cur.rowcount is not None and cur.rowcount > 0
+            return updated
