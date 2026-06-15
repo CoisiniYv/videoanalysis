@@ -53,6 +53,8 @@ def _clip_config(**overrides: Any):
         "keyframe_lookup_retry_sleep_s": 0.0,
         "post_savant_frame_proof_attempts": 1,
         "post_savant_frame_proof_retry_sleep_s": 0.0,
+        "post_savant_frame_proof_wait_budget_s": 0.0,
+        "post_savant_frame_proof_poll_interval_s": 0.0,
         "frame_annotation_stream": "security.frame_annotations",
         "frame_annotation_anchor_lookback_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,
@@ -166,6 +168,38 @@ def _request(event_suffix: str, *, event_type: str = "intrusion") -> dict[str, A
         "pre_seconds": 5,
         "post_seconds": 5,
     }
+
+
+def _frame_annotation(
+    *,
+    frame_uuid: str,
+    frame_pts: int,
+    stream_id: str,
+    source_id: str = "source-1",
+    camera_id: str = "camera-1",
+    runtime_epoch_id: str = "epoch-1",
+    stream_session_id: str = "session-1",
+    keyframe_uuid: str | None = None,
+    previous_keyframe_uuid: str | None = None,
+    keyframe_pts: int | None = None,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "_stream_id": stream_id,
+        "message_type": "frame_annotation",
+        "source_id": source_id,
+        "camera_id": camera_id,
+        "frame_uuid": frame_uuid,
+        "frame_pts": frame_pts,
+        "runtime_epoch_id": runtime_epoch_id,
+        "stream_session_id": stream_session_id,
+    }
+    if keyframe_uuid is not None:
+        message["keyframe_uuid"] = keyframe_uuid
+    if previous_keyframe_uuid is not None:
+        message["previous_keyframe_uuid"] = previous_keyframe_uuid
+    if keyframe_pts is not None:
+        message["keyframe_pts"] = keyframe_pts
+    return message
 
 
 def test_concurrency_pressure_defers_without_permanent_skip(monkeypatch) -> None:
@@ -306,7 +340,7 @@ def test_update_clip_status_writes_operator_evidence_state() -> None:
     assert task_update["attempt_count"] == 2
 
 
-def test_post_savant_missing_frame_proof_is_deferred(monkeypatch) -> None:
+def test_post_savant_missing_frame_proof_fails_with_diagnostics(monkeypatch) -> None:
     _activate()
     import app.worker as worker
 
@@ -319,7 +353,19 @@ def test_post_savant_missing_frame_proof_is_deferred(monkeypatch) -> None:
         "stream_session_id": "session-1",
         "runtime_epoch_id": "epoch-1",
     }
-    redis_client = _FakeRedis([request])
+    redis_client = _FakeRedis(
+        [request],
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="latest-wrong-session",
+                frame_pts=14_000_000_000,
+                stream_id="10-0",
+                stream_session_id="session-2",
+                keyframe_uuid="latest-wrong-session",
+                keyframe_pts=14_000_000_000,
+            )
+        ],
+    )
     updates: list[dict[str, Any]] = []
 
     def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
@@ -332,11 +378,111 @@ def test_post_savant_missing_frame_proof_is_deferred(monkeypatch) -> None:
     monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
 
     worker.run_worker(
-        _clip_config(max_concurrent_jobs=0, pending_claim_count=0),
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.0,
+            post_savant_frame_proof_poll_interval_s=0.0,
+        ),
         redis_client,
         object(),
     )
 
-    assert redis_client.acked == []
-    assert updates[-1]["status"] == "pending"
-    assert "post_savant_frame_proof" in updates[-1]["error_message"]
+    assert redis_client.acked == ["1-0"]
+    assert [update["status"] for update in updates] == ["pending", "failed"]
+    assert updates[0]["evidence_state"] == "waiting_proof"
+    assert updates[-1]["evidence_state"] == "failed"
+    assert updates[-1]["evidence_reason"].startswith(
+        "missing_post_savant_frame_pts_window"
+    )
+    diagnostics = updates[-1]["diagnostics"]
+    assert diagnostics["target_pts"] == 15_000_000_000
+    assert diagnostics["requested_start_pts"] == 5_000_000_000
+    assert diagnostics["requested_end_pts"] == 15_000_000_000
+    assert diagnostics["runtime_epoch_id"] == "epoch-1"
+    assert diagnostics["stream_session_id"] == "session-1"
+    assert diagnostics["same_source_same_session_seen"] is False
+    assert diagnostics["same_source_different_session_candidate"] is True
+    assert (
+        diagnostics["latest_same_source_frame_annotation"]["stream_session_id"]
+        == "session-2"
+    )
+
+
+def test_post_savant_frame_proof_succeeds_after_local_poll(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("006"),
+        "replay_source_kind": "post_savant",
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "stream_session_id": "session-1",
+        "runtime_epoch_id": "epoch-1",
+        "keyframe_uuid": "start-keyframe",
+        "keyframe_pts": 5_000_000_000,
+    }
+
+    class DelayedProofRedis(_FakeRedis):
+        def __init__(self) -> None:
+            super().__init__([request], frame_annotations=[])
+            self.proof_reads = 0
+
+        def xrevrange(self, *_args, **_kwargs):
+            self.proof_reads += 1
+            if self.proof_reads <= 2:
+                self.frame_annotations = []
+            else:
+                self.frame_annotations = [
+                    _frame_annotation(
+                        frame_uuid="start-keyframe",
+                        frame_pts=5_000_000_000,
+                        stream_id="1779999995000-0",
+                        keyframe_uuid="start-keyframe",
+                        keyframe_pts=5_000_000_000,
+                    ),
+                    _frame_annotation(
+                        frame_uuid="post-window-frame",
+                        frame_pts=15_000_000_000,
+                        stream_id="1780000000000-0",
+                        keyframe_uuid="start-keyframe",
+                        keyframe_pts=5_000_000_000,
+                    ),
+                ]
+            return super().xrevrange(*_args, **_kwargs)
+
+    redis_client = DelayedProofRedis()
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.03,
+            post_savant_frame_proof_poll_interval_s=0.01,
+        ),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert [update["status"] for update in updates][:-1]
+    assert all(update["status"] == "pending" for update in updates[:-1])
+    assert updates[-1]["status"] == "replay_job_created"
+    assert updates[0]["evidence_state"] == "waiting_proof"
+    assert updates[0]["attempt_count"] == 1
+    assert _FakeReplay.instances[-1].jobs
+    labels = _FakeReplay.instances[-1].last_job_request["labels"]
+    assert labels["post_window_frame_uuid"] == "post-window-frame"
+    assert labels["start_window_frame_uuid"] == "start-keyframe"

@@ -36,6 +36,8 @@ class Config:
     keyframe_lookup_retry_sleep_s: float
     post_savant_frame_proof_attempts: int
     post_savant_frame_proof_retry_sleep_s: float
+    post_savant_frame_proof_wait_budget_s: float
+    post_savant_frame_proof_poll_interval_s: float
     frame_annotation_stream: str
     frame_annotation_anchor_lookback_count: int
     frame_annotation_anchor_wall_clock_slack_s: float
@@ -106,6 +108,18 @@ def load_config() -> Config:
             os.getenv(
                 "POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S",
                 os.getenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "1.0"),
+            )
+        ),
+        post_savant_frame_proof_wait_budget_s=float(
+            os.getenv("POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S", "12")
+        ),
+        post_savant_frame_proof_poll_interval_s=float(
+            os.getenv(
+                "POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S",
+                os.getenv(
+                    "POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S",
+                    os.getenv("KEYFRAME_LOOKUP_RETRY_SLEEP_S", "0.5"),
+                ),
             )
         ),
         frame_annotation_stream=os.getenv(

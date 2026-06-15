@@ -241,13 +241,19 @@ def test_clip_worker_post_savant_frame_proof_wait_has_separate_config(monkeypatc
     assert cfg.keyframe_lookup_retries == 8
     assert cfg.post_savant_frame_proof_attempts == 1
     assert cfg.post_savant_frame_proof_retry_sleep_s == 0.25
+    assert cfg.post_savant_frame_proof_wait_budget_s == 12.0
+    assert cfg.post_savant_frame_proof_poll_interval_s == 0.25
 
     monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_ATTEMPTS", "45")
     monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S", "0.5")
+    monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S", "9")
+    monkeypatch.setenv("POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S", "0.2")
     cfg = config.load_config()
 
     assert cfg.post_savant_frame_proof_attempts == 45
     assert cfg.post_savant_frame_proof_retry_sleep_s == 0.5
+    assert cfg.post_savant_frame_proof_wait_budget_s == 9.0
+    assert cfg.post_savant_frame_proof_poll_interval_s == 0.2
 
 
 def test_media_worker_frame_cache_sidecar_filters_runtime_epoch() -> None:

@@ -7,6 +7,7 @@ import logging
 import signal
 import sys
 import time
+from collections.abc import Callable
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -330,6 +331,96 @@ def _frame_annotation_anchor_target_pts(req: dict, *, post_seconds: int) -> int 
     return int(event_frame_pts) + int(max(post_seconds, 0)) * PTS_TIME_BASE
 
 
+def _frame_annotation_summary(
+    message: dict[str, object],
+    *,
+    stream_id: str,
+) -> dict[str, object]:
+    return {
+        "stream_id": stream_id,
+        "source_id": str(message.get("source_id") or ""),
+        "camera_id": str(message.get("camera_id") or ""),
+        "frame_uuid": str(message.get("frame_uuid") or ""),
+        "frame_pts": _int_or_none(message.get("frame_pts")),
+        "runtime_epoch_id": str(message.get("runtime_epoch_id") or ""),
+        "stream_session_id": str(message.get("stream_session_id") or ""),
+    }
+
+
+def _post_savant_frame_proof_diagnostics(
+    redis_client: Redis,
+    cfg: Config,
+    req: dict,
+    *,
+    source_id: str,
+    camera_id: str,
+    target_pts: int | None,
+    requested_start_pts: int | None,
+    requested_end_pts: int | None,
+    runtime_epoch_id: str,
+    stream_session_id: str,
+) -> dict[str, object]:
+    diagnostics: dict[str, object] = {
+        "request_id": str(req.get("request_id") or ""),
+        "event_id": str(req.get("event_id") or ""),
+        "source_event_id": str(req.get("source_event_id") or ""),
+        "source_id": str(source_id),
+        "camera_id": str(camera_id or source_id),
+        "target_pts": target_pts,
+        "requested_start_pts": requested_start_pts,
+        "requested_end_pts": requested_end_pts,
+        "runtime_epoch_id": runtime_epoch_id,
+        "stream_session_id": stream_session_id,
+        "latest_same_source_frame_annotation": None,
+        "same_source_same_session_seen": False,
+        "same_source_different_session_candidate": False,
+    }
+    try:
+        entries = redis_client.xrevrange(
+            cfg.frame_annotation_stream,
+            max="+",
+            min="-",
+            count=max(1, int(cfg.frame_annotation_anchor_lookback_count)),
+        )
+    except Exception as exc:
+        diagnostics["frame_annotation_lookup_error"] = str(exc)
+        return diagnostics
+
+    expected_camera_id = str(camera_id or source_id)
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        stream_id = _decode_text(entry[0])
+        message = _message_from_frame_annotation_fields(entry[1])
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("source_id") or "") != str(source_id):
+            continue
+        if str(message.get("camera_id") or "") != expected_camera_id:
+            continue
+        message_runtime_epoch_id = str(message.get("runtime_epoch_id") or "").strip()
+        message_stream_session_id = str(message.get("stream_session_id") or "").strip()
+        if runtime_epoch_id and message_runtime_epoch_id != runtime_epoch_id:
+            continue
+        summary = _frame_annotation_summary(message, stream_id=stream_id)
+        if diagnostics["latest_same_source_frame_annotation"] is None:
+            diagnostics["latest_same_source_frame_annotation"] = summary
+        if stream_session_id and message_stream_session_id == stream_session_id:
+            diagnostics["same_source_same_session_seen"] = True
+        elif stream_session_id and message_stream_session_id:
+            diagnostics["same_source_different_session_candidate"] = True
+            diagnostics.setdefault("latest_same_source_different_session", summary)
+        if (
+            diagnostics["latest_same_source_frame_annotation"] is not None
+            and (
+                diagnostics["same_source_same_session_seen"]
+                or diagnostics["same_source_different_session_candidate"]
+            )
+        ):
+            break
+    return diagnostics
+
+
 def _find_frame_annotation_anchor(
     redis_client: Redis,
     *,
@@ -624,8 +715,22 @@ def _fail_clip_request(
     request_id: str,
     error_message: str,
     seen_requests: set[str],
+    evidence_state: str | None = None,
+    evidence_reason: str = "",
+    attempt_count: int | None = None,
+    diagnostics: dict | None = None,
 ) -> None:
-    update_clip_status(pg_conn, event_id, "failed", error_message=error_message)
+    update_clip_status(
+        pg_conn,
+        event_id,
+        "failed",
+        error_message=error_message,
+        evidence_state=evidence_state,
+        evidence_reason=evidence_reason,
+        request_id=request_id,
+        attempt_count=attempt_count,
+        diagnostics=diagnostics,
+    )
     seen_requests.add(request_id)
     redis_client.xack(stream, group, msg_id)
 
@@ -1233,6 +1338,7 @@ def _prepare_post_savant_replay_request(
     keyframe_source: str,
     pre_seconds: int,
     post_seconds: int,
+    on_wait: Callable[[int, int, str, dict[str, object]], None] | None = None,
 ) -> tuple[dict | None, str | None, str, str | None]:
     if not source_id:
         return None, keyframe_uuid, keyframe_source, "missing source_id in record_request"
@@ -1300,7 +1406,26 @@ def _prepare_post_savant_replay_request(
         anchor_strategy=cfg.replay_anchor_strategy,
     )
     selection = _replay_anchor_selection(cfg.replay_anchor_strategy)
-    attempts = max(1, int(cfg.post_savant_frame_proof_attempts))
+    wait_budget_s = max(
+        0.0,
+        float(getattr(cfg, "post_savant_frame_proof_wait_budget_s", 0.0) or 0.0),
+    )
+    poll_interval_s = max(
+        0.0,
+        float(
+            getattr(
+                cfg,
+                "post_savant_frame_proof_poll_interval_s",
+                getattr(cfg, "post_savant_frame_proof_retry_sleep_s", 0.0),
+            )
+            or 0.0
+        ),
+    )
+    legacy_attempts = max(1, int(cfg.post_savant_frame_proof_attempts))
+    if wait_budget_s > 0.0 and poll_interval_s > 0.0:
+        attempts = max(1, int(wait_budget_s / poll_interval_s) + 1)
+    else:
+        attempts = legacy_attempts
     last_error = f"{POST_SAVANT_MISSING_FRAME_TIMELINE_ERROR} source_id={source_id}"
     for attempt in range(attempts):
         proofs = _find_replay_frame_domain_proofs(
@@ -1484,7 +1609,7 @@ def _prepare_post_savant_replay_request(
             "frame_domain_proof_waiting request_id=%s source_id=%s camera_id=%s "
             "target_pts=%s min_stream_ms=%s min_frame_uuid_ms=%s "
             "max_pts_delta_ns=%s stream_session_id=%s keyframe_source=%s "
-            "attempt=%s attempts=%s "
+            "attempt=%s attempts=%s wait_budget_s=%.3f poll_interval_s=%.3f "
             "last_error=%s",
             req.get("request_id"),
             source_id,
@@ -1497,10 +1622,30 @@ def _prepare_post_savant_replay_request(
             keyframe_source,
             attempt + 1,
             attempts,
+            wait_budget_s,
+            poll_interval_s,
             last_error,
         )
+        if on_wait is not None:
+            diagnostics = _post_savant_frame_proof_diagnostics(
+                redis_client,
+                cfg,
+                req,
+                source_id=str(source_id),
+                camera_id=str(camera_id or source_id),
+                target_pts=target_pts,
+                requested_start_pts=requested_start_pts,
+                requested_end_pts=requested_end_pts,
+                runtime_epoch_id=runtime_epoch_id,
+                stream_session_id=stream_session_id,
+            )
+            diagnostics["proof_attempt"] = attempt + 1
+            diagnostics["proof_attempts"] = attempts
+            diagnostics["proof_wait_budget_s"] = wait_budget_s
+            diagnostics["proof_poll_interval_s"] = poll_interval_s
+            on_wait(attempt + 1, attempts, last_error, diagnostics)
         if attempt + 1 < attempts:
-            time.sleep(max(0.0, cfg.post_savant_frame_proof_retry_sleep_s))
+            time.sleep(poll_interval_s)
 
     return None, keyframe_uuid, keyframe_source, last_error
 
@@ -1814,6 +1959,30 @@ def run_worker(
 
                     if post_savant_media_request:
                         frame_proof_wait_started = time.monotonic()
+                        proof_wait_diagnostics: dict[str, object] = {}
+                        proof_wait_attempt_count = 0
+
+                        def _mark_waiting_proof(
+                            attempt: int,
+                            _attempts: int,
+                            error: str,
+                            diagnostics: dict[str, object],
+                        ) -> None:
+                            nonlocal proof_wait_diagnostics, proof_wait_attempt_count
+                            proof_wait_diagnostics = dict(diagnostics)
+                            proof_wait_attempt_count = attempt
+                            update_clip_status(
+                                pg_conn,
+                                event_id,
+                                "pending",
+                                error_message=error,
+                                evidence_state="waiting_proof",
+                                evidence_reason=error,
+                                request_id=request_id,
+                                attempt_count=attempt,
+                                diagnostics=proof_wait_diagnostics,
+                            )
+
                         (
                             replay_anchor_req,
                             keyframe_uuid,
@@ -1830,6 +1999,7 @@ def run_worker(
                             keyframe_source=keyframe_source,
                             pre_seconds=pre_seconds,
                             post_seconds=post_seconds,
+                            on_wait=_mark_waiting_proof,
                         )
                         frame_proof_wait_seconds = time.monotonic() - frame_proof_wait_started
                         logger.info(
@@ -1841,31 +2011,48 @@ def run_worker(
                             anchor_error is None and replay_anchor_req is not None,
                         )
                         if anchor_error is not None or replay_anchor_req is None:
-                            if _post_savant_anchor_error_retryable(req, str(anchor_error)):
-                                _defer_clip_request(
-                                    redis_client,
-                                    pg_conn,
-                                    stream=stream,
-                                    group=group,
-                                    msg_id=msg_id,
-                                    event_id=event_id,
-                                    request_id=request_id,
-                                    reason="post_savant_frame_proof",
-                                    error_message=str(anchor_error),
-                                    retry_count=retry_count,
-                                    max_retries=cfg.deferred_retry_max_attempts,
-                                    seen_requests=seen_requests,
+                            target_pts = _frame_annotation_anchor_target_pts(
+                                req,
+                                post_seconds=post_seconds,
+                            )
+                            requested_start_pts, requested_end_pts = _requested_pts_window(
+                                req,
+                                pre_seconds=pre_seconds,
+                                post_seconds=post_seconds,
+                            )
+                            if not proof_wait_diagnostics:
+                                proof_wait_diagnostics = (
+                                    _post_savant_frame_proof_diagnostics(
+                                        redis_client,
+                                        cfg,
+                                        req,
+                                        source_id=str(source_id),
+                                        camera_id=str(camera_id or source_id),
+                                        target_pts=target_pts,
+                                        requested_start_pts=requested_start_pts,
+                                        requested_end_pts=requested_end_pts,
+                                        runtime_epoch_id=_runtime_epoch_id_from_request(req),
+                                        stream_session_id=_stream_session_id_from_request(req),
+                                    )
                                 )
-                                total_processed += 1
-                                continue
+                            proof_wait_diagnostics["proof_wait_seconds"] = (
+                                frame_proof_wait_seconds
+                            )
+                            proof_wait_diagnostics["proof_retryable_legacy"] = (
+                                _post_savant_anchor_error_retryable(
+                                    req,
+                                    str(anchor_error),
+                                )
+                            )
                             logger.warning(
-                                "clip_worker_blocked post_savant_anchor_failed "
+                                "clip_worker_final_failed post_savant_anchor_failed "
                                 "request_id=%s source_event_id=%s source_id=%s "
-                                "camera_id=%s error=%s",
+                                "camera_id=%s attempt_count=%s error=%s",
                                 req.get("request_id"),
                                 source_event_id,
                                 source_id,
                                 camera_id,
+                                proof_wait_attempt_count,
                                 anchor_error,
                             )
                             _fail_clip_request(
@@ -1878,6 +2065,10 @@ def run_worker(
                                 request_id=request_id,
                                 error_message=str(anchor_error),
                                 seen_requests=seen_requests,
+                                evidence_state="failed",
+                                evidence_reason=str(anchor_error),
+                                attempt_count=proof_wait_attempt_count or None,
+                                diagnostics=proof_wait_diagnostics,
                             )
                             total_processed += 1
                             continue
