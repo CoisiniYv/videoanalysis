@@ -166,6 +166,121 @@ def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> 
     assert summary["messages_retained"] == 1
 
 
+def test_frame_cache_reader_allows_verified_cross_session_post_window() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    class FakeRedis:
+        def xrevrange(
+            self,
+            _name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            return [
+                (
+                    "1781197210000-0",
+                    {
+                        "data": json.dumps(
+                                _frame_annotation(
+                                    "post-window-frame",
+                                    frame_pts=105_000_000_000,
+                                    stream_session_id="session-2",
+                                )
+                        )
+                    },
+                ),
+                (
+                    "1781197207000-0",
+                    {"data": json.dumps(_frame_annotation("start-window-frame"))},
+                ),
+            ]
+
+    messages, summary = writer._read_frame_annotations(
+        redis_client=FakeRedis(),
+        config={
+            "stream_name": "security.frame_annotations",
+            "lookback_count": 20000,
+            "range_count": 5,
+            "max_scan": 20000,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "start-window-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {
+                "runtime_epoch_id": CURRENT_EPOCH,
+                "stream_session_id": "session-1",
+                "media": {
+                    "replay_job_request": {
+                        "configuration": {
+                            "labels": {
+                                "stream_session_id": "session-1",
+                                "start_window_stream_session_id": "session-1",
+                                "post_window_stream_session_id": "session-2",
+                                "post_window_cross_session_proof_used": "true",
+                                "frame_domain_session_policy": (
+                                    "post_window_cross_session_pts_verified"
+                                ),
+                            }
+                        }
+                    }
+                },
+            },
+        },
+    )
+
+    assert [message["frame_uuid"] for message in messages] == [
+        "start-window-frame",
+        "post-window-frame",
+    ]
+    assert summary["expected_stream_session_id"] == "session-1"
+    assert summary["expected_stream_session_ids"] == ["session-1", "session-2"]
+    assert summary["messages_filtered_stream_session"] == 0
+    assert summary["messages_retained"] == 2
+
+
+def test_frame_cache_window_uses_effective_start_for_truncated_pre_window() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    window = worker._frame_cache_time_domain_window(
+        event_context={
+            "frame_pts": 10_000_000_000,
+            "payload": {"media": {"requested_start_pts": 5_000_000_000}},
+        },
+        replay_labels={
+            "event_frame_pts": "10000000000",
+            "original_requested_start_pts": "5000000000",
+            "effective_start_pts": "9250000000",
+            "requested_start_pts": "9250000000",
+            "requested_end_pts": "15000000000",
+            "pre_window_truncated": "true",
+            "pre_window_policy": "truncated_to_current_session",
+            "requested_pre_window_seconds": "5.0",
+            "effective_pre_window_seconds": "0.75",
+            "pre_window_truncated_seconds": "4.25",
+        },
+    )
+
+    assert window["original_requested_start_pts"] == 5_000_000_000
+    assert window["effective_start_pts"] == 9_250_000_000
+    assert window["requested_start_pts"] == 9_250_000_000
+    assert window["requested_end_pts"] == 15_000_000_000
+    assert window["requested_duration_s"] == 5.75
+    assert window["expected_event_t_s"] == 0.75
+    assert window["pre_window_truncated"] is True
+    assert window["pre_window_policy"] == "truncated_to_current_session"
+    assert window["requested_pre_window_seconds"] == 5.0
+    assert window["effective_pre_window_seconds"] == 0.75
+    assert window["pre_window_truncated_seconds"] == 4.25
+
+
 def _frame_annotation(
     frame_uuid: str,
     *,
@@ -173,13 +288,14 @@ def _frame_annotation(
     stream_session_id: str = "session-1",
     source_id: str = "source-1",
     camera_id: str = "camera-1",
+    frame_pts: int = 100_000_000_000,
 ) -> dict[str, object]:
     return {
         "message_type": "frame_annotation",
         "source_id": source_id,
         "camera_id": camera_id,
         "frame_uuid": frame_uuid,
-        "frame_pts": 100_000_000_000,
+        "frame_pts": frame_pts,
         "timestamp_ms": 1781197200000,
         "runtime_epoch_id": runtime_epoch_id,
         "stream_session_id": stream_session_id,

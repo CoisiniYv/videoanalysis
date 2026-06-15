@@ -38,6 +38,8 @@ class Config:
     post_savant_frame_proof_retry_sleep_s: float
     post_savant_frame_proof_wait_budget_s: float
     post_savant_frame_proof_poll_interval_s: float
+    post_savant_allow_cross_session_post_window_proof: bool
+    post_savant_allow_truncated_pre_window_proof: bool
     frame_annotation_stream: str
     frame_annotation_anchor_lookback_count: int
     frame_annotation_anchor_wall_clock_slack_s: float
@@ -122,6 +124,18 @@ def load_config() -> Config:
                 ),
             )
         ),
+        post_savant_allow_cross_session_post_window_proof=os.getenv(
+            "POST_SAVANT_ALLOW_CROSS_SESSION_POST_WINDOW_PROOF", "true"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes"),
+        post_savant_allow_truncated_pre_window_proof=os.getenv(
+            "POST_SAVANT_ALLOW_TRUNCATED_PRE_WINDOW_PROOF", "true"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes"),
         frame_annotation_stream=os.getenv(
             "FRAME_ANNOTATION_STREAM", "security.frame_annotations"
         ),

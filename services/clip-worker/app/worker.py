@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Callable
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import psycopg
 from redis import Redis
@@ -34,6 +34,10 @@ ANCHOR_KEYFRAME_PTS_OUTSIDE_WINDOW_ERROR = "anchor_keyframe_pts_outside_requeste
 EVENT_FRAME_ANCHOR_NOT_KEYFRAME_ERROR = "event_frame_anchor_not_keyframe"
 LOOKUP_RETURNED_PROOF_KEYFRAME_ERROR = "keyframes_find_returned_proof_keyframe"
 PRIORITY_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
+FRAME_DOMAIN_SESSION_POLICY_STRICT = "strict_single_session"
+FRAME_DOMAIN_SESSION_POLICY_CROSS_POST = "post_window_cross_session_pts_verified"
+PRE_WINDOW_POLICY_FULL = "full_requested_window"
+PRE_WINDOW_POLICY_TRUNCATED = "truncated_to_current_session"
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,10 @@ class FrameAnnotationAnchor:
 class ReplayFrameDomainProofs:
     start_window_frame: FrameAnnotationAnchor
     post_window_frame: FrameAnnotationAnchor
+    requested_start_pts: int = 0
+    effective_start_pts: int = 0
+    pre_window_truncated: bool = False
+    pre_window_policy: str = PRE_WINDOW_POLICY_FULL
 
 
 def _request_identity(req: dict) -> str:
@@ -347,6 +355,56 @@ def _frame_annotation_summary(
     }
 
 
+def _find_cross_session_post_window_candidate(
+    redis_client: Redis,
+    cfg: Config,
+    *,
+    source_id: str,
+    camera_id: str,
+    requested_end_pts: int | None,
+    min_post_stream_ms: int | None,
+    min_post_frame_uuid_ms: int | None,
+    runtime_epoch_id: str,
+    stream_session_id: str,
+) -> dict[str, object] | None:
+    if requested_end_pts is None:
+        return None
+    max_post_pts_delta_ns = int(
+        max(cfg.frame_annotation_anchor_pts_tolerance_s, 0.0) * PTS_TIME_BASE
+    )
+    anchor = _find_frame_annotation_anchor(
+        redis_client,
+        stream_name=cfg.frame_annotation_stream,
+        source_id=source_id,
+        camera_id=camera_id,
+        target_pts=requested_end_pts,
+        count=cfg.frame_annotation_anchor_lookback_count,
+        direction="at_or_after",
+        min_stream_ms=min_post_stream_ms,
+        max_pts_delta_ns=max_post_pts_delta_ns,
+        min_frame_uuid_ms=min_post_frame_uuid_ms,
+        runtime_epoch_id=runtime_epoch_id,
+        stream_session_id="",
+    )
+    if anchor is None:
+        return None
+    summary = {
+        "source_id": anchor.source_id,
+        "camera_id": anchor.camera_id,
+        "frame_uuid": anchor.frame_uuid,
+        "frame_pts": anchor.frame_pts,
+        "stream_id": anchor.stream_id,
+        "stream_session_id": anchor.stream_session_id,
+        "requested_stream_session_id": stream_session_id,
+        "pts_delta_ns": int(anchor.frame_pts) - int(requested_end_pts),
+    }
+    if stream_session_id and anchor.stream_session_id == stream_session_id:
+        summary["matches_requested_stream_session"] = True
+    else:
+        summary["matches_requested_stream_session"] = False
+    return summary
+
+
 def _post_savant_frame_proof_diagnostics(
     redis_client: Redis,
     cfg: Config,
@@ -374,7 +432,14 @@ def _post_savant_frame_proof_diagnostics(
         "latest_same_source_frame_annotation": None,
         "same_source_same_session_seen": False,
         "same_source_different_session_candidate": False,
+        "cross_session_post_window_candidate": None,
+        "truncated_pre_window_candidate": None,
     }
+    min_anchor_stream_ms = _frame_annotation_anchor_min_stream_ms(
+        req,
+        slack_seconds=cfg.frame_annotation_anchor_wall_clock_slack_s,
+    )
+    min_anchor_frame_uuid_ms = _uuid7_timestamp_ms(str(req.get("frame_uuid") or ""))
     try:
         entries = redis_client.xrevrange(
             cfg.frame_annotation_stream,
@@ -385,6 +450,75 @@ def _post_savant_frame_proof_diagnostics(
     except Exception as exc:
         diagnostics["frame_annotation_lookup_error"] = str(exc)
         return diagnostics
+
+    diagnostics["cross_session_post_window_candidate"] = (
+        _find_cross_session_post_window_candidate(
+            redis_client,
+            cfg,
+            source_id=str(source_id),
+            camera_id=str(camera_id or source_id),
+            requested_end_pts=requested_end_pts,
+            min_post_stream_ms=min_anchor_stream_ms,
+            min_post_frame_uuid_ms=min_anchor_frame_uuid_ms,
+            runtime_epoch_id=runtime_epoch_id,
+            stream_session_id=stream_session_id,
+        )
+    )
+    event_frame_pts = _int_or_none(req.get("event_frame_pts") or req.get("frame_pts"))
+    if requested_start_pts is not None and event_frame_pts is not None:
+        min_start_stream_ms = (
+            None
+            if min_anchor_stream_ms is None
+            else int(
+                min_anchor_stream_ms
+                - max(float(req.get("pre_seconds", cfg.default_pre_seconds) or 0), 0.0)
+                * 1000
+            )
+        )
+        min_start_frame_uuid_ms = (
+            None
+            if min_anchor_frame_uuid_ms is None
+            else int(
+                min_anchor_frame_uuid_ms
+                - max(float(req.get("pre_seconds", cfg.default_pre_seconds) or 0), 0.0)
+                * 1000
+                - max(cfg.frame_annotation_anchor_wall_clock_slack_s, 0.0) * 1000
+            )
+        )
+        truncated_start = _derive_truncated_start_window_frame(
+            redis_client,
+            stream_name=cfg.frame_annotation_stream,
+            source_id=str(source_id),
+            camera_id=str(camera_id or source_id),
+            requested_start_pts=int(requested_start_pts),
+            event_frame_pts=int(event_frame_pts),
+            count=cfg.frame_annotation_anchor_lookback_count,
+            min_stream_ms=min_start_stream_ms,
+            max_keyframe_pts_delta_ns=int(
+                max(float(cfg.keyframe_lookup_window_s), 0.0) * PTS_TIME_BASE
+            ),
+            min_frame_uuid_ms=min_start_frame_uuid_ms,
+            runtime_epoch_id=runtime_epoch_id,
+            stream_session_id=stream_session_id,
+        )
+        if truncated_start is not None:
+            diagnostics["truncated_pre_window_candidate"] = {
+                "source_id": truncated_start.source_id,
+                "camera_id": truncated_start.camera_id,
+                "frame_uuid": truncated_start.frame_uuid,
+                "frame_pts": truncated_start.frame_pts,
+                "stream_id": truncated_start.stream_id,
+                "stream_session_id": truncated_start.stream_session_id,
+                "keyframe_uuid": truncated_start.keyframe_uuid,
+                "keyframe_pts": truncated_start.keyframe_pts,
+                "requested_start_pts": requested_start_pts,
+                "event_frame_pts": event_frame_pts,
+                "effective_start_pts": (
+                    truncated_start.keyframe_pts
+                    if truncated_start.keyframe_pts is not None
+                    else truncated_start.frame_pts
+                ),
+            }
 
     expected_camera_id = str(camera_id or source_id)
     for entry in entries:
@@ -1144,6 +1278,108 @@ def _derive_start_window_frame_from_keyframe_reference(
     return min(candidates, key=lambda item: (item.frame_pts, item.stream_id))
 
 
+def _derive_truncated_start_window_frame(
+    redis_client: Redis,
+    *,
+    stream_name: str,
+    source_id: str,
+    camera_id: str,
+    requested_start_pts: int,
+    event_frame_pts: int,
+    count: int,
+    min_stream_ms: int | None = None,
+    max_keyframe_pts_delta_ns: int | None = None,
+    min_frame_uuid_ms: int | None = None,
+    runtime_epoch_id: str = "",
+    stream_session_id: str = "",
+) -> FrameAnnotationAnchor | None:
+    """Find the earliest current-session decodable point before the event."""
+    entries = redis_client.xrevrange(
+        stream_name,
+        max="+",
+        min="-",
+        count=max(1, int(count)),
+    )
+    candidates: list[FrameAnnotationAnchor] = []
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        stream_id = _decode_text(entry[0])
+        stream_ms = _redis_stream_id_ms(stream_id)
+        if (
+            min_stream_ms is not None
+            and stream_ms is not None
+            and stream_ms < min_stream_ms
+        ):
+            continue
+        message = _message_from_frame_annotation_fields(entry[1])
+        if not isinstance(message, dict):
+            continue
+        if not _frame_annotation_matches_domain(
+            message,
+            runtime_epoch_id,
+            stream_session_id,
+        ):
+            continue
+        if str(message.get("source_id") or "") != str(source_id):
+            continue
+        if str(message.get("camera_id") or "") != str(camera_id):
+            continue
+        frame_uuid = str(message.get("frame_uuid") or "")
+        frame_pts = _int_or_none(message.get("frame_pts"))
+        if not frame_uuid or frame_pts is None:
+            continue
+        if int(frame_pts) > int(event_frame_pts):
+            continue
+        frame_uuid_ms = _uuid7_timestamp_ms(frame_uuid)
+        if min_frame_uuid_ms is not None:
+            if frame_uuid_ms is None or frame_uuid_ms < min_frame_uuid_ms:
+                continue
+        keyframe_uuid = (
+            str(message.get("keyframe_uuid") or "")
+            or str(message.get("previous_keyframe_uuid") or "")
+            or None
+        )
+        keyframe_pts = _int_or_none(message.get("keyframe_pts"))
+        if not keyframe_uuid:
+            continue
+        if keyframe_pts is None:
+            keyframe_pts = int(frame_pts) if keyframe_uuid == frame_uuid else None
+        if keyframe_pts is None:
+            continue
+        if int(keyframe_pts) > int(event_frame_pts):
+            continue
+        if (
+            max_keyframe_pts_delta_ns is not None
+            and int(event_frame_pts) - int(keyframe_pts) > max_keyframe_pts_delta_ns
+        ):
+            continue
+        candidates.append(
+            FrameAnnotationAnchor(
+                frame_uuid=frame_uuid,
+                frame_pts=int(frame_pts),
+                stream_id=stream_id,
+                source_id=str(source_id),
+                camera_id=str(camera_id),
+                stream_session_id=str(message.get("stream_session_id") or ""),
+                keyframe_uuid=keyframe_uuid,
+                previous_keyframe_uuid=keyframe_uuid,
+                keyframe_pts=int(keyframe_pts),
+                anchor_method="frame_annotation_truncated_start_window",
+            )
+        )
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda item: (
+            item.keyframe_pts if item.keyframe_pts is not None else item.frame_pts,
+            item.frame_pts,
+            item.stream_id,
+        ),
+    )
+
+
 def _find_replay_frame_domain_proofs(
     redis_client: Redis,
     *,
@@ -1162,6 +1398,9 @@ def _find_replay_frame_domain_proofs(
     min_post_frame_uuid_ms: int | None = None,
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
+    allow_cross_session_post_window: bool = False,
+    allow_truncated_pre_window: bool = False,
+    event_frame_pts: int | None = None,
 ) -> ReplayFrameDomainProofs | None:
     post_window_frame = _find_frame_annotation_anchor(
         redis_client,
@@ -1177,6 +1416,26 @@ def _find_replay_frame_domain_proofs(
         runtime_epoch_id=runtime_epoch_id,
         stream_session_id=stream_session_id,
     )
+    if post_window_frame is None and allow_cross_session_post_window:
+        post_window_frame = _find_frame_annotation_anchor(
+            redis_client,
+            stream_name=stream_name,
+            source_id=source_id,
+            camera_id=camera_id,
+            target_pts=requested_end_pts,
+            count=count,
+            direction="at_or_after",
+            min_stream_ms=min_post_stream_ms,
+            max_pts_delta_ns=max_post_pts_delta_ns,
+            min_frame_uuid_ms=min_post_frame_uuid_ms,
+            runtime_epoch_id=runtime_epoch_id,
+            stream_session_id="",
+        )
+        if post_window_frame is not None:
+            post_window_frame = replace(
+                post_window_frame,
+                anchor_method="frame_annotation_cross_session_post_window_pts",
+            )
     if post_window_frame is None:
         return None
     start_window_frame = _find_frame_annotation_anchor(
@@ -1210,10 +1469,41 @@ def _find_replay_frame_domain_proofs(
             stream_session_id=stream_session_id,
         )
     if start_window_frame is None:
+        if not allow_truncated_pre_window or event_frame_pts is None:
+            return None
+        start_window_frame = _derive_truncated_start_window_frame(
+            redis_client,
+            stream_name=stream_name,
+            source_id=source_id,
+            camera_id=camera_id,
+            requested_start_pts=requested_start_pts,
+            event_frame_pts=event_frame_pts,
+            count=count,
+            min_stream_ms=min_start_stream_ms,
+            max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
+            min_frame_uuid_ms=min_start_frame_uuid_ms,
+            runtime_epoch_id=runtime_epoch_id,
+            stream_session_id=stream_session_id,
+        )
+    if start_window_frame is None:
         return None
+    effective_start_pts = (
+        start_window_frame.keyframe_pts
+        if start_window_frame.keyframe_pts is not None
+        else start_window_frame.frame_pts
+    )
+    pre_window_truncated = int(effective_start_pts) > int(requested_start_pts)
     return ReplayFrameDomainProofs(
         start_window_frame=start_window_frame,
         post_window_frame=post_window_frame,
+        requested_start_pts=int(requested_start_pts),
+        effective_start_pts=int(effective_start_pts),
+        pre_window_truncated=pre_window_truncated,
+        pre_window_policy=(
+            PRE_WINDOW_POLICY_TRUNCATED
+            if pre_window_truncated
+            else PRE_WINDOW_POLICY_FULL
+        ),
     )
 
 
@@ -1241,6 +1531,7 @@ def _apply_replay_anchor_to_request(
         updated["event_frame_uuid"] = event_frame_uuid
     if event_frame_pts is not None:
         updated.setdefault("event_frame_pts", event_frame_pts)
+        original_requested_start_pts = _int_or_none(updated.get("requested_start_pts"))
         updated.setdefault(
             "requested_start_pts",
             max(0, int(event_frame_pts) - int(pre_seconds) * PTS_TIME_BASE),
@@ -1251,6 +1542,44 @@ def _apply_replay_anchor_to_request(
         )
         requested_start_pts = _int_or_none(updated.get("requested_start_pts"))
         requested_end_pts = _int_or_none(updated.get("requested_end_pts"))
+        effective_start_pts = (
+            int(proofs.effective_start_pts)
+            if proofs.effective_start_pts
+            else requested_start_pts
+        )
+        if (
+            requested_start_pts is not None
+            and effective_start_pts is not None
+            and int(effective_start_pts) > int(requested_start_pts)
+        ):
+            updated["original_requested_start_pts"] = int(requested_start_pts)
+            updated["effective_start_pts"] = int(effective_start_pts)
+            updated["requested_start_pts"] = int(effective_start_pts)
+            updated["pre_window_truncated"] = True
+            updated["pre_window_policy"] = PRE_WINDOW_POLICY_TRUNCATED
+            updated["requested_pre_window_seconds"] = max(
+                (int(event_frame_pts) - int(original_requested_start_pts or requested_start_pts))
+                / PTS_TIME_BASE,
+                0.0,
+            )
+            updated["effective_pre_window_seconds"] = max(
+                (int(event_frame_pts) - int(effective_start_pts)) / PTS_TIME_BASE,
+                0.0,
+            )
+            updated["pre_window_truncated_seconds"] = max(
+                (
+                    int(effective_start_pts)
+                    - int(original_requested_start_pts or requested_start_pts)
+                )
+                / PTS_TIME_BASE,
+                0.0,
+            )
+            requested_start_pts = int(effective_start_pts)
+        else:
+            updated["pre_window_truncated"] = False
+            updated["pre_window_policy"] = PRE_WINDOW_POLICY_FULL
+            if requested_start_pts is not None:
+                updated["effective_start_pts"] = int(requested_start_pts)
         if requested_start_pts is not None:
             updated["replay_offset_seconds"] = max(
                 (int(anchor_keyframe_pts) - int(requested_start_pts))
@@ -1277,7 +1606,8 @@ def _apply_replay_anchor_to_request(
             replay_duration_base_seconds = max(
                 (int(requested_end_pts) - job_start_pts)
                 / PTS_TIME_BASE,
-                float(pre_seconds + post_seconds),
+                (int(requested_end_pts) - int(requested_start_pts))
+                / PTS_TIME_BASE,
             )
             replay_duration_seconds = replay_duration_base_seconds
             anchor_before_start_guard_s = 0.0
@@ -1329,11 +1659,40 @@ def _apply_replay_anchor_to_request(
     updated["post_window_frame_annotation_stream_id"] = post_window_frame.stream_id
     updated["post_window_proof_used"] = True
     updated["start_window_coverage_used"] = True
-    updated["frame_domain_proof_method"] = (
-        "frame_cache_start_window_keyframe_and_post_window_pts"
-        if start_window_frame.anchor_method == "frame_annotation"
-        else "frame_cache_start_window_keyframe_reference_and_post_window_pts"
+    requested_stream_session_id = str(updated.get("stream_session_id") or "")
+    post_window_cross_session = bool(
+        requested_stream_session_id
+        and post_window_frame.stream_session_id
+        and post_window_frame.stream_session_id != requested_stream_session_id
     )
+    updated["post_window_cross_session_proof_used"] = post_window_cross_session
+    updated["pre_window_truncated"] = bool(updated.get("pre_window_truncated", False))
+    updated["pre_window_policy"] = str(
+        updated.get("pre_window_policy") or PRE_WINDOW_POLICY_FULL
+    )
+    updated["frame_domain_session_policy"] = (
+        FRAME_DOMAIN_SESSION_POLICY_CROSS_POST
+        if post_window_cross_session
+        else FRAME_DOMAIN_SESSION_POLICY_STRICT
+    )
+    if bool(updated.get("pre_window_truncated")) and post_window_cross_session:
+        updated["frame_domain_proof_method"] = (
+            "frame_cache_truncated_start_window_and_cross_session_post_window_pts"
+        )
+    elif bool(updated.get("pre_window_truncated")):
+        updated["frame_domain_proof_method"] = (
+            "frame_cache_truncated_start_window_keyframe_reference_and_post_window_pts"
+        )
+    elif post_window_cross_session:
+        updated["frame_domain_proof_method"] = (
+            "frame_cache_start_window_keyframe_and_cross_session_post_window_pts"
+        )
+    else:
+        updated["frame_domain_proof_method"] = (
+            "frame_cache_start_window_keyframe_and_post_window_pts"
+            if start_window_frame.anchor_method == "frame_annotation"
+            else "frame_cache_start_window_keyframe_reference_and_post_window_pts"
+        )
     return updated
 
 
@@ -1495,6 +1854,23 @@ def _prepare_post_savant_replay_request(
             min_post_frame_uuid_ms=min_anchor_frame_uuid_ms,
             runtime_epoch_id=runtime_epoch_id,
             stream_session_id=stream_session_id,
+            allow_cross_session_post_window=bool(
+                getattr(
+                    cfg,
+                    "post_savant_allow_cross_session_post_window_proof",
+                    False,
+                )
+            ),
+            allow_truncated_pre_window=bool(
+                getattr(
+                    cfg,
+                    "post_savant_allow_truncated_pre_window_proof",
+                    False,
+                )
+            ),
+            event_frame_pts=_int_or_none(
+                req.get("event_frame_pts") or req.get("frame_pts")
+            ),
         )
         candidate_uuid = keyframe_uuid
         candidate_source = keyframe_source
@@ -1621,6 +1997,7 @@ def _prepare_post_savant_replay_request(
                     "start_window_frame_uuid=%s start_window_session_id=%s "
                     "post_window_frame_pts=%s post_window_frame_uuid=%s "
                     "post_window_session_id=%s post_window_stream_id=%s "
+                    "frame_domain_session_policy=%s "
                     "post_window_proof_only=true start_window_coverage_only=true "
                     "replay_offset_seconds=%s replay_duration_base_seconds=%s "
                     "replay_duration_anchor_before_start_guard_used=%s "
@@ -1643,6 +2020,7 @@ def _prepare_post_savant_replay_request(
                     proofs.post_window_frame.frame_uuid,
                     proofs.post_window_frame.stream_session_id,
                     proofs.post_window_frame.stream_id,
+                    updated_req.get("frame_domain_session_policy"),
                     updated_req.get("replay_offset_seconds"),
                     updated_req.get("replay_duration_base_seconds"),
                     updated_req.get("replay_duration_anchor_before_start_guard_used"),
@@ -1738,7 +2116,12 @@ def _replay_job_labels(
         "frame_num",
         "metadata_domain",
         "requested_start_pts",
+        "original_requested_start_pts",
+        "effective_start_pts",
         "requested_end_pts",
+        "requested_pre_window_seconds",
+        "effective_pre_window_seconds",
+        "pre_window_truncated_seconds",
         "event_frame_uuid",
         "event_frame_pts",
         "anchor_keyframe_uuid",
@@ -1755,6 +2138,10 @@ def _replay_job_labels(
         "post_window_stream_session_id",
         "post_window_proof_used",
         "post_window_frame_annotation_stream_id",
+        "post_window_cross_session_proof_used",
+        "pre_window_truncated",
+        "pre_window_policy",
+        "frame_domain_session_policy",
         "frame_domain_proof_method",
         "replay_stop_strategy",
         "replay_duration_base_seconds",

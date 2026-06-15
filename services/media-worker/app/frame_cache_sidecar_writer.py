@@ -672,7 +672,9 @@ def _read_frame_annotations(
     source_id = anchor.get("source_id") if anchor else None
     camera_id = anchor.get("camera_id") if anchor else None
     runtime_epoch_id = _runtime_epoch_id_from_event(event)
-    stream_session_id = _stream_session_id_from_event(event)
+    stream_session_ids = _stream_session_ids_from_event(event)
+    stream_session_id = stream_session_ids[0] if stream_session_ids else ""
+    stream_session_id_set = set(stream_session_ids)
     stream_name = str(config.get("stream_name") or "security.frame_annotations")
     lookback_count = int(config.get("lookback_count") or 10000)
     max_scan = int(config.get("max_scan") or 20000)
@@ -701,6 +703,7 @@ def _read_frame_annotations(
         "messages_filtered_camera": 0,
         "expected_runtime_epoch_id": runtime_epoch_id,
         "expected_stream_session_id": stream_session_id,
+        "expected_stream_session_ids": stream_session_ids,
         "earliest_frame_pts": None,
         "latest_frame_pts": None,
         "duplicate_frame_uuid_messages": 0,
@@ -731,9 +734,9 @@ def _read_frame_annotations(
         ):
             summary["messages_filtered_runtime_epoch"] += 1
             continue
-        if (
-            stream_session_id
-            and str(message.get("stream_session_id") or "").strip() != stream_session_id
+        if stream_session_id_set and (
+            str(message.get("stream_session_id") or "").strip()
+            not in stream_session_id_set
         ):
             summary["messages_filtered_stream_session"] += 1
             continue
@@ -820,7 +823,7 @@ def _runtime_epoch_id_from_event(event: dict[str, Any]) -> str:
     ).strip()
 
 
-def _stream_session_id_from_event(event: dict[str, Any]) -> str:
+def _replay_labels_from_event(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("payload")
     payload = payload if isinstance(payload, dict) else {}
     media = payload.get("media")
@@ -830,14 +833,46 @@ def _stream_session_id_from_event(event: dict[str, Any]) -> str:
     configuration = replay_job_request.get("configuration")
     configuration = configuration if isinstance(configuration, dict) else {}
     labels = configuration.get("labels")
-    labels = labels if isinstance(labels, dict) else {}
-    return str(
-        event.get("stream_session_id")
-        or payload.get("stream_session_id")
-        or media.get("stream_session_id")
-        or labels.get("stream_session_id")
-        or ""
-    ).strip()
+    return labels if isinstance(labels, dict) else {}
+
+
+def _stream_session_id_from_event(event: dict[str, Any]) -> str:
+    sessions = _stream_session_ids_from_event(event)
+    return sessions[0] if sessions else ""
+
+
+def _stream_session_ids_from_event(event: dict[str, Any]) -> list[str]:
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    labels = _replay_labels_from_event(event)
+    candidates = [
+        event.get("stream_session_id"),
+        payload.get("stream_session_id"),
+        media.get("stream_session_id"),
+        labels.get("stream_session_id"),
+        labels.get("start_window_stream_session_id"),
+    ]
+    if (
+        str(labels.get("frame_domain_session_policy") or "").strip()
+        == "post_window_cross_session_pts_verified"
+        or str(labels.get("post_window_cross_session_proof_used") or "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes"}
+    ):
+        candidates.append(labels.get("post_window_stream_session_id"))
+
+    sessions: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        sessions.append(value)
+    return sessions
 
 
 def _duplicate_message_count(values: list[Any]) -> tuple[int, int]:

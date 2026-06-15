@@ -55,6 +55,8 @@ def _clip_config(**overrides: Any):
         "post_savant_frame_proof_retry_sleep_s": 0.0,
         "post_savant_frame_proof_wait_budget_s": 0.0,
         "post_savant_frame_proof_poll_interval_s": 0.0,
+        "post_savant_allow_cross_session_post_window_proof": True,
+        "post_savant_allow_truncated_pre_window_proof": True,
         "frame_annotation_stream": "security.frame_annotations",
         "frame_annotation_anchor_lookback_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,
@@ -479,6 +481,325 @@ def test_post_savant_missing_frame_proof_fails_with_diagnostics(monkeypatch) -> 
         diagnostics["latest_same_source_frame_annotation"]["stream_session_id"]
         == "session-2"
     )
+    assert diagnostics["cross_session_post_window_candidate"] is None
+
+
+def test_post_savant_cross_session_post_window_proof_can_create_job(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("012"),
+        "replay_source_kind": "post_savant",
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "stream_session_id": "session-1",
+        "runtime_epoch_id": "epoch-1",
+        "keyframe_uuid": "start-keyframe",
+        "keyframe_pts": 5_000_000_000,
+    }
+    redis_client = _FakeRedis(
+        [request],
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="start-keyframe",
+                frame_pts=5_000_000_000,
+                stream_id="1779999995000-0",
+                stream_session_id="session-1",
+                keyframe_uuid="start-keyframe",
+                keyframe_pts=5_000_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="post-window-frame",
+                frame_pts=15_000_000_000,
+                stream_id="1780000005000-0",
+                stream_session_id="session-2",
+                keyframe_uuid="post-session-keyframe",
+                keyframe_pts=14_900_000_000,
+            ),
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.0,
+            post_savant_frame_proof_poll_interval_s=0.0,
+            post_savant_allow_cross_session_post_window_proof=True,
+        ),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "replay_job_created"
+    labels = _FakeReplay.instances[-1].last_job_request["labels"]
+    assert labels["stream_session_id"] == "session-1"
+    assert labels["start_window_stream_session_id"] == "session-1"
+    assert labels["post_window_stream_session_id"] == "session-2"
+    assert labels["post_window_cross_session_proof_used"] == "true"
+    assert labels["frame_domain_session_policy"] == (
+        "post_window_cross_session_pts_verified"
+    )
+    assert labels["frame_domain_proof_method"] == (
+        "frame_cache_start_window_keyframe_and_cross_session_post_window_pts"
+    )
+
+
+def test_post_savant_cross_session_post_window_proof_can_be_disabled(
+    monkeypatch,
+) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("013"),
+        "replay_source_kind": "post_savant",
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "stream_session_id": "session-1",
+        "runtime_epoch_id": "epoch-1",
+        "keyframe_uuid": "start-keyframe",
+        "keyframe_pts": 5_000_000_000,
+    }
+    redis_client = _FakeRedis(
+        [request],
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="start-keyframe",
+                frame_pts=5_000_000_000,
+                stream_id="1779999995000-0",
+                stream_session_id="session-1",
+                keyframe_uuid="start-keyframe",
+                keyframe_pts=5_000_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="post-window-frame",
+                frame_pts=15_000_000_000,
+                stream_id="1780000005000-0",
+                stream_session_id="session-2",
+                keyframe_uuid="post-session-keyframe",
+                keyframe_pts=14_900_000_000,
+            ),
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.0,
+            post_savant_frame_proof_poll_interval_s=0.0,
+            post_savant_allow_cross_session_post_window_proof=False,
+        ),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["evidence_state"] == "failed"
+    assert updates[-1]["evidence_reason"].startswith(
+        "missing_post_savant_frame_pts_window"
+    )
+    assert not _FakeReplay.instances[-1].jobs
+    diagnostics = updates[-1]["diagnostics"]
+    assert diagnostics["same_source_different_session_candidate"] is True
+    assert diagnostics["cross_session_post_window_candidate"]["frame_uuid"] == (
+        "post-window-frame"
+    )
+
+
+def test_post_savant_truncated_pre_window_can_create_job(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("014"),
+        "replay_source_kind": "post_savant",
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "stream_session_id": "session-2",
+        "runtime_epoch_id": "epoch-1",
+        "keyframe_uuid": "current-session-keyframe",
+        "keyframe_pts": 9_250_000_000,
+    }
+    redis_client = _FakeRedis(
+        [request],
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="old-session-start",
+                frame_pts=5_000_000_000,
+                stream_id="1779999995000-0",
+                stream_session_id="session-1",
+                keyframe_uuid="old-session-start",
+                keyframe_pts=5_000_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="current-session-keyframe",
+                frame_pts=9_250_000_000,
+                stream_id="1779999999250-0",
+                stream_session_id="session-2",
+                keyframe_uuid="current-session-keyframe",
+                keyframe_pts=9_250_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="event-frame",
+                frame_pts=10_000_000_000,
+                stream_id="1780000000000-0",
+                stream_session_id="session-2",
+                keyframe_uuid="current-session-keyframe",
+                keyframe_pts=9_250_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="post-window-frame",
+                frame_pts=15_000_000_000,
+                stream_id="1780000005000-0",
+                stream_session_id="session-2",
+                keyframe_uuid="post-session-keyframe",
+                keyframe_pts=14_900_000_000,
+            ),
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.0,
+            post_savant_frame_proof_poll_interval_s=0.0,
+            post_savant_allow_truncated_pre_window_proof=True,
+        ),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "replay_job_created"
+    job = _FakeReplay.instances[-1].last_job_request
+    labels = job["labels"]
+    assert labels["original_requested_start_pts"] == "5000000000"
+    assert labels["effective_start_pts"] == "9250000000"
+    assert labels["requested_start_pts"] == "9250000000"
+    assert labels["requested_end_pts"] == "15000000000"
+    assert labels["pre_window_truncated"] == "true"
+    assert labels["pre_window_policy"] == "truncated_to_current_session"
+    assert labels["requested_pre_window_seconds"] == "5.0"
+    assert labels["effective_pre_window_seconds"] == "0.75"
+    assert labels["pre_window_truncated_seconds"] == "4.25"
+    assert labels["frame_domain_session_policy"] == "strict_single_session"
+    assert labels["frame_domain_proof_method"] == (
+        "frame_cache_truncated_start_window_keyframe_reference_and_post_window_pts"
+    )
+    assert job["offset_seconds_override"] == 0.0
+    assert job["duration_seconds_override"] == 16.75
+
+
+def test_post_savant_truncated_pre_window_can_be_disabled(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("015"),
+        "replay_source_kind": "post_savant",
+        "event_frame_pts": 10_000_000_000,
+        "requested_start_pts": 5_000_000_000,
+        "requested_end_pts": 15_000_000_000,
+        "stream_session_id": "session-2",
+        "runtime_epoch_id": "epoch-1",
+        "keyframe_uuid": "current-session-keyframe",
+        "keyframe_pts": 9_250_000_000,
+    }
+    redis_client = _FakeRedis(
+        [request],
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="current-session-keyframe",
+                frame_pts=9_250_000_000,
+                stream_id="1779999999250-0",
+                stream_session_id="session-2",
+                keyframe_uuid="current-session-keyframe",
+                keyframe_pts=9_250_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="post-window-frame",
+                frame_pts=15_000_000_000,
+                stream_id="1780000005000-0",
+                stream_session_id="session-2",
+                keyframe_uuid="post-session-keyframe",
+                keyframe_pts=14_900_000_000,
+            ),
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            post_savant_frame_proof_wait_budget_s=0.0,
+            post_savant_frame_proof_poll_interval_s=0.0,
+            post_savant_allow_truncated_pre_window_proof=False,
+        ),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["evidence_state"] == "failed"
+    assert updates[-1]["evidence_reason"].startswith(
+        "missing_post_savant_frame_pts_window"
+    )
+    assert not _FakeReplay.instances[-1].jobs
+    diagnostics = updates[-1]["diagnostics"]
+    assert diagnostics["truncated_pre_window_candidate"]["frame_uuid"] == (
+        "current-session-keyframe"
+    )
+    assert diagnostics["truncated_pre_window_candidate"]["effective_start_pts"] == (
+        9_250_000_000
+    )
 
 
 def test_post_savant_frame_proof_wait_respects_deadline(monkeypatch) -> None:
@@ -611,3 +932,5 @@ def test_post_savant_frame_proof_succeeds_after_local_poll(monkeypatch) -> None:
     labels = _FakeReplay.instances[-1].last_job_request["labels"]
     assert labels["post_window_frame_uuid"] == "post-window-frame"
     assert labels["start_window_frame_uuid"] == "start-keyframe"
+    assert labels["post_window_cross_session_proof_used"] == "false"
+    assert labels["frame_domain_session_policy"] == "strict_single_session"

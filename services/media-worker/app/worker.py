@@ -2225,8 +2225,32 @@ def _uuid_first_anchor_metadata(
         "event_frame_pts": replay_labels.get("event_frame_pts"),
         "anchor_keyframe_uuid": anchor_keyframe_uuid,
         "anchor_keyframe_pts": replay_labels.get("anchor_keyframe_pts"),
+        "original_requested_start_pts": replay_labels.get(
+            "original_requested_start_pts"
+        )
+        or time_window.get("original_requested_start_pts"),
+        "effective_start_pts": replay_labels.get("effective_start_pts")
+        or time_window.get("effective_start_pts"),
+        "pre_window_truncated": replay_labels.get("pre_window_truncated")
+        or time_window.get("pre_window_truncated"),
+        "pre_window_policy": replay_labels.get("pre_window_policy")
+        or time_window.get("pre_window_policy"),
+        "requested_pre_window_seconds": replay_labels.get(
+            "requested_pre_window_seconds"
+        )
+        or time_window.get("requested_pre_window_seconds"),
+        "effective_pre_window_seconds": replay_labels.get(
+            "effective_pre_window_seconds"
+        )
+        or time_window.get("effective_pre_window_seconds"),
+        "pre_window_truncated_seconds": replay_labels.get(
+            "pre_window_truncated_seconds"
+        )
+        or time_window.get("pre_window_truncated_seconds"),
         "requested_start_pts": (
-            replay_labels.get("requested_start_pts")
+            replay_labels.get("effective_start_pts")
+            or time_window.get("effective_start_pts")
+            or replay_labels.get("requested_start_pts")
             or time_window.get("requested_start_pts")
         ),
         "requested_end_pts": (
@@ -2237,8 +2261,21 @@ def _uuid_first_anchor_metadata(
         "actual_end_pts": time_window.get("actual_end_pts"),
         "post_window_frame_uuid": replay_labels.get("post_window_frame_uuid"),
         "post_window_frame_pts": replay_labels.get("post_window_frame_pts"),
+        "post_window_cross_session_proof_used": replay_labels.get(
+            "post_window_cross_session_proof_used"
+        ),
+        "frame_domain_session_policy": replay_labels.get(
+            "frame_domain_session_policy"
+        ),
+        "frame_domain_proof_method": replay_labels.get("frame_domain_proof_method"),
         "start_window_frame_uuid": replay_labels.get("start_window_frame_uuid"),
         "start_window_frame_pts": replay_labels.get("start_window_frame_pts"),
+        "start_window_stream_session_id": replay_labels.get(
+            "start_window_stream_session_id"
+        ),
+        "post_window_stream_session_id": replay_labels.get(
+            "post_window_stream_session_id"
+        ),
         "time_domain_crop_applied": bool(time_window.get("time_domain_crop_applied")),
         "crop_reason": (
             "requested_pts_window"
@@ -2385,9 +2422,18 @@ def _frame_cache_time_domain_window(
         or media.get("frame_pts")
     )
     requested_start_pts = _to_int(
-        replay_labels.get("requested_start_pts")
+        replay_labels.get("effective_start_pts")
+        or replay_labels.get("requested_start_pts")
         or media.get("requested_start_pts")
     )
+    original_requested_start_pts = _to_int(
+        replay_labels.get("original_requested_start_pts")
+    )
+    if original_requested_start_pts is None:
+        original_requested_start_pts = _to_int(
+            replay_labels.get("requested_start_pts")
+            or media.get("requested_start_pts")
+        )
     requested_end_pts = _to_int(
         replay_labels.get("requested_end_pts")
         or media.get("requested_end_pts")
@@ -2398,12 +2444,31 @@ def _frame_cache_time_domain_window(
         if requested_end_pts is None:
             requested_end_pts = int(event_frame_pts + post_seconds * 1_000_000_000)
     return {
+        "original_requested_start_pts": original_requested_start_pts,
+        "effective_start_pts": requested_start_pts,
         "requested_start_pts": requested_start_pts,
         "requested_end_pts": requested_end_pts,
         "event_frame_pts": event_frame_pts,
         "pre_seconds": pre_seconds,
         "post_seconds": post_seconds,
-        "expected_event_t_s": pre_seconds,
+        "expected_event_t_s": (
+            round((event_frame_pts - requested_start_pts) / 1_000_000_000.0, 9)
+            if event_frame_pts is not None and requested_start_pts is not None
+            else pre_seconds
+        ),
+        "pre_window_truncated": str(
+            replay_labels.get("pre_window_truncated") or ""
+        ).strip().lower() in {"1", "true", "yes"},
+        "pre_window_policy": replay_labels.get("pre_window_policy"),
+        "requested_pre_window_seconds": _to_float(
+            replay_labels.get("requested_pre_window_seconds")
+        ),
+        "effective_pre_window_seconds": _to_float(
+            replay_labels.get("effective_pre_window_seconds")
+        ),
+        "pre_window_truncated_seconds": _to_float(
+            replay_labels.get("pre_window_truncated_seconds")
+        ),
         "requested_duration_s": (
             round((requested_end_pts - requested_start_pts) / 1_000_000_000.0, 9)
             if requested_start_pts is not None and requested_end_pts is not None
@@ -2761,8 +2826,23 @@ def _finalize_post_savant_evidence_bundle(
             ),
             "replay_source_kind": replay_labels.get("replay_source_kind"),
             "requested_start_pts": replay_labels.get("requested_start_pts"),
+            "original_requested_start_pts": replay_labels.get(
+                "original_requested_start_pts"
+            ),
+            "effective_start_pts": replay_labels.get("effective_start_pts"),
             "requested_end_pts": replay_labels.get("requested_end_pts"),
             "event_frame_pts": replay_labels.get("event_frame_pts"),
+            "pre_window_truncated": replay_labels.get("pre_window_truncated"),
+            "pre_window_policy": replay_labels.get("pre_window_policy"),
+            "requested_pre_window_seconds": replay_labels.get(
+                "requested_pre_window_seconds"
+            ),
+            "effective_pre_window_seconds": replay_labels.get(
+                "effective_pre_window_seconds"
+            ),
+            "pre_window_truncated_seconds": replay_labels.get(
+                "pre_window_truncated_seconds"
+            ),
             "replay_offset_seconds": (replay_job_request.get("offset") or {}).get("seconds"),
             "replay_stop_strategy": replay_labels.get("replay_stop_strategy"),
             "time_domain_crop_applied": bool(
