@@ -998,6 +998,52 @@ def _defer_clip_request(
     return False
 
 
+def _queue_clip_request(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    request_id: str,
+    reason: str,
+    error_message: str,
+    retry_count: int,
+    msg_id: object,
+    active_job_count: int,
+    max_concurrent_jobs: int,
+) -> None:
+    retry_age_s = _message_age_seconds(msg_id)
+    diagnostics = {
+        "queue_reason": reason,
+        "active_job_count": active_job_count,
+        "max_concurrent_jobs": max_concurrent_jobs,
+        "redis_delivery_retry_count": retry_count,
+        "queued_age_seconds": retry_age_s,
+    }
+    logger.info(
+        "clip_worker_queued request_id=%s event_id=%s reason=%s "
+        "active_job_count=%s max_concurrent_jobs=%s retry_count=%s "
+        "queued_age_s=%s error=%s",
+        request_id,
+        event_id,
+        reason,
+        active_job_count,
+        max_concurrent_jobs,
+        retry_count,
+        retry_age_s,
+        error_message,
+    )
+    update_clip_status(
+        pg_conn,
+        event_id,
+        "pending",
+        error_message=error_message,
+        evidence_state="queued",
+        evidence_reason=error_message,
+        request_id=request_id,
+        attempt_count=retry_count,
+        diagnostics=diagnostics,
+    )
+
+
 def _derive_start_window_frame_from_keyframe_reference(
     redis_client: Redis,
     *,
@@ -1911,30 +1957,13 @@ def run_worker(
                     gate = _clip_gate_decision(
                         cfg,
                         jobs_created=jobs_created,
-                        active_job_count=len(active_jobs_until),
+                        active_job_count=0,
                         camera_id=str(camera_id),
                         cooldown_gate_ts_ms=cooldown_gate_ts_ms,
-                        last_job_by_camera=last_job_by_camera,
+                        last_job_by_camera={},
                         event_type=event_type,
                     )
                     if not gate.allowed:
-                        if gate.reason in {"max_concurrent_reached", "cooldown"}:
-                            _defer_clip_request(
-                                redis_client,
-                                pg_conn,
-                                stream=stream,
-                                group=group,
-                                msg_id=msg_id,
-                                event_id=event_id,
-                                request_id=request_id,
-                                reason=gate.reason,
-                                error_message=gate.error_message,
-                                retry_count=retry_count,
-                                max_retries=cfg.deferred_retry_max_attempts,
-                                seen_requests=seen_requests,
-                            )
-                            total_processed += 1
-                            continue
                         logger.info(
                             "clip_worker_skipped %s event_id=%s source_event_id=%s "
                             "event_type=%s camera_id=%s jobs_created=%s run_once=%s",
@@ -2185,6 +2214,73 @@ def run_worker(
                                 + (f" event_ts_ms={event_ts_ms}" if event_ts_ms else "")
                             ),
                         )
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
+
+                    now_monotonic = time.monotonic()
+                    active_jobs_until = [
+                        until for until in active_jobs_until if until > now_monotonic
+                    ]
+                    schedule_gate = _clip_gate_decision(
+                        cfg,
+                        jobs_created=jobs_created,
+                        active_job_count=len(active_jobs_until),
+                        camera_id=str(camera_id),
+                        cooldown_gate_ts_ms=cooldown_gate_ts_ms,
+                        last_job_by_camera=last_job_by_camera,
+                        event_type=event_type,
+                    )
+                    if not schedule_gate.allowed:
+                        if schedule_gate.reason == "max_concurrent_reached":
+                            _queue_clip_request(
+                                pg_conn,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason=schedule_gate.reason,
+                                error_message=schedule_gate.error_message,
+                                retry_count=retry_count,
+                                msg_id=msg_id,
+                                active_job_count=len(active_jobs_until),
+                                max_concurrent_jobs=cfg.max_concurrent_jobs,
+                            )
+                            total_processed += 1
+                            continue
+                        if schedule_gate.reason == "cooldown":
+                            _defer_clip_request(
+                                redis_client,
+                                pg_conn,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason=schedule_gate.reason,
+                                error_message=schedule_gate.error_message,
+                                retry_count=retry_count,
+                                max_retries=cfg.deferred_retry_max_attempts,
+                                seen_requests=seen_requests,
+                            )
+                            total_processed += 1
+                            continue
+                        logger.info(
+                            "clip_worker_skipped %s event_id=%s source_event_id=%s "
+                            "event_type=%s camera_id=%s jobs_created=%s run_once=%s",
+                            schedule_gate.reason,
+                            event_id,
+                            source_event_id,
+                            event_type,
+                            camera_id,
+                            jobs_created,
+                            cfg.run_once,
+                        )
+                        update_clip_status(
+                            pg_conn,
+                            event_id,
+                            "skipped_by_poc_limit",
+                            error_message=schedule_gate.error_message,
+                        )
+                        seen_requests.add(request_id)
                         redis_client.xack(stream, group, msg_id)
                         total_processed += 1
                         continue

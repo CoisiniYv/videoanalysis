@@ -202,7 +202,7 @@ def _frame_annotation(
     return message
 
 
-def test_concurrency_pressure_defers_without_permanent_skip(monkeypatch) -> None:
+def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None:
     _activate()
     import app.worker as worker
 
@@ -226,6 +226,9 @@ def test_concurrency_pressure_defers_without_permanent_skip(monkeypatch) -> None
 
     assert redis_client.acked == ["1-0"]
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
+    assert updates[-1]["evidence_state"] == "queued"
+    assert updates[-1]["diagnostics"]["active_job_count"] == 1
+    assert updates[-1]["diagnostics"]["max_concurrent_jobs"] == 1
     assert all(update["status"] != "skipped_by_poc_limit" for update in updates)
 
 
@@ -290,6 +293,75 @@ def test_deferred_retry_budget_exhaustion_fails_closed(monkeypatch) -> None:
     assert redis_client.acked == ["1-0"]
     assert updates[-1]["status"] == "failed"
     assert "retry_budget_exhausted" in updates[-1]["error_message"]
+
+
+def test_concurrency_queue_does_not_fail_on_retry_budget(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    redis_client = _FakeRedis(
+        pending_requests=[
+            ("9-0", _request("007"), 8),
+            ("10-0", _request("008"), 8),
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=1, deferred_retry_max_attempts=5),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["9-0"]
+    assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
+    assert updates[-1]["evidence_state"] == "queued"
+    assert "retry_budget_exhausted" not in updates[-1].get("error_message", "")
+    assert updates[-1]["attempt_count"] == 7
+
+
+def test_priority_event_bypasses_replay_concurrency(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    redis_client = _FakeRedis(
+        [
+            _request("009", event_type="intrusion"),
+            _request("010", event_type="watchlist_hit"),
+        ]
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=1, pending_claim_count=0),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0", "2-0"]
+    assert [update["status"] for update in updates] == [
+        "replay_job_created",
+        "replay_job_created",
+    ]
+    assert len(_FakeReplay.instances[-1].jobs) == 2
 
 
 class _RepoCursor:
