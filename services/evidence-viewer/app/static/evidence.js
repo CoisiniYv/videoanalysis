@@ -17,6 +17,15 @@ const ROLE_RENDER_WINDOW_MS = {
 const OVERLAY_DEDUP_IOU_THRESHOLD = 0.75;
 const EVIDENCE_API = "/api";
 const BUNDLE_PAGE_SIZE = 200;
+const EVIDENCE_STATE_STORAGE_KEY = "operator-evidence-view-state";
+const FILTER_INPUT_IDS = [
+  "filterEventType",
+  "filterSourceId",
+  "filterCameraId",
+  "filterPerson",
+  "filterClipStatus",
+  "filterEventId"
+];
 
 const state = {
   bundles: [],
@@ -268,6 +277,77 @@ function filterValue(id) {
   return document.getElementById(id)?.value.trim() || "";
 }
 
+function safeStorageGet(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (_err) {
+    return null;
+  }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (_err) {}
+}
+
+function filterSnapshot() {
+  const filters = {};
+  for (const id of FILTER_INPUT_IDS) {
+    const value = filterValue(id);
+    if (value) filters[id] = value;
+  }
+  return filters;
+}
+
+function persistEvidenceState() {
+  const payload = {
+    bundleOffset: Math.max(0, Number(state.bundleOffset) || 0),
+    bundleLimit: Math.max(1, Number(state.bundleLimit) || BUNDLE_PAGE_SIZE),
+    activeCategory: state.activeCategory || "all",
+    selectedEventId: state.selectedEventId || "",
+    filters: filterSnapshot()
+  };
+  safeStorageSet(EVIDENCE_STATE_STORAGE_KEY, JSON.stringify(payload));
+}
+
+function restoreEvidenceState() {
+  const raw = safeStorageGet(EVIDENCE_STATE_STORAGE_KEY);
+  if (!raw) return;
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (_err) {
+    return;
+  }
+  const offset = Number(payload.bundleOffset);
+  const limit = Number(payload.bundleLimit);
+  if (Number.isFinite(offset) && offset >= 0) {
+    state.bundleOffset = Math.floor(offset);
+  }
+  if (Number.isFinite(limit) && limit > 0) {
+    state.bundleLimit = Math.floor(limit);
+  }
+  if (payload.activeCategory) {
+    state.activeCategory = String(payload.activeCategory);
+  }
+  state.selectedEventId = payload.selectedEventId ? String(payload.selectedEventId) : null;
+  const filters = payload.filters && typeof payload.filters === "object" ? payload.filters : {};
+  for (const id of FILTER_INPUT_IDS) {
+    const input = document.getElementById(id);
+    if (input && Object.prototype.hasOwnProperty.call(filters, id)) {
+      input.value = String(filters[id] || "");
+    }
+  }
+  syncCategoryButtons();
+}
+
+function syncCategoryButtons() {
+  for (const button of dom.categoryButtons || []) {
+    button.classList.toggle("active", (button.dataset.eventCategory || "all") === state.activeCategory);
+  }
+}
+
 function bundleQueryString() {
   const params = new URLSearchParams();
   const filters = {
@@ -367,10 +447,12 @@ async function loadBundles() {
   state.bundleTotal = Number.isFinite(Number(data.total)) ? Number(data.total) : state.bundles.length;
   state.bundleOffset = Number.isFinite(Number(data.offset)) ? Number(data.offset) : state.bundleOffset;
   state.bundleLimit = Number.isFinite(Number(data.limit)) ? Number(data.limit) : BUNDLE_PAGE_SIZE;
-  dom.bundleCount.textContent = `证据 ${state.bundleTotal}`;
-  if (dom.evidenceCount) {
-    dom.evidenceCount.textContent = String(state.bundleTotal);
+  if (!state.bundles.length && state.bundleOffset > 0 && state.bundleTotal > 0) {
+    state.bundleOffset = Math.floor((state.bundleTotal - 1) / state.bundleLimit) * state.bundleLimit;
+    persistEvidenceState();
+    return loadBundles();
   }
+  dom.bundleCount.textContent = `证据 ${state.bundleTotal}`;
   renderBundleList();
   updateBundlePagination();
   const selectionStillVisible = Boolean(bundleByEventId(state.selectedEventId));
@@ -378,6 +460,7 @@ async function loadBundles() {
     const preferred = selectionStillVisible ? state.selectedEventId : defaultSelectedBundle(state.bundles).event_id;
     await selectFirstAvailableBundle(preferred);
   }
+  persistEvidenceState();
 }
 
 function renderBundleList() {
@@ -514,6 +597,7 @@ async function selectBundle(eventId, options = {}) {
   const previousVideoTime = Number.isFinite(dom.video.currentTime) ? dom.video.currentTime : 0;
   const previousPaused = dom.video.paused;
   state.selectedEventId = eventId;
+  persistEvidenceState();
   state.warnings = new Set();
   renderBundleList();
 
@@ -569,6 +653,7 @@ async function selectBundle(eventId, options = {}) {
   drawOverlay();
   renderWarnings();
   updateEvidenceDeleteButton();
+  persistEvidenceState();
 }
 
 async function selectFirstAvailableBundle(preferredEventId) {
@@ -1383,26 +1468,38 @@ dom.annotationSource?.addEventListener("change", () => {
 dom.refreshBundles?.addEventListener("click", () => {
   state.bundleOffset = 0;
   resetBundleSelection();
+  persistEvidenceState();
   loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
 });
 dom.previousBundles?.addEventListener("click", () => {
   state.bundleOffset = Math.max(0, state.bundleOffset - state.bundleLimit);
   resetBundleSelection();
+  persistEvidenceState();
   loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
 });
 dom.nextBundles?.addEventListener("click", () => {
   state.bundleOffset += state.bundleLimit;
   resetBundleSelection();
+  persistEvidenceState();
   loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
 });
 for (const button of dom.categoryButtons || []) {
   button.addEventListener("click", () => {
     state.activeCategory = button.dataset.eventCategory || "all";
-    for (const item of dom.categoryButtons) {
-      item.classList.toggle("active", item === button);
-    }
+    syncCategoryButtons();
     state.bundleOffset = 0;
     resetBundleSelection();
+    persistEvidenceState();
+    loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
+  });
+}
+for (const id of FILTER_INPUT_IDS) {
+  const input = document.getElementById(id);
+  if (!input) continue;
+  input.addEventListener("change", () => {
+    state.bundleOffset = 0;
+    resetBundleSelection();
+    persistEvidenceState();
     loadBundles().catch(err => addWarning(`bundle_load_failed:${err.message}`));
   });
 }
@@ -1450,6 +1547,7 @@ async function runInit() {
   }
   state.initialized = true;
   applyOverlayDefaults();
+  restoreEvidenceState();
   await loadHealth();
   await loadBundles();
   resizeCanvas();
@@ -1461,6 +1559,7 @@ window.operatorEvidence = {
   reload: async function reload() {
     state.bundleOffset = 0;
     resetBundleSelection();
+    persistEvidenceState();
     await loadHealth();
     await loadBundles();
   },

@@ -23,8 +23,8 @@ def test_operator_has_chinese_storage_maintenance_entry() -> None:
     assert 'data-view="maintenance"' in html
     assert "存储维护" in html
     assert "/static/maintenance.js" in html
-    assert "evidence-count-summary-20260615" in html
-    assert "evidence-init-fix-20260615" in html
+    assert "operator-view-state-20260615" in html
+    assert "evidence-view-state-20260615" in html
     assert "delete-dialog-fast-20260615" in html
     assert "删除后不会自动重新生成证据" in html
     assert "删除必须先 preview" in html
@@ -80,6 +80,11 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     assert "openDeleteDialog" in operator_js
     assert "loadEvidenceCount" in operator_js
     assert '`${API}/maintenance/storage/summary`' in operator_js
+    assert "ACTIVE_VIEW_STORAGE_KEY" in operator_js
+    assert "EVIDENCE_COUNT_STORAGE_KEY" in operator_js
+    assert "initialTopView" in operator_js
+    assert "restoreEvidenceCount" in operator_js
+    assert "persistTopView(normalized)" in operator_js
     assert "selectedPersonDeleteRequest" in operator_js
     assert "galleryDeleteRequest" in operator_js
     assert "删除照片" in operator_js
@@ -90,6 +95,11 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     assert "initPromise" in evidence_js
     assert "selectFirstAvailableBundle" in evidence_js
     assert "bundle_detail_load_failed" in evidence_js
+    assert "EVIDENCE_STATE_STORAGE_KEY" in evidence_js
+    assert "persistEvidenceState" in evidence_js
+    assert "restoreEvidenceState" in evidence_js
+    assert "syncCategoryButtons" in evidence_js
+    assert "FILTER_INPUT_IDS" in evidence_js
     assert 'window.location.hash === "#evidence"' in evidence_js
     assert "openDeleteDialog" in maintenance_js
     assert "ensureMaintenanceEventsBound" in maintenance_js

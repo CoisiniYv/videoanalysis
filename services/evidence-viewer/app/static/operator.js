@@ -60,6 +60,9 @@ const faceRegistrationSummaryEl = document.getElementById("face-registration-sum
 const faceRegistrationResultEl = document.getElementById("face-registration-result");
 const previewDeleteSelectedPersonBtn = document.getElementById("preview-delete-selected-person");
 const THEME_STORAGE_KEY = "operator-theme";
+const ACTIVE_VIEW_STORAGE_KEY = "operator-active-view";
+const EVIDENCE_COUNT_STORAGE_KEY = "operator-evidence-count";
+const TOP_VIEWS = new Set(["cameras", "people", "evidence", "maintenance", "runtime"]);
 
 /* ---- API URL display ---- */
 apiUrlEl.textContent = window.location.origin + API;
@@ -293,6 +296,33 @@ function currentTheme() {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
 
+function normalizedTopView(view) {
+  return TOP_VIEWS.has(view) ? view : "cameras";
+}
+
+function topViewFromHash() {
+  const hash = String(window.location.hash || "").replace(/^#/, "").split("?")[0];
+  return TOP_VIEWS.has(hash) ? hash : "";
+}
+
+function storedTopView() {
+  try {
+    return normalizedTopView(window.localStorage.getItem(ACTIVE_VIEW_STORAGE_KEY));
+  } catch (_err) {
+    return "cameras";
+  }
+}
+
+function initialTopView() {
+  return topViewFromHash() || storedTopView();
+}
+
+function persistTopView(view) {
+  try {
+    window.localStorage.setItem(ACTIVE_VIEW_STORAGE_KEY, normalizedTopView(view));
+  } catch (_err) {}
+}
+
 function applyTheme(theme, options = {}) {
   const normalized = theme === "dark" ? "dark" : "light";
   if (normalized === "dark") {
@@ -486,7 +516,35 @@ function updateSummary() {
 function setEvidenceCount(value) {
   if (!evidenceCountEl) return;
   const count = Number(value);
-  evidenceCountEl.textContent = Number.isFinite(count) ? String(count) : "--";
+  if (Number.isFinite(count)) {
+    evidenceCountEl.textContent = String(count);
+    try {
+      window.localStorage.setItem(EVIDENCE_COUNT_STORAGE_KEY, String(count));
+    } catch (_err) {}
+    return;
+  }
+  if (!evidenceCountEl.textContent || evidenceCountEl.textContent === "--") {
+    evidenceCountEl.textContent = storedEvidenceCount() || "--";
+  }
+}
+
+function storedEvidenceCount() {
+  try {
+    const raw = window.localStorage.getItem(EVIDENCE_COUNT_STORAGE_KEY);
+    if (!raw) return "";
+    const count = Number(raw);
+    return Number.isFinite(count) ? String(count) : "";
+  } catch (_err) {
+    return "";
+  }
+}
+
+function restoreEvidenceCount() {
+  if (!evidenceCountEl) return;
+  const count = storedEvidenceCount();
+  if (count) {
+    evidenceCountEl.textContent = count;
+  }
 }
 
 function initials(name) {
@@ -952,7 +1010,8 @@ document.querySelectorAll(".top-tab").forEach((btn) => {
 });
 
 function activateTopView(view, updateHash = false) {
-  const normalized = ["people", "evidence", "maintenance", "runtime"].includes(view) ? view : "cameras";
+  const normalized = normalizedTopView(view);
+  persistTopView(normalized);
   document.querySelectorAll(".top-tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.view === normalized);
   });
@@ -1641,17 +1700,12 @@ document.querySelectorAll("[data-template]").forEach((button) => {
 
 /* ---- Init ---- */
 applyTheme(currentTheme());
+restoreEvidenceCount();
 loadEvidenceCount();
+const requestedTopView = initialTopView();
+activateTopView(requestedTopView, requestedTopView !== "cameras" && !topViewFromHash());
 loadCameras()
   .then(() => {
-    if (window.location.hash === "#people") {
-      activateTopView("people", false);
-    } else if (window.location.hash === "#runtime") {
-      activateTopView("runtime", false);
-    } else if (window.location.hash === "#evidence") {
-      activateTopView("evidence", false);
-    } else if (window.location.hash === "#maintenance") {
-      activateTopView("maintenance", false);
-    }
+    activateTopView(requestedTopView, false);
   })
   .catch((e) => showError(e.message));
