@@ -570,14 +570,18 @@
         <div id="delete-dialog-result" class="result-card maintenance-preview-result">
           正在生成删除预览。
         </div>
+        <div id="delete-dialog-pending-action" class="delete-dialog-action" hidden>
+          <p>该证据文件已生成，但后台任务仍标记为待处理。确认这是要清理的历史证据后，可以允许删除这类已生成但任务未收尾的证据并重新预览。</p>
+          <button id="repreview-delete-dialog" type="button">允许待处理后重新预览</button>
+        </div>
         <div class="maintenance-confirm">
           <label>删除原因<input id="delete-dialog-reason" placeholder="填写操作原因" /></label>
           <button id="execute-delete-dialog" type="button" class="danger" disabled>确认删除</button>
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=delete-usability-20260615"></script>
-    <script src="/static/evidence.js?v=delete-usability-20260615"></script>
-    <script src="/static/maintenance.js?v=delete-usability-20260615"></script>
+    <script src="/static/operator.js?v=delete-reasons-20260615"></script>
+    <script src="/static/evidence.js?v=delete-reasons-20260615"></script>
+    <script src="/static/maintenance.js?v=delete-reasons-20260615"></script>
   </body>
 </html>

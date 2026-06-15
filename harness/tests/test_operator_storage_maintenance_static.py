@@ -44,6 +44,9 @@ def test_maintenance_delete_requires_preview_in_frontend() -> None:
     assert "删除当前证据" in html
     assert 'id="delete-dialog"' in html
     assert 'id="execute-delete-dialog"' in html
+    assert 'id="delete-dialog-pending-action"' in html
+    assert 'id="repreview-delete-dialog"' in html
+    assert "允许待处理后重新预览" in html
     assert "executeActiveDelete" in js
     assert 'disabled>确认删除' in html
     assert "确认删除预览对象" not in html
@@ -56,6 +59,12 @@ def test_maintenance_delete_requires_preview_in_frontend() -> None:
     assert '"/people/delete"' in js
     assert '"/people/gallery-delete"' in js
     assert '"/face-media/orphans-cleanup"' not in js
+    assert "active_write_guard" in js
+    assert "写入保护期" in js
+    assert "task_pending" in js
+    assert "待处理" in js
+    assert "shouldOfferPendingRepreview" in js
+    assert "allow_stale_pending_tasks: true" in js
 
 
 def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:

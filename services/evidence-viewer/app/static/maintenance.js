@@ -30,6 +30,8 @@ const maintenanceDom = {
   activeReason: document.getElementById("delete-dialog-reason"),
   activeExecute: document.getElementById("execute-delete-dialog"),
   activeCancel: document.getElementById("delete-dialog-close"),
+  activePendingAction: document.getElementById("delete-dialog-pending-action"),
+  activeRepreview: document.getElementById("repreview-delete-dialog"),
   evidenceForm: document.getElementById("maintenance-evidence-form"),
   previewEvidenceDelete: document.getElementById("preview-evidence-delete"),
   previewResult: document.getElementById("maintenance-preview-result"),
@@ -105,6 +107,52 @@ function setDeleteButtonDisabled(button, disabled, reason = "") {
   button.title = disabled && reason ? reason : "";
 }
 
+const SKIP_REASON_LABELS = {
+  active_write_guard: "证据刚生成或仍在写入保护期内，暂时不能删除。请稍后刷新后再试。",
+  task_pending: "后台证据任务仍是待处理，默认不删除，避免删掉还在处理的录像。",
+  already_media_deleted: "该证据已经被删除或标记过期。",
+  bundle_missing: "证据目录已经不存在。",
+  gallery_inactive: "这张图库照片已经删除或停用。",
+  person_inactive: "该人员已经停用。",
+  already_inactive: "该对象已经停用。",
+  still_referenced: "该文件仍被人员或图库引用。",
+  source_missing: "源文件已经不存在。",
+  path_changed: "预览后文件路径发生变化，请重新生成预览。",
+  stale_preview_item: "预览后文件内容发生变化，请重新生成预览。",
+  stat_failed: "无法读取文件状态，请刷新后重试。",
+  db_state_changed: "数据库状态在预览后发生变化，请重新生成预览。",
+  not_eligible: "该对象当前不符合删除条件。"
+};
+
+function skipReasonLabel(reason = "") {
+  const key = String(reason || "skipped");
+  if (SKIP_REASON_LABELS[key]) return SKIP_REASON_LABELS[key];
+  if (key.startsWith("path_unsafe:")) return "证据路径不安全，已被保护性跳过。";
+  return `后端跳过原因：${key}`;
+}
+
+function previewSkipReasons(preview = {}) {
+  const skipped = Array.isArray(preview.skipped) ? preview.skipped : [];
+  return skipped.map(item => String(item.reason || "skipped")).filter(Boolean);
+}
+
+function primarySkipReason(preview = {}) {
+  return previewSkipReasons(preview)[0] || "";
+}
+
+function shouldOfferPendingRepreview(preview = {}, request = {}) {
+  if (request.kind !== "evidence") return false;
+  if (request.allow_stale_pending_tasks) return false;
+  if (Number(preview.deletable_count || 0) > 0) return false;
+  const reasons = previewSkipReasons(preview);
+  return reasons.includes("task_pending") && !reasons.includes("active_write_guard");
+}
+
+function setPendingRepreviewVisible(visible) {
+  if (!maintenanceDom.activePendingAction) return;
+  maintenanceDom.activePendingAction.hidden = !visible;
+}
+
 function deleteKindLabel(request = {}) {
   if (request.kind === "evidence") return "证据";
   if (request.kind === "person") return "人员";
@@ -149,6 +197,7 @@ function showActiveDelete(request = {}) {
   renderTargetSummary(request);
   maintenanceDom.activeReason.value = defaultDeleteReason(request);
   maintenanceDom.activeResult.innerHTML = "<strong>正在生成预览</strong>";
+  setPendingRepreviewVisible(false);
   setDeleteButtonDisabled(maintenanceDom.activeExecute, true, "正在生成预览");
   maintenanceDom.activeExecute.focus();
 }
@@ -159,6 +208,7 @@ function hideActiveDelete() {
   maintenanceDom.activeResult.innerHTML = "正在生成删除预览。";
   maintenanceDom.activeReason.value = "";
   maintenanceDom.activeExecute.textContent = "确认删除";
+  setPendingRepreviewVisible(false);
   setDeleteButtonDisabled(maintenanceDom.activeExecute, true);
 }
 
@@ -168,7 +218,10 @@ function previewDisabledReason(preview = {}) {
   const deletableCount = Number(preview.deletable_count || 0);
   if (expired) return "预览已过期，请重新生成";
   if (!preview.preview_id) return "预览缺少 ID";
-  if (deletableCount <= 0) return "本次预览没有可删除对象";
+  if (deletableCount <= 0) {
+    const reason = primarySkipReason(preview);
+    return reason ? skipReasonLabel(reason) : "本次预览没有可删除对象";
+  }
   return "";
 }
 
@@ -283,7 +336,7 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
   const skipped = Array.isArray(preview.skipped) ? preview.skipped : [];
   const skippedLines = skipped.slice(0, 5).map(item => {
     const targetId = escapeHtml(item.target_id || "-");
-    const reason = escapeHtml(item.reason || "skipped");
+    const reason = escapeHtml(skipReasonLabel(item.reason || "skipped"));
     return `<li>${targetId}：${reason}</li>`;
   });
   const lines = [
@@ -302,6 +355,7 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
   }
   if (target === maintenanceDom.activeResult) {
     setDeleteButtonDisabled(maintenanceDom.activeExecute, Boolean(disabledReason), disabledReason);
+    setPendingRepreviewVisible(shouldOfferPendingRepreview(preview, maintenanceState.activeDelete || {}));
   }
 }
 
@@ -474,6 +528,15 @@ function bindMaintenanceEvents() {
   maintenanceDom.executeEvidenceDelete?.addEventListener("click", () => executeEvidenceDelete().catch((e) => showError(e.message)));
   maintenanceDom.activeExecute?.addEventListener("click", () => executeActiveDelete().catch((e) => showError(e.message)));
   maintenanceDom.activeCancel?.addEventListener("click", hideActiveDelete);
+  maintenanceDom.activeRepreview?.addEventListener("click", () => {
+    if (!maintenanceState.activeDelete || maintenanceState.activeDelete.kind !== "evidence") return;
+    maintenanceState.activeDelete = {
+      ...maintenanceState.activeDelete,
+      allow_stale_pending_tasks: true
+    };
+    setPendingRepreviewVisible(false);
+    previewActiveDelete(maintenanceState.activeDelete).catch((e) => showError(e.message));
+  });
 }
 
 async function initMaintenance() {

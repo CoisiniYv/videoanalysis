@@ -459,6 +459,29 @@ p {
   box-shadow: var(--shadow);
 }
 
+.delete-dialog-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(184, 134, 11, 0.12);
+  border: 1px solid rgba(184, 134, 11, 0.28);
+  border-radius: var(--radius);
+}
+
+.delete-dialog-action[hidden] {
+  display: none;
+}
+
+.delete-dialog-action p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .maintenance-target {
   display: grid;
   gap: 7px;
