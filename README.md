@@ -86,6 +86,9 @@ postgresql://video:video@host.docker.internal:5432/video_analytics
 - 当前部署说明：`docs/midterm_deployment.md`
 - Compose 清单：`docs/compose_inventory.md`
 - 当前状态：`docs/current_mainline_status.md`
+- 开发入口和文档规则：`CLAUDE.md`
+- Evidence proof window 修复记录：
+  `docs/midterm_post_savant_evidence_proof_windows_2026-06-15.md`
 - 历史阶段/实验文档：各目录下的 `archive/phase-only/`
 
 历史代号入口已归档到：

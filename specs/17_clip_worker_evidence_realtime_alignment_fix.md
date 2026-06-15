@@ -32,6 +32,62 @@ The target behavior:
 - frontend overlays render only frame-bound annotations, not broad time-offset
   fallbacks that can paint stale bbox onto the wrong video frame.
 
+## 1.1 Implementation Status - 2026-06-15
+
+Status: partially implemented and runtime-validated by commit
+`6620f6c Stabilize post-Savant evidence proof windows`.
+
+Implemented:
+
+- explicit evidence states for `waiting_proof`, `queued`, `replaying`,
+  `ready`, and `failed` in the event/evidence-task update path;
+- bounded local post-Savant proof polling in `clip-worker`;
+- Replay concurrency gate moved after proof readiness;
+- cross-session post-window proof fallback with explicit labels;
+- truncated pre-window proof fallback when the requested pre-roll crosses a
+  stream session boundary but the current session contains a provable decodable
+  point before the event;
+- `media-worker` uses `effective_start_pts` for crop/duration/window guards and
+  preserves `original_requested_start_pts` for audit;
+- frame-cache sidecar reads multiple sessions only when Replay labels explicitly
+  prove and mark the policy.
+
+Runtime validation after recreating only `clip-worker` and `media-worker`:
+
+```text
+event_id=4cb41d57-4580-429a-8ab1-130b5df5f415
+state=ready
+reason=replay_job_created
+clip_path=/media/evidence/4cb41d57-4580-429a-8ab1-130b5df5f415/raw_clip.mov
+failed=0
+missing_proof=0
+ready=1
+Redis pending=0
+Redis lag=0
+```
+
+Verification:
+
+```text
+pytest related evidence/proof/runtime set: 55 passed
+docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml config: passed
+git diff --check: passed
+```
+
+Detailed incident/fix record:
+
+```text
+docs/midterm_post_savant_evidence_proof_windows_2026-06-15.md
+```
+
+Remaining work:
+
+- Phase 4 frontend overlay frame-identity hardening is still a separate task
+  unless already covered by a later commit.
+- Lab-camera "person walked through but no evidence" must first be split into
+  "no upstream event" vs "event exists but evidence failed"; this fix only
+  closes the second class.
+
 ## 2. Confirmed Current Facts
 
 ### 2.1 Clip-worker state model is too coarse
