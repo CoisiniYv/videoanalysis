@@ -34,6 +34,7 @@ OPERATOR_PROXY_TIMEOUT_SECONDS = 120.0
 OPERATOR_PROXY_ALLOWED_PREFIXES = (
     "cameras",
     "algorithms",
+    "evidence",
     "events",
     "people",
     "maintenance",
