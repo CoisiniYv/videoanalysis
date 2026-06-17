@@ -16,7 +16,7 @@ from redis import Redis
 
 from app.config import Config, load_config
 from app.replay_client import ReplayClient, _uuid7_timestamp_ms
-from app.repository import update_clip_status
+from app.repository import get_evidence_diagnostics, update_clip_status
 
 logger = logging.getLogger(__name__)
 
@@ -1073,6 +1073,15 @@ def _post_savant_anchor_error_retryable(req: dict, error_message: str) -> bool:
     return any(token in error_message for token in retryable_tokens)
 
 
+def _persisted_proof_retry_count(pg_conn: psycopg.Connection, event_id: str) -> int:
+    diagnostics = get_evidence_diagnostics(pg_conn, event_id)
+    value = diagnostics.get("proof_retry_count") if isinstance(diagnostics, dict) else None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _defer_clip_request(
     redis_client: Redis,
     pg_conn: psycopg.Connection,
@@ -1130,6 +1139,53 @@ def _defer_clip_request(
         ),
     )
     return False
+
+
+def _defer_post_savant_frame_proof(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    request_id: str,
+    error_message: str,
+    proof_retry_count: int,
+    max_retries: int,
+    msg_id: object,
+    diagnostics: dict[str, object],
+) -> bool:
+    retry_age_s = _message_age_seconds(msg_id)
+    if proof_retry_count >= max(0, int(max_retries)):
+        return False
+    next_retry_count = proof_retry_count + 1
+    updated_diagnostics = dict(diagnostics)
+    updated_diagnostics["proof_retry_count"] = next_retry_count
+    updated_diagnostics["proof_retry_max_attempts"] = max(0, int(max_retries))
+    updated_diagnostics["proof_retry_age_seconds"] = retry_age_s
+    logger.info(
+        "clip_worker_deferred request_id=%s event_id=%s reason=%s "
+        "proof_retry_count=%s retry_age_s=%s max_retries=%s error=%s",
+        request_id,
+        event_id,
+        "missing_post_savant_frame_proof",
+        next_retry_count,
+        retry_age_s,
+        max_retries,
+        error_message,
+    )
+    update_clip_status(
+        pg_conn,
+        event_id,
+        "pending",
+        error_message=(
+            "deferred_retry reason=missing_post_savant_frame_proof "
+            f"retry_count={next_retry_count} error={error_message}"
+        ),
+        evidence_state="waiting_proof",
+        evidence_reason=error_message,
+        request_id=request_id,
+        attempt_count=next_retry_count,
+        diagnostics=updated_diagnostics,
+    )
+    return True
 
 
 def _queue_clip_request(
@@ -1744,6 +1800,9 @@ def _prepare_post_savant_replay_request(
     pre_seconds: int,
     post_seconds: int,
     on_wait: Callable[[int, int, str, dict[str, object]], None] | None = None,
+    wait_budget_s_override: float | None = None,
+    poll_interval_s_override: float | None = None,
+    attempts_override: int | None = None,
 ) -> tuple[dict | None, str | None, str, str | None]:
     if not source_id:
         return None, keyframe_uuid, keyframe_source, "missing source_id in record_request"
@@ -1811,23 +1870,24 @@ def _prepare_post_savant_replay_request(
         anchor_strategy=cfg.replay_anchor_strategy,
     )
     selection = _replay_anchor_selection(cfg.replay_anchor_strategy)
-    wait_budget_s = max(
-        0.0,
-        float(getattr(cfg, "post_savant_frame_proof_wait_budget_s", 0.0) or 0.0),
-    )
-    poll_interval_s = max(
-        0.0,
-        float(
-            getattr(
-                cfg,
-                "post_savant_frame_proof_poll_interval_s",
-                getattr(cfg, "post_savant_frame_proof_retry_sleep_s", 0.0),
-            )
-            or 0.0
-        ),
-    )
+    if wait_budget_s_override is None:
+        wait_budget_value = getattr(cfg, "post_savant_frame_proof_wait_budget_s", 0.0)
+    else:
+        wait_budget_value = wait_budget_s_override
+    if poll_interval_s_override is None:
+        poll_interval_value = getattr(
+            cfg,
+            "post_savant_frame_proof_poll_interval_s",
+            getattr(cfg, "post_savant_frame_proof_retry_sleep_s", 0.0),
+        )
+    else:
+        poll_interval_value = poll_interval_s_override
+    wait_budget_s = max(0.0, float(wait_budget_value or 0.0))
+    poll_interval_s = max(0.0, float(poll_interval_value or 0.0))
     legacy_attempts = max(1, int(cfg.post_savant_frame_proof_attempts))
-    if wait_budget_s > 0.0 and poll_interval_s > 0.0:
+    if attempts_override is not None:
+        attempts = max(1, int(attempts_override))
+    elif wait_budget_s > 0.0 and poll_interval_s > 0.0:
         attempts = max(1, int(wait_budget_s / poll_interval_s) + 1)
     else:
         attempts = legacy_attempts
@@ -2362,20 +2422,51 @@ def run_worker(
                         until for until in active_jobs_until if until > now_monotonic
                     ]
 
-                    gate = _clip_gate_decision(
+                    schedule_gate = _clip_gate_decision(
                         cfg,
                         jobs_created=jobs_created,
-                        active_job_count=0,
+                        active_job_count=len(active_jobs_until),
                         camera_id=str(camera_id),
                         cooldown_gate_ts_ms=cooldown_gate_ts_ms,
-                        last_job_by_camera={},
+                        last_job_by_camera=last_job_by_camera,
                         event_type=event_type,
                     )
-                    if not gate.allowed:
+                    if not schedule_gate.allowed:
+                        if schedule_gate.reason == "max_concurrent_reached":
+                            _queue_clip_request(
+                                pg_conn,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason=schedule_gate.reason,
+                                error_message=schedule_gate.error_message,
+                                retry_count=retry_count,
+                                msg_id=msg_id,
+                                active_job_count=len(active_jobs_until),
+                                max_concurrent_jobs=cfg.max_concurrent_jobs,
+                            )
+                            total_processed += 1
+                            continue
+                        if schedule_gate.reason == "cooldown":
+                            _defer_clip_request(
+                                redis_client,
+                                pg_conn,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason=schedule_gate.reason,
+                                error_message=schedule_gate.error_message,
+                                retry_count=retry_count,
+                                max_retries=cfg.deferred_retry_max_attempts,
+                                seen_requests=seen_requests,
+                            )
+                            total_processed += 1
+                            continue
                         logger.info(
                             "clip_worker_skipped %s event_id=%s source_event_id=%s "
                             "event_type=%s camera_id=%s jobs_created=%s run_once=%s",
-                            gate.reason,
+                            schedule_gate.reason,
                             event_id,
                             source_event_id,
                             event_type,
@@ -2387,7 +2478,7 @@ def run_worker(
                             pg_conn,
                             event_id,
                             "skipped_by_poc_limit",
-                            error_message=gate.error_message,
+                            error_message=schedule_gate.error_message,
                         )
                         seen_requests.add(request_id)
                         redis_client.xack(stream, group, msg_id)
@@ -2398,6 +2489,17 @@ def run_worker(
                         frame_proof_wait_started = time.monotonic()
                         proof_wait_diagnostics: dict[str, object] = {}
                         proof_wait_attempt_count = 0
+                        proof_retry_count = _persisted_proof_retry_count(
+                            pg_conn,
+                            event_id,
+                        )
+                        wait_budget_override = None
+                        poll_interval_override = None
+                        attempts_override = None
+                        if retry_count > 0:
+                            wait_budget_override = 0.0
+                            poll_interval_override = 0.0
+                            attempts_override = 1
 
                         def _mark_waiting_proof(
                             attempt: int,
@@ -2407,6 +2509,8 @@ def run_worker(
                         ) -> None:
                             nonlocal proof_wait_diagnostics, proof_wait_attempt_count
                             proof_wait_diagnostics = dict(diagnostics)
+                            proof_wait_diagnostics["proof_retry_count"] = proof_retry_count
+                            proof_wait_diagnostics["redis_delivery_retry_count"] = retry_count
                             proof_wait_attempt_count = attempt
                             update_clip_status(
                                 pg_conn,
@@ -2437,6 +2541,9 @@ def run_worker(
                             pre_seconds=pre_seconds,
                             post_seconds=post_seconds,
                             on_wait=_mark_waiting_proof,
+                            wait_budget_s_override=wait_budget_override,
+                            poll_interval_s_override=poll_interval_override,
+                            attempts_override=attempts_override,
                         )
                         frame_proof_wait_seconds = time.monotonic() - frame_proof_wait_started
                         logger.info(
@@ -2475,22 +2582,49 @@ def run_worker(
                             proof_wait_diagnostics["proof_wait_seconds"] = (
                                 frame_proof_wait_seconds
                             )
-                            proof_wait_diagnostics["proof_retryable_legacy"] = (
-                                _post_savant_anchor_error_retryable(
-                                    req,
-                                    str(anchor_error),
-                                )
+                            proof_retryable = _post_savant_anchor_error_retryable(
+                                req,
+                                str(anchor_error),
                             )
+                            proof_wait_diagnostics["proof_retryable_legacy"] = proof_retryable
+                            proof_wait_diagnostics["proof_retry_count"] = (
+                                proof_retry_count
+                            )
+                            proof_wait_diagnostics["redis_delivery_retry_count"] = (
+                                retry_count
+                            )
+                            if proof_retryable and _defer_post_savant_frame_proof(
+                                pg_conn,
+                                event_id=event_id,
+                                request_id=request_id,
+                                error_message=str(anchor_error),
+                                proof_retry_count=proof_retry_count,
+                                max_retries=cfg.deferred_retry_max_attempts,
+                                msg_id=msg_id,
+                                diagnostics=proof_wait_diagnostics,
+                            ):
+                                total_processed += 1
+                                continue
+                            final_error = str(anchor_error)
+                            if proof_retryable:
+                                final_error = (
+                                    "retry_budget_exhausted "
+                                    "reason=missing_post_savant_frame_proof "
+                                    f"retries={proof_retry_count} "
+                                    f"error={anchor_error}"
+                                )
                             logger.warning(
                                 "clip_worker_final_failed post_savant_anchor_failed "
                                 "request_id=%s source_event_id=%s source_id=%s "
-                                "camera_id=%s attempt_count=%s error=%s",
+                                "camera_id=%s attempt_count=%s proof_retry_count=%s "
+                                "error=%s",
                                 req.get("request_id"),
                                 source_event_id,
                                 source_id,
                                 camera_id,
                                 proof_wait_attempt_count,
-                                anchor_error,
+                                proof_retry_count,
+                                final_error,
                             )
                             _fail_clip_request(
                                 redis_client,
@@ -2500,11 +2634,11 @@ def run_worker(
                                 msg_id=msg_id,
                                 event_id=event_id,
                                 request_id=request_id,
-                                error_message=str(anchor_error),
+                                error_message=final_error,
                                 seen_requests=seen_requests,
                                 evidence_state="failed",
-                                evidence_reason=str(anchor_error),
-                                attempt_count=proof_wait_attempt_count or None,
+                                evidence_reason=final_error,
+                                attempt_count=proof_retry_count or proof_wait_attempt_count or None,
                                 diagnostics=proof_wait_diagnostics,
                             )
                             total_processed += 1
@@ -2622,73 +2756,6 @@ def run_worker(
                                 + (f" event_ts_ms={event_ts_ms}" if event_ts_ms else "")
                             ),
                         )
-                        redis_client.xack(stream, group, msg_id)
-                        total_processed += 1
-                        continue
-
-                    now_monotonic = time.monotonic()
-                    active_jobs_until = [
-                        until for until in active_jobs_until if until > now_monotonic
-                    ]
-                    schedule_gate = _clip_gate_decision(
-                        cfg,
-                        jobs_created=jobs_created,
-                        active_job_count=len(active_jobs_until),
-                        camera_id=str(camera_id),
-                        cooldown_gate_ts_ms=cooldown_gate_ts_ms,
-                        last_job_by_camera=last_job_by_camera,
-                        event_type=event_type,
-                    )
-                    if not schedule_gate.allowed:
-                        if schedule_gate.reason == "max_concurrent_reached":
-                            _queue_clip_request(
-                                pg_conn,
-                                event_id=event_id,
-                                request_id=request_id,
-                                reason=schedule_gate.reason,
-                                error_message=schedule_gate.error_message,
-                                retry_count=retry_count,
-                                msg_id=msg_id,
-                                active_job_count=len(active_jobs_until),
-                                max_concurrent_jobs=cfg.max_concurrent_jobs,
-                            )
-                            total_processed += 1
-                            continue
-                        if schedule_gate.reason == "cooldown":
-                            _defer_clip_request(
-                                redis_client,
-                                pg_conn,
-                                stream=stream,
-                                group=group,
-                                msg_id=msg_id,
-                                event_id=event_id,
-                                request_id=request_id,
-                                reason=schedule_gate.reason,
-                                error_message=schedule_gate.error_message,
-                                retry_count=retry_count,
-                                max_retries=cfg.deferred_retry_max_attempts,
-                                seen_requests=seen_requests,
-                            )
-                            total_processed += 1
-                            continue
-                        logger.info(
-                            "clip_worker_skipped %s event_id=%s source_event_id=%s "
-                            "event_type=%s camera_id=%s jobs_created=%s run_once=%s",
-                            schedule_gate.reason,
-                            event_id,
-                            source_event_id,
-                            event_type,
-                            camera_id,
-                            jobs_created,
-                            cfg.run_once,
-                        )
-                        update_clip_status(
-                            pg_conn,
-                            event_id,
-                            "skipped_by_poc_limit",
-                            error_message=schedule_gate.error_message,
-                        )
-                        seen_requests.add(request_id)
                         redis_client.xack(stream, group, msg_id)
                         total_processed += 1
                         continue

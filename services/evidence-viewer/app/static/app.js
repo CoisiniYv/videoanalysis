@@ -1,6 +1,8 @@
 "use strict";
 
 const NS_PER_SECOND = 1000000000;
+const EVIDENCE_INDEX_API = "/api/v1/evidence";
+const EVIDENCE_BUNDLE_API = "/api";
 const ALERT_REDS = new Set(["#D50000", "#FF0000", "#E53935", "#FF1744"]);
 const DEFAULT_SOURCE_WIDTH = 1920;
 const DEFAULT_SOURCE_HEIGHT = 1080;
@@ -30,7 +32,8 @@ const state = {
   sourceHeight: DEFAULT_SOURCE_HEIGHT,
   warnings: new Set(),
   timeOffsetFallbackUsed: false,
-  frameDurationMs: null
+  frameDurationMs: null,
+  selectionRequestId: 0
 };
 
 const dom = {
@@ -65,6 +68,12 @@ const ctx = dom.canvas.getContext("2d");
 function numberOrNull(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function textOrNull(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text ? text : null;
 }
 
 function addWarning(message) {
@@ -117,6 +126,23 @@ function evidenceStatusLabel(value) {
     ready: "可查看"
   };
   return labels[value] || value || "-";
+}
+
+function evidenceStateLabel(bundle = {}) {
+  const stateValue = textOrNull(bundle.evidence_state) || textOrNull(bundle.media_status);
+  const reason = textOrNull(bundle.evidence_reason);
+  const labels = {
+    pending: "待处理",
+    waiting_proof: "生成中",
+    queued: "生成中",
+    replaying: "生成中",
+    finalizing: "生成中",
+    ready: "可查看",
+    failed: "生成失败"
+  };
+  const label = labels[stateValue] || stateValue || "";
+  if (!label) return "";
+  return stateValue === "failed" && reason ? `${label}: ${reason}` : label;
 }
 
 function warningLabel(value) {
@@ -174,7 +200,10 @@ async function fetchJson(path) {
   if (!response.ok) {
     throw new Error(`${path} returned ${response.status}`);
   }
-  return response.json();
+  const body = await response.json();
+  return body && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "data")
+    ? body.data
+    : body;
 }
 
 function filterValue(id) {
@@ -200,7 +229,7 @@ function bundleQueryString() {
 
 async function loadHealth() {
   try {
-    const health = await fetchJson("/health");
+    const health = await fetchJson(`${EVIDENCE_INDEX_API}/health`);
     dom.healthStatus.textContent = health.status === "ok" ? "服务正常" : "服务需检查";
   } catch (err) {
     dom.healthStatus.textContent = "服务需检查";
@@ -209,7 +238,7 @@ async function loadHealth() {
 }
 
 async function loadBundles() {
-  const data = await fetchJson(`/api/bundles?${bundleQueryString()}`);
+  const data = await fetchJson(`${EVIDENCE_INDEX_API}/bundles?${bundleQueryString()}`);
   state.bundles = Array.isArray(data.bundles) ? data.bundles : [];
   dom.bundleCount.textContent = `证据 ${state.bundles.length}`;
   renderBundleList();
@@ -239,24 +268,89 @@ function renderBundleList() {
     main.textContent = eventTypeLabel(bundle.event_type) || "事件";
     const sub = document.createElement("span");
     sub.className = "bundle-sub";
+    const evidenceStateText = evidenceStateLabel(bundle);
     sub.textContent = [
       bundle.source_id || bundle.camera_id || "未知摄像头",
       clipStatusLabel(bundle.clip_status),
+      evidenceStateText,
       evidenceStatusLabel(bundle.visual_evidence_status),
       `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
-    ].join(" | ");
+    ].filter(Boolean).join(" | ");
+    const reason = textOrNull(bundle.evidence_reason);
+    if (reason) {
+      button.title = reason;
+    }
     button.append(main, sub);
     button.addEventListener("click", () => selectBundle(bundle.event_id));
     dom.bundleList.appendChild(button);
   }
 }
 
+function clearBundleDetailForLoading(eventId) {
+  state.selectedEventId = eventId;
+  state.manifest = null;
+  state.annotations = [];
+  state.sinkRecords = [];
+  state.preparedAnnotations = [];
+  state.annotationPayload = null;
+  state.firstVideoFramePts = null;
+  state.frameDurationMs = null;
+  state.timeOffsetFallbackUsed = false;
+  dom.video.pause();
+  dom.video.removeAttribute("src");
+  dom.video.load();
+  if (ctx) {
+    ctx.clearRect(0, 0, dom.canvas.width || 0, dom.canvas.height || 0);
+  }
+  for (const id of [
+    "eventId",
+    "eventType",
+    "sourceId",
+    "cameraId",
+    "rawClipStatus",
+    "clipValidation",
+    "firstVideoPts",
+    "sourceSize",
+    "annotationLines",
+    "personContextObjects",
+    "personContextFrames",
+    "personContextTracks",
+    "faceObjects",
+    "matchedObjects",
+    "unknownObjects",
+    "colorsUsed",
+    "currentTime",
+    "targetPts",
+    "matchedPts",
+    "alignmentMode",
+    "activeObjects",
+    "annotationSourceStatus",
+    "annotationFileStatus",
+    "activePersonContext",
+    "activeMatchedFaces",
+    "activeBehaviorEvents"
+  ]) {
+    setText(id, "-");
+  }
+  setText("eventId", eventId);
+  dom.clipWarning.hidden = true;
+}
+
+function selectionStillCurrent(requestId, eventId) {
+  return requestId === state.selectionRequestId && state.selectedEventId === eventId;
+}
+
 async function selectBundle(eventId, options = {}) {
+  const requestId = ++state.selectionRequestId;
   const preserveVideo = Boolean(options.preserveVideo);
   const previousVideoSrc = dom.video.currentSrc || dom.video.src || "";
   const previousVideoTime = Number.isFinite(dom.video.currentTime) ? dom.video.currentTime : 0;
   const previousPaused = dom.video.paused;
-  state.selectedEventId = eventId;
+  if (!preserveVideo) {
+    clearBundleDetailForLoading(eventId);
+  } else {
+    state.selectedEventId = eventId;
+  }
   state.warnings = new Set();
   renderBundleList();
 
@@ -264,10 +358,13 @@ async function selectBundle(eventId, options = {}) {
   state.annotationSource = annotationSource;
   const annotationParams = new URLSearchParams({ source: annotationSource });
   const [manifest, annotationsPayload, sinkPayload] = await Promise.all([
-    fetchJson(`/api/bundles/${encodeURIComponent(eventId)}`),
-    fetchJson(`/api/bundles/${encodeURIComponent(eventId)}/annotations?${annotationParams.toString()}`),
-    fetchJson(`/api/bundles/${encodeURIComponent(eventId)}/sink-metadata`)
+    fetchJson(`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}`),
+    fetchJson(`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}/annotations?${annotationParams.toString()}`),
+    fetchJson(`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}/sink-metadata`)
   ]);
+  if (!selectionStillCurrent(requestId, eventId)) {
+    return;
+  }
 
   state.manifest = manifest;
   state.annotationPayload = annotationsPayload;
@@ -298,9 +395,15 @@ async function selectBundle(eventId, options = {}) {
 
   prepareAnnotations();
   const nextVideoSrc = manifest.raw_clip_url || "";
-  if (!preserveVideo || previousVideoSrc !== new URL(nextVideoSrc, window.location.href).href) {
-    dom.video.src = nextVideoSrc;
-    dom.video.load();
+  const nextVideoHref = nextVideoSrc ? new URL(nextVideoSrc, window.location.href).href : "";
+  if (!preserveVideo || previousVideoSrc !== nextVideoHref) {
+    if (nextVideoHref) {
+      dom.video.src = nextVideoHref;
+      dom.video.load();
+    } else {
+      dom.video.removeAttribute("src");
+      dom.video.load();
+    }
   } else {
     dom.video.currentTime = previousVideoTime;
     if (!previousPaused) {

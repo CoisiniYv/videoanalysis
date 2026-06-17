@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from app.db import get_conn
 from app.routers.algorithms import router as algorithms_router
 from app.routers.cameras import router as cameras_router
+from app.routers.evidence import router as evidence_router
 from app.routers.events import router as events_router
 from app.routers.maintenance import router as maintenance_router
 from app.routers.people import router as people_router
@@ -34,6 +35,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Video Analytics API", version="1.0.0", lifespan=lifespan)
 
 app.include_router(events_router)
+app.include_router(evidence_router)
 app.include_router(cameras_router)
 app.include_router(algorithms_router)
 app.include_router(people_router)

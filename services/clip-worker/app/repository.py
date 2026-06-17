@@ -53,6 +53,36 @@ def _reason_for_state(status: str, state: str, reason: str, error_message: str) 
     return ""
 
 
+def get_evidence_diagnostics(pg_conn: psycopg.Connection, event_id: str) -> dict:
+    """Return persisted clip-worker diagnostics for an event."""
+    if not event_id:
+        return {}
+    cursor_factory = getattr(pg_conn, "cursor", None)
+    if not callable(cursor_factory):
+        return {}
+    try:
+        with cursor_factory() as cur:
+            cur.execute(
+                """
+                SELECT payload->'media'->'evidence_diagnostics' AS diagnostics
+                FROM events
+                WHERE id = %(event_id)s::uuid
+                """,
+                {"event_id": event_id},
+            )
+            row = cur.fetchone()
+    except Exception:
+        logger.exception("get_evidence_diagnostics failed event_id=%s", event_id)
+        return {}
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        diagnostics = row.get("diagnostics")
+    else:
+        diagnostics = row[0] if row else None
+    return diagnostics if isinstance(diagnostics, dict) else {}
+
+
 def update_clip_status(
     pg_conn: psycopg.Connection,
     event_id: str,

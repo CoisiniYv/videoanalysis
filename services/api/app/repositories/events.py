@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import psycopg
 from psycopg.rows import dict_row
+
+
+EVENT_CATEGORY_TYPES = {
+    "identity": ("watchlist_hit", "live_search_hit"),
+    "perimeter": ("intrusion", "wall_climb_suspicious"),
+    "behavior": ("loitering", "running", "fall"),
+    "crowd": ("crowd_gathering",),
+}
 
 
 class EventRepository:
@@ -90,6 +98,178 @@ class EventRepository:
             LIMIT %(limit)s OFFSET %(offset)s
         """
 
+        with self._conn.cursor() as cur:
+            cur.execute(count_query, count_params)
+            total_row = cur.fetchone()
+            if total_row is None:
+                total = 0
+            elif isinstance(total_row, dict):
+                total = int(total_row.get("total", 0) or 0)
+            else:
+                total = int(total_row[0] or 0)
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(data_query, params)
+            rows = cur.fetchall()
+
+        return rows, total
+
+    def list_evidence_bundle_summaries(
+        self,
+        *,
+        event_type: str | None = None,
+        event_category: str | None = None,
+        source_id: str | None = None,
+        camera_id: str | None = None,
+        event_id: str | None = None,
+        person: str | None = None,
+        clip_status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """List evidence candidates from PostgreSQL, not evidence directories."""
+
+        where_clauses = [
+            """
+            (
+                COALESCE(e.media_status, '') NOT IN ('media_deleted', 'media_expired')
+                AND COALESCE(e.payload->'maintenance'->>'deleted_at', '') = ''
+            )
+            """,
+            """
+            (
+                COALESCE(e.clip_path, '') <> ''
+                OR COALESCE(e.media_status, 'not_implemented') <> 'not_implemented'
+                OR COALESCE(e.payload->'media'->>'raw_clip_path', '') <> ''
+                OR COALESCE(e.payload->'media'->>'metadata_path', '') <> ''
+                OR COALESCE(e.payload->'media'->>'evidence_dir', '') <> ''
+                OR COALESCE(e.payload->'media'->>'evidence_bundle_path', '') <> ''
+                OR COALESCE(e.payload->'evidence'->>'bundle_path', '') <> ''
+                OR COALESCE(e.payload->>'evidence_bundle_path', '') <> ''
+                OR latest_task.task_id IS NOT NULL
+            )
+            """
+        ]
+        params: dict[str, Any] = {
+            "limit": max(1, int(limit)),
+            "offset": max(0, int(offset)),
+        }
+
+        if event_type:
+            where_clauses.append("e.event_type = %(event_type)s")
+            params["event_type"] = event_type
+
+        if event_category and event_category != "all":
+            event_types = EVENT_CATEGORY_TYPES.get(event_category, ())
+            if event_types:
+                where_clauses.append("e.event_type = ANY(%(event_category_types)s)")
+                params["event_category_types"] = list(event_types)
+            else:
+                where_clauses.append("false")
+
+        if source_id:
+            where_clauses.append("e.source_id ILIKE %(source_id_like)s")
+            params["source_id_like"] = f"%{source_id}%"
+
+        if camera_id:
+            where_clauses.append("e.camera_id ILIKE %(camera_id_like)s")
+            params["camera_id_like"] = f"%{camera_id}%"
+
+        if event_id:
+            where_clauses.append(
+                "(e.id::text ILIKE %(event_id_like)s OR e.source_event_id ILIKE %(event_id_like)s)"
+            )
+            params["event_id_like"] = f"%{event_id}%"
+
+        if person:
+            where_clauses.append(
+                """
+                (
+                    e.person_id::text ILIKE %(person_like)s
+                    OR e.payload->>'external_person_id' ILIKE %(person_like)s
+                    OR e.payload->'matched_person'->>'external_person_id' ILIKE %(person_like)s
+                    OR e.payload->'person'->>'name' ILIKE %(person_like)s
+                    OR e.payload::text ILIKE %(person_like)s
+                )
+                """
+            )
+            params["person_like"] = f"%{person}%"
+
+        if clip_status:
+            where_clauses.append(
+                """
+                COALESCE(
+                    e.payload->'media'->>'clip_status',
+                    e.media_status,
+                    latest_task.status,
+                    ''
+                ) ILIKE %(clip_status_like)s
+                """
+            )
+            params["clip_status_like"] = f"%{clip_status}%"
+
+        where_sql = " AND ".join(f"({clause})" for clause in where_clauses)
+        from_sql = f"""
+            FROM events e
+            LEFT JOIN LATERAL (
+                SELECT et.task_id, et.status, et.clip_path, et.metadata_path, et.updated_at
+                FROM evidence_tasks et
+                WHERE et.event_id = e.id
+                   OR et.source_event_id = e.source_event_id
+                ORDER BY et.updated_at DESC, et.created_at DESC, et.task_id DESC
+                LIMIT 1
+            ) latest_task ON true
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*)::int AS task_count
+                FROM evidence_tasks et
+                WHERE et.event_id = e.id
+                   OR et.source_event_id = e.source_event_id
+            ) task_counts ON true
+            WHERE {where_sql}
+        """
+        count_query = f"SELECT COUNT(*) AS total {from_sql}"
+        data_query = f"""
+            SELECT
+                e.id::text AS event_id,
+                e.source_event_id,
+                e.event_type,
+                e.camera_id,
+                e.source_id,
+                e.person_id,
+                e.media_status,
+                e.status,
+                e.created_at,
+                e.updated_at,
+                e.start_ts,
+                e.event_ts_ms,
+                e.payload,
+                e.clip_path,
+                COALESCE(e.payload->'media'->>'clip_status', e.media_status, latest_task.status) AS clip_status,
+                COALESCE(
+                    e.payload->'media'->>'raw_clip_path',
+                    e.clip_path,
+                    latest_task.clip_path
+                ) AS raw_clip_path,
+                COALESCE(
+                    e.payload->'media'->>'metadata_path',
+                    latest_task.metadata_path
+                ) AS metadata_path,
+                COALESCE(
+                    e.payload->'media'->>'evidence_dir',
+                    e.payload->'media'->>'evidence_bundle_path',
+                    e.payload->'evidence'->>'bundle_path',
+                    e.payload->>'evidence_bundle_path'
+                ) AS evidence_dir,
+                e.payload->'media'->>'summary_json_path' AS summary_json_path,
+                e.payload->'media'->>'annotations_jsonl_path' AS annotations_jsonl_path,
+                COALESCE(task_counts.task_count, 0) AS evidence_task_count,
+                latest_task.status AS latest_task_status
+            {from_sql}
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+
+        count_params = {k: v for k, v in params.items() if k not in {"limit", "offset"}}
         with self._conn.cursor() as cur:
             cur.execute(count_query, count_params)
             total_row = cur.fetchone()

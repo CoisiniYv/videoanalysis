@@ -473,6 +473,9 @@ def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
     assert clip_env["CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS"] == (
         "${CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS:-12}"
     )
+    assert clip_env["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == (
+        "${CLIP_WORKER_MAX_CONCURRENT_JOBS:-4}"
+    )
     assert clip_env["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == (
         "${POST_SAVANT_FRAME_PROOF_ATTEMPTS:-1}"
     )
@@ -480,7 +483,10 @@ def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
     assert env_file["CLIP_WORKER_PENDING_CLAIM_COUNT"] == "10"
     assert env_file["CLIP_WORKER_PENDING_CLAIM_INTERVAL_S"] == "5"
     assert env_file["CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS"] == "12"
+    assert env_file["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "4"
     assert env_file["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == "1"
+    assert env_file["POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S"] == "3"
+    assert env_file["POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S"] == "0.5"
 
 
 def test_midterm_evidence_version_is_project_named() -> None:
