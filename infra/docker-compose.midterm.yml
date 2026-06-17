@@ -552,6 +552,7 @@ services:
       EVIDENCE_CAMERA_CONFIG_PATH: /app/modules/savant_security/config/cameras.midterm.yml
       EVIDENCE_SOURCES_CONFIG_PATH: /app/infra/generated/sources.generated.yml
     volumes:
+      - ../services/evidence-viewer:/app:rw
       - /data/video-analytics/media/evidence:/evidence:ro
       - ../modules/savant_security/config:/app/modules/savant_security/config:ro
       - ../infra/generated:/app/infra/generated:ro
