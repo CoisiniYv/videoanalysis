@@ -332,6 +332,16 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"]["MEDIA_DECODE_TIMEOUT_S"] == (
         "${MEDIA_DECODE_TIMEOUT_S:-120}"
     )
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED"
+    ] == "${MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED:-true}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES"
+    ] == (
+        "${MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES:-"
+        "ready,generated,generated_unverified,generated_annotation_failed,"
+        "duration_guard_failed,generated_corrupt,failed}"
+    )
     assert services["media-worker"]["environment"]["EVIDENCE_RUNTIME_EPOCH_STRICT"] == (
         "${EVIDENCE_RUNTIME_EPOCH_STRICT:-true}"
     )
@@ -588,6 +598,10 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "2000"
     assert env_file["MEDIA_PROBE_TIMEOUT_S"] == "30"
     assert env_file["MEDIA_DECODE_TIMEOUT_S"] == "120"
+    assert env_file["MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES"] == (
+        "ready,generated,generated_unverified,generated_annotation_failed,"
+        "duration_guard_failed,generated_corrupt,failed"
+    )
     assert env_file["FRAME_CACHE_SIDECAR_RANGE_COUNT"] == "2000"
 
 

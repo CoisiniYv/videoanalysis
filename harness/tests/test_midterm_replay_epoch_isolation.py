@@ -428,6 +428,63 @@ def test_media_worker_allows_missing_sink_metadata_epoch(monkeypatch, tmp_path: 
     assert metadata["media"]["epoch_guard_failed"] is False
 
 
+def test_media_worker_cleanup_replay_sink_output_is_status_and_path_guarded(tmp_path: Path) -> None:
+    worker = _activate("media-worker", "app.worker")
+    root = tmp_path / "replay-sink-output" / "midterm" / "epochs" / CURRENT_EPOCH
+    sink_dir = root / f"replay-{CURRENT_EPOCH}-event-{EVENT_ID}" / "unknown"
+    sink_dir.mkdir(parents=True)
+    (sink_dir / "video.mov").write_bytes(b"video")
+    (sink_dir / "metadata.json").write_text("{}\n", encoding="utf-8")
+
+    skipped = worker._cleanup_processed_sink_output(
+        meta_dir=str(sink_dir),
+        sink_root=str(root),
+        event_id=EVENT_ID,
+        clip_status="generated_unverified",
+        enabled=True,
+    )
+    assert skipped["status"] == "skipped"
+    assert sink_dir.exists()
+
+    deleted_unverified = worker._cleanup_processed_sink_output(
+        meta_dir=str(sink_dir),
+        sink_root=str(root),
+        event_id=EVENT_ID,
+        clip_status="generated_unverified",
+        enabled=True,
+        allowed_statuses=("ready", "generated_unverified"),
+    )
+    assert deleted_unverified["status"] == "deleted"
+    assert deleted_unverified["deleted_bytes"] > 0
+    assert not sink_dir.exists()
+
+    sink_dir.mkdir(parents=True)
+    (sink_dir / "video.mov").write_bytes(b"video")
+    (sink_dir / "metadata.json").write_text("{}\n", encoding="utf-8")
+
+    unsafe = worker._cleanup_processed_sink_output(
+        meta_dir=str(root),
+        sink_root=str(root),
+        event_id=EVENT_ID,
+        clip_status="ready",
+        enabled=True,
+    )
+    assert unsafe["status"] == "skipped"
+    assert root.exists()
+
+    deleted = worker._cleanup_processed_sink_output(
+        meta_dir=str(sink_dir),
+        sink_root=str(root),
+        event_id=EVENT_ID,
+        clip_status="ready",
+        enabled=True,
+    )
+    assert deleted["status"] == "deleted"
+    assert deleted["deleted_bytes"] > 0
+    assert not sink_dir.exists()
+    assert root.exists()
+
+
 def _event_context() -> dict[str, Any]:
     return {
         "event_id": EVENT_ID,

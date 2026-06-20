@@ -22,6 +22,8 @@ class Config:
     sink_scan_max_metadata_files: int
     media_probe_timeout_s: float
     media_decode_timeout_s: float
+    cleanup_replay_sink_output_enabled: bool
+    cleanup_replay_sink_output_statuses: tuple[str, ...]
 
 
 def load_config() -> Config:
@@ -60,4 +62,15 @@ def load_config() -> Config:
         ),
         media_probe_timeout_s=float(os.getenv("MEDIA_PROBE_TIMEOUT_S", "30")),
         media_decode_timeout_s=float(os.getenv("MEDIA_DECODE_TIMEOUT_S", "120")),
+        cleanup_replay_sink_output_enabled=os.getenv(
+            "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED", "false"
+        ).lower()
+        in ("1", "true", "yes"),
+        cleanup_replay_sink_output_statuses=tuple(
+            status.strip()
+            for status in os.getenv(
+                "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES", "ready"
+            ).split(",")
+            if status.strip()
+        ),
     )

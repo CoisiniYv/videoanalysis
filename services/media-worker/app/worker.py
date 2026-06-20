@@ -59,6 +59,7 @@ DEFAULT_SINK_SCAN_MAX_METADATA_FILES = 2000
 DEFAULT_MEDIA_PROBE_TIMEOUT_S = 30.0
 DEFAULT_MEDIA_DECODE_TIMEOUT_S = 120.0
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
+DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
 INVALID_SINK_OUTPUT_MARKER = ".media-worker.invalid.json"
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
@@ -108,6 +109,77 @@ def _parse_ndjson(filepath: Path) -> dict | None:
     except Exception:
         logger.exception("failed to read %s", filepath)
     return None
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _path_tree_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file() or path.is_symlink():
+        try:
+            return int(path.lstat().st_size)
+        except OSError:
+            return 0
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file() or child.is_symlink():
+                total += int(child.lstat().st_size)
+        except OSError:
+            continue
+    return total
+
+
+def _cleanup_processed_sink_output(
+    *,
+    meta_dir: str,
+    sink_root: str,
+    event_id: str,
+    clip_status: str,
+    enabled: bool,
+    allowed_statuses: tuple[str, ...] = DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES,
+) -> dict[str, object]:
+    """Delete a finalized video-file-sink output directory after evidence is published."""
+    if not enabled:
+        return {"status": "disabled", "deleted_bytes": 0}
+    if not meta_dir:
+        return {"status": "skipped", "reason": "missing_meta_dir", "deleted_bytes": 0}
+    if clip_status not in set(allowed_statuses):
+        return {
+            "status": "skipped",
+            "reason": "clip_status_not_allowed",
+            "deleted_bytes": 0,
+        }
+
+    root = Path(sink_root).resolve(strict=False)
+    target = Path(meta_dir).resolve(strict=False)
+    if target == root or not _path_is_relative_to(target, root):
+        logger.warning(
+            "replay_sink_cleanup_skipped_unsafe event_id=%s meta_dir=%s root=%s",
+            event_id,
+            meta_dir,
+            sink_root,
+        )
+        return {"status": "skipped", "reason": "unsafe_path", "deleted_bytes": 0}
+    if not target.is_dir():
+        return {"status": "missing", "deleted_bytes": 0}
+
+    deleted_bytes = _path_tree_size(target)
+    shutil.rmtree(target)
+    logger.info(
+        "replay_sink_output_cleaned event_id=%s meta_dir=%s deleted_bytes=%s",
+        event_id,
+        meta_dir,
+        deleted_bytes,
+    )
+    return {"status": "deleted", "deleted_bytes": deleted_bytes}
 
 
 def _metadata_scan_limit(limit: int | None = None) -> int:
@@ -3092,6 +3164,8 @@ def _process_sink_output(
     midterm_sink_stability_checks: int = 2,
     processed_state_path: str | Path | None = None,
     sink_scan_max_metadata_files: int | None = None,
+    cleanup_replay_sink_output_enabled: bool = False,
+    cleanup_replay_sink_output_statuses: tuple[str, ...] = DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
@@ -3557,6 +3631,54 @@ def _process_sink_output(
                         clip_path,
                         sink_path,
                     )
+                    try:
+                        cleanup_result = _cleanup_processed_sink_output(
+                            meta_dir=meta_dir,
+                            sink_root=sink_dir,
+                            event_id=event_id,
+                            clip_status=str(clip_status),
+                            enabled=cleanup_replay_sink_output_enabled,
+                            allowed_statuses=cleanup_replay_sink_output_statuses,
+                        )
+                    except OSError as exc:
+                        logger.warning(
+                            "replay_sink_output_cleanup_failed event_id=%s "
+                            "meta_dir=%s error=%s",
+                            event_id,
+                            meta_dir,
+                            exc,
+                        )
+                        cleanup_result = {
+                            "status": "failed",
+                            "deleted_bytes": 0,
+                        }
+                    if cleanup_result.get("status") == "deleted":
+                        cur.execute(
+                            """
+                            UPDATE events
+                            SET payload = COALESCE(payload, '{}'::jsonb)
+                                    || jsonb_build_object(
+                                        'media',
+                                        COALESCE(payload->'media', '{}'::jsonb)
+                                        || jsonb_build_object(
+                                            'sink_output_cleanup_status',
+                                                %(cleanup_status)s::text,
+                                            'sink_output_cleanup_deleted_bytes',
+                                                %(deleted_bytes)s::bigint,
+                                            'sink_output_cleanup_at', now()
+                                        )
+                                    ),
+                                updated_at = now()
+                            WHERE id = %(event_id)s::uuid
+                            """,
+                            {
+                                "event_id": event_id,
+                                "cleanup_status": "deleted",
+                                "deleted_bytes": int(
+                                    cleanup_result.get("deleted_bytes") or 0
+                                ),
+                            },
+                        )
                     updated += 1
                 if meta_dir:
                     processed_dirs.add(meta_dir)
@@ -4116,7 +4238,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "midterm_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
         "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f "
         "state_path=%s sink_scan_max_metadata_files=%d "
-        "media_probe_timeout_s=%.1f media_decode_timeout_s=%.1f",
+        "media_probe_timeout_s=%.1f media_decode_timeout_s=%.1f "
+        "cleanup_replay_sink_output=%s cleanup_statuses=%s",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
@@ -4130,6 +4253,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.sink_scan_max_metadata_files,
         cfg.media_probe_timeout_s,
         cfg.media_decode_timeout_s,
+        cfg.cleanup_replay_sink_output_enabled,
+        ",".join(cfg.cleanup_replay_sink_output_statuses),
     )
 
     processed_state_path = _media_worker_state_path(
@@ -4154,6 +4279,12 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
                 processed_state_path=processed_state_path,
                 sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
+                cleanup_replay_sink_output_enabled=(
+                    cfg.cleanup_replay_sink_output_enabled
+                ),
+                cleanup_replay_sink_output_statuses=(
+                    cfg.cleanup_replay_sink_output_statuses
+                ),
             )
             if clip_updates:
                 logger.info("media_worker: clip updated %d events", clip_updates)
