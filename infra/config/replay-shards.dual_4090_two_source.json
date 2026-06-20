@@ -1,0 +1,23 @@
+{
+  "default_shard_id": "replay-a",
+  "shards": [
+    {
+      "shard_id": "replay-a",
+      "replay_api_url": "http://replay-a:8080",
+      "in_stream_endpoint": "dealer+connect:tcp://replay-a:5555",
+      "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-a:6666",
+      "source_ids": [
+        "primary_rtsp"
+      ]
+    },
+    {
+      "shard_id": "replay-b",
+      "replay_api_url": "http://replay-b:8080",
+      "in_stream_endpoint": "dealer+connect:tcp://replay-b:5555",
+      "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-b:6666",
+      "source_ids": [
+        "source_00000000-0000-4000-8000-781078565686"
+      ]
+    }
+  ]
+}

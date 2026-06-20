@@ -51,6 +51,9 @@ services:
       CAMERA_RUNTIME_MODULE_CONFIG_PATH: /app/modules/savant_security/config/cameras.midterm.yml
       CAMERA_RUNTIME_SOURCES_CONFIG_PATH: /app/infra/generated/sources.generated.yml
       CAMERA_RUNTIME_ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
+      REPLAY_API_URL: http://replay-service:8080
+      REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
+      REPLAY_SHARDS_CONFIG_PATH: "${REPLAY_SHARDS_CONFIG_PATH:-}"
       CAMERA_RUNTIME_DOCKER_NETWORK: video-analytics-midterm_default
       CAMERA_RUNTIME_REPLAY_CONTAINER: video-analytics-midterm-replay-service
       CAMERA_RUNTIME_FORWARDER_CONTAINER: video-analytics-midterm-analysis-forwarder
@@ -84,6 +87,7 @@ services:
       - ../libs:/app/libs:ro
       - ../modules/savant_security:/app/modules/savant_security:rw
       - ../infra/generated:/app/infra/generated:rw
+      - ../infra/config:/app/infra/config:ro
       - /data/video-analytics/media:/data/video-analytics/media:rw
       - /data/video-analytics/models:/data/video-analytics/models:ro
       - /var/run/docker.sock:/var/run/docker.sock
@@ -128,6 +132,38 @@ services:
       - /data/video-analytics/replay-midterm:/opt/rocksdb:rw
     restart: unless-stopped
 
+  replay-a:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-a
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_A_HOST_PORT:-8198}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-a.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-a:/opt/rocksdb:rw
+    depends_on:
+      analysis-forwarder-a: { condition: service_started }
+    restart: unless-stopped
+
+  replay-b:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-b
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_B_HOST_PORT:-8298}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-b.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-b:/opt/rocksdb:rw
+    depends_on:
+      analysis-forwarder-b: { condition: service_started }
+    restart: unless-stopped
+
   analysis-forwarder:
     build:
       context: ../services/analysis-forwarder
@@ -154,6 +190,88 @@ services:
       - "${FORWARDER_METRICS_HOST_PORT:-18081}:8081"
     depends_on:
       - replay-service
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  analysis-forwarder-a:
+    build:
+      context: ../services/analysis-forwarder
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-analysis-forwarder:latest
+    container_name: video-analytics-midterm-analysis-forwarder-a
+    profiles: ["dual-4090-two-source"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-a:5557
+      ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
+      ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
+      FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"
+      FORWARDER_QUEUE_MAX_SIZE: "${FORWARDER_QUEUE_MAX_SIZE:-256}"
+      FORWARDER_RECEIVE_TIMEOUT_MS: "${FORWARDER_RECEIVE_TIMEOUT_MS:-1000}"
+      FORWARDER_RECEIVE_HWM: "${FORWARDER_RECEIVE_HWM:-1000}"
+      FORWARDER_SEND_TIMEOUT_MS: "${FORWARDER_SEND_TIMEOUT_MS:-100}"
+      FORWARDER_SEND_RETRIES: "${FORWARDER_SEND_RETRIES:-0}"
+      FORWARDER_SEND_HWM: "${FORWARDER_SEND_HWM:-50}"
+      FORWARDER_METRICS_PORT: "8081"
+    ports:
+      - "${FORWARDER_A_METRICS_HOST_PORT:-18182}:8081"
+    depends_on:
+      savant-a: { condition: service_started }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  analysis-forwarder-b:
+    build:
+      context: ../services/analysis-forwarder
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-analysis-forwarder:latest
+    container_name: video-analytics-midterm-analysis-forwarder-b
+    profiles: ["dual-4090-two-source"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-b:5557
+      ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
+      ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
+      FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"
+      FORWARDER_QUEUE_MAX_SIZE: "${FORWARDER_QUEUE_MAX_SIZE:-256}"
+      FORWARDER_RECEIVE_TIMEOUT_MS: "${FORWARDER_RECEIVE_TIMEOUT_MS:-1000}"
+      FORWARDER_RECEIVE_HWM: "${FORWARDER_RECEIVE_HWM:-1000}"
+      FORWARDER_SEND_TIMEOUT_MS: "${FORWARDER_SEND_TIMEOUT_MS:-100}"
+      FORWARDER_SEND_RETRIES: "${FORWARDER_SEND_RETRIES:-0}"
+      FORWARDER_SEND_HWM: "${FORWARDER_SEND_HWM:-50}"
+      FORWARDER_METRICS_PORT: "8081"
+    ports:
+      - "${FORWARDER_B_METRICS_HOST_PORT:-18183}:8081"
+    depends_on:
+      savant-b: { condition: service_started }
     healthcheck:
       test:
         [
@@ -263,6 +381,133 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       analysis-forwarder: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "sh", "/opt/savant/healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+    restart: unless-stopped
+
+  savant-a:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: video-analytics-midterm-savant-a
+    profiles: ["dual-4090-two-source"]
+    entrypoint:
+      [
+        "bash", "-c",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; python /opt/savant/src/module/savant_patches/apply_patches.py || exit 1; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
+      ]
+    working_dir: /opt/savant/src/module
+    env_file:
+      - ./env/midterm.env
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      NVIDIA_VISIBLE_DEVICES: "${SAVANT_A_NVIDIA_VISIBLE_DEVICES:-0}"
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      WEBSERVER_PORT: "8080"
+      METRICS_FRAME_PERIOD: "1000"
+      METRICS_TIME_PERIOD: "5"
+      METRICS_HISTORY: "100"
+      METRICS_EXTRA_LABELS: '{"service":"savant-a","profile":"dual-4090-two-source"}'
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-4}"
+      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
+      INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
+      MAX_FPS: "${MAX_FPS:-8/1}"
+      MIN_FPS: "${MIN_FPS:-2/1}"
+      BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.midterm.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      OUTPUT_FRAME: '{"codec":"copy"}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
+      - /data/video-analytics/models:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
+      - /data/video-analytics/media:/data/video-analytics/media:rw
+    ports:
+      - "${SAVANT_A_METRICS_HOST_PORT:-18180}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "sh", "/opt/savant/healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+    restart: unless-stopped
+
+  savant-b:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: video-analytics-midterm-savant-b
+    profiles: ["dual-4090-two-source"]
+    entrypoint:
+      [
+        "bash", "-c",
+        "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; python /opt/savant/src/module/savant_patches/apply_patches.py || exit 1; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE:-module.yml}",
+      ]
+    working_dir: /opt/savant/src/module
+    env_file:
+      - ./env/midterm.env
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      NVIDIA_VISIBLE_DEVICES: "${SAVANT_B_NVIDIA_VISIBLE_DEVICES:-all}"
+      CUDA_VISIBLE_DEVICES: "${SAVANT_B_CUDA_VISIBLE_DEVICES:-1}"
+      ZMQ_SRC_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      ZMQ_SINK_ENDPOINT: pub+bind:tcp://0.0.0.0:5558
+      MODEL_PATH: /models
+      DOWNLOAD_PATH: /downloads
+      WEBSERVER_PORT: "8080"
+      METRICS_FRAME_PERIOD: "1000"
+      METRICS_TIME_PERIOD: "5"
+      METRICS_HISTORY: "100"
+      METRICS_EXTRA_LABELS: '{"service":"savant-b","profile":"dual-4090-two-source"}'
+      BATCH_SIZE: "1"
+      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-4}"
+      MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
+      INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
+      MAX_FPS: "${MAX_FPS:-8/1}"
+      MIN_FPS: "${MIN_FPS:-2/1}"
+      BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
+      REDIS_URL: redis://redis:6379/0
+      EVENT_STREAM: security.events
+      EVENT_EXPORTER: redis
+      CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.midterm.yml
+      SAVANT_EVENT_MEDIA_REQUIRED: "false"
+      OUTPUT_FRAME: '{"codec":"copy"}'
+    volumes:
+      - ../modules/savant_security:/opt/savant/src/module:rw
+      - ../modules/savant_security/poc_deps:/opt/savant/poc_deps:ro
+      - ${SAVANT_B_MODEL_ROOT:-/data/video-analytics/models-savant-b}:/models:rw
+      - /data/video-analytics/downloads:/downloads:rw
+      - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
+      - /data/video-analytics/media:/data/video-analytics/media:rw
+    ports:
+      - "${SAVANT_B_METRICS_HOST_PORT:-18181}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+    depends_on:
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "sh", "/opt/savant/healthcheck.sh"]
       interval: 5s
@@ -395,6 +640,7 @@ services:
       RECORD_REQUEST_STREAM: security.record_requests
       REPLAY_API_URL: http://replay-service:8080
       REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
+      REPLAY_SHARDS_CONFIG_PATH: "${REPLAY_SHARDS_CONFIG_PATH:-}"
       CONSUMER_GROUP: clip-workers-midterm
       CONSUMER_NAME: clip-worker-midterm-1
       POLL_TIMEOUT_MS: "5000"
@@ -427,6 +673,7 @@ services:
       ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
     volumes:
       - ../services/clip-worker:/app:rw
+      - ../infra/config:/app/infra/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -449,6 +696,46 @@ services:
       - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
     depends_on:
       redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  video-file-sink-a:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-a
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-a.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink-b:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-b
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-b.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
     restart: unless-stopped
 
   media-worker:

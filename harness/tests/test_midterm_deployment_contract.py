@@ -17,6 +17,8 @@ API_FACE_RUNTIME_DOCKERFILE = ROOT / "services" / "api" / "Dockerfile.face-runti
 API_FACE_RUNTIME_REQUIREMENTS = ROOT / "services" / "api" / "requirements.face-runtime.txt"
 MEDIA_WORKER_DOCKERFILE = ROOT / "services" / "media-worker" / "Dockerfile"
 REPLAY_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.json"
+REPLAY_A_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.replay-a.json"
+REPLAY_B_CONFIG = ROOT / "modules" / "savant_replay" / "config.midterm.replay-b.json"
 CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midterm.yml"
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
 SAVANT_PATCH_DIR = ROOT / "modules" / "savant_security" / "savant_patches"
@@ -92,6 +94,8 @@ def test_midterm_deployment_files_exist() -> None:
     assert API_FACE_RUNTIME_DOCKERFILE.exists()
     assert API_FACE_RUNTIME_REQUIREMENTS.exists()
     assert REPLAY_CONFIG.exists()
+    assert REPLAY_A_CONFIG.exists()
+    assert REPLAY_B_CONFIG.exists()
     assert CAMERA_CONFIG.exists()
     assert SAVANT_MODULE.exists()
     assert VIDEO_FILE_SINK_ENTRYPOINT.exists()
@@ -109,13 +113,18 @@ def test_active_deploy_surface_has_only_midterm_compose_and_env_files() -> None:
 
     assert root_compose_files == ["docker-compose.midterm.yml"]
     assert env_files == ["midterm.env"]
-    assert replay_configs == ["config.midterm.json"]
+    assert replay_configs == [
+        "config.midterm.json",
+        "config.midterm.replay-a.json",
+        "config.midterm.replay-b.json",
+    ]
     assert camera_configs == ["cameras.midterm.yml"]
 
 
 def test_current_smoke_surface_is_midterm_only() -> None:
     scripts = sorted(path.name for path in CURRENT_SMOKE_DIR.glob("*.sh"))
     assert scripts == [
+        "check_dual_4090_two_source_replay_inference_evidence.sh",
         "check_midterm_deployment.sh",
         "check_operator_camera_and_face_registration.sh",
         "check_savant_perf_observability.sh",
@@ -129,6 +138,7 @@ def test_runtime_doctor_is_midterm_named() -> None:
     runtime_scripts = sorted(path.name for path in (ROOT / "scripts" / "runtime").glob("*.sh"))
     assert runtime_scripts == [
         "doctor_midterm.sh",
+        "prepare_dual_4090_savant_b_model_cache.sh",
         "video_file_sink_entrypoint.sh",
     ]
     text = _text(RUNTIME_DOCTOR)
@@ -138,6 +148,7 @@ def test_runtime_doctor_is_midterm_named() -> None:
     assert "enabled_rtsp_source_count" in text
     assert "recommended_max_parallel_streams" in text
     assert "video-analytics-midterm" in text
+    assert (ROOT / "scripts" / "runtime" / "prepare_dual_4090_savant_b_model_cache.sh").is_file()
 
 
 def test_midterm_compose_uses_neutral_project_names() -> None:
@@ -202,9 +213,11 @@ def test_midterm_runtime_apply_stays_behind_8090_proxy() -> None:
     assert api["expose"] == ["8000"]
     assert env["CAMERA_RUNTIME_APPLY_ENABLED"] == "${CAMERA_RUNTIME_APPLY_ENABLED:-true}"
     assert env["CAMERA_RUNTIME_ZMQ_ENDPOINT"] == "dealer+connect:tcp://replay-service:5555"
+    assert env["REPLAY_SHARDS_CONFIG_PATH"] == "${REPLAY_SHARDS_CONFIG_PATH:-}"
     assert env["CAMERA_RUNTIME_DOCKER_NETWORK"] == "video-analytics-midterm_default"
     assert env["CAMERA_RUNTIME_REPLAY_CONTAINER"] == "video-analytics-midterm-replay-service"
     assert "../infra/generated:/app/infra/generated:rw" in api["volumes"]
+    assert "../infra/config:/app/infra/config:ro" in api["volumes"]
     assert "/var/run/docker.sock:/var/run/docker.sock" in api["volumes"]
 
 
@@ -215,6 +228,26 @@ def test_replay_first_topology_is_preserved() -> None:
 
     assert services["source-adapter"]["environment"]["ZMQ_ENDPOINT"] == (
         "dealer+connect:tcp://replay-service:5555"
+    )
+    assert services["replay-a"]["profiles"] == [
+        "dual-replay-shards",
+        "dual-4090-two-source",
+    ]
+    assert services["replay-b"]["profiles"] == [
+        "dual-replay-shards",
+        "dual-4090-two-source",
+    ]
+    assert services["replay-a"]["volumes"][0] == (
+        "../modules/savant_replay/config.midterm.replay-a.json:/opt/etc/config.json:ro"
+    )
+    assert services["replay-b"]["volumes"][0] == (
+        "../modules/savant_replay/config.midterm.replay-b.json:/opt/etc/config.json:ro"
+    )
+    assert services["replay-a"]["volumes"][-1] == (
+        "/data/video-analytics/replay-midterm-a:/opt/rocksdb:rw"
+    )
+    assert services["replay-b"]["volumes"][-1] == (
+        "/data/video-analytics/replay-midterm-b:/opt/rocksdb:rw"
     )
     assert replay["in_stream"]["url"] == "router+bind:tcp://0.0.0.0:5555"
     assert replay["out_stream"]["url"] == "dealer+connect:tcp://analysis-forwarder:5557"
@@ -235,6 +268,10 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["clip-worker"]["environment"]["REPLAY_JOB_SINK_URL"] == (
         "dealer+connect:tcp://video-file-sink:6666"
     )
+    assert services["clip-worker"]["environment"]["REPLAY_SHARDS_CONFIG_PATH"] == (
+        "${REPLAY_SHARDS_CONFIG_PATH:-}"
+    )
+    assert "../infra/config:/app/infra/config:ro" in services["clip-worker"]["volumes"]
     assert services["video-file-sink"]["environment"]["ZMQ_ENDPOINT"] == (
         "router+bind:tcp://0.0.0.0:6666"
     )
@@ -242,14 +279,40 @@ def test_replay_first_topology_is_preserved() -> None:
         "/bin/sh",
         "/opt/video-file-sink-entrypoint.sh",
     ]
+    for service_name, created_by in (
+        ("video-file-sink-a", "video-file-sink-a.startup"),
+        ("video-file-sink-b", "video-file-sink-b.startup"),
+    ):
+        sink = services[service_name]
+        assert sink["profiles"] == ["dual-replay-shards", "dual-4090-two-source"]
+        assert sink["environment"]["ZMQ_ENDPOINT"] == "router+bind:tcp://0.0.0.0:6666"
+        assert sink["environment"]["VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH"] == "true"
+        assert sink["environment"]["VIDEO_FILE_SINK_CREATED_BY"] == created_by
+        assert sink["depends_on"]["video-file-sink"]["condition"] == "service_started"
+        assert sink["entrypoint"] == [
+            "/bin/sh",
+            "/opt/video-file-sink-entrypoint.sh",
+        ]
     assert (
         "../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro"
         in services["video-file-sink"]["volumes"]
     )
+    assert (
+        "../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro"
+        in services["video-file-sink-a"]["volumes"]
+    )
+    assert (
+        "../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro"
+        in services["video-file-sink-b"]["volumes"]
+    )
     assert "video_analytics:midterm:runtime_epoch" in _text(VIDEO_FILE_SINK_ENTRYPOINT)
-    assert "/media/replay-sink-output/midterm/epochs/${EPOCH_ID}" in _text(
+    assert 'VIDEO_FILE_SINK_EPOCH_ROOT:-/media/replay-sink-output/midterm' in _text(
         VIDEO_FILE_SINK_ENTRYPOINT
     )
+    assert 'DIR_LOCATION="${EPOCH_ROOT}/epochs/${EPOCH_ID}' in _text(
+        VIDEO_FILE_SINK_ENTRYPOINT
+    )
+    assert "VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH" in _text(VIDEO_FILE_SINK_ENTRYPOINT)
     assert services["replay-service"]["environment"]["RUST_LOG"] == "${RUST_LOG:-info}"
     assert services["media-worker"]["environment"]["RUNTIME_EPOCH_STATE_PATH"] == (
         "/media/replay-sink-output/midterm/.current_epoch.json"
