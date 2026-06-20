@@ -15,10 +15,18 @@ from urllib.parse import quote, urlsplit
 from redis import Redis
 import yaml
 
+from app.services.replay_shards import (
+    ReplayShardConfigError,
+    ReplayShardMap,
+    load_replay_shard_map,
+)
+
 
 DEFAULT_MODULE_CONFIG_PATH = "/app/modules/savant_security/config/cameras.midterm.yml"
 DEFAULT_SOURCES_CONFIG_PATH = "/app/infra/generated/sources.generated.yml"
 DEFAULT_ZMQ_ENDPOINT = "dealer+connect:tcp://replay-service:5555"
+DEFAULT_REPLAY_API_URL = "http://replay-service:8080"
+DEFAULT_REPLAY_JOB_SINK_URL = "dealer+connect:tcp://video-file-sink:6666"
 DEFAULT_NETWORK = "video-analytics-midterm_default"
 DEFAULT_ADAPTER_IMAGE = "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
 DEFAULT_SAVANT_CONTAINER = "video-analytics-midterm-savant"
@@ -138,6 +146,7 @@ def converge_camera_sources(
         os.getenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", DEFAULT_SOURCES_CONFIG_PATH)
     )
     zmq_endpoint = os.getenv("CAMERA_RUNTIME_ZMQ_ENDPOINT", DEFAULT_ZMQ_ENDPOINT)
+    replay_shards = _load_runtime_replay_shards(zmq_endpoint)
     adapter_image = os.getenv("CAMERA_RUNTIME_ADAPTER_IMAGE", DEFAULT_ADAPTER_IMAGE)
     network = os.getenv("CAMERA_RUNTIME_DOCKER_NETWORK", DEFAULT_NETWORK)
     savant_container = os.getenv("CAMERA_RUNTIME_SAVANT_CONTAINER", DEFAULT_SAVANT_CONTAINER)
@@ -149,7 +158,7 @@ def converge_camera_sources(
     docker_socket = os.getenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/var/run/docker.sock")
 
     client = DockerSocketClient(docker_socket)
-    sources_doc = _build_sources_doc(cameras, zmq_endpoint=zmq_endpoint)
+    sources_doc = _build_sources_doc(cameras, replay_shards=replay_shards)
     _write_yaml(sources_config_path, sources_doc)
 
     plan = _source_only_convergence_plan(
@@ -272,6 +281,7 @@ def converge_camera_sources(
         "compose_sources_kept": compose_sources_kept,
         "sources_skipped": sources_skipped,
         "source_lifecycle": lifecycle,
+        "replay_shards": replay_shards.to_dict(),
     }
 
 
@@ -292,6 +302,7 @@ def _apply_camera_runtime_controlled(
         os.getenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", DEFAULT_SOURCES_CONFIG_PATH)
     )
     zmq_endpoint = os.getenv("CAMERA_RUNTIME_ZMQ_ENDPOINT", DEFAULT_ZMQ_ENDPOINT)
+    replay_shards = _load_runtime_replay_shards(zmq_endpoint)
     adapter_image = os.getenv("CAMERA_RUNTIME_ADAPTER_IMAGE", DEFAULT_ADAPTER_IMAGE)
     network = os.getenv("CAMERA_RUNTIME_DOCKER_NETWORK", DEFAULT_NETWORK)
     savant_container = os.getenv("CAMERA_RUNTIME_SAVANT_CONTAINER", DEFAULT_SAVANT_CONTAINER)
@@ -328,7 +339,7 @@ def _apply_camera_runtime_controlled(
     )
 
     client = DockerSocketClient(docker_socket)
-    sources_doc = _build_sources_doc(cameras, zmq_endpoint=zmq_endpoint)
+    sources_doc = _build_sources_doc(cameras, replay_shards=replay_shards)
     source_containers = _source_adapter_containers(
         client,
         sources_doc=sources_doc,
@@ -458,6 +469,7 @@ def _apply_camera_runtime_controlled(
         "replay_restarted": replay_container,
         "forwarder_restarted": forwarder_container,
         "savant_restarted": savant_container,
+        "replay_shards": replay_shards.to_dict(),
         "management_containers_preserved": [
             os.getenv("CAMERA_RUNTIME_API_CONTAINER", "video-analytics-midterm-api"),
             os.getenv(
@@ -468,18 +480,44 @@ def _apply_camera_runtime_controlled(
     }
 
 
-def _build_sources_doc(cameras: list[dict[str, Any]], *, zmq_endpoint: str) -> dict[str, Any]:
+def _load_runtime_replay_shards(default_zmq_endpoint: str) -> ReplayShardMap:
+    try:
+        return load_replay_shard_map(
+            default_replay_api_url=os.getenv("REPLAY_API_URL", DEFAULT_REPLAY_API_URL),
+            default_in_stream_endpoint=default_zmq_endpoint,
+            default_replay_job_sink_url=os.getenv(
+                "REPLAY_JOB_SINK_URL",
+                DEFAULT_REPLAY_JOB_SINK_URL,
+            ),
+        )
+    except ReplayShardConfigError as exc:
+        raise RuntimeApplyError(str(exc)) from exc
+
+
+def _build_sources_doc(
+    cameras: list[dict[str, Any]],
+    *,
+    replay_shards: ReplayShardMap,
+) -> dict[str, Any]:
     sources: dict[str, dict[str, Any]] = {}
     for camera in cameras:
         camera_id = str(camera["id"])
         source_id = validate_source_id(str(camera["source_id"]))
+        enabled = bool(camera.get("enabled", True))
+        try:
+            replay_shard = replay_shards.shard_for_source(source_id)
+        except ReplayShardConfigError:
+            if enabled:
+                raise
+            replay_shard = replay_shards.shard_by_id(replay_shards.default_shard_id)
         source = {
             "camera_id": camera_id,
             "source_id": source_id,
             "uri": str(camera["rtsp_url"]),
-            "enabled": bool(camera.get("enabled", True)),
+            "enabled": enabled,
             "adapter_type": "gstreamer",
-            "zmq_endpoint": zmq_endpoint,
+            "zmq_endpoint": replay_shard.in_stream_endpoint,
+            "replay_shard_id": replay_shard.shard_id,
         }
         camera_name = str(camera.get("name") or "")
         if camera_name:
@@ -1017,7 +1055,12 @@ def _source_only_convergence_plan(
         if not source_id:
             plan.append({**base, "planned_action": "skip", "skip_reason": "missing_source_id"})
             continue
-        if source_id == compose_source_id:
+        compose_source_requires_dynamic = (
+            source_id == compose_source_id
+            and str(source.get("zmq_endpoint") or "")
+            != os.getenv("CAMERA_RUNTIME_ZMQ_ENDPOINT", DEFAULT_ZMQ_ENDPOINT)
+        )
+        if source_id == compose_source_id and not compose_source_requires_dynamic:
             actual = _inspect_container(client, compose_source_container)
             actual_state = str(((actual.get("State") or {}) if isinstance(actual, dict) else {}).get("Status") or "")
             diag = {
@@ -1035,6 +1078,21 @@ def _source_only_convergence_plan(
             else:
                 plan.append({**diag, "planned_action": "stop_compose_disabled"})
             continue
+        if compose_source_requires_dynamic:
+            actual = _inspect_container(client, compose_source_container)
+            actual_state = str(((actual.get("State") or {}) if isinstance(actual, dict) else {}).get("Status") or "")
+            if actual_state == "running":
+                plan.append(
+                    {
+                        **base,
+                        "source": source,
+                        "container_name": compose_source_container,
+                        "actual_state": actual_state,
+                        "actual_present": bool(actual),
+                        "planned_action": "stop_compose_disabled",
+                        "skip_reason": "compose_source_replaced_by_shard_dynamic_source",
+                    }
+                )
 
         container_name = SOURCE_CONTAINER_PREFIX + source_id
         configured_dynamic_names.add(container_name)

@@ -23,12 +23,19 @@ def _activate() -> None:
 def _clip_config(**overrides: Any):
     _activate()
     from app.config import Config
+    from app.replay_shards import load_replay_shard_map
 
     values = {
         "redis_url": "redis://redis:6379/0",
         "record_request_stream": "security.record_requests",
         "replay_api_url": "http://replay-service:8080",
         "replay_job_sink_url": "dealer+connect:tcp://video-file-sink:6666",
+        "replay_shards": load_replay_shard_map(
+            default_replay_api_url="http://replay-service:8080",
+            default_in_stream_endpoint="dealer+connect:tcp://replay-service:5555",
+            default_replay_job_sink_url="dealer+connect:tcp://video-file-sink:6666",
+            env={},
+        ),
         "database_url": "postgresql://video:video@postgres:5432/video_analytics",
         "consumer_group": "clip-workers-test",
         "consumer_name": "clip-worker-test-1",
@@ -142,7 +149,8 @@ class _FakeRedis:
 class _FakeReplay:
     instances: list["_FakeReplay"] = []
 
-    def __init__(self, _url: str) -> None:
+    def __init__(self, url: str) -> None:
+        self.url = url
         self.jobs: list[dict[str, Any]] = []
         self.last_job_request: dict[str, Any] = {}
         self.last_job_payload: dict[str, Any] = {}
@@ -197,6 +205,35 @@ def _request(event_suffix: str, *, event_type: str = "intrusion") -> dict[str, A
         "pre_seconds": 5,
         "post_seconds": 5,
     }
+
+
+def _two_replay_shards():
+    from app.replay_shards import parse_replay_shard_map
+
+    return parse_replay_shard_map(
+        {
+            "default_shard_id": "replay-a",
+            "shards": [
+                {
+                    "shard_id": "replay-a",
+                    "replay_api_url": "http://replay-a:8080",
+                    "in_stream_endpoint": "dealer+connect:tcp://replay-a:5555",
+                    "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-a:6666",
+                    "source_ids": ["source-a"],
+                },
+                {
+                    "shard_id": "replay-b",
+                    "replay_api_url": "http://replay-b:8080",
+                    "in_stream_endpoint": "dealer+connect:tcp://replay-b:5555",
+                    "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-b:6666",
+                    "source_ids": ["source-b"],
+                },
+            ],
+        },
+        default_replay_api_url="http://replay-service:8080",
+        default_in_stream_endpoint="dealer+connect:tcp://replay-service:5555",
+        default_replay_job_sink_url="dealer+connect:tcp://video-file-sink:6666",
+    )
 
 
 def _frame_annotation(
@@ -326,6 +363,70 @@ def test_pending_entry_is_claimed_and_processed(monkeypatch) -> None:
     assert redis_client.claims == 1
     assert redis_client.acked == ["9-0"]
     assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_replay_job_routes_to_source_shard(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {**_request("020"), "source_id": "source-b"}
+    redis_client = _FakeRedis([request])
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=0, replay_shards=_two_replay_shards()),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert len(_FakeReplay.instances) == 1
+    replay = _FakeReplay.instances[0]
+    assert replay.url == "http://replay-b:8080"
+    assert replay.jobs[0]["source_id"] == "source-b"
+    assert replay.jobs[0]["sink_endpoint"] == "dealer+connect:tcp://video-file-sink-b:6666"
+    assert updates[-1]["status"] == "replay_job_created"
+    assert updates[-1]["replay_shard"]["shard_id"] == "replay-b"
+    assert updates[-1]["replay_shard"]["replay_api_url"] == "http://replay-b:8080"
+
+
+def test_unknown_source_fails_before_replay_job(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {**_request("021"), "source_id": "source-missing"}
+    redis_client = _FakeRedis([request])
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=0, replay_shards=_two_replay_shards()),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    assert _FakeReplay.instances == []
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["evidence_reason"] == "replay_shard_routing_failed"
+    assert "source-missing" in updates[-1]["error_message"]
 
 
 def test_deferred_retry_budget_exhaustion_fails_closed(monkeypatch) -> None:

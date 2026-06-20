@@ -500,12 +500,19 @@ def test_person_context_count_positive_is_required_for_pass_marker() -> None:
 def _clip_config(**overrides: Any):
     _activate(CLIP_WORKER_DIR)
     from app.config import Config
+    from app.replay_shards import load_replay_shard_map
 
     values = {
         "redis_url": "redis://redis:6379/0",
         "record_request_stream": "security.record_requests",
         "replay_api_url": "http://replay-service:8080",
         "replay_job_sink_url": "dealer+connect:tcp://video-file-sink:6666",
+        "replay_shards": load_replay_shard_map(
+            default_replay_api_url="http://replay-service:8080",
+            default_in_stream_endpoint="dealer+connect:tcp://replay-service:5555",
+            default_replay_job_sink_url="dealer+connect:tcp://video-file-sink:6666",
+            env={},
+        ),
         "database_url": "postgresql://video:video@postgres:5432/video_analytics",
         "consumer_group": "clip-workers-test",
         "consumer_name": "clip-worker-test-1",
@@ -516,6 +523,10 @@ def _clip_config(**overrides: Any):
         "max_jobs_per_run": 100,
         "run_once": False,
         "max_concurrent_jobs": 1,
+        "pending_claim_min_idle_ms": 0,
+        "pending_claim_count": 10,
+        "pending_claim_interval_s": 0.0,
+        "deferred_retry_max_attempts": 5,
         "per_camera_cooldown_seconds": 30,
         "replay_stop_condition_mode": "ts_delta_sec",
         "replay_fps": 30,
@@ -524,6 +535,12 @@ def _clip_config(**overrides: Any):
         "allow_unbounded_keyframe_fallback": False,
         "keyframe_lookup_retries": 0,
         "keyframe_lookup_retry_sleep_s": 0.0,
+        "post_savant_frame_proof_attempts": 1,
+        "post_savant_frame_proof_retry_sleep_s": 0.0,
+        "post_savant_frame_proof_wait_budget_s": 0.0,
+        "post_savant_frame_proof_poll_interval_s": 0.0,
+        "post_savant_allow_cross_session_post_window_proof": True,
+        "post_savant_allow_truncated_pre_window_proof": True,
         "frame_annotation_stream": "security.frame_annotations",
         "frame_annotation_anchor_lookback_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,

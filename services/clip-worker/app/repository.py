@@ -53,6 +53,12 @@ def _reason_for_state(status: str, state: str, reason: str, error_message: str) 
     return ""
 
 
+def _replay_shard_value(replay_shard: dict | None, key: str) -> str:
+    if not isinstance(replay_shard, dict):
+        return ""
+    return str(replay_shard.get(key) or "")
+
+
 def get_evidence_diagnostics(pg_conn: psycopg.Connection, event_id: str) -> dict:
     """Return persisted clip-worker diagnostics for an event."""
     if not event_id:
@@ -95,6 +101,7 @@ def update_clip_status(
     request_id: str = "",
     attempt_count: int | None = None,
     diagnostics: dict | None = None,
+    replay_shard: dict | None = None,
 ) -> bool:
     """Set clip status and synchronize operator-visible evidence state."""
     if not event_id:
@@ -120,6 +127,9 @@ def update_clip_status(
                                 'evidence_request_id', NULLIF(%(request_id)s::text, ''),
                                 'evidence_attempt_count', %(attempt_count)s::int,
                                 'evidence_diagnostics', %(diagnostics)s::jsonb,
+                                'replay_shard_id', NULLIF(%(replay_shard_id)s::text, ''),
+                                'replay_api_url', NULLIF(%(replay_api_url)s::text, ''),
+                                'replay_job_sink_url', NULLIF(%(replay_job_sink_url)s::text, ''),
                                 'error_message', NULLIF(%(error_message)s::text, '')
                             ))
                         ),
@@ -135,6 +145,12 @@ def update_clip_status(
                     "request_id": request_id,
                     "attempt_count": attempt_count,
                     "diagnostics": _json_or_null(diagnostics),
+                    "replay_shard_id": _replay_shard_value(replay_shard, "shard_id"),
+                    "replay_api_url": _replay_shard_value(replay_shard, "replay_api_url"),
+                    "replay_job_sink_url": _replay_shard_value(
+                        replay_shard,
+                        "replay_job_sink_url",
+                    ),
                     "error_message": error_message,
                     "event_id": event_id,
                 },

@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from app.replay_shards import ReplayShardMap, load_replay_shard_map
+
 
 @dataclass(frozen=True)
 class Config:
@@ -12,6 +14,7 @@ class Config:
     record_request_stream: str
     replay_api_url: str
     replay_job_sink_url: str
+    replay_shards: ReplayShardMap
     database_url: str
     consumer_group: str
     consumer_name: str
@@ -47,15 +50,25 @@ class Config:
 
 
 def load_config() -> Config:
+    replay_api_url = os.getenv("REPLAY_API_URL", "http://replay-service:8080")
+    replay_job_sink_url = os.getenv(
+        "REPLAY_JOB_SINK_URL",
+        "dealer+connect:tcp://video-file-sink:6666",
+    )
     return Config(
         redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
         record_request_stream=os.getenv(
             "RECORD_REQUEST_STREAM", "security.record_requests"
         ),
-        replay_api_url=os.getenv("REPLAY_API_URL", "http://replay-service:8080"),
-        replay_job_sink_url=os.getenv(
-            "REPLAY_JOB_SINK_URL",
-            "dealer+connect:tcp://video-file-sink:6666",
+        replay_api_url=replay_api_url,
+        replay_job_sink_url=replay_job_sink_url,
+        replay_shards=load_replay_shard_map(
+            default_replay_api_url=replay_api_url,
+            default_in_stream_endpoint=os.getenv(
+                "REPLAY_IN_STREAM_ENDPOINT",
+                "dealer+connect:tcp://replay-service:5555",
+            ),
+            default_replay_job_sink_url=replay_job_sink_url,
         ),
         database_url=os.getenv(
             "DATABASE_URL",
