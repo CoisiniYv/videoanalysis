@@ -280,9 +280,15 @@ def _resolve_person(
             request.external_person_id is not None
             and person.get("external_person_id") not in (None, request.external_person_id)
         ):
+            current_external_id = person.get("external_person_id") or "not set"
             raise RegistrationError(
                 ERROR_EXTERNAL_PERSON_ID_CONFLICT,
-                "person_id and external_person_id refer to different persons",
+                (
+                    f"当前选中的人员 ID {request.person_id} 已绑定人员编号 "
+                    f"{current_external_id}，但这次提交的人员编号是 "
+                    f"{request.external_person_id}。请选中匹配的人员，或者先清空当前"
+                    "选中人员后再注册这张脸。"
+                ),
             )
         return (
             int(person["id"]),

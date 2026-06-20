@@ -266,6 +266,11 @@
               </div>
               <button id="submit-face-registration" type="button" class="primary">开始注册</button>
             </div>
+            <div class="registration-mode-toggle" role="group" aria-label="人脸注册模式">
+              <button id="register-new-person" type="button" class="active">新人员</button>
+              <button id="append-selected-person" type="button" disabled>追加到当前人员</button>
+            </div>
+            <div id="registration-mode-status" class="registration-mode-status">当前将按人员编号注册。</div>
             <form id="face-registration-form">
               <label>图片<input name="image" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,image/*" required /></label>
               <input name="person_id" type="hidden" />
@@ -590,7 +595,7 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=operator-evidence-pause-20260615"></script>
+    <script src="/static/operator.js?v=face-registration-conflict-copy-20260618"></script>
     <script src="/static/evidence.js?v=evidence-list-fast-20260615"></script>
     <script src="/static/maintenance.js?v=delete-dialog-fast-20260615"></script>
   </body>

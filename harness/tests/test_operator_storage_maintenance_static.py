@@ -23,7 +23,7 @@ def test_operator_has_chinese_storage_maintenance_entry() -> None:
     assert 'data-view="maintenance"' in html
     assert "存储维护" in html
     assert "/static/maintenance.js" in html
-    assert "operator-evidence-pause-20260615" in html
+    assert "/static/operator.js?v=" in html
     assert "evidence-list-fast-20260615" in html
     assert "delete-dialog-fast-20260615" in html
     assert "删除后不会自动重新生成证据" in html

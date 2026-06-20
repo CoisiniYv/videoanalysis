@@ -24,7 +24,13 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.routers.people import _registrar as registrar_dep
 from app.routers.people import _repo as people_repo_dep
-from face_registration.image_face_registration import RegistrationResult
+from face_registration.image_face_registration import (
+    ERROR_EXTERNAL_PERSON_ID_CONFLICT,
+    RegistrationRequest,
+    RegistrationResult,
+    RegistrationError,
+    _resolve_person,
+)
 
 
 NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
@@ -227,3 +233,40 @@ def test_register_face_rejects_video_extension(client: TestClient) -> None:
     assert resp.status_code == 400
     error = resp.json()["error"]
     assert error["registration_error_code"] == "IMAGE_FILE_TYPE_UNSUPPORTED"
+
+
+def test_resolve_person_reports_person_id_external_id_conflict() -> None:
+    class RepoStub:
+        def get_by_id(self, person_id: int) -> dict[str, Any] | None:
+            assert person_id == 10
+            return {
+                "id": 10,
+                "external_person_id": "demo:midterm:reese",
+                "name": "Reese",
+            }
+
+        def get_by_external_person_id(self, external_person_id: str) -> dict[str, Any] | None:
+            raise AssertionError("not expected")
+
+    repo = RepoStub()
+    request = RegistrationRequest(
+        image_path="/tmp/face.jpg",
+        external_person_id="demo:midterm:finch",
+        name="Finch",
+        person_id=10,
+        description=None,
+        source_type="manual_upload",
+        is_primary=False,
+        quality_threshold=0.65,
+        allow_multiple_faces=False,
+        keep_crop=True,
+        created_by="operator",
+        dev_mock_embedding_fixture=None,
+    )
+
+    with pytest.raises(RegistrationError) as exc_info:
+        _resolve_person(repo, request)
+
+    exc = exc_info.value
+    assert getattr(exc, "error_code", None) == ERROR_EXTERNAL_PERSON_ID_CONFLICT
+    assert "请选中匹配的人员" in str(exc)

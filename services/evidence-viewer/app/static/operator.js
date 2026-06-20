@@ -11,6 +11,7 @@ let selectedCameraId = "";
 let people = [];
 let selectedPersonId = "";
 let selectedPerson = null;
+let faceRegistrationMode = "new";
 let algorithms = [];
 let currentZones = [];
 let currentRules = [];
@@ -59,6 +60,9 @@ const personDetailEl = document.getElementById("person-detail");
 const galleryEl = document.getElementById("gallery");
 const faceRegistrationSummaryEl = document.getElementById("face-registration-summary");
 const faceRegistrationResultEl = document.getElementById("face-registration-result");
+const registerNewPersonBtn = document.getElementById("register-new-person");
+const appendSelectedPersonBtn = document.getElementById("append-selected-person");
+const registrationModeStatusEl = document.getElementById("registration-mode-status");
 const previewDeleteSelectedPersonBtn = document.getElementById("preview-delete-selected-person");
 const THEME_STORAGE_KEY = "operator-theme";
 const ACTIVE_VIEW_STORAGE_KEY = "operator-active-view";
@@ -291,6 +295,30 @@ function showSuccess(msg) {
 function clearMessages() {
   errorBox.hidden = true;
   successBox.hidden = true;
+}
+
+function normalizedPersonNumber(value) {
+  return String(value || "").trim();
+}
+
+function prepareFaceRegistrationFormData() {
+  const fd = new FormData(faceRegistrationForm);
+  const selectedExternalId = normalizedPersonNumber(
+    faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId
+  );
+  const submittedExternalId = normalizedPersonNumber(fd.get("external_person_id"));
+  if (
+    fd.get("person_id") &&
+    selectedExternalId &&
+    submittedExternalId &&
+    selectedExternalId !== submittedExternalId
+  ) {
+    fd.delete("person_id");
+  }
+  if (!fd.get("person_id")) {
+    fd.delete("person_id");
+  }
+  return fd;
 }
 
 function currentTheme() {
@@ -1273,6 +1301,7 @@ function fillRegistrationForPerson(person) {
   if (!person || !faceRegistrationForm) return;
   faceRegistrationForm.elements.person_id.value = person.person_id || "";
   faceRegistrationForm.elements.external_person_id.value = person.external_person_id || "";
+  faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId = person.external_person_id || "";
   faceRegistrationForm.elements.name.value = person.name || "";
   faceRegistrationForm.elements.description.value = person.description || "";
 }
@@ -1324,10 +1353,7 @@ async function submitFaceRegistration() {
   const submit = document.getElementById("submit-face-registration");
   submit.disabled = true;
   try {
-    const fd = new FormData(faceRegistrationForm);
-    if (!fd.get("person_id")) {
-      fd.delete("person_id");
-    }
+    const fd = prepareFaceRegistrationFormData();
     const result = await request(`${API}/people/register-face`, {
       method: "POST",
       body: fd,

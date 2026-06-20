@@ -170,6 +170,30 @@ function clearMessages() {
   successBox.hidden = true;
 }
 
+function normalizedPersonNumber(value) {
+  return String(value || "").trim();
+}
+
+function prepareFaceRegistrationFormData() {
+  const fd = new FormData(faceRegistrationForm);
+  const selectedExternalId = normalizedPersonNumber(
+    faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId
+  );
+  const submittedExternalId = normalizedPersonNumber(fd.get("external_person_id"));
+  if (
+    fd.get("person_id") &&
+    selectedExternalId &&
+    submittedExternalId &&
+    selectedExternalId !== submittedExternalId
+  ) {
+    fd.delete("person_id");
+  }
+  if (!fd.get("person_id")) {
+    fd.delete("person_id");
+  }
+  return fd;
+}
+
 async function request(path, options = {}) {
   const headers = options.body instanceof FormData
     ? { ...(options.headers || {}) }
@@ -502,6 +526,7 @@ function fillRegistrationForPerson(person) {
   if (!person || !faceRegistrationForm) return;
   faceRegistrationForm.elements.person_id.value = person.person_id || "";
   faceRegistrationForm.elements.external_person_id.value = person.external_person_id || "";
+  faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId = person.external_person_id || "";
   faceRegistrationForm.elements.name.value = person.name || "";
   faceRegistrationForm.elements.description.value = person.description || "";
 }
@@ -542,10 +567,7 @@ async function submitFaceRegistration() {
   const submit = document.getElementById("submit-face-registration");
   submit.disabled = true;
   try {
-    const fd = new FormData(faceRegistrationForm);
-    if (!fd.get("person_id")) {
-      fd.delete("person_id");
-    }
+    const fd = prepareFaceRegistrationFormData();
     const result = await request(`${API}/people/register-face`, {
       method: "POST",
       body: fd,

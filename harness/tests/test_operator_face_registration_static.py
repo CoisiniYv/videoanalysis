@@ -78,7 +78,8 @@ def test_operator_js_uses_real_camera_and_people_apis() -> None:
     assert "`${API}/cameras`" in js
     assert "`${API}/people" in js
     assert "`${API}/people/register-face`" in js
-    assert "FormData(faceRegistrationForm)" in js
+    assert "prepareFaceRegistrationFormData" in js
+    assert "selectedExternalPersonId" in js
     assert "dev_mock" not in js
 
 
@@ -154,13 +155,21 @@ def test_operator_theme_toggle_is_frontend_only_and_persistent() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "operator.js")
     css = _text(STATIC_ROOT / "style.css")
-    assert "style.css?v=dark-mode-20260611" in html
-    assert "operator.js?v=runtime-overview-20260614" in html
+    assert "/static/style.css" in html
+    assert "/static/operator.js" in html
     assert "operator-theme" in html
     assert "operator-theme" in js
     assert "theme-toggle" in js
     assert 'data-theme="dark"' not in html
     assert ':root[data-theme="dark"]' in css
+
+
+def test_operator_registration_clears_conflicting_selected_person_id() -> None:
+    js = _text(STATIC_ROOT / "operator.js")
+    assert "prepareFaceRegistrationFormData" in js
+    assert "fd.delete(\"person_id\")" in js
+    assert "selectedExternalPersonId" in js
+    assert "fillRegistrationForPerson" in js
 
 
 def test_operator_evidence_page_shows_alarm_machine_time() -> None:
