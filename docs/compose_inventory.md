@@ -23,17 +23,20 @@ Current deployment files:
 | Compose | `infra/docker-compose.midterm.yml` |
 | Env | `infra/env/midterm.env` |
 | Replay config | `modules/savant_replay/config.midterm.json` |
+| Analysis-forwarder | `services/analysis-forwarder/` |
 | Camera config | `modules/savant_security/config/cameras.midterm.yml` |
 | Savant module | `modules/savant_security/module.yml` |
 
 The deployment source id is `primary_rtsp`. The evidence viewer is exposed on
-host port `8090`; Replay API is exposed on host port `8098`.
+host port `8090`; Replay API is exposed on host port `8098`; analysis-forwarder
+metrics are exposed on host port `18081`.
 
 ## Runtime Shape
 
 ```text
 RTSP source
   -> replay-service storage
+  -> analysis-forwarder sampled analysis path
   -> savant-security inference
   -> Redis/PostgreSQL workers
   -> clip-worker Replay job
@@ -41,6 +44,9 @@ RTSP source
   -> media-worker JSONL sidecar evidence
   -> evidence-viewer
 ```
+
+Replay stores the full-rate stream and remains the source of truth for evidence
+clips. `analysis-forwarder` only limits the Savant analysis branch.
 
 The deployable version uses neutral project naming. It should not require
 historical codename filenames at runtime.

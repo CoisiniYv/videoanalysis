@@ -4,6 +4,15 @@
 
 Date: 2026-06-12
 
+Update 2026-06-15: this note remains useful for the Savant batching and
+per-source state model, but its runtime chain and `MAX_FPS_CONTROL=true`
+snapshot are historical. The current midterm topology inserts
+`analysis-forwarder` between Replay and Savant, keeps
+`INGRESS_FPS_GATE_ENABLED=true`, and keeps `MAX_FPS_CONTROL=false` after the
+Phase 0A experiment. See `docs/current_mainline_status.md` and
+`specs/16_dual_path_30x2_t4_production_optimization.md` for the current
+topology.
+
 This note freezes the read-only runtime diagnosis for these questions:
 
 - whether `clip-worker` or `media-worker` can stall the current program flow;
@@ -30,7 +39,7 @@ diagnosis:
 Current chain:
 
 ```text
-RTSP -> Replay storage -> Savant inference -> Redis events/annotations
+RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis events/annotations
   -> event-worker -> clip-worker -> Replay job -> video-file-sink
   -> media-worker evidence sidecar -> 8090 operator portal
 ```
@@ -256,13 +265,23 @@ frame is not a keyframe and the PTS delta from the last accepted frame is below
 the configured minimum interval, it returns `False`. In Savant frame-filter
 terms, that frame is skipped before entering the inference graph.
 
-Current defaults:
+Historical defaults observed during the 2026-06-12 diagnosis:
 
 ```text
 MAX_FPS_CONTROL=true
 MAX_FPS=8/1
 MIN_FPS=2/1
 SOURCE_INPUT_FPS_ESTIMATE=24
+```
+
+Current 2026-06-15 defaults keep the project FPS gate but separate it from
+nvstreammux control:
+
+```text
+MAX_FPS_CONTROL=false
+INGRESS_FPS_GATE_ENABLED=true
+MAX_FPS=8/1
+MIN_FPS=2/1
 ```
 
 Observed Savant log counters:

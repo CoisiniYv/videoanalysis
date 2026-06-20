@@ -1,6 +1,6 @@
 # Current Mainline Status
 
-## 2026-06-11 Midterm Project Version
+## 2026-06-15 Midterm Project Version
 
 The current deployable runtime in this checkout is the midterm project version.
 It intentionally avoids historical codename files in the active deployment surface.
@@ -15,10 +15,15 @@ It intentionally avoids historical codename files in the active deployment surfa
 - Internal API service: compose network port `8000`; not published to host and
   reached through the 8090 portal proxy.
 - Replay API: host port `8098`.
+- Analysis-forwarder metrics: host port `18081`.
 - Worker database default: `host.docker.internal:5432`.
 - Internal API runtime: `services/api/Dockerfile.face-runtime`, inheriting from
   `video-analytics-midterm-face-worker:latest` to reuse the already-installed
   ONNX Runtime/OpenCV/Numpy face-registration layer.
+- Analysis path isolation: `analysis-forwarder` is inserted between
+  Replay `out_stream` and Savant. Replay remains the full-rate evidence storage
+  authority; the forwarder samples/drops only the analysis branch and exposes
+  `va_forwarder_*` metrics.
 - Savant v0.6.0 PTS-reset crash hardening: `savant-security` applies the
   md5-pinned overlay in `modules/savant_security/savant_patches/` before module
   startup, and the API service behind the 8090 management plane runs the
@@ -41,6 +46,18 @@ It intentionally avoids historical codename files in the active deployment surfa
   `docs/midterm_operator_algorithm_controls_runtime_status.md`.
 - 2026-06-11 progress snapshot and next-plan baseline:
   `docs/midterm_progress_snapshot_2026-06-11.md`.
+- 2026-06-15 documentation network and phase map:
+  `docs/project_knowledge_network.md`.
+- Dual-path / T4 production capacity plan and phase status:
+  `specs/16_dual_path_30x2_t4_production_optimization.md`.
+- Dual-4090 as T4 two-source validation plan:
+  `specs/20_dual_4090_as_t4_two_source_validation.md`.
+- Replay evidence IO optimization plan:
+  `specs/21_replay_evidence_io_optimization_60_stream_production.md`.
+- Clip-worker/evidence real-time alignment plan:
+  `specs/17_clip_worker_evidence_realtime_alignment_fix.md`.
+- Post-Savant evidence proof window fix record:
+  `docs/midterm_post_savant_evidence_proof_windows_2026-06-15.md`.
 - Current Replay intrusion clip-duration diagnosis:
   `docs/midterm_replay_intrusion_clip_duration_diagnosis.md`.
 - Replay routing-id mismatch recovery:
@@ -51,17 +68,24 @@ It intentionally avoids historical codename files in the active deployment surfa
 ## Current Runtime Chain
 
 ```text
-RTSP -> Replay storage -> Savant inference -> Redis events/annotations
+RTSP -> Replay storage -> analysis-forwarder -> Savant inference
+  -> Redis events/annotations
   -> event-worker -> clip-worker -> Replay job -> video-file-sink
   -> media-worker evidence sidecar -> 8090 operator portal
 ```
 
+Evidence remains full-rate because `raw_clip.mov` is generated from
+Replay/video-file-sink jobs, not from the sampled analysis branch.
+
 ## Current Calibration
 
-The midterm entrypoint enables Savant ingress FPS control and stricter detection
-quality defaults:
+The midterm entrypoint keeps Savant's project ingress FPS gate enabled, disables
+nvstreammux `MAX_FPS_CONTROL` after the Phase 0A experiment, and limits the
+analysis branch through `analysis-forwarder`:
 
-- `MAX_FPS_CONTROL=true`
+- `MAX_FPS_CONTROL=false`
+- `INGRESS_FPS_GATE_ENABLED=true`
+- `ANALYSIS_FPS=8/1`
 - `MAX_FPS=8/1`
 - `MIN_FPS=2/1`
 - `POSE_INFER_INTERVAL=1`
@@ -73,6 +97,20 @@ quality defaults:
 - `POSE_MIN_HEIGHT=100`
 - `FACE_CONFIDENCE_THRESHOLD=0.50`
 - `WATCHLIST_THRESHOLD=0.60`
+
+## Phase Status
+
+| Area | Current status |
+| --- | --- |
+| Midterm deployment surface | Active. Use only neutral `midterm` entrypoints. |
+| Replay/Savant backpressure Phase 0 | Complete for observability and reversible experiments 0A-0D. Kept `MAX_FPS_CONTROL=false`, short Replay retry, and `SYNC_OUTPUT=false`; did not add ineffective RTSP adapter tolerance envs. |
+| Phase 0.5 forwarder spike | Complete. Savant image can use `savant_rs`; current ingress gate drops before decode on the ZMQ path. |
+| Phase 1 analysis-forwarder | Complete for the current two-source runtime. `PASS_PHASE1_FORWARDER` is documented. |
+| Phase 2 single-T4 30 streams | Gated. Readiness and pressure-run scripts exist, but the current development host is not a T4 30-stream environment. |
+| Phase 3 dual-T4 60 streams | Partial. Phase 3A shard routing and dual-4090 validation scaffolding are implemented; real 60-stream throughput, RocksDB write latency, and evidence burst capacity remain gated. |
+| Phase 4 production hardening | Not implemented. Requires drills, dashboard thresholds, storage sizing, and runbook. |
+| Evidence proof window fix | Partially implemented and runtime-validated for "event exists but proof window fails"; frontend frame-bound overlay hardening remains open. |
+| Algorithm support matrix | Not implemented as a stable API/UI matrix. Current docs still define the boundary. |
 
 ## Archive Rule
 

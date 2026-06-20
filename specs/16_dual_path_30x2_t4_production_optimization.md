@@ -46,6 +46,63 @@ Companion docs: `specs/15_savant_performance_observability.md`,
 `docs/runtime_stability_fix/midterm_multi_source_runtime_stability_plan.md`,
 `docs/repair_goal/midterm_alarm_frequency_backpressure_findings_2026-06-13.md`.
 
+## 1.1 Implementation Status - 2026-06-15
+
+Status: Phase 0, Phase 0.5, and Phase 1 are implemented for the current
+two-source midterm runtime. Phase 2 and later remain gated by production-like
+hardware and input count.
+
+Implemented / kept:
+
+- Phase 0 observability: 8090 runtime overview exposes restart counts/rates and
+  flags restart storms.
+- Phase 0A: `MAX_FPS_CONTROL=false` kept after measurement, while
+  `INGRESS_FPS_GATE_ENABLED=true` keeps the project `PtsFpsGate` enabled.
+- Phase 0B: Replay analysis `out_stream` retry window shortened to reduce the
+  future in-stream blocking window.
+- Phase 0C: fixed and dynamic live RTSP source adapters use `SYNC_OUTPUT=false`.
+- Phase 0D: no adapter tolerance envs were added because the RTSP entrypoint
+  does not honor send-timeout/retry envs.
+- Phase 0.5: the current Savant image can use `savant_rs` passthrough, and the
+  ZMQ source path calls the ingress filter before building the downstream
+  GStreamer buffer.
+- Phase 1: `services/analysis-forwarder/` is inserted between Replay and
+  Savant; Replay `out_stream` targets `analysis-forwarder:5557`; forwarder
+  targets `savant-security:5557`; runtime overview renders `va_forwarder_*`
+  metrics.
+
+Current topology:
+
+```text
+RTSP adapter -> Replay -> analysis-forwarder -> Savant
+Replay -> video-file-sink -> media-worker evidence bundle
+```
+
+Still open:
+
+- Phase 2 single-T4 30-stream readiness and pressure acceptance. The scripts
+  exist, but the current development host is not a 30-stream T4 target.
+- P5.2 TensorRT batch/latency derivation on the real T4.
+- P5.3 disabling unused Savant output encoding after confirming no consumer in
+  the target topology.
+- P5.4 Replay storage sizing on NVMe for the production stream count.
+- Phase 3 dual-T4 sharding and shard-aware Replay job routing.
+- Phase 4 production drills, dashboard thresholds, storage headroom, and
+  runbook.
+
+The detailed phase records are under `docs/repair_goal/`:
+
+- `midterm_phase0_observability_baseline_2026-06-14.md`
+- `midterm_phase0a_max_fps_control_experiment_2026-06-15.md`
+- `midterm_phase0b_replay_short_retry_experiment_2026-06-15.md`
+- `midterm_phase0c_sync_output_experiment_2026-06-15.md`
+- `midterm_phase0d_source_adapter_tolerance_verification_2026-06-15.md`
+- `midterm_phase05_forwarder_spike_2026-06-15.md`
+- `midterm_phase1_analysis_forwarder_2026-06-15.md`
+- `midterm_phase2_readiness_gate_2026-06-15.md`
+- `midterm_phase2_pressure_runner_2026-06-15.md`
+- `midterm_phase2_operating_point_appendix_2026-06-15.md`
+
 ## 2. Confirmed Failure Chain and Open Boundary (live evidence, 2026-06-14 ~02:55Z)
 
 Read-only diagnosis on the running stack:
@@ -405,6 +462,16 @@ in this spec's appendix.
 
 ### Phase 3 — Dual-T4 60-stream scale-out
 
+- **Phase 3A — Replay recording shard routing minimum closed loop
+  (implemented 2026-06-18):** `REPLAY_SHARDS_JSON` /
+  `REPLAY_SHARDS_CONFIG_PATH` define `source_id -> shard_id -> Replay API +
+  in_stream + job sink`. `runtime_apply.py` writes per-source `replay_shard_id`
+  and `zmq_endpoint`; clip-worker resolves the source shard per record request,
+  uses the storing Replay shard's API/sink, persists shard routing metadata in
+  event payload, and fails unknown sources closed. `scripts/runtime/check_replay_shard_plan.py`
+  validates the 60-source 30/30 plan without requiring camera streams. The
+  `dual-replay-shards` compose profile now also declares `video-file-sink-a` /
+  `video-file-sink-b` so per-shard Replay job sinks have real receivers.
 - Parameterize the stack into two shards (A on `device_ids:['0']`, B on `['1']`)
   via compose + env; shared Redis/PG/workers.
 - **Shard-aware replay-job routing:** clip-worker must send a source's replay job
@@ -424,6 +491,22 @@ in this spec's appendix.
   cap, and size it against `CLIP_WORKER_MAX_CONCURRENT_JOBS` and Replay job limits.
 - Staged pressure test **10 → 30 → 60** with active reattach fault injection
   (per `midterm_multi_source_runtime_stability_plan.md` Phase 4 method).
+
+Current no-60-camera boundary: Phase 3A proves routing/identity/DB correctness
+for 60 simulated source ids and can run small real or looped-stream E2E checks.
+It does **not** prove real 60-camera ingest throughput, Replay RocksDB write
+latency, or video-file-sink/media-worker burst capacity; those remain staged
+runtime pressure tests.
+
+Looped-source runtime check, 2026-06-18: `source_00` was recorded through
+`replay-a -> video-file-sink-a`, and `source_30` through
+`replay-b -> video-file-sink-b`. DB payloads preserved the expected
+`replay_shard_id`, `replay_api_url`, `replay_job_sink_url`, and full
+`replay_job_request`; both shards produced real `video.mov` sink outputs. The
+manual looped-source check did not pass full post-Savant evidence readiness,
+because it did not include real Savant frame proof / event-centered metadata.
+Treat this as Replay recording shard validation, not as Phase 3 throughput or
+complete evidence acceptance.
 
 **Acceptance — `PASS_PHASE3_DUAL_T4_60`:** 60 streams across both T4s;
 `RestartCount` flat in steady state; both shards' annotations advancing;

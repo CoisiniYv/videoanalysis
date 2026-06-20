@@ -2,6 +2,23 @@
 
 日期：2026-06-13
 
+## 当前状态补充（2026-06-15）
+
+本文记录的是 Phase 0/0.5/1 之前的报警频率与 source-adapter 背压诊断。当时的
+source-adapter send timeout、Replay/Savant shared-hop pressure、以及两路
+intrusion 频率差异仍是有效历史证据。
+
+当前 midterm topology 已经改为：
+
+```text
+RTSP -> Replay -> analysis-forwarder -> Savant
+```
+
+当前配置保留 `INGRESS_FPS_GATE_ENABLED=true`，并在 Phase 0A 后保留
+`MAX_FPS_CONTROL=false`。后续判断当前运行态时，以
+`docs/current_mainline_status.md`、`docs/project_knowledge_network.md` 和
+`specs/16_dual_path_30x2_t4_production_optimization.md` 为准。
+
 ## 结论
 
 - 两路摄像头的 intrusion 报警频率不一致，主要不是规则配置导致。`primary_rtsp` 的电影片段当前画面以人脸和上半身近景为主，Savant face 输出很多，但 YOLO26 pose/person 输出很少；当前 intrusion 规则只消费 pose/person 观测，不消费 face 观测。
@@ -169,9 +186,9 @@ Savant 侧仍能维持约 `8.00 FPS` 的推理入口节奏，但 source queue �
 存在堆积。这说明问题不是 Savant 模型完全停止，而是 Replay/source-adapter 共享
 链路承受了高于分析帧率的完整流压力。
 
-### 关键语义：当前跳帧发生在 Savant 内部
+### 关键语义：当时跳帧发生在 Savant 内部
 
-当前 `MAX_FPS_CONTROL=true`、`MAX_FPS=8/1` 并不是 source-adapter 或 Replay
+当时 `MAX_FPS_CONTROL=true`、`MAX_FPS=8/1` 并不是 source-adapter 或 Replay
 入口限流。它配置在 `modules/savant_security/module.yml` 的
 `pipeline.source.ingress_frame_filter`：
 

@@ -29,6 +29,7 @@ docker compose -f infra/docker-compose.midterm.yml up -d --build
 ```text
 RTSP source
   -> replay-service storage
+  -> analysis-forwarder sampled analysis path
   -> savant-security inference
   -> Redis / PostgreSQL workers
   -> clip-worker Replay job
@@ -36,6 +37,10 @@ RTSP source
   -> media-worker JSONL sidecar evidence
   -> 8090 operator portal (`/#evidence`)
 ```
+
+`replay-service` remains the full-rate evidence authority. The
+`analysis-forwarder` only samples the analysis branch before Savant and exposes
+metrics on host port `18081`.
 
 证据包默认包含：
 
@@ -49,6 +54,7 @@ RTSP source
 
 - Redis: `6396`
 - Replay API: `8098`
+- Analysis-forwarder metrics: `18081`
 - Operator portal / evidence viewer: `8090`
 - Internal API service: compose-network port `8000` only, reached through 8090
 - Optional local PostgreSQL profile: `5439`
@@ -66,9 +72,12 @@ postgresql://video:video@host.docker.internal:5432/video_analytics
 
 ## 当前运行参数
 
-`infra/env/midterm.env` 当前固定了单路中期部署的主要阈值：
+`infra/env/midterm.env` 和 `infra/docker-compose.midterm.yml` 当前固定了中期
+部署的主要阈值：
 
-- `MAX_FPS_CONTROL=true`
+- `MAX_FPS_CONTROL=false`
+- `INGRESS_FPS_GATE_ENABLED=true`
+- `ANALYSIS_FPS=8/1`（analysis-forwarder 默认）
 - `MAX_FPS=8/1`
 - `MIN_FPS=2/1`
 - `POSE_INFER_INTERVAL=1`
@@ -83,10 +92,14 @@ postgresql://video:video@host.docker.internal:5432/video_analytics
 
 ## 文档
 
+- 文档知识网络：`docs/project_knowledge_network.md`
 - 当前部署说明：`docs/midterm_deployment.md`
 - Compose 清单：`docs/compose_inventory.md`
 - 当前状态：`docs/current_mainline_status.md`
+- 当前进度总览：`docs/project_current_progress_summary.md`
 - 开发入口和文档规则：`CLAUDE.md`
+- Dual-path / T4 产能计划：`specs/16_dual_path_30x2_t4_production_optimization.md`
+- Evidence 实时对齐修复计划：`specs/17_clip_worker_evidence_realtime_alignment_fix.md`
 - Evidence proof window 修复记录：
   `docs/midterm_post_savant_evidence_proof_windows_2026-06-15.md`
 - 历史阶段/实验文档：各目录下的 `archive/phase-only/`

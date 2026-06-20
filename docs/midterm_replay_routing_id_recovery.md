@@ -2,6 +2,23 @@
 
 更新时间：2026-06-11
 
+## 当前状态补充（2026-06-15）
+
+本文记录的是 2026-06-10/11 的 Replay routing identity 和
+`video-file-sink` 网络别名故障。该修复仍是当前 midterm runtime apply/restart
+顺序的基础。
+
+后续 2026-06-15 已在 Replay 和 Savant 之间增加 `analysis-forwarder`：
+
+```text
+RTSP adapter -> replay-service -> analysis-forwarder -> savant-security
+```
+
+该变化不改变本文对 source-adapter -> Replay 连接身份、Replay job sink alias、
+runtime epoch、以及 fail-closed evidence guard 的要求。阅读本文时，把文中的
+旧单跳 `replay-service -> savant-security` 理解为当时拓扑；当前拓扑以
+`docs/current_mainline_status.md` 和 `docs/project_knowledge_network.md` 为准。
+
 ## 结论
 
 2026-06-10 晚上没有新的 evidence 输出，不是因为 Docker healthcheck
@@ -109,6 +126,10 @@ event payload、record request、Replay labels、sink 路径和 current epoch �
 ```text
 RTSP adapter -> replay-service -> savant-security
 ```
+
+2026-06-15 之后的当前拓扑在 Replay 和 Savant 之间多了
+`analysis-forwarder`，但 Replay 仍是 source-adapter 连接身份的状态持有者，
+因此受控重启仍必须覆盖 Replay 和所有 source-adapter。
 
 Replay 是 source-adapter 连接身份的状态持有者。只重启 Savant 不能清掉 Replay
 里的旧 routing identity；只重建部分动态源也不能处理 compose 固定源

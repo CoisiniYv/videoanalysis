@@ -11,6 +11,7 @@ This is the active project-machine deployment entrypoint.
 | Compose | `infra/docker-compose.midterm.yml` |
 | Env | `infra/env/midterm.env` |
 | Replay config | `modules/savant_replay/config.midterm.json` |
+| Analysis-forwarder | `services/analysis-forwarder/` |
 | Camera config | `modules/savant_security/config/cameras.midterm.yml` |
 | Savant module | `modules/savant_security/module.yml` |
 | Savant v0.6.0 patch overlay | `modules/savant_security/savant_patches/` |
@@ -41,6 +42,7 @@ The stack uses these default host ports:
 
 - Redis: `6396`
 - Replay API: `8098`
+- Analysis-forwarder metrics: `18081`
 - Operator portal / evidence viewer: `8090`
 - Internal API service: compose network port `8000`; not published to host and
   reached through the 8090 portal proxy.
@@ -143,10 +145,11 @@ order:
 
 The runtime apply operation writes both generated config files, stops all
 source-adapter containers first, recreates dynamic RTSP source-adapter
-containers for non-primary sources, restarts Replay and Savant, restores
-workers, then starts enabled sources last. This ordering clears Replay's ZeroMQ routing
-identity cache and prevents the source adapters from continuing to send frames
-through stale connections. When the operation recreates `video-file-sink`, it
+containers for non-primary sources, restarts Replay, analysis-forwarder, and
+Savant, restores workers, then starts enabled sources last. This ordering clears
+Replay's ZeroMQ routing identity cache and prevents the source adapters from
+continuing to send frames through stale connections. When the operation
+recreates `video-file-sink`, it
 must also preserve the Docker network alias `video-file-sink`, because
 clip-worker Replay jobs use
 `dealer+connect:tcp://video-file-sink:6666` as their sink URL. A manually
@@ -167,11 +170,17 @@ python scripts/config/export_runtime_configs.py \
 ```
 
 The explicit `--zmq-endpoint dealer+connect:tcp://replay-service:5555` keeps
-the midterm replay-first path:
+the midterm replay-first ingest path:
 
 ```text
-RTSP adapter -> replay-service -> savant-security
+RTSP adapter -> replay-service -> analysis-forwarder -> savant-security
 ```
+
+The adapter still sends full-rate frames to Replay. Replay stores the full-rate
+stream and sends its analysis `out_stream` to `analysis-forwarder`. The
+forwarder samples/drops only the analysis branch, then writes accepted frames to
+Savant. Evidence Replay jobs still read from Replay and write to
+`video-file-sink`; they do not use the sampled forwarder output.
 
 The Savant service must not set a single-source `SOURCE_ID` filter. The
 compose-managed primary adapter still uses `SOURCE_ID=primary_rtsp`, but Savant
@@ -245,9 +254,13 @@ stack-local PostgreSQL on host port `5439`.
 The evidence path is replay-first:
 
 ```text
-RTSP -> Replay -> Savant -> Redis/PostgreSQL
+RTSP -> Replay -> analysis-forwarder -> Savant -> Redis/PostgreSQL
   -> clip-worker Replay job -> video-file-sink -> media-worker sidecar
 ```
+
+Replay is the evidence source of truth. `analysis-forwarder` is part of the
+analysis path and is allowed to drop sampled analysis frames under pressure; it
+must not be used as the source for `raw_clip.mov`.
 
 Evidence bundles contain:
 
@@ -282,7 +295,9 @@ are not accepted as machine time.
 
 Current defaults are set in `infra/env/midterm.env`:
 
-- Savant ingress FPS gate: enabled, `8/1`
+- Analysis-forwarder FPS: `8/1`
+- Savant project ingress FPS gate: enabled, `8/1`
+- Savant nvstreammux `MAX_FPS_CONTROL`: disabled after Phase 0A
 - Pose infer interval: `1`
 - Pose detector/selector thresholds: `0.50`
 - Pose keypoint threshold: `0.35`

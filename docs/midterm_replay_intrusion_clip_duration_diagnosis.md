@@ -8,7 +8,15 @@ This note captures the runtime diagnosis for intrusion evidence bundles whose
 `raw_clip.mov` is longer than the expected event window, plus the current
 working-tree mitigation.
 
-Current midterm evidence configuration still requests event-window clips:
+Update 2026-06-15: the duration-guard conclusions remain current, but the
+`MAX_FPS_CONTROL=true` line below is the 2026-06-10 runtime snapshot. Current
+midterm config keeps `MAX_FPS=8/1` and `INGRESS_FPS_GATE_ENABLED=true`, but
+sets `MAX_FPS_CONTROL=false` after the Phase 0A backpressure experiment. Current
+topology also includes `analysis-forwarder` before Savant. See
+`docs/current_mainline_status.md` for current runtime shape.
+
+The 2026-06-10 midterm evidence configuration still requested event-window
+clips:
 
 ```text
 EVIDENCE_TOPOLOGY=post_savant_replay
