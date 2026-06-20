@@ -1074,9 +1074,18 @@ def _production_sidecar_contract_summary(
     vector_count = _count_forbidden(annotations, FORBIDDEN_VECTOR_FIELDS)
     image_count = _count_forbidden(annotations, FORBIDDEN_IMAGE_FIELDS)
 
+    expected_duration = _first_context_float(
+        final_clip_context,
+        "expected_duration_seconds",
+        "requested_duration_s",
+    )
     min_duration = _float_config(config, "canonical_min_duration_seconds", 8.0)
+    if expected_duration is not None and expected_duration > 0:
+        min_duration = min(min_duration, expected_duration)
     max_duration = _float_config(config, "canonical_max_duration_seconds", 12.5)
-    expected_event_t = _float_config(config, "canonical_expected_event_t_s", 5.0)
+    expected_event_t = _first_context_float(final_clip_context, "expected_event_t_s")
+    if expected_event_t is None:
+        expected_event_t = _float_config(config, "canonical_expected_event_t_s", 5.0)
     event_center_tolerance = _float_config(
         config,
         "canonical_event_center_tolerance_seconds",
@@ -1683,9 +1692,10 @@ def _event_clip_metrics(
                 projected / duration if duration is not None and duration > 0 else None
             ),
         }
-    projected = _float_or_none(
-        _context_lookup(final_clip_context, "event_projected_t_s")
-        or _context_lookup(final_clip_context, "expected_event_t_s")
+    projected = _first_context_float(
+        final_clip_context,
+        "event_projected_t_s",
+        "expected_event_t_s",
     )
     inside = _bool_or_none(_context_lookup(final_clip_context, "event_pts_inside_clip"))
     ratio = _float_or_none(_context_lookup(final_clip_context, "event_position_ratio"))
@@ -1813,6 +1823,14 @@ def _normalize_path_text(value: Any) -> str:
 def _float_config(config: dict[str, Any], key: str, default: float) -> float:
     parsed = _float_or_none(config.get(key))
     return float(default if parsed is None else parsed)
+
+
+def _first_context_float(context: dict[str, Any] | None, *keys: str) -> float | None:
+    for key in keys:
+        parsed = _float_or_none(_context_lookup(context, key))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _float_or_none(value: Any) -> float | None:

@@ -216,6 +216,90 @@ def test_media_worker_frame_cache_sidecar_filters_stream_session() -> None:
     assert summary["messages_filtered_stream_session"] == 1
 
 
+def test_sidecar_contract_uses_effective_truncated_window_context() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    def _summary(
+        *,
+        raw_clip_duration: float,
+        expected_duration_seconds: float,
+        expected_event_t_s: float,
+    ) -> dict[str, Any]:
+        return writer._production_sidecar_contract_summary(
+            event={"event_type": "intrusion"},
+            annotations=[
+                {
+                    "frame_uuid": "event-frame",
+                    "frame_pts": 102_500_000_000,
+                    "t_ms": round(expected_event_t_s * 1000),
+                    "clip_timeline_match": "metadata_frame_uuid",
+                    "displayable": True,
+                    "objects": [
+                        {
+                            "object_type": "person",
+                            "annotation_role": "person_context",
+                        }
+                    ],
+                }
+            ],
+            identity_counts={},
+            clip_timeline_summary={
+                "enabled": True,
+                "status": "aligned",
+                "annotations_aligned": 1,
+                "annotations_unmatched": 0,
+                "rows_total_input": 1,
+            },
+            raw_clip_path="/evidence/event/raw_clip.mov",
+            metadata_path="/evidence/event/sink_metadata.json",
+            final_clip_context={
+                "raw_clip_path": "/evidence/event/raw_clip.mov",
+                "sink_metadata_path": "/evidence/event/sink_metadata.json",
+                "raw_clip_duration": raw_clip_duration,
+                "expected_duration_seconds": expected_duration_seconds,
+                "expected_event_t_s": expected_event_t_s,
+                "event_projected_t_s": expected_event_t_s,
+                "event_pts_inside_clip": True,
+                "event_position_ratio": (
+                    expected_event_t_s / raw_clip_duration
+                    if raw_clip_duration > 0
+                    else None
+                ),
+            },
+            config={
+                "canonical_min_duration_seconds": 8.0,
+                "canonical_max_duration_seconds": 12.5,
+                "canonical_expected_event_t_s": 5.0,
+                "canonical_event_center_tolerance_seconds": 0.75,
+                "require_event_centered": True,
+            },
+        )
+
+    summary = _summary(
+        raw_clip_duration=7.52,
+        expected_duration_seconds=7.5,
+        expected_event_t_s=2.5,
+    )
+
+    assert summary["production_ready"] is True
+    assert summary["canonical_clip"] is True
+    assert summary["production_ready_failures"] == []
+    assert summary["event_projected_t_s"] == 2.5
+    assert summary["expected_event_t_s"] == 2.5
+
+    start_summary = _summary(
+        raw_clip_duration=5.02,
+        expected_duration_seconds=5.0,
+        expected_event_t_s=0.0,
+    )
+
+    assert start_summary["production_ready"] is True
+    assert start_summary["canonical_clip"] is True
+    assert start_summary["production_ready_failures"] == []
+    assert start_summary["event_projected_t_s"] == 0.0
+    assert start_summary["expected_event_t_s"] == 0.0
+
+
 def _frame_annotation(frame_uuid: str, stream_session_id: str) -> dict[str, Any]:
     return {
         "message_type": "frame_annotation",

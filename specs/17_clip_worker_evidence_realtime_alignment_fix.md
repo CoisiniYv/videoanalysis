@@ -88,19 +88,17 @@ Remaining work:
   "no upstream event" vs "event exists but evidence failed"; this fix only
   closes the second class.
 
-## 2. Confirmed Current Facts
+## 2. Original Facts and Current Deltas
 
-### 2.1 Clip-worker state model is too coarse
+The facts below were the baseline that motivated this spec. Some have since
+been fixed by the 2026-06-15 commits listed in §1.1; the remaining work is
+called out explicitly.
 
-Current code writes only broad statuses through
-`services/clip-worker/app/repository.py::update_clip_status()`:
+### 2.1 Clip-worker state model
 
-- `pending`
-- `failed`
-- replay job id after job creation
-
-`_defer_clip_request()` rewrites event media status to `pending` and puts the
-reason into `payload.media.error_message`. 8090 cannot clearly distinguish:
+Original gap: `clip-worker` wrote only broad statuses such as `pending`,
+`failed`, or replay job id after job creation. 8090 could not clearly
+distinguish:
 
 - event detected but waiting for post-Savant frame proof;
 - waiting because Replay/video-file-sink is busy;
@@ -108,11 +106,30 @@ reason into `payload.media.error_message`. 8090 cannot clearly distinguish:
 - finalizing in media-worker;
 - failed permanently.
 
-### 2.2 Proof wait is implemented as Redis consumer deferral
+Current delta: `services/clip-worker/app/repository.py::update_clip_status()`
+now writes operator-visible `payload.media.evidence_state`,
+`evidence_reason`, `evidence_state_updated_at`, request id, attempt count, and
+diagnostics. `event-worker`, `media-worker`, API schemas, runtime overview, and
+static operator tests also know the state families:
 
-Current post-Savant proof lookup is in
+```text
+waiting_proof
+queued
+replaying
+finalizing
+ready
+failed
+```
+
+Remaining work: runtime/UI acceptance for the full Phase 5 path is still open,
+and frontend overlay hardening is still tracked separately in Phase 4.
+
+### 2.2 Proof wait implementation
+
+Original gap: post-Savant proof lookup is in
 `services/clip-worker/app/worker.py::_prepare_post_savant_replay_request()`.
-Runtime env currently has:
+The older runtime mainly relied on one proof attempt followed by Redis
+redelivery:
 
 ```text
 POST_SAVANT_FRAME_PROOF_ATTEMPTS=1
@@ -121,20 +138,37 @@ CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS=12
 CLIP_WORKER_MAX_CONCURRENT_JOBS=1
 ```
 
-One failed lookup returns `missing_post_savant_frame_pts_window`; the message
-then stays pending, is reclaimed, and burns delivery-count retry budget. This
-is why failures appear after roughly 70-90 seconds rather than after a clean
-state-machine timeout.
+One failed lookup returned `missing_post_savant_frame_pts_window`; the message
+then stayed pending, was reclaimed, and burned delivery-count retry budget.
 
-### 2.3 Concurrency gate is applied before proof readiness
+Current delta: `clip-worker` now has a bounded local proof wait budget and poll
+interval, emits `waiting_proof`, and has tests for proof timeout, local polling,
+cross-session post-window proof, and truncated pre-window proof. The runtime
+env keeps the compatibility attempt fields and enables the two explicit
+fallback policies:
 
-`_clip_gate_decision()` checks `CLIP_WORKER_MAX_CONCURRENT_JOBS` before the
-post-Savant proof is prepared. With `max_concurrent_jobs=1`, a task waiting on
-proof or one long Replay job can make another detected event hit
+```text
+POST_SAVANT_ALLOW_CROSS_SESSION_POST_WINDOW_PROOF=true
+POST_SAVANT_ALLOW_TRUNCATED_PRE_WINDOW_PROOF=true
+```
+
+Remaining work: monitor new runtime windows for source/camera-specific proof
+failure rates and keep "no upstream event" separate from proof failures.
+
+### 2.3 Replay concurrency gate
+
+Original gap: `_clip_gate_decision()` checked `CLIP_WORKER_MAX_CONCURRENT_JOBS`
+before post-Savant proof was prepared. With `max_concurrent_jobs=1`, a task
+waiting on proof or one long Replay job could make another detected event hit
 `max_concurrent_reached` and eventually fail.
 
-This is acceptable as a one-shot development gate, but not as production
-evidence scheduling.
+Current delta: Replay concurrency gating is now after proof readiness for the
+post-Savant path, and concurrency-full requests can become `queued` instead of
+terminal failures. Unit coverage exists in `harness/tests/test_clip_worker_queue_safety.py`.
+
+Remaining work: production scheduling is still intentionally simple; if higher
+throughput is required, active job accounting should move from bounded time
+estimates toward completion-aware state.
 
 ### 2.4 Video/metadata crop is mostly correct in recent bundles
 
@@ -313,6 +347,10 @@ PASS_PHASE0_EVIDENCE_BASELINE_CAPTURED
 
 ### Phase 1 - Evidence Status Model and 8090 Visibility
 
+Status: implemented by the 2026-06-15 evidence-state commits and covered by
+targeted tests. Runtime validation is recorded in
+`docs/midterm_post_savant_evidence_proof_windows_2026-06-15.md`.
+
 Add stable evidence progress fields.
 
 Implementation options:
@@ -353,6 +391,11 @@ PASS_PHASE1_EVIDENCE_STATUS_VISIBLE_8090
 ```
 
 ### Phase 2 - Clip-worker Proof Wait Refactor
+
+Status: implemented for the post-Savant path by commit
+`6620f6c Stabilize post-Savant evidence proof windows`; local proof polling,
+deadline handling, explicit terminal diagnostics, cross-session post-window
+proof, and truncated pre-window proof have focused test coverage.
 
 Refactor post-Savant proof waiting so it is a bounded local state, not a Redis
 delivery-count side effect.
@@ -397,6 +440,11 @@ PASS_PHASE2_PROOF_WAIT_STATE_MACHINE
 
 ### Phase 3 - Replay Job Queue Semantics
 
+Status: implemented for the current `CLIP_WORKER_MAX_CONCURRENT_JOBS` gate:
+proof waiting no longer consumes the active Replay slot, and concurrency-full
+requests can be reported as `queued`. Completion-aware production scheduling is
+still open if higher throughput is required.
+
 Move active job concurrency gating after proof readiness.
 
 Required changes:
@@ -434,6 +482,8 @@ PASS_PHASE3_REPLAY_QUEUE_NO_FALSE_FAILURES
 ```
 
 ### Phase 4 - Overlay Frame-Identity Hardening
+
+Status: open. This remains the main unfinished phase in this spec.
 
 Make evidence overlay display frame-bound by default.
 
@@ -480,6 +530,11 @@ PASS_PHASE4_FRAME_BOUND_OVERLAY
 ```
 
 ### Phase 5 - Runtime Validation
+
+Status: partially complete. A focused runtime validation after recreating
+`clip-worker` and `media-worker` produced one ready bundle with zero
+`missing_proof` failures in the inspected window. The broader 10-minute
+validation and overlay first-seconds acceptance remain open.
 
 Run against the current two-source midterm stack.
 

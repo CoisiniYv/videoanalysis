@@ -2997,6 +2997,9 @@ def _finalize_post_savant_evidence_bundle(
                 "raw_clip_path": str(raw_clip_path) if raw_clip_available else None,
                 "sink_metadata_path": str(sink_metadata_path),
                 "raw_clip_duration": raw_clip_duration,
+                "expected_duration_seconds": _requested_duration_from_time_window(
+                    frame_cache_time_window
+                ),
                 "expected_event_t_s": frame_cache_time_window.get("expected_event_t_s"),
                 "event_projected_t_s": None,
                 "event_pts_inside_clip": None,
