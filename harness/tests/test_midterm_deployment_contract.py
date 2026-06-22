@@ -441,6 +441,7 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["INGRESS_FPS_GATE_ENABLED"] == "true"
     assert env_file["MAX_FPS"] == "8/1"
     assert env_file["MIN_FPS"] == "2/1"
+    assert env_file["STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS"] == "5000000000"
     assert env_file["POSE_INFER_INTERVAL"] == "1"
     assert env_file["POSE_CONFIDENCE_THRESHOLD"] == "0.50"
     assert env_file["POSE_KEYPOINT_THRESHOLD"] == "0.35"
@@ -454,6 +455,9 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["WATCHLIST_THRESHOLD"] == "0.60"
     assert savant_env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-false}"
     assert savant_env["INGRESS_FPS_GATE_ENABLED"] == "${INGRESS_FPS_GATE_ENABLED:-true}"
+    assert savant_env["STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS"] == (
+        "${STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS:-5000000000}"
+    )
     assert savant_env["POSE_INFER_INTERVAL"] == "${POSE_INFER_INTERVAL:-1}"
     assert savant_env["FACE_INFER_INTERVAL"] == "${FACE_INFER_INTERVAL:-2}"
     assert savant_env["FACE_EMBEDDING_INFER_INTERVAL"] == (
@@ -592,6 +596,9 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert media_env["FRAME_CACHE_SIDECAR_MAX_SCAN"] == (
         "${FRAME_CACHE_SIDECAR_MAX_SCAN:-20000}"
     )
+    assert media_env["FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE"] == (
+        "${FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE:-event_window}"
+    )
     assert env_file["MEDIA_WORKER_STATE_PATH"] == (
         "/media/replay-sink-output/midterm/.media-worker.processed.json"
     )
@@ -603,6 +610,7 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
         "duration_guard_failed,generated_corrupt,failed"
     )
     assert env_file["FRAME_CACHE_SIDECAR_RANGE_COUNT"] == "2000"
+    assert env_file["FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE"] == "event_window"
 
 
 def test_midterm_operator_api_reuses_face_runtime_without_host_8000() -> None:

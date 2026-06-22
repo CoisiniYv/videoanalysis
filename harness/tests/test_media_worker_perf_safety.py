@@ -160,10 +160,75 @@ def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> 
     assert summary["read_mode"] == "bounded_stream_id_range"
     assert summary["range_max"] != "+"
     assert summary["range_min"] != "-"
+    assert summary["stream_session_filter_mode"] == "strict"
     assert summary["messages_filtered_stream_session"] == 1
+    assert summary["messages_stream_session_mismatch"] == 0
     assert summary["messages_filtered_source"] == 1
     assert summary["messages_filtered_camera"] == 1
     assert summary["messages_retained"] == 1
+
+
+def test_frame_cache_reader_event_window_mode_retains_same_source_session_mismatch() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    class FakeRedis:
+        def xrevrange(
+            self,
+            _name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            return [
+                (
+                    "1781197207000-0",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                "old-session-frame",
+                                frame_pts=99_875_000_000,
+                                stream_session_id="old-session",
+                            )
+                        )
+                    },
+                ),
+                (
+                    "1781197208000-0",
+                    {"data": json.dumps(_frame_annotation("current-frame"))},
+                ),
+            ]
+
+    messages, summary = writer._read_frame_annotations(
+        redis_client=FakeRedis(),
+        config={
+            "stream_name": "security.frame_annotations",
+            "range_count": 5,
+            "stream_session_filter_mode": "event_window",
+        },
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "current-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {
+                "runtime_epoch_id": CURRENT_EPOCH,
+                "stream_session_id": "session-1",
+            },
+        },
+    )
+
+    assert [message["frame_uuid"] for message in messages] == [
+        "old-session-frame",
+        "current-frame",
+    ]
+    assert summary["stream_session_filter_mode"] == "event_window"
+    assert summary["stream_session_filter_strict"] is False
+    assert summary["messages_filtered_stream_session"] == 0
+    assert summary["messages_stream_session_mismatch"] == 1
+    assert summary["messages_retained"] == 2
 
 
 def test_frame_cache_reader_allows_verified_cross_session_post_window() -> None:

@@ -662,6 +662,13 @@ def _object_source_delta_ns(
     return abs(int(source_frame_pts) - int(target_frame_pts))
 
 
+def _stream_session_filter_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("stream_session_filter_mode") or "strict").strip().lower()
+    if mode in {"event_window", "window", "diagnostic", "source_camera_window"}:
+        return "event_window"
+    return "strict"
+
+
 def _read_frame_annotations(
     *,
     redis_client: Any | None,
@@ -675,6 +682,8 @@ def _read_frame_annotations(
     stream_session_ids = _stream_session_ids_from_event(event)
     stream_session_id = stream_session_ids[0] if stream_session_ids else ""
     stream_session_id_set = set(stream_session_ids)
+    stream_session_filter_mode = _stream_session_filter_mode(config)
+    stream_session_filter_strict = stream_session_filter_mode == "strict"
     stream_name = str(config.get("stream_name") or "security.frame_annotations")
     lookback_count = int(config.get("lookback_count") or 10000)
     max_scan = int(config.get("max_scan") or 20000)
@@ -699,11 +708,14 @@ def _read_frame_annotations(
         "messages_invalid": 0,
         "messages_filtered_runtime_epoch": 0,
         "messages_filtered_stream_session": 0,
+        "messages_stream_session_mismatch": 0,
         "messages_filtered_source": 0,
         "messages_filtered_camera": 0,
         "expected_runtime_epoch_id": runtime_epoch_id,
         "expected_stream_session_id": stream_session_id,
         "expected_stream_session_ids": stream_session_ids,
+        "stream_session_filter_mode": stream_session_filter_mode,
+        "stream_session_filter_strict": stream_session_filter_strict,
         "earliest_frame_pts": None,
         "latest_frame_pts": None,
         "duplicate_frame_uuid_messages": 0,
@@ -734,18 +746,20 @@ def _read_frame_annotations(
         ):
             summary["messages_filtered_runtime_epoch"] += 1
             continue
-        if stream_session_id_set and (
-            str(message.get("stream_session_id") or "").strip()
-            not in stream_session_id_set
-        ):
-            summary["messages_filtered_stream_session"] += 1
-            continue
         if source_id is not None and message.get("source_id") != source_id:
             summary["messages_filtered_source"] += 1
             continue
         if camera_id is not None and message.get("camera_id") != camera_id:
             summary["messages_filtered_camera"] += 1
             continue
+        if stream_session_id_set and (
+            str(message.get("stream_session_id") or "").strip()
+            not in stream_session_id_set
+        ):
+            if stream_session_filter_strict:
+                summary["messages_filtered_stream_session"] += 1
+                continue
+            summary["messages_stream_session_mismatch"] += 1
         normalized = copy.deepcopy(message)
         normalized["_stream_id"] = stream_id
         normalized["_stream_order"] = index

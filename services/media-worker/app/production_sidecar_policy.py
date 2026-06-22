@@ -20,6 +20,7 @@ DEFAULT_SIDECAR_CONFIG = {
     "lookback_count": 10000,
     "range_count": 2000,
     "max_scan": 20000,
+    "stream_session_filter_mode": "strict",
     "max_events_per_run": 5,
     "annotations_filename": "annotations.frame_cache.identity.jsonl",
     "summary_filename": "summary.frame_cache.identity.json",
@@ -110,6 +111,10 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
                 source.get("FRAME_CACHE_SIDECAR_MAX_SCAN"),
                 int(config["max_scan"]),
             ),
+            "stream_session_filter_mode": str(
+                source.get("FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE")
+                or config["stream_session_filter_mode"]
+            ).strip().lower(),
             "max_events_per_run": _positive_int(
                 source.get("FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN"),
                 int(config["max_events_per_run"]),
