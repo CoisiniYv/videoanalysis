@@ -267,9 +267,120 @@ session 过滤修复是不同问题。
   `face_reid_gate faces=0`、`behavior_rules raw_observation_count=0`，到事件附近才出现
   `raw_observation_count=1`。
 
-当前更精确结论：前 4 秒无 bbox 是 Savant detector/object metadata 对该画面前段未产生
-face/person object，尤其是侧脸、胡须、遮挡和姿态变化下的召回问题；不是 frame cache
-读取、sidecar 写入或 viewer overlay 问题。
+### 2026-06-23 补充：sampler、interval 和运行时像素证据
+
+针对"前几秒没有 bbox"继续检查后，结论进一步收敛为 Savant 检测链路输出稀疏/漏检，
+不是 sidecar、viewer、证据裁剪或单纯 `FACE_INFER_INTERVAL` 问题。
+
+#### analysis sampler 是否真的丢帧
+
+midterm 的 24/25fps 到 8fps 限制发生在 `analysis-forwarder`，不是把视频慢速发送：
+
+- `analysis-forwarder` 配置：
+  - `ANALYSIS_FPS=8/1`
+  - `FORWARDER_SAMPLER_ENABLED=true`
+- `services/analysis-forwarder/app/sampler.py` 使用 PTS domain，只有满足
+  `pts_ns - last_pts_ns >= 125ms` 的帧才会进入 Savant 分析路径。
+- 运行态 metrics 显示 `primary_rtsp`：
+  - `va_forwarder_frames_seen_total=6006673`
+  - `va_forwarder_frames_forwarded_total=2018196`
+  - `va_forwarder_frames_dropped_total=3988477`
+  - 约三分之二帧被丢弃，符合 24/25fps 采样到 8fps。
+
+同时，evidence raw clip 仍是全帧视频。例如
+`51b055bb-2077-4ae0-9c26-2a83c8768cf7/raw_clip.mov`：
+
+- `r_frame_rate=25/1`
+- `duration=10.000000`
+- `nb_frames=250`
+
+同一个 evidence 的 frame annotation cache 在 clip 内约 80 行，符合 10s * 8fps。
+因此：证据视频没有被慢放；分析路径确实只保留约 8fps，未进入分析路径的帧天然没有
+runtime bbox。
+
+#### `FACE_INFER_INTERVAL=0` 不是充分修复
+
+临时用 `FACE_INFER_INTERVAL=0` 重建 `savant-security` 后，新 evidence 仍出现同类问题：
+
+- `e4b80336-aa76-475d-9c63-9853d157b9b2`
+  - `first face t_s=4.212544444`
+  - t=2.920、3.170、3.420、3.670、3.921、4.171 的 exact sampled frame
+    在 raw clip 上离线 YOLOv8-face top score 为 `0.7937~0.8334`
+  - 但 Redis 同 PTS 行仍为 `object_count=0`
+- `fb322405-9da2-4a61-9210-bc2915481db9`
+  - t=2.920 到 4.171 的 exact sampled frame 离线 top score 为
+    `0.8120~0.8299`
+  - Redis 同 PTS 行仍为 `object_count=0`
+
+实验后运行态已恢复默认：
+
+- `FACE_INFER_INTERVAL=2`
+- `REPLAY_SAVANT_FRAME_DUMP_ENABLED=false`
+
+#### runtime frame dump 证明问题在 Savant 输出侧
+
+长窗口 runtime frame dump：
+
+```bash
+REPLAY_SAVANT_FRAME_DUMP_ENABLED=true
+REPLAY_SAVANT_FRAME_DUMP_ROOT=/data/video-analytics/media/debug/runtime_frame_dump/probe_20260623_long
+REPLAY_SAVANT_FRAME_DUMP_MAX_FRAMES=2000
+docker compose -f infra/docker-compose.midterm.yml up -d --no-build --force-recreate --no-deps savant-security
+```
+
+恢复默认后确认：
+
+- `REPLAY_SAVANT_FRAME_DUMP_ENABLED=false`
+- `FACE_INFER_INTERVAL=2`
+
+对 `probe_20260623_long/primary_rtsp` 的 869 张运行时 pre-inference frame 做离线
+YOLOv8-face 对齐 Redis 同 PTS：
+
+- `redis_found=869`
+- 离线 `score>=0.7` 且 Redis `face_count=0`：65 帧
+- 离线 `score>=0.5` 且 Redis `face_count=0`：87 帧
+- 离线 `score>=0.7` 且 Redis `face_count>0`：77 帧
+
+典型 mismatch：
+
+- `019ef024-0c15-7401-9471-36037fb16d43.jpg`
+  - 离线 score `0.8441`
+  - Redis `object_count=0`, `face_count=0`, `person_count=0`
+  - frame_num `31`
+- `019ef024-a435-78f1-aae6-91e9d3a02313.jpg`
+  - 离线 score `0.8188`
+  - Redis `object_count=0`, `face_count=0`, `person_count=0`
+  - frame_num `345`
+
+典型 match：
+
+- `019ef024-05af-7421-b6bf-9fed433c8901.jpg`
+  - 离线 score `0.8494`
+  - Redis face bbox confidence `0.7988`
+  - Redis bbox 与离线 bbox 基本对齐
+
+结论：runtime 像素中确实存在可检测人脸，但 Savant 当前检测输出会在部分连续帧中掉到
+`face_count=0`。这不是 sidecar 忽略 bbox，也不是 raw clip/frame_uuid 对齐错误。
+
+#### 修复方向
+
+短期如果目标是 evidence 视觉 bbox 完整性，应把 evidence bbox 生成从实时 Savant 检测
+输出中解耦：
+
+- 在 media-worker evidence finalization 阶段，对 `raw_clip.mov` 的目标时间窗做离线
+  face/person detector 补充，仅用于 visual annotation sidecar。
+- 输出必须带明确 provenance，例如 `source=offline_evidence_detector`，不得用于告警、
+  ReID、身份匹配或业务事件判断。
+- 可以只在 frame-cache sidecar 出现早段/窗口空洞时触发，避免把所有 evidence 都走重
+  推理。
+
+中期应继续定位 Savant 检测链路本身：
+
+- 对比 TensorRT/DeepStream `yolov8_face` 输出与 CPU ONNX 输出，确认是否为 FP16 engine、
+  converter、selector 或预处理差异。
+- 检查 RTSP/Replayed analysis path 的运行时解码质量和关键帧/GOP 边界；runtime dump
+  中可见明显块状损坏，检测输出在这些片段上不稳定。
+- 单纯调 `FACE_INFER_INTERVAL=0` 不足以修复该现象。
 
 ## 数据来源
 
