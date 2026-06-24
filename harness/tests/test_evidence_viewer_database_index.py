@@ -86,6 +86,8 @@ def test_evidence_bundle_list_query_is_database_backed() -> None:
     assert rows == [{"event_id": "11111111-1111-4111-8111-111111111111", "source_event_id": "source-event-1"}]
     assert "FROM events e" in data_sql
     assert "LEFT JOIN LATERAL" in data_sql
+    assert "LEFT JOIN cameras c" in data_sql
+    assert "c.name AS camera_name" in data_sql
     assert "evidence_tasks" in data_sql
     assert "media_deleted" in data_sql
     assert "media_expired" in data_sql
@@ -146,6 +148,31 @@ def test_database_row_maps_to_frontend_bundle_summary() -> None:
     assert summary["matched_objects"] == 2
     assert summary["unknown_objects"] == 1
     assert summary["index_source"] == "database"
+
+
+def test_database_row_uses_camera_table_name_when_payload_lacks_name() -> None:
+    row = {
+        "event_id": "22222222-2222-4222-8222-222222222223",
+        "source_event_id": "source-event-3",
+        "event_type": "intrusion",
+        "camera_id": "camera-1",
+        "source_id": "source-1",
+        "camera_name": "Lab Camera",
+        "media_status": "ready",
+        "created_at": datetime(2026, 6, 15, 4, 5, 6, tzinfo=timezone.utc),
+        "start_ts": None,
+        "event_ts_ms": 0,
+        "clip_status": "ready",
+        "raw_clip_path": "/data/video-analytics/media/evidence/event/raw_clip.mov",
+        "annotations_jsonl_path": None,
+        "evidence_task_count": 1,
+        "latest_task_status": "ready",
+        "payload": {"media": {}},
+    }
+
+    summary = _bundle_summary_from_row(row)
+
+    assert summary["camera_name"] == "Lab Camera"
 
 
 def test_database_row_exposes_reviewable_raw_clip_when_path_exists() -> None:

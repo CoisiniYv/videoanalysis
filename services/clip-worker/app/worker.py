@@ -17,7 +17,12 @@ from redis import Redis
 from app.config import Config, load_config
 from app.replay_client import ReplayClient, _uuid7_timestamp_ms
 from app.replay_shards import ReplayShard, ReplayShardConfigError
-from app.repository import get_evidence_diagnostics, update_clip_status
+from app.repository import (
+    expire_materialization_deadlines,
+    get_evidence_diagnostics,
+    terminal_evidence_state,
+    update_clip_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,17 @@ class ClipGateDecision:
     allowed: bool
     reason: str = ""
     error_message: str = ""
+    terminal_defer: bool = False
+    quota_decision: dict | None = None
+    degrade_decision: dict | None = None
+
+
+@dataclass(frozen=True)
+class ActiveReplayJob:
+    until_monotonic: float
+    shard_id: str
+    source_id: str
+    event_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -1113,6 +1129,9 @@ def _defer_clip_request(
     max_retries: int,
     seen_requests: set[str],
     replay_shard: dict | None = None,
+    evidence_state: str = "materialization_deferred",
+    quota_decision: dict | None = None,
+    degrade_decision: dict | None = None,
 ) -> bool:
     retry_age_s = _message_age_seconds(msg_id)
     if retry_count >= max(0, int(max_retries)):
@@ -1135,7 +1154,11 @@ def _defer_clip_request(
             event_id,
             "failed",
             error_message=final_error,
+            evidence_state="materialization_failed",
+            evidence_reason=final_error,
             replay_shard=replay_shard,
+            quota_decision=quota_decision,
+            degrade_decision=degrade_decision,
         )
         seen_requests.add(request_id)
         redis_client.xack(stream, group, msg_id)
@@ -1160,9 +1183,52 @@ def _defer_clip_request(
             f"deferred_retry reason={reason} "
             f"retry_count={retry_count + 1} error={error_message}"
         ),
+        evidence_state=evidence_state,
+        evidence_reason=reason,
+        quota_decision=quota_decision,
+        degrade_decision=degrade_decision,
         replay_shard=replay_shard,
     )
     return False
+
+
+def _defer_clip_request_terminal(
+    redis_client: Redis,
+    pg_conn: psycopg.Connection,
+    *,
+    stream: str,
+    group: str,
+    msg_id: object,
+    event_id: str,
+    request_id: str,
+    reason: str,
+    error_message: str,
+    seen_requests: set[str],
+    replay_shard: dict | None = None,
+    quota_decision: dict | None = None,
+    degrade_decision: dict | None = None,
+) -> None:
+    diagnostics = {
+        "defer_reason": reason,
+        "terminal_defer": True,
+        "quota_decision": quota_decision or {},
+        "degrade_decision": degrade_decision or {},
+    }
+    update_clip_status(
+        pg_conn,
+        event_id,
+        "pending",
+        error_message=error_message,
+        evidence_state="materialization_deferred",
+        evidence_reason=reason,
+        request_id=request_id,
+        diagnostics=diagnostics,
+        replay_shard=replay_shard,
+        quota_decision=quota_decision,
+        degrade_decision=degrade_decision,
+    )
+    seen_requests.add(request_id)
+    redis_client.xack(stream, group, msg_id)
 
 
 def _defer_post_savant_frame_proof(
@@ -1228,6 +1294,7 @@ def _queue_clip_request(
     active_job_count: int,
     max_concurrent_jobs: int,
     replay_shard: dict | None = None,
+    quota_decision: dict | None = None,
 ) -> None:
     retry_age_s = _message_age_seconds(msg_id)
     diagnostics = {
@@ -1236,6 +1303,7 @@ def _queue_clip_request(
         "max_concurrent_jobs": max_concurrent_jobs,
         "redis_delivery_retry_count": retry_count,
         "queued_age_seconds": retry_age_s,
+        "quota_decision": quota_decision or {},
     }
     if replay_shard:
         diagnostics["replay_shard"] = replay_shard
@@ -1257,12 +1325,13 @@ def _queue_clip_request(
         event_id,
         "pending",
         error_message=error_message,
-        evidence_state="queued",
-        evidence_reason=error_message,
+        evidence_state="materialization_deferred",
+        evidence_reason=reason,
         request_id=request_id,
         attempt_count=retry_count,
         diagnostics=diagnostics,
         replay_shard=replay_shard,
+        quota_decision=quota_decision,
     )
 
 
@@ -2274,28 +2343,121 @@ def _clip_gate_decision(
     cfg: Config,
     *,
     jobs_created: int,
-    active_job_count: int,
+    active_jobs: list[ActiveReplayJob],
+    shard_id: str,
+    source_id: str,
     camera_id: str,
     cooldown_gate_ts_ms: int,
     last_job_by_camera: dict[str, int],
+    event_type_counts: dict[str, int],
     event_type: str = "",
 ) -> ClipGateDecision:
-    is_priority_event = event_type in PRIORITY_EVENT_TYPES
+    high_priority_types = set(cfg.evidence_high_priority_event_types) or PRIORITY_EVENT_TYPES
+    is_priority_event = event_type in high_priority_types
+    active_job_count = len(active_jobs)
+    active_for_shard = sum(1 for job in active_jobs if job.shard_id == shard_id)
+    active_for_source = sum(1 for job in active_jobs if job.source_id == source_id)
+    pressure_level = str(cfg.evidence_materialization_pressure_level or "normal").lower()
+    if pressure_level == "hard":
+        return ClipGateDecision(
+            allowed=False,
+            reason="materialization_pressure_hard_limit",
+            error_message="EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL=hard",
+            terminal_defer=True,
+            degrade_decision={
+                "level": pressure_level,
+                "action": "keep_manifest_stop_media_materialization",
+            },
+        )
+    if pressure_level == "critical" and not is_priority_event:
+        return ClipGateDecision(
+            allowed=False,
+            reason="materialization_pressure_critical_low_priority_deferred",
+            error_message="critical pressure allows only high-priority materialization",
+            terminal_defer=True,
+            degrade_decision={
+                "level": pressure_level,
+                "action": "defer_low_priority",
+            },
+        )
+    if pressure_level == "warning" and not is_priority_event:
+        return ClipGateDecision(
+            allowed=False,
+            reason="materialization_pressure_warning_low_priority_deferred",
+            error_message="warning pressure defers low-priority materialization",
+            terminal_defer=True,
+            degrade_decision={
+                "level": pressure_level,
+                "action": "defer_low_priority",
+            },
+        )
     if _max_jobs_limit_reached(cfg, jobs_created):
         return ClipGateDecision(
             allowed=False,
             reason="max_jobs_reached",
             error_message="CLIP_WORKER_MAX_JOBS_PER_RUN reached",
+            terminal_defer=True,
+            quota_decision={
+                "scope": "run",
+                "limit": cfg.max_jobs_per_run,
+                "observed": jobs_created,
+            },
         )
+    event_type_limit = cfg.evidence_materialization_event_type_quotas.get(event_type, 0)
+    if event_type_limit > 0 and event_type_counts.get(event_type, 0) >= event_type_limit:
+        return ClipGateDecision(
+            allowed=False,
+            reason="event_type_quota_reached",
+            error_message=f"EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS reached for {event_type}",
+            terminal_defer=True,
+            quota_decision={
+                "scope": "event_type",
+                "event_type": event_type,
+                "limit": event_type_limit,
+                "observed": event_type_counts.get(event_type, 0),
+            },
+        )
+    max_global = cfg.evidence_materialization_max_concurrency
     if (
-        cfg.max_concurrent_jobs > 0
-        and active_job_count >= cfg.max_concurrent_jobs
+        max_global > 0
+        and active_job_count >= max_global
         and not is_priority_event
     ):
         return ClipGateDecision(
             allowed=False,
             reason="max_concurrent_reached",
-            error_message="CLIP_WORKER_MAX_CONCURRENT_JOBS reached",
+            error_message="EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY reached",
+            quota_decision={
+                "scope": "global_concurrency",
+                "limit": max_global,
+                "observed": active_job_count,
+            },
+        )
+    max_per_shard = cfg.evidence_materialization_max_concurrency_per_shard
+    if max_per_shard > 0 and active_for_shard >= max_per_shard and not is_priority_event:
+        return ClipGateDecision(
+            allowed=False,
+            reason="max_concurrent_per_shard_reached",
+            error_message="EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD reached",
+            quota_decision={
+                "scope": "shard_concurrency",
+                "shard_id": shard_id,
+                "limit": max_per_shard,
+                "observed": active_for_shard,
+            },
+        )
+    max_per_source = cfg.evidence_materialization_max_concurrency_per_source
+    if max_per_source > 0 and active_for_source >= max_per_source and not is_priority_event:
+        return ClipGateDecision(
+            allowed=False,
+            reason="max_concurrent_per_source_reached",
+            error_message="EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE reached",
+            quota_decision={
+                "scope": "source_concurrency",
+                "source_id": source_id,
+                "limit": max_per_source,
+                "observed": active_for_source,
+            },
         )
     if (
         cfg.per_camera_cooldown_seconds > 0
@@ -2366,10 +2528,12 @@ def run_worker(
     _ensure_group(redis_client, stream, group)
     replay_clients: dict[str, ReplayClient] = {}
     jobs_created = 0
-    active_jobs_until: list[float] = []
+    active_jobs: list[ActiveReplayJob] = []
+    event_type_counts: dict[str, int] = defaultdict(int)
     last_job_by_camera: dict[str, int] = defaultdict(int)
     seen_requests: set[str] = set()
     last_pending_claim_at = 0.0
+    last_expire_check_at = 0.0
 
     logger.info(
         "clip-worker started stream=%s group=%s replay=%s "
@@ -2401,6 +2565,16 @@ def run_worker(
 
     while not shutdown_requested:
         try:
+            now_for_expire = time.monotonic()
+            if now_for_expire - last_expire_check_at >= 30.0 or cfg.run_once:
+                expired_count = expire_materialization_deadlines(pg_conn)
+                if expired_count:
+                    logger.info(
+                        "clip_worker_materialization_expired count=%s",
+                        expired_count,
+                    )
+                last_expire_check_at = now_for_expire
+
             pending_delivery_counts: dict[str, int] = {}
             pending_entries: list[tuple[object, object]] = []
             now_for_claim = time.monotonic()
@@ -2465,9 +2639,24 @@ def run_worker(
                     replay_anchor_req = req
                     post_savant_media_request = _is_post_savant_media_request(req)
                     now_monotonic = time.monotonic()
-                    active_jobs_until = [
-                        until for until in active_jobs_until if until > now_monotonic
+                    active_jobs = [
+                        job for job in active_jobs if job.until_monotonic > now_monotonic
                     ]
+
+                    terminal_state = terminal_evidence_state(pg_conn, event_id)
+                    if terminal_state:
+                        logger.info(
+                            "clip_worker_acked_terminal_request request_id=%s "
+                            "event_id=%s state=%s msg_id=%s",
+                            request_id,
+                            event_id,
+                            terminal_state,
+                            msg_id,
+                        )
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
 
                     try:
                         replay_route = _resolve_replay_route(
@@ -2501,14 +2690,35 @@ def run_worker(
                     schedule_gate = _clip_gate_decision(
                         cfg,
                         jobs_created=jobs_created,
-                        active_job_count=len(active_jobs_until),
+                        active_jobs=active_jobs,
+                        shard_id=replay_route.shard.shard_id,
+                        source_id=str(source_id),
                         camera_id=str(camera_id),
                         cooldown_gate_ts_ms=cooldown_gate_ts_ms,
                         last_job_by_camera=last_job_by_camera,
+                        event_type_counts=event_type_counts,
                         event_type=event_type,
                     )
                     if not schedule_gate.allowed:
-                        if schedule_gate.reason == "max_concurrent_reached":
+                        if schedule_gate.terminal_defer:
+                            _defer_clip_request_terminal(
+                                redis_client,
+                                pg_conn,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason=schedule_gate.reason,
+                                error_message=schedule_gate.error_message,
+                                seen_requests=seen_requests,
+                                replay_shard=replay_shard,
+                                quota_decision=schedule_gate.quota_decision,
+                                degrade_decision=schedule_gate.degrade_decision,
+                            )
+                            total_processed += 1
+                            continue
+                        if schedule_gate.reason.startswith("max_concurrent"):
                             _queue_clip_request(
                                 pg_conn,
                                 event_id=event_id,
@@ -2517,9 +2727,10 @@ def run_worker(
                                 error_message=schedule_gate.error_message,
                                 retry_count=retry_count,
                                 msg_id=msg_id,
-                                active_job_count=len(active_jobs_until),
-                                max_concurrent_jobs=cfg.max_concurrent_jobs,
+                                active_job_count=len(active_jobs),
+                                max_concurrent_jobs=cfg.evidence_materialization_max_concurrency,
                                 replay_shard=replay_shard,
+                                quota_decision=schedule_gate.quota_decision,
                             )
                             total_processed += 1
                             continue
@@ -2538,6 +2749,8 @@ def run_worker(
                                 max_retries=cfg.deferred_retry_max_attempts,
                                 seen_requests=seen_requests,
                                 replay_shard=replay_shard,
+                                quota_decision=schedule_gate.quota_decision,
+                                degrade_decision=schedule_gate.degrade_decision,
                             )
                             total_processed += 1
                             continue
@@ -2906,9 +3119,19 @@ def run_worker(
                             replay_shard=replay_shard,
                         )
                         jobs_created += 1
-                        active_jobs_until.append(
-                            time.monotonic() + float(pre_seconds + post_seconds + 5)
+                        active_jobs.append(
+                            ActiveReplayJob(
+                                until_monotonic=(
+                                    time.monotonic()
+                                    + float(pre_seconds + post_seconds + 5)
+                                ),
+                                shard_id=replay_route.shard.shard_id,
+                                source_id=str(source_id),
+                                event_type=event_type,
+                            )
                         )
+                        if event_type:
+                            event_type_counts[event_type] += 1
                         seen_requests.add(request_id)
                         if camera_id:
                             last_job_by_camera[camera_id] = cooldown_gate_ts_ms

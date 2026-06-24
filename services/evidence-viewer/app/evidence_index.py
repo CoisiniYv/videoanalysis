@@ -23,6 +23,14 @@ RAW_CLIP_PREFERRED_NAMES = (
     "raw_clip.webm",
     "raw_clip.mkv",
 )
+RAW_CLIP_UNAVAILABLE_MATERIALIZATION_STATUSES = {
+    "manifest_ready",
+    "materialization_pending",
+    "materializing",
+    "materialization_deferred",
+    "materialization_failed",
+    "materialization_expired",
+}
 EPOCH_MS_MIN = 946684800000
 EPOCH_MS_MAX = 4102444800000
 EVENT_CATEGORY_TYPES = {
@@ -443,6 +451,10 @@ def bundle_summary(
         else {}
     )
     raw_clip = discover_raw_clip(bundle_dir, metadata)
+    materialization = materialization_summary(metadata, summary, raw_clip=raw_clip)
+    raw_clip_playable = raw_clip is not None and not materialization.get(
+        "raw_clip_unavailable_reason"
+    )
     annotations_path = bundle_dir / "annotations.jsonl"
     alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
     event_id = event.get("event_id") or summary.get("event_id") or bundle_dir.name
@@ -455,11 +467,12 @@ def bundle_summary(
         "camera_name": camera_name,
         "alarm_machine_time": alarm_time,
         "alarm_machine_time_source": alarm_time_source,
-        "raw_clip_available": raw_clip is not None,
+        "raw_clip_available": raw_clip_playable,
         "raw_clip_name": raw_clip.name if raw_clip else None,
         "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip"
-        if raw_clip is not None
+        if raw_clip_playable
         else None,
+        **materialization,
         "annotations_available": annotations_path.is_file(),
         "annotation_lines": summary.get("annotation_lines"),
         "clip_status": status.get("clip_status") or summary.get("clip_status"),
@@ -566,10 +579,16 @@ def bundle_manifest(
     metadata, metadata_warnings = load_json_object(bundle_dir / "metadata.json")
     summary, summary_warnings = load_json_object(bundle_dir / "summary.json")
     raw_clip = discover_raw_clip(bundle_dir, metadata)
+    materialization = materialization_summary(metadata, summary, raw_clip=raw_clip)
+    raw_clip_playable = raw_clip is not None and not materialization.get(
+        "raw_clip_unavailable_reason"
+    )
     available_files = sorted(path.name for path in bundle_dir.iterdir() if path.is_file())
     warnings = metadata_warnings + summary_warnings
     if raw_clip is None:
         warnings.append("raw_clip_missing")
+    elif not raw_clip_playable:
+        warnings.append(str(materialization["raw_clip_unavailable_reason"]))
     alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
     camera_name = camera_name_for_bundle(metadata, summary, camera_name_lookup)
     return {
@@ -580,14 +599,63 @@ def bundle_manifest(
         "metadata": metadata,
         "summary": summary,
         "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip"
-        if raw_clip is not None
+        if raw_clip_playable
         else None,
         "raw_clip_name": raw_clip.name if raw_clip else None,
+        **materialization,
         "annotations_url": f"/api/bundles/{event_id}/annotations",
         "sink_metadata_url": f"/api/bundles/{event_id}/sink-metadata",
         "available_files": available_files,
         "warnings": warnings,
     }
+
+
+def materialization_summary(
+    metadata: dict[str, Any],
+    summary: dict[str, Any],
+    *,
+    raw_clip: Path | None,
+) -> dict[str, Any]:
+    media = metadata.get("media") if isinstance(metadata.get("media"), dict) else {}
+    status_doc = metadata.get("status") if isinstance(metadata.get("status"), dict) else {}
+    materialization_status = _text_or_none(
+        media.get("materialization_status")
+        or status_doc.get("materialization_status")
+        or summary.get("materialization_status")
+    )
+    if not materialization_status and raw_clip is not None:
+        materialization_status = "materialized"
+    materialization_reason = _text_or_none(
+        media.get("materialization_reason")
+        or media.get("materialization_defer_reason")
+        or media.get("materialization_failure_reason")
+        or media.get("materialization_expired_reason")
+        or summary.get("materialization_reason")
+    )
+    return {
+        "materialization_status": materialization_status,
+        "materialization_reason": materialization_reason,
+        "materialization_deadline_at": _text_or_none(
+            media.get("materialization_deadline_at")
+            or summary.get("materialization_deadline_at")
+        ),
+        "quota_decision": media.get("quota_decision")
+        if isinstance(media.get("quota_decision"), dict)
+        else {},
+        "degrade_decision": media.get("degrade_decision")
+        if isinstance(media.get("degrade_decision"), dict)
+        else {},
+        "raw_clip_unavailable_reason": raw_clip_unavailable_reason_for_status(
+            materialization_status
+        ),
+    }
+
+
+def raw_clip_unavailable_reason_for_status(status: str | None) -> str | None:
+    text = _text_or_none(status)
+    if text in RAW_CLIP_UNAVAILABLE_MATERIALIZATION_STATUSES:
+        return f"raw_clip_unavailable:{text}"
+    return None
 
 
 def normalize_bbox(

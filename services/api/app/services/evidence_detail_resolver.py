@@ -113,6 +113,13 @@ def resolve_event_evidence_detail(event: Any) -> dict[str, Any]:
         "evidence": {
             "bundle_path": bundle_path,
             "bundle_exists": bool(bundle_dir and bundle_dir.is_dir()),
+            "materialization_status": _text(media.get("materialization_status")),
+            "materialization_reason": _text(media.get("materialization_reason")),
+            "materialization_deadline_at": _text(
+                media.get("materialization_deadline_at")
+            ),
+            "quota_decision": _dict(media.get("quota_decision")),
+            "degrade_decision": _dict(media.get("degrade_decision")),
             "event_worker_output_dir": _text(payload.get("event_worker_output_dir")),
             "raw_clip_path": files["raw_clip_path"],
             "raw_clip_url": _media_url(files["raw_clip_path"]),

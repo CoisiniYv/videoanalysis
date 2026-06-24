@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 
 from app.replay_shards import ReplayShardMap, load_replay_shard_map
@@ -47,6 +48,56 @@ class Config:
     frame_annotation_anchor_lookback_count: int
     frame_annotation_anchor_wall_clock_slack_s: float
     frame_annotation_anchor_pts_tolerance_s: float
+    evidence_materialization_policy: str
+    evidence_high_priority_event_types: tuple[str, ...]
+    evidence_defer_low_priority: bool
+    evidence_replay_ttl_seconds: int
+    evidence_frame_annotation_ttl_seconds: int
+    evidence_unknown_source_fail_closed: bool
+    evidence_materialization_max_concurrency: int
+    evidence_materialization_max_concurrency_per_shard: int
+    evidence_materialization_max_concurrency_per_source: int
+    evidence_materialization_event_type_quotas: dict[str, int]
+    evidence_materialization_pressure_level: str
+
+
+def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
+    value = os.getenv(name, default)
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _bool_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _event_type_quotas_env(name: str) -> dict[str, int]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        result: dict[str, int] = {}
+        for key, value in parsed.items():
+            try:
+                result[str(key)] = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
+    result = {}
+    for item in raw.split(","):
+        if not item.strip() or ":" not in item:
+            continue
+        key, value = item.split(":", 1)
+        try:
+            result[key.strip()] = max(0, int(value.strip()))
+        except ValueError:
+            continue
+    return result
 
 
 def load_config() -> Config:
@@ -161,4 +212,43 @@ def load_config() -> Config:
         frame_annotation_anchor_pts_tolerance_s=float(
             os.getenv("FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S", "1.0")
         ),
+        evidence_materialization_policy=os.getenv(
+            "EVIDENCE_MATERIALIZATION_POLICY", "priority"
+        ),
+        evidence_high_priority_event_types=_csv_env(
+            "EVIDENCE_HIGH_PRIORITY_EVENT_TYPES",
+            "watchlist_hit,live_search_hit",
+        ),
+        evidence_defer_low_priority=_bool_env(
+            "EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY", "false"
+        ),
+        evidence_replay_ttl_seconds=int(
+            os.getenv("EVIDENCE_REPLAY_TTL_SECONDS", "300")
+        ),
+        evidence_frame_annotation_ttl_seconds=int(
+            os.getenv("EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS", "120")
+        ),
+        evidence_unknown_source_fail_closed=_bool_env(
+            "EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED", "true"
+        ),
+        evidence_materialization_max_concurrency=int(
+            os.getenv(
+                "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY",
+                os.getenv("CLIP_WORKER_MAX_CONCURRENT_JOBS", "4"),
+            )
+        ),
+        evidence_materialization_max_concurrency_per_shard=int(
+            os.getenv("EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD", "2")
+        ),
+        evidence_materialization_max_concurrency_per_source=int(
+            os.getenv("EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE", "1")
+        ),
+        evidence_materialization_event_type_quotas=_event_type_quotas_env(
+            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS"
+        ),
+        evidence_materialization_pressure_level=os.getenv(
+            "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL", "normal"
+        )
+        .strip()
+        .lower(),
     )

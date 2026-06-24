@@ -145,8 +145,11 @@ def test_operator_smoke_prepares_camera_schema() -> None:
 def test_operator_portal_is_served_by_evidence_viewer_8090() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "operator.js")
+    viewer_main = _text(ROOT / "services" / "evidence-viewer" / "app" / "main.py")
     assert "/static/operator.js" in html
     assert "/static/evidence.js" in html
+    assert '@app.get("/operator")' in viewer_main
+    assert "def operator_index" in viewer_main
     assert "/operator/static" not in html
     assert "evidence-viewer" not in (html + js).lower()
 
@@ -170,6 +173,16 @@ def test_operator_registration_clears_conflicting_selected_person_id() -> None:
     assert "fd.delete(\"person_id\")" in js
     assert "selectedExternalPersonId" in js
     assert "fillRegistrationForPerson" in js
+
+
+def test_operator_face_registration_requires_explicit_append_mode() -> None:
+    js = _text(STATIC_ROOT / "operator.js")
+    assert "setFaceRegistrationMode" in js
+    assert "clearFaceRegistrationIdentityFields" in js
+    assert 'faceRegistrationMode === "append"' in js
+    assert '点击“追加到当前人员”后再上传新照片' in js
+    assert 'registerNewPersonBtn?.addEventListener("click"' in js
+    assert 'appendSelectedPersonBtn?.addEventListener("click"' in js
 
 
 def test_operator_evidence_page_shows_alarm_machine_time() -> None:

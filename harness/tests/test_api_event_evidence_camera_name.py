@@ -61,3 +61,28 @@ def test_event_response_exposes_camera_name_for_list_recent_and_detail_routes() 
     assert payload["evidence_state"] == "waiting_proof"
     assert payload["source_id"] == "source-1"
     assert payload["camera_id"] == "camera-1"
+
+
+def test_event_response_uses_joined_camera_name_when_payload_has_no_name() -> None:
+    event = EventResponse.from_db_row(
+        {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "source_event_id": "source-event-2",
+            "event_type": "intrusion",
+            "camera_id": "camera-2",
+            "camera_name": "Front Gate",
+            "source_id": "source-2",
+            "media_status": "not_implemented",
+            "payload": {"media": {}},
+        }
+    )
+
+    evidence = EventEvidenceResponse.from_event_and_tasks(
+        event=event,
+        evidence_tasks=[],
+        evidence_detail=resolve_event_evidence_detail(event),
+    ).model_dump()
+
+    assert event.camera_name == "Front Gate"
+    assert evidence["camera_name"] == "Front Gate"
+    assert evidence["event"]["camera_name"] == "Front Gate"

@@ -19,6 +19,12 @@ EPOCH_MS_MAX = 4102444800000
 RAW_CLIP_UNAVAILABLE_STATUSES = {
     "duration_guard_failed",
     "failed",
+    "manifest_ready",
+    "materialization_pending",
+    "materializing",
+    "materialization_deferred",
+    "materialization_failed",
+    "materialization_expired",
     "media_deleted",
     "media_expired",
     "not_implemented",
@@ -123,7 +129,7 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "event_type": row.get("event_type") or "",
         "source_id": row.get("source_id") or "",
         "camera_id": row.get("camera_id") or "",
-        "camera_name": _camera_name(payload, media),
+        "camera_name": _camera_name(payload, media, row),
         "alarm_machine_time": alarm_time,
         "alarm_machine_time_source": alarm_source,
         "raw_clip_available": bool(
@@ -144,6 +150,17 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "media_status": media_status,
         "evidence_state": _text(media.get("evidence_state")) or media_status,
         "evidence_reason": _text(media.get("evidence_reason") or media.get("error_message")),
+        "materialization_status": (
+            _text(media.get("materialization_status"))
+            or _text(row.get("latest_materialization_status"))
+        ),
+        "materialization_reason": _text(media.get("materialization_reason")),
+        "materialization_deadline_at": (
+            _text(media.get("materialization_deadline_at"))
+            or _text(row.get("latest_materialization_deadline_at"))
+        ),
+        "quota_decision": _dict(media.get("quota_decision")),
+        "degrade_decision": _dict(media.get("degrade_decision")),
         "evidence_task_count": _int_or_none(row.get("evidence_task_count")) or 0,
         "latest_task_status": row.get("latest_task_status"),
         "index_source": "database",
@@ -177,12 +194,18 @@ def _alarm_machine_time(
     return None, None
 
 
-def _camera_name(payload: dict[str, Any], media: dict[str, Any]) -> str | None:
+def _camera_name(
+    payload: dict[str, Any],
+    media: dict[str, Any],
+    row: dict[str, Any] | None = None,
+) -> str | None:
     camera = _dict(payload.get("camera"))
+    row = row or {}
     for value in (
         payload.get("camera_name"),
         media.get("camera_name"),
         camera.get("name"),
+        row.get("camera_name"),
     ):
         text = _text(value)
         if text:

@@ -38,6 +38,11 @@ def _safe_media(payload: dict | None) -> dict:
         "evidence_request_id": None,
         "evidence_attempt_count": None,
         "evidence_diagnostics": None,
+        "materialization_status": None,
+        "materialization_reason": None,
+        "materialization_deadline_at": None,
+        "quota_decision": None,
+        "degrade_decision": None,
         "error_message": None,
     }
     if payload and isinstance(payload.get("media"), dict):
@@ -101,6 +106,9 @@ class EventResponse(BaseModel):
     evidence_state: str = "not_implemented"
     evidence_reason: Optional[str] = None
     evidence_state_updated_at: Optional[str] = None
+    materialization_status: Optional[str] = None
+    materialization_reason: Optional[str] = None
+    materialization_deadline_at: Optional[str] = None
     snapshot_required: bool = False
     clip_required: bool = False
     evidence_policy: Dict[str, Any] = Field(default_factory=dict)
@@ -157,12 +165,16 @@ class EventResponse(BaseModel):
             or "not_implemented"
         )
 
+        camera_name = _camera_name_from_payload(payload, media) or str(
+            row.get("camera_name") or ""
+        ).strip()
+
         return cls(
             id=str(row.get("id", "")),
             source_event_id=row.get("source_event_id", ""),
             event_type=row.get("event_type", ""),
             camera_id=row.get("camera_id", ""),
-            camera_name=_camera_name_from_payload(payload, media),
+            camera_name=camera_name,
             source_id=row.get("source_id", ""),
             track_id=str(row.get("track_id", "")),
             person_id=row.get("person_id"),
@@ -193,6 +205,9 @@ class EventResponse(BaseModel):
             evidence_state=str(evidence_state),
             evidence_reason=media.get("evidence_reason") or media.get("error_message"),
             evidence_state_updated_at=_iso(media.get("evidence_state_updated_at")),
+            materialization_status=media.get("materialization_status"),
+            materialization_reason=media.get("materialization_reason"),
+            materialization_deadline_at=_iso(media.get("materialization_deadline_at")),
             snapshot_required=bool(row.get("snapshot_required", False)),
             clip_required=bool(row.get("clip_required", False)),
             evidence_policy=row.get("evidence_policy") or payload.get("evidence_policy", {}),
@@ -229,6 +244,25 @@ class EvidenceTaskResponse(BaseModel):
     pre_seconds: int = 5
     post_seconds: int = 5
     status: str = "pending"
+    materialization_status: str = "manifest_ready"
+    materialization_policy: str = "priority"
+    priority: int = 0
+    replay_shard_id: Optional[str] = None
+    replay_api_url: Optional[str] = None
+    replay_job_sink_url: Optional[str] = None
+    replay_source_id: Optional[str] = None
+    replay_window: Dict[str, Any] = Field(default_factory=dict)
+    sink_output_path: Optional[str] = None
+    replay_deadline_at: Optional[str] = None
+    annotation_deadline_at: Optional[str] = None
+    materialization_deadline_at: Optional[str] = None
+    materialization_defer_reason: Optional[str] = None
+    materialization_failure_reason: Optional[str] = None
+    materialization_expired_reason: Optional[str] = None
+    materialization_audit: Dict[str, Any] = Field(default_factory=dict)
+    cleanup_audit: Dict[str, Any] = Field(default_factory=dict)
+    quota_decision: Dict[str, Any] = Field(default_factory=dict)
+    degrade_decision: Dict[str, Any] = Field(default_factory=dict)
     snapshot_path: Optional[str] = None
     clip_path: Optional[str] = None
     metadata_path: Optional[str] = None
@@ -259,6 +293,25 @@ class EvidenceTaskResponse(BaseModel):
             pre_seconds=int(row.get("pre_seconds", 5) or 5),
             post_seconds=int(row.get("post_seconds", 5) or 5),
             status=row.get("status", "pending"),
+            materialization_status=row.get("materialization_status", "manifest_ready"),
+            materialization_policy=row.get("materialization_policy", "priority"),
+            priority=int(row.get("priority", 0) or 0),
+            replay_shard_id=row.get("replay_shard_id"),
+            replay_api_url=row.get("replay_api_url"),
+            replay_job_sink_url=row.get("replay_job_sink_url"),
+            replay_source_id=row.get("replay_source_id"),
+            replay_window=row.get("replay_window") or {},
+            sink_output_path=row.get("sink_output_path"),
+            replay_deadline_at=_iso(row.get("replay_deadline_at")),
+            annotation_deadline_at=_iso(row.get("annotation_deadline_at")),
+            materialization_deadline_at=_iso(row.get("materialization_deadline_at")),
+            materialization_defer_reason=row.get("materialization_defer_reason"),
+            materialization_failure_reason=row.get("materialization_failure_reason"),
+            materialization_expired_reason=row.get("materialization_expired_reason"),
+            materialization_audit=row.get("materialization_audit") or {},
+            cleanup_audit=row.get("cleanup_audit") or {},
+            quota_decision=row.get("quota_decision") or {},
+            degrade_decision=row.get("degrade_decision") or {},
             snapshot_path=row.get("snapshot_path"),
             clip_path=row.get("clip_path"),
             metadata_path=row.get("metadata_path"),
@@ -284,6 +337,9 @@ class EventEvidenceResponse(BaseModel):
     evidence_state: str = "not_implemented"
     evidence_reason: Optional[str] = None
     evidence_state_updated_at: Optional[str] = None
+    materialization_status: Optional[str] = None
+    materialization_reason: Optional[str] = None
+    materialization_deadline_at: Optional[str] = None
     snapshot_status: str = "not_implemented"
     clip_status: str = "not_implemented"
     metadata_status: str = "not_implemented"
@@ -329,7 +385,7 @@ class EventEvidenceResponse(BaseModel):
         clip_error_message = event.media.get("clip_error_message") if event.media else None
         raw_clip_path = event.media.get("raw_clip_path") if event.media else None
         annotated_clip_path = event.media.get("annotated_clip_path") if event.media else None
-        camera_name = _camera_name_from_payload(event.payload, event.media)
+        camera_name = event.camera_name or _camera_name_from_payload(event.payload, event.media)
 
         return cls(
             event_id=event.id,
@@ -340,6 +396,9 @@ class EventEvidenceResponse(BaseModel):
             evidence_state=event.evidence_state,
             evidence_reason=event.evidence_reason,
             evidence_state_updated_at=event.evidence_state_updated_at,
+            materialization_status=event.materialization_status,
+            materialization_reason=event.materialization_reason,
+            materialization_deadline_at=event.materialization_deadline_at,
             snapshot_status=event.media.get("snapshot_status", "not_implemented"),
             clip_status=event.media.get("clip_status", "not_implemented"),
             metadata_status=event.media.get("metadata_status", "not_implemented"),

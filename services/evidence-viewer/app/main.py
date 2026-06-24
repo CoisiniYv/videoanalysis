@@ -24,6 +24,7 @@ from app.evidence_index import (
     media_type_for_path,
     parse_json_or_jsonl_records,
     parse_jsonl_records,
+    raw_clip_unavailable_reason_for_status,
     scan_bundles,
 )
 
@@ -160,6 +161,11 @@ def _proxy_request(method: str, target: str, request: Request, body: bytes) -> R
 
 @app.get("/")
 def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
+@app.get("/operator")
+def operator_index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
 
 
@@ -376,6 +382,11 @@ def api_raw_clip(event_id: str) -> FileResponse:
         raise _http_error(exc) from exc
     if raw_clip is None:
         raise HTTPException(status_code=404, detail="raw_clip.* not found")
+    blocker = raw_clip_unavailable_reason_for_status(
+        manifest.get("materialization_status")
+    )
+    if blocker:
+        raise HTTPException(status_code=409, detail=blocker)
     return FileResponse(
         raw_clip,
         media_type=media_type_for_path(raw_clip),

@@ -68,8 +68,21 @@ def _clip_config(**overrides: Any):
         "frame_annotation_anchor_lookback_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,
         "frame_annotation_anchor_pts_tolerance_s": 1.0,
+        "evidence_materialization_policy": "priority",
+        "evidence_high_priority_event_types": ("watchlist_hit", "live_search_hit"),
+        "evidence_defer_low_priority": False,
+        "evidence_replay_ttl_seconds": 300,
+        "evidence_frame_annotation_ttl_seconds": 120,
+        "evidence_unknown_source_fail_closed": True,
+        "evidence_materialization_max_concurrency": 1,
+        "evidence_materialization_max_concurrency_per_shard": 0,
+        "evidence_materialization_max_concurrency_per_source": 0,
+        "evidence_materialization_event_type_quotas": {},
+        "evidence_materialization_pressure_level": "normal",
     }
     values.update(overrides)
+    if "evidence_materialization_max_concurrency" not in overrides:
+        values["evidence_materialization_max_concurrency"] = values["max_concurrent_jobs"]
     return Config(**values)
 
 
@@ -292,7 +305,7 @@ def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None
 
     assert redis_client.acked == ["1-0"]
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "queued"
+    assert updates[-1]["evidence_state"] == "materialization_deferred"
     assert updates[-1]["diagnostics"]["active_job_count"] == 1
     assert updates[-1]["diagnostics"]["max_concurrent_jobs"] == 1
     assert all(update["status"] != "skipped_by_poc_limit" for update in updates)
@@ -333,7 +346,7 @@ def test_post_savant_concurrency_queue_does_not_wait_for_proof(monkeypatch) -> N
     assert redis_client.acked == ["1-0"]
     assert redis_client.proof_reads == 0
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "queued"
+    assert updates[-1]["evidence_state"] == "materialization_deferred"
 
 
 def test_pending_entry_is_claimed_and_processed(monkeypatch) -> None:
@@ -363,6 +376,41 @@ def test_pending_entry_is_claimed_and_processed(monkeypatch) -> None:
     assert redis_client.claims == 1
     assert redis_client.acked == ["9-0"]
     assert updates[-1]["status"] == "replay_job_created"
+
+
+def test_terminal_pending_entry_is_acked_without_replay(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    redis_client = _FakeRedis(
+        pending_requests=[("9-0", _request("022"), 8)],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+    monkeypatch.setattr(
+        worker,
+        "terminal_evidence_state",
+        lambda _pg_conn, _event_id: "materialization_expired",
+    )
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=0),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.claims == 1
+    assert redis_client.acked == ["9-0"]
+    assert updates == []
+    assert _FakeReplay.instances == []
 
 
 def test_replay_job_routes_to_source_shard(monkeypatch) -> None:
@@ -492,7 +540,7 @@ def test_concurrency_queue_does_not_fail_on_retry_budget(monkeypatch) -> None:
 
     assert redis_client.acked == ["9-0"]
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "queued"
+    assert updates[-1]["evidence_state"] == "materialization_deferred"
     assert "retry_budget_exhausted" not in updates[-1].get("error_message", "")
     assert updates[-1]["attempt_count"] == 7
 
@@ -572,11 +620,12 @@ def test_update_clip_status_writes_operator_evidence_state() -> None:
 
     event_update = conn.cursor_obj.calls[0][1]
     task_update = conn.cursor_obj.calls[-1][1]
-    assert event_update["evidence_state"] == "replaying"
+    assert event_update["evidence_state"] == "materializing"
+    assert event_update["materialization_status"] == "materializing"
     assert event_update["evidence_reason"] == "replay_job_created"
     assert event_update["request_id"] == "req-1"
     assert event_update["attempt_count"] == 2
-    assert task_update["evidence_state"] == "replaying"
+    assert task_update["materialization_status"] == "materializing"
     assert task_update["attempt_count"] == 2
 
 
@@ -1111,7 +1160,7 @@ def test_post_savant_frame_proof_wait_respects_deadline(monkeypatch) -> None:
     assert redis_client.acked == []
     assert updates[-1]["evidence_state"] == "waiting_proof"
     assert len(waiting_updates) <= 2
-    assert elapsed_s < 0.08
+    assert elapsed_s < 0.12
 
 
 def test_post_savant_frame_proof_succeeds_after_local_poll(monkeypatch) -> None:

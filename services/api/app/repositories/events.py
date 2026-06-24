@@ -16,6 +16,14 @@ EVENT_CATEGORY_TYPES = {
     "crowd": ("crowd_gathering",),
 }
 
+EVENTS_WITH_CAMERA_SQL = """
+    SELECT e.*, c.name AS camera_name
+    FROM events e
+    LEFT JOIN cameras c
+      ON c.id::text = e.camera_id
+      OR c.source_id = e.source_id
+"""
+
 
 class EventRepository:
     """Read-only repository for events."""
@@ -28,9 +36,9 @@ class EventRepository:
     # ------------------------------------------------------------------
 
     def list_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
-        query = """
-            SELECT * FROM events
-            ORDER BY created_at DESC
+        query = f"""
+            {EVENTS_WITH_CAMERA_SQL}
+            ORDER BY e.created_at DESC
             LIMIT %(limit)s
         """
         with self._conn.cursor(row_factory=dict_row) as cur:
@@ -57,27 +65,27 @@ class EventRepository:
         params: dict[str, Any] = {}
 
         if event_type:
-            where_clauses.append("event_type = %(event_type)s")
+            where_clauses.append("e.event_type = %(event_type)s")
             params["event_type"] = event_type
 
         if camera_id:
-            where_clauses.append("camera_id = %(camera_id)s")
+            where_clauses.append("e.camera_id = %(camera_id)s")
             params["camera_id"] = camera_id
 
         if track_id:
-            where_clauses.append("track_id = %(track_id)s")
+            where_clauses.append("e.track_id = %(track_id)s")
             params["track_id"] = track_id
 
         if status:
-            where_clauses.append("status = %(status)s")
+            where_clauses.append("e.status = %(status)s")
             params["status"] = status
 
         if start:
-            where_clauses.append("start_ts >= %(start)s::timestamptz")
+            where_clauses.append("e.start_ts >= %(start)s::timestamptz")
             params["start"] = start
 
         if end:
-            where_clauses.append("start_ts <= %(end)s::timestamptz")
+            where_clauses.append("e.start_ts <= %(end)s::timestamptz")
             params["end"] = end
 
         where_sql = ""
@@ -85,16 +93,16 @@ class EventRepository:
             where_sql = "WHERE " + " AND ".join(where_clauses)
 
         # Count total
-        count_query = f"SELECT COUNT(*) AS total FROM events {where_sql}"
+        count_query = f"SELECT COUNT(*) AS total FROM events e {where_sql}"
         count_params = {k: v for k, v in params.items()}
 
         # Fetch page
         params["limit"] = limit
         params["offset"] = offset
         data_query = f"""
-            SELECT * FROM events
+            {EVENTS_WITH_CAMERA_SQL}
             {where_sql}
-            ORDER BY created_at DESC
+            ORDER BY e.created_at DESC
             LIMIT %(limit)s OFFSET %(offset)s
         """
 
@@ -211,8 +219,18 @@ class EventRepository:
         where_sql = " AND ".join(f"({clause})" for clause in where_clauses)
         from_sql = f"""
             FROM events e
+            LEFT JOIN cameras c
+              ON c.id::text = e.camera_id
+              OR c.source_id = e.source_id
             LEFT JOIN LATERAL (
-                SELECT et.task_id, et.status, et.clip_path, et.metadata_path, et.updated_at
+                SELECT
+                    et.task_id,
+                    et.status,
+                    et.materialization_status,
+                    et.materialization_deadline_at,
+                    et.clip_path,
+                    et.metadata_path,
+                    et.updated_at
                 FROM evidence_tasks et
                 WHERE et.event_id = e.id
                    OR et.source_event_id = e.source_event_id
@@ -235,6 +253,7 @@ class EventRepository:
                 e.event_type,
                 e.camera_id,
                 e.source_id,
+                c.name AS camera_name,
                 e.person_id,
                 e.media_status,
                 e.status,
@@ -263,7 +282,9 @@ class EventRepository:
                 e.payload->'media'->>'summary_json_path' AS summary_json_path,
                 e.payload->'media'->>'annotations_jsonl_path' AS annotations_jsonl_path,
                 COALESCE(task_counts.task_count, 0) AS evidence_task_count,
-                latest_task.status AS latest_task_status
+                latest_task.status AS latest_task_status,
+                latest_task.materialization_status AS latest_materialization_status,
+                latest_task.materialization_deadline_at AS latest_materialization_deadline_at
             {from_sql}
             ORDER BY e.created_at DESC, e.id DESC
             LIMIT %(limit)s OFFSET %(offset)s
@@ -296,7 +317,10 @@ class EventRepository:
         except (ValueError, TypeError):
             return None
 
-        query = "SELECT * FROM events WHERE id = %(id)s"
+        query = f"""
+            {EVENTS_WITH_CAMERA_SQL}
+            WHERE e.id = %(id)s
+        """
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, {"id": str(uid)})
             return cur.fetchone()
@@ -306,7 +330,10 @@ class EventRepository:
     # ------------------------------------------------------------------
 
     def get_by_source_event_id(self, source_event_id: str) -> Dict[str, Any] | None:
-        query = "SELECT * FROM events WHERE source_event_id = %(sid)s"
+        query = f"""
+            {EVENTS_WITH_CAMERA_SQL}
+            WHERE e.source_event_id = %(sid)s
+        """
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, {"sid": source_event_id})
             return cur.fetchone()
@@ -389,4 +416,8 @@ class EventRepository:
         """
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, {"status": new_status, "id": row["id"]})
-            return cur.fetchone()
+            updated = cur.fetchone()
+
+        if updated is None:
+            return None
+        return self.get_by_id(str(updated["id"]))

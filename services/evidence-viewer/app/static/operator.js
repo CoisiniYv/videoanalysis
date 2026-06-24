@@ -16,6 +16,7 @@ let algorithms = [];
 let currentZones = [];
 let currentRules = [];
 let runtimeOverview = null;
+let runtimeControl = null;
 
 /* ---- DOM refs ---- */
 const statusEl = document.getElementById("status");
@@ -36,7 +37,12 @@ const runtimeSourceTableEl = document.getElementById("runtime-source-table");
 const runtimeForwarderTableEl = document.getElementById("runtime-forwarder-table");
 const runtimeEvidenceTableEl = document.getElementById("runtime-evidence-table");
 const runtimeContainerTableEl = document.getElementById("runtime-container-table");
+const runtimeControlStatusEl = document.getElementById("runtime-control-status");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
+const startSingleRuntimeBtn = document.getElementById("start-single-runtime");
+const stopSingleRuntimeBtn = document.getElementById("stop-single-runtime");
+const restartSingleRuntimeBtn = document.getElementById("restart-single-runtime");
+const stopDualRuntimeBtn = document.getElementById("stop-dual-runtime");
 const camerasEl = document.getElementById("cameras");
 const zonesEl = document.getElementById("zones");
 const rulesEl = document.getElementById("rules");
@@ -319,6 +325,36 @@ function prepareFaceRegistrationFormData() {
     fd.delete("person_id");
   }
   return fd;
+}
+
+function clearFaceRegistrationIdentityFields() {
+  if (!faceRegistrationForm) return;
+  faceRegistrationForm.elements.person_id.value = "";
+  faceRegistrationForm.elements.external_person_id.value = "";
+  faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId = "";
+  faceRegistrationForm.elements.name.value = "";
+  faceRegistrationForm.elements.description.value = "";
+}
+
+function setFaceRegistrationMode(mode) {
+  faceRegistrationMode = mode === "append" ? "append" : "new";
+  registerNewPersonBtn?.classList.toggle("active", faceRegistrationMode === "new");
+  appendSelectedPersonBtn?.classList.toggle("active", faceRegistrationMode === "append");
+  if (appendSelectedPersonBtn) {
+    appendSelectedPersonBtn.disabled = !selectedPerson;
+  }
+  if (faceRegistrationMode === "append" && selectedPerson) {
+    fillRegistrationForPerson(selectedPerson);
+    if (registrationModeStatusEl) {
+      registrationModeStatusEl.textContent =
+        `追加到当前人员：${selectedPerson.name || selectedPerson.external_person_id || selectedPerson.person_id}`;
+    }
+    return;
+  }
+  clearFaceRegistrationIdentityFields();
+  if (registrationModeStatusEl) {
+    registrationModeStatusEl.textContent = "新人员注册：请填写人员编号和姓名。";
+  }
 }
 
 function currentTheme() {
@@ -887,6 +923,32 @@ function evidenceStateLabel(state) {
   return labels[state] || state || "--";
 }
 
+function containerGroupCounts(group = []) {
+  const items = Array.isArray(group) ? group : [];
+  return {
+    total: items.length,
+    running: items.filter((item) => item.running || item.state === "running").length,
+    missing: items.filter((item) => !item.present || item.state === "missing").length,
+    restarting: items.filter((item) => item.restarting || item.state === "restarting").length,
+  };
+}
+
+function renderRuntimeControlStatus() {
+  if (!runtimeControlStatusEl) return;
+  const control = runtimeControl || {};
+  const single = containerGroupCounts(control.single);
+  const dual = containerGroupCounts(control.dual);
+  const management = containerGroupCounts(control.management);
+  const dualText = dual.running > 0 ? `${dual.running} 个仍在运行` : "已关闭";
+  runtimeControlStatusEl.innerHTML =
+    `<div class="runtime-kv-grid">` +
+      `<div><span>单路主链路</span><strong>${single.running}/${single.total || "--"} 运行</strong></div>` +
+      `<div><span>双路扩展</span><strong>${escapeHtml(dualText)}</strong></div>` +
+      `<div><span>管理面</span><strong>${management.running}/${management.total || "--"} 运行</strong></div>` +
+      `<div><span>重启中</span><strong>${formatInteger(single.restarting + dual.restarting)}</strong></div>` +
+    `</div>`;
+}
+
 function renderRuntimeOverview() {
   if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
   const overview = runtimeOverview || {};
@@ -933,6 +995,7 @@ function renderRuntimeOverview() {
   renderRuntimeForwarderTable(forwarder);
   renderRuntimeEvidenceTable(overview.evidence || {});
   renderRuntimeContainerTable(containers);
+  renderRuntimeControlStatus();
 }
 
 function renderRuntimeSourceTable(sources) {
@@ -1199,8 +1262,12 @@ async function loadPeople() {
 }
 
 async function loadRuntimeOverview() {
-  const data = await request(`${API}/runtime/overview`);
-  runtimeOverview = data || {};
+  const [overviewData, controlData] = await Promise.all([
+    request(`${API}/runtime/overview`),
+    request(`${API}/runtime/control`),
+  ]);
+  runtimeOverview = overviewData || {};
+  runtimeControl = controlData || {};
   renderRuntimeOverview();
   setStatus("运行状态已刷新");
 }
@@ -1239,7 +1306,15 @@ async function selectPerson(personId) {
   personDetailEl.value = JSON.stringify(data.person, null, 2);
   renderPersonProfile(data.person);
   renderGallery(data.gallery || []);
-  fillRegistrationForPerson(data.person);
+  if (appendSelectedPersonBtn) {
+    appendSelectedPersonBtn.disabled = false;
+  }
+  if (faceRegistrationMode === "append") {
+    fillRegistrationForPerson(data.person);
+  } else if (registrationModeStatusEl) {
+    registrationModeStatusEl.textContent =
+      `已选择人员：${data.person?.name || data.person?.external_person_id || personId}。点击“追加到当前人员”后再上传新照片。`;
+  }
   renderPeople();
   if (previewDeleteSelectedPersonBtn) {
     previewDeleteSelectedPersonBtn.disabled = false;
@@ -1396,6 +1471,76 @@ async function loadAlgorithmRules(cameraId, fallbackRules = []) {
     renderRules(fallbackRules || []);
     showError(`算法规则加载失败：${e.message}`);
   }
+}
+
+function setRuntimeControlButtonsBusy(busy) {
+  for (const button of [
+    startSingleRuntimeBtn,
+    stopSingleRuntimeBtn,
+    restartSingleRuntimeBtn,
+    stopDualRuntimeBtn,
+    refreshRuntimeOverviewBtn,
+  ]) {
+    if (button) button.disabled = busy;
+  }
+}
+
+function runtimeControlActionMessage(data) {
+  const actions = Array.isArray(data?.actions) ? data.actions : [];
+  const ok = actions.filter((item) => item.ok).length;
+  const missing = actions.filter((item) => item.missing).length;
+  const failed = actions.length - ok - missing;
+  const labels = {
+    single_start: "单路链路启动命令已发送",
+    single_stop: "单路链路停止命令已发送",
+    single_restart: "单路链路重启命令已发送",
+    dual_stop: "双路扩展停止命令已发送",
+  };
+  const label = labels[data?.runtime_action] || "运行控制命令已发送";
+  return `${label}：成功 ${ok} 个，缺失 ${missing} 个，失败 ${failed} 个`;
+}
+
+async function runRuntimeControlAction(path, confirmText = "") {
+  if (confirmText && !window.confirm(confirmText)) {
+    return null;
+  }
+  clearMessages();
+  setRuntimeControlButtonsBusy(true);
+  try {
+    const data = await request(path, { method: "POST" });
+    runtimeControl = data.status || runtimeControl;
+    renderRuntimeControlStatus();
+    showSuccess(runtimeControlActionMessage(data));
+    await loadRuntimeOverview();
+    return data;
+  } finally {
+    setRuntimeControlButtonsBusy(false);
+  }
+}
+
+async function startSingleRuntime() {
+  return runRuntimeControlAction(`${API}/runtime/control/single/start`);
+}
+
+async function stopSingleRuntime() {
+  return runRuntimeControlAction(
+    `${API}/runtime/control/single/stop`,
+    "确认停止单路推理与录像链路？8090 操作台会保持在线。"
+  );
+}
+
+async function restartSingleRuntime() {
+  return runRuntimeControlAction(
+    `${API}/runtime/control/single/restart`,
+    "确认重启单路推理与录像链路？8090 操作台会保持在线。"
+  );
+}
+
+async function stopDualRuntime() {
+  return runRuntimeControlAction(
+    `${API}/runtime/control/dual/stop`,
+    "确认关闭双路扩展容器？单路主链路和 8090 操作台会保持在线。"
+  );
 }
 
 function runtimeApplyMessage(data) {
@@ -1769,6 +1914,16 @@ ruleAlgorithmEl?.addEventListener("change", () => {
 document.getElementById("submit-face-registration").addEventListener("click", () => {
   submitFaceRegistration().catch((e) => showError(e.message));
 });
+registerNewPersonBtn?.addEventListener("click", () => {
+  setFaceRegistrationMode("new");
+});
+appendSelectedPersonBtn?.addEventListener("click", () => {
+  if (!selectedPerson) {
+    showError("请先选择人员");
+    return;
+  }
+  setFaceRegistrationMode("append");
+});
 previewDeleteSelectedPersonBtn?.addEventListener("click", () => {
   if (!selectedPersonId) {
     showError("未选择人员");
@@ -1779,6 +1934,18 @@ previewDeleteSelectedPersonBtn?.addEventListener("click", () => {
 refreshRuntimeOverviewBtn?.addEventListener("click", () => {
   clearMessages();
   loadRuntimeOverview().catch((e) => showError(`运行状态刷新失败：${e.message}`));
+});
+startSingleRuntimeBtn?.addEventListener("click", () => {
+  startSingleRuntime().catch((e) => showError(`单路链路启动失败：${e.message}`));
+});
+stopSingleRuntimeBtn?.addEventListener("click", () => {
+  stopSingleRuntime().catch((e) => showError(`单路链路停止失败：${e.message}`));
+});
+restartSingleRuntimeBtn?.addEventListener("click", () => {
+  restartSingleRuntime().catch((e) => showError(`单路链路重启失败：${e.message}`));
+});
+stopDualRuntimeBtn?.addEventListener("click", () => {
+  stopDualRuntime().catch((e) => showError(`双路扩展关闭失败：${e.message}`));
 });
 
 document.querySelectorAll("[data-template]").forEach((button) => {

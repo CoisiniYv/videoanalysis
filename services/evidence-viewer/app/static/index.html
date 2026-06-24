@@ -312,10 +312,15 @@
                 <p>Savant、source adapter、worker 与 watchdog 状态。</p>
               </div>
               <div class="button-group">
+                <button id="start-single-runtime" type="button" class="primary">启动单路链路</button>
+                <button id="stop-single-runtime" type="button" class="danger">停止单路链路</button>
+                <button id="restart-single-runtime" type="button">重启单路链路</button>
+                <button id="stop-dual-runtime" type="button">关闭双路扩展</button>
                 <button id="refresh-runtime-overview" type="button">刷新</button>
               </div>
             </div>
             <div id="runtime-health-summary" class="runtime-health-grid"></div>
+            <div id="runtime-control-status" class="result-card runtime-control-status">运行控制待刷新</div>
             <div id="runtime-supervisor-summary" class="result-card runtime-supervisor-summary"></div>
           </section>
 
@@ -595,7 +600,7 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=face-registration-conflict-copy-20260618"></script>
+    <script src="/static/operator.js?v=runtime-control-20260624"></script>
     <script src="/static/evidence.js?v=evidence-list-fast-20260615"></script>
     <script src="/static/maintenance.js?v=delete-dialog-fast-20260615"></script>
   </body>
