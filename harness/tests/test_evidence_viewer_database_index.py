@@ -271,11 +271,14 @@ def test_8090_evidence_frontend_uses_db_index_and_file_details() -> None:
         assert 'const EVIDENCE_BUNDLE_API = "/api";' in text
         assert "`${EVIDENCE_INDEX_API}/bundles?${bundleQueryString()}`" in text
         assert "`${EVIDENCE_INDEX_API}/health`" in text
+        assert 'const CAMERA_INDEX_API = "/api/v1/cameras";' in text
+        assert "function loadCameraNameLookup" in text
         assert "`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}`" in text
         assert "`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}/annotations?${annotationParams.toString()}`" in text
         assert "`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}/sink-metadata`" in text
         assert "`${EVIDENCE_API}/bundles?${bundleQueryString()}`" not in text
         assert "`/api/bundles?${bundleQueryString()}`" not in text
+        assert "bundle.source_id || bundle.camera_id" not in text
         assert 'fetchJson("/health")' not in text
 
 

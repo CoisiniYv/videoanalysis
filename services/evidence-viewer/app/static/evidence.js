@@ -7,6 +7,7 @@ const DEFAULT_SOURCE_HEIGHT = 1080;
 const DEFAULT_SHOW_PERSON_BOXES = true;
 const DEFAULT_SHOW_UNKNOWN_FACES = true;
 const FACE_OVERLAY_POLICY = "sparse_observation";
+const CAMERA_INDEX_API = "/api/v1/cameras";
 const ROLE_RENDER_WINDOW_MS = {
   behavior_event: 1500,
   person_context: 1000,
@@ -55,6 +56,8 @@ const state = {
   selectionRequestId: 0
 };
 
+const cameraNameLookup = new Map();
+
 const dom = {
   healthStatus: document.getElementById("healthStatus"),
   bundleCount: document.getElementById("bundleCount"),
@@ -102,11 +105,20 @@ function textOrNull(value) {
 }
 
 function cameraDisplayName(value = {}) {
-  return textOrNull(value.camera_name)
-    || textOrNull(value.cameraName)
-    || textOrNull(value.source_id)
-    || textOrNull(value.camera_id)
-    || "未知摄像头";
+  const explicitName = textOrNull(value.camera_name) || textOrNull(value.cameraName);
+  if (explicitName) return explicitName;
+
+  const sourceId = textOrNull(value.source_id);
+  if (sourceId && cameraNameLookup.has(`source_id:${sourceId}`)) {
+    return cameraNameLookup.get(`source_id:${sourceId}`);
+  }
+
+  const cameraId = textOrNull(value.camera_id) || textOrNull(value.id);
+  if (cameraId && cameraNameLookup.has(`camera_id:${cameraId}`)) {
+    return cameraNameLookup.get(`camera_id:${cameraId}`);
+  }
+
+  return "未知摄像头";
 }
 
 function epochMsOrNull(value) {
@@ -295,6 +307,32 @@ async function fetchJson(path) {
   return body && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "data")
     ? body.data
     : body;
+}
+
+function indexCameraName(camera) {
+  const name = textOrNull(camera?.name) || textOrNull(camera?.camera_name);
+  if (!name) return;
+  const sourceId = textOrNull(camera.source_id);
+  const cameraId = textOrNull(camera.id) || textOrNull(camera.camera_id);
+  if (sourceId) {
+    cameraNameLookup.set(`source_id:${sourceId}`, name);
+  }
+  if (cameraId) {
+    cameraNameLookup.set(`camera_id:${cameraId}`, name);
+  }
+}
+
+async function loadCameraNameLookup() {
+  try {
+    const data = await fetchJson(`${CAMERA_INDEX_API}?limit=1000`);
+    const items = Array.isArray(data) ? data : (Array.isArray(data.cameras) ? data.cameras : []);
+    cameraNameLookup.clear();
+    for (const camera of items) {
+      indexCameraName(camera);
+    }
+  } catch (err) {
+    addWarning(`camera_lookup_failed:${err.message}`);
+  }
 }
 
 function filterValue(id) {
@@ -1658,6 +1696,7 @@ async function init() {
 
 async function runInit() {
   if (state.initialized) {
+    await loadCameraNameLookup();
     resizeCanvas();
     startOverlayLoop();
     return;
@@ -1665,6 +1704,7 @@ async function runInit() {
   state.initialized = true;
   applyOverlayDefaults();
   restoreEvidenceState();
+  await loadCameraNameLookup();
   await loadHealth();
   await loadBundles();
   resizeCanvas();
@@ -1678,6 +1718,7 @@ window.operatorEvidence = {
     state.bundleOffset = 0;
     resetBundleSelection();
     persistEvidenceState();
+    await loadCameraNameLookup();
     await loadHealth();
     await loadBundles();
   },

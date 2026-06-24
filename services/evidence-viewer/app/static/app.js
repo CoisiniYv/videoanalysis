@@ -3,6 +3,7 @@
 const NS_PER_SECOND = 1000000000;
 const EVIDENCE_INDEX_API = "/api/v1/evidence";
 const EVIDENCE_BUNDLE_API = "/api";
+const CAMERA_INDEX_API = "/api/v1/cameras";
 const ALERT_REDS = new Set(["#D50000", "#FF0000", "#E53935", "#FF1744"]);
 const DEFAULT_SOURCE_WIDTH = 1920;
 const DEFAULT_SOURCE_HEIGHT = 1080;
@@ -35,6 +36,8 @@ const state = {
   frameDurationMs: null,
   selectionRequestId: 0
 };
+
+const cameraNameLookup = new Map();
 
 const dom = {
   healthStatus: document.getElementById("healthStatus"),
@@ -74,6 +77,23 @@ function textOrNull(value) {
   if (value === undefined || value === null) return null;
   const text = String(value).trim();
   return text ? text : null;
+}
+
+function cameraDisplayName(value = {}) {
+  const explicitName = textOrNull(value.camera_name) || textOrNull(value.cameraName);
+  if (explicitName) return explicitName;
+
+  const sourceId = textOrNull(value.source_id);
+  if (sourceId && cameraNameLookup.has(`source_id:${sourceId}`)) {
+    return cameraNameLookup.get(`source_id:${sourceId}`);
+  }
+
+  const cameraId = textOrNull(value.camera_id) || textOrNull(value.id);
+  if (cameraId && cameraNameLookup.has(`camera_id:${cameraId}`)) {
+    return cameraNameLookup.get(`camera_id:${cameraId}`);
+  }
+
+  return "未知摄像头";
 }
 
 function addWarning(message) {
@@ -206,6 +226,32 @@ async function fetchJson(path) {
     : body;
 }
 
+function indexCameraName(camera) {
+  const name = textOrNull(camera?.name) || textOrNull(camera?.camera_name);
+  if (!name) return;
+  const sourceId = textOrNull(camera.source_id);
+  const cameraId = textOrNull(camera.id) || textOrNull(camera.camera_id);
+  if (sourceId) {
+    cameraNameLookup.set(`source_id:${sourceId}`, name);
+  }
+  if (cameraId) {
+    cameraNameLookup.set(`camera_id:${cameraId}`, name);
+  }
+}
+
+async function loadCameraNameLookup() {
+  try {
+    const data = await fetchJson(`${CAMERA_INDEX_API}?limit=1000`);
+    const items = Array.isArray(data) ? data : (Array.isArray(data.cameras) ? data.cameras : []);
+    cameraNameLookup.clear();
+    for (const camera of items) {
+      indexCameraName(camera);
+    }
+  } catch (err) {
+    addWarning(`camera_lookup_failed:${err.message}`);
+  }
+}
+
 function filterValue(id) {
   return document.getElementById(id).value.trim();
 }
@@ -270,7 +316,7 @@ function renderBundleList() {
     sub.className = "bundle-sub";
     const evidenceStateText = evidenceStateLabel(bundle);
     sub.textContent = [
-      bundle.source_id || bundle.camera_id || "未知摄像头",
+      cameraDisplayName(bundle),
       clipStatusLabel(bundle.clip_status),
       evidenceStateText,
       evidenceStatusLabel(bundle.visual_evidence_status),
@@ -1028,7 +1074,11 @@ function renderDetails() {
 
   setText("eventId", event.event_id || state.selectedEventId);
   setText("eventType", eventTypeLabel(event.event_type || summary.event_type));
-  setText("sourceId", event.source_id || summary.source_id);
+  setText("sourceId", cameraDisplayName({
+    camera_name: state.manifest?.camera_name || event.camera_name || metadata.camera_name || summary.camera_name,
+    source_id: event.source_id || summary.source_id,
+    camera_id: event.camera_id || summary.camera_id
+  }));
   setText("cameraId", event.camera_id || summary.camera_id);
   setText("rawClipStatus", clipStatusLabel(clipStatus));
   setText("clipValidation", corrupt ? `录像已生成，画面质量需复核` : "已验证");
@@ -1137,6 +1187,7 @@ function applyOverlayDefaults() {
 
 async function init() {
   applyOverlayDefaults();
+  await loadCameraNameLookup();
   await loadHealth();
   await loadBundles();
   resizeCanvas();

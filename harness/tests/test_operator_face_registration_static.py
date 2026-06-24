@@ -140,6 +140,9 @@ def test_operator_smoke_prepares_camera_schema() -> None:
     assert "http://0.0.0.0:8090" in smoke_text
     assert '"${API_BASE_URL}/operator"' not in smoke_text
     assert '"${API_BASE_URL}/"' in smoke_text
+    assert "cleanup_smoke_camera" in smoke_text
+    assert "OPERATOR_SMOKE_KEEP_CAMERA" in smoke_text
+    assert "DELETE FROM cameras" in smoke_text
 
 
 def test_operator_portal_is_served_by_evidence_viewer_8090() -> None:
@@ -201,5 +204,10 @@ def test_operator_evidence_prefers_camera_name_and_keeps_source_id_detail() -> N
         evidence_js = _text(static_root / "evidence.js")
         assert 'id="sourceRawId"' in html
         assert "function cameraDisplayName" in evidence_js
+        assert 'const CAMERA_INDEX_API = "/api/v1/cameras";' in evidence_js
+        assert "function loadCameraNameLookup" in evidence_js
         assert "camera_name" in evidence_js
+        assert "cameraNameLookup.get(`source_id:${sourceId}`)" in evidence_js
+        assert "|| textOrNull(value.source_id)" not in evidence_js
+        assert "|| textOrNull(value.camera_id)" not in evidence_js
         assert "setText(\"sourceRawId\"" in evidence_js

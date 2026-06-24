@@ -21,6 +21,38 @@ curl_api() {
   curl --noproxy '*' -fsS "$@"
 }
 
+cleanup_smoke_camera() {
+  if [[ "${OPERATOR_SMOKE_KEEP_CAMERA:-false}" == "true" ]]; then
+    return
+  fi
+  DATABASE_URL="${DATABASE_URL}" CAMERA_ID="${CAMERA_ID}" python3 - <<'PY' || true
+import os
+
+import psycopg
+
+database_url = os.environ["DATABASE_URL"]
+camera_id = os.environ["CAMERA_ID"]
+with psycopg.connect(database_url, autocommit=True) as conn:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM camera_rules WHERE camera_id = %s::uuid", (camera_id,))
+        cur.execute("DELETE FROM camera_zones WHERE camera_id = %s::uuid", (camera_id,))
+        cur.execute(
+            """
+            DELETE FROM cameras
+            WHERE id = %s::uuid
+              AND enabled IS FALSE
+              AND (
+                name = 'Operator Smoke Camera'
+                OR rtsp_url = 'rtsp://example.local/operator-smoke'
+              )
+            """,
+            (camera_id,),
+        )
+PY
+}
+
+trap cleanup_smoke_camera EXIT
+
 echo "[operator-smoke] checking operator portal health at ${API_BASE_URL}"
 curl_api "${API_BASE_URL}/health" | grep -q '"status":"ok"'
 

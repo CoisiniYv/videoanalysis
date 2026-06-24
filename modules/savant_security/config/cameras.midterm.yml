@@ -56,63 +56,7 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
-  00000000-0000-4000-8000-000000000901:
-    enabled: false
-    source_id: 00000000-0000-4000-8000-000000000901_source
-    name: Operator Smoke Camera
-    rtsp_url: rtsp://example.local/operator-smoke
-    gpu_id: 0
-    input_type: rtsp
-    rtsp_transport: tcp
-    fps_policy:
-      max_fps: 8/1
-      min_fps: 2/1
-    alert_policy:
-      critical_bypass: false
-      global_alert_cooldown_s: 30
-      store_suppressed_events: true
-      suppress_record_request: true
-    location: operator_smoke
-    site_id: operator_smoke
-    zones:
-      operator_smoke_perimeter:
-        zone_id: operator_smoke_perimeter
-        zone_type: polygon
-        type: polygon
-        coordinate_space: pixel
-        points:
-        - - 100.0
-          - 300.0
-        - - 900.0
-          - 300.0
-        - - 900.0
-          - 700.0
-        - - 100.0
-          - 700.0
-        enabled: true
-        payload:
-          purpose: 8090_integration_check
-    runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
-  00000000-0000-4000-8000-202606100901:
-    enabled: false
-    source_id: source_00000000-0000-4000-8000-202606100901
-    name: UI Probe Camera 20260610
-    rtsp_url: rtsp://example.local/ui-probe-20260610
-    gpu_id: 0
-    input_type: rtsp
-    rtsp_transport: tcp
-    fps_policy:
-      max_fps: 8/1
-      min_fps: 2/1
-    alert_policy:
-      critical_bypass: false
-      global_alert_cooldown_s: 30
-      store_suppressed_events: true
-      suppress_record_request: true
-    location: 8090 add page probe
-    site_id: ui_probe
-    runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
+    runtime_epoch_id: midterm-20260624T143429Z-c8128d7e
   00000000-0000-4000-8000-781078565686:
     enabled: true
     source_id: source_00000000-0000-4000-8000-781078565686
@@ -170,43 +114,5 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
-  63033025-392e-43e7-91bb-eafae5c8be5d:
-    enabled: false
-    source_id: source_63033025-392e-43e7-91bb-eafae5c8be5d
-    name: UI Browser Probe 20260610T1605
-    rtsp_url: rtsp://example.local/ui-browser-probe-20260610T1605
-    gpu_id: 0
-    input_type: rtsp
-    rtsp_transport: tcp
-    fps_policy:
-      max_fps: 8/1
-      min_fps: 2/1
-    alert_policy:
-      critical_bypass: false
-      global_alert_cooldown_s: 30
-      store_suppressed_events: true
-      suppress_record_request: true
-    location: 8090 browser add probe
-    site_id: ui_browser_probe
-    runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
-  d067ea89-e6d7-4b09-8113-df0e8be08593:
-    enabled: false
-    source_id: source_d067ea89-e6d7-4b09-8113-df0e8be08593
-    name: UI Browser Probe 20260610T1607
-    rtsp_url: rtsp://example.local/ui-browser-probe-20260610T1607
-    gpu_id: 0
-    input_type: rtsp
-    rtsp_transport: tcp
-    fps_policy:
-      max_fps: 8/1
-      min_fps: 2/1
-    alert_policy:
-      critical_bypass: false
-      global_alert_cooldown_s: 30
-      store_suppressed_events: true
-      suppress_record_request: true
-    location: 8090 browser add probe
-    site_id: ui_browser_probe
-    runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
-runtime_epoch_id: midterm-20260611T121215Z-b1c08bf1
+    runtime_epoch_id: midterm-20260624T143429Z-c8128d7e
+runtime_epoch_id: midterm-20260624T143429Z-c8128d7e
