@@ -25,6 +25,7 @@ RAW_CLIP_UNAVAILABLE_STATUSES = {
     "materialization_deferred",
     "materialization_failed",
     "materialization_expired",
+    "materialization_skipped",
     "media_deleted",
     "media_expired",
     "not_implemented",

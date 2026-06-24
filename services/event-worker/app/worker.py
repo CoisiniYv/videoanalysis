@@ -32,7 +32,16 @@ MIDTERM_DEFAULT_EVIDENCE_POLICY = {
     "pre_seconds": 5,
     "post_seconds": 5,
 }
-RECORDING_PRIORITY_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
+MATERIALIZATION_RECORDABLE_TASK_STATUSES = {
+    "pending",
+    "materialization_pending",
+}
+RECORDING_POLICY_TERMINAL_SKIP_REASONS = {
+    "cooldown",
+    "event_type_mismatch",
+    "max_requests_reached",
+    "source_id_mismatch",
+}
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
 DEFAULT_RUNTIME_EPOCH_REDIS_KEY = "video_analytics:midterm:runtime_epoch"
@@ -148,6 +157,32 @@ def _get_evidence_task_status(
     return status
 
 
+def _mark_recording_policy_skipped(
+    repo: EventRepository,
+    *,
+    event_id: str | None,
+    skip_reason: str,
+) -> None:
+    if not event_id or skip_reason not in RECORDING_POLICY_TERMINAL_SKIP_REASONS:
+        return
+    reason = f"recording_policy_skipped:{skip_reason}"
+    try:
+        if hasattr(repo, "mark_evidence_materialization_skipped"):
+            repo.mark_evidence_materialization_skipped(event_id, reason=reason)
+        elif hasattr(repo, "set_evidence_status"):
+            repo.set_evidence_status(
+                event_id=event_id,
+                status="materialization_skipped",
+                error_message=reason,
+            )
+    except Exception:
+        logger.exception(
+            "evidence_task skip status update failed event_id=%s reason=%s",
+            event_id,
+            reason,
+        )
+
+
 def _recording_gate_ts_ms(event: dict) -> int:
     """Return a comparable timestamp for recording cooldown decisions.
 
@@ -164,6 +199,11 @@ def _recording_gate_ts_ms(event: dict) -> int:
     if ts_ms < _MIN_EPOCH_MS or ts_ms > now_ms + _MAX_FUTURE_SKEW_MS:
         return now_ms
     return ts_ms
+
+
+def _recording_cooldown_key(source_id: str, event_type: str) -> str:
+    event_part = str(event_type or "_unknown_event")
+    return f"{source_id}:{event_part}" if source_id else event_part
 
 
 def _current_runtime_epoch_id(redis_client: Redis) -> str:
@@ -233,6 +273,7 @@ def _handle_event(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
+    recording_cooldown_grace_ms: int = 1000,
     recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
     runtime_epoch_id: str = "",
@@ -329,11 +370,12 @@ def _handle_event(
             allowed = True
             skip_reason = ""
             recording_gate_ts_ms = _recording_gate_ts_ms(event)
+            cooldown_key = _recording_cooldown_key(source_id, event_type)
 
             if recording_event_types and event_type not in recording_event_types:
                 allowed = False
                 skip_reason = "event_type_mismatch"
-            elif evidence_task_status != "pending":
+            elif evidence_task_status not in MATERIALIZATION_RECORDABLE_TASK_STATUSES:
                 allowed = False
                 skip_reason = f"evidence_task_status={evidence_task_status or 'missing'}"
             elif recording_source_id and source_id != recording_source_id:
@@ -348,39 +390,25 @@ def _handle_event(
                     allowed = False
                     skip_reason = "max_requests_reached"
                 elif recording_cooldown_seconds > 0:
-                    last_recorded_at = recording_state.last_recorded_at_ms.get(source_id)
+                    last_recorded_at = recording_state.last_recorded_at_ms.get(
+                        cooldown_key
+                    )
                     last_recorded_event_type = (
-                        recording_state.last_recorded_event_type.get(source_id)
+                        recording_state.last_recorded_event_type.get(cooldown_key)
+                    )
+                    cooldown_threshold_ms = max(
+                        0,
+                        recording_cooldown_seconds * 1000
+                        - max(0, recording_cooldown_grace_ms),
                     )
                     cooldown_active = (
                         last_recorded_at is not None
                         and recording_gate_ts_ms - last_recorded_at
-                        < recording_cooldown_seconds * 1000
+                        < cooldown_threshold_ms
                     )
-                    priority_event_overrides_intrusion_cooldown = (
-                        cooldown_active
-                        and event_type in RECORDING_PRIORITY_EVENT_TYPES
-                        and last_recorded_event_type == "intrusion"
-                    )
-                    if (
-                        cooldown_active
-                        and not priority_event_overrides_intrusion_cooldown
-                    ):
+                    if cooldown_active:
                         allowed = False
                         skip_reason = "cooldown"
-                    elif (
-                        event_type == "intrusion"
-                        and last_recorded_at is not None
-                        and last_recorded_event_type == "intrusion"
-                        and hasattr(repo, "has_event_type_since_ts_ms")
-                        and repo.has_event_type_since_ts_ms(
-                            source_id=source_id,
-                            event_type="watchlist_hit",
-                            since_ts_ms=last_recorded_at,
-                        )
-                    ):
-                        allowed = False
-                        skip_reason = "watchlist_priority_after_intrusion"
 
             if allowed and source_event_id and record_publisher.has_request(
                 source_event_id, "savant_replay"
@@ -402,6 +430,15 @@ def _handle_event(
                     event_type,
                     skip_reason,
                 )
+                if (
+                    newly_inserted
+                    and evidence_task_status in MATERIALIZATION_RECORDABLE_TASK_STATUSES
+                ):
+                    _mark_recording_policy_skipped(
+                        repo,
+                        event_id=event_id,
+                        skip_reason=skip_reason,
+                    )
             else:
                 logger.info(
                     "record_request_check source_event_id=%s top_clip_required=%s "
@@ -421,12 +458,12 @@ def _handle_event(
                         if recording_state is not None:
                             recording_state.published_requests += 1
                             if source_id:
-                                recording_state.last_recorded_at_ms[source_id] = (
+                                recording_state.last_recorded_at_ms[cooldown_key] = (
                                     recording_gate_ts_ms
                                 )
-                                recording_state.last_recorded_event_type[source_id] = (
-                                    event_type
-                                )
+                                recording_state.last_recorded_event_type[
+                                    cooldown_key
+                                ] = event_type
                 except Exception:
                     logger.exception(
                         "record_request publish failed for source_event_id=%s",
@@ -578,6 +615,7 @@ def _process_batch(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
+    recording_cooldown_grace_ms: int = 1000,
     recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
     runtime_epoch_id: str = "",
@@ -603,6 +641,7 @@ def _process_batch(
             recording_source_id=recording_source_id,
             recording_max_requests_per_run=recording_max_requests_per_run,
             recording_cooldown_seconds=recording_cooldown_seconds,
+            recording_cooldown_grace_ms=recording_cooldown_grace_ms,
             recording_pre_seconds=recording_pre_seconds,
             recording_post_seconds=recording_post_seconds,
             runtime_epoch_id=runtime_epoch_id,
@@ -717,7 +756,8 @@ def run_worker(
         "worker started stream=%s group=%s consumer=%s alert_stream=%s "
         "recording_enabled=%s record_request_stream=%s recording_event_types=%s "
         "recording_source_id=%s recording_max_requests_per_run=%s "
-        "recording_cooldown_seconds=%s recording_pre_seconds=%s "
+        "recording_cooldown_seconds=%s recording_cooldown_grace_ms=%s "
+        "recording_pre_seconds=%s "
         "recording_post_seconds=%s person_observation_enabled=%s "
         "person_observation_stream=%s person_observation_group=%s "
         "person_observation_start_id=%s person_observation_batch_size=%s",
@@ -731,6 +771,7 @@ def run_worker(
         cfg.recording_source_id,
         cfg.recording_max_requests_per_run,
         cfg.recording_cooldown_seconds,
+        cfg.recording_cooldown_grace_ms,
         cfg.recording_pre_seconds,
         cfg.recording_post_seconds,
         cfg.person_observation_enabled,
@@ -812,6 +853,7 @@ def run_worker(
                     recording_source_id=cfg.recording_source_id,
                     recording_max_requests_per_run=cfg.recording_max_requests_per_run,
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                    recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
                     recording_pre_seconds=cfg.recording_pre_seconds,
                     recording_post_seconds=cfg.recording_post_seconds,
                     runtime_epoch_id=runtime_epoch_id,
@@ -841,6 +883,7 @@ def run_worker(
                     recording_source_id=cfg.recording_source_id,
                     recording_max_requests_per_run=cfg.recording_max_requests_per_run,
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                    recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
                     recording_pre_seconds=cfg.recording_pre_seconds,
                     recording_post_seconds=cfg.recording_post_seconds,
                     runtime_epoch_id=runtime_epoch_id,

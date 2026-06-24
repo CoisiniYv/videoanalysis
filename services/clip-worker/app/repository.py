@@ -17,6 +17,7 @@ EVIDENCE_STATES = {
     "materialization_deferred",
     "materialization_failed",
     "materialization_expired",
+    "materialization_skipped",
     "pending",
     "waiting_proof",
     "queued",
@@ -34,6 +35,7 @@ TERMINAL_EVIDENCE_STATES = {
     "generated_unverified",
     "materialization_expired",
     "materialization_failed",
+    "materialization_skipped",
     "materialized",
     "media_deleted",
     "media_expired",
@@ -74,6 +76,7 @@ def materialization_status_for_state(state: str) -> str:
         "materialization_deferred",
         "materialization_failed",
         "materialization_expired",
+        "materialization_skipped",
     }:
         return state
     if state in {"pending", "queued", "waiting_proof", "replaying", "finalizing"}:

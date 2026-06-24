@@ -23,6 +23,7 @@ class Config:
     recording_source_id: str
     recording_max_requests_per_run: int
     recording_cooldown_seconds: int
+    recording_cooldown_grace_ms: int
     recording_pre_seconds: int
     recording_post_seconds: int
     person_observation_stream: str
@@ -65,6 +66,9 @@ def load_config() -> Config:
         ),
         recording_cooldown_seconds=int(
             os.getenv("RECORDING_COOLDOWN_SECONDS", "0")
+        ),
+        recording_cooldown_grace_ms=max(
+            0, int(os.getenv("RECORDING_COOLDOWN_GRACE_MS", "1000"))
         ),
         recording_pre_seconds=int(
             os.getenv("RECORDING_PRE_SECONDS", os.getenv("DEFAULT_PRE_SECONDS", "5"))

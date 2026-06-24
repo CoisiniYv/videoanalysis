@@ -119,6 +119,7 @@ EVIDENCE_TASK_STATUSES = (
     "partial",
     "failed",
     "not_implemented",
+    "materialization_skipped",
 )
 
 OPERATOR_EVIDENCE_STATES = {
@@ -130,6 +131,7 @@ OPERATOR_EVIDENCE_STATES = {
     "ready",
     "failed",
     "not_implemented",
+    "materialization_skipped",
 }
 
 _STATUS_TO_EVIDENCE_STATE = {
@@ -614,6 +616,55 @@ class EventRepository:
             )
             row = cur.fetchone()
             return row[0] if row else None
+
+    def mark_evidence_materialization_skipped(
+        self,
+        event_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Mark an evidence task terminal when recording policy skips generation."""
+        reason_text = reason or "recording_policy_skipped"
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET media_status = 'materialization_skipped',
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'clip_status', 'materialization_skipped',
+                                'metadata_status', 'materialization_skipped',
+                                'evidence_state', 'materialization_skipped',
+                                'evidence_reason', %(reason)s::text,
+                                'evidence_state_updated_at', now(),
+                                'materialization_status', 'materialization_skipped',
+                                'materialization_reason', %(reason)s::text,
+                                'error_message', %(reason)s::text
+                            ))
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {"event_id": event_id, "reason": reason_text},
+            )
+            updated = cur.rowcount is not None and cur.rowcount > 0
+            if updated:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = 'materialization_skipped',
+                        materialization_status = 'materialization_skipped',
+                        materialization_defer_reason = %(reason)s::text,
+                        error_message = %(reason)s::text,
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                    """,
+                    {"event_id": event_id, "reason": reason_text},
+                )
+            return updated
 
     def set_clip_status(
         self,

@@ -203,7 +203,8 @@ function clipStatusLabel(value) {
     generated_corrupt: "录像需复核",
     failed: "生成失败",
     pending: "生成中",
-    not_implemented: "未生成"
+    not_implemented: "未生成",
+    materialization_skipped: "策略跳过"
   };
   return labels[value] || value || "-";
 }
@@ -226,6 +227,7 @@ function evidenceStateLabel(bundle = {}) {
     queued: "生成中",
     replaying: "生成中",
     finalizing: "生成中",
+    materialization_skipped: "策略跳过",
     ready: "可查看",
     failed: "生成失败"
   };

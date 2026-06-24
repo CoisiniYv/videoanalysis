@@ -25,10 +25,18 @@ class _Repo:
         self.clip_status = ""
         self.task_status = "pending"
         self.inserted_events: list[dict[str, Any]] = []
+        self.event_ids_by_source_event_id: dict[str, str] = {}
+        self.source_event_ids_by_event_id: dict[str, str] = {}
+        self.clip_status_by_source_event_id: dict[str, str] = {}
+        self.skipped_materializations: list[dict[str, str]] = []
 
     def insert_event(self, event: dict[str, Any]) -> str:
+        event_id = f"event-{len(self.inserted_events) + 1}"
         self.inserted_events.append(event)
-        return "event-1"
+        source_event_id = str(event.get("source_event_id") or "")
+        self.event_ids_by_source_event_id[source_event_id] = event_id
+        self.source_event_ids_by_event_id[event_id] = source_event_id
+        return event_id
 
     def create_evidence_task(self, event: dict[str, Any], event_id: str) -> None:
         self.task_status = "pending"
@@ -37,10 +45,23 @@ class _Repo:
         return self.task_status
 
     def get_media_clip_status(self, source_event_id: str) -> str:
-        return self.clip_status
+        return self.clip_status_by_source_event_id.get(source_event_id, "")
 
     def set_clip_status(self, event_id: str, status: str) -> None:
         self.clip_status = status
+        source_event_id = self.source_event_ids_by_event_id.get(event_id, "")
+        if source_event_id:
+            self.clip_status_by_source_event_id[source_event_id] = status
+
+    def mark_evidence_materialization_skipped(
+        self,
+        event_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        self.task_status = "materialization_skipped"
+        self.skipped_materializations.append({"event_id": event_id, "reason": reason})
+        return True
 
 
 class _Consumer:
@@ -208,3 +229,236 @@ def test_current_runtime_epoch_overrides_stale_event_epoch() -> None:
         "midterm-current"
     )
     assert publisher.records[0]["runtime_epoch_id"] == "midterm-current"
+
+
+def test_recording_cooldown_marks_evidence_task_skipped_not_pending() -> None:
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+    state = RecordingPolicyState()
+    first_intrusion = {
+        "event_type": "intrusion",
+        "source_event_id": "intrusion:primary:1",
+        "camera_id": "cam_primary",
+        "source_id": "primary_rtsp",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "primary_rtsp",
+            }
+        },
+    }
+    second_intrusion = {
+        "event_type": "intrusion",
+        "source_event_id": "intrusion:primary:2",
+        "camera_id": "cam_primary",
+        "source_id": "primary_rtsp",
+        "event_ts_ms": 1_765_000_010_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "primary_rtsp",
+            }
+        },
+    }
+
+    _handle_event(
+        first_intrusion,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_source_id="",
+        recording_cooldown_seconds=30,
+    )
+    inserted, event_id = _handle_event(
+        second_intrusion,
+        "2-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_source_id="",
+        recording_cooldown_seconds=30,
+    )
+
+    assert inserted is True
+    assert event_id == "event-2"
+    assert len(publisher.records) == 1
+    assert state.published_requests == 1
+    assert repo.skipped_materializations == [
+        {
+            "event_id": "event-2",
+            "reason": "recording_policy_skipped:cooldown",
+        }
+    ]
+    assert repo.task_status == "materialization_skipped"
+
+
+def test_recording_cooldown_does_not_cross_event_types() -> None:
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+    state = RecordingPolicyState()
+    watchlist = {
+        "event_type": "watchlist_hit",
+        "source_event_id": "watchlist:primary:1",
+        "camera_id": "cam_primary",
+        "source_id": "primary_rtsp",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "primary_rtsp",
+            }
+        },
+    }
+    intrusion = {
+        "event_type": "intrusion",
+        "source_event_id": "intrusion:primary:1",
+        "camera_id": "cam_primary",
+        "source_id": "primary_rtsp",
+        "event_ts_ms": 1_765_000_010_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "primary_rtsp",
+            }
+        },
+    }
+
+    _handle_event(
+        watchlist,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_source_id="",
+        recording_cooldown_seconds=30,
+    )
+    inserted, event_id = _handle_event(
+        intrusion,
+        "2-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_source_id="",
+        recording_cooldown_seconds=30,
+    )
+
+    assert inserted is True
+    assert event_id == "event-2"
+    assert len(publisher.records) == 2
+    assert state.published_requests == 2
+    assert repo.skipped_materializations == []
+    assert repo.task_status == "pending"
+
+
+def test_recording_cooldown_grace_allows_near_boundary_event() -> None:
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+    state = RecordingPolicyState()
+    first = {
+        "event_type": "intrusion",
+        "source_event_id": "intrusion:primary:1",
+        "camera_id": "cam_primary",
+        "source_id": "primary_rtsp",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "primary_rtsp",
+            }
+        },
+    }
+    second = {
+        **first,
+        "source_event_id": "intrusion:primary:2",
+        "event_ts_ms": 1_765_000_029_000,
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "primary_rtsp",
+            }
+        },
+    }
+
+    _handle_event(
+        first,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_source_id="",
+        recording_cooldown_seconds=30,
+        recording_cooldown_grace_ms=1000,
+    )
+    inserted, event_id = _handle_event(
+        second,
+        "2-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_source_id="",
+        recording_cooldown_seconds=30,
+        recording_cooldown_grace_ms=1000,
+    )
+
+    assert inserted is True
+    assert event_id == "event-2"
+    assert len(publisher.records) == 2
+    assert state.published_requests == 2
+    assert repo.skipped_materializations == []
