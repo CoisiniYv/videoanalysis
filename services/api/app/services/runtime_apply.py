@@ -20,6 +20,10 @@ from app.services.replay_shards import (
     ReplayShardMap,
     load_replay_shard_map,
 )
+from app.algorithm_registry import (
+    get_algorithm_support,
+    runtime_apply_state_for_algorithm,
+)
 
 
 DEFAULT_MODULE_CONFIG_PATH = "/app/modules/savant_security/config/cameras.midterm.yml"
@@ -393,6 +397,8 @@ def _apply_camera_runtime_controlled(
         )
     _start_containers(client, worker_containers)
 
+    runtime_rule_report = _runtime_rule_report(export_doc, cameras)
+
     started_sources: list[str] = []
     compose_sources_started: list[str] = []
     skipped_sources: list[str] = []
@@ -448,6 +454,7 @@ def _apply_camera_runtime_controlled(
         "module_config_path": str(module_config_path),
         "sources_config_path": str(sources_config_path),
         "runtime_epoch_id": runtime_epoch_id,
+        "runtime_epoch": epoch_state,
         "runtime_epoch_state_path": str(_runtime_epoch_state_path()),
         "runtime_epoch_root": str(_runtime_epoch_root()),
         **savant_ready,
@@ -469,6 +476,14 @@ def _apply_camera_runtime_controlled(
         "replay_restarted": replay_container,
         "forwarder_restarted": forwarder_container,
         "savant_restarted": savant_container,
+        "camera_ids": runtime_rule_report["camera_ids"],
+        "source_ids": runtime_rule_report["source_ids"],
+        "applied_cameras": runtime_rule_report["applied_cameras"],
+        "configured_rules": runtime_rule_report["configured_rules"],
+        "enabled_rules": runtime_rule_report["enabled_rules"],
+        "applied_rules": runtime_rule_report["applied_rules"],
+        "skipped_rules": runtime_rule_report["skipped_rules"],
+        "unsupported_rules": runtime_rule_report["unsupported_rules"],
         "replay_shards": replay_shards.to_dict(),
         "management_containers_preserved": [
             os.getenv("CAMERA_RUNTIME_API_CONTAINER", "video-analytics-midterm-api"),
@@ -477,6 +492,135 @@ def _apply_camera_runtime_controlled(
                 "video-analytics-midterm-evidence-viewer",
             ),
         ],
+    }
+
+
+def _runtime_rule_report(
+    export_doc: dict[str, Any],
+    cameras: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]] | list[str]]:
+    camera_rows = export_doc.get("cameras") if isinstance(export_doc, dict) else {}
+    camera_map = {
+        str(camera.get("id") or camera.get("camera_id") or ""): camera
+        for camera in cameras
+        if isinstance(camera, dict)
+    }
+    applied_cameras: list[dict[str, Any]] = []
+    configured_rules: list[dict[str, Any]] = []
+    enabled_rules: list[dict[str, Any]] = []
+    applied_rules: list[dict[str, Any]] = []
+    skipped_rules: list[dict[str, Any]] = []
+    unsupported_rules: list[dict[str, Any]] = []
+    camera_ids: list[str] = []
+    source_ids: list[str] = []
+
+    if not isinstance(camera_rows, dict):
+        return {
+            "camera_ids": [],
+            "source_ids": [],
+            "applied_cameras": [],
+            "configured_rules": [],
+            "enabled_rules": [],
+            "applied_rules": [],
+            "skipped_rules": [],
+            "unsupported_rules": [],
+        }
+
+    for camera_id, camera_doc in camera_rows.items():
+        if not isinstance(camera_doc, dict):
+            continue
+        camera_id = str(camera_id or camera_doc.get("camera_id") or "")
+        source_id = str(camera_doc.get("source_id") or "")
+        camera_enabled = bool(camera_doc.get("enabled", True))
+        runtime_camera = camera_map.get(camera_id, {})
+        source_enabled = bool(runtime_camera.get("enabled", True))
+        camera_ids.append(camera_id)
+        if source_id:
+            source_ids.append(source_id)
+        summary = {
+            "camera_id": camera_id,
+            "source_id": source_id,
+            "enabled": camera_enabled,
+            "source_enabled": source_enabled,
+            "applied_rule_ids": [],
+            "skipped_rule_ids": [],
+            "unsupported_rule_ids": [],
+            "configured_rule_count": 0,
+            "enabled_rule_count": 0,
+            "applied_rule_count": 0,
+            "skipped_rule_count": 0,
+            "unsupported_rule_count": 0,
+        }
+        rules = camera_doc.get("rules") if isinstance(camera_doc.get("rules"), dict) else {}
+        for rule_id, rule in rules.items():
+            if not isinstance(rule, dict):
+                continue
+            algorithm_id = str(rule.get("algorithm_id") or rule.get("rule_type") or "")
+            rule_enabled = bool(rule.get("enabled", True))
+            state = runtime_apply_state_for_algorithm(
+                algorithm_id,
+                rule_enabled=rule_enabled,
+                camera_enabled=camera_enabled and source_enabled,
+            )
+            support = get_algorithm_support(algorithm_id)
+            row = {
+                "camera_id": camera_id,
+                "source_id": source_id,
+                "rule_id": str(rule_id or rule.get("rule_id") or ""),
+                "algorithm_id": algorithm_id,
+                "rule_type": str(rule.get("rule_type") or ""),
+                "enabled": rule_enabled,
+                "support_status": state["support_status"],
+                "support_status_reason": state["support_status_reason"],
+                "runtime_apply_state": state["runtime_apply_state"],
+                "runtime_consumed": state["runtime_consumed"],
+                "runtime_skip_reason": state["runtime_skip_reason"],
+                "rule_kind": rule.get("rule_kind"),
+                "zone_id": rule.get("zone_id"),
+                "line_id": rule.get("line_id"),
+            }
+            if support is not None:
+                row.update(
+                    {
+                        "display_name": support.display_name,
+                        "category": support.category,
+                        "configurable": support.configurable,
+                        "per_camera_gate": support.per_camera_gate,
+                        "runtime_detecting": support.runtime_detecting,
+                        "event_enabled": support.event_enabled,
+                        "evidence_enabled": support.evidence_enabled,
+                        "production_ready": support.production_ready,
+                        "requires_runtime_apply": support.requires_runtime_apply,
+                    }
+                )
+            configured_rules.append(row)
+            summary["configured_rule_count"] += 1
+            if rule_enabled:
+                enabled_rules.append(row)
+                summary["enabled_rule_count"] += 1
+            if state["runtime_apply_state"] == "applied":
+                applied_rules.append(row)
+                summary["applied_rule_ids"].append(str(row["rule_id"]))
+                summary["applied_rule_count"] += 1
+            elif state["runtime_apply_state"] == "unsupported":
+                unsupported_rules.append(row)
+                summary["unsupported_rule_ids"].append(str(row["rule_id"]))
+                summary["unsupported_rule_count"] += 1
+            else:
+                skipped_rules.append(row)
+                summary["skipped_rule_ids"].append(str(row["rule_id"]))
+                summary["skipped_rule_count"] += 1
+        applied_cameras.append(summary)
+
+    return {
+        "camera_ids": camera_ids,
+        "source_ids": source_ids,
+        "applied_cameras": applied_cameras,
+        "configured_rules": configured_rules,
+        "enabled_rules": enabled_rules,
+        "applied_rules": applied_rules,
+        "skipped_rules": skipped_rules,
+        "unsupported_rules": unsupported_rules,
     }
 
 

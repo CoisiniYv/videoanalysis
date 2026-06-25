@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.algorithm_ids import (
     ALGORITHM_FAMILY_IDS,
+    FACE_INTELLIGENCE_ALGORITHM_ID,
     FACE_RULE_ALGORITHM_IDS,
     RULE_ALGORITHM_IDS,
     normalize_algorithm_id,
@@ -31,6 +32,13 @@ EVENT_TYPES = (
 )
 
 SEVERITIES = ("low", "medium", "high", "critical", "info")
+SUPPORT_STATUSES = (
+    "production_ready",
+    "event_only",
+    "config_only",
+    "unsupported",
+    "deferred",
+)
 
 
 def _iso(ts: Any) -> Optional[str]:
@@ -74,6 +82,42 @@ class AlgorithmDefinition(BaseModel):
     @property
     def algorithm_type(self) -> str:
         """Compatibility alias for older tests/clients."""
+        return self.algorithm_id
+
+
+class AlgorithmSupportDefinition(BaseModel):
+    algorithm_id: str
+    display_name: str
+    category: str
+    configurable: bool = True
+    per_camera_gate: bool = False
+    runtime_detecting: bool = False
+    event_enabled: bool = False
+    evidence_enabled: bool = False
+    production_ready: bool = False
+    status: str
+    status_reason: str
+    requires_runtime_apply: bool = True
+
+    @field_validator("algorithm_id")
+    @classmethod
+    def _algorithm_id_known(cls, value: str) -> str:
+        normalized = normalize_algorithm_id(value)
+        allowed = set(RULE_ALGORITHM_IDS) | {FACE_INTELLIGENCE_ALGORITHM_ID}
+        if normalized not in allowed:
+            raise ValueError(f"unknown algorithm_id: {value}")
+        return normalized
+
+    @field_validator("status")
+    @classmethod
+    def _status_known(cls, value: str) -> str:
+        if value not in SUPPORT_STATUSES:
+            raise ValueError(f"status must be one of {list(SUPPORT_STATUSES)}")
+        return value
+
+    @property
+    def algorithm_type(self) -> str:
+        """Compatibility alias for operator code that keys by algorithm_type."""
         return self.algorithm_id
 
 

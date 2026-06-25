@@ -121,8 +121,32 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
 
     export_doc = {
         "cameras": {
-            "primary": {"source_id": "primary_rtsp", "enabled": True},
-            "lab": {"source_id": "source_lab", "enabled": True},
+            "primary": {
+                "source_id": "primary_rtsp",
+                "enabled": True,
+                "rules": {
+                    "intrusion_full_frame": {
+                        "rule_id": "intrusion_full_frame",
+                        "algorithm_id": "behavior.intrusion",
+                        "rule_type": "intrusion",
+                        "enabled": True,
+                        "zone_id": "full_frame",
+                    },
+                    "watchlist_config": {
+                        "rule_id": "watchlist_config",
+                        "algorithm_id": "face.watchlist",
+                        "rule_type": "face.watchlist",
+                        "enabled": True,
+                    },
+                    "running_unsupported": {
+                        "rule_id": "running_unsupported",
+                        "algorithm_id": "behavior.running",
+                        "rule_type": "running",
+                        "enabled": True,
+                    },
+                },
+            },
+            "lab": {"source_id": "source_lab", "enabled": True, "rules": {}},
         }
     }
     cameras = [
@@ -143,6 +167,28 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     result = runtime_apply.apply_camera_runtime(export_doc=export_doc, cameras=cameras)
 
     assert result["runtime_action"] == "apply"
+    assert result["runtime_epoch"]["runtime_epoch_id"] == result["runtime_epoch_id"]
+    assert result["camera_ids"] == ["primary", "lab"]
+    assert result["source_ids"] == ["primary_rtsp", "source_lab"]
+    assert [rule["rule_id"] for rule in result["applied_rules"]] == [
+        "intrusion_full_frame"
+    ]
+    assert {
+        rule["rule_id"]: rule["runtime_skip_reason"]
+        for rule in result["skipped_rules"]
+    } == {"watchlist_config": "config_only_not_runtime_gate"}
+    assert [
+        rule["rule_id"] for rule in result["unsupported_rules"]
+    ] == ["running_unsupported"]
+    assert {
+        rule["rule_id"] for rule in result["enabled_rules"]
+    } == {"intrusion_full_frame", "watchlist_config", "running_unsupported"}
+    primary_apply = next(
+        camera for camera in result["applied_cameras"] if camera["camera_id"] == "primary"
+    )
+    assert primary_apply["applied_rule_ids"] == ["intrusion_full_frame"]
+    assert primary_apply["skipped_rule_ids"] == ["watchlist_config"]
+    assert primary_apply["unsupported_rule_ids"] == ["running_unsupported"]
     assert result["dynamic_sources_started"] == ["source_lab"]
     assert result["compose_sources_started"] == ["primary_rtsp"]
     assert result["sources_skipped"] == []

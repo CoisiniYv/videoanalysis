@@ -124,9 +124,7 @@
                 <button id="save-camera" type="button" class="primary">保存</button>
                 <button id="enable-camera" type="button">启用</button>
                 <button id="disable-camera" type="button" class="danger">停用</button>
-                <button id="open-rules-panel" type="button">算法开关</button>
-                <button id="open-recording-settings" type="button">录制设置</button>
-                <button id="apply-runtime" type="button">应用摄像头源</button>
+                <button id="apply-runtime" type="button">应用视频源</button>
                 <button id="restart-runtime" type="button" class="danger">受控重启运行时</button>
               </div>
             </div>
@@ -164,12 +162,24 @@
             <div class="sub-section algorithm-control-section">
               <div class="section-title-row">
                 <div>
-                  <h3>算法开关与录像</h3>
-                  <p>按摄像头保存算法启停和证据录像窗口。</p>
+                  <h3>告警算法</h3>
+                  <p>入侵检测与名单命中</p>
                 </div>
-                <button id="save-quick-algorithms" type="button" class="primary">保存算法并应用运行时</button>
+                <button id="save-quick-algorithms" type="button" class="primary">保存并应用</button>
               </div>
               <div id="algorithm-controls" class="algorithm-control-grid"></div>
+            </div>
+
+            <div class="sub-section runtime-apply-section">
+              <div class="section-title-row">
+                <div>
+                  <h3>运行时应用状态</h3>
+                  <p>当前摄像头的规则应用结果与生成配置。</p>
+                </div>
+                <button id="refresh-runtime-config" type="button">刷新生成配置</button>
+              </div>
+              <div id="runtime-apply-result" class="result-card runtime-apply-result">尚未应用运行时</div>
+              <textarea id="generated-runtime-config" class="generated-runtime-config" readonly spellcheck="false" placeholder="选择摄像头后显示生成运行时配置"></textarea>
             </div>
 
             <div class="sub-section internal-config" hidden>
@@ -181,7 +191,7 @@
           <section class="pane rules">
             <div class="tab-bar">
               <button class="tab-btn active" data-tab="zones" type="button">区域</button>
-              <button class="tab-btn" data-tab="rules" type="button">算法规则</button>
+              <button class="tab-btn" data-tab="rules" type="button">高级规则</button>
             </div>
 
             <div id="tab-zones" class="tab-panel">
@@ -203,21 +213,14 @@
             <div id="tab-rules" class="tab-panel" hidden>
               <div class="pane-title">
                 <div>
-                  <h2>算法规则</h2>
-                  <p>按摄像头启停算法，并设置录像窗口</p>
+                  <h2>高级规则</h2>
+                  <p>JSON 规则维护</p>
                 </div>
                 <button id="save-rule" type="button" class="primary">保存规则</button>
               </div>
               <div class="templates">
-                <button data-template="face.observation" type="button">人脸观察</button>
+                <button data-template="behavior.intrusion" type="button">入侵检测</button>
                 <button data-template="face.watchlist" type="button">名单命中</button>
-                <button data-template="face.live_search" type="button">实时检索</button>
-                <button data-template="behavior.intrusion" type="button">入侵</button>
-                <button data-template="behavior.loitering" type="button">徘徊</button>
-                <button data-template="behavior.crowd_gathering" type="button">聚集</button>
-                <button data-template="behavior.fall" type="button">跌倒</button>
-                <button data-template="behavior.running" type="button">奔跑</button>
-                <button data-template="behavior.wall_climb_suspicious" type="button">翻越</button>
               </div>
               <form id="rule-form" class="rule-form">
                 <label>算法<select name="algorithm_id" id="rule-algorithm"></select></label>

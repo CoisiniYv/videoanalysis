@@ -14,10 +14,14 @@ if API_DIR not in sys.path:
 for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]:
     sys.modules.pop(_mod, None)
 
+from app.routers.cameras import cameras_runtime_config_preview
 from app.runtime_config_export import ExportOptions, export_runtime_config
 
 
 class _Repo:
+    def get_camera(self, camera_id: str) -> dict[str, Any] | None:
+        return next((row for row in self.list_cameras() if row["id"] == camera_id), None)
+
     def list_cameras(self, *, enabled=None) -> list[dict[str, Any]]:
         row = {
             "id": "cam_001",
@@ -90,3 +94,23 @@ def test_runtime_export_fills_effective_evidence_policy(tmp_path: Path) -> None:
     }
     assert generated_rule["evidence_policy"] == expected
     assert runtime_rule["evidence_policy"] == expected
+    assert runtime_rule["support_status"] == "production_ready"
+    assert runtime_rule["runtime_apply_state"] == "applied"
+    assert runtime_rule["runtime_consumed"] is True
+    assert runtime_rule["runtime_skip_reason"] == ""
+
+
+def test_camera_runtime_config_preview_endpoint_returns_selected_camera() -> None:
+    body = cameras_runtime_config_preview(
+        "cam_001",
+        repo=_Repo(),
+        request_id="req-1",
+    )
+
+    data = body["data"]
+    assert data["camera_id"] == "cam_001"
+    assert data["cameras_midterm_yml"]["source_id"] == "primary_rtsp"
+    runtime_rule = data["algorithm_runtime_config"]["rules"][0]
+    assert runtime_rule["rule_id"] == "intrusion_full_frame"
+    assert runtime_rule["support_status"] == "production_ready"
+    assert runtime_rule["runtime_apply_state"] == "applied"

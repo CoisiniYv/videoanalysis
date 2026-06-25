@@ -12,9 +12,14 @@ from typing import Dict, Iterable
 from app.algorithm_ids import (
     ALGORITHM_FAMILY_IDS,
     FACE_INTELLIGENCE_ALGORITHM_ID,
+    RULE_ALGORITHM_IDS,
     normalize_algorithm_id,
 )
-from app.schemas.algorithms import AlgorithmDefinition, EvidencePolicy
+from app.schemas.algorithms import (
+    AlgorithmDefinition,
+    AlgorithmSupportDefinition,
+    EvidencePolicy,
+)
 
 
 def _policy(snapshot: bool = True, clip: bool = True) -> EvidencePolicy:
@@ -159,12 +164,278 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
 }
 
 
+def _support(
+    *,
+    algorithm_id: str,
+    display_name: str,
+    category: str,
+    configurable: bool,
+    per_camera_gate: bool,
+    runtime_detecting: bool,
+    event_enabled: bool,
+    evidence_enabled: bool,
+    production_ready: bool,
+    status: str,
+    status_reason: str,
+    requires_runtime_apply: bool = True,
+) -> AlgorithmSupportDefinition:
+    return AlgorithmSupportDefinition(
+        algorithm_id=algorithm_id,
+        display_name=display_name,
+        category=category,
+        configurable=configurable,
+        per_camera_gate=per_camera_gate,
+        runtime_detecting=runtime_detecting,
+        event_enabled=event_enabled,
+        evidence_enabled=evidence_enabled,
+        production_ready=production_ready,
+        status=status,
+        status_reason=status_reason,
+        requires_runtime_apply=requires_runtime_apply,
+    )
+
+
+_SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
+    "behavior.intrusion": _support(
+        algorithm_id="behavior.intrusion",
+        display_name="Intrusion",
+        category="behavior",
+        configurable=True,
+        per_camera_gate=True,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=True,
+        production_ready=True,
+        status="production_ready",
+        status_reason=(
+            "baseline behavior rule: Savant consumes camera_rules and the "
+            "event/evidence pipeline can materialize intrusion evidence"
+        ),
+    ),
+    "behavior.crowd_gathering": _support(
+        algorithm_id="behavior.crowd_gathering",
+        display_name="Crowd Gathering",
+        category="behavior",
+        configurable=True,
+        per_camera_gate=True,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=False,
+        production_ready=False,
+        status="event_only",
+        status_reason=(
+            "Savant rule is registered and can emit events, but non-intrusion "
+            "behavior evidence still starts as not_implemented"
+        ),
+    ),
+    "behavior.fall": _support(
+        algorithm_id="behavior.fall",
+        display_name="Fall",
+        category="behavior",
+        configurable=True,
+        per_camera_gate=True,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=False,
+        production_ready=False,
+        status="event_only",
+        status_reason=(
+            "Savant rule is registered and can emit events, but non-intrusion "
+            "behavior evidence still starts as not_implemented"
+        ),
+    ),
+    "behavior.chasing": _support(
+        algorithm_id="behavior.chasing",
+        display_name="Chasing",
+        category="behavior",
+        configurable=True,
+        per_camera_gate=True,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=False,
+        production_ready=False,
+        status="event_only",
+        status_reason=(
+            "Savant rule is registered and can emit events, but non-intrusion "
+            "behavior evidence still starts as not_implemented"
+        ),
+    ),
+    "behavior.loitering": _support(
+        algorithm_id="behavior.loitering",
+        display_name="Loitering",
+        category="behavior",
+        configurable=False,
+        per_camera_gate=False,
+        runtime_detecting=False,
+        event_enabled=False,
+        evidence_enabled=False,
+        production_ready=False,
+        status="unsupported",
+        status_reason=(
+            "rule module is not registered in custom.rules; runtime would skip "
+            "this camera_rules entry"
+        ),
+    ),
+    "behavior.running": _support(
+        algorithm_id="behavior.running",
+        display_name="Running",
+        category="behavior",
+        configurable=False,
+        per_camera_gate=False,
+        runtime_detecting=False,
+        event_enabled=False,
+        evidence_enabled=False,
+        production_ready=False,
+        status="unsupported",
+        status_reason=(
+            "rule module is not registered in custom.rules; runtime would skip "
+            "this camera_rules entry"
+        ),
+    ),
+    "behavior.wall_climb_suspicious": _support(
+        algorithm_id="behavior.wall_climb_suspicious",
+        display_name="Wall Climb Suspicious",
+        category="behavior",
+        configurable=False,
+        per_camera_gate=False,
+        runtime_detecting=False,
+        event_enabled=False,
+        evidence_enabled=False,
+        production_ready=False,
+        status="unsupported",
+        status_reason=(
+            "rule module is not registered in custom.rules; runtime would skip "
+            "this camera_rules entry"
+        ),
+    ),
+    "face.observation": _support(
+        algorithm_id="face.observation",
+        display_name="Face Observation",
+        category="face",
+        configurable=True,
+        per_camera_gate=False,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=False,
+        production_ready=False,
+        status="config_only",
+        status_reason=(
+            "face_observation_exporter is controlled by the pipeline/env and "
+            "does not use per-camera camera_rules as the runtime gate yet"
+        ),
+    ),
+    "face.watchlist": _support(
+        algorithm_id="face.watchlist",
+        display_name="Watchlist Hit",
+        category="face",
+        configurable=True,
+        per_camera_gate=False,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=True,
+        production_ready=False,
+        status="config_only",
+        status_reason=(
+            "watchlist matching is still controlled by face-worker env, not "
+            "per-camera camera_rules"
+        ),
+    ),
+    "face.live_search": _support(
+        algorithm_id="face.live_search",
+        display_name="Live Search",
+        category="face",
+        configurable=False,
+        per_camera_gate=False,
+        runtime_detecting=False,
+        event_enabled=False,
+        evidence_enabled=False,
+        production_ready=False,
+        status="deferred",
+        status_reason="live_search_hit is contract-only until the runtime path exists",
+        requires_runtime_apply=False,
+    ),
+}
+
+
 def list_algorithms() -> list[AlgorithmDefinition]:
     return [_REGISTRY[algorithm_id] for algorithm_id in ALGORITHM_FAMILY_IDS]
 
 
+def list_algorithm_support_matrix() -> list[AlgorithmSupportDefinition]:
+    return [_SUPPORT_MATRIX[algorithm_id] for algorithm_id in RULE_ALGORITHM_IDS]
+
+
 def get_algorithm(algorithm_id: str) -> AlgorithmDefinition | None:
     return _REGISTRY.get(normalize_algorithm_id(algorithm_id))
+
+
+def get_algorithm_support(algorithm_id: str) -> AlgorithmSupportDefinition | None:
+    return _SUPPORT_MATRIX.get(normalize_algorithm_id(algorithm_id))
+
+
+def runtime_apply_state_for_algorithm(
+    algorithm_id: str,
+    *,
+    rule_enabled: bool = True,
+    camera_enabled: bool = True,
+) -> dict[str, object]:
+    support = get_algorithm_support(algorithm_id)
+    if support is None:
+        return {
+            "support_status": "unsupported",
+            "support_status_reason": f"unknown algorithm_id: {algorithm_id}",
+            "runtime_apply_state": "unsupported",
+            "runtime_consumed": False,
+            "runtime_skip_reason": "unknown_algorithm",
+        }
+
+    if not rule_enabled:
+        return {
+            "support_status": support.status,
+            "support_status_reason": support.status_reason,
+            "runtime_apply_state": "skipped",
+            "runtime_consumed": False,
+            "runtime_skip_reason": "rule_disabled",
+        }
+    if not camera_enabled:
+        return {
+            "support_status": support.status,
+            "support_status_reason": support.status_reason,
+            "runtime_apply_state": "skipped",
+            "runtime_consumed": False,
+            "runtime_skip_reason": "camera_disabled",
+        }
+    if support.status == "unsupported":
+        return {
+            "support_status": support.status,
+            "support_status_reason": support.status_reason,
+            "runtime_apply_state": "unsupported",
+            "runtime_consumed": False,
+            "runtime_skip_reason": "unsupported_algorithm",
+        }
+    if support.status == "deferred":
+        return {
+            "support_status": support.status,
+            "support_status_reason": support.status_reason,
+            "runtime_apply_state": "skipped",
+            "runtime_consumed": False,
+            "runtime_skip_reason": "deferred_algorithm",
+        }
+    if support.status == "config_only":
+        return {
+            "support_status": support.status,
+            "support_status_reason": support.status_reason,
+            "runtime_apply_state": "skipped",
+            "runtime_consumed": False,
+            "runtime_skip_reason": "config_only_not_runtime_gate",
+        }
+    return {
+        "support_status": support.status,
+        "support_status_reason": support.status_reason,
+        "runtime_apply_state": "applied",
+        "runtime_consumed": True,
+        "runtime_skip_reason": "",
+    }
 
 
 def require_algorithm(algorithm_id: str) -> AlgorithmDefinition:

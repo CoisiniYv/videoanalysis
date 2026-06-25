@@ -26,6 +26,10 @@ from app.algorithm_ids import (
     behavior_rule_type_for_algorithm_id,
     normalize_algorithm_id,
 )
+from app.algorithm_registry import (
+    get_algorithm_support,
+    runtime_apply_state_for_algorithm,
+)
 
 SCHEMA_VERSION_RUNTIME = "midterm.runtime_config.v1"
 SCHEMA_VERSION_SUMMARY = "midterm.export_summary.v1"
@@ -452,24 +456,82 @@ def _build_algorithm_runtime_config(cameras: list[dict[str, Any]], generated_at:
                 "alert_policy": camera["alert_policy"],
                 "zones": camera["zones"],
                 "capabilities": _camera_capabilities(camera["rules"]),
-                "rules": [
-                    {
-                        "rule_id": rule["rule_id"],
-                        "algorithm_id": rule["algorithm_id"],
-                        "rule_type": rule["rule_type"],
-                        "rule_kind": rule["rule_kind"],
-                        "enabled": rule["enabled"],
-                        "config": rule["config"],
-                        "zone_id": rule.get("zone_id") or None,
-                        "line_id": rule.get("line_id") or None,
-                        "evidence_policy": rule.get("evidence_policy") or {},
-                    }
-                    for rule in camera["rules"]
-                ],
+                "rules": _runtime_rules_for_camera(camera),
+                "runtime_rule_summary": camera.get("_runtime_rule_summary", {}),
             }
             for camera in cameras
         ],
     }
+
+
+def _runtime_rules_for_camera(camera: dict[str, Any]) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    applied_rule_ids: list[str] = []
+    skipped_rule_ids: list[str] = []
+    unsupported_rule_ids: list[str] = []
+    configured_rule_count = 0
+    enabled_rule_count = 0
+
+    for rule in camera["rules"]:
+        configured_rule_count += 1
+        if bool(rule.get("enabled", True)):
+            enabled_rule_count += 1
+        runtime_state = runtime_apply_state_for_algorithm(
+            rule["algorithm_id"],
+            rule_enabled=bool(rule.get("enabled", True)),
+            camera_enabled=bool(camera.get("enabled", True)),
+        )
+        support = get_algorithm_support(rule["algorithm_id"])
+        row = {
+            "rule_id": rule["rule_id"],
+            "algorithm_id": rule["algorithm_id"],
+            "rule_type": rule["rule_type"],
+            "rule_kind": rule["rule_kind"],
+            "enabled": rule["enabled"],
+            "config": rule["config"],
+            "zone_id": rule.get("zone_id") or None,
+            "line_id": rule.get("line_id") or None,
+            "evidence_policy": rule.get("evidence_policy") or {},
+            "support_status": runtime_state["support_status"],
+            "support_status_reason": runtime_state["support_status_reason"],
+            "runtime_apply_state": runtime_state["runtime_apply_state"],
+            "runtime_consumed": runtime_state["runtime_consumed"],
+            "runtime_skip_reason": runtime_state["runtime_skip_reason"],
+        }
+        if support is not None:
+            row.update(
+                {
+                    "display_name": support.display_name,
+                    "category": support.category,
+                    "configurable": support.configurable,
+                    "per_camera_gate": support.per_camera_gate,
+                    "runtime_detecting": support.runtime_detecting,
+                    "event_enabled": support.event_enabled,
+                    "evidence_enabled": support.evidence_enabled,
+                    "production_ready": support.production_ready,
+                    "requires_runtime_apply": support.requires_runtime_apply,
+                }
+            )
+        rules.append(row)
+        if runtime_state["runtime_apply_state"] == "applied":
+            applied_rule_ids.append(rule["rule_id"])
+        elif runtime_state["runtime_apply_state"] == "unsupported":
+            unsupported_rule_ids.append(rule["rule_id"])
+        else:
+            skipped_rule_ids.append(rule["rule_id"])
+
+    camera.setdefault("_runtime_rule_summary", {})
+    camera["_runtime_rule_summary"] = {
+        "configured_rule_count": configured_rule_count,
+        "enabled_rule_count": enabled_rule_count,
+        "applied_rule_count": len(applied_rule_ids),
+        "skipped_rule_count": len(skipped_rule_ids),
+        "unsupported_rule_count": len(unsupported_rule_ids),
+        "applied_rule_ids": applied_rule_ids,
+        "skipped_rule_ids": skipped_rule_ids,
+        "unsupported_rule_ids": unsupported_rule_ids,
+    }
+    return rules
 
 
 def _build_summary(

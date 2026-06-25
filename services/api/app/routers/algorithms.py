@@ -16,7 +16,11 @@ from app.algorithm_ids import (
     is_face_rule_algorithm_id,
     normalize_algorithm_id,
 )
-from app.algorithm_registry import get_algorithm, list_algorithms
+from app.algorithm_registry import (
+    get_algorithm,
+    list_algorithm_support_matrix,
+    list_algorithms,
+)
 from app.db import get_conn
 from app.repositories.cameras import CameraRepository
 from app.schemas.algorithms import (
@@ -68,6 +72,28 @@ def algorithms_list(request_id: str = Depends(_request_id)) -> dict:
         algorithms.append(item)
     return _ok(
         {"algorithms": algorithms},
+        request_id,
+    )
+
+
+@router.get("/algorithms/support-matrix")
+def algorithms_support_matrix(request_id: str = Depends(_request_id)) -> dict:
+    matrix = []
+    for definition in list_algorithm_support_matrix():
+        item = definition.model_dump()
+        item["algorithm_type"] = item["algorithm_id"]
+        matrix.append(item)
+    return _ok(
+        {
+            "algorithms": matrix,
+            "statuses": [
+                "production_ready",
+                "event_only",
+                "config_only",
+                "unsupported",
+                "deferred",
+            ],
+        },
         request_id,
     )
 

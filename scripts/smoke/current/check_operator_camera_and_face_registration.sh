@@ -8,6 +8,7 @@ CAMERA_ENABLED="${OPERATOR_SMOKE_CAMERA_ENABLED:-false}"
 FACE_IMAGE="${FACE_REGISTRATION_TEST_IMAGE:-${F4_2_TEST_IMAGE:-}}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CAMERA_COMPAT_MIGRATION="${REPO_ROOT}/db/migrations/012_operator_camera_schema_compat.sql"
+CAMERA_RULE_ZONE_COMPAT_MIGRATION="${REPO_ROOT}/db/migrations/016_camera_rule_zone_id_text_compat.sql"
 
 case "${CAMERA_ENABLED}" in
   true|false) ;;
@@ -60,7 +61,10 @@ echo "[operator-smoke] checking operator portal page"
 curl_api "${API_BASE_URL}/" | grep -q 'camera-form'
 
 echo "[operator-smoke] ensuring camera operator schema"
-DATABASE_URL="${DATABASE_URL}" CAMERA_COMPAT_MIGRATION="${CAMERA_COMPAT_MIGRATION}" python3 - <<'PY'
+DATABASE_URL="${DATABASE_URL}" \
+CAMERA_COMPAT_MIGRATION="${CAMERA_COMPAT_MIGRATION}" \
+CAMERA_RULE_ZONE_COMPAT_MIGRATION="${CAMERA_RULE_ZONE_COMPAT_MIGRATION}" \
+python3 - <<'PY'
 import os
 from pathlib import Path
 
@@ -68,6 +72,7 @@ import psycopg
 
 database_url = os.environ["DATABASE_URL"]
 migration = Path(os.environ["CAMERA_COMPAT_MIGRATION"])
+zone_migration = Path(os.environ["CAMERA_RULE_ZONE_COMPAT_MIGRATION"])
 required = {"source_id", "rtsp_url", "input_type", "rtsp_transport", "fps_policy", "alert_policy"}
 with psycopg.connect(database_url, autocommit=True) as conn:
     with conn.cursor() as cur:
@@ -81,6 +86,18 @@ with psycopg.connect(database_url, autocommit=True) as conn:
         columns = {row[0] for row in cur.fetchall()}
         if not required.issubset(columns):
             cur.execute(migration.read_text(encoding="utf-8"))
+        cur.execute(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'camera_rules'
+              AND column_name = 'zone_id'
+            """
+        )
+        zone_type = cur.fetchone()
+        if not zone_type or zone_type[0] != "text":
+            cur.execute(zone_migration.read_text(encoding="utf-8"))
 PY
 
 echo "[operator-smoke] creating/updating deterministic camera ${CAMERA_ID}"

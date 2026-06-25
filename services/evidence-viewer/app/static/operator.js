@@ -13,10 +13,13 @@ let selectedPersonId = "";
 let selectedPerson = null;
 let faceRegistrationMode = "new";
 let algorithms = [];
+let algorithmSupportMatrix = [];
 let currentZones = [];
 let currentRules = [];
 let runtimeOverview = null;
 let runtimeControl = null;
+let lastRuntimeApplyResult = null;
+let selectedRuntimeConfig = null;
 
 /* ---- DOM refs ---- */
 const statusEl = document.getElementById("status");
@@ -58,6 +61,9 @@ const saveQuickAlgorithmsBtn = document.getElementById("save-quick-algorithms");
 const zoneJson = document.getElementById("zone-json");
 const ruleJson = document.getElementById("rule-json");
 const fullConfigEl = document.getElementById("full-config");
+const runtimeApplyResultEl = document.getElementById("runtime-apply-result");
+const generatedRuntimeConfigEl = document.getElementById("generated-runtime-config");
+const refreshRuntimeConfigBtn = document.getElementById("refresh-runtime-config");
 const peopleEl = document.getElementById("people");
 const peopleSearchEl = document.getElementById("people-search");
 const faceRegistrationForm = document.getElementById("face-registration-form");
@@ -78,26 +84,8 @@ const TOP_VIEWS = new Set(["cameras", "people", "evidence", "maintenance", "runt
 /* ---- API URL display ---- */
 apiUrlEl.textContent = window.location.origin + API;
 
-/* ---- Templates (9 algorithm templates) ---- */
+/* ---- Operator-facing algorithm templates ---- */
 const templates = {
-  "face.observation": {
-    rule_id: "rule_face_observation",
-    algorithm_id: "face.observation",
-    enabled: true,
-    config: {
-      min_face_confidence: 0.6,
-      min_face_size: 40,
-      min_quality: 0.6,
-      reid_min_interval_ms: 1000,
-      retention_days: 30,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
   "face.watchlist": {
     rule_id: "rule_watchlist",
     algorithm_id: "face.watchlist",
@@ -106,21 +94,6 @@ const templates = {
       threshold: 0.75,
       cooldown_s: 60,
       camera_scope: [],
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
-  "face.live_search": {
-    rule_id: "rule_live_search_config",
-    algorithm_id: "face.live_search",
-    enabled: false,
-    config: {
-      default_threshold: 0.75,
-      default_expires_minutes: 60,
     },
     evidence_policy: {
       snapshot_required: true,
@@ -145,137 +118,49 @@ const templates = {
       post_seconds: 5,
     },
   },
-  "behavior.loitering": {
-    rule_id: "rule_loitering",
-    algorithm_id: "behavior.loitering",
-    enabled: true,
-    config: {
-      zone_id: "perimeter",
-      min_duration_s: 30,
-      max_avg_speed_px_s: 25,
-      max_motion_range_px: 120,
-      cooldown_s: 60,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
-  "behavior.crowd_gathering": {
-    rule_id: "rule_crowd_gathering",
-    algorithm_id: "behavior.crowd_gathering",
-    enabled: true,
-    config: {
-      zone_id: "plaza",
-      min_person_count: 5,
-      min_duration_s: 10,
-      cooldown_s: 60,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
-  "behavior.fall": {
-    rule_id: "rule_fall",
-    algorithm_id: "behavior.fall",
-    enabled: true,
-    config: {
-      min_height_drop_ratio: 0.35,
-      horizontal_pose_ratio: 1.4,
-      min_static_s: 3,
-      min_keypoint_confidence: 0.3,
-      cooldown_s: 60,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
-  "behavior.running": {
-    rule_id: "rule_running",
-    algorithm_id: "behavior.running",
-    enabled: true,
-    config: {
-      min_speed_px_s: 180,
-      min_duration_ms: 800,
-      cooldown_s: 30,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
-  "behavior.chasing": {
-    rule_id: "rule_chasing",
-    algorithm_id: "behavior.chasing",
-    enabled: true,
-    config: {
-      zone_id: "perimeter",
-      min_chase_speed_px_s: 140,
-      min_duration_ms: 1200,
-      cooldown_s: 60,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
-  "behavior.wall_climb_suspicious": {
-    rule_id: "rule_wall_climb_suspicious",
-    algorithm_id: "behavior.wall_climb_suspicious",
-    enabled: true,
-    config: {
-      line_id: "wall_line_01",
-      direction: "outside_to_inside",
-      min_crossing_height_change_px: 40,
-      min_keypoint_confidence: 0.3,
-      max_event_duration_ms: 4000,
-      cooldown_s: 60,
-    },
-    evidence_policy: {
-      snapshot_required: true,
-      clip_required: true,
-      pre_seconds: 5,
-      post_seconds: 5,
-    },
-  },
 };
 
 const quickAlgorithmIds = [
   "behavior.intrusion",
-  "behavior.loitering",
-  "behavior.crowd_gathering",
-  "behavior.running",
-  "behavior.chasing",
-  "behavior.fall",
-  "behavior.wall_climb_suspicious",
-  "face.observation",
   "face.watchlist",
-  "face.live_search",
 ];
 
 const quickAlgorithmLabels = {
-  "behavior.intrusion": "入侵",
-  "behavior.loitering": "徘徊",
-  "behavior.crowd_gathering": "聚集",
-  "behavior.running": "奔跑",
-  "behavior.chasing": "追逐",
-  "behavior.fall": "跌倒",
-  "behavior.wall_climb_suspicious": "翻越",
-  "face.observation": "人脸观察",
+  "behavior.intrusion": "入侵检测",
   "face.watchlist": "名单命中",
-  "face.live_search": "实时检索",
+};
+
+const operatorAlgorithmMeta = {
+  "behavior.intrusion": {
+    title: "入侵检测",
+    subtitle: "区域入侵事件与证据",
+    statusLabel: "运行时生效",
+    statusClass: "support-production_ready",
+  },
+  "face.watchlist": {
+    title: "名单命中",
+    subtitle: "目标由 face-worker 名单控制",
+    statusLabel: "按目标名单",
+    statusClass: "support-config_only",
+  },
+};
+
+const supportStatusLabels = {
+  production_ready: "生产可用",
+  event_only: "仅事件",
+  config_only: "仅配置",
+  unsupported: "未支持",
+  deferred: "已延期",
+};
+
+const applyStateLabels = {
+  applied: "已应用",
+  skipped: "已跳过",
+  unsupported: "未支持",
+  disabled: "未启用",
+  pending: "尚未应用",
+  not_configured: "未配置",
+  missing: "未出现在本次应用",
 };
 
 /* ---- Helpers ---- */
@@ -450,6 +335,11 @@ function asInt(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asFloat(value, fallback) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -475,6 +365,74 @@ function ruleIdForAlgorithm(algorithmId) {
 function algorithmLabel(algorithmId) {
   const definition = algorithms.find((item) => item.algorithm_id === algorithmId);
   return quickAlgorithmLabels[algorithmId] || definition?.display_name || algorithmId;
+}
+
+function algorithmDebugModeEnabled() {
+  try {
+    return new URLSearchParams(window.location.search).get("algorithm_debug") === "1";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function supportForAlgorithm(algorithmId) {
+  return algorithmSupportMatrix.find((item) => item.algorithm_id === algorithmId) || null;
+}
+
+function supportStatusLabel(status) {
+  return supportStatusLabels[status] || status || "未知";
+}
+
+function applyStateLabel(state) {
+  return applyStateLabels[state] || state || "未知";
+}
+
+function isAlgorithmBlockedSupport(support) {
+  return support && ["unsupported", "deferred"].includes(support.status);
+}
+
+function isAlgorithmBlocked(algorithmId) {
+  return isAlgorithmBlockedSupport(supportForAlgorithm(algorithmId));
+}
+
+function latestApplyRows() {
+  if (!lastRuntimeApplyResult) return [];
+  return [
+    ...(lastRuntimeApplyResult.applied_rules || []),
+    ...(lastRuntimeApplyResult.skipped_rules || []),
+    ...(lastRuntimeApplyResult.unsupported_rules || []),
+  ];
+}
+
+function latestApplyStateForAlgorithm(algorithmId, rule) {
+  if (!lastRuntimeApplyResult) {
+    if (rule?.enabled === false) {
+      return { state: "disabled", label: applyStateLabel("disabled"), reason: "" };
+    }
+    return {
+      state: rule ? "pending" : "not_configured",
+      label: applyStateLabel(rule ? "pending" : "not_configured"),
+      reason: "",
+    };
+  }
+  const ruleId = rule?.rule_id || ruleIdForAlgorithm(algorithmId);
+  const row = latestApplyRows().find((item) => (
+    String(item.camera_id || "") === String(selectedCameraId || "") &&
+    (String(item.rule_id || "") === String(ruleId) || item.algorithm_id === algorithmId)
+  ));
+  if (!row) {
+    return {
+      state: rule?.enabled === false ? "disabled" : "missing",
+      label: applyStateLabel(rule?.enabled === false ? "disabled" : "missing"),
+      reason: "",
+    };
+  }
+  const state = row.runtime_apply_state || "missing";
+  return {
+    state,
+    label: applyStateLabel(state),
+    reason: row.runtime_skip_reason || row.support_status_reason || "",
+  };
 }
 
 function ruleForAlgorithm(algorithmId) {
@@ -739,12 +697,17 @@ function renderRules(rules) {
     const cat = rule.rule_category || (rule.is_alert_rule ? "alert" : "observation");
     const badgeClass = cat === "observation" ? "observation" : "alert";
     const categoryText = cat === "observation" ? "观察" : cat === "alert" ? "告警" : "配置";
+    const support = supportForAlgorithm(rule.algorithm_id);
+    const supportStatus = support?.status || "config_only";
     const policy = rule.evidence_policy || {};
     const zoneText = rule.zone_id || rule.config?.zone_id || rule.config?.zone || "";
     const lineText = rule.line_id || rule.config?.line_id || "";
     item.innerHTML =
       `<strong>${rule.rule_id}</strong>` +
-      `<div>${rule.algorithm_id} <span class="badge ${badgeClass}">${categoryText}</span></div>` +
+      `<div>${rule.algorithm_id} ` +
+        `<span class="badge ${badgeClass}">${categoryText}</span> ` +
+        `<span class="support-badge support-${escapeHtml(supportStatus)}">${escapeHtml(supportStatusLabel(supportStatus))}</span>` +
+      `</div>` +
       `<div class="muted">${rule.enabled ? "已启用" : "已停用"} · 录像 ${policy.pre_seconds ?? 5}s/${policy.post_seconds ?? 5}s</div>` +
       `<div class="muted">${zoneText ? `区域 ${zoneText}` : ""}${lineText ? ` 检测线 ${lineText}` : ""}</div>` +
       `<div class="item-actions">` +
@@ -779,8 +742,8 @@ function renderAlgorithms() {
       display_name: algorithmLabel(algorithmId),
     });
   }
-  for (const definition of algorithms) {
-    if (definition.algorithm_id?.startsWith("behavior.")) {
+  if (algorithmDebugModeEnabled()) {
+    for (const definition of algorithms) {
       knownById.set(definition.algorithm_id, definition);
     }
   }
@@ -797,7 +760,20 @@ function renderAlgorithms() {
   if (previous && known.some((definition) => definition.algorithm_id === previous)) {
     ruleAlgorithmEl.value = previous;
   }
+  renderAlgorithmTemplateButtons();
   renderQuickAlgorithmControls();
+}
+
+function renderAlgorithmTemplateButtons() {
+  document.querySelectorAll("[data-template]").forEach((button) => {
+    const algorithmId = button.dataset.template;
+    const support = supportForAlgorithm(algorithmId);
+    const blocked = isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled();
+    button.disabled = blocked;
+    button.title = blocked
+      ? `${supportStatusLabel(support.status)}: ${support.status_reason || ""}`
+      : "";
+  });
 }
 
 function renderZoneSelectors() {
@@ -827,6 +803,25 @@ function renderZoneSelectors() {
   renderQuickAlgorithmControls();
 }
 
+function zoneOptionId(zone) {
+  return zone.zone_id || zone.zone_name || "";
+}
+
+function operatorApplyBadge(algorithmId, rule, applyState) {
+  if (algorithmId === "face.watchlist") {
+    if (rule?.enabled === false) {
+      return { label: "未启用", className: "apply-disabled" };
+    }
+    return rule
+      ? { label: "已配置", className: "apply-applied" }
+      : { label: "未配置", className: "apply-not_configured" };
+  }
+  return {
+    label: applyState.label,
+    className: `apply-${applyState.state}`,
+  };
+}
+
 function renderQuickAlgorithmControls() {
   if (!algorithmControlsEl) return;
   if (!selectedCameraId) {
@@ -834,50 +829,75 @@ function renderQuickAlgorithmControls() {
     return;
   }
   const polygonZones = currentZones.filter((z) => z.zone_type === "polygon");
-  const lineZones = currentZones.filter((z) => ["line", "direction_line"].includes(z.zone_type));
   algorithmControlsEl.innerHTML = "";
   for (const algorithmId of quickAlgorithmIds) {
+    const meta = operatorAlgorithmMeta[algorithmId] || {
+      title: algorithmLabel(algorithmId),
+      subtitle: algorithmId,
+      statusLabel: supportStatusLabel(supportForAlgorithm(algorithmId)?.status),
+      statusClass: `support-${supportForAlgorithm(algorithmId)?.status || "config_only"}`,
+    };
     const rule = ruleForAlgorithm(algorithmId);
     const policy = evidencePolicyFor(rule, algorithmId);
-    const selectedZone = rule?.zone_id || rule?.config?.zone_id || rule?.config?.zone || polygonZones[0]?.zone_id || "";
-    const selectedLine = rule?.line_id || rule?.config?.line_id || lineZones[0]?.zone_id || "";
+    const support = supportForAlgorithm(algorithmId);
+    const supportStatus = support?.status || "config_only";
+    const blocked = isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled();
+    const applyState = latestApplyStateForAlgorithm(algorithmId, rule);
+    const applyBadge = operatorApplyBadge(algorithmId, rule, applyState);
+    const disabledAttr = blocked ? " disabled" : "";
+    const checked = rule
+      ? rule.enabled !== false
+      : (templates[algorithmId]?.enabled !== false && !blocked);
+    const config = { ...(templates[algorithmId]?.config || {}), ...(rule?.config || {}) };
+    const selectedZone = rule?.zone_id || config.zone_id || config.zone || zoneOptionId(polygonZones[0]) || "";
     const row = document.createElement("div");
-    row.className = "algorithm-control-item";
+    row.className = `algorithm-control-item${blocked ? " blocked" : ""}`;
     row.dataset.algorithmId = algorithmId;
     const zoneControl = algorithmNeedsZone(algorithmId)
-      ? `<label>区域<select data-control="zone_id">` +
+      ? `<label class="algorithm-field">区域<select data-control="zone_id"${disabledAttr}>` +
           `<option value="">未绑定</option>` +
           polygonZones.map((zone) => {
-            const id = zone.zone_id || zone.zone_name;
+            const id = zoneOptionId(zone);
             const selected = id === selectedZone ? " selected" : "";
             return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(zone.zone_name && zone.zone_name !== id ? `${zone.zone_name} (${id})` : id)}</option>`;
           }).join("") +
         `</select></label>`
       : "";
-    const lineControl = algorithmNeedsLine(algorithmId)
-      ? `<label>检测线<select data-control="line_id">` +
-          `<option value="">未绑定</option>` +
-          lineZones.map((zone) => {
-            const id = zone.zone_id || zone.zone_name;
-            const selected = id === selectedLine ? " selected" : "";
-            return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(zone.zone_name && zone.zone_name !== id ? `${zone.zone_name} (${id})` : id)}</option>`;
-          }).join("") +
-        `</select></label>`
+    const intrusionControls = algorithmId === "behavior.intrusion"
+      ? `<label class="algorithm-field">停留毫秒<input data-control="min_inside_ms" type="number" min="1" value="${Number(config.min_inside_ms ?? 1000)}"${disabledAttr} /></label>` +
+        `<label class="algorithm-field">冷却秒数<input data-control="cooldown_s" type="number" min="0" value="${Number(config.cooldown_s ?? 30)}"${disabledAttr} /></label>`
+      : "";
+    const watchlistControls = algorithmId === "face.watchlist"
+      ? `<label class="algorithm-field">匹配阈值<input data-control="threshold" type="number" min="0" max="1" step="0.01" value="${Number(config.threshold ?? 0.75)}"${disabledAttr} /></label>` +
+        `<label class="algorithm-field">冷却秒数<input data-control="cooldown_s" type="number" min="0" value="${Number(config.cooldown_s ?? 60)}"${disabledAttr} /></label>`
       : "";
     row.innerHTML =
-      `<div class="algorithm-control-main">` +
-        `<label class="inline algorithm-toggle">` +
-          `<input data-control="enabled" type="checkbox" ${rule?.enabled !== false ? "checked" : ""} />` +
-          `<span>${escapeHtml(algorithmLabel(algorithmId))}</span>` +
-        `</label>` +
-        `<span class="muted">${escapeHtml(algorithmId)}</span>` +
+      `<div class="algorithm-control-header">` +
+        `<div class="algorithm-control-main">` +
+          `<label class="inline algorithm-toggle">` +
+            `<input data-control="enabled" type="checkbox" ${checked ? "checked" : ""}${disabledAttr} />` +
+            `<span>${escapeHtml(meta.title)}</span>` +
+          `</label>` +
+          `<span class="muted">${escapeHtml(meta.subtitle)}</span>` +
+        `</div>` +
+        `<div class="algorithm-status-stack">` +
+          `<span class="support-badge ${escapeHtml(meta.statusClass)}">${escapeHtml(meta.statusLabel)}</span>` +
+          `<span class="apply-badge ${escapeHtml(applyBadge.className)}">${escapeHtml(applyBadge.label)}</span>` +
+          `<button class="sm" data-action="edit-quick-rule" type="button"${disabledAttr}>高级</button>` +
+        `</div>` +
       `</div>` +
-      zoneControl +
-      lineControl +
-      `<label>前录秒数<input data-control="pre_seconds" type="number" min="0" max="300" value="${Number(policy.pre_seconds ?? 5)}" /></label>` +
-      `<label>后录秒数<input data-control="post_seconds" type="number" min="0" max="300" value="${Number(policy.post_seconds ?? 5)}" /></label>` +
-      `<button class="sm" data-action="edit-quick-rule" type="button">高级</button>`;
+      `<div class="algorithm-control-fields">` +
+        zoneControl +
+        intrusionControls +
+        watchlistControls +
+        `<label class="algorithm-field">前录秒数<input data-control="pre_seconds" type="number" min="0" max="300" value="${Number(policy.pre_seconds ?? 5)}"${disabledAttr} /></label>` +
+        `<label class="algorithm-field">后录秒数<input data-control="post_seconds" type="number" min="0" max="300" value="${Number(policy.post_seconds ?? 5)}"${disabledAttr} /></label>` +
+      `</div>`;
     row.querySelector('[data-action="edit-quick-rule"]').addEventListener("click", () => {
+      if (blocked) {
+        showError(`${algorithmLabel(algorithmId)} 当前为 ${supportStatusLabel(supportStatus)}，不能保存或应用`);
+        return;
+      }
       fillRuleForm(rule || defaultRuleForAlgorithm(algorithmId));
       switchCameraTab("rules");
       ruleForm?.scrollIntoView({ block: "start", behavior: "smooth" });
@@ -1141,6 +1161,63 @@ function renderRuntimeContainerTable(containers) {
     `</table>`;
 }
 
+function renderRuntimeApplyResult() {
+  if (!runtimeApplyResultEl) return;
+  if (!lastRuntimeApplyResult) {
+    runtimeApplyResultEl.innerHTML = `<div class="muted">尚未应用运行时。</div>`;
+    return;
+  }
+  const selectedRows = latestApplyRows().filter((row) => (
+    !selectedCameraId || String(row.camera_id || "") === String(selectedCameraId)
+  ));
+  const applied = selectedRows.filter((row) => row.runtime_apply_state === "applied");
+  const skipped = selectedRows.filter((row) => row.runtime_apply_state === "skipped");
+  const unsupported = selectedRows.filter((row) => row.runtime_apply_state === "unsupported");
+  const epoch = lastRuntimeApplyResult.runtime_epoch_id ||
+    lastRuntimeApplyResult.runtime_epoch?.runtime_epoch_id || "--";
+  const sourceIds = (lastRuntimeApplyResult.source_ids || []).filter(Boolean);
+  const warningRows = [...unsupported, ...skipped].slice(0, 8);
+  const warningHtml = warningRows.length
+    ? `<ul class="runtime-warning-list">` + warningRows.map((row) =>
+        `<li><strong>${escapeHtml(row.rule_id || row.algorithm_id || "--")}</strong> ` +
+        `${escapeHtml(row.runtime_skip_reason || row.support_status || "skipped")} ` +
+        `<span>${escapeHtml(row.support_status_reason || "")}</span></li>`
+      ).join("") + `</ul>`
+    : `<div class="muted">当前选中摄像头没有运行时应用警告。</div>`;
+  runtimeApplyResultEl.innerHTML =
+    `<div class="runtime-kv-grid">` +
+      `<div><span>runtime epoch</span><strong>${escapeHtml(epoch)}</strong></div>` +
+      `<div><span>摄像头</span><strong>${formatInteger((lastRuntimeApplyResult.camera_ids || []).length)}</strong></div>` +
+      `<div><span>source</span><strong>${formatInteger(sourceIds.length)}</strong></div>` +
+      `<div><span>已应用规则</span><strong>${formatInteger(applied.length)}</strong></div>` +
+      `<div><span>已跳过</span><strong>${formatInteger(skipped.length)}</strong></div>` +
+      `<div><span>未支持</span><strong>${formatInteger(unsupported.length)}</strong></div>` +
+    `</div>` +
+    warningHtml;
+}
+
+function renderSelectedRuntimeConfig(data = selectedRuntimeConfig) {
+  if (!generatedRuntimeConfigEl) return;
+  if (!data) {
+    generatedRuntimeConfigEl.value = "";
+    return;
+  }
+  const preview = {
+    camera_id: data.camera_id,
+    generated_at: data.generated_at,
+    paths: data.paths,
+    cameras_midterm_yml: data.cameras_midterm_yml,
+    algorithm_runtime_config: data.algorithm_runtime_config,
+    export_summary: data.export_summary,
+  };
+  generatedRuntimeConfigEl.value = JSON.stringify(preview, null, 2);
+}
+
+function renderSelectedRuntimeConfigError(message) {
+  if (!generatedRuntimeConfigEl) return;
+  generatedRuntimeConfigEl.value = `生成配置加载失败：${message}`;
+}
+
 function switchCameraTab(tab) {
   const normalized = tab === "rules" ? "rules" : "zones";
   document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -1225,8 +1302,12 @@ async function loadEvidenceCount() {
 }
 
 async function loadAlgorithms() {
-  const data = await request(`${API}/algorithms`);
+  const [data, supportData] = await Promise.all([
+    request(`${API}/algorithms`),
+    request(`${API}/algorithms/support-matrix`).catch(() => ({ algorithms: [] })),
+  ]);
   algorithms = data.algorithms || [];
+  algorithmSupportMatrix = supportData.algorithms || [];
   renderAlgorithms();
   if (ruleAlgorithmEl && !ruleAlgorithmEl.value && algorithms[0]) {
     fillRuleForm(defaultRuleForAlgorithm(algorithms[0].algorithm_id));
@@ -1454,12 +1535,15 @@ async function submitFaceRegistration() {
 async function selectCamera(cameraId) {
   clearMessages();
   selectedCameraId = cameraId;
-  const data = await request(`${API}/cameras/${cameraId}/config`);
+  const data = await request(`${API}/cameras/${encodeURIComponent(cameraId)}/config`);
   fillCamera(data.camera);
   renderCameras();
   renderZones(data.zones || []);
   await loadAlgorithmRules(cameraId, data.rules || []);
   fullConfigEl.value = JSON.stringify(data, null, 2);
+  await loadSelectedRuntimeConfig(cameraId);
+  renderRuntimeApplyResult();
+  renderQuickAlgorithmControls();
   setStatus(data.camera?.name || "摄像头就绪");
 }
 
@@ -1470,6 +1554,18 @@ async function loadAlgorithmRules(cameraId, fallbackRules = []) {
   } catch (e) {
     renderRules(fallbackRules || []);
     showError(`算法规则加载失败：${e.message}`);
+  }
+}
+
+async function loadSelectedRuntimeConfig(cameraId) {
+  if (!generatedRuntimeConfigEl || !cameraId) return;
+  try {
+    const data = await request(`${API}/cameras/${encodeURIComponent(cameraId)}/runtime-config`);
+    selectedRuntimeConfig = data;
+    renderSelectedRuntimeConfig(data);
+  } catch (e) {
+    selectedRuntimeConfig = null;
+    renderSelectedRuntimeConfigError(e.message);
   }
 }
 
@@ -1548,7 +1644,10 @@ function runtimeApplyMessage(data) {
   const composeStarted = data.compose_sources_started || [];
   const restarted = data.savant_restarted || "Savant";
   const replay = data.replay_restarted || "Replay";
-  return `运行时已应用：${composeStarted.length} 个固定源、${started.length} 个动态源，${replay} / ${restarted} 已重启`;
+  const appliedRules = (data.applied_rules || []).length;
+  const skippedRules = (data.skipped_rules || []).length;
+  const unsupportedRules = (data.unsupported_rules || []).length;
+  return `运行时已应用：${composeStarted.length} 个固定源、${started.length} 个动态源，${replay} / ${restarted} 已重启；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
 }
 
 function sourceApplyMessage(data) {
@@ -1568,6 +1667,12 @@ async function applyCameraSources({ context = "" } = {}) {
 
 async function applyRuntime({ context = "" } = {}) {
   const data = await request(`${API}/cameras/runtime/apply`, { method: "POST" });
+  lastRuntimeApplyResult = data;
+  renderRuntimeApplyResult();
+  renderQuickAlgorithmControls();
+  if (selectedCameraId) {
+    await loadSelectedRuntimeConfig(selectedCameraId);
+  }
   const message = runtimeApplyMessage(data);
   showSuccess(context ? `${context}；${message}` : message);
   return data;
@@ -1577,7 +1682,10 @@ function runtimeRestartMessage(data) {
   const composeStarted = data.compose_sources_started || [];
   const started = data.dynamic_sources_started || [];
   const workers = data.workers_restarted || [];
-  return `运行时已受控重启：${composeStarted.length} 个固定源、${started.length} 个动态源、${workers.length} 个 worker 已恢复`;
+  const appliedRules = (data.applied_rules || []).length;
+  const skippedRules = (data.skipped_rules || []).length;
+  const unsupportedRules = (data.unsupported_rules || []).length;
+  return `运行时已受控重启：${composeStarted.length} 个固定源、${started.length} 个动态源、${workers.length} 个 worker 已恢复；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
 }
 
 async function restartRuntime() {
@@ -1585,6 +1693,12 @@ async function restartRuntime() {
     return null;
   }
   const data = await request(`${API}/cameras/runtime/restart`, { method: "POST" });
+  lastRuntimeApplyResult = data;
+  renderRuntimeApplyResult();
+  renderQuickAlgorithmControls();
+  if (selectedCameraId) {
+    await loadSelectedRuntimeConfig(selectedCameraId);
+  }
   showSuccess(runtimeRestartMessage(data));
   return data;
 }
@@ -1681,6 +1795,11 @@ async function saveRule() {
     showError("请选择算法");
     return;
   }
+  const support = supportForAlgorithm(algorithmId);
+  if (isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled()) {
+    showError(`${algorithmLabel(algorithmId)} 当前为 ${supportStatusLabel(support.status)}，不能保存或应用`);
+    return;
+  }
   const ruleId = String(fd.get("rule_id") || ruleIdForAlgorithm(algorithmId)).trim();
   const zoneId = String(fd.get("zone_id") || config.zone_id || config.zone || "").trim();
   const lineId = String(fd.get("line_id") || config.line_id || "").trim();
@@ -1696,9 +1815,10 @@ async function saveRule() {
   if (zoneId) body.zone_id = zoneId;
   if (lineId) body.line_id = lineId;
   const exists = currentRules.some((r) => r.rule_id === ruleId);
+  const encodedCameraId = encodeURIComponent(selectedCameraId);
   const path = exists
-    ? `${API}/cameras/${selectedCameraId}/algorithm-rules/${encodeURIComponent(ruleId)}`
-    : `${API}/cameras/${selectedCameraId}/algorithm-rules`;
+    ? `${API}/cameras/${encodedCameraId}/algorithm-rules/${encodeURIComponent(ruleId)}`
+    : `${API}/cameras/${encodedCameraId}/algorithm-rules`;
   await request(path, { method: exists ? "PUT" : "POST", body: JSON.stringify(body) });
   await selectCamera(selectedCameraId);
   await applyRuntimeAfterChange(`规则 ${ruleId} 已保存`);
@@ -1707,7 +1827,7 @@ async function saveRule() {
 async function deleteRule(ruleId) {
   if (!selectedCameraId) return;
   clearMessages();
-  await request(`${API}/cameras/${selectedCameraId}/rules/${encodeURIComponent(ruleId)}`, {
+  await request(`${API}/cameras/${encodeURIComponent(selectedCameraId)}/rules/${encodeURIComponent(ruleId)}`, {
     method: "DELETE",
   });
   await selectCamera(selectedCameraId);
@@ -1717,7 +1837,7 @@ async function deleteRule(ruleId) {
 async function setRuleEnabled(ruleId, enabled) {
   if (!selectedCameraId) return;
   clearMessages();
-  await request(`${API}/cameras/${selectedCameraId}/algorithm-rules/${encodeURIComponent(ruleId)}/${enabled ? "enable" : "disable"}`, {
+  await request(`${API}/cameras/${encodeURIComponent(selectedCameraId)}/algorithm-rules/${encodeURIComponent(ruleId)}/${enabled ? "enable" : "disable"}`, {
     method: "POST",
   });
   await selectCamera(selectedCameraId);
@@ -1732,6 +1852,19 @@ function quickRuleBodyFromCard(card) {
   const postSeconds = asInt(card.querySelector('[data-control="post_seconds"]')?.value, 5);
   const base = defaultRuleForAlgorithm(algorithmId);
   const config = { ...(base.config || {}), ...(existing?.config || {}) };
+  const cooldownControl = card.querySelector('[data-control="cooldown_s"]');
+  if (cooldownControl) {
+    config.cooldown_s = asInt(cooldownControl.value, asInt(config.cooldown_s, 30));
+  }
+  const minInsideControl = card.querySelector('[data-control="min_inside_ms"]');
+  if (minInsideControl) {
+    config.min_inside_ms = asInt(minInsideControl.value, asInt(config.min_inside_ms, 1000));
+  }
+  const thresholdControl = card.querySelector('[data-control="threshold"]');
+  if (thresholdControl) {
+    const fallback = Number(config.threshold ?? 0.75);
+    config.threshold = asFloat(thresholdControl.value, Number.isFinite(fallback) ? fallback : 0.75);
+  }
   const body = {
     algorithm_id: algorithmId,
     rule_id: existing?.rule_id || base.rule_id || ruleIdForAlgorithm(algorithmId),
@@ -1777,14 +1910,22 @@ async function saveQuickAlgorithmControls() {
   clearMessages();
   const cards = Array.from(algorithmControlsEl?.querySelectorAll(".algorithm-control-item") || []);
   let savedCount = 0;
+  let skippedBlocked = 0;
   for (const card of cards) {
+    const algorithmId = card.dataset.algorithmId || "";
+    const support = supportForAlgorithm(algorithmId);
+    if (isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled()) {
+      skippedBlocked += 1;
+      continue;
+    }
     const { body, existing } = quickRuleBodyFromCard(card);
     if (!body.enabled && !existing) {
       continue;
     }
+    const encodedCameraId = encodeURIComponent(selectedCameraId);
     const path = existing
-      ? `${API}/cameras/${selectedCameraId}/algorithm-rules/${encodeURIComponent(existing.rule_id)}`
-      : `${API}/cameras/${selectedCameraId}/algorithm-rules`;
+      ? `${API}/cameras/${encodedCameraId}/algorithm-rules/${encodeURIComponent(existing.rule_id)}`
+      : `${API}/cameras/${encodedCameraId}/algorithm-rules`;
     await request(path, {
       method: existing ? "PUT" : "POST",
       body: JSON.stringify(body),
@@ -1792,7 +1933,18 @@ async function saveQuickAlgorithmControls() {
     savedCount += 1;
   }
   await selectCamera(selectedCameraId);
-  await applyRuntime({ context: `${savedCount} 个算法配置已保存` });
+  if (savedCount === 0) {
+    showSuccess(
+      skippedBlocked
+        ? `未保存可运行算法；跳过 ${skippedBlocked} 个未支持或已延期算法`
+        : "未保存算法配置"
+    );
+    renderRuntimeApplyResult();
+    return;
+  }
+  await applyRuntime({
+    context: `${savedCount} 个算法配置已保存${skippedBlocked ? `，跳过 ${skippedBlocked} 个未支持或已延期算法` : ""}`,
+  });
 }
 
 /* ---- Event listeners ---- */
@@ -1847,7 +1999,7 @@ document.getElementById("enable-camera").addEventListener("click", () => {
 document.getElementById("disable-camera").addEventListener("click", () => {
   setCameraEnabled(false).catch((e) => showError(e.message));
 });
-document.getElementById("open-rules-panel").addEventListener("click", () => {
+document.getElementById("open-rules-panel")?.addEventListener("click", () => {
   if (!selectedCameraId && !cameraForm.elements.id.value) {
     showError("请先选择或保存摄像头");
     return;
@@ -1856,7 +2008,7 @@ document.getElementById("open-rules-panel").addEventListener("click", () => {
   switchCameraTab("rules");
   ruleForm?.scrollIntoView({ block: "start", behavior: "smooth" });
 });
-document.getElementById("open-recording-settings").addEventListener("click", () => {
+document.getElementById("open-recording-settings")?.addEventListener("click", () => {
   if (!selectedCameraId && !cameraForm.elements.id.value) {
     showError("请先选择或保存摄像头");
     return;
@@ -1935,6 +2087,14 @@ refreshRuntimeOverviewBtn?.addEventListener("click", () => {
   clearMessages();
   loadRuntimeOverview().catch((e) => showError(`运行状态刷新失败：${e.message}`));
 });
+refreshRuntimeConfigBtn?.addEventListener("click", () => {
+  if (!selectedCameraId) {
+    showError("未选择摄像头");
+    return;
+  }
+  clearMessages();
+  loadSelectedRuntimeConfig(selectedCameraId).catch((e) => showError(`生成配置刷新失败：${e.message}`));
+});
 startSingleRuntimeBtn?.addEventListener("click", () => {
   startSingleRuntime().catch((e) => showError(`单路链路启动失败：${e.message}`));
 });
@@ -1950,7 +2110,13 @@ stopDualRuntimeBtn?.addEventListener("click", () => {
 
 document.querySelectorAll("[data-template]").forEach((button) => {
   button.addEventListener("click", () => {
-    const template = templates[button.dataset.template];
+    const algorithmId = button.dataset.template;
+    const support = supportForAlgorithm(algorithmId);
+    if (isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled()) {
+      showError(`${algorithmLabel(algorithmId)} 当前为 ${supportStatusLabel(support.status)}，不能保存或应用`);
+      return;
+    }
+    const template = templates[algorithmId];
     if (template) {
       fillRuleForm(template);
     }

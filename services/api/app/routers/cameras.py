@@ -18,6 +18,11 @@ from fastapi.responses import JSONResponse, Response
 from app.algorithm_ids import RULE_ALGORITHM_IDS, runtime_rule_type_for_algorithm_id
 from app.db import get_conn
 from app.repositories.cameras import CameraRepository
+from app.runtime_config_export import (
+    ExportOptions,
+    ExportValidationError,
+    export_runtime_config,
+)
 from app.schemas.cameras import (
     AlertPolicy,
     CameraConfigResponse,
@@ -212,6 +217,57 @@ def cameras_runtime_sources_apply(
     except OSError as exc:
         return _err_response(503, f"runtime source apply filesystem error: {exc}", request_id)
     return _ok(result, request_id)
+
+
+@router.get("/{camera_id}/runtime-config")
+def cameras_runtime_config_preview(
+    camera_id: str,
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    try:
+        result = export_runtime_config(
+            repo,
+            ExportOptions(camera_id=camera_id, include_disabled=True, dry_run=True),
+        )
+    except ExportValidationError as exc:
+        return _err_response(
+            400,
+            f"runtime config validation failed: {exc.errors}",
+            request_id,
+        )
+
+    runtime_cameras = result.algorithm_runtime_config.get("cameras") or []
+    runtime_camera = next(
+        (
+            row
+            for row in runtime_cameras
+            if str(row.get("camera_id") or "") == str(camera_id)
+        ),
+        None,
+    )
+    summary_cameras = result.export_summary.get("cameras") or []
+    summary_camera = next(
+        (
+            row
+            for row in summary_cameras
+            if str(row.get("camera_id") or "") == str(camera_id)
+        ),
+        None,
+    )
+    cameras_doc = result.cameras_generated_doc.get("cameras") or {}
+    return _ok(
+        {
+            "camera_id": camera_id,
+            "generated_at": result.export_summary.get("generated_at"),
+            "paths": result.paths_dict(),
+            "cameras_midterm_yml": cameras_doc.get(camera_id),
+            "algorithm_runtime_config": runtime_camera,
+            "export_summary": summary_camera,
+            "apply_plan": result.apply_plan,
+        },
+        request_id,
+    )
 
 
 @router.get("/runtime/supervisor")

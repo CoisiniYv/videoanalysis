@@ -18,15 +18,13 @@ def test_operator_keeps_camera_registration_controls() -> None:
     assert "new-camera" in html
     assert "camera-form" in html
     assert "save-camera" in html
-    assert "open-rules-panel" in html
-    assert "open-recording-settings" in html
     assert "apply-runtime" in html
     assert "algorithm-controls" in html
     assert "save-quick-algorithms" in html
-    assert "算法开关" in html
-    assert "录制设置" in html
-    assert "应用运行时" in html
-    assert "算法开关与录像" in html
+    assert "告警算法" in html
+    assert "入侵检测与名单命中" in html
+    assert "应用视频源" in html
+    assert "保存并应用" in html
 
 
 def test_operator_adds_people_face_registration_controls() -> None:
@@ -105,7 +103,7 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
 
     assert '<section class="pane rules">' in html
     assert 'data-tab="rules"' in html
-    assert "算法规则" in html
+    assert "高级规则" in html
     assert "rule-form" in html
     assert 'name="algorithm_id"' in html
     assert 'name="enabled"' in html
@@ -128,12 +126,55 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
     assert "运行时已受控重启" in js
 
 
+def test_operator_primary_algorithm_controls_are_limited_to_live_alarm_paths() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    js = _text(STATIC_ROOT / "operator.js")
+
+    assert 'data-template="behavior.intrusion"' in html
+    assert 'data-template="face.watchlist"' in html
+    assert 'data-template="behavior.loitering"' not in html
+    assert 'data-template="behavior.running"' not in html
+    assert 'data-template="behavior.fall"' not in html
+    assert 'data-template="behavior.crowd_gathering"' not in html
+    assert 'data-template="face.live_search"' not in html
+    assert 'const quickAlgorithmIds = [\n  "behavior.intrusion",\n  "face.watchlist",\n];' in js
+    assert "operatorAlgorithmMeta" in js
+    assert "目标由 face-worker 名单控制" in js
+    assert "按目标名单" in js
+    assert "匹配阈值" in js
+    assert "停留毫秒" in js
+
+
+def test_operator_exposes_algorithm_support_and_runtime_apply_visibility() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    js = _text(STATIC_ROOT / "operator.js")
+    css = _text(STATIC_ROOT / "style.css")
+
+    assert "algorithms/support-matrix" in js
+    assert "supportStatusLabels" in js
+    assert "applyStateLabels" in js
+    assert "algorithmDebugModeEnabled" in js
+    assert "renderRuntimeApplyResult" in js
+    assert "loadSelectedRuntimeConfig" in js
+    assert "generated-runtime-config" in html
+    assert "runtime-apply-result" in html
+    assert "refresh-runtime-config" in html
+    assert "support-badge" in css
+    assert "runtime-warning-list" in css
+    assert "support-config_only" in css
+    assert "support-unsupported" in css
+    assert "support-deferred" in css
+
+
 def test_operator_smoke_prepares_camera_schema() -> None:
     migration = ROOT / "db" / "migrations" / "012_operator_camera_schema_compat.sql"
+    zone_migration = ROOT / "db" / "migrations" / "016_camera_rule_zone_id_text_compat.sql"
     smoke = ROOT / "scripts" / "smoke" / "current" / "check_operator_camera_and_face_registration.sh"
     assert migration.exists()
+    assert zone_migration.exists()
     smoke_text = smoke.read_text(encoding="utf-8")
     assert "012_operator_camera_schema_compat.sql" in smoke_text
+    assert "016_camera_rule_zone_id_text_compat.sql" in smoke_text
     assert "ensuring camera operator schema" in smoke_text
     assert 'OPERATOR_SMOKE_CAMERA_ENABLED:-false' in smoke_text
     assert '"enabled": ${CAMERA_ENABLED}' in smoke_text
@@ -143,6 +184,9 @@ def test_operator_smoke_prepares_camera_schema() -> None:
     assert "cleanup_smoke_camera" in smoke_text
     assert "OPERATOR_SMOKE_KEEP_CAMERA" in smoke_text
     assert "DELETE FROM cameras" in smoke_text
+    zone_text = zone_migration.read_text(encoding="utf-8")
+    assert "ALTER COLUMN zone_id TYPE TEXT" in zone_text
+    assert "camera_rules_zone_id_fkey" in zone_text or "DROP CONSTRAINT IF EXISTS" in zone_text
 
 
 def test_operator_portal_is_served_by_evidence_viewer_8090() -> None:
