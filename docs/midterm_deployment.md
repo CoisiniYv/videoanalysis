@@ -22,9 +22,24 @@ Do not deploy from archived historical compose files.
 ## Start
 
 ```bash
-docker compose -f infra/docker-compose.midterm.yml config
-docker compose -f infra/docker-compose.midterm.yml up -d --build
+bash scripts/midterm_start.sh
 ```
+
+`scripts/midterm_start.sh` is the supported whole-stack startup entrypoint for
+fresh target machines. It validates the compose/env files, prepares required
+runtime directories under `/data/video-analytics`, checks the required model
+assets, builds `face-worker` before the API image that inherits from it, starts
+the stack, then waits for the 8090 portal and API proxy.
+
+After startup, customer/operator management stays on:
+
+```text
+http://127.0.0.1:8090/operator
+```
+
+Use 8090 for cameras, people/face registration, evidence review, storage
+maintenance, and controlled runtime restart/apply actions. Do not expose the
+internal API service on host port 8000.
 
 Lightweight pre-deploy check:
 
@@ -42,6 +57,7 @@ The stack uses these default host ports:
 
 - Redis: `6396`
 - Replay API: `8098`
+- Savant metrics: `18080`
 - Analysis-forwarder metrics: `18081`
 - Operator portal / evidence viewer: `8090`
 - Internal API service: compose network port `8000`; not published to host and

@@ -7,9 +7,16 @@
 项目机器部署使用中期项目版本，不使用历史代号入口。
 
 ```bash
-docker compose -f infra/docker-compose.midterm.yml config
-docker compose -f infra/docker-compose.midterm.yml up -d --build
+bash scripts/midterm_start.sh
 ```
+
+`scripts/midterm_start.sh` 是迁移到新机器后的整体启动入口。它会检查
+Docker/GPU 基础环境，创建必要的 `/data/video-analytics` 运行目录，验证关键模型
+资产，先构建 `face-worker` 基础镜像再构建 API 镜像，并统一使用
+`infra/env/midterm.env` 渲染 compose。
+
+启动完成后，日常管理通过 `http://127.0.0.1:8090/operator` 完成。内部 API 仍只在
+compose 网络内监听 `8000`，不要作为单独客户入口发布。
 
 当前部署入口：
 
@@ -54,6 +61,7 @@ metrics on host port `18081`.
 
 - Redis: `6396`
 - Replay API: `8098`
+- Savant metrics: `18080`
 - Analysis-forwarder metrics: `18081`
 - Operator portal / evidence viewer: `8090`
 - Internal API service: compose-network port `8000` only, reached through 8090
