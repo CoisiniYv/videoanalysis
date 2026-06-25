@@ -2,8 +2,9 @@
 
 更新时间：2026-06-25
 
-状态：P0-P1 已完成。本记录用于固化 8090 操作台算法配置能力的当前边界，
-避免把“已保存到数据库”误认为“运行时已经生效”。
+状态：P0-P1 已完成，`face.watchlist` 已补齐 per-camera 目标名单配置。
+本记录用于固化 8090 操作台算法配置能力的当前边界，避免把“已保存到数据库”
+误认为“运行时已经生效”。
 
 ## 当前结论
 
@@ -18,8 +19,9 @@
 - 运行时 apply/restart 返回本次实际涉及的 camera、source、rule、跳过规则、
   未支持规则和 `runtime_epoch`；
 - 8090 可以查看选中摄像头的 dry-run 生成运行时配置；
-- 未改变 `face-worker` 的 watchlist 匹配语义；
-- 未把 `face.watchlist` 改成 DB/8090 驱动；
+- `face.watchlist` 已支持按摄像头选择目标人员名单；
+- `face-worker` 会优先读取该摄像头启用的 `camera_rules.face.watchlist`；
+- 只有摄像头没有 per-camera watchlist 规则时，才回退到 env 配置；
 - `behavior.intrusion` 仍是当前生产可用的行为告警和证据基线。
 
 ## 2026-06-25 规则区域兼容修复
@@ -74,8 +76,8 @@ browser
 - lab 有 face observations，说明人脸检测/观察路径不是完全缺失；
 - lab 没有由 per-camera `face.watchlist` 规则证明出来的 watchlist 配置。
 
-如果运行数据里看到 `watchlist_hit`，不能据此反推 8090 已经为某个摄像头启用了
-watchlist。当前 watchlist 匹配仍由 `face-worker` 的 compose/env 控制，例如：
+旧运行数据里看到 `watchlist_hit`，不能据此反推 8090 已经为某个摄像头启用了
+watchlist。旧路径由 `face-worker` 的 compose/env 控制，例如：
 
 ```text
 WATCHLIST_MATCH_ENABLED=true
@@ -84,8 +86,14 @@ WATCHLIST_TARGET_EXTERNAL_PERSON_IDS=demo:midterm:reese,demo:midterm:finch
 WATCHLIST_TARGET_NAMES=Reese,Finch
 ```
 
-因此，`face.watchlist` 当前是“可配置/可导出，但不是 per-camera 运行时 gate”。
-真正让 watchlist 从 8090/DB 驱动，需要后续 P3-P4 单独实现。
+现在 `face.watchlist` 已经是 per-camera 运行时 gate：
+
+- 8090 的“名单命中”卡片会列出已注册人员；
+- 每台摄像头的目标名单写入该摄像头的 `camera_rules.config`；
+- 使用字段为 `target_person_ids`、`target_external_person_ids`、`target_names`；
+- `face-worker` 处理 face observation 时按 `camera_id` 读取对应规则；
+- 规则存在但目标名单为空时不会匹配全部人员；
+- 摄像头没有 per-camera watchlist 规则时，保留 env fallback。
 
 ## 算法支持矩阵
 
@@ -117,7 +125,7 @@ GET /api/v1/algorithms/support-matrix
 | `behavior.running` | `unsupported` | rule module 未注册，运行时会跳过 |
 | `behavior.wall_climb_suspicious` | `unsupported` | rule module 未注册，运行时会跳过 |
 | `face.observation` | `config_only` | 人脸观察由 pipeline/env 控制，未使用 per-camera rule gate |
-| `face.watchlist` | `config_only` | watchlist 由 face-worker env 控制，未使用 per-camera camera_rules |
+| `face.watchlist` | `production_ready` | watchlist 由 per-camera camera_rules 控制目标名单和阈值，face-worker 运行时消费 |
 | `face.live_search` | `deferred` | `live_search_hit` 仍是契约/延期状态 |
 
 ## 8090 页面变化
@@ -203,16 +211,17 @@ GET /api/v1/cameras/{camera_id}/runtime-config
 
 ## 本轮没有改变的内容
 
-本轮只做 P0-P1：状态可见性和运行时应用反馈。
+本轮已完成 P0-P1，并补齐 `face.watchlist` 的 per-camera 目标名单控制。
 
 明确没有做：
 
-- 没有把 `face.watchlist` 改成 DB/8090 驱动；
-- 没有改变 `face-worker` 的 env-driven watchlist 匹配；
-- 没有实现 watchlist target membership 的 8090 管理；
+- 没有把 `face.observation` 改成 per-camera gate；
 - 没有把 `face.live_search` 做成真实运行时能力；
 - 没有把所有行为算法都升级成 production-ready；
 - 没有把 API 侧 `/operator/static` 旧页面作为 8090 主入口。
+
+`face-worker` 的 env target 配置仍保留为 fallback：当某台摄像头没有
+per-camera `face.watchlist` 规则时，仍可按部署环境变量匹配历史默认目标。
 
 8090 主入口仍是 `services/evidence-viewer/app/static/operator.js`。API 服务下的
 `services/api/app/static/operator/*` 是内部 API 自带的旧静态页副本，不是
@@ -224,17 +233,19 @@ midterm compose 对外发布的 8090 页面。
 
 ```text
 pytest -q \
+  harness/tests/test_face_worker.py \
+  harness/tests/test_face_match_evidence_policy.py \
+  harness/tests/test_midterm_stream_session_isolation.py \
   harness/tests/test_algorithm_support_matrix.py \
   harness/tests/test_api_runtime_config_export.py \
   harness/tests/test_camera_runtime_apply_service.py \
-  harness/tests/test_operator_face_registration_static.py \
-  harness/tests/test_midterm_deployment_contract.py
+  harness/tests/test_operator_face_registration_static.py
 ```
 
 结果：
 
 ```text
-55 passed
+102 passed
 ```
 
 静态语法检查：
@@ -242,6 +253,7 @@ pytest -q \
 ```text
 node --check services/evidence-viewer/app/static/operator.js
 node --check services/api/app/static/operator/app.js
+python -m py_compile services/face-worker/app/worker.py services/face-worker/app/face_match_event_service.py services/api/app/algorithm_registry.py services/api/app/routers/algorithms.py services/api/app/runtime_config_export.py
 ```
 
 Compose 配置检查：
@@ -281,11 +293,10 @@ apply/restart 和推理/录像链路重启，应在单独运行窗口执行。
 
 ## 后续阶段建议
 
-下一阶段不要和 P0-P1 混在一起。建议单独开 P3-P4 goal：
+下一阶段不要和 P0-P1 混在一起。建议单独开 runtime smoke：
 
 ```text
-实现 DB/runtime-config 驱动的 face.watchlist 控制，让 8090 可以按摄像头启停
-watchlist，维护目标人员集合，并证明 lab 摄像头启用/停用 watchlist 会改变
+证明 lab 摄像头启用/停用 face.watchlist，且选择不同目标人员后，会改变
 watchlist_hit 事件和证据产出。
 ```
 

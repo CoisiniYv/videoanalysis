@@ -93,7 +93,9 @@ const templates = {
     config: {
       threshold: 0.75,
       cooldown_s: 60,
-      camera_scope: [],
+      target_person_ids: [],
+      target_external_person_ids: [],
+      target_names: [],
     },
     evidence_policy: {
       snapshot_required: true,
@@ -139,9 +141,9 @@ const operatorAlgorithmMeta = {
   },
   "face.watchlist": {
     title: "名单命中",
-    subtitle: "目标由 face-worker 名单控制",
-    statusLabel: "按目标名单",
-    statusClass: "support-config_only",
+    subtitle: "按摄像头名单",
+    statusLabel: "运行时生效",
+    statusClass: "support-production_ready",
   },
 };
 
@@ -458,6 +460,72 @@ function evidencePolicyFor(rule, algorithmId) {
     pre_seconds: 5,
     post_seconds: 5,
   };
+}
+
+function listValue(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null || value === "") return [];
+  return [value];
+}
+
+function normalizedTargetPersonIds(config = {}) {
+  return new Set(
+    listValue(config.target_person_ids || config.person_ids)
+      .map((value) => String(value))
+      .filter(Boolean)
+  );
+}
+
+function normalizedTargetExternalIds(config = {}) {
+  return new Set(
+    listValue(config.target_external_person_ids || config.external_person_ids)
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+  );
+}
+
+function normalizedTargetNames(config = {}) {
+  return new Set(
+    listValue(config.target_names || config.names)
+      .map((value) => String(value).trim())
+      .filter(Boolean)
+  );
+}
+
+function isWatchlistPersonSelected(person, config = {}) {
+  const personIds = normalizedTargetPersonIds(config);
+  const externalIds = normalizedTargetExternalIds(config);
+  const targetNames = normalizedTargetNames(config);
+  return personIds.has(String(person.person_id)) ||
+    (person.external_person_id && externalIds.has(String(person.external_person_id))) ||
+    (person.name && targetNames.has(String(person.name)));
+}
+
+function renderWatchlistTargets(config = {}, disabledAttr = "") {
+  const selectedCount = people.filter((person) => isWatchlistPersonSelected(person, config)).length;
+  if (!people.length) {
+    return `<div class="algorithm-watchlist-targets">` +
+      `<div class="algorithm-watchlist-target-header"><span>目标人员</span><strong>0</strong></div>` +
+      `<div class="muted">暂无已注册人员。</div>` +
+    `</div>`;
+  }
+  const rows = people.map((person) => {
+    const checked = isWatchlistPersonSelected(person, config) ? " checked" : "";
+    const disabled = disabledAttr ? " disabled" : "";
+    const externalId = person.external_person_id || "";
+    return `<label class="watchlist-target-item">` +
+      `<input data-control="target_person" type="checkbox"` +
+        ` data-person-id="${escapeHtml(person.person_id)}"` +
+        ` data-external-person-id="${escapeHtml(externalId)}"` +
+        ` data-person-name="${escapeHtml(person.name || "")}"${checked}${disabled} />` +
+      `<span><strong>${escapeHtml(person.name || "未命名人员")}</strong>` +
+      `<small>${escapeHtml(externalId || `ID ${person.person_id}`)}</small></span>` +
+    `</label>`;
+  }).join("");
+  return `<div class="algorithm-watchlist-targets">` +
+    `<div class="algorithm-watchlist-target-header"><span>目标人员</span><strong>已选 ${selectedCount}</strong></div>` +
+    `<div class="watchlist-target-list">${rows}</div>` +
+  `</div>`;
 }
 
 function defaultRuleForAlgorithm(algorithmId) {
@@ -871,6 +939,9 @@ function renderQuickAlgorithmControls() {
       ? `<label class="algorithm-field">匹配阈值<input data-control="threshold" type="number" min="0" max="1" step="0.01" value="${Number(config.threshold ?? 0.75)}"${disabledAttr} /></label>` +
         `<label class="algorithm-field">冷却秒数<input data-control="cooldown_s" type="number" min="0" value="${Number(config.cooldown_s ?? 60)}"${disabledAttr} /></label>`
       : "";
+    const watchlistTargetsHtml = algorithmId === "face.watchlist"
+      ? renderWatchlistTargets(config, disabledAttr)
+      : "";
     row.innerHTML =
       `<div class="algorithm-control-header">` +
         `<div class="algorithm-control-main">` +
@@ -892,7 +963,8 @@ function renderQuickAlgorithmControls() {
         watchlistControls +
         `<label class="algorithm-field">前录秒数<input data-control="pre_seconds" type="number" min="0" max="300" value="${Number(policy.pre_seconds ?? 5)}"${disabledAttr} /></label>` +
         `<label class="algorithm-field">后录秒数<input data-control="post_seconds" type="number" min="0" max="300" value="${Number(policy.post_seconds ?? 5)}"${disabledAttr} /></label>` +
-      `</div>`;
+      `</div>` +
+      watchlistTargetsHtml;
     row.querySelector('[data-action="edit-quick-rule"]').addEventListener("click", () => {
       if (blocked) {
         showError(`${algorithmLabel(algorithmId)} 当前为 ${supportStatusLabel(supportStatus)}，不能保存或应用`);
@@ -1284,6 +1356,7 @@ async function loadCameras() {
   if (!algorithms.length) {
     await loadAlgorithms();
   }
+  await loadWatchlistTargetPeople();
   const data = await request(`${API}/cameras`);
   cameras = Array.isArray(data) ? data : (data.cameras || []);
   if (!selectedCameraId && cameras[0]) selectedCameraId = cameras[0].id;
@@ -1314,6 +1387,16 @@ async function loadAlgorithms() {
   }
 }
 
+async function loadWatchlistTargetPeople() {
+  try {
+    const data = await request(`${API}/people?limit=200`);
+    people = data.people || [];
+    updateSummary();
+  } catch (_err) {
+    people = people || [];
+  }
+}
+
 async function loadPeople() {
   clearMessages();
   const params = new URLSearchParams();
@@ -1339,6 +1422,7 @@ async function loadPeople() {
     previewDeleteSelectedPersonBtn.disabled = !selectedPersonId;
   }
   updateSummary();
+  renderQuickAlgorithmControls();
   setStatus("人员就绪");
 }
 
@@ -1864,6 +1948,24 @@ function quickRuleBodyFromCard(card) {
   if (thresholdControl) {
     const fallback = Number(config.threshold ?? 0.75);
     config.threshold = asFloat(thresholdControl.value, Number.isFinite(fallback) ? fallback : 0.75);
+  }
+  const targetControls = Array.from(card.querySelectorAll('[data-control="target_person"]'));
+  if (targetControls.length > 0) {
+    const selectedTargets = targetControls.filter((control) => control.checked);
+    config.target_person_ids = selectedTargets
+      .map((control) => Number.parseInt(control.dataset.personId || "", 10))
+      .filter((value) => Number.isFinite(value));
+    config.target_external_person_ids = selectedTargets
+      .map((control) => String(control.dataset.externalPersonId || "").trim())
+      .filter(Boolean);
+    config.target_names = selectedTargets
+      .map((control) => String(control.dataset.personName || "").trim())
+      .filter(Boolean);
+    delete config.camera_scope;
+    delete config.person_ids;
+    delete config.external_person_ids;
+    delete config.names;
+    delete config.targets;
   }
   const body = {
     algorithm_id: algorithmId,

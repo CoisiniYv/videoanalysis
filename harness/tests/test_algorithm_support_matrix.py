@@ -14,7 +14,10 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
     sys.modules.pop(_mod, None)
 
 from app.algorithm_registry import runtime_apply_state_for_algorithm  # noqa: E402
-from app.routers.algorithms import algorithms_support_matrix  # noqa: E402
+from app.routers.algorithms import (  # noqa: E402
+    _merge_and_validate_config,
+    algorithms_support_matrix,
+)
 
 
 def test_support_matrix_covers_8090_operator_algorithms() -> None:
@@ -62,9 +65,10 @@ def test_support_matrix_marks_runtime_semantics_explicitly() -> None:
     assert matrix["behavior.running"]["status"] == "unsupported"
     assert matrix["behavior.running"]["configurable"] is False
 
-    assert matrix["face.watchlist"]["status"] == "config_only"
-    assert matrix["face.watchlist"]["per_camera_gate"] is False
-    assert "face-worker env" in matrix["face.watchlist"]["status_reason"]
+    assert matrix["face.watchlist"]["status"] == "production_ready"
+    assert matrix["face.watchlist"]["per_camera_gate"] is True
+    assert matrix["face.watchlist"]["production_ready"] is True
+    assert "camera_rules" in matrix["face.watchlist"]["status_reason"]
 
     assert matrix["face.live_search"]["status"] == "deferred"
     assert matrix["face.live_search"]["requires_runtime_apply"] is False
@@ -76,8 +80,8 @@ def test_runtime_apply_state_uses_support_matrix() -> None:
     assert intrusion["runtime_consumed"] is True
 
     watchlist = runtime_apply_state_for_algorithm("face.watchlist")
-    assert watchlist["runtime_apply_state"] == "skipped"
-    assert watchlist["runtime_skip_reason"] == "config_only_not_runtime_gate"
+    assert watchlist["runtime_apply_state"] == "applied"
+    assert watchlist["runtime_consumed"] is True
 
     running = runtime_apply_state_for_algorithm("behavior.running")
     assert running["runtime_apply_state"] == "unsupported"
@@ -89,3 +93,24 @@ def test_runtime_apply_state_uses_support_matrix() -> None:
     )
     assert disabled["runtime_apply_state"] == "skipped"
     assert disabled["runtime_skip_reason"] == "rule_disabled"
+
+
+def test_watchlist_config_empty_target_lists_override_legacy_fields() -> None:
+    merged, error = _merge_and_validate_config(
+        "face.watchlist",
+        {
+            "threshold": 0.8,
+            "target_person_ids": [],
+            "target_external_person_ids": [],
+            "target_names": [],
+            "person_ids": [10],
+            "external_person_ids": ["demo:old"],
+            "names": ["Old Target"],
+        },
+    )
+
+    assert error == ""
+    assert merged is not None
+    assert merged["target_person_ids"] == []
+    assert merged["target_external_person_ids"] == []
+    assert merged["target_names"] == []

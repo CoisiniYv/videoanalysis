@@ -171,12 +171,13 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert result["camera_ids"] == ["primary", "lab"]
     assert result["source_ids"] == ["primary_rtsp", "source_lab"]
     assert [rule["rule_id"] for rule in result["applied_rules"]] == [
-        "intrusion_full_frame"
+        "intrusion_full_frame",
+        "watchlist_config",
     ]
     assert {
         rule["rule_id"]: rule["runtime_skip_reason"]
         for rule in result["skipped_rules"]
-    } == {"watchlist_config": "config_only_not_runtime_gate"}
+    } == {}
     assert [
         rule["rule_id"] for rule in result["unsupported_rules"]
     ] == ["running_unsupported"]
@@ -186,8 +187,11 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     primary_apply = next(
         camera for camera in result["applied_cameras"] if camera["camera_id"] == "primary"
     )
-    assert primary_apply["applied_rule_ids"] == ["intrusion_full_frame"]
-    assert primary_apply["skipped_rule_ids"] == ["watchlist_config"]
+    assert primary_apply["applied_rule_ids"] == [
+        "intrusion_full_frame",
+        "watchlist_config",
+    ]
+    assert primary_apply["skipped_rule_ids"] == []
     assert primary_apply["unsupported_rule_ids"] == ["running_unsupported"]
     assert result["dynamic_sources_started"] == ["source_lab"]
     assert result["compose_sources_started"] == ["primary_rtsp"]

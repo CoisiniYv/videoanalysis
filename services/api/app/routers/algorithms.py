@@ -144,6 +144,85 @@ def _validate_zone_line(
     return ""
 
 
+def _list_value(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _config_value(config: Dict[str, Any], primary: str, legacy: str) -> Any:
+    if primary in config:
+        return config.get(primary)
+    return config.get(legacy)
+
+
+def _normalize_watchlist_target_config(
+    config: Dict[str, Any],
+) -> tuple[Dict[str, Any] | None, str]:
+    normalized = dict(config or {})
+    person_ids: list[int] = []
+    for value in _list_value(
+        _config_value(normalized, "target_person_ids", "person_ids")
+    ):
+        try:
+            person_ids.append(int(value))
+        except (TypeError, ValueError):
+            return None, "config.target_person_ids must be a list of integers"
+
+    external_ids = []
+    for value in _list_value(
+        _config_value(
+            normalized,
+            "target_external_person_ids",
+            "external_person_ids",
+        )
+    ):
+        text = str(value).strip()
+        if text:
+            external_ids.append(text)
+
+    target_names = []
+    for value in _list_value(_config_value(normalized, "target_names", "names")):
+        text = str(value).strip()
+        if text:
+            target_names.append(text)
+
+    target_objects: list[dict[str, Any]] = []
+    for target in _list_value(normalized.get("targets")):
+        if target in (None, ""):
+            continue
+        if not isinstance(target, dict):
+            return None, "config.targets must be a list of objects"
+        target_objects.append(target)
+        if target.get("person_id") is not None:
+            try:
+                person_ids.append(int(target["person_id"]))
+            except (TypeError, ValueError):
+                return None, "config.targets[].person_id must be an integer"
+        if target.get("external_person_id"):
+            external_ids.append(str(target["external_person_id"]).strip())
+        if target.get("name"):
+            target_names.append(str(target["name"]).strip())
+
+    threshold = normalized.get("threshold", normalized.get("min_similarity", 0.75))
+    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+        return None, "config.threshold must be numeric"
+    if threshold < 0 or threshold > 1:
+        return None, "config.threshold must be between 0 and 1"
+
+    normalized["threshold"] = float(threshold)
+    normalized["target_person_ids"] = list(dict.fromkeys(person_ids))
+    normalized["target_external_person_ids"] = list(dict.fromkeys(external_ids))
+    normalized["target_names"] = list(dict.fromkeys(target_names))
+    if target_objects:
+        normalized["targets"] = target_objects
+    return normalized, ""
+
+
 def _merge_and_validate_config(
     algorithm_id: str,
     config: Dict[str, Any],
@@ -181,6 +260,9 @@ def _merge_and_validate_config(
                 return None, f"config.{field} must be an integer"
             if "minimum" in spec and value < spec["minimum"]:
                 return None, f"config.{field} must be >= {spec['minimum']}"
+
+    if normalized == "face.watchlist":
+        return _normalize_watchlist_target_config(merged)
 
     return merged, ""
 

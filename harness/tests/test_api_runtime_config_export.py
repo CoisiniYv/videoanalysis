@@ -71,6 +71,23 @@ class _Repo:
                         "clip_required": True,
                     },
                     "evidence_policy": {},
+                },
+                {
+                    "id": 2,
+                    "rule_id": "rule_watchlist",
+                    "algorithm_id": "face.watchlist",
+                    "rule_type": "face.watchlist",
+                    "enabled": True,
+                    "zone_id": None,
+                    "line_id": None,
+                    "config": {
+                        "threshold": 0.82,
+                        "cooldown_s": 60,
+                        "target_person_ids": [10, 11],
+                        "target_external_person_ids": ["emp10", "emp11"],
+                        "target_names": ["Alice", "Bob"],
+                    },
+                    "evidence_policy": {"pre_seconds": 3, "post_seconds": 7},
                 }
             ]
         }
@@ -98,6 +115,16 @@ def test_runtime_export_fills_effective_evidence_policy(tmp_path: Path) -> None:
     assert runtime_rule["runtime_apply_state"] == "applied"
     assert runtime_rule["runtime_consumed"] is True
     assert runtime_rule["runtime_skip_reason"] == ""
+
+    watchlist_rule = next(
+        row
+        for row in result.algorithm_runtime_config["cameras"][0]["rules"]
+        if row["algorithm_id"] == "face.watchlist"
+    )
+    assert watchlist_rule["runtime_apply_state"] == "applied"
+    assert watchlist_rule["config"]["target_person_ids"] == [10, 11]
+    assert watchlist_rule["config"]["target_external_person_ids"] == ["emp10", "emp11"]
+    assert watchlist_rule["evidence_policy"]["pre_seconds"] == 3
 
 
 def test_camera_runtime_config_preview_endpoint_returns_selected_camera() -> None:

@@ -777,6 +777,58 @@ p {
   min-width: 0;
 }
 
+.algorithm-watchlist-targets {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.algorithm-watchlist-target-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.watchlist-target-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.watchlist-target-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.watchlist-target-item span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.watchlist-target-item strong,
+.watchlist-target-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watchlist-target-item small {
+  color: var(--muted);
+}
+
 .support-badge,
 .apply-badge {
   display: inline-flex;
@@ -1448,6 +1500,10 @@ textarea[readonly] {
 
   .algorithm-control-fields {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .watchlist-target-list {
+    grid-template-columns: 1fr;
   }
 }
 

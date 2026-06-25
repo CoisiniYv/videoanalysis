@@ -20,8 +20,8 @@ Operators should use only the 8090 portal for:
 - evidence review, deletion, and storage maintenance;
 - controlled runtime apply/restart/recovery.
 
-This document is an execution plan, not an implementation record. It exists so
-the follow-up goal can implement the control-plane closure in scoped phases.
+This document is both the execution plan and the current control-plane record.
+Implementation notes below mark which parts have already landed.
 
 ## 2. Current Finding
 
@@ -52,10 +52,19 @@ WATCHLIST_TARGET_EXTERNAL_PERSON_IDS=demo:midterm:reese,demo:midterm:finch
 WATCHLIST_TARGET_NAMES=Reese,Finch
 ```
 
-This means a `watchlist_hit` can exist in runtime data without proving that the
-8090 per-camera `face.watchlist` rule is active. In the current implementation,
-8090 can save/export some face algorithm rules, but face-worker does not consume
-those rules as the authoritative runtime gate.
+This meant a `watchlist_hit` could exist in runtime data without proving that
+the 8090 per-camera `face.watchlist` rule was active.
+
+Implementation update on 2026-06-25:
+
+- 8090 now stores per-camera `face.watchlist` targets in `camera_rules.config`;
+- the saved fields are `target_person_ids`, `target_external_person_ids`, and
+  `target_names`;
+- `face-worker` now resolves enabled `face.watchlist` camera rules by
+  observation `camera_id`;
+- a configured rule with an empty target list emits no hits and does not fall
+  back to "all people";
+- env targets remain only as fallback for cameras with no per-camera rule.
 
 ## 3. Target Contract
 
@@ -95,13 +104,13 @@ Minimum fields per algorithm:
   "display_name": "名单命中",
   "category": "face",
   "configurable": true,
-  "per_camera_gate": false,
+  "per_camera_gate": true,
   "runtime_detecting": true,
   "event_enabled": true,
   "evidence_enabled": true,
-  "production_ready": false,
-  "status": "config_only",
-  "status_reason": "watchlist matching is still controlled by face-worker env, not camera_rules",
+  "production_ready": true,
+  "status": "production_ready",
+  "status_reason": "face-worker resolves enabled per-camera face.watchlist rules from camera_rules",
   "requires_runtime_apply": true
 }
 ```
@@ -136,7 +145,8 @@ Implementation requirements:
 - update 8090 algorithm cards to show support state and reason;
 - disable save/apply for `unsupported` algorithms unless an explicit debug mode
   is enabled;
-- label `face.watchlist` as not yet a per-camera runtime gate;
+- label `face.watchlist` as a per-camera runtime gate with target-person
+  selection;
 - label `face.live_search` as deferred until the runtime path exists;
 - keep `behavior.intrusion` marked as the current production-ready baseline.
 
@@ -199,15 +209,20 @@ Acceptance:
 
 Goal: make face-related operator controls on 8090 authoritative.
 
+Status: `face.watchlist` per-camera target membership is implemented.
+`face.observation` remains pipeline/env controlled, and `face.live_search`
+remains deferred.
+
 Implementation requirements:
 
 - `face.observation` per-camera enabled state gates face observation export for
   that camera, or the UI marks it as a pipeline-level control instead of a
   per-camera gate;
 - `face.watchlist` rule config is read by face-worker from DB or from a runtime
-  config generated from DB;
+  config generated from DB; **implemented from DB camera_rules**
 - watchlist threshold, target set, camera scope, cooldown, and evidence policy
-  come from 8090-managed state;
+  come from 8090-managed state; **implemented for threshold, target set, and
+  evidence policy**
 - global env remains only a deployment default or emergency override, not the
   authoritative operator setting;
 - face-worker logs and metrics report the active rule source:
@@ -235,8 +250,9 @@ Implementation requirements:
 
 - 8090 can create/update people and gallery embeddings through the existing
   registration flow;
-- 8090 can choose which people are watchlist targets;
-- target membership is stored in DB and auditable;
+- 8090 can choose which people are watchlist targets; **implemented per camera**
+- target membership is stored in DB and auditable; **implemented in
+  camera_rules.config**
 - face-worker refreshes target membership without requiring an image rebuild;
 - stale/deleted people are not matched as active targets.
 
@@ -356,18 +372,18 @@ This spec does not require:
 ## 10. Handoff For Goal Execution
 
 Use this spec as the starting contract for the follow-up goal. The first goal
-should implement P0 and P1 before changing face-worker matching semantics.
+implemented P0 and P1 before changing face-worker matching semantics.
 
-Recommended first goal boundary:
+Completed first goal boundary:
 
 ```text
 Implement the 8090 algorithm support matrix and runtime apply visibility from
-specs/23_midterm_8090_operator_algorithm_control_plane.md P0-P1. Do not change
-watchlist matching behavior yet. Preserve the current intrusion evidence path
-and validate with targeted pytest, node checks, compose config, and 8090 health.
+specs/23_midterm_8090_operator_algorithm_control_plane.md P0-P1. Preserve the
+current intrusion evidence path and validate with targeted pytest, node checks,
+compose config, and 8090 health.
 ```
 
-Recommended second goal boundary:
+Current second goal boundary:
 
 ```text
 Implement DB/runtime-config driven face.watchlist controls from

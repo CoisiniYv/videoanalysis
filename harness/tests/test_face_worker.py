@@ -19,7 +19,12 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
 
 from app.config import Config, load_config
 from app.redis_consumer import RedisStreamConsumer
-from app.worker import _parse_observation, _process_batch, _validate_embedding
+from app.worker import (
+    WatchlistMatchEmitter,
+    _parse_observation,
+    _process_batch,
+    _validate_embedding,
+)
 
 
 # ── Config tests ─────────────────────────────────────────────────────────────
@@ -142,6 +147,121 @@ def _make_obs_dict(**kwargs) -> dict:
     return defaults
 
 
+class _FakeWatchlistCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self.rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query, params=None):
+        params = params or {}
+        if "FROM camera_rules" in query:
+            self.rows = self.conn.rules_by_camera.get(params.get("camera_id"), [])
+            return
+        if "FROM persons" in query:
+            person_ids = set(int(value) for value in params.get("person_ids", []))
+            external_ids = set(params.get("external_ids", []))
+            names = set(params.get("names", []))
+            out = []
+            for row in self.conn.person_rows:
+                if not row.get("is_active", True):
+                    continue
+                matches_id = int(row["id"]) in person_ids
+                matches_external = str(row.get("external_person_id") or "").lower() in external_ids
+                matches_name = str(row.get("name") or "").lower() in names
+                if matches_id or matches_external or matches_name:
+                    out.append(row)
+            self.rows = out
+            return
+        self.rows = []
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class _FakeWatchlistConn:
+    def __init__(self, *, rules_by_camera, person_rows):
+        self.rules_by_camera = rules_by_camera
+        self.person_rows = person_rows
+
+    def cursor(self, *_, **__):
+        return _FakeWatchlistCursor(self)
+
+
+class _FakeGalleryStore:
+    def __init__(self):
+        self.calls = []
+
+    def search_gallery(self, _embedding, *, top_k, min_similarity, person_ids):
+        self.calls.append(
+            {
+                "top_k": top_k,
+                "min_similarity": min_similarity,
+                "person_ids": list(person_ids or []),
+            }
+        )
+        rows = []
+        for person_id in person_ids or []:
+            rows.append(
+                {
+                    "id": person_id * 10,
+                    "person_id": person_id,
+                    "external_person_id": f"p{person_id}",
+                    "person_name": f"Person {person_id}",
+                    "similarity": 0.95,
+                }
+            )
+        return rows
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.events = []
+
+    def xadd(self, stream, fields, maxlen=None, approximate=True):
+        self.events.append({"stream": stream, "fields": fields})
+        return b"1-0"
+
+
+def _make_watchlist_cfg(**overrides):
+    defaults = {
+        "redis_url": "redis://redis:6379/0",
+        "database_url": "postgresql://video:video@postgres:5432/video_analytics",
+        "face_observation_stream": "security.face_observations",
+        "consumer_group": "face-workers",
+        "consumer_name": "face-worker-1",
+        "poll_timeout_ms": 5000,
+        "batch_size": 10,
+        "consumer_start_id": "0",
+        "watchlist_match_enabled": True,
+        "watchlist_event_stream": "security.events",
+        "watchlist_threshold": 0.60,
+        "watchlist_top_k": 5,
+        "watchlist_target_external_person_ids": (),
+        "watchlist_target_names": (),
+        "watchlist_target_refresh_seconds": 30,
+    }
+    defaults.update(overrides)
+    return Config(**defaults)
+
+
+def _make_watchlist_emitter(cfg, conn, store, redis):
+    emitter = WatchlistMatchEmitter.__new__(WatchlistMatchEmitter)
+    emitter._cfg = cfg
+    emitter._conn = conn
+    emitter._redis = redis
+    emitter._store = store
+    emitter._rule_cache = {}
+    emitter._env_target_person_ids = None
+    emitter._last_env_target_refresh = 0.0
+    return emitter
+
+
 class TestObservationParsing:
     def test_valid_observation_parsed(self):
         obs_dict = _make_obs_dict()
@@ -226,6 +346,101 @@ class TestObservationParsing:
         result = _parse_observation(fields)
         assert "person_bbox" in result
         assert result["person_bbox"] is None
+
+
+class TestWatchlistCameraRules:
+    def test_emitter_uses_camera_specific_watchlist_targets(self):
+        conn = _FakeWatchlistConn(
+            rules_by_camera={
+                "cam-a": [
+                    {
+                        "rule_id": "rule_watchlist_a",
+                        "config": {
+                            "threshold": 0.81,
+                            "top_k": 3,
+                            "target_person_ids": [7],
+                        },
+                        "evidence_policy": {"pre_seconds": 2, "post_seconds": 6},
+                    }
+                ],
+                "cam-b": [
+                    {
+                        "rule_id": "rule_watchlist_b",
+                        "config": {
+                            "threshold": 0.72,
+                            "target_external_person_ids": ["p8"],
+                        },
+                        "evidence_policy": {},
+                    }
+                ],
+            },
+            person_rows=[
+                {"id": 7, "name": "Person 7", "external_person_id": "p7", "is_active": True},
+                {"id": 8, "name": "Person 8", "external_person_id": "p8", "is_active": True},
+            ],
+        )
+        store = _FakeGalleryStore()
+        redis = _FakeRedis()
+        emitter = _make_watchlist_emitter(
+            _make_watchlist_cfg(),
+            conn,
+            store,
+            redis,
+        )
+
+        assert emitter.emit_for_observation(_make_obs_dict(camera_id="cam-a")) == 1
+        assert emitter.emit_for_observation(_make_obs_dict(camera_id="cam-b")) == 1
+
+        assert store.calls[0]["person_ids"] == [7]
+        assert store.calls[0]["min_similarity"] == 0.81
+        assert store.calls[0]["top_k"] == 3
+        assert store.calls[1]["person_ids"] == [8]
+        assert store.calls[1]["min_similarity"] == 0.72
+
+        first_event = json.loads(redis.events[0]["fields"]["data"])
+        assert first_event["rule_id"] == "rule_watchlist_a"
+        assert first_event["evidence_policy"]["pre_seconds"] == 2
+        assert first_event["payload"]["watchlist"]["match_source"] == "db_camera_rule"
+        assert first_event["payload"]["watchlist"]["target_person_ids"] == [7]
+
+    def test_empty_camera_watchlist_targets_do_not_match_all_people(self):
+        conn = _FakeWatchlistConn(
+            rules_by_camera={
+                "cam-a": [
+                    {
+                        "rule_id": "rule_watchlist_a",
+                        "config": {
+                            "threshold": 0.81,
+                            "target_person_ids": [],
+                            "target_external_person_ids": [],
+                            "target_names": [],
+                            "person_ids": [7],
+                            "external_person_ids": ["p7"],
+                            "names": ["Person 7"],
+                        },
+                        "evidence_policy": {},
+                    }
+                ],
+            },
+            person_rows=[
+                {"id": 7, "name": "Person 7", "external_person_id": "p7", "is_active": True},
+            ],
+        )
+        store = _FakeGalleryStore()
+        redis = _FakeRedis()
+        emitter = _make_watchlist_emitter(
+            _make_watchlist_cfg(
+                watchlist_target_external_person_ids=("p7",),
+                watchlist_target_names=("Person 7",),
+            ),
+            conn,
+            store,
+            redis,
+        )
+
+        assert emitter.emit_for_observation(_make_obs_dict(camera_id="cam-a")) == 0
+        assert store.calls == []
+        assert redis.events == []
 
 
 # ── Embedding validation tests — basic ───────────────────────────────────────

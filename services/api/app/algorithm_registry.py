@@ -157,7 +157,11 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
             "watchlist_enabled": True,
             "live_search_enabled": True,
             "min_similarity": 0.75,
+            "threshold": 0.75,
             "cooldown_s": 60,
+            "target_person_ids": [],
+            "target_external_person_ids": [],
+            "target_names": [],
         },
         evidence_policy=_policy(snapshot=True, clip=True),
     ),
@@ -329,15 +333,15 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         display_name="Watchlist Hit",
         category="face",
         configurable=True,
-        per_camera_gate=False,
+        per_camera_gate=True,
         runtime_detecting=True,
         event_enabled=True,
         evidence_enabled=True,
-        production_ready=False,
-        status="config_only",
+        production_ready=True,
+        status="production_ready",
         status_reason=(
-            "watchlist matching is still controlled by face-worker env, not "
-            "per-camera camera_rules"
+            "face-worker resolves enabled per-camera face.watchlist rules from "
+            "camera_rules and searches only the configured target persons"
         ),
     ),
     "face.live_search": _support(

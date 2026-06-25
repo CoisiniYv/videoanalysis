@@ -129,6 +129,7 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
 def test_operator_primary_algorithm_controls_are_limited_to_live_alarm_paths() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "operator.js")
+    css = _text(STATIC_ROOT / "style.css")
 
     assert 'data-template="behavior.intrusion"' in html
     assert 'data-template="face.watchlist"' in html
@@ -139,8 +140,11 @@ def test_operator_primary_algorithm_controls_are_limited_to_live_alarm_paths() -
     assert 'data-template="face.live_search"' not in html
     assert 'const quickAlgorithmIds = [\n  "behavior.intrusion",\n  "face.watchlist",\n];' in js
     assert "operatorAlgorithmMeta" in js
-    assert "目标由 face-worker 名单控制" in js
-    assert "按目标名单" in js
+    assert "按摄像头名单" in js
+    assert "target_person_ids" in js
+    assert "target_external_person_ids" in js
+    assert "target_names" in js
+    assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js
 

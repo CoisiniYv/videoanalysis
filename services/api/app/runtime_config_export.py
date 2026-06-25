@@ -364,11 +364,13 @@ def _validate_rule(
         elif line_id not in line_zone_ids:
             _error(errors, path, f"config.line_id references unknown line zone: {line_id}")
     if algorithm_id == "face.watchlist":
-        threshold = config.get("threshold")
+        threshold = config.get("threshold", config.get("min_similarity", 0.75))
         if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
             _error(errors, path, "config.threshold must be numeric")
         elif threshold < 0 or threshold > 1:
             _error(errors, path, "config.threshold must be between 0 and 1")
+        else:
+            config["threshold"] = float(threshold)
 
 
 def _normalize_alert_policy(value: Any) -> dict[str, Any]:

@@ -138,6 +138,13 @@ def build_watchlist_hit_event(
     gallery_match: dict[str, Any],
     threshold: float,
     severity: str = "high",
+    rule_id: str = "watchlist_hit_mvp",
+    rule_name: str = "watchlist_hit_mvp",
+    match_source: str = "env_fallback",
+    target_person_ids: list[int] | tuple[int, ...] | None = None,
+    target_external_person_ids: list[str] | tuple[str, ...] | None = None,
+    target_names: list[str] | tuple[str, ...] | None = None,
+    evidence_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a unified SecurityEvent dict for one watchlist hit."""
     timestamp_ms = int(observation.get("timestamp_ms") or 0)
@@ -154,8 +161,24 @@ def build_watchlist_hit_event(
     frame_uuid = source_media.get("frame_uuid")
     keyframe_uuid = source_media.get("keyframe_uuid")
     previous_keyframe_uuid = source_media.get("previous_keyframe_uuid")
+    effective_policy = {
+        **DEFAULT_EVIDENCE_POLICY,
+        **(evidence_policy or {}),
+    }
+    target_person_id_list = [int(value) for value in (target_person_ids or [])]
+    target_external_id_list = [str(value) for value in (target_external_person_ids or [])]
+    target_name_list = [str(value) for value in (target_names or [])]
 
     payload = {
+        "watchlist": {
+            "rule_id": rule_id,
+            "rule_name": rule_name,
+            "match_source": match_source,
+            "threshold": float(threshold),
+            "target_person_ids": target_person_id_list,
+            "target_external_person_ids": target_external_id_list,
+            "target_names": target_name_list,
+        },
         "matched_person": {
             "person_id": person_id,
             "external_person_id": gallery_match.get("external_person_id"),
@@ -204,8 +227,8 @@ def build_watchlist_hit_event(
             "annotated_clip_path": None,
             "metadata_path": None,
             "recording_strategy": "reserved",
-            "pre_seconds": DEFAULT_EVIDENCE_POLICY["pre_seconds"],
-            "post_seconds": DEFAULT_EVIDENCE_POLICY["post_seconds"],
+            "pre_seconds": effective_policy["pre_seconds"],
+            "post_seconds": effective_policy["post_seconds"],
             "frame_uuid": frame_uuid,
             "keyframe_uuid": keyframe_uuid,
             "previous_keyframe_uuid": previous_keyframe_uuid,
@@ -242,11 +265,12 @@ def build_watchlist_hit_event(
         "confidence": similarity,
         "severity": severity,
         "zone": "",
-        "rule_name": "watchlist_hit_mvp",
+        "rule_id": rule_id,
+        "rule_name": rule_name,
         "description": f"Watchlist hit for {person_name}".strip(),
         "snapshot_required": True,
         "clip_required": True,
-        "evidence_policy": dict(DEFAULT_EVIDENCE_POLICY),
+        "evidence_policy": dict(effective_policy),
         "payload": payload,
     }
 
