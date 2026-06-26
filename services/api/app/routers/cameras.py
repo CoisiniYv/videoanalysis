@@ -41,8 +41,8 @@ from app.schemas.cameras import (
 from app.services.runtime_apply import (
     RuntimeApplyError,
     apply_camera_runtime,
-    converge_camera_sources,
     restart_camera_runtime,
+    sync_camera_runtime_config_and_sources,
 )
 from app.services.savant_supervisor import (
     SavantSupervisorError,
@@ -93,13 +93,31 @@ def _err_response(status_code: int, message: str, request_id: str) -> JSONRespon
 def _runtime_source_apply_payload(repo: CameraRepository) -> dict[str, Any]:
     if not _env_bool("CAMERA_RUNTIME_APPLY_ENABLED", default=False):
         return {"ok": False, "skipped": "camera runtime control is disabled"}
-    cameras = repo.list_cameras()
+    cameras, export_doc = _runtime_config_docs(repo)
     try:
-        return {"ok": True, "result": converge_camera_sources(cameras=cameras)}
+        return {
+            "ok": True,
+            "result": sync_camera_runtime_config_and_sources(
+                export_doc=export_doc,
+                cameras=cameras,
+            ),
+        }
     except RuntimeApplyError as exc:
         return {"ok": False, "error": str(exc)}
     except OSError as exc:
         return {"ok": False, "error": f"runtime source apply filesystem error: {exc}"}
+
+
+def _runtime_config_docs(
+    repo: CameraRepository,
+    *,
+    include_disabled: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
+    camera_ids = [c["id"] for c in cameras]
+    zones_by_camera = repo.list_zones_for_cameras(camera_ids)
+    rules_by_camera = repo.list_rules_for_cameras(camera_ids)
+    return cameras, build_export_doc(cameras, zones_by_camera, rules_by_camera)
 
 
 def _camera_response_with_runtime(row: dict[str, Any], runtime_payload: dict[str, Any]) -> dict[str, Any]:
@@ -209,9 +227,12 @@ def cameras_runtime_sources_apply(
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
 ):
-    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
+    cameras, export_doc = _runtime_config_docs(repo, include_disabled=include_disabled)
     try:
-        result = converge_camera_sources(cameras=cameras)
+        result = sync_camera_runtime_config_and_sources(
+            export_doc=export_doc,
+            cameras=cameras,
+        )
     except RuntimeApplyError as exc:
         return _err_response(503, str(exc), request_id)
     except OSError as exc:

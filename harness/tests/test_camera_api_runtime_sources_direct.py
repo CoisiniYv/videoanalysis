@@ -39,6 +39,12 @@ class FakeRepo:
             rows = [row for row in rows if row["enabled"] is enabled]
         return sorted(rows, key=lambda row: row["id"])
 
+    def list_zones_for_cameras(self, camera_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        return {camera_id: [] for camera_id in camera_ids}
+
+    def list_rules_for_cameras(self, camera_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        return {camera_id: [] for camera_id in camera_ids}
+
     def create_camera(self, **kwargs: Any) -> dict[str, Any]:
         row = {
             "id": kwargs["camera_id"],
@@ -96,18 +102,22 @@ def _create_body(source_id: str = "source_cam_001") -> CameraCreate:
     )
 
 
-def test_camera_create_update_enable_disable_trigger_source_only_convergence(
+def test_camera_create_update_enable_disable_sync_runtime_config_and_sources(
     monkeypatch,
 ) -> None:
     repo = FakeRepo()
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    def fake_converge(*, cameras):
-        calls.append([row["source_id"] for row in cameras])
-        return {"runtime_action": "source_converge", "sources_total": len(cameras)}
+    def fake_sync(*, export_doc, cameras):
+        calls.append(([row["source_id"] for row in cameras], export_doc))
+        return {
+            "runtime_action": "source_converge",
+            "sources_total": len(cameras),
+            "module_config_synced": True,
+        }
 
     monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
-    monkeypatch.setattr(cameras_router, "converge_camera_sources", fake_converge)
+    monkeypatch.setattr(cameras_router, "sync_camera_runtime_config_and_sources", fake_sync)
 
     created = cameras_router.cameras_create(_create_body(), repo=repo, request_id="req")
     updated = cameras_router.cameras_update(
@@ -125,12 +135,15 @@ def test_camera_create_update_enable_disable_trigger_source_only_convergence(
         assert response["data"]["runtime_source_apply"]["result"]["runtime_action"] == (
             "source_converge"
         )
-    assert calls == [
+        assert response["data"]["runtime_source_apply"]["result"]["module_config_synced"] is True
+    assert [source_ids for source_ids, _doc in calls] == [
         ["source_cam_001"],
         ["source_cam_001"],
         ["source_cam_001"],
         ["source_cam_001"],
     ]
+    assert calls[2][1]["cameras"]["cam_001"]["enabled"] is False
+    assert calls[3][1]["cameras"]["cam_001"]["enabled"] is True
 
 
 def test_camera_crud_does_not_call_source_convergence_when_runtime_disabled(
@@ -138,11 +151,11 @@ def test_camera_crud_does_not_call_source_convergence_when_runtime_disabled(
 ) -> None:
     repo = FakeRepo()
 
-    def fail_converge(*, cameras):
+    def fail_sync(*, export_doc, cameras):
         raise AssertionError(f"unexpected convergence call: {cameras!r}")
 
     monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "false")
-    monkeypatch.setattr(cameras_router, "converge_camera_sources", fail_converge)
+    monkeypatch.setattr(cameras_router, "sync_camera_runtime_config_and_sources", fail_sync)
 
     response = cameras_router.cameras_create(_create_body(), repo=repo, request_id="req")
 

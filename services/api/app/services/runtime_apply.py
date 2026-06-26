@@ -132,6 +132,32 @@ def restart_camera_runtime(
     )
 
 
+def sync_camera_runtime_config_and_sources(
+    *,
+    export_doc: dict[str, Any],
+    cameras: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Sync the module config snapshot and converge source adapters.
+
+    This path does not restart Savant or create a new runtime epoch. It is used
+    by 8090 camera CRUD/enable/disable actions so the on-disk config snapshot
+    follows the operator source of truth while source containers are reconciled.
+    """
+
+    module_config_path = Path(
+        os.getenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", DEFAULT_MODULE_CONFIG_PATH)
+    )
+    result = converge_camera_sources(cameras=cameras)
+    runtime_epoch_id = _runtime_epoch_id_for_source_only_sync(module_config_path)
+    if runtime_epoch_id:
+        export_doc = _with_runtime_epoch(export_doc, runtime_epoch_id)
+    _write_yaml(module_config_path, export_doc)
+    result["module_config_path"] = str(module_config_path)
+    result["module_config_synced"] = True
+    result["runtime_epoch_id_preserved"] = runtime_epoch_id
+    return result
+
+
 def converge_camera_sources(
     *,
     cameras: list[dict[str, Any]],
@@ -809,6 +835,29 @@ def _with_runtime_epoch(export_doc: dict[str, Any], runtime_epoch_id: str) -> di
                 updated_cameras[camera_id] = camera
         updated["cameras"] = updated_cameras
     return updated
+
+
+def _runtime_epoch_id_for_source_only_sync(module_config_path: Path) -> str:
+    for candidate in (
+        _read_runtime_epoch_id_from_yaml(module_config_path),
+        str(_read_runtime_epoch_state(_runtime_epoch_state_path()).get("runtime_epoch_id") or ""),
+    ):
+        if not candidate:
+            continue
+        return validate_runtime_epoch_id(candidate)
+    return ""
+
+
+def _read_runtime_epoch_id_from_yaml(path: Path) -> str:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        raise RuntimeApplyError(f"failed to read runtime module config: {exc}") from exc
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("runtime_epoch_id") or "")
 
 
 def _stop_container(client: DockerSocketClient, container_name: str) -> None:

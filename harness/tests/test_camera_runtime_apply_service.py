@@ -542,6 +542,61 @@ def test_source_only_converge_stops_disabled_compose_source(
     assert sources_doc["sources"]["primary"]["enabled"] is False
 
 
+def test_source_only_sync_writes_module_config_and_preserves_epoch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    module_path = tmp_path / "cameras.midterm.yml"
+    module_path.write_text(
+        "runtime_epoch_id: midterm-existing\n"
+        "cameras:\n"
+        "  primary:\n"
+        "    enabled: true\n"
+        "    source_id: primary_rtsp\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", str(module_path))
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    fake.inspect_by_name["video-analytics-midterm-source-adapter"] = {
+        "State": {"Status": "running"}
+    }
+
+    export_doc = {
+        "cameras": {
+            "primary": {
+                "enabled": False,
+                "source_id": "primary_rtsp",
+                "name": "Primary",
+                "rtsp_url": "rtsp://primary/stream",
+            }
+        }
+    }
+    result = runtime_apply.sync_camera_runtime_config_and_sources(
+        export_doc=export_doc,
+        cameras=[
+            {
+                "id": "primary",
+                "source_id": "primary_rtsp",
+                "name": "Primary",
+                "rtsp_url": "rtsp://primary/stream",
+                "enabled": False,
+            }
+        ],
+    )
+
+    module_doc = yaml.safe_load(module_path.read_text(encoding="utf-8"))
+    assert result["module_config_synced"] is True
+    assert result["runtime_epoch_id_preserved"] == "midterm-existing"
+    assert module_doc["runtime_epoch_id"] == "midterm-existing"
+    assert module_doc["cameras"]["primary"]["runtime_epoch_id"] == "midterm-existing"
+    assert module_doc["cameras"]["primary"]["enabled"] is False
+
+
 def test_source_only_converge_starts_enabled_compose_source(
     monkeypatch,
     tmp_path: Path,
