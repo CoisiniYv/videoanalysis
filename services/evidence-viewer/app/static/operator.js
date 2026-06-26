@@ -954,6 +954,7 @@ function renderQuickAlgorithmControls() {
         `<div class="algorithm-status-stack">` +
           `<span class="support-badge ${escapeHtml(meta.statusClass)}">${escapeHtml(meta.statusLabel)}</span>` +
           `<span class="apply-badge ${escapeHtml(applyBadge.className)}">${escapeHtml(applyBadge.label)}</span>` +
+          `<button class="sm primary" data-action="save-quick-rule" type="button"${disabledAttr}>保存并应用</button>` +
           `<button class="sm" data-action="edit-quick-rule" type="button"${disabledAttr}>高级</button>` +
         `</div>` +
       `</div>` +
@@ -973,6 +974,9 @@ function renderQuickAlgorithmControls() {
       fillRuleForm(rule || defaultRuleForAlgorithm(algorithmId));
       switchCameraTab("rules");
       ruleForm?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+    row.querySelector('[data-action="save-quick-rule"]').addEventListener("click", () => {
+      saveQuickAlgorithmCard(row).catch((e) => showError(e.message));
     });
     algorithmControlsEl.appendChild(row);
   }
@@ -2004,6 +2008,49 @@ function quickRuleBodyFromCard(card) {
   return { body, existing };
 }
 
+async function persistQuickAlgorithmCard(card) {
+  const algorithmId = card.dataset.algorithmId || "";
+  const support = supportForAlgorithm(algorithmId);
+  if (isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled()) {
+    return { saved: false, skippedBlocked: true, body: null };
+  }
+  const { body, existing } = quickRuleBodyFromCard(card);
+  if (!body.enabled && !existing) {
+    return { saved: false, skippedBlocked: false, body };
+  }
+  const encodedCameraId = encodeURIComponent(selectedCameraId);
+  const path = existing
+    ? `${API}/cameras/${encodedCameraId}/algorithm-rules/${encodeURIComponent(existing.rule_id)}`
+    : `${API}/cameras/${encodedCameraId}/algorithm-rules`;
+  await request(path, {
+    method: existing ? "PUT" : "POST",
+    body: JSON.stringify(body),
+  });
+  return { saved: true, skippedBlocked: false, body };
+}
+
+async function saveQuickAlgorithmCard(card) {
+  if (!selectedCameraId) {
+    showError("未选择摄像头");
+    return;
+  }
+  clearMessages();
+  const result = await persistQuickAlgorithmCard(card);
+  await selectCamera(selectedCameraId);
+  if (!result.saved) {
+    if (result.skippedBlocked) {
+      showSuccess("未保存：该算法当前为未支持或已延期状态");
+    } else {
+      showSuccess("未保存算法配置");
+    }
+    renderRuntimeApplyResult();
+    return;
+  }
+  await applyRuntime({
+    context: `${algorithmLabel(result.body.algorithm_id)} 配置已保存`,
+  });
+}
+
 async function saveQuickAlgorithmControls() {
   if (!selectedCameraId) {
     showError("未选择摄像头");
@@ -2014,25 +2061,12 @@ async function saveQuickAlgorithmControls() {
   let savedCount = 0;
   let skippedBlocked = 0;
   for (const card of cards) {
-    const algorithmId = card.dataset.algorithmId || "";
-    const support = supportForAlgorithm(algorithmId);
-    if (isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled()) {
+    const result = await persistQuickAlgorithmCard(card);
+    if (result.skippedBlocked) {
       skippedBlocked += 1;
       continue;
     }
-    const { body, existing } = quickRuleBodyFromCard(card);
-    if (!body.enabled && !existing) {
-      continue;
-    }
-    const encodedCameraId = encodeURIComponent(selectedCameraId);
-    const path = existing
-      ? `${API}/cameras/${encodedCameraId}/algorithm-rules/${encodeURIComponent(existing.rule_id)}`
-      : `${API}/cameras/${encodedCameraId}/algorithm-rules`;
-    await request(path, {
-      method: existing ? "PUT" : "POST",
-      body: JSON.stringify(body),
-    });
-    savedCount += 1;
+    if (result.saved) savedCount += 1;
   }
   await selectCamera(selectedCameraId);
   if (savedCount === 0) {
