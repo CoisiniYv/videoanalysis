@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-from app.services.runtime_apply import DockerSocketClient, RuntimeApplyError
+from app.services.runtime_apply import (
+    DockerSocketClient,
+    RuntimeApplyBlockedError,
+    RuntimeApplyError,
+    check_runtime_restart_evidence_guard,
+)
 
 
 DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock"
@@ -53,6 +58,13 @@ DEFAULT_DUAL_CONTAINERS = (
 
 class RuntimeControlError(RuntimeError):
     pass
+
+
+class RuntimeControlBlockedError(RuntimeControlError):
+    def __init__(self, message: str, *, details: dict[str, Any], status_code: int = 409) -> None:
+        super().__init__(message)
+        self.details = details
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -145,12 +157,15 @@ def restart_single_runtime(
     *,
     config: RuntimeControlConfig | None = None,
     docker_client: DockerSocketClient | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     cfg = config or config_from_env()
     client = docker_client or DockerSocketClient(cfg.docker_socket)
+    evidence_guard = _check_evidence_restart_guard(action="single_restart", force=force)
     actions = [_container_action(client, name, "restart") for name in cfg.single_stop_containers]
     return {
         "runtime_action": "single_restart",
+        "evidence_restart_guard": evidence_guard,
         "actions": actions,
         "status": runtime_control_status(config=cfg, docker_client=client),
     }
@@ -202,6 +217,17 @@ def _container_action(client: DockerSocketClient, container_name: str, action: s
         result["message"] = body.decode("utf-8", errors="replace")[:500]
     result["state"] = _inspect_container(client, name)
     return result
+
+
+def _check_evidence_restart_guard(*, action: str, force: bool) -> dict[str, Any]:
+    try:
+        return check_runtime_restart_evidence_guard(action=action, force=force)
+    except RuntimeApplyBlockedError as exc:
+        raise RuntimeControlBlockedError(
+            str(exc),
+            details=exc.details,
+            status_code=exc.status_code,
+        ) from exc
 
 
 def _inspect_group(client: DockerSocketClient, names: tuple[str, ...]) -> list[dict[str, Any]]:

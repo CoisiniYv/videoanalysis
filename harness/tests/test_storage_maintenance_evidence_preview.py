@@ -36,6 +36,7 @@ class FakeRepo:
         self.next_item = 1
         self.records: dict[str, dict[str, Any]] = {}
         self.task_status_updates: list[str] = []
+        self.bundle_status_updates: list[str] = []
 
     def create_job(self, **kwargs: Any) -> dict[str, Any]:
         job_id = f"00000000-0000-4000-8000-{self.next_job:012d}"
@@ -94,6 +95,11 @@ class FakeRepo:
     def update_event_media_deleted(self, **kwargs: Any) -> None:
         record = next(row for row in self.records.values() if str(row["event_id"]) == kwargs["event_id"])
         record["media_status"] = kwargs["media_status"]
+
+    def update_evidence_bundle_media_deleted(self, **kwargs: Any) -> None:
+        self.bundle_status_updates.append(
+            f"{kwargs['event_id']}:{kwargs['job_id']}:{kwargs.get('media_status', 'media_deleted')}"
+        )
 
     def mark_evidence_tasks_deleted_metadata(self, *, event_id: str, job_id: str) -> None:
         self.task_status_updates.append(f"{event_id}:{job_id}:error_message_only")

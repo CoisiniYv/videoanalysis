@@ -16,7 +16,9 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
     sys.modules.pop(_mod, None)
 
 from app.services.runtime_control import (  # noqa: E402
+    RuntimeControlBlockedError,
     RuntimeControlConfig,
+    restart_single_runtime,
     start_single_runtime,
     stop_dual_runtime,
     stop_single_runtime,
@@ -139,3 +141,63 @@ def test_stop_dual_runtime_only_stops_dual_extension_containers() -> None:
         "/containers/video-analytics-midterm-savant-b/stop?t=10",
     ]
     assert result["runtime_action"] == "dual_stop"
+
+
+def test_restart_single_runtime_blocks_when_evidence_active(monkeypatch) -> None:
+    fake = FakeDockerClient()
+
+    def fake_guard(**_kwargs):
+        raise RuntimeControlBlockedError(
+            "runtime restart blocked because evidence tasks are still active",
+            details={
+                "ok": False,
+                "blocked": True,
+                "active_count": 1,
+                "tasks": [{"task_id": "task-1", "blocking_state": "finalizing"}],
+            },
+            status_code=409,
+        )
+
+    import app.services.runtime_control as runtime_control
+
+    monkeypatch.setattr(runtime_control, "_check_evidence_restart_guard", fake_guard)
+
+    try:
+        restart_single_runtime(config=_config(), docker_client=fake)
+    except RuntimeControlBlockedError as exc:
+        assert exc.status_code == 409
+        assert exc.details["tasks"][0]["blocking_state"] == "finalizing"
+    else:
+        raise AssertionError("single runtime restart should block while evidence is active")
+
+    assert fake.calls == []
+
+
+def test_restart_single_runtime_force_records_guard_and_restarts(monkeypatch) -> None:
+    fake = FakeDockerClient()
+
+    import app.services.runtime_control as runtime_control
+
+    monkeypatch.setattr(
+        runtime_control,
+        "_check_evidence_restart_guard",
+        lambda **kwargs: {
+            "ok": True,
+            "blocked": False,
+            "forced": bool(kwargs.get("force")),
+            "active_count": 1,
+            "tasks": [{"task_id": "task-1", "blocking_state": "replaying"}],
+        },
+    )
+
+    result = restart_single_runtime(config=_config(), docker_client=fake, force=True)
+
+    post_paths = [path for method, path, _body in fake.calls if method == "POST"]
+    assert result["runtime_action"] == "single_restart"
+    assert result["evidence_restart_guard"]["forced"] is True
+    assert post_paths == [
+        "/containers/video-analytics-midterm-source-adapter/restart?t=10",
+        "/containers/video-analytics-midterm-event-worker/restart?t=10",
+        "/containers/video-analytics-midterm-savant/restart?t=10",
+        "/containers/video-analytics-midterm-replay-service/restart?t=10",
+    ]

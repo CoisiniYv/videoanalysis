@@ -71,6 +71,22 @@ class FakeRedis:
         return FakeRedisClient()
 
 
+def _allow_runtime_evidence_restart(monkeypatch) -> None:
+    monkeypatch.setattr(
+        runtime_apply,
+        "check_runtime_restart_evidence_guard",
+        lambda **kwargs: {
+            "ok": True,
+            "blocked": False,
+            "forced": bool(kwargs.get("force")),
+            "action": kwargs.get("action", ""),
+            "active_count": 0,
+            "blocking_states": list(runtime_apply.RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES),
+            "tasks": [],
+        },
+    )
+
+
 def test_docker_socket_response_parser_decodes_chunked_json() -> None:
     body = b'{"State":{"Status":"running"}}'
     chunked_body = (
@@ -109,6 +125,7 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     )
     monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
     monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
+    _allow_runtime_evidence_restart(monkeypatch)
     FakeRedisClient.values.clear()
     FakeRedisClient.deleted.clear()
     fake.containers = [{"Names": ["/video-analytics-source-stale"]}]
@@ -334,6 +351,7 @@ def test_runtime_restart_uses_same_controlled_surface(monkeypatch, tmp_path: Pat
     )
     monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
     monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
+    _allow_runtime_evidence_restart(monkeypatch)
     fake.inspect_by_name["video-analytics-midterm-savant"] = {
         "State": {"Health": {"Status": "healthy"}}
     }
@@ -358,6 +376,104 @@ def test_runtime_restart_uses_same_controlled_surface(monkeypatch, tmp_path: Pat
     assert "/containers/video-analytics-midterm-savant/restart?t=10" in called_paths
 
 
+def test_runtime_apply_blocks_before_docker_when_evidence_active(monkeypatch, tmp_path: Path) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", str(tmp_path / "cameras.midterm.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+
+    def fake_guard(**_kwargs):
+        raise runtime_apply.RuntimeApplyBlockedError(
+            "runtime restart blocked because evidence tasks are still active",
+            details={
+                "ok": False,
+                "blocked": True,
+                "active_count": 1,
+                "tasks": [{"task_id": "task-1", "blocking_state": "replaying"}],
+            },
+            status_code=409,
+        )
+
+    monkeypatch.setattr(runtime_apply, "check_runtime_restart_evidence_guard", fake_guard)
+
+    try:
+        runtime_apply.apply_camera_runtime(
+            export_doc={"cameras": {"primary": {"source_id": "primary_rtsp", "enabled": True}}},
+            cameras=[
+                {
+                    "id": "primary",
+                    "source_id": "primary_rtsp",
+                    "rtsp_url": "rtsp://primary/stream",
+                    "enabled": True,
+                }
+            ],
+        )
+    except runtime_apply.RuntimeApplyBlockedError as exc:
+        assert exc.status_code == 409
+        assert exc.details["active_count"] == 1
+    else:
+        raise AssertionError("runtime apply should block while evidence is active")
+
+    assert fake.calls == []
+    assert not (tmp_path / "cameras.midterm.yml").exists()
+    assert not (tmp_path / "sources.generated.yml").exists()
+
+
+def test_runtime_apply_force_records_evidence_guard_and_continues(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fake = FakeDockerClient("/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", str(tmp_path / "cameras.midterm.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_SOURCES_CONFIG_PATH", str(tmp_path / "sources.generated.yml"))
+    monkeypatch.setenv("CAMERA_RUNTIME_DOCKER_SOCKET", "/fake/docker.sock")
+    monkeypatch.setenv("CAMERA_RUNTIME_COMPOSE_SOURCE_ID", "primary_rtsp")
+    monkeypatch.setenv("RUNTIME_EPOCH_ROOT", str(tmp_path / "replay-sink-output" / "midterm"))
+    monkeypatch.setenv(
+        "RUNTIME_EPOCH_STATE_PATH",
+        str(tmp_path / "replay-sink-output" / "midterm" / ".current_epoch.json"),
+    )
+    monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
+    monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
+    monkeypatch.setattr(
+        runtime_apply,
+        "check_runtime_restart_evidence_guard",
+        lambda **kwargs: {
+            "ok": True,
+            "blocked": False,
+            "forced": bool(kwargs.get("force")),
+            "action": kwargs.get("action", ""),
+            "active_count": 1,
+            "blocking_states": list(runtime_apply.RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES),
+            "tasks": [{"task_id": "task-1", "blocking_state": "replaying"}],
+        },
+    )
+    fake.inspect_by_name["video-analytics-midterm-savant"] = {
+        "State": {"Health": {"Status": "healthy"}}
+    }
+
+    result = runtime_apply.restart_camera_runtime(
+        export_doc={"cameras": {"primary": {"source_id": "primary_rtsp", "enabled": True}}},
+        cameras=[
+            {
+                "id": "primary",
+                "source_id": "primary_rtsp",
+                "rtsp_url": "rtsp://primary/stream",
+                "enabled": True,
+            }
+        ],
+        force=True,
+    )
+
+    called_paths = [path for _method, path, _body in fake.calls]
+    assert result["evidence_restart_guard"]["forced"] is True
+    assert result["evidence_restart_guard"]["active_count"] == 1
+    assert "/containers/video-analytics-midterm-replay-service/restart?t=10" in called_paths
+
+
 def test_runtime_apply_fails_before_sources_when_savant_not_ready(
     monkeypatch,
     tmp_path: Path,
@@ -377,6 +493,7 @@ def test_runtime_apply_fails_before_sources_when_savant_not_ready(
     )
     monkeypatch.setattr(runtime_apply, "DockerSocketClient", lambda socket_path: fake)
     monkeypatch.setattr(runtime_apply, "Redis", FakeRedis)
+    _allow_runtime_evidence_restart(monkeypatch)
     fake.logs_by_name["video-analytics-midterm-savant"] = "still loading models\n"
 
     try:

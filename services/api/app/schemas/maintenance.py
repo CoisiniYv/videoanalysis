@@ -39,6 +39,12 @@ class EvidenceDeleteExecuteRequest(BaseModel):
     candidate_hash: str | None = None
 
 
+class MaintenanceExecutionControlRequest(BaseModel):
+    enabled: bool
+    reason: str = Field(min_length=1, max_length=500)
+    operator: str = "operator"
+
+
 class PeopleDeletePreviewRequest(BaseModel):
     person_ids: list[int] = Field(default_factory=list)
     external_person_ids: list[str] = Field(default_factory=list)

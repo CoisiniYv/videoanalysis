@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,33 @@ class _Repo:
         }
 
 
+class _UuidKeyRepo(_Repo):
+    camera_uuid = uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+    def get_camera(self, camera_id: str) -> dict[str, Any] | None:
+        return next((row for row in self.list_cameras() if str(row["id"]) == camera_id), None)
+
+    def list_cameras(self, *, enabled=None) -> list[dict[str, Any]]:
+        rows = super().list_cameras(enabled=enabled)
+        for row in rows:
+            row = row.copy()
+            row["id"] = self.camera_uuid
+            return [row]
+        return []
+
+    def list_zones_for_cameras(self, camera_ids):
+        rows = super().list_zones_for_cameras(camera_ids).get("cam_001", [])
+        for row in rows:
+            row["camera_id"] = self.camera_uuid
+        return {self.camera_uuid: rows}
+
+    def list_rules_for_cameras(self, camera_ids):
+        rows = super().list_rules_for_cameras(camera_ids).get("cam_001", [])
+        for row in rows:
+            row["camera_id"] = self.camera_uuid
+        return {self.camera_uuid: rows}
+
+
 def test_runtime_export_fills_effective_evidence_policy(tmp_path: Path) -> None:
     result = export_runtime_config(
         _Repo(),
@@ -125,6 +153,24 @@ def test_runtime_export_fills_effective_evidence_policy(tmp_path: Path) -> None:
     assert watchlist_rule["config"]["target_person_ids"] == [10, 11]
     assert watchlist_rule["config"]["target_external_person_ids"] == ["emp10", "emp11"]
     assert watchlist_rule["evidence_policy"]["pre_seconds"] == 3
+
+
+def test_runtime_export_accepts_uuid_camera_keys(tmp_path: Path) -> None:
+    repo = _UuidKeyRepo()
+    result = export_runtime_config(
+        repo,
+        ExportOptions(
+            camera_id=str(repo.camera_uuid),
+            include_disabled=True,
+            output_dir=tmp_path,
+            dry_run=True,
+        ),
+    )
+
+    camera = result.algorithm_runtime_config["cameras"][0]
+    assert camera["camera_id"] == str(repo.camera_uuid)
+    assert camera["zones"][0]["zone_id"] == "full_frame"
+    assert camera["rules"][0]["rule_id"] == "intrusion_full_frame"
 
 
 def test_camera_runtime_config_preview_endpoint_returns_selected_camera() -> None:

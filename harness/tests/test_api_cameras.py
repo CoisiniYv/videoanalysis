@@ -86,7 +86,8 @@ class FakeCameraRepository:
     # -- zone -----------------------------------------------------------
 
     def create_zone(self, *, camera_id, zone_name, zone_type, points,
-                    payload) -> Dict[str, Any]:
+                    payload, zone_id=None, coordinate_space="pixel",
+                    enabled=True) -> Dict[str, Any]:
         for z in self.zones:
             if z["camera_id"] == camera_id and z["zone_name"] == zone_name:
                 raise _UniqueViolation(
@@ -96,14 +97,66 @@ class FakeCameraRepository:
         row = {
             "id": self._zone_id_seq,
             "camera_id": camera_id,
+            "zone_id": zone_id or zone_name,
             "zone_name": zone_name,
             "zone_type": zone_type,
+            "coordinate_space": coordinate_space,
             "points": list(points),
+            "enabled": enabled,
             "payload": dict(payload or {}),
             "created_at": NOW,
             "updated_at": NOW,
         }
         self.zones.append(row)
+        return row
+
+    def get_zone(self, camera_id: str, zone_id: str) -> Dict[str, Any] | None:
+        return next(
+            (
+                z
+                for z in self.zones
+                if z["camera_id"] == camera_id
+                and zone_id in {str(z.get("zone_id")), str(z.get("zone_name"))}
+            ),
+            None,
+        )
+
+    def update_zone(
+        self,
+        *,
+        camera_id,
+        zone_id,
+        new_zone_id=None,
+        zone_name=None,
+        zone_type=None,
+        coordinate_space=None,
+        points=None,
+        enabled=None,
+        payload=None,
+    ) -> Dict[str, Any] | None:
+        row = self.get_zone(camera_id, zone_id)
+        if row is None:
+            return None
+        old_ids = {str(row.get("zone_id")), str(row.get("zone_name")), str(zone_id)}
+        row.update(
+            {
+                "zone_id": new_zone_id or row.get("zone_id") or row["zone_name"],
+                "zone_name": zone_name or row["zone_name"],
+                "zone_type": zone_type or row["zone_type"],
+                "coordinate_space": coordinate_space or row.get("coordinate_space", "pixel"),
+                "points": list(points if points is not None else row["points"]),
+                "enabled": row.get("enabled", True) if enabled is None else enabled,
+                "payload": dict(payload if payload is not None else row.get("payload", {})),
+                "updated_at": NOW,
+            }
+        )
+        for old_id in old_ids:
+            if old_id and old_id != str(row["zone_id"]):
+                self.rebind_zone_references(
+                    camera_id=camera_id,
+                    old_zone_id=old_id,
+                    new_zone_id=row["zone_id"],
+                )
         return row
 
     def list_zones(self, camera_id: str) -> List[Dict[str, Any]]:
@@ -113,13 +166,20 @@ class FakeCameraRepository:
         )
 
     def get_zone_names(self, camera_id: str) -> List[str]:
-        return [z["zone_name"] for z in self.zones if z["camera_id"] == camera_id]
+        names: list[str] = []
+        for z in self.zones:
+            if z["camera_id"] != camera_id:
+                continue
+            for value in (z.get("zone_id"), z.get("zone_name")):
+                if value and str(value) not in names:
+                    names.append(str(value))
+        return names
 
     def list_zones_for_cameras(self, camera_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        out = {cid: [] for cid in camera_ids}
+        out = {str(cid): [] for cid in camera_ids}
         for z in self.zones:
-            if z["camera_id"] in out:
-                out[z["camera_id"]].append(z)
+            if str(z["camera_id"]) in out:
+                out[str(z["camera_id"])].append(z)
         for cid in out:
             out[cid].sort(key=lambda z: z["zone_name"])
         return out
@@ -149,12 +209,54 @@ class FakeCameraRepository:
             "algorithm_id": algorithm_id or rule_type,
             "rule_type": rule_type,
             "enabled": enabled,
+            "zone_id": config.get("zone_id") or config.get("zone"),
+            "line_id": config.get("line_id"),
             "config": dict(config or {}),
             "created_at": NOW,
             "updated_at": NOW,
         }
         self.rules.append(row)
         return row
+
+    def rebind_zone_references(self, *, camera_id: str, old_zone_id: str, new_zone_id: str):
+        rows = []
+        for row in self.rules:
+            config = dict(row.get("config") or {})
+            if row["camera_id"] != camera_id:
+                continue
+            if not (
+                row.get("zone_id") == old_zone_id
+                or config.get("zone_id") == old_zone_id
+                or config.get("zone") == old_zone_id
+            ):
+                continue
+            row["zone_id"] = new_zone_id
+            config["zone_id"] = new_zone_id
+            config["zone"] = new_zone_id
+            row["config"] = config
+            row["updated_at"] = NOW
+            rows.append(row)
+        return rows
+
+    def bind_final_roi_zone(self, *, camera_id: str, zone_id: str):
+        rows = []
+        for row in self.rules:
+            if row["camera_id"] != camera_id:
+                continue
+            if row.get("algorithm_id") in {"face.watchlist", "face.observation", "face.live_search"}:
+                continue
+            if row.get("rule_type") in {"face.watchlist", "face.observation", "face.live_search"}:
+                continue
+            config = dict(row.get("config") or {})
+            if row.get("rule_type") in {"wall_climb", "wall_climb_suspicious"}:
+                continue
+            row["zone_id"] = zone_id
+            config["zone_id"] = zone_id
+            config["zone"] = zone_id
+            row["config"] = config
+            row["updated_at"] = NOW
+            rows.append(row)
+        return rows
 
     def list_rules(self, camera_id: str) -> List[Dict[str, Any]]:
         return sorted(
@@ -163,10 +265,10 @@ class FakeCameraRepository:
         )
 
     def list_rules_for_cameras(self, camera_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        out = {cid: [] for cid in camera_ids}
+        out = {str(cid): [] for cid in camera_ids}
         for r in self.rules:
-            if r["camera_id"] in out:
-                out[r["camera_id"]].append(r)
+            if str(r["camera_id"]) in out:
+                out[str(r["camera_id"])].append(r)
         for cid in out:
             out[cid].sort(key=lambda r: r["rule_type"])
         return out
@@ -348,6 +450,102 @@ def test_create_intrusion_rule(client):
     assert cfg["clip_required"] is True
 
 
+def test_roi_save_can_bind_zone_rules(client, repo):
+    _create_camera(client)
+    _create_zone(client)
+    _create_intrusion_rule(client)
+
+    resp = client.post(
+        "/api/v1/cameras/cam_001/zones?bind_rules=true",
+        json={
+            "zone_id": "roi_final",
+            "zone_name": "roi_final",
+            "zone_type": "polygon",
+            "points": [[10, 10], [100, 10], [100, 100], [10, 100]],
+        },
+    )
+
+    assert resp.status_code == 200, resp.json()
+    rule = repo.list_rules("cam_001")[0]
+    assert rule["zone_id"] == "roi_final"
+    assert rule["config"]["zone_id"] == "roi_final"
+    assert rule["config"]["zone"] == "roi_final"
+
+
+def test_roi_save_does_not_bind_face_or_line_rules(client, repo):
+    _create_camera(client)
+    _create_zone(client)
+    repo.rules.extend(
+        [
+            {
+                "id": 100,
+                "camera_id": "cam_001",
+                "rule_id": "rule_watchlist",
+                "algorithm_id": "face.watchlist",
+                "rule_type": "face.watchlist",
+                "enabled": True,
+                "zone_id": None,
+                "line_id": None,
+                "config": {"threshold": 0.75},
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+            {
+                "id": 101,
+                "camera_id": "cam_001",
+                "rule_id": "rule_wall_climb",
+                "algorithm_id": "behavior.wall_climb_suspicious",
+                "rule_type": "wall_climb",
+                "enabled": True,
+                "zone_id": None,
+                "line_id": "tripwire_01",
+                "config": {"line_id": "tripwire_01", "cooldown_s": 60},
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+        ]
+    )
+
+    resp = client.post(
+        "/api/v1/cameras/cam_001/zones?bind_rules=true",
+        json={
+            "zone_id": "roi_final",
+            "zone_name": "roi_final",
+            "zone_type": "polygon",
+            "points": [[10, 10], [100, 10], [100, 100], [10, 100]],
+        },
+    )
+
+    assert resp.status_code == 200, resp.json()
+    rules = {rule["rule_id"]: rule for rule in repo.list_rules("cam_001")}
+    assert rules["rule_watchlist"]["zone_id"] is None
+    assert "zone_id" not in rules["rule_watchlist"]["config"]
+    assert rules["rule_wall_climb"]["line_id"] == "tripwire_01"
+    assert rules["rule_wall_climb"]["zone_id"] is None
+    assert "zone_id" not in rules["rule_wall_climb"]["config"]
+
+
+def test_zone_rename_rebinds_existing_rule_references(client, repo):
+    _create_camera(client)
+    _create_zone(client, zone_id="perimeter", zone_name="perimeter")
+    _create_intrusion_rule(client, zone="perimeter")
+
+    resp = client.put(
+        "/api/v1/cameras/cam_001/zones/perimeter",
+        json={
+            "zone_id": "roi_final",
+            "zone_name": "roi_final",
+            "zone_type": "polygon",
+            "points": [[10, 10], [100, 10], [100, 100], [10, 100]],
+        },
+    )
+
+    assert resp.status_code == 200, resp.json()
+    rule = repo.list_rules("cam_001")[0]
+    assert rule["zone_id"] == "roi_final"
+    assert rule["config"]["zone"] == "roi_final"
+
+
 # ===========================================================================
 # 7. GET rules returns the rule
 # ===========================================================================
@@ -456,14 +654,15 @@ def test_runtime_sources_apply_route_is_under_cameras_prefix(client, monkeypatch
     _create_camera(client)
     captured: dict[str, Any] = {}
 
-    def fake_converge(*, cameras):
+    def fake_sync(*, export_doc, cameras):
+        captured["export_doc"] = export_doc
         captured["cameras"] = cameras
         return {
             "runtime_action": "source_converge",
             "dynamic_sources_started": ["test_source"],
         }
 
-    monkeypatch.setattr(cameras_router_module, "converge_camera_sources", fake_converge)
+    monkeypatch.setattr(cameras_router_module, "sync_camera_runtime_config_and_sources", fake_sync)
 
     resp = client.post("/api/v1/cameras/runtime/sources/apply")
 
@@ -471,7 +670,56 @@ def test_runtime_sources_apply_route_is_under_cameras_prefix(client, monkeypatch
     body = resp.json()
     assert body["error"] is None
     assert body["data"]["runtime_action"] == "source_converge"
+    assert "cameras" in captured["export_doc"]
     assert captured["cameras"][0]["id"] == "cam_001"
+
+
+def test_runtime_restart_returns_409_when_evidence_guard_blocks(client, monkeypatch):
+    _create_camera(client)
+
+    def fake_restart(*, export_doc, cameras, force=False):
+        raise cameras_router_module.RuntimeApplyBlockedError(
+            "runtime restart blocked because evidence tasks are still active",
+            details={
+                "ok": False,
+                "blocked": True,
+                "active_count": 2,
+                "tasks": [{"task_id": "task-1", "blocking_state": "replaying"}],
+            },
+            status_code=409,
+        )
+
+    monkeypatch.setattr(cameras_router_module, "restart_camera_runtime", fake_restart)
+
+    resp = client.post("/api/v1/cameras/runtime/restart")
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"]["code"] == 409
+    assert body["error"]["details"]["active_count"] == 2
+    assert body["error"]["details"]["tasks"][0]["blocking_state"] == "replaying"
+
+
+def test_runtime_restart_force_query_is_passed_to_service(client, monkeypatch):
+    _create_camera(client)
+    captured: dict[str, Any] = {}
+
+    def fake_restart(*, export_doc, cameras, force=False):
+        captured["force"] = force
+        return {
+            "runtime_action": "restart",
+            "evidence_restart_guard": {"forced": force, "active_count": 1},
+        }
+
+    monkeypatch.setattr(cameras_router_module, "restart_camera_runtime", fake_restart)
+
+    resp = client.post("/api/v1/cameras/runtime/restart?force=true")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["error"] is None
+    assert captured["force"] is True
+    assert body["data"]["evidence_restart_guard"]["forced"] is True
 
 
 # ===========================================================================

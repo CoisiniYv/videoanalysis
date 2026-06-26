@@ -39,11 +39,13 @@ from app.schemas.cameras import (
     validate_intrusion_config,
 )
 from app.services.runtime_apply import (
+    RuntimeApplyBlockedError,
     RuntimeApplyError,
     apply_camera_runtime,
     restart_camera_runtime,
     sync_camera_runtime_config_and_sources,
 )
+from app.services.camera_preview import CameraPreviewError, capture_camera_preview_jpeg
 from app.services.savant_supervisor import (
     SavantSupervisorError,
     get_savant_supervisor_snapshot,
@@ -83,11 +85,31 @@ def _err(message: str, request_id: str, status_code: int = 404) -> dict:
     }
 
 
-def _err_response(status_code: int, message: str, request_id: str) -> JSONResponse:
+def _err_response(
+    status_code: int,
+    message: str,
+    request_id: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> JSONResponse:
+    content = _err(message, request_id, status_code=status_code)
+    if details is not None:
+        content["error"]["details"] = details
     return JSONResponse(
         status_code=status_code,
-        content=_err(message, request_id, status_code=status_code),
+        content=content,
     )
+
+
+def _runtime_apply_error_response(exc: RuntimeApplyError, request_id: str) -> JSONResponse:
+    if isinstance(exc, RuntimeApplyBlockedError):
+        return _err_response(
+            exc.status_code,
+            str(exc),
+            request_id,
+            details=exc.details,
+        )
+    return _err_response(503, str(exc), request_id)
 
 
 def _runtime_source_apply_payload(repo: CameraRepository) -> dict[str, Any]:
@@ -145,6 +167,21 @@ def _env_bool(name: str, *, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _bind_final_roi_zone(
+    repo: CameraRepository,
+    *,
+    camera_id: str,
+    zone: ZoneResponse,
+    bind_rules: bool,
+) -> list[RuleResponse]:
+    if not bind_rules or zone.zone_type != "polygon":
+        return []
+    if not hasattr(repo, "bind_final_roi_zone"):
+        return []
+    rows = repo.bind_final_roi_zone(camera_id=camera_id, zone_id=zone.zone_id)
+    return [RuleResponse.from_db_row(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # /api/v1/cameras/config/export  (yaml)
 #
@@ -180,27 +217,9 @@ def cameras_runtime_apply(
     include_disabled: bool = Query(
         True, description="Include disabled cameras in exported runtime files."
     ),
-    repo: CameraRepository = Depends(_repo),
-    request_id: str = Depends(_request_id),
-):
-    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
-    camera_ids = [c["id"] for c in cameras]
-    zones_by_camera = repo.list_zones_for_cameras(camera_ids)
-    rules_by_camera = repo.list_rules_for_cameras(camera_ids)
-    export_doc = build_export_doc(cameras, zones_by_camera, rules_by_camera)
-    try:
-        result = apply_camera_runtime(export_doc=export_doc, cameras=cameras)
-    except RuntimeApplyError as exc:
-        return _err_response(503, str(exc), request_id)
-    except OSError as exc:
-        return _err_response(503, f"runtime apply filesystem error: {exc}", request_id)
-    return _ok(result, request_id)
-
-
-@router.post("/runtime/restart")
-def cameras_runtime_restart(
-    include_disabled: bool = Query(
-        True, description="Include disabled cameras in exported runtime files."
+    force: bool = Query(
+        False,
+        description="Force runtime apply even when active evidence tasks would be interrupted.",
     ),
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
@@ -211,9 +230,35 @@ def cameras_runtime_restart(
     rules_by_camera = repo.list_rules_for_cameras(camera_ids)
     export_doc = build_export_doc(cameras, zones_by_camera, rules_by_camera)
     try:
-        result = restart_camera_runtime(export_doc=export_doc, cameras=cameras)
+        result = apply_camera_runtime(export_doc=export_doc, cameras=cameras, force=force)
     except RuntimeApplyError as exc:
-        return _err_response(503, str(exc), request_id)
+        return _runtime_apply_error_response(exc, request_id)
+    except OSError as exc:
+        return _err_response(503, f"runtime apply filesystem error: {exc}", request_id)
+    return _ok(result, request_id)
+
+
+@router.post("/runtime/restart")
+def cameras_runtime_restart(
+    include_disabled: bool = Query(
+        True, description="Include disabled cameras in exported runtime files."
+    ),
+    force: bool = Query(
+        False,
+        description="Force runtime restart even when active evidence tasks would be interrupted.",
+    ),
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    cameras = repo.list_cameras() if include_disabled else repo.list_cameras(enabled=True)
+    camera_ids = [c["id"] for c in cameras]
+    zones_by_camera = repo.list_zones_for_cameras(camera_ids)
+    rules_by_camera = repo.list_rules_for_cameras(camera_ids)
+    export_doc = build_export_doc(cameras, zones_by_camera, rules_by_camera)
+    try:
+        result = restart_camera_runtime(export_doc=export_doc, cameras=cameras, force=force)
+    except RuntimeApplyError as exc:
+        return _runtime_apply_error_response(exc, request_id)
     except OSError as exc:
         return _err_response(503, f"runtime restart filesystem error: {exc}", request_id)
     return _ok(result, request_id)
@@ -383,6 +428,43 @@ def cameras_get(
     return _ok(CameraResponse.from_db_row(row).model_dump(), request_id)
 
 
+@router.get("/{camera_id}/preview.jpg")
+def cameras_preview_jpeg(
+    camera_id: str,
+    max_width: int = Query(1280, ge=160, le=3840),
+    timeout_ms: int = Query(3000, ge=500, le=15000),
+    quality: int = Query(85, ge=30, le=95),
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    row = repo.get_camera(camera_id)
+    if row is None:
+        return _err_response(404, f"camera not found: {camera_id}", request_id)
+    if (row.get("input_type") or "rtsp") != "rtsp":
+        return _err_response(400, "camera preview currently supports only rtsp inputs", request_id)
+    try:
+        preview = capture_camera_preview_jpeg(
+            str(row.get("rtsp_url") or ""),
+            rtsp_transport=str(row.get("rtsp_transport") or "tcp"),
+            timeout_ms=timeout_ms,
+            max_width=max_width,
+            jpeg_quality=quality,
+        )
+    except CameraPreviewError as exc:
+        return _err_response(503, f"camera preview unavailable: {exc}", request_id)
+    return Response(
+        content=preview.data,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Camera-Preview-Width": str(preview.width),
+            "X-Camera-Preview-Height": str(preview.height),
+            "X-Camera-Source-Width": str(preview.source_width),
+            "X-Camera-Source-Height": str(preview.source_height),
+        },
+    )
+
+
 @router.put("/{camera_id}")
 def cameras_update(
     camera_id: str,
@@ -446,6 +528,10 @@ def cameras_disable(
 def cameras_create_zone(
     camera_id: str,
     body: ZoneCreate,
+    bind_rules: bool = Query(
+        False,
+        description="When true, bind polygon ROI based rules to this zone.",
+    ),
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
 ):
@@ -482,7 +568,9 @@ def cameras_create_zone(
         row = repo.create_zone(**kwargs)
     except psycopg.errors.UniqueViolation as exc:
         return _err_response(409, f"unique constraint violation: {exc}", request_id)
-    return _ok(ZoneResponse.from_db_row(row).model_dump(), request_id)
+    zone = ZoneResponse.from_db_row(row)
+    _bind_final_roi_zone(repo, camera_id=camera_id, zone=zone, bind_rules=bind_rules)
+    return _ok(zone.model_dump(), request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +598,10 @@ def cameras_update_zone(
     camera_id: str,
     zone_id: str,
     body: ZoneCreate,
+    bind_rules: bool = Query(
+        False,
+        description="When true, bind polygon ROI based rules to this zone.",
+    ),
     repo: CameraRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
 ):
@@ -534,7 +626,9 @@ def cameras_update_zone(
     )
     if row is None:
         return _err_response(404, f"zone not found: {zone_id}", request_id)
-    return _ok(ZoneResponse.from_db_row(row).model_dump(), request_id)
+    zone = ZoneResponse.from_db_row(row)
+    _bind_final_roi_zone(repo, camera_id=camera_id, zone=zone, bind_rules=bind_rules)
+    return _ok(zone.model_dump(), request_id)
 
 
 @router.delete("/{camera_id}/zones/{zone_id}")

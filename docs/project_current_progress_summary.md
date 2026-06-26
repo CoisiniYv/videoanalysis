@@ -77,8 +77,8 @@ RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis/Postgr
 - 8090 代理 `/api/v1/*` 到内部 API，代理 `/media/*` 到内部媒体文件。
 - 证据列表和详情展示报警机器时间；新 bundle 写入
   `event.alarm_machine_time`，来源为 `events.created_at`。
-- 存储维护支持 summary、preview、job detail；默认执行删除关闭，返回
-  `403 storage maintenance execute disabled` 属于预期保护。
+- 存储维护支持 summary、preview、job detail；默认执行删除关闭，可在 8090
+  存储维护页受控开启/关闭。
 
 详细对接见 `docs/midterm_8090_port_integration.md`。
 

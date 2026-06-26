@@ -21,6 +21,36 @@ SOURCE_ACTIVITY_TABLES = (
     "person_bbox_observations",
 )
 
+POLYGON_ZONE_RULE_ALGORITHM_IDS = (
+    "behavior.intrusion",
+    "behavior.loitering",
+    "behavior.crowd_gathering",
+    "behavior.running",
+    "behavior.chasing",
+    "behavior.fall",
+)
+POLYGON_ZONE_RULE_TYPES = (
+    "intrusion",
+    "loitering",
+    "crowd_gathering",
+    "running",
+    "chasing",
+    "fall",
+)
+NON_POLYGON_ZONE_RULE_ALGORITHM_IDS = (
+    "behavior.wall_climb_suspicious",
+    "face.observation",
+    "face.watchlist",
+    "face.live_search",
+)
+NON_POLYGON_ZONE_RULE_TYPES = (
+    "wall_climb",
+    "wall_climb_suspicious",
+    "face.observation",
+    "face.watchlist",
+    "face.live_search",
+)
+
 
 class CameraRepository:
     def __init__(self, conn: psycopg.Connection) -> None:
@@ -288,7 +318,25 @@ class CameraRepository:
                     "payload": json.dumps(payload if payload is not None else current.get("payload", {})),
                 },
             )
-            return cur.fetchone()
+            updated = cur.fetchone()
+        if updated is not None:
+            old_zone_ids = {
+                str(value)
+                for value in (
+                    current.get("zone_id"),
+                    current.get("zone_name"),
+                    zone_id,
+                )
+                if value
+            }
+            for old_zone_id in old_zone_ids:
+                if old_zone_id != str(next_zone_id):
+                    self.rebind_zone_references(
+                        camera_id=camera_id,
+                        old_zone_id=old_zone_id,
+                        new_zone_id=str(next_zone_id),
+                    )
+        return updated
 
     def delete_zone(self, camera_id: str, zone_id: str) -> bool:
         with self._conn.cursor() as cur:
@@ -318,10 +366,104 @@ class CameraRepository:
         # the column by name rather than by index.
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT zone_name FROM camera_zones WHERE camera_id = %(id)s",
+                "SELECT zone_id, zone_name FROM camera_zones WHERE camera_id = %(id)s",
                 {"id": camera_id},
             )
-            return [row["zone_name"] for row in cur.fetchall()]
+            names: list[str] = []
+            for row in cur.fetchall():
+                for value in (row.get("zone_id"), row.get("zone_name")):
+                    if value and str(value) not in names:
+                        names.append(str(value))
+            return names
+
+    def rebind_zone_references(
+        self,
+        *,
+        camera_id: str,
+        old_zone_id: str,
+        new_zone_id: str,
+    ) -> List[Dict[str, Any]]:
+        if not old_zone_id or not new_zone_id or old_zone_id == new_zone_id:
+            return []
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE camera_rules
+                SET zone_id = %(new_zone_id)s,
+                    config = jsonb_set(
+                        jsonb_set(
+                            COALESCE(config, '{}'::jsonb),
+                            '{zone_id}',
+                            to_jsonb(%(new_zone_id)s::text),
+                            true
+                        ),
+                        '{zone}',
+                        to_jsonb(%(new_zone_id)s::text),
+                        true
+                    ),
+                    updated_at = now()
+                WHERE camera_id = %(camera_id)s
+                  AND (
+                    zone_id = %(old_zone_id)s
+                    OR config->>'zone_id' = %(old_zone_id)s
+                    OR config->>'zone' = %(old_zone_id)s
+                  )
+                RETURNING *, algorithm_id AS algorithm_type
+                """,
+                {
+                    "camera_id": camera_id,
+                    "old_zone_id": old_zone_id,
+                    "new_zone_id": new_zone_id,
+                },
+            )
+            return cur.fetchall()
+
+    def bind_final_roi_zone(
+        self,
+        *,
+        camera_id: str,
+        zone_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Make one polygon ROI the authoritative zone for zone-based rules."""
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE camera_rules
+                SET zone_id = %(zone_id)s,
+                    config = jsonb_set(
+                        jsonb_set(
+                            COALESCE(config, '{}'::jsonb),
+                            '{zone_id}',
+                            to_jsonb(%(zone_id)s::text),
+                            true
+                        ),
+                        '{zone}',
+                        to_jsonb(%(zone_id)s::text),
+                        true
+                    ),
+                    updated_at = now()
+                WHERE camera_id = %(camera_id)s
+                  AND (
+                    algorithm_id = ANY(%(algorithm_ids)s)
+                    OR rule_type = ANY(%(rule_types)s)
+                    OR zone_id IS NOT NULL
+                    OR config ? 'zone_id'
+                    OR config ? 'zone'
+                  )
+                  AND COALESCE(algorithm_id, '') <> ALL(%(excluded_algorithm_ids)s)
+                  AND COALESCE(rule_type, '') <> ALL(%(excluded_rule_types)s)
+                RETURNING *, algorithm_id AS algorithm_type
+                """,
+                {
+                    "camera_id": camera_id,
+                    "zone_id": zone_id,
+                    "algorithm_ids": list(POLYGON_ZONE_RULE_ALGORITHM_IDS),
+                    "rule_types": list(POLYGON_ZONE_RULE_TYPES),
+                    "excluded_algorithm_ids": list(NON_POLYGON_ZONE_RULE_ALGORITHM_IDS),
+                    "excluded_rule_types": list(NON_POLYGON_ZONE_RULE_TYPES),
+                },
+            )
+            return cur.fetchall()
 
     # ------------------------------------------------------------------
     # Rule CRUD
@@ -605,9 +747,9 @@ class CameraRepository:
                 {"ids": camera_ids},
             )
             rows = cur.fetchall()
-        out: Dict[str, List[Dict[str, Any]]] = {cid: [] for cid in camera_ids}
+        out: Dict[str, List[Dict[str, Any]]] = {str(cid): [] for cid in camera_ids}
         for r in rows:
-            out.setdefault(r["camera_id"], []).append(r)
+            out.setdefault(str(r["camera_id"]), []).append(r)
         return out
 
     def list_rules_for_cameras(self, camera_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
@@ -620,7 +762,7 @@ class CameraRepository:
                 {"ids": camera_ids},
             )
             rows = cur.fetchall()
-        out: Dict[str, List[Dict[str, Any]]] = {cid: [] for cid in camera_ids}
+        out: Dict[str, List[Dict[str, Any]]] = {str(cid): [] for cid in camera_ids}
         for r in rows:
-            out.setdefault(r["camera_id"], []).append(r)
+            out.setdefault(str(r["camera_id"]), []).append(r)
         return out

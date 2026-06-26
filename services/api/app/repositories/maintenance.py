@@ -284,6 +284,53 @@ class MaintenanceRepository:
                 },
             )
 
+    def update_evidence_bundle_media_deleted(
+        self,
+        *,
+        event_id: str,
+        job_id: str,
+        operator: str,
+        reason: str,
+        media_status: str = "media_deleted",
+    ) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE evidence_bundles
+                SET media_status = %(media_status)s::text,
+                    evidence_state = %(media_status)s::text,
+                    evidence_reason = %(message)s::text,
+                    summary = jsonb_set(
+                        COALESCE(summary, '{}'::jsonb),
+                        '{maintenance}',
+                        COALESCE(summary->'maintenance', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'deleted_at', now(),
+                            'deleted_by', %(operator)s::text,
+                            'delete_reason', %(reason)s::text,
+                            'delete_job_id', %(job_id)s::text,
+                            'no_auto_regenerate', true
+                        ),
+                        true
+                    ),
+                    materialization = COALESCE(materialization, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'deleted_by_storage_maintenance', true,
+                            'delete_job_id', %(job_id)s::text
+                        ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "job_id": job_id,
+                    "operator": operator,
+                    "reason": reason,
+                    "media_status": media_status,
+                    "message": f"deleted_by_storage_maintenance:{job_id}",
+                },
+            )
+
     def mark_evidence_tasks_deleted_metadata(self, *, event_id: str, job_id: str) -> None:
         with self._conn.cursor() as cur:
             cur.execute(

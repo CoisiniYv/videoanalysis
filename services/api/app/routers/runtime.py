@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.services.runtime_control import (
+    RuntimeControlBlockedError,
     RuntimeControlError,
     restart_single_runtime,
     runtime_control_status,
@@ -37,12 +38,36 @@ def _err(message: str, request_id: str, status_code: int = 503) -> dict:
     }
 
 
+def _err_response(
+    status_code: int,
+    message: str,
+    request_id: str,
+    *,
+    details: dict | None = None,
+) -> JSONResponse:
+    content = _err(message, request_id, status_code)
+    if details is not None:
+        content["error"]["details"] = details
+    return JSONResponse(status_code=status_code, content=content)
+
+
+def _runtime_control_error_response(exc: RuntimeControlError, request_id: str) -> JSONResponse:
+    if isinstance(exc, RuntimeControlBlockedError):
+        return _err_response(
+            exc.status_code,
+            str(exc),
+            request_id,
+            details=exc.details,
+        )
+    return _err_response(503, str(exc), request_id)
+
+
 @router.get("/overview")
 def runtime_overview(request_id: str = Depends(_request_id)):
     try:
         return _ok(build_runtime_overview(), request_id)
     except RuntimeOverviewError as exc:
-        return JSONResponse(status_code=503, content=_err(str(exc), request_id))
+        return _err_response(503, str(exc), request_id)
 
 
 @router.get("/control")
@@ -50,7 +75,7 @@ def runtime_control(request_id: str = Depends(_request_id)):
     try:
         return _ok(runtime_control_status(), request_id)
     except RuntimeControlError as exc:
-        return JSONResponse(status_code=503, content=_err(str(exc), request_id))
+        return _runtime_control_error_response(exc, request_id)
 
 
 @router.post("/control/single/start")
@@ -58,7 +83,7 @@ def runtime_control_single_start(request_id: str = Depends(_request_id)):
     try:
         return _ok(start_single_runtime(), request_id)
     except RuntimeControlError as exc:
-        return JSONResponse(status_code=503, content=_err(str(exc), request_id))
+        return _runtime_control_error_response(exc, request_id)
 
 
 @router.post("/control/single/stop")
@@ -66,15 +91,21 @@ def runtime_control_single_stop(request_id: str = Depends(_request_id)):
     try:
         return _ok(stop_single_runtime(), request_id)
     except RuntimeControlError as exc:
-        return JSONResponse(status_code=503, content=_err(str(exc), request_id))
+        return _runtime_control_error_response(exc, request_id)
 
 
 @router.post("/control/single/restart")
-def runtime_control_single_restart(request_id: str = Depends(_request_id)):
+def runtime_control_single_restart(
+    force: bool = Query(
+        False,
+        description="Force single-runtime restart even when active evidence tasks would be interrupted.",
+    ),
+    request_id: str = Depends(_request_id),
+):
     try:
-        return _ok(restart_single_runtime(), request_id)
+        return _ok(restart_single_runtime(force=force), request_id)
     except RuntimeControlError as exc:
-        return JSONResponse(status_code=503, content=_err(str(exc), request_id))
+        return _runtime_control_error_response(exc, request_id)
 
 
 @router.post("/control/dual/stop")
@@ -82,4 +113,4 @@ def runtime_control_dual_stop(request_id: str = Depends(_request_id)):
     try:
         return _ok(stop_dual_runtime(), request_id)
     except RuntimeControlError as exc:
-        return JSONResponse(status_code=503, content=_err(str(exc), request_id))
+        return _runtime_control_error_response(exc, request_id)

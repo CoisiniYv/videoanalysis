@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=delete-usability-20260615" />
+    <link rel="stylesheet" href="/static/style.css?v=roi-zone-stack-20260627" />
   </head>
   <body>
     <div class="app-shell">
@@ -206,8 +206,37 @@
                   <button id="save-zone" type="button" class="primary">保存区域</button>
                 </div>
               </div>
-              <textarea id="zone-json" spellcheck="false" placeholder="区域 JSON"></textarea>
-              <div id="zones" class="scroll-list"></div>
+              <div class="roi-workbench">
+                <div class="roi-editor">
+                  <div class="roi-toolbar">
+                    <label>区域 ID<input id="roi-zone-id" value="perimeter" /></label>
+                    <label>类型
+                      <select id="roi-zone-type">
+                        <option value="polygon">多边形</option>
+                        <option value="line">检测线</option>
+                      </select>
+                    </label>
+                    <button id="refresh-roi-preview" type="button">刷新画面</button>
+                    <button id="add-roi-center-point" type="button">中心点</button>
+                    <button id="undo-roi-point" type="button">撤销点</button>
+                    <button id="clear-roi-points" type="button">清空</button>
+                    <button id="save-roi-zone" type="button" class="primary">保存 ROI</button>
+                  </div>
+                  <div id="roi-canvas-wrap" class="roi-canvas-wrap">
+                    <img id="roi-preview-image" alt="摄像头预览画面" />
+                    <canvas id="roi-canvas"></canvas>
+                    <div id="roi-preview-empty" class="roi-preview-empty">选择摄像头后刷新画面</div>
+                  </div>
+                  <div id="roi-editor-status" class="message-box roi-editor-status">未加载画面</div>
+                </div>
+                <div class="zone-list-panel">
+                  <div id="zones" class="scroll-list"></div>
+                </div>
+              </div>
+              <details class="zone-json-details">
+                <summary>高级 JSON</summary>
+                <textarea id="zone-json" spellcheck="false" placeholder="区域 JSON"></textarea>
+              </details>
             </div>
 
             <div id="tab-rules" class="tab-panel" hidden>
@@ -548,6 +577,14 @@
             <div id="maintenance-execute-status" class="message-box maintenance-note">
               Midterm 默认只允许统计和预览，执行删除处于关闭状态。
             </div>
+            <div class="maintenance-execute-control">
+              <label class="maintenance-switch">
+                <input id="maintenance-execute-toggle" type="checkbox" />
+                <span>允许执行删除</span>
+              </label>
+              <input id="maintenance-execute-reason" placeholder="变更原因" />
+              <button id="apply-maintenance-execute-control" type="button">应用</button>
+            </div>
           </section>
 
           <section class="pane maintenance-preview-pane">
@@ -601,8 +638,8 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=source-apply-once-20260626"></script>
+    <script src="/static/operator.js?v=roi-zone-stack-20260627"></script>
     <script src="/static/evidence.js?v=evidence-list-fast-20260615"></script>
-    <script src="/static/maintenance.js?v=delete-dialog-fast-20260615"></script>
+    <script src="/static/maintenance.js?v=maintenance-execute-control-20260627"></script>
   </body>
 </html>

@@ -157,12 +157,14 @@ python -m compileall -q \
 git diff --check
 ```
 
-## 后续建议
+## 受控重启证据保护
 
-8090 后续应增加重启保护：
+8090 的 full runtime apply/restart 已增加 evidence restart guard：
 
-- 在 full runtime apply/restart 前检查是否存在 `pending`、`queued`、`replaying`、`finalizing` 等进行中的 evidence 任务；
-- 若存在进行中任务，默认阻止重启或提示等待排空；
-- 页面上明确区分 source-only 操作和 full runtime 操作。
+- 在 full runtime apply/restart 和单路链路 restart 前，检查是否存在 `pending`、`waiting_proof`、`queued`、`replay_job_created`、`replaying`、`materializing`、`finalizing` 等进行中的 evidence 任务；
+- 若存在进行中任务，默认返回 409 并阻止重启，8090 页面展示阻断原因和前几条任务摘要；
+- 已超过 `CAMERA_RUNTIME_EVIDENCE_GUARD_STALE_AFTER_S` 且 materialization/replay/annotation deadline 均已过期的历史卡死任务不阻断重启，但会以 `stale_tasks` 返回；
+- 只有显式传入 `force=true` 时才允许带活跃 evidence 强制重启，返回结果会记录 `evidence_restart_guard.forced=true`；
+- source-only 摄像头新增、保存、启用、停用不重启 evidence 链路，不受该 guard 阻断。
 
-这属于运行时操作安全增强，不影响本次 source-only 控制问题的完成状态。
+该保护是运行时操作安全增强，目的是避免受控重启打断 Replay、clip-worker、media-worker 正在生成的证据。

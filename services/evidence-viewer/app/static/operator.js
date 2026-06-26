@@ -20,6 +20,17 @@ let runtimeOverview = null;
 let runtimeControl = null;
 let lastRuntimeApplyResult = null;
 let selectedRuntimeConfig = null;
+let roiPreviewObjectUrl = "";
+let roiPreviewRequestId = 0;
+const roiState = {
+  points: [],
+  sourceWidth: 0,
+  sourceHeight: 0,
+  imageLoaded: false,
+  lastPointerAt: 0,
+  lastPointerX: Number.NaN,
+  lastPointerY: Number.NaN,
+};
 
 /* ---- DOM refs ---- */
 const statusEl = document.getElementById("status");
@@ -64,6 +75,13 @@ const fullConfigEl = document.getElementById("full-config");
 const runtimeApplyResultEl = document.getElementById("runtime-apply-result");
 const generatedRuntimeConfigEl = document.getElementById("generated-runtime-config");
 const refreshRuntimeConfigBtn = document.getElementById("refresh-runtime-config");
+const roiZoneIdEl = document.getElementById("roi-zone-id");
+const roiZoneTypeEl = document.getElementById("roi-zone-type");
+const roiPreviewImageEl = document.getElementById("roi-preview-image");
+const roiCanvasWrapEl = document.getElementById("roi-canvas-wrap");
+const roiCanvasEl = document.getElementById("roi-canvas");
+const roiPreviewEmptyEl = document.getElementById("roi-preview-empty");
+const roiEditorStatusEl = document.getElementById("roi-editor-status");
 const peopleEl = document.getElementById("people");
 const peopleSearchEl = document.getElementById("people-search");
 const faceRegistrationForm = document.getElementById("face-registration-form");
@@ -319,9 +337,30 @@ async function request(path, options = {}) {
     throw new Error(`接口返回不是有效 JSON：${text.slice(0, 200)}`);
   }
   if (!response.ok || body.error) {
-    throw new Error(body.error?.message || body.error?.detail || `HTTP ${response.status}`);
+    const error = new Error(body.error?.message || body.error?.detail || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.details = body.error?.details || null;
+    throw error;
   }
   return body.data ?? body;
+}
+
+function apiErrorMessage(error) {
+  const details = error?.details || {};
+  if (details.blocked && details.active_count) {
+    const count = formatInteger(details.active_count);
+    const taskSummary = (details.tasks || []).slice(0, 3).map((task) => {
+      const label = evidenceStateLabel(task.blocking_state || task.status || task.materialization_status);
+      const source = task.source_id || task.camera_id || "--";
+      const eventType = task.event_type || "--";
+      return `${eventType}/${source}/${label}`;
+    }).join("；");
+    return `仍有 ${count} 个证据任务在生成中，已阻止重启以避免证据丢失${taskSummary ? `；${taskSummary}` : ""}`;
+  }
+  if (details.guard_unavailable) {
+    return "无法确认是否存在生成中的证据任务，已阻止重启";
+  }
+  return error?.message || String(error || "未知错误");
 }
 
 function parseJsonTextarea(textarea, label) {
@@ -597,6 +636,423 @@ function makeCameraId() {
   return "00000000-0000-4000-8000-" + Date.now().toString().padStart(12, "0").slice(-12);
 }
 
+function selectedCamera() {
+  return cameras.find((camera) => String(camera.id) === String(selectedCameraId)) || null;
+}
+
+function roiPointLimit() {
+  return roiZoneTypeEl?.value === "line" ? 2 : 10;
+}
+
+function roiPointMinimum() {
+  return roiZoneTypeEl?.value === "line" ? 2 : 3;
+}
+
+function roiTypeLabel() {
+  return roiZoneTypeEl?.value === "line" ? "检测线" : "多边形";
+}
+
+function defaultRoiZoneId(type = roiZoneTypeEl?.value) {
+  return type === "line" ? "tripwire_01" : "perimeter";
+}
+
+function nextRoiZoneId(type = roiZoneTypeEl?.value) {
+  const prefix = type === "line" ? "tripwire" : "roi";
+  const existing = new Set(
+    (currentZones || [])
+      .map((zone) => String(zone.zone_id || zone.zone_name || ""))
+      .filter(Boolean)
+  );
+  for (let index = 1; index <= 99; index += 1) {
+    const candidate = `${prefix}_${String(index).padStart(2, "0")}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${prefix}_${Date.now().toString().slice(-6)}`;
+}
+
+function setRoiStatus(text) {
+  if (!roiEditorStatusEl) return;
+  roiEditorStatusEl.textContent = text;
+}
+
+function roiSourceDimensions() {
+  const width = roiState.sourceWidth || roiPreviewImageEl?.naturalWidth || 1920;
+  const height = roiState.sourceHeight || roiPreviewImageEl?.naturalHeight || 1080;
+  return { width: Math.max(Number(width) || 1, 1), height: Math.max(Number(height) || 1, 1) };
+}
+
+function roiDisplayDimensions() {
+  const rect = roiCanvasWrapEl?.getBoundingClientRect();
+  return {
+    width: Math.max(rect?.width || roiPreviewImageEl?.clientWidth || 1, 1),
+    height: Math.max(rect?.height || roiPreviewImageEl?.clientHeight || 1, 1),
+  };
+}
+
+function roiImageDisplayRect() {
+  const display = roiDisplayDimensions();
+  const source = roiSourceDimensions();
+  const sourceAspect = source.width / source.height;
+  const displayAspect = display.width / display.height;
+  if (displayAspect > sourceAspect) {
+    const height = display.height;
+    const width = height * sourceAspect;
+    return { left: (display.width - width) / 2, top: 0, width, height };
+  }
+  const width = display.width;
+  const height = width / sourceAspect;
+  return { left: 0, top: (display.height - height) / 2, width, height };
+}
+
+function normalizeRoiPoint(point) {
+  if (!Array.isArray(point) || point.length !== 2) return null;
+  const x = Number(point[0]);
+  const y = Number(point[1]);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return [x, y];
+}
+
+function sourcePointToDisplay(point, coordinateSpace = "pixel") {
+  const imageRect = roiImageDisplayRect();
+  const source = roiSourceDimensions();
+  const xy = normalizeRoiPoint(point);
+  if (!xy) return null;
+  const x = coordinateSpace === "normalized"
+    ? imageRect.left + xy[0] * imageRect.width
+    : imageRect.left + (xy[0] / source.width) * imageRect.width;
+  const y = coordinateSpace === "normalized"
+    ? imageRect.top + xy[1] * imageRect.height
+    : imageRect.top + (xy[1] / source.height) * imageRect.height;
+  return [x, y];
+}
+
+function displayPointToSource(x, y) {
+  const imageRect = roiImageDisplayRect();
+  const source = roiSourceDimensions();
+  const relativeX = Math.max(0, Math.min(imageRect.width, x - imageRect.left));
+  const relativeY = Math.max(0, Math.min(imageRect.height, y - imageRect.top));
+  return [
+    Math.round(Math.max(0, Math.min(source.width, (relativeX / imageRect.width) * source.width))),
+    Math.round(Math.max(0, Math.min(source.height, (relativeY / imageRect.height) * source.height))),
+  ];
+}
+
+function syncRoiCanvasSize() {
+  if (!roiCanvasEl || !roiCanvasWrapEl) return null;
+  const rect = roiCanvasWrapEl.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(rect.width * dpr));
+  const height = Math.max(1, Math.round(rect.height * dpr));
+  if (roiCanvasEl.width !== width) roiCanvasEl.width = width;
+  if (roiCanvasEl.height !== height) roiCanvasEl.height = height;
+  const ctx = roiCanvasEl.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+
+function drawZonePath(ctx, points, { closed, stroke, fill, width = 2, dash = [] }) {
+  if (!ctx || !Array.isArray(points) || points.length < 2) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.setLineDash(dash);
+  ctx.lineWidth = width;
+  ctx.strokeStyle = stroke;
+  ctx.fillStyle = fill;
+  ctx.moveTo(points[0][0], points[0][1]);
+  for (const point of points.slice(1)) {
+    ctx.lineTo(point[0], point[1]);
+  }
+  if (closed) {
+    ctx.closePath();
+    if (fill) ctx.fill();
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRoiCanvas() {
+  const ctx = syncRoiCanvasSize();
+  if (!ctx || !roiCanvasWrapEl) return;
+  const display = roiDisplayDimensions();
+  ctx.clearRect(0, 0, display.width, display.height);
+  if (!roiState.imageLoaded) return;
+
+  for (const zone of currentZones || []) {
+    const points = (zone.points || [])
+      .map((point) => sourcePointToDisplay(point, zone.coordinate_space || "pixel"))
+      .filter(Boolean);
+    if (points.length < 2) continue;
+    const closed = zone.zone_type === "polygon";
+    drawZonePath(ctx, points, {
+      closed,
+      stroke: "rgba(45, 212, 191, 0.7)",
+      fill: closed ? "rgba(45, 212, 191, 0.12)" : "",
+      width: 2,
+      dash: [8, 6],
+    });
+  }
+
+  const draftPoints = roiState.points
+    .map((point) => sourcePointToDisplay(point, "pixel"))
+    .filter(Boolean);
+  if (draftPoints.length >= 2) {
+    drawZonePath(ctx, draftPoints, {
+      closed: roiZoneTypeEl?.value === "polygon" && draftPoints.length >= 3,
+      stroke: "rgba(248, 113, 113, 0.96)",
+      fill: roiZoneTypeEl?.value === "polygon" && draftPoints.length >= 3
+        ? "rgba(248, 113, 113, 0.16)"
+        : "",
+      width: 3,
+    });
+  }
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "rgba(194, 65, 12, 0.96)";
+  ctx.lineWidth = 2;
+  draftPoints.forEach((point, index) => {
+    ctx.beginPath();
+    ctx.arc(point[0], point[1], 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(24, 34, 48, 0.92)";
+    ctx.font = "11px sans-serif";
+    ctx.fillText(String(index + 1), point[0] + 8, point[1] - 8);
+    ctx.fillStyle = "#ffffff";
+  });
+  ctx.restore();
+}
+
+function roiZoneFromDraft() {
+  const zoneType = roiZoneTypeEl?.value === "line" ? "line" : "polygon";
+  const zoneId = String(roiZoneIdEl?.value || defaultRoiZoneId(zoneType)).trim();
+  if (!zoneId) {
+    throw new Error("区域 ID 不能为空");
+  }
+  if (roiState.points.length < (zoneType === "line" ? 2 : 3)) {
+    throw new Error(`${zoneType === "line" ? "检测线" : "多边形"} 点位不足`);
+  }
+  if (zoneType === "polygon" && roiState.points.length > 10) {
+    throw new Error("多边形最多 10 个点");
+  }
+  return {
+    zone_id: zoneId,
+    zone_name: zoneId,
+    zone_type: zoneType,
+    coordinate_space: "pixel",
+    points: roiState.points.map((point) => [Math.round(point[0]), Math.round(point[1])]),
+    enabled: true,
+  };
+}
+
+function writeRoiZoneJson({ allowIncomplete = false } = {}) {
+  if (!zoneJson) return null;
+  try {
+    const zone = roiZoneFromDraft();
+    zoneJson.value = JSON.stringify(zone, null, 2);
+    setRoiStatus(`${roiTypeLabel()} ${zone.zone_id}：${zone.points.length} 个点`);
+    return zone;
+  } catch (e) {
+    if (!allowIncomplete) throw e;
+    const zoneType = roiZoneTypeEl?.value === "line" ? "line" : "polygon";
+    const zoneId = String(roiZoneIdEl?.value || defaultRoiZoneId(zoneType)).trim();
+    zoneJson.value = JSON.stringify({
+      zone_id: zoneId,
+      zone_name: zoneId,
+      zone_type: zoneType,
+      coordinate_space: "pixel",
+      points: roiState.points,
+      enabled: true,
+    }, null, 2);
+    const min = roiPointMinimum();
+    setRoiStatus(`${roiTypeLabel()}：${roiState.points.length}/${min} 最少点位`);
+    return null;
+  }
+}
+
+function startRoiDraft(type = "polygon", points = []) {
+  if (roiZoneTypeEl) roiZoneTypeEl.value = type === "line" ? "line" : "polygon";
+  if (roiZoneIdEl && !roiZoneIdEl.value) roiZoneIdEl.value = defaultRoiZoneId(type);
+  roiState.points = points.map(normalizeRoiPoint).filter(Boolean);
+  writeRoiZoneJson({ allowIncomplete: true });
+  drawRoiCanvas();
+}
+
+function startNewRoiDraft(type = "polygon") {
+  const normalized = type === "line" ? "line" : "polygon";
+  if (roiZoneIdEl) roiZoneIdEl.value = nextRoiZoneId(normalized);
+  startRoiDraft(normalized, []);
+  setRoiStatus(`${roiTypeLabel()}：点击画面添加点`);
+}
+
+function rulePolygonZoneId(rule) {
+  const config = rule?.config || {};
+  return String(rule?.zone_id || config.zone_id || config.zone || "").trim();
+}
+
+function preferredFinalRoiZone(zones = [], rules = []) {
+  const polygonZones = (zones || []).filter((zone) => zone.zone_type === "polygon");
+  if (!polygonZones.length) return null;
+  const byId = new Map(
+    polygonZones.map((zone) => [String(zone.zone_id || zone.zone_name || ""), zone])
+  );
+  const enabledRules = (rules || []).filter((rule) => rule.enabled !== false);
+  const intrusionRule = enabledRules.find((rule) => rule.algorithm_id === "behavior.intrusion");
+  const intrusionZone = byId.get(rulePolygonZoneId(intrusionRule));
+  if (intrusionZone) return intrusionZone;
+  for (const rule of enabledRules) {
+    const zone = byId.get(rulePolygonZoneId(rule));
+    if (zone) return zone;
+  }
+  return polygonZones[0];
+}
+
+function loadZoneIntoRoiEditor(zone) {
+  if (!zone) return;
+  if (roiZoneIdEl) roiZoneIdEl.value = zone.zone_id || zone.zone_name || defaultRoiZoneId(zone.zone_type);
+  const type = zone.zone_type === "line" || zone.zone_type === "direction_line" ? "line" : "polygon";
+  const source = roiSourceDimensions();
+  const points = (zone.points || []).map((point) => {
+    const xy = normalizeRoiPoint(point);
+    if (!xy) return null;
+    if ((zone.coordinate_space || "pixel") === "normalized") {
+      return [xy[0] * source.width, xy[1] * source.height];
+    }
+    return xy;
+  }).filter(Boolean);
+  startRoiDraft(type, points);
+}
+
+function prepareRoiEditorForCamera(zones = [], rules = currentRules) {
+  roiPreviewEmptyEl?.classList.remove("hidden");
+  roiState.imageLoaded = false;
+  const finalZone = preferredFinalRoiZone(zones, rules);
+  if (finalZone) {
+    loadZoneIntoRoiEditor(finalZone);
+    setRoiStatus(`最终检测区域：${finalZone.zone_id || finalZone.zone_name}`);
+    return;
+  }
+  startNewRoiDraft("polygon");
+  setRoiStatus(selectedCameraId ? "画面加载中，点击画面添加最终检测区域" : "未选择摄像头");
+}
+
+async function refreshRoiPreview({ silent = false } = {}) {
+  if (!selectedCameraId) {
+    setRoiStatus("未选择摄像头");
+    return;
+  }
+  const camera = selectedCamera();
+  if (!camera?.rtsp_url && !cameraForm?.elements.rtsp_url.value) {
+    setRoiStatus("摄像头地址为空");
+    return;
+  }
+  const requestId = ++roiPreviewRequestId;
+  if (!silent) clearMessages();
+  setRoiStatus("画面加载中");
+  const response = await fetch(
+    `${API}/cameras/${encodeURIComponent(selectedCameraId)}/preview.jpg?max_width=1280&_=${Date.now()}`,
+    { headers: { Accept: "image/jpeg" } }
+  );
+  if (requestId !== roiPreviewRequestId) return;
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      message = body.error?.message || body.detail || message;
+    } catch (_err) {}
+    roiState.imageLoaded = false;
+    roiPreviewEmptyEl?.classList.remove("hidden");
+    drawRoiCanvas();
+    throw new Error(message);
+  }
+  roiState.sourceWidth = Number(response.headers.get("X-Camera-Source-Width")) || 0;
+  roiState.sourceHeight = Number(response.headers.get("X-Camera-Source-Height")) || 0;
+  const blob = await response.blob();
+  if (roiPreviewObjectUrl) URL.revokeObjectURL(roiPreviewObjectUrl);
+  roiPreviewObjectUrl = URL.createObjectURL(blob);
+  roiPreviewImageEl.src = roiPreviewObjectUrl;
+}
+
+async function saveRoiZone() {
+  if (!selectedCameraId) {
+    showError("未选择摄像头");
+    return;
+  }
+  writeRoiZoneJson();
+  await saveZone({ bindRules: true });
+}
+
+function ensureRoiImageReadyForInput() {
+  if (roiState.imageLoaded) return true;
+  if (roiPreviewImageEl?.complete && roiPreviewImageEl.naturalWidth > 0) {
+    roiState.imageLoaded = true;
+    if (!roiState.sourceWidth) roiState.sourceWidth = roiPreviewImageEl.naturalWidth || 0;
+    if (!roiState.sourceHeight) roiState.sourceHeight = roiPreviewImageEl.naturalHeight || 0;
+    roiPreviewEmptyEl?.classList.add("hidden");
+    drawRoiCanvas();
+    return true;
+  }
+  return false;
+}
+
+function roiInputPoint(event) {
+  const rect = roiCanvasWrapEl?.getBoundingClientRect();
+  return {
+    x: Number(event.clientX || 0) - Number(rect?.left || 0),
+    y: Number(event.clientY || 0) - Number(rect?.top || 0),
+  };
+}
+
+function shouldIgnoreRoiInput(event) {
+  const now = Date.now();
+  const point = roiInputPoint(event);
+  const dx = Number.isFinite(roiState.lastPointerX) ? point.x - roiState.lastPointerX : Infinity;
+  const dy = Number.isFinite(roiState.lastPointerY) ? point.y - roiState.lastPointerY : Infinity;
+  const sameSpot = Math.hypot(dx, dy) <= 10;
+  if (sameSpot && now - roiState.lastPointerAt < 600) {
+    return true;
+  }
+  roiState.lastPointerX = point.x;
+  roiState.lastPointerY = point.y;
+  roiState.lastPointerAt = now;
+  return false;
+}
+
+function addRoiPointFromEvent(event) {
+  if (shouldIgnoreRoiInput(event)) return;
+  if (!ensureRoiImageReadyForInput()) {
+    setRoiStatus("请先刷新画面");
+    return;
+  }
+  const limit = roiPointLimit();
+  if (roiState.points.length >= limit) {
+    setRoiStatus(`${roiTypeLabel()}最多 ${limit} 个点`);
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const point = roiInputPoint(event);
+  roiState.points.push(displayPointToSource(point.x, point.y));
+  writeRoiZoneJson({ allowIncomplete: true });
+  drawRoiCanvas();
+}
+
+function addRoiCenterPoint() {
+  if (!ensureRoiImageReadyForInput()) {
+    setRoiStatus("请先刷新画面");
+    return;
+  }
+  const limit = roiPointLimit();
+  if (roiState.points.length >= limit) {
+    setRoiStatus(`${roiTypeLabel()}最多 ${limit} 个点`);
+    return;
+  }
+  const source = roiSourceDimensions();
+  roiState.points.push([Math.round(source.width / 2), Math.round(source.height / 2)]);
+  writeRoiZoneJson({ allowIncomplete: true });
+  drawRoiCanvas();
+}
+
 function updateSummary() {
   if (cameraCountEl) {
     cameraCountEl.textContent = String(cameras.length);
@@ -734,37 +1190,128 @@ function renderCameras() {
   updateSummary();
 }
 
+function zoneTypeLabel(zone) {
+  return ["line", "direction_line"].includes(zone?.zone_type) ? "检测线" : "区域";
+}
+
+function zonePointBounds(points = []) {
+  const normalized = points.map(normalizeRoiPoint).filter(Boolean);
+  if (!normalized.length) return "";
+  const xs = normalized.map((point) => point[0]);
+  const ys = normalized.map((point) => point[1]);
+  return `X ${Math.min(...xs)}-${Math.max(...xs)} / Y ${Math.min(...ys)}-${Math.max(...ys)}`;
+}
+
+function zoneRuleBindings(zone) {
+  const zoneId = String(zone?.zone_id || zone?.zone_name || "");
+  if (!zoneId) return [];
+  const isLine = ["line", "direction_line"].includes(zone?.zone_type);
+  return (currentRules || [])
+    .filter((rule) => {
+      const config = rule?.config || {};
+      const ref = isLine
+        ? String(rule?.line_id || config.line_id || "")
+        : String(rule?.zone_id || config.zone_id || config.zone || "");
+      return ref === zoneId;
+    })
+    .map((rule) => {
+      const label = algorithmLabel(rule.algorithm_id || rule.rule_type || rule.rule_id);
+      return `${label}${rule.enabled === false ? "（停用）" : ""}`;
+    });
+}
+
+function createZoneListItem(zone, finalZoneId) {
+  const item = document.createElement("div");
+  const zoneId = zone.zone_id || zone.zone_name || "";
+  const typeLabel = zoneTypeLabel(zone);
+  const points = zone.points || [];
+  const pointUnit = typeLabel === "检测线" ? "端点" : "点";
+  const bounds = zonePointBounds(points);
+  const bindings = zoneRuleBindings(zone);
+  const isFinalZone = typeLabel === "区域" && zoneId && zoneId === finalZoneId;
+  item.className = `zone-item zone-item-${typeLabel === "检测线" ? "line" : "polygon"}`;
+  item.innerHTML =
+    `<div class="zone-item-header">` +
+      `<div class="zone-item-main">` +
+        `<strong>${escapeHtml(zoneId)}</strong>` +
+        `<div class="muted">${escapeHtml(zone.zone_name && zone.zone_name !== zoneId ? zone.zone_name : typeLabel)}</div>` +
+      `</div>` +
+      `<div class="zone-badges">` +
+        `<span class="zone-chip">${escapeHtml(typeLabel)}</span>` +
+        `<span class="zone-chip ${zone.enabled === false ? "disabled" : "enabled"}">${zone.enabled === false ? "停用" : "启用"}</span>` +
+        `${isFinalZone ? `<span class="zone-chip final">最终检测区域</span>` : ""}` +
+      `</div>` +
+    `</div>` +
+    `<div class="zone-meta-grid">` +
+      `<span>${points.length} 个${pointUnit}</span>` +
+      `<span>${escapeHtml(zone.coordinate_space || "pixel")}</span>` +
+      `<span>${escapeHtml(bounds || "未记录坐标")}</span>` +
+    `</div>` +
+    `<div class="zone-binding-list">` +
+      (bindings.length
+        ? bindings.map((label) => `<span>${escapeHtml(label)}</span>`).join("")
+        : `<span class="muted">未绑定算法</span>`) +
+    `</div>` +
+    `<div class="item-actions">` +
+      `<button class="sm" data-action="edit-zone" data-zone-id="${escapeHtml(zoneId)}">编辑</button>` +
+      `<button class="sm danger" data-action="delete-zone" data-zone-id="${escapeHtml(zoneId)}">删除</button>` +
+    `</div>`;
+  item.querySelector('[data-action="edit-zone"]').addEventListener("click", (e) => {
+    e.stopPropagation();
+    zoneJson.value = JSON.stringify({
+      zone_id: zone.zone_id,
+      zone_name: zone.zone_name || "",
+      zone_type: zone.zone_type,
+      coordinate_space: zone.coordinate_space || "pixel",
+      points: zone.points || [],
+      enabled: zone.enabled !== false,
+    }, null, 2);
+    loadZoneIntoRoiEditor(zone);
+  });
+  item.querySelector('[data-action="delete-zone"]').addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteZone(zone.zone_id);
+  });
+  return item;
+}
+
+function appendZoneGroup({ title, rows, emptyText, finalZoneId }) {
+  const group = document.createElement("section");
+  group.className = "zone-list-group";
+  const header = document.createElement("div");
+  header.className = "zone-list-title";
+  header.innerHTML = `<h3>${escapeHtml(title)}</h3><span>${rows.length}</span>`;
+  group.appendChild(header);
+  const list = document.createElement("div");
+  list.className = "zone-list-items";
+  if (rows.length) {
+    rows.forEach((zone) => list.appendChild(createZoneListItem(zone, finalZoneId)));
+  } else {
+    list.innerHTML = `<div class="zone-list-empty">${escapeHtml(emptyText)}</div>`;
+  }
+  group.appendChild(list);
+  zonesEl.appendChild(group);
+}
+
 function renderZones(zones) {
   currentZones = zones || [];
   zonesEl.innerHTML = "";
-  for (const z of currentZones) {
-    const item = document.createElement("div");
-    item.className = "zone-item";
-    item.innerHTML =
-      `<strong>${z.zone_id}</strong>` +
-      `<div>${z.zone_type} | ${z.enabled ? "已启用" : "已停用"}</div>` +
-      `<div class="muted">${z.zone_name || ""}</div>` +
-      `<div class="item-actions">` +
-        `<button class="sm" data-action="edit-zone" data-zone-id="${z.zone_id}">编辑</button>` +
-        `<button class="sm danger" data-action="delete-zone" data-zone-id="${z.zone_id}">删除</button>` +
-      `</div>`;
-    item.querySelector('[data-action="edit-zone"]').addEventListener("click", (e) => {
-      e.stopPropagation();
-      zoneJson.value = JSON.stringify({
-        zone_id: z.zone_id,
-        zone_name: z.zone_name || "",
-        zone_type: z.zone_type,
-        coordinate_space: z.coordinate_space || "pixel",
-        points: z.points || [],
-        enabled: z.enabled !== false,
-      }, null, 2);
-    });
-    item.querySelector('[data-action="delete-zone"]').addEventListener("click", (e) => {
-      e.stopPropagation();
-      deleteZone(z.zone_id);
-    });
-    zonesEl.appendChild(item);
-  }
+  const finalZone = preferredFinalRoiZone(currentZones, currentRules);
+  const finalZoneId = finalZone ? String(finalZone.zone_id || finalZone.zone_name || "") : "";
+  const polygonZones = currentZones.filter((zone) => zone.zone_type === "polygon");
+  const lineZones = currentZones.filter((zone) => ["line", "direction_line"].includes(zone.zone_type));
+  appendZoneGroup({
+    title: "已保存区域",
+    rows: polygonZones,
+    emptyText: "暂无已保存区域",
+    finalZoneId,
+  });
+  appendZoneGroup({
+    title: "已保存检测线",
+    rows: lineZones,
+    emptyText: "暂无已保存检测线",
+    finalZoneId,
+  });
   renderZoneSelectors();
 }
 
@@ -809,6 +1356,7 @@ function renderRules(rules) {
     });
     rulesEl.appendChild(item);
   }
+  if (zonesEl) renderZones(currentZones);
   renderQuickAlgorithmControls();
 }
 
@@ -988,7 +1536,7 @@ function renderQuickAlgorithmControls() {
       ruleForm?.scrollIntoView({ block: "start", behavior: "smooth" });
     });
     row.querySelector('[data-action="save-quick-rule"]').addEventListener("click", () => {
-      saveQuickAlgorithmCard(row).catch((e) => showError(e.message));
+        saveQuickAlgorithmCard(row).catch((e) => showError(apiErrorMessage(e)));
     });
     algorithmControlsEl.appendChild(row);
   }
@@ -1638,12 +2186,15 @@ async function selectCamera(cameraId, { clear = true } = {}) {
   const data = await request(`${API}/cameras/${encodeURIComponent(cameraId)}/config`);
   fillCamera(data.camera);
   renderCameras();
+  currentRules = data.rules || [];
   renderZones(data.zones || []);
   await loadAlgorithmRules(cameraId, data.rules || []);
+  prepareRoiEditorForCamera(data.zones || [], currentRules);
   fullConfigEl.value = JSON.stringify(data, null, 2);
   await loadSelectedRuntimeConfig(cameraId);
   renderRuntimeApplyResult();
   renderQuickAlgorithmControls();
+  refreshRoiPreview({ silent: true }).catch((e) => setRoiStatus(`画面不可用：${e.message}`));
   setStatus(data.camera?.name || "摄像头就绪");
 }
 
@@ -1828,7 +2379,7 @@ async function applyRuntimeAfterChange(context) {
   try {
     await applyRuntime({ context });
   } catch (e) {
-    showError(`${context}，但运行时应用失败：${e.message}`);
+    showError(`${context}，但运行时应用失败：${apiErrorMessage(e)}`);
   }
 }
 
@@ -1862,7 +2413,7 @@ async function setCameraEnabled(enabled) {
   showCameraSourceApplyResult(`摄像头已${enabled ? "启用" : "停用"}`, savedCamera);
 }
 
-async function saveZone() {
+async function saveZone({ bindRules = false } = {}) {
   if (!selectedCameraId) { showError("未选择摄像头"); return; }
   clearMessages();
   let body;
@@ -1874,12 +2425,14 @@ async function saveZone() {
   }
   const config = await request(`${API}/cameras/${selectedCameraId}/config`);
   const exists = (config.zones || []).some((z) => z.zone_id === body.zone_id);
+  const bindRuleRefs = bindRules && body.zone_type === "polygon";
+  const bindQuery = bindRuleRefs ? "?bind_rules=true" : "";
   const path = exists
     ? `${API}/cameras/${selectedCameraId}/zones/${encodeURIComponent(body.zone_id)}`
     : `${API}/cameras/${selectedCameraId}/zones`;
-  await request(path, { method: exists ? "PUT" : "POST", body: JSON.stringify(body) });
+  await request(`${path}${bindQuery}`, { method: exists ? "PUT" : "POST", body: JSON.stringify(body) });
   await selectCamera(selectedCameraId);
-  await applyRuntimeAfterChange(`区域 ${body.zone_id} 已保存`);
+  await applyRuntimeAfterChange(bindRuleRefs ? `最终检测区域 ${body.zone_id} 已保存` : `区域 ${body.zone_id} 已保存`);
 }
 
 async function deleteZone(zoneId) {
@@ -2152,6 +2705,7 @@ document.getElementById("new-camera").addEventListener("click", () => {
   fullConfigEl.value = "";
   ruleJson.value = "";
   zoneJson.value = "";
+  prepareRoiEditorForCamera([]);
   if (ruleAlgorithmEl?.value) {
     fillRuleForm(defaultRuleForAlgorithm(ruleAlgorithmEl.value));
   }
@@ -2191,39 +2745,81 @@ document.getElementById("apply-runtime").addEventListener("click", () => {
 });
 document.getElementById("restart-runtime").addEventListener("click", () => {
   clearMessages();
-  restartRuntime().catch((e) => showError(`运行时受控重启失败：${e.message}`));
+  restartRuntime().catch((e) => showError(`运行时受控重启失败：${apiErrorMessage(e)}`));
 });
 themeToggleBtn?.addEventListener("click", () => {
   applyTheme(currentTheme() === "dark" ? "light" : "dark", { persist: true });
 });
 saveQuickAlgorithmsBtn?.addEventListener("click", () => {
-  saveQuickAlgorithmControls().catch((e) => showError(e.message));
+  saveQuickAlgorithmControls().catch((e) => showError(apiErrorMessage(e)));
+});
+roiPreviewImageEl?.addEventListener("load", () => {
+  roiState.imageLoaded = true;
+  if (!roiState.sourceWidth) roiState.sourceWidth = roiPreviewImageEl.naturalWidth || 0;
+  if (!roiState.sourceHeight) roiState.sourceHeight = roiPreviewImageEl.naturalHeight || 0;
+  roiPreviewEmptyEl?.classList.add("hidden");
+  drawRoiCanvas();
+  const source = roiSourceDimensions();
+  setRoiStatus(`画面已加载：${Math.round(source.width)} x ${Math.round(source.height)}`);
+});
+roiPreviewImageEl?.addEventListener("error", () => {
+  roiState.imageLoaded = false;
+  roiPreviewEmptyEl?.classList.remove("hidden");
+  drawRoiCanvas();
+  setRoiStatus("画面加载失败");
+});
+for (const target of [roiCanvasEl, roiCanvasWrapEl]) {
+  target?.addEventListener("pointerdown", addRoiPointFromEvent);
+  target?.addEventListener("mousedown", addRoiPointFromEvent);
+  target?.addEventListener("click", addRoiPointFromEvent);
+}
+roiZoneTypeEl?.addEventListener("change", () => {
+  const type = roiZoneTypeEl.value === "line" ? "line" : "polygon";
+  if (roiZoneIdEl && (!roiZoneIdEl.value || ["perimeter", "tripwire_01"].includes(roiZoneIdEl.value))) {
+    roiZoneIdEl.value = nextRoiZoneId(type);
+  }
+  if (type === "line" && roiState.points.length > 2) {
+    roiState.points = roiState.points.slice(0, 2);
+  }
+  writeRoiZoneJson({ allowIncomplete: true });
+  drawRoiCanvas();
+});
+roiZoneIdEl?.addEventListener("input", () => {
+  writeRoiZoneJson({ allowIncomplete: true });
+});
+window.addEventListener("resize", () => {
+  drawRoiCanvas();
+});
+document.getElementById("refresh-roi-preview")?.addEventListener("click", () => {
+  refreshRoiPreview().catch((e) => setRoiStatus(`画面不可用：${e.message}`));
+});
+document.getElementById("add-roi-center-point")?.addEventListener("click", () => {
+  addRoiCenterPoint();
+});
+document.getElementById("undo-roi-point")?.addEventListener("click", () => {
+  roiState.points.pop();
+  writeRoiZoneJson({ allowIncomplete: true });
+  drawRoiCanvas();
+});
+document.getElementById("clear-roi-points")?.addEventListener("click", () => {
+  roiState.points = [];
+  writeRoiZoneJson({ allowIncomplete: true });
+  drawRoiCanvas();
+});
+document.getElementById("save-roi-zone")?.addEventListener("click", () => {
+  saveRoiZone().catch((e) => showError(e.message));
 });
 
 document.getElementById("add-zone-polygon").addEventListener("click", () => {
-  zoneJson.value = JSON.stringify({
-    zone_id: "perimeter",
-    zone_name: "周界区域",
-    zone_type: "polygon",
-    coordinate_space: "pixel",
-    points: [[100, 300], [900, 300], [900, 700], [100, 700]],
-    enabled: true,
-  }, null, 2);
+  startNewRoiDraft("polygon");
 });
 
 document.getElementById("add-zone-line").addEventListener("click", () => {
-  zoneJson.value = JSON.stringify({
-    zone_id: "tripwire_01",
-    zone_name: "翻墙检测线",
-    zone_type: "line",
-    coordinate_space: "pixel",
-    points: [[0, 400], [1920, 400]],
-    enabled: true,
-  }, null, 2);
+  startNewRoiDraft("line");
 });
 
 document.getElementById("save-zone").addEventListener("click", () => {
-  saveZone().catch((e) => showError(e.message));
+  saveZone({ bindRules: true }).catch((e) => showError(e.message));
 });
 document.getElementById("save-rule").addEventListener("click", () => {
   saveRule().catch((e) => showError(e.message));
@@ -2270,7 +2866,7 @@ stopSingleRuntimeBtn?.addEventListener("click", () => {
   stopSingleRuntime().catch((e) => showError(`单路链路停止失败：${e.message}`));
 });
 restartSingleRuntimeBtn?.addEventListener("click", () => {
-  restartSingleRuntime().catch((e) => showError(`单路链路重启失败：${e.message}`));
+  restartSingleRuntime().catch((e) => showError(`单路链路重启失败：${apiErrorMessage(e)}`));
 });
 stopDualRuntimeBtn?.addEventListener("click", () => {
   stopDualRuntime().catch((e) => showError(`双路扩展关闭失败：${e.message}`));

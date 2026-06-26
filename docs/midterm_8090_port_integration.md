@@ -76,7 +76,8 @@ time-range evidence delete preview does not use filesystem mtime as event time
 - 事件 API 可通过 8090 proxy 查询。
 - 存储维护 summary、证据删除 preview、job detail、人员删除 preview、图库删除
   preview 正常。
-- 删除执行返回 `403 storage maintenance execute disabled`，符合当前默认配置。
+- 删除执行默认关闭；8090 存储维护页可受控开启/关闭执行开关，关闭时仍返回
+  `403 storage maintenance execute disabled`。
 - `POST /api/v1/cameras/runtime/apply` 是受控运行时应用入口：导出配置后会
   停源、停 workers、重建 sink epoch、重启 Replay/Savant，再恢复源和 workers。
 - `POST /api/v1/cameras/runtime/restart` 是 8090 上的一键受控重启入口，用于在
@@ -435,8 +436,10 @@ bundle，先等 media-worker 完成 sink 稳定检查和长源文件探测；现
   - `STORAGE_MAINTENANCE_SUMMARY_ENABLED=true`
   - `STORAGE_MAINTENANCE_PREVIEW_ENABLED=true`
   - `STORAGE_MAINTENANCE_EXECUTE_ENABLED=false`
-- 因此页面能看容量和生成删除预览，但执行删除默认会被后端 403 拦截。
-- 若开启执行删除，需要同步考虑 8090 的网络访问范围、操作审计和权限控制。
+- 因此页面能看容量和生成删除预览，执行删除默认会被后端 403 拦截。
+- 8090 存储维护页提供“允许执行删除”运行时开关，状态写入
+  `/data/video-analytics/media/.maintenance/execute_control.json`；开启后仍必须先
+  preview，并通过 `confirm_token` / `candidate_hash` / 删除原因校验。
 
 ### 事件 API
 

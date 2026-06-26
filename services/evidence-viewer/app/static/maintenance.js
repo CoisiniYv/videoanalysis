@@ -8,7 +8,9 @@ const maintenanceState = {
   preview: null,
   facePreview: null,
   facePreviewKind: null,
-  activeDelete: null
+  activeDelete: null,
+  executeEnabled: false,
+  executeControlEnabled: true
 };
 
 const maintenanceDom = {
@@ -22,6 +24,9 @@ const maintenanceDom = {
   trashBytes: document.getElementById("maintenance-trash-bytes"),
   trashCount: document.getElementById("maintenance-trash-count"),
   executeStatus: document.getElementById("maintenance-execute-status"),
+  executeToggle: document.getElementById("maintenance-execute-toggle"),
+  executeReason: document.getElementById("maintenance-execute-reason"),
+  applyExecuteControl: document.getElementById("apply-maintenance-execute-control"),
   activePane: document.getElementById("delete-dialog"),
   activeTitle: document.getElementById("delete-dialog-title"),
   activeSubtitle: document.getElementById("delete-dialog-subtitle"),
@@ -226,6 +231,30 @@ function previewDisabledReason(preview = {}) {
   return "";
 }
 
+function executeDisabledReason() {
+  if (maintenanceState.executeEnabled) return "";
+  if (!maintenanceState.executeControlEnabled) return "删除执行控制未开放";
+  return "删除执行未开启";
+}
+
+function deleteActionDisabledReason(preview = {}) {
+  return previewDisabledReason(preview) || executeDisabledReason();
+}
+
+function refreshDeleteButtons() {
+  if (maintenanceState.preview?.preview_id) {
+    const reason = deleteActionDisabledReason(maintenanceState.preview);
+    setDeleteButtonDisabled(maintenanceDom.executeEvidenceDelete, Boolean(reason), reason);
+  }
+  const activePreview = maintenanceState.facePreview?.preview_id
+    ? maintenanceState.facePreview
+    : maintenanceState.preview;
+  if (maintenanceState.activeDelete && activePreview?.preview_id) {
+    const reason = deleteActionDisabledReason(activePreview);
+    setDeleteButtonDisabled(maintenanceDom.activeExecute, Boolean(reason), reason);
+  }
+}
+
 function requireDeleteTargets(values, label) {
   if (values.length) return values;
   throw new Error(`没有拿到${label}，请刷新人员页后重试`);
@@ -333,7 +362,7 @@ function evidencePreviewBody() {
 
 function renderPreview(preview, target = maintenanceDom.previewResult) {
   const expiresAt = preview.preview_expires_at ? new Date(preview.preview_expires_at) : null;
-  const disabledReason = previewDisabledReason(preview);
+  const disabledReason = deleteActionDisabledReason(preview);
   const skipped = Array.isArray(preview.skipped) ? preview.skipped : [];
   const skippedLines = skipped.slice(0, 5).map(item => {
     const targetId = escapeHtml(item.target_id || "-");
@@ -372,9 +401,55 @@ async function loadMaintenanceSummary() {
   maintenanceDom.trashBytes.textContent = formatBytes(summary.trash?.bytes);
   maintenanceDom.trashCount.textContent = `对象 ${summary.trash?.item_count || 0}`;
   const executeEnabled = summary.contract?.execute_enabled === true;
+  const executeControl = summary.contract?.execute_control || {};
+  maintenanceState.executeEnabled = executeEnabled;
+  maintenanceState.executeControlEnabled = executeControl.control_enabled !== false;
+  if (maintenanceDom.executeToggle) {
+    maintenanceDom.executeToggle.checked = executeEnabled;
+    maintenanceDom.executeToggle.disabled = !maintenanceState.executeControlEnabled;
+  }
+  if (maintenanceDom.applyExecuteControl) {
+    maintenanceDom.applyExecuteControl.disabled = !maintenanceState.executeControlEnabled;
+  }
+  const updatedAt = executeControl.updated_at ? new Date(executeControl.updated_at) : null;
+  const updatedText = updatedAt && !Number.isNaN(updatedAt.getTime())
+    ? `，最近变更 ${updatedAt.toLocaleString()}`
+    : "";
   maintenanceDom.executeStatus.textContent = executeEnabled
-    ? "删除执行已开启。请先生成预览，确认候选对象后再执行删除。"
-    : "Midterm 当前只允许统计和预览，执行删除处于关闭状态。";
+    ? `删除执行已开启${updatedText}。请先生成预览，确认候选对象后再执行删除。`
+    : `删除执行处于关闭状态${updatedText}。`;
+  refreshDeleteButtons();
+}
+
+async function applyExecuteControl() {
+  if (!maintenanceDom.executeToggle) return;
+  const enabled = Boolean(maintenanceDom.executeToggle.checked);
+  const reason = maintenanceDom.executeReason?.value.trim()
+    || (enabled ? "operator_enable_storage_maintenance_execute" : "operator_disable_storage_maintenance_execute");
+  const confirmed = window.confirm(enabled ? "确认开启删除执行？" : "确认关闭删除执行？");
+  if (!confirmed) {
+    await loadMaintenanceSummary();
+    return;
+  }
+  const restore = setButtonBusy(maintenanceDom.applyExecuteControl, true, "应用中");
+  try {
+    const state = await maintenanceRequest("/execution-control", {
+      method: "PATCH",
+      body: JSON.stringify({
+        enabled,
+        reason,
+        operator: "operator"
+      })
+    });
+    maintenanceState.executeEnabled = state.effective_enabled === true;
+    maintenanceState.executeControlEnabled = state.control_enabled !== false;
+    if (maintenanceDom.executeReason) {
+      maintenanceDom.executeReason.value = "";
+    }
+    await loadMaintenanceSummary();
+  } finally {
+    restore();
+  }
 }
 
 async function previewEvidenceDelete(options = {}) {
@@ -405,6 +480,10 @@ async function executeEvidenceDelete(options = {}) {
   const preview = maintenanceState.preview;
   if (!preview?.preview_id) {
     throw new Error("删除必须先 preview");
+  }
+  const disabledReason = deleteActionDisabledReason(preview);
+  if (disabledReason) {
+    throw new Error(disabledReason);
   }
   const reasonInput = options.reasonInput || maintenanceDom.reason;
   const resultTarget = options.resultTarget || maintenanceDom.previewResult;
@@ -453,6 +532,10 @@ async function executeFaceDelete(options = {}) {
   const preview = maintenanceState.facePreview;
   if (!preview?.preview_id || !maintenanceState.facePreviewKind) {
     throw new Error("删除必须先 preview");
+  }
+  const disabledReason = deleteActionDisabledReason(preview);
+  if (disabledReason) {
+    throw new Error(disabledReason);
   }
   const reasonInput = options.reasonInput || maintenanceDom.faceReason;
   const resultTarget = options.resultTarget || maintenanceDom.activeResult;
@@ -525,6 +608,7 @@ async function executeActiveDelete() {
 
 function bindMaintenanceEvents() {
   maintenanceDom.refresh?.addEventListener("click", () => loadMaintenanceSummary().catch((e) => showError(e.message)));
+  maintenanceDom.applyExecuteControl?.addEventListener("click", () => applyExecuteControl().catch((e) => showError(e.message)));
   maintenanceDom.previewEvidenceDelete?.addEventListener("click", () => previewEvidenceDelete().catch((e) => showError(e.message)));
   maintenanceDom.executeEvidenceDelete?.addEventListener("click", () => executeEvidenceDelete().catch((e) => showError(e.message)));
   maintenanceDom.activeExecute?.addEventListener("click", () => executeActiveDelete().catch((e) => showError(e.message)));

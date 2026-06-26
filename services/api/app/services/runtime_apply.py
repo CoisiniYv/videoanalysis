@@ -12,9 +12,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+import psycopg
+from psycopg.rows import dict_row
 from redis import Redis
 import yaml
 
+from app.config import get_settings
 from app.services.replay_shards import (
     ReplayShardConfigError,
     ReplayShardMap,
@@ -59,12 +62,30 @@ SAVANT_READY_PATTERNS = (
     re.compile(r"\bpipeline\b.*\bready\b", re.IGNORECASE),
     re.compile(r"\bpipeline\b.*\bstarted\b", re.IGNORECASE),
 )
+RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES = (
+    "pending",
+    "waiting_proof",
+    "queued",
+    "replay_job_created",
+    "replaying",
+    "materializing",
+    "finalizing",
+)
+DEFAULT_EVIDENCE_GUARD_LIMIT = 12
+DEFAULT_EVIDENCE_GUARD_STALE_AFTER_S = 900.0
 
 LOGGER = logging.getLogger(__name__)
 
 
 class RuntimeApplyError(RuntimeError):
     pass
+
+
+class RuntimeApplyBlockedError(RuntimeApplyError):
+    def __init__(self, message: str, *, details: dict[str, Any], status_code: int = 409) -> None:
+        super().__init__(message)
+        self.details = details
+        self.status_code = status_code
 
 
 class DockerSocketClient:
@@ -110,12 +131,14 @@ def apply_camera_runtime(
     *,
     export_doc: dict[str, Any],
     cameras: list[dict[str, Any]],
+    force: bool = False,
 ) -> dict[str, Any]:
     return _apply_camera_runtime_controlled(
         export_doc=export_doc,
         cameras=cameras,
         reason="camera_runtime_apply",
         action="apply",
+        force=force,
     )
 
 
@@ -123,12 +146,14 @@ def restart_camera_runtime(
     *,
     export_doc: dict[str, Any],
     cameras: list[dict[str, Any]],
+    force: bool = False,
 ) -> dict[str, Any]:
     return _apply_camera_runtime_controlled(
         export_doc=export_doc,
         cameras=cameras,
         reason="controlled_runtime_restart",
         action="restart",
+        force=force,
     )
 
 
@@ -315,15 +340,88 @@ def converge_camera_sources(
     }
 
 
+def check_runtime_restart_evidence_guard(
+    *,
+    action: str,
+    force: bool = False,
+    limit: int = DEFAULT_EVIDENCE_GUARD_LIMIT,
+) -> dict[str, Any]:
+    """Block full runtime restarts while evidence tasks are still active."""
+
+    blocking_states = list(RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES)
+    guard: dict[str, Any] = {
+        "ok": True,
+        "blocked": False,
+        "forced": False,
+        "action": action,
+        "active_count": 0,
+        "stale_count": 0,
+        "blocking_states": blocking_states,
+        "tasks": [],
+        "stale_tasks": [],
+    }
+    if not _env_bool("CAMERA_RUNTIME_EVIDENCE_GUARD_ENABLED", default=True):
+        return {
+            **guard,
+            "skipped": True,
+            "skip_reason": "camera_runtime_evidence_guard_disabled",
+        }
+
+    try:
+        active = _active_evidence_tasks_snapshot(
+            limit=limit,
+            states=blocking_states,
+            stale_after_s=_env_float(
+                "CAMERA_RUNTIME_EVIDENCE_GUARD_STALE_AFTER_S",
+                DEFAULT_EVIDENCE_GUARD_STALE_AFTER_S,
+            ),
+        )
+    except Exception as exc:
+        details = {
+            **guard,
+            "ok": False,
+            "blocked": not force,
+            "guard_unavailable": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "force_parameter": "force=true",
+        }
+        if force:
+            return {**details, "ok": True, "blocked": False, "forced": True}
+        raise RuntimeApplyBlockedError(
+            "runtime evidence guard unavailable; refusing to interrupt evidence workers",
+            details=details,
+            status_code=503,
+        ) from exc
+
+    guard.update(active)
+    if int(guard.get("active_count") or 0) <= 0:
+        return guard
+    if force:
+        return {**guard, "blocked": False, "forced": True}
+    raise RuntimeApplyBlockedError(
+        "runtime restart blocked because evidence tasks are still active",
+        details={
+            **guard,
+            "ok": False,
+            "blocked": True,
+            "force_parameter": "force=true",
+        },
+        status_code=409,
+    )
+
+
 def _apply_camera_runtime_controlled(
     *,
     export_doc: dict[str, Any],
     cameras: list[dict[str, Any]],
     reason: str,
     action: str,
+    force: bool,
 ) -> dict[str, Any]:
     if not _env_bool("CAMERA_RUNTIME_APPLY_ENABLED", default=False):
         raise RuntimeApplyError("camera runtime control is disabled")
+
+    evidence_guard = check_runtime_restart_evidence_guard(action=action, force=force)
 
     module_config_path = Path(
         os.getenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", DEFAULT_MODULE_CONFIG_PATH)
@@ -483,6 +581,7 @@ def _apply_camera_runtime_controlled(
         "runtime_epoch": epoch_state,
         "runtime_epoch_state_path": str(_runtime_epoch_state_path()),
         "runtime_epoch_root": str(_runtime_epoch_root()),
+        "evidence_restart_guard": evidence_guard,
         **savant_ready,
         "redis_frame_cache_streams_reset": list(
             epoch_state.get("redis_frame_cache_streams_reset") or []
@@ -648,6 +747,148 @@ def _runtime_rule_report(
         "skipped_rules": skipped_rules,
         "unsupported_rules": unsupported_rules,
     }
+
+
+def _active_evidence_tasks_snapshot(
+    *,
+    limit: int,
+    states: list[str],
+    stale_after_s: float,
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(int(limit or DEFAULT_EVIDENCE_GUARD_LIMIT), 100))
+    stale_after_s = max(1.0, float(stale_after_s or DEFAULT_EVIDENCE_GUARD_STALE_AFTER_S))
+    with psycopg.connect(
+        get_settings().database_url,
+        row_factory=dict_row,
+        autocommit=True,
+        connect_timeout=1,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidates AS (
+                    SELECT
+                        et.task_id,
+                        et.event_id::text AS event_id,
+                        et.source_event_id,
+                        et.camera_id,
+                        et.source_id,
+                        et.event_type,
+                        et.status,
+                        et.materialization_status,
+                        et.created_at,
+                        et.updated_at,
+                        et.error_message,
+                        e.payload->'media'->>'evidence_state' AS event_evidence_state,
+                        e.media_status,
+                        e.payload->'media'->>'clip_status' AS event_clip_status,
+                        (
+                            SELECT max(deadline_at)
+                            FROM (
+                                VALUES
+                                    (et.materialization_deadline_at),
+                                    (et.replay_deadline_at),
+                                    (et.annotation_deadline_at)
+                            ) AS deadlines(deadline_at)
+                        ) AS latest_deadline_at,
+                        CASE
+                            WHEN et.status = ANY(%(states)s::text[]) THEN et.status
+                            WHEN et.materialization_status = ANY(%(states)s::text[])
+                                THEN et.materialization_status
+                            WHEN e.payload->'media'->>'evidence_state' = ANY(%(states)s::text[])
+                                THEN e.payload->'media'->>'evidence_state'
+                            WHEN e.media_status = ANY(%(states)s::text[]) THEN e.media_status
+                            WHEN e.payload->'media'->>'clip_status' = ANY(%(states)s::text[])
+                                THEN e.payload->'media'->>'clip_status'
+                            ELSE NULL
+                        END AS blocking_state
+                    FROM evidence_tasks et
+                    LEFT JOIN events e ON e.id = et.event_id
+                    WHERE
+                        et.status = ANY(%(states)s::text[])
+                        OR et.materialization_status = ANY(%(states)s::text[])
+                        OR e.payload->'media'->>'evidence_state' = ANY(%(states)s::text[])
+                        OR e.media_status = ANY(%(states)s::text[])
+                        OR e.payload->'media'->>'clip_status' = ANY(%(states)s::text[])
+                ),
+                marked AS (
+                    SELECT
+                        *,
+                        (
+                            COALESCE(updated_at, created_at) < now() - (%(stale_after_s)s * interval '1 second')
+                            AND (latest_deadline_at IS NULL OR latest_deadline_at < now())
+                        ) AS stale
+                    FROM candidates
+                    WHERE blocking_state IS NOT NULL
+                )
+                SELECT
+                    *,
+                    COUNT(*) FILTER (WHERE NOT stale) OVER() AS active_count,
+                    COUNT(*) FILTER (WHERE stale) OVER() AS stale_count,
+                    EXTRACT(EPOCH FROM (now() - COALESCE(updated_at, created_at))) AS age_seconds
+                FROM marked
+                ORDER BY stale ASC, COALESCE(updated_at, created_at) DESC, task_id DESC
+                LIMIT %(limit)s
+                """,
+                {
+                    "states": states,
+                    "limit": bounded_limit,
+                    "stale_after_s": stale_after_s,
+                },
+            )
+            rows = cur.fetchall()
+
+    active_count = int(rows[0]["active_count"]) if rows else 0
+    stale_count = int(rows[0]["stale_count"]) if rows else 0
+    tasks = [_evidence_guard_task(row) for row in rows if not row.get("stale")]
+    stale_tasks = [_evidence_guard_task(row) for row in rows if row.get("stale")]
+    return {
+        "active_count": active_count,
+        "stale_count": stale_count,
+        "stale_after_s": stale_after_s,
+        "tasks": tasks,
+        "stale_tasks": stale_tasks,
+    }
+
+
+def _evidence_guard_task(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": _text(row.get("task_id")),
+        "event_id": _text(row.get("event_id")),
+        "source_event_id": _text(row.get("source_event_id")),
+        "camera_id": _text(row.get("camera_id")),
+        "source_id": _text(row.get("source_id")),
+        "event_type": _text(row.get("event_type")),
+        "status": _text(row.get("status")),
+        "materialization_status": _text(row.get("materialization_status")),
+        "event_evidence_state": _text(row.get("event_evidence_state")),
+        "media_status": _text(row.get("media_status")),
+        "event_clip_status": _text(row.get("event_clip_status")),
+        "blocking_state": _text(row.get("blocking_state")),
+        "latest_deadline_at": _datetime_text(row.get("latest_deadline_at")),
+        "stale": bool(row.get("stale")),
+        "created_at": _datetime_text(row.get("created_at")),
+        "updated_at": _datetime_text(row.get("updated_at")),
+        "age_seconds": _float_or_none(row.get("age_seconds")),
+        "error_message": _text(row.get("error_message")),
+    }
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _datetime_text(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return _text(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_runtime_replay_shards(default_zmq_endpoint: str) -> ReplayShardMap:

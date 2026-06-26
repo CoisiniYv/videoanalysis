@@ -25,10 +25,14 @@ def test_operator_has_chinese_storage_maintenance_entry() -> None:
     assert "/static/maintenance.js" in html
     assert "/static/operator.js?v=" in html
     assert "evidence-list-fast-20260615" in html
-    assert "delete-dialog-fast-20260615" in html
+    assert "maintenance-execute-control-20260627" in html
     assert "删除后不会自动重新生成证据" in html
     assert "删除必须先 preview" in html
     assert "删除必须先 preview" in js
+    assert 'id="maintenance-execute-toggle"' in html
+    assert 'id="apply-maintenance-execute-control"' in html
+    assert "/execution-control" in js
+    assert "删除执行未开启" in js
     assert "8000" not in html
     assert "8000" not in js
 

@@ -118,9 +118,13 @@ def export_runtime_config(repo: Any, options: ExportOptions) -> ExportResult:
     }
 
     cameras = _load_cameras(repo, options)
-    camera_ids = [row["id"] for row in cameras]
-    zones_by_camera = repo.list_zones_for_cameras(camera_ids) if camera_ids else {}
-    rules_by_camera = repo.list_rules_for_cameras(camera_ids) if camera_ids else {}
+    camera_ids = [str(row["id"]) for row in cameras]
+    zones_by_camera = _string_keyed_rows_by_camera(
+        repo.list_zones_for_cameras(camera_ids) if camera_ids else {}
+    )
+    rules_by_camera = _string_keyed_rows_by_camera(
+        repo.list_rules_for_cameras(camera_ids) if camera_ids else {}
+    )
 
     normalized = _normalize_and_validate(
         cameras,
@@ -156,6 +160,12 @@ def export_runtime_config(repo: Any, options: ExportOptions) -> ExportResult:
     if not options.dry_run:
         _write_result(result)
     return result
+
+
+def _string_keyed_rows_by_camera(
+    rows_by_camera: dict[Any, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    return {str(camera_id): rows for camera_id, rows in rows_by_camera.items()}
 
 
 def _load_cameras(repo: Any, options: ExportOptions) -> list[dict[str, Any]]:

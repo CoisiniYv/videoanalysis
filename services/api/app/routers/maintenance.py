@@ -17,12 +17,15 @@ from app.schemas.maintenance import (
     FaceMediaOrphansPreviewRequest,
     GalleryDeleteExecuteRequest,
     GalleryDeletePreviewRequest,
+    MaintenanceExecutionControlRequest,
     PeopleDeleteExecuteRequest,
     PeopleDeletePreviewRequest,
 )
 from app.services.storage_maintenance import (
     MaintenanceError,
     StorageMaintenanceService,
+    storage_execute_control_state,
+    write_storage_execute_control,
 )
 
 
@@ -77,7 +80,7 @@ def _preview_enabled() -> bool:
 
 
 def _execute_enabled() -> bool:
-    return _flag("STORAGE_MAINTENANCE_EXECUTE_ENABLED", False)
+    return bool(storage_execute_control_state().get("effective_enabled"))
 
 
 def _require_summary(request_id: str):
@@ -114,6 +117,26 @@ def storage_summary(
     if blocked:
         return blocked
     return _run(request_id, service.storage_summary)
+
+
+@router.get("/execution-control")
+def execution_control(request_id: str = Depends(_request_id)):
+    return _run(request_id, storage_execute_control_state)
+
+
+@router.patch("/execution-control")
+def update_execution_control(
+    body: MaintenanceExecutionControlRequest,
+    request_id: str = Depends(_request_id),
+):
+    return _run(
+        request_id,
+        lambda: write_storage_execute_control(
+            enabled=body.enabled,
+            operator=body.operator,
+            reason=body.reason,
+        ),
+    )
 
 
 @router.post("/evidence/delete-preview")

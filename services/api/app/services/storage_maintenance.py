@@ -107,6 +107,72 @@ def _bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _execute_control_path(settings: MaintenanceSettings | None = None) -> Path:
+    raw = os.getenv("STORAGE_MAINTENANCE_EXECUTE_CONTROL_PATH")
+    if raw:
+        return Path(raw)
+    media_root = settings.media_root if settings else Path(os.getenv("MEDIA_ROOT", "/data/video-analytics/media"))
+    return media_root / ".maintenance" / "execute_control.json"
+
+
+def storage_execute_control_state(settings: MaintenanceSettings | None = None) -> dict[str, Any]:
+    configured_enabled = _bool_env("STORAGE_MAINTENANCE_EXECUTE_ENABLED", False)
+    control_enabled = _bool_env("STORAGE_MAINTENANCE_EXECUTE_CONTROL_ENABLED", True)
+    path = _execute_control_path(settings)
+    override_enabled: bool | None = None
+    state_payload: dict[str, Any] = {}
+    read_error: str | None = None
+    if path.is_file():
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                state_payload = parsed
+                if isinstance(parsed.get("enabled"), bool):
+                    override_enabled = bool(parsed["enabled"])
+        except (OSError, json.JSONDecodeError) as exc:
+            read_error = str(exc)
+
+    effective_enabled = override_enabled if override_enabled is not None else configured_enabled
+    return {
+        "control_enabled": control_enabled,
+        "configured_enabled": configured_enabled,
+        "override_enabled": override_enabled,
+        "effective_enabled": effective_enabled,
+        "source": "runtime_control" if override_enabled is not None else "environment",
+        "updated_at": state_payload.get("updated_at"),
+        "updated_by": state_payload.get("updated_by"),
+        "reason": state_payload.get("reason"),
+        "path": str(path),
+        "read_error": read_error,
+    }
+
+
+def write_storage_execute_control(
+    *,
+    enabled: bool,
+    operator: str,
+    reason: str,
+    settings: MaintenanceSettings | None = None,
+) -> dict[str, Any]:
+    if not _bool_env("STORAGE_MAINTENANCE_EXECUTE_CONTROL_ENABLED", True):
+        raise MaintenanceError("storage maintenance execute control disabled", 403)
+    clean_reason = reason.strip()
+    if not clean_reason:
+        raise MaintenanceError("execute control reason required", 400)
+    path = _execute_control_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "enabled": bool(enabled),
+        "updated_at": _utcnow().isoformat(),
+        "updated_by": operator.strip() or "operator",
+        "reason": clean_reason,
+    }
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+    return storage_execute_control_state(settings)
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -397,6 +463,7 @@ class StorageMaintenanceService:
         )
         root_tree_bytes = _path_size(media_root)
 
+        execute_control = storage_execute_control_state(self.settings)
         return {
             "media_root": {
                 "total_bytes": total,
@@ -433,7 +500,8 @@ class StorageMaintenanceService:
                 "entrypoint": "8090",
                 "evidence_layout": "flat_bundle",
                 "execute_default_enabled": False,
-                "execute_enabled": _bool_env("STORAGE_MAINTENANCE_EXECUTE_ENABLED", False),
+                "execute_enabled": bool(execute_control.get("effective_enabled")),
+                "execute_control": execute_control,
                 "no_auto_regenerate_message": NO_AUTO_REGENERATE_MESSAGE,
             },
         }
@@ -1141,6 +1209,13 @@ class StorageMaintenanceService:
                 )
                 if db_record and db_record.get("event_id"):
                     self.repo.update_event_media_deleted(
+                        event_id=str(db_record["event_id"]),
+                        job_id=job_id,
+                        operator=operator,
+                        reason=reason,
+                        media_status="media_deleted",
+                    )
+                    self.repo.update_evidence_bundle_media_deleted(
                         event_id=str(db_record["event_id"]),
                         job_id=job_id,
                         operator=operator,
