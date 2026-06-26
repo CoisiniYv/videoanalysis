@@ -115,19 +115,28 @@ def _settings(tmp_path: Path, *, guard: int = 0) -> MaintenanceSettings:
     )
 
 
-def _bundle(root: Path, event_id: str, *, event_type: str = "watchlist_hit", camera_id: str = "cam-1") -> Path:
+def _bundle(
+    root: Path,
+    event_id: str,
+    *,
+    event_type: str = "watchlist_hit",
+    camera_id: str = "cam-1",
+    start_ts: str | None = "2026-06-01T00:00:00+00:00",
+) -> Path:
     bundle = root / event_id
     bundle.mkdir(parents=True)
+    event = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "camera_id": camera_id,
+        "source_id": "primary_rtsp",
+    }
+    if start_ts is not None:
+        event["start_ts"] = start_ts
     (bundle / "metadata.json").write_text(
         json.dumps(
             {
-                "event": {
-                    "event_id": event_id,
-                    "event_type": event_type,
-                    "camera_id": camera_id,
-                    "source_id": "primary_rtsp",
-                    "start_ts": "2026-06-01T00:00:00+00:00",
-                },
+                "event": event,
                 "status": {"clip_status": "ready"},
             }
         ),
@@ -190,6 +199,44 @@ def test_preview_skips_pending_task_and_does_not_delete_files(tmp_path: Path) ->
     assert preview["deletable_count"] == 0
     assert preview["skipped"][0]["reason"] == "task_pending"
     assert (settings.evidence_root / "event-1").exists()
+
+
+def test_time_range_preview_uses_event_time_not_bundle_mtime(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    repo = FakeRepo()
+    _bundle(settings.evidence_root, "event-old", start_ts="2026-06-01T00:00:00+00:00")
+    _bundle(settings.evidence_root, "event-new", start_ts="2026-06-10T00:00:00+00:00")
+
+    service = StorageMaintenanceService(repo, settings)
+    preview = service.create_evidence_delete_preview(
+        EvidenceDeletePreviewRequest(
+            time_from=datetime(2026, 6, 9, tzinfo=timezone.utc),
+            time_to=datetime(2026, 6, 11, tzinfo=timezone.utc),
+        )
+    )
+
+    assert preview["candidate_count"] == 1
+    assert repo.items[preview["preview_id"]][0]["target_id"] == "event-new"
+    assert repo.items[preview["preview_id"]][0]["item_payload"]["time_source"] == "metadata.event.start_ts"
+
+
+def test_time_range_preview_skips_bundle_without_event_time(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    repo = FakeRepo()
+    _bundle(settings.evidence_root, "event-missing-time", start_ts=None)
+
+    service = StorageMaintenanceService(repo, settings)
+    preview = service.create_evidence_delete_preview(
+        EvidenceDeletePreviewRequest(
+            time_from=datetime(2026, 6, 9, tzinfo=timezone.utc),
+            time_to=datetime(2026, 6, 11, tzinfo=timezone.utc),
+        )
+    )
+
+    assert preview["candidate_count"] == 1
+    assert preview["deletable_count"] == 0
+    assert preview["skipped"][0]["target_id"] == "event-missing-time"
+    assert preview["skipped"][0]["reason"] == "missing_event_time_for_range"
 
 
 def test_preview_can_include_stale_pending_task_when_requested(tmp_path: Path) -> None:

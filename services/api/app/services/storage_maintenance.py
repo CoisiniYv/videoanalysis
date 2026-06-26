@@ -170,6 +170,14 @@ def _parse_datetime(value: Any) -> datetime | None:
         text = value.strip()
         if not text:
             return None
+        try:
+            raw = float(text)
+        except ValueError:
+            raw = None
+        if raw is not None:
+            if raw > 10_000_000_000:
+                raw = raw / 1000.0
+            return datetime.fromtimestamp(raw, tz=timezone.utc)
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         try:
@@ -256,17 +264,25 @@ def _load_json(path: Path) -> dict[str, Any]:
 def _event_time_from_bundle(bundle_dir: Path, db_record: dict[str, Any] | None) -> tuple[datetime | None, str]:
     metadata = _load_json(bundle_dir / "metadata.json")
     event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
-    for key in ("start_ts", "created_at", "event_time", "timestamp"):
+    media = metadata.get("media") if isinstance(metadata.get("media"), dict) else {}
+    for key in ("alarm_machine_time", "created_at", "start_ts", "event_time", "timestamp", "event_ts_ms"):
         parsed = _parse_datetime(event.get(key))
         if parsed:
             return parsed, f"metadata.event.{key}"
+    for key in ("alarm_machine_time", "event_created_at"):
+        parsed = _parse_datetime(metadata.get(key))
+        if parsed:
+            return parsed, f"metadata.{key}"
+        parsed = _parse_datetime(media.get(key))
+        if parsed:
+            return parsed, f"metadata.media.{key}"
     if db_record:
-        for key in ("start_ts", "created_at"):
+        for key in ("created_at", "start_ts", "event_ts_ms"):
             parsed = _parse_datetime(db_record.get(key))
             if parsed:
                 return parsed, f"db.{key}"
     summary = _load_json(bundle_dir / "summary.json")
-    for key in ("start_ts", "created_at", "event_time", "timestamp"):
+    for key in ("alarm_machine_time", "event_created_at", "created_at", "start_ts", "event_time", "timestamp", "event_ts_ms"):
         parsed = _parse_datetime(summary.get(key))
         if parsed:
             return parsed, f"summary.{key}"
@@ -762,8 +778,10 @@ class StorageMaintenanceService:
 
         time_from = _as_aware(request.time_from)
         time_to = _as_aware(request.time_to)
+        has_time_filter = bool(time_from or time_to)
         if request.older_than_days is not None and time_to is None:
             time_to = _utcnow() - timedelta(days=request.older_than_days)
+            has_time_filter = True
 
         items: list[dict[str, Any]] = []
         for event_id, bundle, path_error in bundles:
@@ -783,6 +801,26 @@ class StorageMaintenanceService:
                 )
                 continue
             event_time, time_source = _event_time_from_bundle(bundle, db_record)
+            if has_time_filter and (event_time is None or time_source in {"mtime_fallback", "unavailable"}):
+                items.append(
+                    self._evidence_item(
+                        event_id,
+                        bundle,
+                        status="skipped",
+                        skip_reason="missing_event_time_for_range",
+                        db_record=db_record,
+                        item_payload={
+                            "event_time": _iso(event_time),
+                            "time_source": time_source,
+                            "event_type": _metadata_value(bundle, "event_type"),
+                            "camera_id": _metadata_value(bundle, "camera_id"),
+                            "source_id": _metadata_value(bundle, "source_id"),
+                            "db_record_missing": db_record is None,
+                            "no_auto_regenerate": True,
+                        },
+                    )
+                )
+                continue
             if time_from and event_time and event_time < time_from:
                 continue
             if time_to and event_time and event_time > time_to:

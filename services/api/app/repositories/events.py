@@ -176,7 +176,20 @@ class EventRepository:
                 where_clauses.append("false")
 
         if source_id:
-            where_clauses.append("e.source_id ILIKE %(source_id_like)s")
+            where_clauses.append(
+                """
+                (
+                    e.source_id ILIKE %(source_id_like)s
+                    OR e.camera_id::text ILIKE %(source_id_like)s
+                    OR c.id::text ILIKE %(source_id_like)s
+                    OR c.source_id ILIKE %(source_id_like)s
+                    OR c.name ILIKE %(source_id_like)s
+                    OR e.payload->>'camera_name' ILIKE %(source_id_like)s
+                    OR e.payload->'camera'->>'name' ILIKE %(source_id_like)s
+                    OR e.payload->'media'->>'camera_name' ILIKE %(source_id_like)s
+                )
+                """
+            )
             params["source_id_like"] = f"%{source_id}%"
 
         if camera_id:

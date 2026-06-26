@@ -22,6 +22,38 @@ browser
 http://0.0.0.0:8090/
 ```
 
+## 2026-06-24 操作台一致性修正
+
+本次复核发现 8090 的客户感知问题集中在三个读写边界：
+
+- 摄像头管理页保存的是 `cameras.name`，但证据列表主要从事件 payload 或 bundle
+  metadata 读取 `camera_name`。历史事件如果没有写入 `camera_name`，证据页会退回
+  `source_id` / `camera_id`，导致 lab 摄像头名称和 evidence 名称不一致。
+- 人脸注册页选中人员后会填充注册表单，容易把“新人员注册”和“追加到当前人员”
+  混在一起。
+- 存储维护的按时间范围删除依赖 bundle 事件时间。若 bundle 缺少
+  `metadata.event.start_ts` / `created_at` / `alarm_machine_time` 等可信事件时间，
+  不能用目录 mtime 当作删除范围依据，否则会产生误删或漏删。
+
+修正策略：
+
+- 数据库证据索引 `/api/v1/evidence/bundles` 回补 `cameras.name`，优先级仍为：
+  event payload `camera_name`、media `camera_name`、payload `camera.name`、最后才是
+  cameras 表名称。这样不需要迁移历史 event payload，也能让 8090 证据页显示管理端
+  名称。
+- 人脸注册前端分离“新人员”和“追加到当前人员”模式。选择人员只改变右侧图库和可追加
+  目标；只有点击“追加到当前人员”才会带 hidden `person_id`。
+- 范围删除预览只使用事件/报警时间。缺少可信事件时间的 bundle 会被预览为
+  `missing_event_time_for_range` 跳过项，操作者可改用单条证据删除或先修复元数据。
+
+迁移到新机器前，必须把以上三项作为 8090 sanity check：
+
+```text
+camera display name in /api/v1/evidence/bundles == cameras.name when event payload lacks camera_name
+new face registration does not submit hidden person_id unless append mode is selected
+time-range evidence delete preview does not use filesystem mtime as event time
+```
+
 ## 2026-06-10 实测状态
 
 当前 8090 大部分操作实测可用，但不能判定为全链路完全正常。

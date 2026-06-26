@@ -88,6 +88,8 @@ def test_evidence_bundle_list_query_is_database_backed() -> None:
     assert "LEFT JOIN LATERAL" in data_sql
     assert "LEFT JOIN cameras c" in data_sql
     assert "c.name AS camera_name" in data_sql
+    assert "c.name ILIKE %(source_id_like)s" in data_sql
+    assert "e.payload->>'camera_name' ILIKE %(source_id_like)s" in data_sql
     assert "evidence_tasks" in data_sql
     assert "media_deleted" in data_sql
     assert "media_expired" in data_sql

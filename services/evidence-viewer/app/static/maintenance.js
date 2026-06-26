@@ -115,6 +115,7 @@ const SKIP_REASON_LABELS = {
   gallery_inactive: "这张图库照片已经删除或停用。",
   person_inactive: "该人员已经停用。",
   already_inactive: "该对象已经停用。",
+  missing_event_time_for_range: "该证据缺少可用于范围删除的报警时间，已跳过。请按单条证据删除或先修复元数据。",
   still_referenced: "该文件仍被人员或图库引用。",
   source_missing: "源文件已经不存在。",
   path_changed: "预览后文件路径发生变化，请重新生成预览。",
