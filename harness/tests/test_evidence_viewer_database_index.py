@@ -84,16 +84,16 @@ def test_evidence_bundle_list_query_is_database_backed() -> None:
 
     assert total == 1
     assert rows == [{"event_id": "11111111-1111-4111-8111-111111111111", "source_event_id": "source-event-1"}]
-    assert "FROM events e" in data_sql
+    assert "FROM evidence_bundles eb" in data_sql
     assert "LEFT JOIN LATERAL" in data_sql
     assert "LEFT JOIN cameras c" in data_sql
-    assert "c.name AS camera_name" in data_sql
+    assert "COALESCE(eb.camera_name, c.name) AS camera_name" in data_sql
     assert "c.name ILIKE %(source_id_like)s" in data_sql
-    assert "e.payload->>'camera_name' ILIKE %(source_id_like)s" in data_sql
+    assert "eb.camera_name ILIKE %(source_id_like)s" in data_sql
     assert "evidence_tasks" in data_sql
     assert "media_deleted" in data_sql
     assert "media_expired" in data_sql
-    assert "deleted_at" in data_sql
+    assert "raw_clip_uri" in data_sql
     assert "clip_required IS TRUE" not in data_sql
     assert "->>'clip_required'" not in data_sql
     assert "metadata.json" not in count_sql + data_sql

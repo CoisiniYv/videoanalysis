@@ -18,6 +18,7 @@ import psycopg
 
 from app.annotated_snapshot import generate_annotated_snapshot
 from app.config import Config, load_config
+from app.evidence_db_index import upsert_evidence_bundle_index
 from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
 from app.post_savant_evidence_bundle import (
     EVIDENCE_TOPOLOGY as POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
@@ -557,6 +558,43 @@ def _set_event_evidence_state(
     except Exception:
         logger.exception(
             "failed to set evidence state event_id=%s state=%s", event_id, state
+        )
+
+
+def _set_event_db_index_status(
+    pg_conn: psycopg.Connection,
+    event_id: str,
+    *,
+    status: str,
+    error: str = "",
+) -> None:
+    if not event_id:
+        return
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET payload = COALESCE(payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'media',
+                        COALESCE(payload->'media', '{}'::jsonb)
+                        || jsonb_strip_nulls(jsonb_build_object(
+                            'db_index_status', %(status)s::text,
+                            'db_index_updated_at', now(),
+                            'db_index_error', NULLIF(%(error)s::text, '')
+                        ))
+                    ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {"event_id": event_id, "status": status, "error": error},
+            )
+    except Exception:
+        logger.exception(
+            "failed to set evidence DB index status event_id=%s status=%s",
+            event_id,
+            status,
         )
 
 
@@ -3395,6 +3433,42 @@ def _process_sink_output(
                             "evidence_reason": evidence_reason,
                         },
                     )
+                    if (
+                        bundle
+                        and bundle.get("evidence_dir")
+                        and os.getenv("EVIDENCE_DB_INDEX_WRITE_ENABLED", "true").lower()
+                        in {"1", "true", "yes", "on"}
+                    ):
+                        try:
+                            index_result = upsert_evidence_bundle_index(
+                                pg_conn,
+                                event_id=event_id,
+                                bundle_dir=bundle["evidence_dir"],
+                                compute_sha256=False,
+                                include_timeline=False,
+                                include_overlays=False,
+                            )
+                            logger.info(
+                                "evidence_db_index_upserted event_id=%s result=%s",
+                                event_id,
+                                index_result,
+                            )
+                            _set_event_db_index_status(
+                                pg_conn,
+                                event_id,
+                                status="ready",
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "evidence_db_index_upsert_failed event_id=%s",
+                                event_id,
+                            )
+                            _set_event_db_index_status(
+                                pg_conn,
+                                event_id,
+                                status="failed",
+                                error=str(exc),
+                            )
                     logger.info(
                         "media_event_updated event_id=%s clip_path=%s sink_path=%s",
                         event_id,
