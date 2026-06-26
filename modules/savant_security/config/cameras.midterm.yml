@@ -1,6 +1,6 @@
 cameras:
   00000000-0000-4000-8000-000000000100:
-    enabled: true
+    enabled: false
     source_id: primary_rtsp
     name: Primary RTSP Camera
     rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
@@ -56,7 +56,7 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260624T143429Z-c8128d7e
+    runtime_epoch_id: midterm-20260626T051557Z-f6edf9f6
   00000000-0000-4000-8000-781078565686:
     enabled: true
     source_id: source_00000000-0000-4000-8000-781078565686
@@ -92,6 +92,119 @@ cameras:
           - 720.0
         enabled: true
     rules:
+      rule_chasing:
+        rule_id: rule_chasing
+        algorithm_id: behavior.chasing
+        rule_type: chasing
+        enabled: false
+        config:
+          zone: lab_full_frame
+          zone_id: lab_full_frame
+          severity: medium
+          cooldown_s: 60
+          behind_cos_min: 0.5
+          min_speed_px_s: 120
+          max_distance_px: 220
+          min_duration_ms: 1200
+          min_cos_alignment: 0.8
+          velocity_window_ms: 700
+          min_pair_duration_s: 1.5
+          min_chase_speed_px_s: 140
+          speed_ratio_tolerance: 0.6
+        zone_id: lab_full_frame
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+      rule_crowd_gathering:
+        rule_id: rule_crowd_gathering
+        algorithm_id: behavior.crowd_gathering
+        rule_type: crowd_gathering
+        enabled: false
+        config:
+          zone: lab_full_frame
+          eps_px: 180
+          zone_id: lab_full_frame
+          severity: medium
+          cooldown_s: 60
+          min_duration_s: 10
+          require_in_zone: true
+          min_person_count: 5
+          exit_person_count: 3
+        zone_id: lab_full_frame
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+      rule_face_observation:
+        rule_id: rule_face_observation
+        algorithm_id: face.observation
+        rule_type: face.observation
+        enabled: false
+        config:
+          severity: medium
+          cooldown_s: 60
+          min_quality: 0.6
+          min_face_size: 40
+          min_similarity: 0.75
+          retention_days: 30
+          watchlist_enabled: true
+          live_search_enabled: true
+          min_face_confidence: 0.6
+          reid_min_interval_ms: 1000
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+      rule_watchlist:
+        rule_id: rule_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.75
+          cooldown_s: 60
+          camera_scope: []
+          min_similarity: 0.75
+          watchlist_enabled: true
+          live_search_enabled: true
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+      rule_fall:
+        rule_id: rule_fall
+        algorithm_id: behavior.fall
+        rule_type: fall
+        enabled: false
+        config:
+          zone: lab_full_frame
+          zone_id: lab_full_frame
+          severity: medium
+          cooldown_s: 60
+          min_down_ms: 1500
+          min_static_s: 3
+          keypoint_threshold: 0.25
+          lying_aspect_ratio: 0.85
+          require_transition: true
+          torso_horizontal_deg: 45
+          upright_aspect_ratio: 0.55
+          horizontal_pose_ratio: 1.4
+          min_height_drop_ratio: 0.35
+          min_visible_keypoints: 0
+          head_hip_collapse_ratio: 0.22
+          min_keypoint_confidence: 0.3
+        zone_id: lab_full_frame
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
       lab_intrusion_rule:
         rule_id: lab_intrusion_rule
         algorithm_id: behavior.intrusion
@@ -99,6 +212,7 @@ cameras:
         enabled: true
         config:
           zone: lab_full_frame
+          zone_id: lab_full_frame
           severity: medium
           cooldown_s: 30
           clip_required: true
@@ -109,10 +223,48 @@ cameras:
           max_bbox_area_ratio: 0.9
           min_person_confidence: 0.25
           min_visible_keypoints: 0
+        zone_id: lab_full_frame
         evidence_policy:
-          snapshot_required: false
+          snapshot_required: true
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260624T143429Z-c8128d7e
-runtime_epoch_id: midterm-20260624T143429Z-c8128d7e
+      rule_loitering:
+        rule_id: rule_loitering
+        algorithm_id: behavior.loitering
+        rule_type: loitering
+        enabled: false
+        config:
+          zone: lab_full_frame
+          zone_id: lab_full_frame
+          severity: medium
+          cooldown_s: 60
+          min_duration_s: 30
+          max_avg_speed_px_s: 25
+          max_motion_range_px: 120
+        zone_id: lab_full_frame
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+      rule_running:
+        rule_id: rule_running
+        algorithm_id: behavior.running
+        rule_type: running
+        enabled: false
+        config:
+          zone: lab_full_frame
+          zone_id: lab_full_frame
+          severity: medium
+          cooldown_s: 30
+          min_speed_px_s: 180
+          min_duration_ms: 800
+        zone_id: lab_full_frame
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+    runtime_epoch_id: midterm-20260626T051557Z-f6edf9f6
+runtime_epoch_id: midterm-20260626T051557Z-f6edf9f6
