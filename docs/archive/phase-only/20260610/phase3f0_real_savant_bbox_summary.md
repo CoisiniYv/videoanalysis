@@ -15,7 +15,7 @@ source-adapter → (ZMQ) → replay-service → (ZMQ) → video-file-sink
 ```
 
 - `metadata.json` from video-file-sink captures metadata embedded in GStreamer frames delivered by Replay.
-- Replay receives raw frames from source-adapter (testVideo/test.mp4). No detection metadata exists.
+- Replay receives encoded H.264 packets from source-adapter (testVideo/test.mp4). No detection metadata exists.
 - Savant reads from RTSP (`rtsp://rtsp-server:8554/phase3b`) independently and exports events to Redis.
 - Savant does NOT sit between source-adapter and video-file-sink.
 

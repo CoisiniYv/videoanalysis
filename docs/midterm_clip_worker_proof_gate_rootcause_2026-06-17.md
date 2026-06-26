@@ -128,8 +128,10 @@ current relevance:
   (`FRAME_ANNOTATION_ANCHOR_PTS_TOLERANCE_S=1.0`, runtime_epoch / stream_session match);
 - analysis-forwarder drop under pressure (dropped frames never reach Savant, so they
   are never exported);
-- Replay raw-frame storage `data_expiration_ttl=300s`
-  (`modules/savant_replay/config.midterm.json:44`).
+- Replay encoded-video storage `data_expiration_ttl=300s`
+  (`modules/savant_replay/config.midterm.json:44`). Replay stores H.264
+  encoded packets (not decoded raw frames) in RocksDB; decoding only happens
+  inside the Savant GPU inference pipeline.
 
 At 1-2 streams, `maxlen=20000` @ ~8fps is tens of minutes of history, so it is
 **not** the binding constraint today. At 60 streams, `20000 / (60*8) ~= 42s` becomes

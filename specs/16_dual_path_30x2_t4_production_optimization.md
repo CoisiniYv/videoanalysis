@@ -44,7 +44,8 @@ Official Savant references (verify against the running
 
 Companion docs: `specs/15_savant_performance_observability.md`,
 `docs/runtime_stability_fix/midterm_multi_source_runtime_stability_plan.md`,
-`docs/repair_goal/midterm_alarm_frequency_backpressure_findings_2026-06-13.md`.
+`docs/repair_goal/midterm_alarm_frequency_backpressure_findings_2026-06-13.md`,
+`specs/22_midterm_60_stream_readiness_risk_closure_plan.md`.
 
 ## 1.1 Implementation Status - 2026-06-15
 
@@ -89,6 +90,14 @@ Still open:
 - Phase 3 dual-T4 sharding and shard-aware Replay job routing.
 - Phase 4 production drills, dashboard thresholds, storage headroom, and
   runbook.
+
+2026-06-23 readiness review: the forwarder sampling path is confirmed active
+for the two-source runtime, but this does not change the Phase 2/3 gate. The
+remaining production risk set is tracked in
+`specs/22_midterm_60_stream_readiness_risk_closure_plan.md`: Savant batch/T4
+operating point, Redis exporter hot-path blocking, production debug/output
+cost, evidence materialization latency, Redis annotation retention, and
+30-source forwarder fairness.
 
 The detailed phase records are under `docs/repair_goal/`:
 
