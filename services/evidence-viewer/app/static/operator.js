@@ -445,6 +445,18 @@ function ruleForAlgorithm(algorithmId) {
   ));
 }
 
+function upsertCurrentRule(rule) {
+  if (!rule || !rule.rule_id) return;
+  const index = currentRules.findIndex((item) => item.rule_id === rule.rule_id);
+  if (index >= 0) {
+    currentRules[index] = rule;
+  } else {
+    currentRules.push(rule);
+  }
+  renderRules(currentRules);
+  renderQuickAlgorithmControls();
+}
+
 function algorithmNeedsZone(algorithmId) {
   return algorithmId.startsWith("behavior.") && algorithmId !== "behavior.wall_climb_suspicious";
 }
@@ -1620,8 +1632,8 @@ async function submitFaceRegistration() {
   }
 }
 
-async function selectCamera(cameraId) {
-  clearMessages();
+async function selectCamera(cameraId, { clear = true } = {}) {
+  if (clear) clearMessages();
   selectedCameraId = cameraId;
   const data = await request(`${API}/cameras/${encodeURIComponent(cameraId)}/config`);
   fillCamera(data.camera);
@@ -2022,11 +2034,12 @@ async function persistQuickAlgorithmCard(card) {
   const path = existing
     ? `${API}/cameras/${encodedCameraId}/algorithm-rules/${encodeURIComponent(existing.rule_id)}`
     : `${API}/cameras/${encodedCameraId}/algorithm-rules`;
-  await request(path, {
+  const savedRule = await request(path, {
     method: existing ? "PUT" : "POST",
     body: JSON.stringify(body),
   });
-  return { saved: true, skippedBlocked: false, body };
+  upsertCurrentRule(savedRule);
+  return { saved: true, skippedBlocked: false, body, rule: savedRule };
 }
 
 async function saveQuickAlgorithmCard(card) {
@@ -2035,8 +2048,8 @@ async function saveQuickAlgorithmCard(card) {
     return;
   }
   clearMessages();
+  const cameraId = selectedCameraId;
   const result = await persistQuickAlgorithmCard(card);
-  await selectCamera(selectedCameraId);
   if (!result.saved) {
     if (result.skippedBlocked) {
       showSuccess("未保存：该算法当前为未支持或已延期状态");
@@ -2049,6 +2062,9 @@ async function saveQuickAlgorithmCard(card) {
   await applyRuntime({
     context: `${algorithmLabel(result.body.algorithm_id)} 配置已保存`,
   });
+  if (selectedCameraId === cameraId) {
+    await selectCamera(cameraId, { clear: false });
+  }
 }
 
 async function saveQuickAlgorithmControls() {
@@ -2057,6 +2073,7 @@ async function saveQuickAlgorithmControls() {
     return;
   }
   clearMessages();
+  const cameraId = selectedCameraId;
   const cards = Array.from(algorithmControlsEl?.querySelectorAll(".algorithm-control-item") || []);
   let savedCount = 0;
   let skippedBlocked = 0;
@@ -2068,7 +2085,6 @@ async function saveQuickAlgorithmControls() {
     }
     if (result.saved) savedCount += 1;
   }
-  await selectCamera(selectedCameraId);
   if (savedCount === 0) {
     showSuccess(
       skippedBlocked
@@ -2081,6 +2097,9 @@ async function saveQuickAlgorithmControls() {
   await applyRuntime({
     context: `${savedCount} 个算法配置已保存${skippedBlocked ? `，跳过 ${skippedBlocked} 个未支持或已延期算法` : ""}`,
   });
+  if (selectedCameraId === cameraId) {
+    await selectCamera(cameraId, { clear: false });
+  }
 }
 
 /* ---- Event listeners ---- */

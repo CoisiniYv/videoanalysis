@@ -146,6 +146,9 @@ def test_operator_primary_algorithm_controls_are_limited_to_live_alarm_paths() -
     assert "target_names" in js
     assert 'data-action="save-quick-rule"' in js
     assert "saveQuickAlgorithmCard" in js
+    assert "upsertCurrentRule(savedRule)" in js
+    assert "await selectCamera(cameraId, { clear: false })" in js
+    assert "operator.js?v=watchlist-rule-save-20260626" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js
