@@ -70,6 +70,44 @@ def test_time_domain_crop_rejects_zero_frame_mov_shell(monkeypatch, tmp_path: Pa
     )
 
 
+def test_time_domain_crop_timeout_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    source_video = tmp_path / "source.mov"
+    source_video.write_bytes(b"source video")
+    output_video = tmp_path / "raw_clip.mov"
+    output_video.write_bytes(b"partial")
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 0.25
+        raise subprocess.TimeoutExpired(command, timeout=0.25, stderr="timed out")
+
+    monkeypatch.setattr(bundle, "_ffmpeg_executable", lambda: "ffmpeg")
+    monkeypatch.setattr(bundle.subprocess, "run", fake_run)
+
+    try:
+        bundle._copy_or_crop_video(
+            source_video_path=source_video,
+            output_video_path=output_video,
+            source_frames=[{"pts": 1_000_000_000}],
+            time_window={
+                "requested_start_pts": 1_000_000_000,
+                "requested_end_pts": 11_000_000_000,
+                "time_domain_crop_applied": True,
+            },
+            copy_video=True,
+            crop_video_to_time_window=True,
+            materialization_timeout_s=0.25,
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "video_time_domain_crop_failed:timeout:0.25s"
+    else:
+        raise AssertionError("timeout should fail closed")
+
+    assert not output_video.exists()
+    assert "timed out" in (tmp_path / "video_crop_ffmpeg.log").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_time_domain_selection_uses_latest_contiguous_pts_segment() -> None:
     frames = (
         _frames(0, [80, 81], "stale-head")
@@ -173,6 +211,18 @@ def test_time_domain_crop_uses_segment_relative_filter_timeline(
     assert result["method"] == "ffmpeg_segment_normalized_transcode"
     assert result["start_seconds"] == 35.0
     assert result["crop_segment_first_pts"] == 1_000_000_000
+    assert result["measurement_schema_version"] == "phase0-materialization-v1"
+    assert result["materialization_mode"] == "baseline_crop"
+    assert result["ffmpeg_returncode"] == 0
+    assert result["ffmpeg_elapsed_ms"] >= 0
+    assert result["ffmpeg_child_cpu_seconds"] is not None
+    assert result["ffmpeg_stderr_bytes"] == 0
+    assert result["decoded_frame_count"] == 240
+    assert result["decoded_frame_count_probe_elapsed_ms"] >= 0
+    assert result["input_bytes"] == len(b"source video")
+    assert result["output_bytes"] == len(b"cropped video")
+    assert result["materialization_elapsed_ms"] == result["ffmpeg_elapsed_ms"]
+    assert result["source_metadata_frame_count"] == 1
 
 
 def _frames(start_index: int, pts_seconds: list[int], prefix: str) -> list[dict[str, object]]:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import psycopg
@@ -109,6 +111,14 @@ RETURNING id
 """
 
 EVIDENCE_TASK_STATUSES = (
+    "manifest_ready",
+    "materialization_pending",
+    "materializing",
+    "materialized",
+    "materialization_deferred",
+    "materialization_failed",
+    "materialization_expired",
+    "materialization_skipped",
     "pending",
     "waiting_proof",
     "queued",
@@ -119,10 +129,17 @@ EVIDENCE_TASK_STATUSES = (
     "partial",
     "failed",
     "not_implemented",
-    "materialization_skipped",
 )
 
 OPERATOR_EVIDENCE_STATES = {
+    "manifest_ready",
+    "materialization_pending",
+    "materializing",
+    "materialized",
+    "materialization_deferred",
+    "materialization_failed",
+    "materialization_expired",
+    "materialization_skipped",
     "pending",
     "waiting_proof",
     "queued",
@@ -131,23 +148,113 @@ OPERATOR_EVIDENCE_STATES = {
     "ready",
     "failed",
     "not_implemented",
-    "materialization_skipped",
 }
 
 _STATUS_TO_EVIDENCE_STATE = {
-    "replay_job_created": "replaying",
-    "generated": "ready",
-    "generated_corrupt": "failed",
-    "generated_unverified": "failed",
-    "duration_guard_failed": "failed",
-    "generated_annotation_failed": "failed",
-    "skipped_by_poc_limit": "failed",
+    "pending": "materialization_pending",
+    "replay_job_created": "materializing",
+    "generated": "materialized",
+    "ready": "materialized",
+    "generated_corrupt": "materialization_failed",
+    "generated_unverified": "materialization_failed",
+    "duration_guard_failed": "materialization_failed",
+    "generated_annotation_failed": "materialization_failed",
+    "skipped_by_poc_limit": "materialization_failed",
+    "failed": "materialization_failed",
 }
 
 
 def _evidence_state_for_status(status: str) -> str:
     state = _STATUS_TO_EVIDENCE_STATE.get(str(status), str(status))
     return state if state in OPERATOR_EVIDENCE_STATES else "failed"
+
+
+def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
+    value = os.getenv(name, default)
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _bool_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_high_priority_event(event: Dict[str, Any]) -> bool:
+    event_type = str(event.get("event_type") or "")
+    priority_types = set(
+        _csv_env(
+            "EVIDENCE_HIGH_PRIORITY_EVENT_TYPES",
+            "watchlist_hit,live_search_hit",
+        )
+    )
+    if event_type in priority_types:
+        return True
+    policy = event.get("evidence_policy") if isinstance(event.get("evidence_policy"), dict) else {}
+    return str(policy.get("priority") or "").strip().lower() in {"high", "critical"}
+
+
+def _materialization_initial_status(event: Dict[str, Any]) -> str:
+    if _bool_env("EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY", "false") and not _is_high_priority_event(event):
+        return "manifest_ready"
+    return "materialization_pending"
+
+
+def _materialization_priority(event: Dict[str, Any]) -> int:
+    policy = event.get("evidence_policy") if isinstance(event.get("evidence_policy"), dict) else {}
+    value = policy.get("priority")
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"critical", "high"}:
+        return 100
+    if _is_high_priority_event(event):
+        return 100
+    if text == "low":
+        return 10
+    return 50
+
+
+def _event_datetime(event: Dict[str, Any]) -> datetime:
+    for key in ("event_ts_ms", "start_ts_ms"):
+        try:
+            value = int(event.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return datetime.fromtimestamp(value / 1000.0, timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _materialization_ttl_metadata(event: Dict[str, Any]) -> dict[str, Any]:
+    event_at = _event_datetime(event)
+    replay_ttl_s = max(0, _int_env("EVIDENCE_REPLAY_TTL_SECONDS", 300))
+    annotation_ttl_s = max(0, _int_env("EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS", 120))
+    replay_deadline = event_at + timedelta(seconds=replay_ttl_s)
+    annotation_deadline = event_at + timedelta(seconds=annotation_ttl_s)
+    materialization_deadline = min(replay_deadline, annotation_deadline)
+    return {
+        "replay_ttl_seconds": replay_ttl_s,
+        "frame_annotation_ttl_seconds": annotation_ttl_s,
+        "replay_deadline_at": replay_deadline.isoformat(),
+        "annotation_deadline_at": annotation_deadline.isoformat(),
+        "materialization_deadline_at": materialization_deadline.isoformat(),
+    }
+
+
+def _replay_window_metadata(event: Dict[str, Any], policy: Dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_ts_ms": int(event.get("event_ts_ms") or event.get("start_ts_ms") or 0),
+        "pre_seconds": int(policy.get("pre_seconds", 5)),
+        "post_seconds": int(policy.get("post_seconds", 10)),
+        "frame_uuid": event.get("frame_uuid"),
+        "keyframe_uuid": event.get("keyframe_uuid"),
+    }
 
 _MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON = (
     "Midterm behavior evidence created the evidence task, but production "
@@ -183,7 +290,7 @@ def _evidence_task_initial_status(event: Dict[str, Any]) -> tuple[str, str]:
         "live_search_hit",
         "intrusion",
     ):
-        return "pending", ""
+        return _materialization_initial_status(event), ""
     return "not_implemented", _MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON
 
 
@@ -277,13 +384,18 @@ class EventRepository:
         if not isinstance(policy, dict):
             policy = {}
         initial_status, error_message = _evidence_task_initial_status(event)
+        ttl_metadata = _materialization_ttl_metadata(event)
+        replay_window = _replay_window_metadata(event, policy)
+        materialization_policy = os.getenv("EVIDENCE_MATERIALIZATION_POLICY", "priority")
+        priority = _materialization_priority(event)
+        source_id = event.get("source_id", "")
 
         params = {
             "task_id": task_id,
             "event_id": event_id,
             "source_event_id": event.get("source_event_id", ""),
             "camera_id": event.get("camera_id", ""),
-            "source_id": event.get("source_id", ""),
+            "source_id": source_id,
             "event_type": event.get("event_type", ""),
             "event_ts_ms": int(
                 event.get("event_ts_ms") or event.get("start_ts_ms", 0)
@@ -294,6 +406,26 @@ class EventRepository:
             "pre_seconds": int(policy.get("pre_seconds", 5)),
             "post_seconds": int(policy.get("post_seconds", 10)),
             "status": initial_status,
+            "materialization_status": initial_status,
+            "materialization_policy": materialization_policy,
+            "priority": priority,
+            "replay_source_id": source_id,
+            "replay_window": json.dumps(replay_window, ensure_ascii=False),
+            "replay_deadline_at": ttl_metadata["replay_deadline_at"],
+            "annotation_deadline_at": ttl_metadata["annotation_deadline_at"],
+            "materialization_deadline_at": ttl_metadata["materialization_deadline_at"],
+            "materialization_audit": json.dumps(
+                {
+                    "schema_version": "manifest-first-v1",
+                    "created_by": "event-worker",
+                    "replay_ttl_seconds": ttl_metadata["replay_ttl_seconds"],
+                    "frame_annotation_ttl_seconds": ttl_metadata[
+                        "frame_annotation_ttl_seconds"
+                    ],
+                    "high_priority": _is_high_priority_event(event),
+                },
+                ensure_ascii=False,
+            ),
             "error_message": error_message,
         }
 
@@ -304,13 +436,25 @@ class EventRepository:
                     task_id, event_id, source_event_id, camera_id, source_id,
                     event_type, event_ts_ms, task_type,
                     snapshot_required, clip_required,
-                    pre_seconds, post_seconds, status, error_message
+                    pre_seconds, post_seconds, status,
+                    materialization_status, materialization_policy, priority,
+                    replay_source_id, replay_window,
+                    replay_deadline_at, annotation_deadline_at,
+                    materialization_deadline_at, materialization_audit,
+                    error_message
                 ) VALUES (
                     %(task_id)s, %(event_id)s::uuid, %(source_event_id)s,
                     %(camera_id)s, %(source_id)s, %(event_type)s,
                     %(event_ts_ms)s, %(task_type)s,
                     %(snapshot_required)s, %(clip_required)s,
                     %(pre_seconds)s, %(post_seconds)s, %(status)s,
+                    %(materialization_status)s, %(materialization_policy)s,
+                    %(priority)s, %(replay_source_id)s,
+                    %(replay_window)s::jsonb,
+                    %(replay_deadline_at)s::timestamptz,
+                    %(annotation_deadline_at)s::timestamptz,
+                    %(materialization_deadline_at)s::timestamptz,
+                    %(materialization_audit)s::jsonb,
                     %(error_message)s
                 )
                 ON CONFLICT (task_id) DO UPDATE SET
@@ -326,11 +470,18 @@ class EventRepository:
         # For pending tasks, the media-worker will update the status after
         # generating the bundle. Setting clip_status="pending" here would
         # block the record_request gate in _handle_event.
-        if initial_status == "not_implemented":
+        if initial_status in {"not_implemented", "manifest_ready"}:
             self.set_evidence_status(
                 event_id=event_id,
                 status=initial_status,
                 error_message=error_message,
+                materialization_metadata={
+                    **ttl_metadata,
+                    "materialization_policy": materialization_policy,
+                    "priority": priority,
+                    "replay_source_id": source_id,
+                    "replay_window": replay_window,
+                },
             )
         return task_id_out
 
@@ -343,12 +494,20 @@ class EventRepository:
         snapshot_path: str | None = None,
         clip_path: str | None = None,
         metadata_path: str | None = None,
+        materialization_metadata: dict[str, Any] | None = None,
     ) -> bool:
         """Update event-level media status and media payload fields."""
         if status not in EVIDENCE_TASK_STATUSES:
             raise ValueError(f"unsupported evidence status: {status}")
 
         evidence_state = _evidence_state_for_status(status)
+        materialization_state = (
+            evidence_state
+            if evidence_state.startswith("materialization_")
+            or evidence_state == "manifest_ready"
+            else status
+        )
+        materialization_metadata = materialization_metadata or {}
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -368,6 +527,20 @@ class EventRepository:
                                 'evidence_state', %(evidence_state)s::text,
                                 'evidence_reason', NULLIF(%(error_message)s::text, ''),
                                 'evidence_state_updated_at', now(),
+                                'materialization_status',
+                                    %(materialization_status)s::text,
+                                'materialization_reason',
+                                    NULLIF(%(error_message)s::text, ''),
+                                'materialization_deadline_at',
+                                    NULLIF(%(materialization_deadline_at)s::text, ''),
+                                'materialization_policy',
+                                    NULLIF(%(materialization_policy)s::text, ''),
+                                'materialization_priority',
+                                    %(materialization_priority)s::int,
+                                'replay_source_id',
+                                    NULLIF(%(replay_source_id)s::text, ''),
+                                'replay_window',
+                                    %(replay_window)s::jsonb,
                                 'error_message', %(error_message)s::text
                             )
                         ),
@@ -378,10 +551,26 @@ class EventRepository:
                     "event_id": event_id,
                     "status": status,
                     "evidence_state": evidence_state,
+                    "materialization_status": materialization_state,
                     "error_message": error_message,
                     "snapshot_path": snapshot_path,
                     "clip_path": clip_path,
                     "metadata_path": metadata_path,
+                    "materialization_deadline_at": str(
+                        materialization_metadata.get("materialization_deadline_at") or ""
+                    ),
+                    "materialization_policy": str(
+                        materialization_metadata.get("materialization_policy") or ""
+                    ),
+                    "materialization_priority": materialization_metadata.get(
+                        "priority"
+                    ),
+                    "replay_source_id": str(
+                        materialization_metadata.get("replay_source_id") or ""
+                    ),
+                    "replay_window": json.dumps(
+                        materialization_metadata.get("replay_window") or {}
+                    ),
                 },
             )
             updated = cur.rowcount is not None and cur.rowcount > 0
@@ -389,7 +578,8 @@ class EventRepository:
                 cur.execute(
                     """
                     UPDATE evidence_tasks
-                    SET status = %(status)s,
+                    SET status = %(evidence_state)s,
+                        materialization_status = %(materialization_status)s,
                         error_message = CASE
                             WHEN %(error_message)s::text != ''
                                 THEN %(error_message)s::text
@@ -400,7 +590,8 @@ class EventRepository:
                     """,
                     {
                         "event_id": event_id,
-                        "status": evidence_state,
+                        "evidence_state": evidence_state,
+                        "materialization_status": materialization_state,
                         "error_message": error_message,
                     },
                 )
@@ -678,6 +869,12 @@ class EventRepository:
         Returns True if a row was updated.
         """
         evidence_state = _evidence_state_for_status(status)
+        materialization_state = (
+            evidence_state
+            if evidence_state.startswith("materialization_")
+            or evidence_state == "manifest_ready"
+            else status
+        )
         evidence_reason = error_message or (status if status != evidence_state else "")
         with self._conn.cursor() as cur:
             cur.execute(
@@ -694,6 +891,10 @@ class EventRepository:
                                 'evidence_state', %(evidence_state)s::text,
                                 'evidence_reason', NULLIF(%(evidence_reason)s::text, ''),
                                 'evidence_state_updated_at', now(),
+                                'materialization_status',
+                                    %(materialization_status)s::text,
+                                'materialization_reason',
+                                    NULLIF(%(evidence_reason)s::text, ''),
                                 'error_message', NULLIF(%(error_message)s::text, '')
                             ))
                         ),
@@ -705,6 +906,7 @@ class EventRepository:
                     "status_text": status,
                     "replay_job_id": replay_job_id,
                     "evidence_state": evidence_state,
+                    "materialization_status": materialization_state,
                     "evidence_reason": evidence_reason,
                     "error_message": error_message,
                     "event_id": event_id,
@@ -716,6 +918,7 @@ class EventRepository:
                     """
                     UPDATE evidence_tasks
                     SET status = %(evidence_state)s,
+                        materialization_status = %(materialization_status)s,
                         error_message = CASE
                             WHEN %(evidence_reason)s::text != ''
                                 THEN %(evidence_reason)s::text
@@ -726,6 +929,7 @@ class EventRepository:
                     """,
                     {
                         "evidence_state": evidence_state,
+                        "materialization_status": materialization_state,
                         "evidence_reason": evidence_reason,
                         "event_id": event_id,
                     },

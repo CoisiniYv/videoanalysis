@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import resource
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -76,6 +78,7 @@ def build_post_savant_evidence_bundle(
     workaround_reason: str | None = None,
     replay_timing_metadata: dict[str, Any] | None = None,
     video_integrity_required: bool = False,
+    materialization_timeout_s: float | None = None,
     decoded_frame_count_reader: Callable[[Path], int] | None = None,
 ) -> EvidenceBundleResult:
     """Create a standard evidence bundle from video-file-sink output."""
@@ -114,6 +117,7 @@ def build_post_savant_evidence_bundle(
         time_window=time_window,
         copy_video=copy_video,
         crop_video_to_time_window=crop_video_to_time_window,
+        materialization_timeout_s=materialization_timeout_s,
     )
     if time_domain_crop_applied:
         _write_jsonl(sink_metadata_path, native_frames)
@@ -334,8 +338,13 @@ def _copy_or_crop_video(
     time_window: dict[str, Any],
     copy_video: bool,
     crop_video_to_time_window: bool,
+    materialization_timeout_s: float | None = None,
 ) -> dict[str, Any]:
+    input_bytes = _file_size_or_none(source_video_path)
+    source_metadata_frame_count = len(source_frames or [])
+    source_metadata_duration_seconds = _source_metadata_duration_seconds(source_frames)
     if not crop_video_to_time_window:
+        started = time.monotonic()
         if copy_video:
             shutil.copy2(source_video_path, output_video_path)
             method = "copy"
@@ -344,10 +353,19 @@ def _copy_or_crop_video(
                 output_video_path.unlink()
             output_video_path.symlink_to(source_video_path)
             method = "symlink"
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         return {
+            "measurement_schema_version": "phase0-materialization-v1",
             "method": method,
+            "materialization_mode": "copy" if copy_video else "symlink",
             "crop_video_to_time_window": False,
             "source_video_path": str(source_video_path),
+            "input_bytes": input_bytes,
+            "input_duration_seconds": source_metadata_duration_seconds,
+            "output_bytes": _file_size_or_none(output_video_path),
+            "materialization_elapsed_ms": elapsed_ms,
+            "source_metadata_frame_count": source_metadata_frame_count,
+            "source_metadata_duration_seconds": source_metadata_duration_seconds,
         }
 
     if not time_window.get("time_domain_crop_applied"):
@@ -390,16 +408,39 @@ def _copy_or_crop_video(
         "yuv420p",
         str(output_video_path),
     ]
-    completed = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    ffmpeg_started = time.monotonic()
+    child_cpu_before = _child_cpu_seconds()
+    timeout = _positive_timeout_or_none(materialization_timeout_s)
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output_video_path.unlink(missing_ok=True)
+        log_path = output_video_path.with_name("video_crop_ffmpeg.log")
+        timeout_stderr = exc.stderr or ""
+        if isinstance(timeout_stderr, bytes):
+            timeout_stderr = timeout_stderr.decode("utf-8", errors="replace")
+        log_path.write_text(timeout_stderr, encoding="utf-8")
+        raise RuntimeError(
+            f"video_time_domain_crop_failed:timeout:{timeout:g}s"
+        ) from exc
+    ffmpeg_elapsed_ms = int((time.monotonic() - ffmpeg_started) * 1000)
+    child_cpu_after = _child_cpu_seconds()
+    ffmpeg_child_cpu_seconds = (
+        round(max(0.0, child_cpu_after - child_cpu_before), 6)
+        if child_cpu_before is not None and child_cpu_after is not None
+        else None
     )
     log_path = output_video_path.with_name("video_crop_ffmpeg.log")
     log_path.write_text(completed.stderr or "", encoding="utf-8")
     if completed.returncode != 0 or not output_video_path.is_file() or output_video_path.stat().st_size <= 0:
         raise RuntimeError(f"video_time_domain_crop_failed:{completed.returncode}")
+    decode_probe_started = time.monotonic()
     try:
         decoded_frame_count = read_decoded_video_frame_count(output_video_path)
     except Exception as exc:
@@ -407,13 +448,29 @@ def _copy_or_crop_video(
         raise RuntimeError(
             "video_time_domain_crop_failed:decoded_frame_count_unavailable"
         ) from exc
+    decoded_probe_elapsed_ms = int((time.monotonic() - decode_probe_started) * 1000)
     if decoded_frame_count <= 0:
         output_video_path.unlink(missing_ok=True)
         raise RuntimeError("video_time_domain_crop_failed:decoded_frame_count_zero")
     return {
+        "measurement_schema_version": "phase0-materialization-v1",
         "method": "ffmpeg_segment_normalized_transcode",
+        "materialization_mode": "baseline_crop",
         "crop_video_to_time_window": True,
         "ffmpeg_executable": ffmpeg_exe,
+        "ffmpeg_returncode": int(completed.returncode),
+        "ffmpeg_timeout_s": timeout,
+        "ffmpeg_elapsed_ms": ffmpeg_elapsed_ms,
+        "ffmpeg_child_cpu_seconds": ffmpeg_child_cpu_seconds,
+        "ffmpeg_stderr_bytes": len((completed.stderr or "").encode("utf-8", errors="replace")),
+        "decoded_frame_count": int(decoded_frame_count),
+        "decoded_frame_count_probe_elapsed_ms": decoded_probe_elapsed_ms,
+        "input_bytes": input_bytes,
+        "input_duration_seconds": source_metadata_duration_seconds,
+        "output_bytes": _file_size_or_none(output_video_path),
+        "materialization_elapsed_ms": ffmpeg_elapsed_ms,
+        "source_metadata_frame_count": source_metadata_frame_count,
+        "source_metadata_duration_seconds": source_metadata_duration_seconds,
         "diagnostic_remux_or_transcode": False,
         "source_video_path": str(source_video_path),
         "start_seconds": start_seconds,
@@ -424,6 +481,40 @@ def _copy_or_crop_video(
         "ffmpeg_filter": video_filter,
         "ffmpeg_log_path": str(log_path),
     }
+
+
+def _file_size_or_none(path: Path) -> int | None:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return None
+
+
+def _child_cpu_seconds() -> float | None:
+    try:
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (OSError, AttributeError):
+        return None
+    return float(usage.ru_utime + usage.ru_stime)
+
+
+def _source_metadata_duration_seconds(frames: list[dict[str, Any]]) -> float | None:
+    pts_values = [
+        int(pts)
+        for frame in frames
+        if (pts := _frame_pts(frame)) is not None
+    ]
+    if len(pts_values) < 2:
+        return None
+    return round((max(pts_values) - min(pts_values)) / 1_000_000_000.0, 9)
+
+
+def _positive_timeout_or_none(value: float | None) -> float | None:
+    try:
+        timeout = float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    return timeout if timeout > 0 else None
 
 
 def _ffmpeg_executable() -> str:

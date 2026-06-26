@@ -58,12 +58,23 @@ DEFAULT_MEDIA_WORKER_STATE_PATH = (
 DEFAULT_SINK_SCAN_MAX_METADATA_FILES = 2000
 DEFAULT_MEDIA_PROBE_TIMEOUT_S = 30.0
 DEFAULT_MEDIA_DECODE_TIMEOUT_S = 120.0
+DEFAULT_MATERIALIZATION_MAX_ACTIVE = 1
+DEFAULT_MATERIALIZATION_TIMEOUT_S = 0.0
+DEFAULT_MATERIALIZATION_MAX_BACKLOG = 0
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
 INVALID_SINK_OUTPUT_MARKER = ".media-worker.invalid.json"
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
+MATERIALIZATION_STATUS_DEFERRED = "materialization_deferred"
+MATERIALIZATION_STATUS_FAILED = "materialization_failed"
+MATERIALIZATION_BACKLOG_STATUSES = (
+    "pending",
+    "replaying",
+    "finalizing",
+    MATERIALIZATION_STATUS_DEFERRED,
+)
 POST_SAVANT_FINALIZER_ENV = "EVIDENCE_TOPOLOGY"
 SNAPSHOT_ELIGIBLE_CLIP_STATUSES = ("ready", "generated")
 SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
@@ -484,7 +495,7 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
 
 def _evidence_state_for_clip_status(clip_status: str) -> str:
     if clip_status in {"ready", "generated"}:
-        return "ready"
+        return "materialized"
     if clip_status in {
         BUNDLE_STATUS_DURATION_GUARD_FAILED,
         BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
@@ -492,10 +503,10 @@ def _evidence_state_for_clip_status(clip_status: str) -> str:
         "generated_unverified",
         "failed",
     }:
-        return "failed"
+        return "materialization_failed"
     if clip_status == "replay_job_created":
-        return "replaying"
-    return "finalizing"
+        return "materializing"
+    return "materializing"
 
 
 def _set_event_evidence_state(
@@ -520,7 +531,10 @@ def _set_event_evidence_state(
                             || jsonb_strip_nulls(jsonb_build_object(
                                 'evidence_state', %(state)s::text,
                                 'evidence_reason', NULLIF(%(reason)s::text, ''),
-                                'evidence_state_updated_at', now()
+                                'evidence_state_updated_at', now(),
+                                'materialization_status', %(state)s::text,
+                                'materialization_reason',
+                                    NULLIF(%(reason)s::text, '')
                             ))
                         ),
                     updated_at = now()
@@ -533,6 +547,7 @@ def _set_event_evidence_state(
                     """
                     UPDATE evidence_tasks
                     SET status = %(state)s,
+                        materialization_status = %(state)s,
                         error_message = CASE
                             WHEN %(reason)s::text != '' THEN %(reason)s::text
                             ELSE error_message
@@ -545,6 +560,269 @@ def _set_event_evidence_state(
     except Exception:
         logger.exception(
             "failed to set evidence state event_id=%s state=%s", event_id, state
+        )
+
+
+class _MaterializationGuard:
+    def __init__(self, max_active: int) -> None:
+        self.max_active = max(0, int(max_active))
+        self.active = 0
+
+    def acquire(self) -> bool:
+        if self.max_active <= 0:
+            return False
+        if self.active >= self.max_active:
+            return False
+        self.active += 1
+        return True
+
+    def release(self) -> None:
+        if self.active > 0:
+            self.active -= 1
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "max_active": self.max_active,
+            "active": self.active,
+        }
+
+
+def _materialization_backlog_depth(pg_conn: psycopg.Connection) -> int:
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM evidence_tasks
+                WHERE status IN (
+                    'pending',
+                    'replaying',
+                    'finalizing',
+                    'materialization_deferred'
+                )
+                """
+            )
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
+    except Exception:
+        logger.exception("failed to query materialization backlog depth")
+        return 0
+
+
+def _materialization_backlog_limit_exceeded(
+    *,
+    backlog_depth: int | None,
+    max_backlog: int,
+) -> bool:
+    return (
+        max_backlog > 0
+        and backlog_depth is not None
+        and backlog_depth >= max_backlog
+    )
+
+
+def _directory_usage_bytes(path: str | Path) -> int:
+    root = Path(path)
+    if not root.exists():
+        return 0
+    total = 0
+    for item in root.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _storage_quota_decision(
+    *,
+    evidence_output_dir: str | None,
+    sink_output_dir: str,
+    incoming_dir: str | None = None,
+    evidence_final_root_max_bytes: int = 0,
+    evidence_incoming_root_max_bytes: int = 0,
+    replay_sink_output_max_bytes: int = 0,
+    warning_ratio: float = 0.80,
+    critical_ratio: float = 0.90,
+    hard_ratio: float = 1.00,
+) -> dict:
+    areas = []
+    for name, path, limit in (
+        ("evidence_final_root", evidence_output_dir, evidence_final_root_max_bytes),
+        ("evidence_incoming_root", incoming_dir, evidence_incoming_root_max_bytes),
+        ("replay_sink_output", sink_output_dir, replay_sink_output_max_bytes),
+    ):
+        if not path or limit <= 0:
+            continue
+        used = _directory_usage_bytes(path)
+        ratio = float(used) / float(limit) if limit > 0 else 0.0
+        if ratio >= hard_ratio:
+            level = "hard"
+        elif ratio >= critical_ratio:
+            level = "critical"
+        elif ratio >= warning_ratio:
+            level = "warning"
+        else:
+            level = "normal"
+        areas.append(
+            {
+                "area": name,
+                "path": str(path),
+                "used_bytes": used,
+                "max_bytes": int(limit),
+                "used_ratio": round(ratio, 6),
+                "level": level,
+            }
+        )
+    order = {"normal": 0, "warning": 1, "critical": 2, "hard": 3}
+    overall = max((area["level"] for area in areas), key=lambda value: order[value], default="normal")
+    return {
+        "schema_version": "phase4-storage-quota-v1",
+        "overall_level": overall,
+        "areas": areas,
+    }
+
+
+def _materialization_guardrails(
+    *,
+    guard: _MaterializationGuard | None,
+    timeout_s: float,
+    max_backlog: int,
+    backlog_depth: int | None,
+    admission_status: str,
+    reason: str = "",
+) -> dict:
+    snapshot = guard.snapshot() if guard is not None else {}
+    return {
+        "schema_version": "phase1a-materialization-guardrails-v1",
+        "mode": "bounded_crop",
+        "admission_status": admission_status,
+        "reason": reason,
+        "max_active": snapshot.get("max_active"),
+        "active_at_decision": snapshot.get("active"),
+        "timeout_s": float(timeout_s or 0.0),
+        "max_backlog": int(max_backlog or 0),
+        "backlog_depth_at_decision": backlog_depth,
+    }
+
+
+def _mark_media_materialization_deferred(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    sink_path: str,
+    reason: str,
+    guardrails: dict,
+) -> None:
+    _mark_media_materialization_terminal(
+        pg_conn,
+        event_id=event_id,
+        sink_path=sink_path,
+        state=MATERIALIZATION_STATUS_DEFERRED,
+        reason=reason,
+        guardrails=guardrails,
+    )
+
+
+def _mark_media_materialization_failed(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    sink_path: str,
+    reason: str,
+    guardrails: dict,
+) -> None:
+    _mark_media_materialization_terminal(
+        pg_conn,
+        event_id=event_id,
+        sink_path=sink_path,
+        state=MATERIALIZATION_STATUS_FAILED,
+        reason=reason,
+        guardrails=guardrails,
+    )
+
+
+def _mark_media_materialization_terminal(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    sink_path: str,
+    state: str,
+    reason: str,
+    guardrails: dict,
+) -> None:
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events
+                SET media_status = %(state)s,
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'sink_output_path', %(sink_path)s::text,
+                                'materialization_status', %(state)s::text,
+                                'materialization_reason', %(reason)s::text,
+                                'materialization_guardrails', %(guardrails)s::jsonb,
+                                'evidence_state', %(state)s::text,
+                                'evidence_reason', %(reason)s::text,
+                                'evidence_state_updated_at', now()
+                            ))
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "sink_path": sink_path,
+                    "state": state,
+                    "reason": reason,
+                    "guardrails": json.dumps(guardrails),
+                },
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = %(state)s,
+                        materialization_status = %(state)s,
+                        error_message = %(reason)s,
+                        sink_output_path = %(sink_path)s,
+                        materialization_defer_reason = CASE
+                            WHEN %(state)s::text = 'materialization_deferred'
+                                THEN %(reason)s
+                            ELSE materialization_defer_reason
+                        END,
+                        materialization_failure_reason = CASE
+                            WHEN %(state)s::text = 'materialization_failed'
+                                THEN %(reason)s
+                            ELSE materialization_failure_reason
+                        END,
+                        materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'last_guardrails', %(guardrails)s::jsonb,
+                                'last_reason', %(reason)s::text,
+                                'last_sink_output_path', %(sink_path)s::text
+                            ),
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                    """,
+                    {
+                        "event_id": event_id,
+                        "state": state,
+                        "reason": reason,
+                        "sink_path": sink_path,
+                        "guardrails": json.dumps(guardrails),
+                    },
+                )
+    except Exception:
+        logger.exception(
+            "failed to mark materialization state event_id=%s state=%s",
+            event_id,
+            state,
         )
 
 
@@ -575,6 +853,14 @@ def _media_probe_timeout_s() -> float:
 
 def _media_decode_timeout_s() -> float:
     return _env_positive_float("MEDIA_DECODE_TIMEOUT_S", DEFAULT_MEDIA_DECODE_TIMEOUT_S)
+
+
+def _materialization_timeout_s() -> float:
+    return max(
+        0.0,
+        _to_float(os.getenv("MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"))
+        or DEFAULT_MATERIALIZATION_TIMEOUT_S,
+    )
 
 
 def _probe_metrics_snapshot() -> dict[str, int]:
@@ -1199,6 +1485,83 @@ def _json_isoformat(value: object) -> str:
             normalized = normalized.replace(tzinfo=timezone.utc)
         return normalized.isoformat()
     return str(value)
+
+
+def _datetime_or_none(value: object) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _elapsed_ms_between(start: datetime | None, end: datetime | None) -> int | None:
+    if start is None or end is None:
+        return None
+    return int(max(0.0, (end - start).total_seconds()) * 1000)
+
+
+def _post_savant_materialization_metrics(
+    *,
+    summary: dict,
+    event_context: dict,
+    started_at: datetime,
+    finished_at: datetime,
+    finalization_duration_ms: int,
+    finalization_process_cpu_seconds: float | None = None,
+    materialization_guardrails: dict | None = None,
+) -> dict:
+    video_crop = summary.get("video_crop") if isinstance(summary, dict) else {}
+    video_crop = video_crop if isinstance(video_crop, dict) else {}
+    event_created_at = _datetime_or_none(event_context.get("created_at"))
+    started_at = started_at.astimezone(timezone.utc)
+    finished_at = finished_at.astimezone(timezone.utc)
+    return {
+        "measurement_schema_version": "phase0-materialization-v1",
+        "materialization_mode": (
+            video_crop.get("materialization_mode")
+            or ("baseline_crop" if video_crop.get("crop_video_to_time_window") else "copy")
+        ),
+        "method": video_crop.get("method"),
+        "crop_video_to_time_window": bool(video_crop.get("crop_video_to_time_window")),
+        "guardrail_mode": (
+            (materialization_guardrails or {}).get("mode") or "baseline_crop"
+        ),
+        "guardrails": materialization_guardrails or {},
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "finalization_elapsed_ms": int(finalization_duration_ms),
+        "queue_wait_ms": _elapsed_ms_between(event_created_at, started_at),
+        "input_bytes": video_crop.get("input_bytes"),
+        "input_duration_seconds": video_crop.get("input_duration_seconds"),
+        "output_bytes": video_crop.get("output_bytes"),
+        "source_metadata_frame_count": video_crop.get("source_metadata_frame_count"),
+        "source_metadata_duration_seconds": video_crop.get(
+            "source_metadata_duration_seconds"
+        ),
+        "ffmpeg_returncode": video_crop.get("ffmpeg_returncode"),
+        "ffmpeg_timeout_s": video_crop.get("ffmpeg_timeout_s"),
+        "ffmpeg_elapsed_ms": video_crop.get("ffmpeg_elapsed_ms"),
+        "ffmpeg_child_cpu_seconds": video_crop.get("ffmpeg_child_cpu_seconds"),
+        "finalization_process_cpu_seconds": finalization_process_cpu_seconds,
+        "ffmpeg_stderr_bytes": video_crop.get("ffmpeg_stderr_bytes"),
+        "decoded_frame_count": video_crop.get("decoded_frame_count"),
+        "decoded_frame_count_probe_elapsed_ms": video_crop.get(
+            "decoded_frame_count_probe_elapsed_ms"
+        ),
+    }
 
 
 def _update_summary_with_bundle_validation(
@@ -2670,6 +3033,7 @@ def _build_event_metadata(
             "raw_clip_path": raw_clip_path,
             "production_sidecar_path": production_sidecar_path,
             "summary_json_path": summary_path,
+            "materialization_metrics": summary.get("materialization_metrics") or {},
             "raw_clip_size": raw_clip_size,
             "raw_clip_duration": summary.get("raw_clip_duration"),
             "expected_duration_seconds": summary.get("expected_duration_seconds"),
@@ -2739,9 +3103,13 @@ def _finalize_post_savant_evidence_bundle(
     meta_dir: str,
     metadata_file: str,
     evidence_output_dir: str,
+    materialization_timeout_s: float = 0.0,
+    materialization_guardrails: dict | None = None,
 ) -> dict:
     """Package post-Savant sink output as a production evidence bundle."""
     finalize_started = time.monotonic()
+    finalization_process_cpu_started = time.process_time()
+    materialization_started_at = datetime.now(timezone.utc)
     probe_before = _probe_metrics_snapshot()
     metadata_rows_loaded = 0
     decoded_frame_count_duration_ms = 0
@@ -2839,6 +3207,7 @@ def _finalize_post_savant_evidence_bundle(
                 time_window=frame_cache_time_window,
                 copy_video=True,
                 crop_video_to_time_window=True,
+                materialization_timeout_s=materialization_timeout_s,
             )
             _write_metadata_jsonl(sink_metadata_path, selected_rows)
             sink_metadata_rows_for_guard = selected_rows
@@ -2969,6 +3338,7 @@ def _finalize_post_savant_evidence_bundle(
             ),
             event_metadata=builder_event_metadata,
             video_integrity_required=False,
+            materialization_timeout_s=materialization_timeout_s,
         )
     else:
         sidecar_config = load_frame_cache_sidecar_config()
@@ -3092,8 +3462,23 @@ def _finalize_post_savant_evidence_bundle(
             or "sink_metadata_window_guard_failed"
         )
         result = _without_published_raw_clip(result)
+    materialization_finished_at = datetime.now(timezone.utc)
+    finalization_duration_ms = int((time.monotonic() - finalize_started) * 1000)
+    finalization_process_cpu_seconds = round(
+        max(0.0, time.process_time() - finalization_process_cpu_started),
+        6,
+    )
+    result.summary["materialization_metrics"] = _post_savant_materialization_metrics(
+        summary=result.summary,
+        event_context=event_context,
+        started_at=materialization_started_at,
+        finished_at=materialization_finished_at,
+        finalization_duration_ms=finalization_duration_ms,
+        finalization_process_cpu_seconds=finalization_process_cpu_seconds,
+        materialization_guardrails=materialization_guardrails,
+    )
     result.summary["media_worker_perf"] = {
-        "finalization_duration_ms": int((time.monotonic() - finalize_started) * 1000),
+        "finalization_duration_ms": finalization_duration_ms,
         "metadata_rows_loaded": metadata_rows_loaded,
         "sink_metadata_rows_for_guard": len(sink_window_rows),
         "decoded_frame_count_duration_ms": decoded_frame_count_duration_ms,
@@ -3152,6 +3537,7 @@ def _finalize_post_savant_evidence_bundle(
         "person_count": int(object_counts.get("person") or 0),
         "face_count": int(object_counts.get("face") or 0),
         "known_face_count": int(object_counts.get("known_face") or 0),
+        "materialization_metrics": summary.get("materialization_metrics") or {},
     }
 
 
@@ -3167,6 +3553,15 @@ def _process_sink_output(
     midterm_sink_stability_checks: int = 2,
     processed_state_path: str | Path | None = None,
     sink_scan_max_metadata_files: int | None = None,
+    materialization_guard: _MaterializationGuard | None = None,
+    materialization_timeout_s: float = 0.0,
+    materialization_max_backlog: int = 0,
+    evidence_final_root_max_bytes: int = 0,
+    evidence_incoming_root_max_bytes: int = 0,
+    replay_sink_output_max_bytes: int = 0,
+    evidence_storage_warning_ratio: float = 0.80,
+    evidence_storage_critical_ratio: float = 0.90,
+    evidence_storage_hard_ratio: float = 1.00,
     cleanup_replay_sink_output_enabled: bool = False,
     cleanup_replay_sink_output_statuses: tuple[str, ...] = DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES,
 ) -> int:
@@ -3296,53 +3691,190 @@ def _process_sink_output(
         bundle = None
         finalize_started = time.monotonic()
         probe_before = _probe_metrics_snapshot()
-        _set_event_evidence_state(pg_conn, event_id, state="finalizing")
-        if post_savant_finalizer_enabled:
-            if not evidence_output_dir:
-                logger.error("post_savant_finalizer enabled but no evidence_output_dir")
-                continue
-            try:
-                bundle = _finalize_post_savant_evidence_bundle(
-                    pg_conn,
-                    event_id=event_id,
-                    meta_dir=meta_dir,
-                    metadata_file=metadata_file,
-                    evidence_output_dir=evidence_output_dir,
+        storage_decision = _storage_quota_decision(
+            evidence_output_dir=evidence_output_dir,
+            incoming_dir=(
+                str(Path(evidence_output_dir) / ".incoming")
+                if evidence_output_dir
+                else None
+            ),
+            sink_output_dir=sink_dir,
+            evidence_final_root_max_bytes=evidence_final_root_max_bytes,
+            evidence_incoming_root_max_bytes=evidence_incoming_root_max_bytes,
+            replay_sink_output_max_bytes=replay_sink_output_max_bytes,
+            warning_ratio=evidence_storage_warning_ratio,
+            critical_ratio=evidence_storage_critical_ratio,
+            hard_ratio=evidence_storage_hard_ratio,
+        )
+        if post_savant_finalizer_enabled and storage_decision["overall_level"] == "hard":
+            reason = "storage_hard_limit_exceeded"
+            guardrails = _materialization_guardrails(
+                guard=materialization_guard,
+                timeout_s=materialization_timeout_s,
+                max_backlog=materialization_max_backlog,
+                backlog_depth=None,
+                admission_status="deferred",
+                reason=reason,
+            )
+            guardrails["storage_quota_decision"] = storage_decision
+            _mark_media_materialization_deferred(
+                pg_conn,
+                event_id=event_id,
+                sink_path=meta_dir,
+                reason=reason,
+                guardrails=guardrails,
+            )
+            logger.warning(
+                "media_materialization_deferred event_id=%s meta_dir=%s reason=%s",
+                event_id,
+                meta_dir,
+                reason,
+            )
+            continue
+        backlog_depth = (
+            _materialization_backlog_depth(pg_conn)
+            if post_savant_finalizer_enabled and materialization_max_backlog > 0
+            else None
+        )
+        if (
+            post_savant_finalizer_enabled
+            and _materialization_backlog_limit_exceeded(
+                backlog_depth=backlog_depth,
+                max_backlog=materialization_max_backlog,
+            )
+        ):
+            reason = (
+                "materialization_backlog_limit_exceeded:"
+                f"{backlog_depth}>={materialization_max_backlog}"
+            )
+            guardrails = _materialization_guardrails(
+                guard=materialization_guard,
+                timeout_s=materialization_timeout_s,
+                max_backlog=materialization_max_backlog,
+                backlog_depth=backlog_depth,
+                admission_status="deferred",
+                reason=reason,
+            )
+            _mark_media_materialization_deferred(
+                pg_conn,
+                event_id=event_id,
+                sink_path=meta_dir,
+                reason=reason,
+                guardrails=guardrails,
+            )
+            logger.info(
+                "media_materialization_deferred event_id=%s meta_dir=%s reason=%s",
+                event_id,
+                meta_dir,
+                reason,
+            )
+            continue
+        acquired_materialization_slot = True
+        if post_savant_finalizer_enabled and materialization_guard is not None:
+            acquired_materialization_slot = materialization_guard.acquire()
+            if not acquired_materialization_slot:
+                reason = "materialization_concurrency_limit_exceeded"
+                guardrails = _materialization_guardrails(
+                    guard=materialization_guard,
+                    timeout_s=materialization_timeout_s,
+                    max_backlog=materialization_max_backlog,
+                    backlog_depth=backlog_depth,
+                    admission_status="deferred",
+                    reason=reason,
                 )
-            except Exception as exc:
-                logger.exception(
-                    "post_savant_finalizer_failed event_id=%s meta_dir=%s",
-                    event_id,
-                    meta_dir,
-                )
-                _mark_media_finalize_failed(
+                _mark_media_materialization_deferred(
                     pg_conn,
                     event_id=event_id,
                     sink_path=meta_dir,
-                    error_message=f"{type(exc).__name__}:{exc}",
+                    reason=reason,
+                    guardrails=guardrails,
                 )
-                if meta_dir:
-                    processed_dirs.add(meta_dir)
+                logger.info(
+                    "media_materialization_deferred event_id=%s meta_dir=%s reason=%s",
+                    event_id,
+                    meta_dir,
+                    reason,
+                )
                 continue
-            clip_path = bundle["raw_clip"]
-            clip_status = bundle.get("clip_status", "generated_unverified")
-        elif midterm_raw_clip_finalizer_enabled:
-            if not evidence_output_dir:
-                logger.error("midterm_finalizer enabled but no evidence_output_dir")
-                continue
-            bundle = _finalize_midterm_evidence_bundle(
-                pg_conn,
-                event_id=event_id,
-                meta_dir=meta_dir,
-                video_file=video_file,
-                metadata_file=metadata_file,
-                evidence_output_dir=evidence_output_dir,
-            )
-            clip_path = bundle["raw_clip"]
-            clip_status = bundle.get("clip_status", "generated_unverified")
-        else:
-            clip_path = video_file
-            clip_status = "ready"
+        guardrails = _materialization_guardrails(
+            guard=materialization_guard,
+            timeout_s=materialization_timeout_s,
+            max_backlog=materialization_max_backlog,
+            backlog_depth=backlog_depth,
+            admission_status="admitted",
+        )
+        _set_event_evidence_state(pg_conn, event_id, state="materializing")
+        try:
+            if post_savant_finalizer_enabled:
+                if not evidence_output_dir:
+                    logger.error("post_savant_finalizer enabled but no evidence_output_dir")
+                    continue
+                try:
+                    bundle = _finalize_post_savant_evidence_bundle(
+                        pg_conn,
+                        event_id=event_id,
+                        meta_dir=meta_dir,
+                        metadata_file=metadata_file,
+                        evidence_output_dir=evidence_output_dir,
+                        materialization_timeout_s=materialization_timeout_s,
+                        materialization_guardrails=guardrails,
+                    )
+                except Exception as exc:
+                    error_message = f"{type(exc).__name__}:{exc}"
+                    logger.exception(
+                        "post_savant_finalizer_failed event_id=%s meta_dir=%s",
+                        event_id,
+                        meta_dir,
+                    )
+                    if "timeout" in error_message:
+                        failed_guardrails = {
+                            **guardrails,
+                            "admission_status": "failed",
+                            "reason": error_message,
+                        }
+                        _mark_media_materialization_failed(
+                            pg_conn,
+                            event_id=event_id,
+                            sink_path=meta_dir,
+                            reason=error_message,
+                            guardrails=failed_guardrails,
+                        )
+                    else:
+                        _mark_media_finalize_failed(
+                            pg_conn,
+                            event_id=event_id,
+                            sink_path=meta_dir,
+                            error_message=error_message,
+                        )
+                    if meta_dir:
+                        processed_dirs.add(meta_dir)
+                    continue
+                clip_path = bundle["raw_clip"]
+                clip_status = bundle.get("clip_status", "generated_unverified")
+            elif midterm_raw_clip_finalizer_enabled:
+                if not evidence_output_dir:
+                    logger.error("midterm_finalizer enabled but no evidence_output_dir")
+                    continue
+                bundle = _finalize_midterm_evidence_bundle(
+                    pg_conn,
+                    event_id=event_id,
+                    meta_dir=meta_dir,
+                    video_file=video_file,
+                    metadata_file=metadata_file,
+                    evidence_output_dir=evidence_output_dir,
+                )
+                clip_path = bundle["raw_clip"]
+                clip_status = bundle.get("clip_status", "generated_unverified")
+            else:
+                clip_path = video_file
+                clip_status = "ready"
+        finally:
+            if (
+                post_savant_finalizer_enabled
+                and materialization_guard is not None
+                and acquired_materialization_slot
+            ):
+                materialization_guard.release()
         finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
         probe_delta = _probe_metrics_delta(probe_before)
         logger.info(
@@ -3449,6 +3981,8 @@ def _process_sink_output(
                                         'annotations_jsonl_path', %(annotations_path)s::text,
                                         'summary_json_path', %(summary_path)s::text,
                                         'raw_clip_path', %(raw_clip_path)s::text,
+                                        'materialization_metrics',
+                                            %(materialization_metrics)s::jsonb,
                                         'evidence_topology',
                                             %(evidence_topology)s::text,
                                         'annotation_source',
@@ -3513,6 +4047,9 @@ def _process_sink_output(
                             "annotations_path": bundle["annotations_jsonl"],
                             "summary_path": bundle["summary"],
                             "raw_clip_path": bundle["raw_clip"],
+                            "materialization_metrics": json.dumps(
+                                bundle.get("materialization_metrics") or {}
+                            ),
                             "evidence_topology": bundle.get("evidence_topology", ""),
                             "annotation_source": bundle.get("annotation_source", ""),
                             "production_ready": bool(
@@ -3590,7 +4127,11 @@ def _process_sink_output(
                                         'evidence_state', %(evidence_state)s::text,
                                         'evidence_reason',
                                             NULLIF(%(evidence_reason)s::text, ''),
-                                        'evidence_state_updated_at', now()
+                                        'evidence_state_updated_at', now(),
+                                        'materialization_status',
+                                            %(evidence_state)s::text,
+                                        'materialization_reason',
+                                            NULLIF(%(evidence_reason)s::text, '')
                                     ))
                                 ),
                             updated_at = now()
@@ -3606,9 +4147,20 @@ def _process_sink_output(
                         """
                         UPDATE evidence_tasks
                         SET status = %(evidence_state)s,
+                            materialization_status = %(evidence_state)s,
                             clip_path = COALESCE(%(clip_path)s, clip_path),
                             metadata_path = COALESCE(%(metadata_path)s, metadata_path),
                             output_root = COALESCE(%(output_root)s, output_root),
+                            last_materialization_at = CASE
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN now()
+                                ELSE last_materialization_at
+                            END,
+                            materialization_failure_reason = CASE
+                                WHEN %(evidence_state)s::text = 'materialization_failed'
+                                    THEN %(evidence_reason)s::text
+                                ELSE materialization_failure_reason
+                            END,
                             error_message = CASE
                                 WHEN %(evidence_reason)s::text != ''
                                     THEN %(evidence_reason)s::text
@@ -4242,6 +4794,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f "
         "state_path=%s sink_scan_max_metadata_files=%d "
         "media_probe_timeout_s=%.1f media_decode_timeout_s=%.1f "
+        "materialization_max_active=%d materialization_timeout_s=%.1f "
+        "materialization_max_backlog=%d "
         "cleanup_replay_sink_output=%s cleanup_statuses=%s",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
@@ -4256,6 +4810,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.sink_scan_max_metadata_files,
         cfg.media_probe_timeout_s,
         cfg.media_decode_timeout_s,
+        cfg.materialization_max_active,
+        cfg.materialization_timeout_s,
+        cfg.materialization_max_backlog,
         cfg.cleanup_replay_sink_output_enabled,
         ",".join(cfg.cleanup_replay_sink_output_statuses),
     )
@@ -4267,6 +4824,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     processed_dirs: set[str] = _load_processed_sink_state(processed_state_path)
     candidate_dirs: dict[str, tuple[int, int]] = {}
     invalid_output_failures: dict[str, int] = {}
+    materialization_guard = _MaterializationGuard(cfg.materialization_max_active)
 
     while not shutdown_requested:
         try:
@@ -4282,6 +4840,15 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
                 processed_state_path=processed_state_path,
                 sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
+                materialization_guard=materialization_guard,
+                materialization_timeout_s=cfg.materialization_timeout_s,
+                materialization_max_backlog=cfg.materialization_max_backlog,
+                evidence_final_root_max_bytes=cfg.evidence_final_root_max_bytes,
+                evidence_incoming_root_max_bytes=cfg.evidence_incoming_root_max_bytes,
+                replay_sink_output_max_bytes=cfg.replay_sink_output_max_bytes,
+                evidence_storage_warning_ratio=cfg.evidence_storage_warning_ratio,
+                evidence_storage_critical_ratio=cfg.evidence_storage_critical_ratio,
+                evidence_storage_hard_ratio=cfg.evidence_storage_hard_ratio,
                 cleanup_replay_sink_output_enabled=(
                     cfg.cleanup_replay_sink_output_enabled
                 ),

@@ -22,6 +22,15 @@ class Config:
     sink_scan_max_metadata_files: int
     media_probe_timeout_s: float
     media_decode_timeout_s: float
+    materialization_max_active: int
+    materialization_timeout_s: float
+    materialization_max_backlog: int
+    evidence_final_root_max_bytes: int
+    evidence_incoming_root_max_bytes: int
+    replay_sink_output_max_bytes: int
+    evidence_storage_warning_ratio: float
+    evidence_storage_critical_ratio: float
+    evidence_storage_hard_ratio: float
     cleanup_replay_sink_output_enabled: bool
     cleanup_replay_sink_output_statuses: tuple[str, ...]
 
@@ -62,6 +71,42 @@ def load_config() -> Config:
         ),
         media_probe_timeout_s=float(os.getenv("MEDIA_PROBE_TIMEOUT_S", "30")),
         media_decode_timeout_s=float(os.getenv("MEDIA_DECODE_TIMEOUT_S", "120")),
+        materialization_max_active=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE", "1")),
+        ),
+        materialization_timeout_s=max(
+            0.0,
+            float(os.getenv("MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S", "0")),
+        ),
+        materialization_max_backlog=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG", "0")),
+        ),
+        evidence_final_root_max_bytes=max(
+            0,
+            int(os.getenv("EVIDENCE_FINAL_ROOT_MAX_BYTES", "0")),
+        ),
+        evidence_incoming_root_max_bytes=max(
+            0,
+            int(os.getenv("EVIDENCE_INCOMING_ROOT_MAX_BYTES", "0")),
+        ),
+        replay_sink_output_max_bytes=max(
+            0,
+            int(os.getenv("REPLAY_SINK_OUTPUT_MAX_BYTES", "0")),
+        ),
+        evidence_storage_warning_ratio=max(
+            0.0,
+            float(os.getenv("EVIDENCE_STORAGE_WARNING_RATIO", "0.80")),
+        ),
+        evidence_storage_critical_ratio=max(
+            0.0,
+            float(os.getenv("EVIDENCE_STORAGE_CRITICAL_RATIO", "0.90")),
+        ),
+        evidence_storage_hard_ratio=max(
+            0.0,
+            float(os.getenv("EVIDENCE_STORAGE_HARD_RATIO", "1.00")),
+        ),
         cleanup_replay_sink_output_enabled=os.getenv(
             "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED", "false"
         ).lower()

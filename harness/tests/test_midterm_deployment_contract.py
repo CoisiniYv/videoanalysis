@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import os
 from pathlib import Path
 
 import yaml
@@ -26,6 +27,12 @@ API_SAVANT_SUPERVISOR = ROOT / "services" / "api" / "app" / "services" / "savant
 VIDEO_FILE_SINK_ENTRYPOINT = ROOT / "scripts" / "runtime" / "video_file_sink_entrypoint.sh"
 CURRENT_SMOKE_DIR = ROOT / "scripts" / "smoke" / "current"
 RUNTIME_DOCTOR = ROOT / "scripts" / "runtime" / "doctor_midterm.sh"
+MIDTERM_START = ROOT / "scripts" / "midterm_start.sh"
+MIDTERM_STOP = ROOT / "scripts" / "midterm_stop.sh"
+MIDTERM_HEALTH = ROOT / "scripts" / "midterm_health.sh"
+MIDTERM_PACKAGE_CLEAN = ROOT / "scripts" / "midterm_package_clean.sh"
+MIDTERM_DEPLOY_CLEAN = ROOT / "scripts" / "midterm_deploy_clean.sh"
+CLEAN_MIGRATION_DOC = ROOT / "docs" / "midterm_clean_machine_migration_2026-06-25.md"
 DOCS = (
     ROOT / "README.md",
     ROOT / "CLAUDE.md",
@@ -91,6 +98,12 @@ def _compose_env_default_int(value: str, env_name: str) -> int:
 def test_midterm_deployment_files_exist() -> None:
     assert COMPOSE.exists()
     assert ENV_FILE.exists()
+    assert MIDTERM_START.exists()
+    assert MIDTERM_STOP.exists()
+    assert MIDTERM_HEALTH.exists()
+    assert MIDTERM_PACKAGE_CLEAN.exists()
+    assert MIDTERM_DEPLOY_CLEAN.exists()
+    assert CLEAN_MIGRATION_DOC.exists()
     assert API_FACE_RUNTIME_DOCKERFILE.exists()
     assert API_FACE_RUNTIME_REQUIREMENTS.exists()
     assert REPLAY_CONFIG.exists()
@@ -101,6 +114,71 @@ def test_midterm_deployment_files_exist() -> None:
     assert VIDEO_FILE_SINK_ENTRYPOINT.exists()
     for doc in DOCS:
         assert doc.exists()
+
+
+def test_midterm_one_click_startup_scripts_are_the_customer_entrypoint() -> None:
+    start = _text(MIDTERM_START)
+    stop = _text(MIDTERM_STOP)
+    health = _text(MIDTERM_HEALTH)
+
+    for script in (MIDTERM_START, MIDTERM_STOP, MIDTERM_HEALTH):
+        assert os.access(script, os.X_OK)
+
+    assert 'COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"' in start
+    assert 'ENV_FILE="$REPO_ROOT/infra/env/midterm.env"' in start
+    assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in start
+    assert 'docker compose "${COMPOSE_ARGS[@]}" build face-worker' in start
+    assert "check_model_assets" in start
+    assert "ensure_yolov8_face_symlinks" in start
+    assert "http://127.0.0.1:8090/operator" in start
+    assert "http://127.0.0.1:8000" not in start
+
+    assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in stop
+    assert "local-postgres" in stop
+    assert "dual-4090-two-source" in stop
+
+    assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in health
+    assert '"savant-security"' in health
+    assert '"source-adapter"' in health
+    assert '"18080:Savant metrics"' in health
+
+
+def test_midterm_clean_machine_migration_scripts_exclude_old_runtime_data() -> None:
+    package = _text(MIDTERM_PACKAGE_CLEAN)
+    deploy = _text(MIDTERM_DEPLOY_CLEAN)
+    doc = _text(CLEAN_MIGRATION_DOC)
+
+    for script in (MIDTERM_PACKAGE_CLEAN, MIDTERM_DEPLOY_CLEAN):
+        assert os.access(script, os.X_OK)
+
+    assert "models.tgz" in package
+    assert "repo.tgz" in package
+    assert "contains_postgres_dump=false" in package
+    assert "contains_redis_state=false" in package
+    assert "contains_media_evidence=false" in package
+    assert "contains_replay_rocksdb=false" in package
+    assert "contains_downloads=false" in package
+    assert "contains_models_savant_b=false" in package
+    assert "models-savant-b" not in " ".join(
+        line.strip()
+        for line in package.splitlines()
+        if line.strip().startswith("tar -C")
+    )
+
+    assert "repo.tgz" in deploy
+    assert "models.tgz" in deploy
+    assert "media/face_uploads" in deploy
+    assert "media/face_registration" in deploy
+    assert "replay-midterm-a" in deploy
+    assert "replay-midterm-b" in deploy
+    assert "scripts/midterm_start.sh" in deploy
+
+    assert "新机器干净迁移" in doc
+    assert "不迁移旧数据库" in doc
+    assert "PostgreSQL persons" in doc
+    assert "person_gallery_embeddings" in doc
+    assert "media/face-registration/reese.jpg" in doc
+    assert "media/face-registration/finch.jpg" in doc
 
 
 def test_active_deploy_surface_has_only_midterm_compose_and_env_files() -> None:
@@ -333,6 +411,30 @@ def test_replay_first_topology_is_preserved() -> None:
         "${MEDIA_DECODE_TIMEOUT_S:-120}"
     )
     assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-1}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-0}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-0}"
+    assert services["clip-worker"]["environment"][
+        "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"
+    ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-2}"
+    assert services["clip-worker"]["environment"][
+        "EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"
+    ] == "${EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED:-true}"
+    assert services["event-worker"]["environment"][
+        "EVIDENCE_REPLAY_TTL_SECONDS"
+    ] == "${EVIDENCE_REPLAY_TTL_SECONDS:-300}"
+    assert services["event-worker"]["environment"][
+        "EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"
+    ] == "${EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS:-120}"
+    assert services["media-worker"]["environment"][
+        "EVIDENCE_FINAL_ROOT_MAX_BYTES"
+    ] == "${EVIDENCE_FINAL_ROOT_MAX_BYTES:-0}"
+    assert services["media-worker"]["environment"][
         "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED"
     ] == "${MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED:-true}"
     assert services["media-worker"]["environment"][
@@ -344,6 +446,9 @@ def test_replay_first_topology_is_preserved() -> None:
     )
     assert services["media-worker"]["environment"]["EVIDENCE_RUNTIME_EPOCH_STRICT"] == (
         "${EVIDENCE_RUNTIME_EPOCH_STRICT:-true}"
+    )
+    assert services["media-worker"]["environment"]["RAW_CLIP_SANITIZE_MODE"] == (
+        "${RAW_CLIP_SANITIZE_MODE:-auto}"
     )
 
 
@@ -605,6 +710,18 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "2000"
     assert env_file["MEDIA_PROBE_TIMEOUT_S"] == "30"
     assert env_file["MEDIA_DECODE_TIMEOUT_S"] == "120"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "1"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "0"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "0"
+    assert env_file["EVIDENCE_MATERIALIZATION_POLICY"] == "priority"
+    assert env_file["EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY"] == "false"
+    assert env_file["EVIDENCE_REPLAY_TTL_SECONDS"] == "300"
+    assert env_file["EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"] == "120"
+    assert env_file["EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"] == "true"
+    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"] == "2"
+    assert env_file["EVIDENCE_FINAL_ROOT_MAX_BYTES"] == "0"
+    assert env_file["REPLAY_SINK_OUTPUT_MAX_BYTES"] == "0"
+    assert env_file["RAW_CLIP_SANITIZE_MODE"] == "auto"
     assert env_file["MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES"] == (
         "ready,generated,generated_unverified,generated_annotation_failed,"
         "duration_guard_failed,generated_corrupt,failed"
