@@ -96,3 +96,16 @@ def test_phase05_passthrough_probe_is_available() -> None:
     assert "PASS_PHASE05_S2_MINIMAL_PASSTHROUGH" in text
     assert "savant-deepstream:0.6.0-7.1" in text
     assert "outbound_bytes == inbound_bytes" in text
+
+
+def test_analysis_forwarder_branch_pressure_probe_is_available() -> None:
+    script = Path(__file__).resolve().parents[2] / "scripts" / "spikes" / (
+        "check_analysis_forwarder_branch_pressure.py"
+    )
+    text = script.read_text(encoding="utf-8")
+
+    assert "PASS_ANALYSIS_FORWARDER_BRANCH_30_STREAM_PRESSURE" in text
+    assert 'parser.add_argument("--streams", type=int, default=30)' in text
+    assert '"--payload-bytes"' in text
+    assert "docker" in text
+    assert "AnalysisForwarder(config)" in text
