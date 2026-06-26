@@ -34,6 +34,32 @@ cameras:
           - 1080.0
         enabled: true
     rules:
+      rule_watchlist:
+        rule_id: rule_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.5
+          cooldown_s: 30
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.75
+          target_person_ids:
+          - 5
+          - 6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:f4_3:reese
+          - demo:f4_3:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
       primary_intrusion_rule:
         rule_id: primary_intrusion_rule
         algorithm_id: behavior.intrusion
@@ -41,6 +67,7 @@ cameras:
         enabled: true
         config:
           zone: primary_full_frame
+          zone_id: primary_full_frame
           severity: medium
           cooldown_s: 30
           clip_required: true
@@ -51,12 +78,13 @@ cameras:
           max_bbox_area_ratio: 0.9
           min_person_confidence: 0.25
           min_visible_keypoints: 0
+        zone_id: primary_full_frame
         evidence_policy:
-          snapshot_required: false
+          snapshot_required: true
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260626T051557Z-f6edf9f6
+    runtime_epoch_id: midterm-20260626T062143Z-0b1fb842
   00000000-0000-4000-8000-781078565686:
     enabled: true
     source_id: source_00000000-0000-4000-8000-781078565686
@@ -166,12 +194,17 @@ cameras:
         enabled: true
         config:
           severity: medium
-          threshold: 0.75
-          cooldown_s: 60
-          camera_scope: []
+          threshold: 0.66
+          cooldown_s: 17
+          target_names:
+          - zr
           min_similarity: 0.75
+          target_person_ids:
+          - 8
           watchlist_enabled: true
           live_search_enabled: true
+          target_external_person_ids:
+          - '3'
         evidence_policy:
           snapshot_required: true
           clip_required: true
@@ -266,5 +299,5 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260626T051557Z-f6edf9f6
-runtime_epoch_id: midterm-20260626T051557Z-f6edf9f6
+    runtime_epoch_id: midterm-20260626T062143Z-0b1fb842
+runtime_epoch_id: midterm-20260626T062143Z-0b1fb842
