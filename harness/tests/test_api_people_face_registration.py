@@ -29,6 +29,7 @@ from face_registration.image_face_registration import (
     RegistrationRequest,
     RegistrationResult,
     RegistrationError,
+    _has_active_primary_gallery,
     _resolve_person,
 )
 
@@ -270,3 +271,36 @@ def test_resolve_person_reports_person_id_external_id_conflict() -> None:
     exc = exc_info.value
     assert getattr(exc, "error_code", None) == ERROR_EXTERNAL_PERSON_ID_CONFLICT
     assert "请选中匹配的人员" in str(exc)
+
+
+def test_has_active_primary_gallery_detects_missing_primary() -> None:
+    class CursorStub:
+        def __init__(self, row):
+            self.row = row
+            self.params = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, _sql, params):
+            self.params = params
+
+        def fetchone(self):
+            return self.row
+
+    class ConnStub:
+        def __init__(self, row):
+            self.cursor_obj = CursorStub(row)
+
+        def cursor(self):
+            return self.cursor_obj
+
+    missing = ConnStub(None)
+    assert _has_active_primary_gallery(missing, person_id=8) is False
+    assert missing.cursor_obj.params == {"person_id": 8}
+
+    existing = ConnStub((1,))
+    assert _has_active_primary_gallery(existing, person_id=8) is True

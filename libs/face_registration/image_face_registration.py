@@ -370,6 +370,22 @@ def _promote_gallery_primary(
         )
 
 
+def _has_active_primary_gallery(conn: psycopg.Connection, *, person_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM person_gallery_embeddings
+            WHERE person_id = %(person_id)s
+              AND is_active = true
+              AND is_primary = true
+            LIMIT 1
+            """,
+            {"person_id": person_id},
+        )
+        return cur.fetchone() is not None
+
+
 def _ensure_candidate_valid(
     candidate: EmbeddingCandidate,
     quality_threshold: float,
@@ -621,7 +637,11 @@ def register_external_image(
                 is_primary=False,
                 payload=payload,
             )
-            if request.is_primary:
+            promote_primary = request.is_primary or not _has_active_primary_gallery(
+                conn,
+                person_id=person_id,
+            )
+            if promote_primary:
                 _promote_gallery_primary(
                     conn,
                     person_id=person_id,
@@ -651,7 +671,7 @@ def register_external_image(
         result.external_person_id = external_person_id
         result.name = person_name
         result.gallery_embedding_id = gallery_id
-        result.is_primary = request.is_primary
+        result.is_primary = promote_primary
         result.face_bbox = candidate.face_bbox
         result.landmarks = candidate.landmarks
         result.quality = candidate.quality
