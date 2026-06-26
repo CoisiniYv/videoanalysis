@@ -1758,6 +1758,27 @@ function sourceApplyMessage(data) {
   return `摄像头源已应用：启动 ${started.length} 个、重建 ${recreated.length} 个、停止 ${stopped.length} 个、保持 ${kept.length} 个`;
 }
 
+function sourceApplyPayloadStatus(cameraResponse) {
+  const payload = cameraResponse?.runtime_source_apply;
+  if (!payload) return { ok: true, message: "" };
+  if (payload.ok && payload.result) {
+    return { ok: true, message: sourceApplyMessage(payload.result) };
+  }
+  const reason = payload.error || payload.skipped || "未知原因";
+  return { ok: false, message: `摄像头源未应用：${reason}` };
+}
+
+function showCameraSourceApplyResult(context, cameraResponse) {
+  const status = sourceApplyPayloadStatus(cameraResponse);
+  if (!status.message) {
+    showSuccess(context);
+  } else if (status.ok) {
+    showSuccess(`${context}；${status.message}`);
+  } else {
+    showError(`${context}，但${status.message}`);
+  }
+}
+
 async function applyCameraSources({ context = "" } = {}) {
   const data = await request(`${API}/cameras/runtime/sources/apply`, { method: "POST" });
   const message = sourceApplyMessage(data);
@@ -1803,14 +1824,6 @@ async function restartRuntime() {
   return data;
 }
 
-async function applyCameraSourcesAfterChange(context) {
-  try {
-    await applyCameraSources({ context });
-  } catch (e) {
-    showError(`${context}，但摄像头源应用失败：${e.message}`);
-  }
-}
-
 async function applyRuntimeAfterChange(context) {
   try {
     await applyRuntime({ context });
@@ -1823,30 +1836,30 @@ async function saveCamera() {
   clearMessages();
   const camera = formToCamera();
   const exists = cameras.some((c) => c.id === camera.id);
+  let savedCamera;
   if (exists) {
     const { id, ...body } = camera;
-    await request(`${API}/cameras/${encodeURIComponent(id)}`, {
+    savedCamera = await request(`${API}/cameras/${encodeURIComponent(id)}`, {
       method: "PUT",
       body: JSON.stringify(body),
     });
   } else {
-    await request(`${API}/cameras`, { method: "POST", body: JSON.stringify(camera) });
+    savedCamera = await request(`${API}/cameras`, { method: "POST", body: JSON.stringify(camera) });
   }
   selectedCameraId = camera.id;
-  showSuccess("摄像头已保存；配置并启用算法规则后才会产生告警和证据");
   await loadCameras();
-  await applyCameraSourcesAfterChange("摄像头已保存");
+  showCameraSourceApplyResult("摄像头已保存；配置并启用算法规则后才会产生告警和证据", savedCamera);
 }
 
 async function setCameraEnabled(enabled) {
   clearMessages();
   const camera = formToCamera();
   if (!camera.id) return;
-  await request(`${API}/cameras/${encodeURIComponent(camera.id)}/${enabled ? "enable" : "disable"}`, {
+  const savedCamera = await request(`${API}/cameras/${encodeURIComponent(camera.id)}/${enabled ? "enable" : "disable"}`, {
     method: "POST",
   });
   await loadCameras();
-  await applyCameraSourcesAfterChange(`摄像头已${enabled ? "启用" : "停用"}`);
+  showCameraSourceApplyResult(`摄像头已${enabled ? "启用" : "停用"}`, savedCamera);
 }
 
 async function saveZone() {
