@@ -223,9 +223,9 @@ GET /api/v1/cameras/{camera_id}/runtime-config
 `face-worker` 的 env target 配置仍保留为 fallback：当某台摄像头没有
 per-camera `face.watchlist` 规则时，仍可按部署环境变量匹配历史默认目标。
 
-8090 主入口仍是 `services/evidence-viewer/app/static/operator.js`。API 服务下的
-`services/api/app/static/operator/*` 是内部 API 自带的旧静态页副本，不是
-midterm compose 对外发布的 8090 页面。
+8090 主入口仍是 `services/evidence-viewer/app/static/operator.js`。后续清理已移除
+API 服务下的旧 `services/api/app/static/operator/*` 静态页副本；API 服务不再挂载
+`/operator/static` 或自己的 `/operator` 页面，避免和 8090 入口继续漂移。
 
 ## 验证记录
 
@@ -252,7 +252,6 @@ pytest -q \
 
 ```text
 node --check services/evidence-viewer/app/static/operator.js
-node --check services/api/app/static/operator/app.js
 python -m py_compile services/face-worker/app/worker.py services/face-worker/app/face_match_event_service.py services/api/app/algorithm_registry.py services/api/app/routers/algorithms.py services/api/app/runtime_config_export.py
 ```
 

@@ -205,12 +205,17 @@ def test_operator_portal_is_served_by_evidence_viewer_8090() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "operator.js")
     viewer_main = _text(ROOT / "services" / "evidence-viewer" / "app" / "main.py")
+    api_main = _text(ROOT / "services" / "api" / "app" / "main.py")
     assert "/static/operator.js" in html
     assert "/static/evidence.js" in html
     assert '@app.get("/operator")' in viewer_main
     assert "def operator_index" in viewer_main
     assert "/operator/static" not in html
     assert "evidence-viewer" not in (html + js).lower()
+    assert not API_OPERATOR_STATIC_ROOT.exists()
+    assert "OPERATOR_STATIC_DIR" not in api_main
+    assert '"/operator/static"' not in api_main
+    assert '@app.get("/operator"' not in api_main
 
 
 def test_operator_theme_toggle_is_frontend_only_and_persistent() -> None:
@@ -255,15 +260,14 @@ def test_operator_evidence_page_shows_alarm_machine_time() -> None:
 
 
 def test_operator_evidence_prefers_camera_name_and_keeps_source_id_detail() -> None:
-    for static_root in (STATIC_ROOT, API_OPERATOR_STATIC_ROOT):
-        html = _text(static_root / "index.html")
-        evidence_js = _text(static_root / "evidence.js")
-        assert 'id="sourceRawId"' in html
-        assert "function cameraDisplayName" in evidence_js
-        assert 'const CAMERA_INDEX_API = "/api/v1/cameras";' in evidence_js
-        assert "function loadCameraNameLookup" in evidence_js
-        assert "camera_name" in evidence_js
-        assert "cameraNameLookup.get(`source_id:${sourceId}`)" in evidence_js
-        assert "|| textOrNull(value.source_id)" not in evidence_js
-        assert "|| textOrNull(value.camera_id)" not in evidence_js
-        assert "setText(\"sourceRawId\"" in evidence_js
+    html = _text(STATIC_ROOT / "index.html")
+    evidence_js = _text(STATIC_ROOT / "evidence.js")
+    assert 'id="sourceRawId"' in html
+    assert "function cameraDisplayName" in evidence_js
+    assert 'const CAMERA_INDEX_API = "/api/v1/cameras";' in evidence_js
+    assert "function loadCameraNameLookup" in evidence_js
+    assert "camera_name" in evidence_js
+    assert "cameraNameLookup.get(`source_id:${sourceId}`)" in evidence_js
+    assert "|| textOrNull(value.source_id)" not in evidence_js
+    assert "|| textOrNull(value.camera_id)" not in evidence_js
+    assert "setText(\"sourceRawId\"" in evidence_js

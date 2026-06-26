@@ -255,12 +255,10 @@ implemented.
   - desired source config includes `lab`
 - `services/api/app/services/runtime_apply.py`
   - dynamic source container lifecycle and runtime apply sequence
-- `services/api/app/static/operator/app.js`
+- `services/evidence-viewer/app/static/operator.js`
   - new camera default `source_id`
-- `services/api/app/static/operator/evidence.js`
-  - evidence list currently displays `source_id`
 - `services/evidence-viewer/app/static/evidence.js`
-  - standalone evidence viewer has the same display pattern
+  - evidence list currently displays `source_id`
 
 ## Official References Checked
 

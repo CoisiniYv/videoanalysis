@@ -73,17 +73,17 @@ YOLOv8-Face/AdaFace registration path.
 The repo already has a lightweight operator page:
 
 - Current customer route: `GET /` on the 8090 operator portal
-- Legacy/internal API route: `GET /operator`
 - Static assets:
-  - `services/api/app/static/operator/index.html`
-  - `services/api/app/static/operator/app.js`
-  - `services/api/app/static/operator/style.css`
-- The customer-facing assets now live under `services/evidence-viewer/app/static`.
+  - `services/evidence-viewer/app/static/index.html`
+  - `services/evidence-viewer/app/static/operator.js`
+  - `services/evidence-viewer/app/static/evidence.js`
+  - `services/evidence-viewer/app/static/style.css`
+- The customer-facing assets live under `services/evidence-viewer/app/static`.
 - Camera and people API requests use same-origin `/api/v1/*` on 8090; the
   evidence-viewer service proxies those calls to the internal `api:8000`
   container.
-- The older `services/api/app/static/operator/*` page remains as an internal
-  compatibility surface, not the midterm customer entrypoint.
+- The older API-owned operator static page has been removed; `services/api`
+  remains an internal API service, not a second operator page host.
 
 The page is currently a camera/zone/rule workbench. It has:
 
@@ -591,9 +591,9 @@ Goal: protect the current camera add/edit behavior before adding People.
 
 Files:
 
-- `services/api/app/static/operator/index.html`
-- `services/api/app/static/operator/app.js`
-- `services/api/app/static/operator/style.css`
+- `services/evidence-viewer/app/static/index.html`
+- `services/evidence-viewer/app/static/operator.js`
+- `services/evidence-viewer/app/static/style.css`
 - `harness/tests/test_c1g1b_operator_frontend_static.py`
 - optionally `harness/tests/test_operator_unified_static.py`
 
@@ -676,9 +676,9 @@ Acceptance:
 
 Files:
 
-- `services/api/app/static/operator/index.html`
-- `services/api/app/static/operator/app.js`
-- `services/api/app/static/operator/style.css`
+- `services/evidence-viewer/app/static/index.html`
+- `services/evidence-viewer/app/static/operator.js`
+- `services/evidence-viewer/app/static/style.css`
 - `harness/tests/test_operator_unified_static.py` or
   `harness/tests/test_operator_face_registration_static.py`
 

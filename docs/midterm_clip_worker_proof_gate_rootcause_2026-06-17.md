@@ -230,7 +230,7 @@ frontend surfacing:
   `evidence_reason`, `latest_task_status` (`services/api/app/routers/evidence.py:142-145`)
   and is mounted (`services/api/app/main.py:38`).
 - Gap: the operator list renders only `clipStatusLabel(bundle.clip_status)`
-  (`services/api/app/static/operator/evidence.js:370`); it does not surface the
+  (`services/evidence-viewer/app/static/evidence.js`); it does not surface the
   `evidence_state` / `evidence_reason` already returned by the API. This is a
   frontend wiring task, not a new observability system.
 

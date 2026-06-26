@@ -332,7 +332,7 @@ python -m pytest \
   -q
 
 node --check services/evidence-viewer/app/static/operator.js
-node --check services/api/app/static/operator/app.js
+node --check services/evidence-viewer/app/static/evidence.js
 docker compose -f infra/docker-compose.midterm.yml config
 git diff --check
 ```

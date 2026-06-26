@@ -195,7 +195,7 @@ or after the exact frame interval where it is valid.
 
 ### 2.6 Frontend currently supports broad hold windows
 
-`services/api/app/static/operator/evidence.js::findActiveAnnotations()` uses a
+`services/evidence-viewer/app/static/evidence.js::findActiveAnnotations()` uses a
 per-object hold window around sparse annotations. `annotationTimeSeconds()` can
 fall back to time offsets when frame identity is missing. This can make an
 event-frame bbox appear during pre-event frames.
@@ -497,7 +497,7 @@ Backend sidecar requirements:
 
 Frontend requirements:
 
-- in `services/api/app/static/operator/evidence.js`, production overlay should
+- in `services/evidence-viewer/app/static/evidence.js`, production overlay should
   render bbox only when annotation timing came from:
   `frame_uuid`, `frame_pts`, or `clip_frame_index`;
 - disable or sharply limit `time_offset_ms` bbox display for production
@@ -506,9 +506,6 @@ Frontend requirements:
   seconds;
 - event bbox should display only near the event frame, not during pre-event
   seconds.
-
-Mirror the same fix to `services/evidence-viewer/app/static/evidence.js` if
-that standalone viewer is still used.
 
 Tests:
 

@@ -128,7 +128,7 @@ Invariants this spec must enforce (and test):
 
 ### Phase E - 8090 surfacing (frontend only)
 
-- `services/api/app/static/operator/evidence.js`: render `bundle.evidence_state`
+- `services/evidence-viewer/app/static/evidence.js`: render `bundle.evidence_state`
   and `bundle.evidence_reason` (already returned by `evidence.py:142-143`) alongside
   `clip_status` (`:370`) as a state badge + reason tooltip. Group
   `waiting_proof / queued / replaying / finalizing` as "generating", show `failed`
