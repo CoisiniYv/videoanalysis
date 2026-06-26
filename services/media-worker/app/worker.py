@@ -79,6 +79,17 @@ SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
     "generated_corrupt",
     BUNDLE_STATUS_DURATION_GUARD_FAILED,
 )
+DB_BACKED_EVIDENCE_SIDECARS_TO_PRUNE = (
+    "annotations.frame_cache.identity.jsonl",
+    "sink_metadata.json",
+    "summary.json",
+    "summary.frame_cache.identity.json",
+    "metadata.json",
+)
+SUCCESS_EVIDENCE_FILES_TO_PRUNE = (
+    *DB_BACKED_EVIDENCE_SIDECARS_TO_PRUNE,
+    "video_crop_ffmpeg.log",
+)
 PERMANENT_INVALID_SINK_OUTPUT_REASONS = {"video_duration_unavailable"}
 _PROBE_METRICS = {
     "ffprobe_invocation_count": 0,
@@ -596,6 +607,33 @@ def _set_event_db_index_status(
             event_id,
             status,
         )
+
+
+def _prune_success_evidence_sidecars(bundle_dir: str | Path) -> dict[str, int | list[str]]:
+    return _prune_evidence_files(bundle_dir, SUCCESS_EVIDENCE_FILES_TO_PRUNE)
+
+
+def _prune_db_backed_evidence_sidecars(bundle_dir: str | Path) -> dict[str, int | list[str]]:
+    return _prune_evidence_files(bundle_dir, DB_BACKED_EVIDENCE_SIDECARS_TO_PRUNE)
+
+
+def _prune_evidence_files(
+    bundle_dir: str | Path,
+    filenames: tuple[str, ...],
+) -> dict[str, int | list[str]]:
+    root = Path(bundle_dir)
+    deleted: list[str] = []
+    errors = 0
+    for name in filenames:
+        path = root / name
+        try:
+            if path.is_file():
+                path.unlink()
+                deleted.append(name)
+        except OSError:
+            errors += 1
+            logger.exception("evidence_sidecar_prune_failed path=%s", path)
+    return {"deleted": deleted, "errors": errors}
 
 
 class _MaterializationGuard:
@@ -3445,13 +3483,26 @@ def _process_sink_output(
                                 event_id=event_id,
                                 bundle_dir=bundle["evidence_dir"],
                                 compute_sha256=False,
-                                include_timeline=False,
-                                include_overlays=False,
+                                include_timeline=True,
+                                include_overlays=True,
                             )
                             logger.info(
                                 "evidence_db_index_upserted event_id=%s result=%s",
                                 event_id,
                                 index_result,
+                            )
+                            if evidence_state == "materialized":
+                                prune_result = _prune_success_evidence_sidecars(
+                                    bundle["evidence_dir"]
+                                )
+                            else:
+                                prune_result = _prune_db_backed_evidence_sidecars(
+                                    bundle["evidence_dir"]
+                                )
+                            logger.info(
+                                "evidence_sidecars_pruned event_id=%s result=%s",
+                                event_id,
+                                prune_result,
                             )
                             _set_event_db_index_status(
                                 pg_conn,

@@ -97,6 +97,95 @@ def evidence_bundles(
     )
 
 
+@router.get("/bundles/{event_id}")
+def evidence_bundle_manifest(
+    event_id: str,
+    repo: EventRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    row = repo.get_evidence_bundle_index(event_id)
+    if row is None:
+        return {
+            "data": None,
+            "error": {"message": f"evidence bundle not found: {event_id}", "code": 404},
+            "request_id": request_id,
+        }
+    return _ok(_bundle_manifest_from_index_row(row), request_id)
+
+
+@router.get("/bundles/{event_id}/annotations")
+def evidence_bundle_annotations(
+    event_id: str,
+    repo: EventRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    row = repo.get_evidence_bundle_index(event_id)
+    if row is None:
+        return {
+            "data": None,
+            "error": {"message": f"evidence bundle not found: {event_id}", "code": 404},
+            "request_id": request_id,
+        }
+    records = [
+        record
+        for record in repo.list_evidence_overlay_records(event_id)
+        if _dict(record).get("displayable") is not False
+    ]
+    summary = _dict(row.get("summary"))
+    sidecar_summary = _dict(summary.get("sidecar_summary"))
+    return _ok(
+        {
+            "event_id": str(row.get("event_id") or event_id),
+            "count": len(records),
+            "raw_count": len(records),
+            "records": records,
+            "annotations": records,
+            "annotation_source": "database",
+            "annotation_source_kind": "database_overlay_segments",
+            "requested_source": "database",
+            "annotation_file": None,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "preview": False,
+            "production_ready": sidecar_summary.get("production_ready"),
+            "timeline_domain": sidecar_summary.get("timeline_domain"),
+            "sidecar_type": sidecar_summary.get("sidecar_type"),
+            "canonical_clip": sidecar_summary.get("canonical_clip"),
+            "production_file_overwritten": False,
+            **_visual_evidence_summary_from_index(row),
+            "warnings": [],
+            "index_source": "database",
+        },
+        request_id,
+    )
+
+
+@router.get("/bundles/{event_id}/sink-metadata")
+def evidence_bundle_sink_metadata(
+    event_id: str,
+    repo: EventRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    row = repo.get_evidence_bundle_index(event_id)
+    if row is None:
+        return {
+            "data": None,
+            "error": {"message": f"evidence bundle not found: {event_id}", "code": 404},
+            "request_id": request_id,
+        }
+    records = repo.list_evidence_timeline_records(event_id)
+    return _ok(
+        {
+            "event_id": str(row.get("event_id") or event_id),
+            "count": len(records),
+            "records": records,
+            "warnings": [],
+            "index_source": "database",
+        },
+        request_id,
+    )
+
+
 def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
     payload = _dict(row.get("payload"))
     media = _dict(payload.get("media"))
@@ -170,6 +259,122 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "index_source": "database",
         "warnings": [],
     }
+
+
+def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
+    summary = _dict(row.get("summary"))
+    materialization = _dict(row.get("materialization"))
+    sidecar_summary = _dict(summary.get("sidecar_summary"))
+    event_id = str(row.get("event_id") or "")
+    raw_clip_uri = _text(row.get("raw_clip_uri") or row.get("raw_clip_artifact_uri"))
+    media_status = _text(row.get("media_status"))
+    materialization_status = (
+        _text(summary.get("materialization_status"))
+        or _text(summary.get("clip_status"))
+        or media_status
+    )
+    raw_clip_unavailable_reason = _raw_clip_unavailable_reason_for_status(
+        materialization_status
+    )
+    raw_clip_playable = bool(raw_clip_uri and not raw_clip_unavailable_reason)
+    return {
+        "event_id": event_id,
+        "camera_name": _text(row.get("camera_name") or row.get("camera_table_name")),
+        "alarm_machine_time": _iso(row.get("alarm_machine_time") or row.get("event_created_at")),
+        "alarm_machine_time_source": "evidence_bundles.alarm_machine_time",
+        "metadata": {
+            "event": {
+                "event_id": event_id,
+                "source_event_id": row.get("source_event_id") or "",
+                "event_type": row.get("event_type") or "",
+                "source_id": row.get("source_id") or "",
+                "camera_id": row.get("camera_id") or "",
+                "camera_name": row.get("camera_name") or row.get("camera_table_name") or "",
+                "created_at": _iso(row.get("event_created_at")),
+            },
+            "media": {
+                "raw_clip_path": raw_clip_uri,
+                "materialization_status": materialization_status,
+                "materialization_reason": row.get("evidence_reason") or "",
+                "db_index_status": "ready",
+            },
+            "annotations": {
+                "frontend_overlay_required": row.get("frontend_overlay_required"),
+            },
+        },
+        "summary": summary,
+        "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip"
+        if raw_clip_playable
+        else None,
+        "raw_clip_name": _basename(raw_clip_uri),
+        "materialization_status": materialization_status,
+        "materialization_reason": row.get("evidence_reason") or "",
+        "materialization_deadline_at": materialization.get("materialization_deadline_at"),
+        "quota_decision": {},
+        "degrade_decision": {},
+        "raw_clip_unavailable_reason": raw_clip_unavailable_reason,
+        "annotations_url": f"/api/bundles/{event_id}/annotations",
+        "sink_metadata_url": f"/api/bundles/{event_id}/sink-metadata",
+        "available_files": ["raw_clip.mov"] if raw_clip_uri else [],
+        "sidecar_available": bool(row.get("overlay_artifact_uri")),
+        "production_sidecar_ready": sidecar_summary.get("production_ready") is True,
+        "production_sidecar_not_ready_reason": None,
+        "auto_requires_production_sidecar": False,
+        "watchlist_auto_requires_production_sidecar": False,
+        "default_annotation_source": "database",
+        "default_annotation_source_kind": "database_overlay_segments",
+        "default_annotation_file": None,
+        "sidecar_summary_path": None,
+        **_visual_evidence_summary_from_index(row),
+        "warnings": [],
+        "index_source": "database",
+    }
+
+
+def _visual_evidence_summary_from_index(row: dict[str, Any]) -> dict[str, Any]:
+    summary = _dict(row.get("summary"))
+    sidecar_summary = _dict(summary.get("sidecar_summary"))
+    visual_status = (
+        _text(row.get("visual_evidence_status"))
+        or _text(sidecar_summary.get("visual_binding_status"))
+        or "verified"
+    )
+    reason = (
+        _text(sidecar_summary.get("visual_binding_reason"))
+        or _text(row.get("evidence_reason"))
+        or "database_overlay_segments"
+    )
+    frame_identity_method = (
+        _text(sidecar_summary.get("frame_identity_method"))
+        or ("frame_uuid" if sidecar_summary.get("rows_matched_by_frame_uuid") else "")
+    )
+    return {
+        "event_status": row.get("event_type") or sidecar_summary.get("event_type"),
+        "visual_evidence_status": "verified" if visual_status == "verified" else visual_status,
+        "reason": reason,
+        "visual_binding_status": visual_status,
+        "visual_binding_reason": reason,
+        "source_observation_id": (
+            sidecar_summary.get("source_observation_id")
+            or _dict(sidecar_summary.get("event_anchor")).get("source_observation_id")
+        ),
+        "frame_identity_method": frame_identity_method or None,
+        "frame_identity_confidence": (
+            sidecar_summary.get("frame_identity_confidence")
+            or ("high" if frame_identity_method == "frame_uuid" else None)
+        ),
+        "trigger_face_row_exists": bool(sidecar_summary.get("trigger_face_row_exists")),
+        "trigger_face_row_passed_freshness_guard": bool(
+            sidecar_summary.get("trigger_face_row_passed_freshness_guard")
+        ),
+    }
+
+
+def _raw_clip_unavailable_reason_for_status(status: str | None) -> str | None:
+    text = _text(status)
+    if text in RAW_CLIP_UNAVAILABLE_STATUSES:
+        return f"raw_clip_unavailable:{text}"
+    return None
 
 
 def _alarm_machine_time(

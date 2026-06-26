@@ -322,6 +322,93 @@ class EventRepository:
 
         return rows, total
 
+    def get_evidence_bundle_index(self, event_id: str) -> Dict[str, Any] | None:
+        query = """
+            SELECT
+                eb.*,
+                c.name AS camera_table_name,
+                raw_artifact.uri AS raw_clip_artifact_uri,
+                overlay_artifact.uri AS overlay_artifact_uri,
+                timeline_artifact.uri AS timeline_artifact_uri
+            FROM evidence_bundles eb
+            LEFT JOIN cameras c
+              ON c.id::text = eb.camera_id
+              OR c.source_id = eb.source_id
+            LEFT JOIN evidence_artifacts raw_artifact
+              ON raw_artifact.event_id = eb.event_id
+             AND raw_artifact.artifact_type = 'raw_clip'
+            LEFT JOIN evidence_artifacts overlay_artifact
+              ON overlay_artifact.event_id = eb.event_id
+             AND overlay_artifact.artifact_type = 'overlay_annotations'
+            LEFT JOIN evidence_artifacts timeline_artifact
+              ON timeline_artifact.event_id = eb.event_id
+             AND timeline_artifact.artifact_type = 'sink_timeline'
+            WHERE eb.event_id::text = %(event_id)s
+               OR eb.source_event_id = %(event_id)s
+            LIMIT 1
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, {"event_id": event_id})
+            return cur.fetchone()
+
+    def list_evidence_overlay_records(self, event_id: str) -> List[Dict[str, Any]]:
+        query = """
+            SELECT eos.record
+            FROM evidence_overlay_segments eos
+            JOIN evidence_bundles eb ON eb.event_id = eos.event_id
+            WHERE eb.event_id::text = %(event_id)s
+               OR eb.source_event_id = %(event_id)s
+            ORDER BY eos.clip_frame_index ASC
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, {"event_id": event_id})
+            return [row["record"] for row in cur.fetchall() if isinstance(row.get("record"), dict)]
+
+    def list_evidence_timeline_records(self, event_id: str) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                eft.clip_frame_index,
+                eft.frame_uuid,
+                eft.frame_pts,
+                eft.frame_dts,
+                eft.duration_ns,
+                eft.timestamp_ms,
+                eft.width,
+                eft.height,
+                eft.source_id,
+                eft.camera_id,
+                eft.stream_session_id,
+                eft.keyframe_uuid,
+                eft.metadata
+            FROM evidence_frame_timeline eft
+            JOIN evidence_bundles eb ON eb.event_id = eft.event_id
+            WHERE eb.event_id::text = %(event_id)s
+               OR eb.source_event_id = %(event_id)s
+            ORDER BY eft.clip_frame_index ASC
+        """
+        records: list[dict[str, Any]] = []
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, {"event_id": event_id})
+            for row in cur.fetchall():
+                metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                record = dict(metadata)
+                record.setdefault("clip_frame_index", row.get("clip_frame_index"))
+                record.setdefault("frame_uuid", row.get("frame_uuid"))
+                record.setdefault("frame_pts", row.get("frame_pts"))
+                record.setdefault("pts", row.get("frame_pts"))
+                record.setdefault("frame_dts", row.get("frame_dts"))
+                record.setdefault("dts", row.get("frame_dts"))
+                record.setdefault("duration", row.get("duration_ns"))
+                record.setdefault("timestamp_ms", row.get("timestamp_ms"))
+                record.setdefault("width", row.get("width"))
+                record.setdefault("height", row.get("height"))
+                record.setdefault("source_id", row.get("source_id"))
+                record.setdefault("camera_id", row.get("camera_id"))
+                record.setdefault("stream_session_id", row.get("stream_session_id"))
+                record.setdefault("keyframe_uuid", row.get("keyframe_uuid"))
+                records.append(record)
+        return records
+
     # ------------------------------------------------------------------
     # get by id (UUID)
     # ------------------------------------------------------------------

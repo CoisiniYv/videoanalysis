@@ -530,3 +530,56 @@ manifest.json
 - 未删除任何现有小文件。
 - 未停止写 `video_crop_ffmpeg.log`。
 - 未做 1000/10000 bundle 性能压测。
+
+## 17. R24.5-R24.7 实施记录
+
+执行日期：2026-06-26
+
+本次已完成 R24.5-R24.7 的主线目标：
+
+- 8090 evidence-viewer 的 manifest、annotations、sink-metadata 详情路径已切到 PostgreSQL 主路径。
+- evidence-viewer 不直接连接数据库，而是通过已有 `OPERATOR_API_BASE_URL` 调用 API 的 DB-backed evidence endpoint，避免新增镜像依赖和 rebuild。
+- API 新增 DB-backed 详情端点：
+  - `/api/v1/evidence/bundles/{event_id}`
+  - `/api/v1/evidence/bundles/{event_id}/annotations`
+  - `/api/v1/evidence/bundles/{event_id}/sink-metadata`
+- DB 详情路径读取：
+  - `evidence_bundles`
+  - `evidence_artifacts`
+  - `evidence_frame_timeline`
+  - `evidence_overlay_segments`
+- evidence-viewer 仍保留文件回退，但默认 DB 可用时不依赖 json/jsonl sidecar。
+- media-worker 新生成证据时会在删除 sidecar 前完整写入 DB bundle/artifact/timeline/overlay。
+- 新生成的成功 evidence bundle 在 DB 写入成功后只保留 `raw_clip.mov`。
+- 新生成的失败 evidence bundle 在 DB 写入成功后删除 DB-backed json/jsonl sidecar，只保留诊断日志。
+- 历史 lab evidence 已重跑 backfill，然后执行安全清理。
+
+当前清理结果：
+
+| 文件类型 | 数量 | 说明 |
+| --- | ---: | --- |
+| `raw_clip.mov` | 222 | 成功可播放证据，保留在文件系统 |
+| `video_crop_ffmpeg.log` | 1 | 失败证据诊断日志 |
+| `*.json` | 0 | 已清理 |
+| `*.jsonl` | 0 | 已清理 |
+
+DB 当前计数：
+
+| 表 | 数量 |
+| --- | ---: |
+| `evidence_bundles` | 223 |
+| `evidence_frame_timeline` | 68095 |
+| `evidence_overlay_segments` | 14613 |
+
+删除 sidecar 后的 8090 验证样例：
+
+- `GET /api/bundles/b62bc8f4-1056-4c56-afc9-9c44cbdad02d` 返回 `index_source=database`，`available_files=["raw_clip.mov"]`。
+- `GET /api/bundles/b62bc8f4-1056-4c56-afc9-9c44cbdad02d/annotations` 返回 `annotation_source=database`，`count=15`。
+- `GET /api/bundles/b62bc8f4-1056-4c56-afc9-9c44cbdad02d/sink-metadata` 返回 `index_source=database`，`count=301`。
+- `GET /api/bundles/b62bc8f4-1056-4c56-afc9-9c44cbdad02d/media/raw_clip` 可读取视频字节。
+
+本次仍未做：
+
+- 未删除失败证据的诊断日志。
+- 未做 1000/10000 bundle 性能压测。
+- 未移除文件回退代码；回退路径保留用于故障恢复。

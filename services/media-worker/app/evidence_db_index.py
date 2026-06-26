@@ -17,6 +17,7 @@ SIDECAR_SUMMARY_FILE = "summary.frame_cache.identity.json"
 BUNDLE_SUMMARY_FILE = "summary.json"
 SINK_METADATA_FILE = "sink_metadata.json"
 RAW_CLIP_FILE = "raw_clip.mov"
+FFMPEG_LOG_FILE = "video_crop_ffmpeg.log"
 
 
 def upsert_evidence_bundle_index(
@@ -147,6 +148,19 @@ def upsert_evidence_bundle_index(
         ("sink_timeline", sink_metadata_path if sink_metadata_path.is_file() else None, "application/json", None, _file_size(sink_metadata_path), None, {}),
         ("bundle_summary", bundle / BUNDLE_SUMMARY_FILE if (bundle / BUNDLE_SUMMARY_FILE).is_file() else None, "application/json", None, _file_size(bundle / BUNDLE_SUMMARY_FILE), None, {}),
     ]
+    ffmpeg_log = bundle / FFMPEG_LOG_FILE
+    if media_status != "materialized" and ffmpeg_log.is_file():
+        artifacts.append(
+            (
+                "ffmpeg_log",
+                ffmpeg_log,
+                "text/plain",
+                None,
+                _file_size(ffmpeg_log),
+                None,
+                {"diagnostic": True},
+            )
+        )
     artifact_count = 0
     for artifact_type, path, content_type, compression, size, sha, artifact_meta in artifacts:
         if path is None:

@@ -19,7 +19,10 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
     sys.modules.pop(_mod, None)
 
 from app.repositories.events import EventRepository  # noqa: E402
-from app.routers.evidence import _bundle_summary_from_row  # noqa: E402
+from app.routers.evidence import (  # noqa: E402
+    _bundle_manifest_from_index_row,
+    _bundle_summary_from_row,
+)
 
 
 class _Cursor:
@@ -150,6 +153,42 @@ def test_database_row_maps_to_frontend_bundle_summary() -> None:
     assert summary["matched_objects"] == 2
     assert summary["unknown_objects"] == 1
     assert summary["index_source"] == "database"
+
+
+def test_database_bundle_manifest_does_not_require_sidecar_files() -> None:
+    row = {
+        "event_id": "22222222-2222-4222-8222-222222222222",
+        "source_event_id": "source-event-2",
+        "event_type": "watchlist_hit",
+        "camera_id": "camera-1",
+        "source_id": "source-1",
+        "camera_name": "Lab",
+        "event_created_at": datetime(2026, 6, 15, 4, 5, 6, tzinfo=timezone.utc),
+        "alarm_machine_time": datetime(2026, 6, 15, 4, 5, 6, tzinfo=timezone.utc),
+        "media_status": "materialized",
+        "evidence_reason": "",
+        "raw_clip_uri": "/data/video-analytics/media/evidence/event/raw_clip.mov",
+        "overlay_artifact_uri": "/data/video-analytics/media/evidence/event/annotations.frame_cache.identity.jsonl",
+        "frontend_overlay_required": True,
+        "visual_evidence_status": "verified",
+        "summary": {
+            "sidecar_summary": {
+                "production_ready": True,
+                "timeline_domain": "final_canonical_clip",
+                "frame_identity_method": "frame_uuid",
+            }
+        },
+        "materialization": {},
+    }
+
+    manifest = _bundle_manifest_from_index_row(row)
+
+    assert manifest["index_source"] == "database"
+    assert manifest["raw_clip_url"] == "/api/bundles/22222222-2222-4222-8222-222222222222/media/raw_clip"
+    assert manifest["available_files"] == ["raw_clip.mov"]
+    assert manifest["default_annotation_source"] == "database"
+    assert manifest["default_annotation_file"] is None
+    assert manifest["metadata"]["media"]["db_index_status"] == "ready"
 
 
 def test_database_row_uses_camera_table_name_when_payload_lacks_name() -> None:

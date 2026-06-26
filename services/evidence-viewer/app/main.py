@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
@@ -156,6 +157,20 @@ def _proxy_request(method: str, target: str, request: Request, body: bytes) -> R
         )
 
 
+def _operator_api_json(path: str) -> dict[str, Any] | None:
+    url = _operator_proxy_url(path)
+    request = UrlRequest(url, method="GET")
+    try:
+        with urlopen(request, timeout=OPERATOR_PROXY_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None
+    data = payload.get("data")
+    return data if isinstance(data, dict) else None
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
@@ -252,6 +267,11 @@ def api_annotations(
     format: Literal["json", "jsonl"] = "json",
     source: AnnotationSource = "auto",
 ):
+    if source != "sidecar" and format == "json":
+        data = _operator_api_json(f"evidence/bundles/{event_id}/annotations")
+        if data is not None:
+            return JSONResponse(data)
+
     try:
         bundle_dir = ensure_bundle_dir(settings.evidence_root, event_id)
     except Exception as exc:
@@ -329,6 +349,10 @@ def api_annotations(
 
 @app.get("/api/bundles/{event_id}/sink-metadata")
 def api_sink_metadata(event_id: str) -> JSONResponse:
+    data = _operator_api_json(f"evidence/bundles/{event_id}/sink-metadata")
+    if data is not None:
+        return JSONResponse(data)
+
     try:
         bundle_dir = ensure_bundle_dir(settings.evidence_root, event_id)
     except Exception as exc:
@@ -368,6 +392,10 @@ def api_raw_clip(event_id: str) -> FileResponse:
 
 @app.get("/api/bundles/{event_id:path}")
 def api_bundle_manifest(event_id: str) -> JSONResponse:
+    data = _operator_api_json(f"evidence/bundles/{event_id}")
+    if data is not None:
+        return JSONResponse(data)
+
     try:
         manifest = bundle_manifest(
             settings.evidence_root,
