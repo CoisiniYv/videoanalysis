@@ -1150,13 +1150,6 @@ button.sm {
   border-color: #267a49;
 }
 
-.source-banner--legacy_debug,
-.source-banner--preview_debug {
-  color: #ffd166;
-  background: rgba(51, 42, 19, 0.9);
-  border-color: #8a6c1e;
-}
-
 .source-banner--unavailable {
   color: #ffb4a8;
   background: rgba(55, 22, 22, 0.9);

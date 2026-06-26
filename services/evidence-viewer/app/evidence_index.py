@@ -23,6 +23,7 @@ RAW_CLIP_PREFERRED_NAMES = (
     "raw_clip.webm",
     "raw_clip.mkv",
 )
+PRODUCTION_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
 RAW_CLIP_UNAVAILABLE_MATERIALIZATION_STATUSES = {
     "manifest_ready",
     "materialization_pending",
@@ -269,7 +270,7 @@ def _contains_person(bundle_dir: Path, metadata: dict[str, Any], needle: str) ->
     lowered = needle.lower()
     if lowered in json.dumps(metadata, sort_keys=True).lower():
         return True
-    annotations_path = bundle_dir / "annotations.jsonl"
+    annotations_path = bundle_dir / PRODUCTION_ANNOTATIONS_FILE
     if not annotations_path.is_file():
         return False
     try:
@@ -455,7 +456,7 @@ def bundle_summary(
     raw_clip_playable = raw_clip is not None and not materialization.get(
         "raw_clip_unavailable_reason"
     )
-    annotations_path = bundle_dir / "annotations.jsonl"
+    annotations_path = bundle_dir / PRODUCTION_ANNOTATIONS_FILE
     alarm_time, alarm_time_source = alarm_machine_time(metadata, summary)
     event_id = event.get("event_id") or summary.get("event_id") or bundle_dir.name
     camera_name = camera_name_for_bundle(metadata, summary, camera_name_lookup)

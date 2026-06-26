@@ -2271,8 +2271,6 @@ def _replay_job_labels(
         "replay_source_kind",
         "evidence_topology",
         "annotation_source_policy",
-        "allow_db_annotation_fallback",
-        "allow_legacy_annotation_fallback",
         "frame_pts",
         "frame_num",
         "metadata_domain",

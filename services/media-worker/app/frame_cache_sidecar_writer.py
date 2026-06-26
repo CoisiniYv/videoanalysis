@@ -101,8 +101,6 @@ def write_frame_cache_identity_sidecar(
     summary_name = str(config.get("summary_filename") or "summary.frame_cache.identity.json")
     annotations_path = out_dir / annotations_name
     summary_path = out_dir / summary_name
-    old_annotations_path = out_dir / "annotations.jsonl"
-    old_summary_path = out_dir / "summary.json"
 
     allowed, decision = should_attempt_sidecar(event_copy, config, state)
     base_summary = _base_summary(
@@ -114,8 +112,6 @@ def write_frame_cache_identity_sidecar(
         metadata_path=metadata_path,
         annotations_path=str(annotations_path),
         summary_path=str(summary_path),
-        old_annotations_path=str(old_annotations_path),
-        old_summary_path=str(old_summary_path),
     )
     if not allowed:
         summary = {
@@ -1252,7 +1248,6 @@ def _production_sidecar_contract_summary(
         "known_face_trigger_only": identity_scope_status == "trigger_only",
         "identity_trigger_required": identity_event,
         "person_context_rows": int(written_contract.get("person_context_rows") or 0),
-        "legacy_fallback_allowed": False,
         "production_ready_failures": failures,
         "stale_timing_rows": stale_timing_rows,
         **trigger_binding,
@@ -1570,7 +1565,6 @@ def _trigger_visual_binding_summary(
         "trigger_face_row_match_type": trigger.get("clip_timeline_match") if trigger else None,
         "trigger_face_row_frame_uuid": trigger.get("frame_uuid") if trigger else anchor.get("frame_uuid") if anchor else None,
         "trigger_face_row_frame_pts": trigger.get("frame_pts") if trigger else anchor.get("frame_pts") if anchor else None,
-        "legacy_used_for_visual_binding": False,
     }
 
 
@@ -1996,8 +1990,6 @@ def _base_summary(
     metadata_path: str | None,
     annotations_path: str,
     summary_path: str,
-    old_annotations_path: str,
-    old_summary_path: str,
 ) -> dict[str, Any]:
     anchor, _anchor_summary = extract_evidence_event_anchor(event)
     summary = {
@@ -2047,14 +2039,10 @@ def _base_summary(
         "rows_unmatched": 0,
         "clip_timeline_match_distribution": {},
         "identity_scope_status": "unavailable",
-        "legacy_fallback_allowed": False,
         "production_ready_failures": ["sidecar_not_written"],
         "stale_timing_rows": 0,
         "embedding_vectors_in_output": 0,
         "image_bytes_in_output": 0,
-        "old_annotations_preserved": Path(old_annotations_path).is_file()
-        and Path(annotations_path).name != "annotations.jsonl",
-        "old_summary_preserved": Path(old_summary_path).is_file(),
         "production_replacement": False,
         "fail_open": bool(config.get("fail_open", True)),
         "error": None,
@@ -2064,8 +2052,6 @@ def _base_summary(
         "metadata_path": metadata_path,
         "sidecar_annotations_path": annotations_path,
         "sidecar_summary_path": summary_path,
-        "old_annotations_path": old_annotations_path,
-        "old_summary_path": old_summary_path,
         "db_writes": False,
         "production_redis_writes": False,
     }

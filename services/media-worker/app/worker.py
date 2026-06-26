@@ -11,16 +11,13 @@ import signal
 import subprocess
 import sys
 import time
-from ast import literal_eval
 from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg
 
 from app.annotated_snapshot import generate_annotated_snapshot
-from app.clip_sanitizer import sanitize_raw_clip
 from app.config import Config, load_config
-from app.continuous_annotation import write_continuous_annotation_bundle
 from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
 from app.post_savant_evidence_bundle import (
     EVIDENCE_TOPOLOGY as POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
@@ -887,96 +884,6 @@ def _record_probe_metric(tool: str, duration_s: float) -> None:
         _PROBE_METRICS["ffmpeg_duration_ms"] += duration_ms
 
 
-def _parse_simple_camera_yaml(path: str) -> dict:
-    """Parse the limited camera YAML shape used by POC/dev configs.
-
-    This fallback keeps media-worker independent from PyYAML in no-build
-    dev images. It intentionally supports only the camera/zones/points fields
-    needed for ROI annotation lookup.
-    """
-    cameras: dict[str, dict] = {}
-    current_camera: str | None = None
-    current_zone: str | None = None
-    in_zones = False
-    in_points = False
-
-    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
-        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-            continue
-        indent = len(raw_line) - len(raw_line.lstrip(" "))
-        stripped = raw_line.strip()
-
-        if indent == 2 and stripped.endswith(":"):
-            current_camera = stripped[:-1]
-            cameras[current_camera] = {"zones": {}}
-            current_zone = None
-            in_zones = False
-            in_points = False
-            continue
-
-        if current_camera is None:
-            continue
-
-        camera = cameras[current_camera]
-        if indent == 4:
-            current_zone = None
-            in_points = False
-            if stripped == "zones:":
-                in_zones = True
-                continue
-            in_zones = False
-            if stripped.startswith("source_id:"):
-                camera["source_id"] = stripped.split(":", 1)[1].strip()
-            continue
-
-        if in_zones and indent == 6 and stripped.endswith(":"):
-            current_zone = stripped[:-1]
-            camera.setdefault("zones", {})[current_zone] = {}
-            in_points = False
-            continue
-
-        if not in_zones or current_zone is None:
-            continue
-
-        zone = camera.setdefault("zones", {})[current_zone]
-        if indent == 8:
-            if stripped == "points:":
-                in_points = True
-                zone.setdefault("points", [])
-            elif stripped.startswith("type:"):
-                zone["type"] = stripped.split(":", 1)[1].strip()
-            continue
-
-        if in_points and indent >= 10 and stripped.startswith("- "):
-            try:
-                point = literal_eval(stripped[2:].strip())
-            except (SyntaxError, ValueError):
-                continue
-            if isinstance(point, (list, tuple)) and len(point) == 2:
-                zone.setdefault("points", []).append([float(point[0]), float(point[1])])
-
-    return {"cameras": cameras}
-
-
-def _load_camera_config(path: str | None) -> dict:
-    if not path:
-        return {}
-    config_path = Path(path)
-    if not config_path.is_file():
-        logger.warning("camera config not found for ROI lookup: %s", path)
-        return {}
-    try:
-        import yaml  # type: ignore
-
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except ImportError:
-        return _parse_simple_camera_yaml(str(config_path))
-    except Exception:
-        logger.exception("failed to load camera config for ROI lookup: %s", path)
-        return {}
-
-
 def _event_context_from_row(event_id: str, row: tuple) -> dict:
     payload = row[6] if len(row) > 6 else {}
     if isinstance(payload, str):
@@ -1005,46 +912,6 @@ def _event_context_from_row(event_id: str, row: tuple) -> dict:
         "previous_keyframe_uuid": media.get("previous_keyframe_uuid", ""),
     }
 
-
-def _lookup_roi_from_camera_config(
-    *,
-    camera_id: str,
-    source_id: str,
-    zone_id: str,
-    cameras_config_path: str | None,
-) -> tuple[list | None, str]:
-    if not cameras_config_path:
-        return None, "not_configured"
-    config = _load_camera_config(cameras_config_path)
-    cameras = config.get("cameras", {}) if isinstance(config, dict) else {}
-    if not isinstance(cameras, dict):
-        return None, "not_found"
-
-    camera = cameras.get(camera_id)
-    if not isinstance(camera, dict):
-        for candidate in cameras.values():
-            if (
-                isinstance(candidate, dict)
-                and source_id
-                and candidate.get("source_id") == source_id
-            ):
-                camera = candidate
-                break
-    if not isinstance(camera, dict):
-        return None, "not_found"
-
-    zones = camera.get("zones", {})
-    if not isinstance(zones, dict):
-        return None, "not_found"
-    zone = zones.get(zone_id) if zone_id else None
-    if not isinstance(zone, dict):
-        return None, "not_found"
-    points = zone.get("points")
-    if isinstance(points, list) and points:
-        return points, "found"
-    return None, "not_found"
-
-
 def _load_event_context(pg_conn: psycopg.Connection, event_id: str) -> dict:
     with pg_conn.cursor() as cur:
         cur.execute(
@@ -1063,198 +930,6 @@ def _load_event_context(pg_conn: psycopg.Connection, event_id: str) -> dict:
         raise ValueError(f"event not found: {event_id}")
 
     return _event_context_from_row(event_id, row)
-
-
-def _normalise_person_bbox(
-    bbox: object,
-    *,
-    confidence: float,
-    source: str,
-    source_format: str | None = None,
-) -> dict | None:
-    if isinstance(bbox, dict):
-        if {"x", "y", "width", "height"}.issubset(bbox):
-            x = _to_float(bbox.get("x"))
-            y = _to_float(bbox.get("y"))
-            width = _to_float(bbox.get("width"))
-            height = _to_float(bbox.get("height"))
-            if None in (x, y, width, height):
-                return None
-            return {
-                "type": "person_bbox",
-                "bbox_format": "xyxy",
-                "bbox": [x, y, x + width, y + height],
-                "bbox_source_format": "xywh",
-                "bbox_raw": bbox,
-                "confidence": confidence,
-                "source": source,
-            }
-        if {"x1", "y1", "x2", "y2"}.issubset(bbox):
-            x1 = _to_float(bbox.get("x1"))
-            y1 = _to_float(bbox.get("y1"))
-            x2 = _to_float(bbox.get("x2"))
-            y2 = _to_float(bbox.get("y2"))
-            if None in (x1, y1, x2, y2):
-                return None
-            return {
-                "type": "person_bbox",
-                "bbox_format": "xyxy",
-                "bbox": [x1, y1, x2, y2],
-                "bbox_source_format": "xyxy",
-                "bbox_raw": bbox,
-                "confidence": confidence,
-                "source": source,
-            }
-        return None
-
-    if isinstance(bbox, list) and len(bbox) == 4:
-        values = [_to_float(item) for item in bbox]
-        if any(item is None for item in values):
-            return None
-        numbers = [float(item) for item in values if item is not None]
-        if source_format == "xywh":
-            x, y, width, height = numbers
-            return {
-                "type": "person_bbox",
-                "bbox_format": "xyxy",
-                "bbox": [x, y, x + width, y + height],
-                "bbox_source_format": "xywh",
-                "bbox_raw": bbox,
-                "confidence": confidence,
-                "source": source,
-            }
-        if source_format == "xyxy":
-            return {
-                "type": "person_bbox",
-                "bbox_format": "xyxy",
-                "bbox": numbers,
-                "bbox_source_format": "xyxy",
-                "bbox_raw": bbox,
-                "confidence": confidence,
-                "source": source,
-            }
-        return {
-            "type": "person_bbox",
-            "bbox_format": "unknown",
-            "bbox": numbers,
-            "bbox_source_format": "list_unknown",
-            "bbox_raw": bbox,
-            "confidence": confidence,
-            "source": source,
-        }
-
-    return None
-
-
-def _event_annotation_from_context(
-    context: dict,
-    *,
-    cameras_config_path: str | None = None,
-) -> dict:
-    """Build the midterm event-frame annotation document from event context."""
-    payload = context["payload"]
-    media = payload.get("media", {}) if isinstance(payload, dict) else {}
-    if not isinstance(media, dict):
-        media = {}
-
-    overlays = []
-    missing = []
-    bbox = payload.get("person_bbox")
-    bbox_source = "event.payload.person_bbox"
-    if bbox is None:
-        bbox = payload.get("bbox")
-        bbox_source = "event.payload.bbox"
-    if bbox is None:
-        bbox = media.get("person_bbox")
-        bbox_source = "event.payload.media.person_bbox"
-    if bbox is None:
-        bbox = media.get("bbox")
-        bbox_source = "event.payload.media.bbox"
-    bbox_source_format = (
-        payload.get("bbox_format")
-        or payload.get("person_bbox_format")
-        or media.get("bbox_format")
-        or media.get("person_bbox_format")
-    )
-    if bbox is not None:
-        overlay = _normalise_person_bbox(
-            bbox,
-            confidence=float(context["confidence"] or 0.0),
-            source=bbox_source,
-            source_format=bbox_source_format,
-        )
-        if overlay:
-            overlays.append(overlay)
-        else:
-            missing.append("person_bbox")
-    else:
-        missing.append("person_bbox")
-
-    roi = payload.get("roi_polygon")
-    roi_source = "event.payload.roi_polygon"
-    if roi is None:
-        roi = payload.get("zone_polygon")
-        roi_source = "event.payload.zone_polygon"
-    if roi is None:
-        roi = media.get("roi_polygon")
-        roi_source = "event.payload.media.roi_polygon"
-    if roi is None:
-        roi = media.get("zone_polygon")
-        roi_source = "event.payload.media.zone_polygon"
-    zone_id = (
-        payload.get("zone_id")
-        or payload.get("zone")
-        or media.get("zone_id")
-        or media.get("zone")
-    )
-    roi_lookup_status = "payload" if roi else "not_found"
-    if roi is None:
-        roi, roi_lookup_status = _lookup_roi_from_camera_config(
-            camera_id=str(context.get("camera_id", "")),
-            source_id=str(context.get("source_id", "")),
-            zone_id=str(zone_id or ""),
-            cameras_config_path=cameras_config_path,
-        )
-        if roi is not None:
-            roi_source = "camera_config"
-    if roi:
-        overlays.append({
-            "type": "roi_polygon",
-            "zone_id": zone_id,
-            "points": roi,
-            "source": roi_source,
-        })
-    else:
-        missing.append("roi_polygon")
-
-    return {
-        "schema_version": "1.0",
-        "annotation_type": "event_frame",
-        "annotation_status": "partial" if missing else "complete",
-        "missing": missing,
-        "roi_lookup_status": roi_lookup_status,
-        "event": {
-            "event_id": context["event_id"],
-            "source_event_id": context["source_event_id"],
-            "event_type": context["event_type"],
-            "camera_id": context["camera_id"],
-            "source_id": context["source_id"],
-            "track_id": context["track_id"],
-            "event_ts_ms": context["event_ts_ms"],
-            "frame_uuid": context["frame_uuid"],
-            "keyframe_uuid": context["keyframe_uuid"],
-            "previous_keyframe_uuid": context["previous_keyframe_uuid"],
-        },
-        "overlays": overlays,
-    }
-
-
-def _load_event_annotation(pg_conn: psycopg.Connection, event_id: str) -> dict:
-    """Build the midterm event-frame annotation document from the event row."""
-    return _event_annotation_from_context(
-        _load_event_context(pg_conn, event_id),
-        cameras_config_path=os.getenv("CAMERAS_CONFIG_PATH"),
-    )
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -1564,61 +1239,6 @@ def _post_savant_materialization_metrics(
     }
 
 
-def _update_summary_with_bundle_validation(
-    summary_path: Path,
-    business_metadata: dict,
-) -> dict:
-    try:
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        if not isinstance(summary, dict):
-            summary = {}
-    except Exception:
-        logger.exception("failed to load annotation summary for validation merge")
-        summary = {}
-
-    media = business_metadata.get("media", {})
-    status = business_metadata.get("status", {})
-    clip_validation = (
-        media.get("clip_validation", {}) if isinstance(media, dict) else {}
-    )
-    if not isinstance(clip_validation, dict):
-        clip_validation = {}
-
-    summary.update(
-        {
-            "raw_clip_duration": media.get("raw_clip_duration"),
-            "expected_duration_seconds": media.get("expected_duration_seconds"),
-            "max_allowed_duration_seconds": clip_validation.get(
-                "max_allowed_duration_seconds"
-            ),
-            "duration_guard_status": clip_validation.get("duration_guard_status"),
-            "duration_guard_failed": bool(
-                clip_validation.get("duration_guard_failed")
-            ),
-            "duration_guard_reason": clip_validation.get("duration_guard_reason", ""),
-            "duration_guard_slack_seconds": clip_validation.get(
-                "duration_guard_slack_seconds"
-            ),
-            "clip_status": status.get("clip_status"),
-            "decode_error_count": clip_validation.get("decode_error_count", 0),
-            "decode_error_sample": clip_validation.get("decode_error_sample", []),
-            "raw_clip_sanitize_method": media.get("raw_clip_sanitize_method", ""),
-            "raw_clip_sanitize_decode_ok": media.get(
-                "raw_clip_sanitize_decode_ok"
-            ),
-            "raw_clip_sanitize_decode_error_count": media.get(
-                "raw_clip_sanitize_decode_error_count", 0
-            ),
-            "raw_clip_sanitize_fallback_used": bool(
-                media.get("raw_clip_sanitize_fallback_used")
-            ),
-            "raw_clip_sanitize_error": media.get("raw_clip_sanitize_error", ""),
-        }
-    )
-    _atomic_write_json(summary_path, summary)
-    return summary
-
-
 def _probe_duration_with_imageio_ffmpeg(path: str) -> float | None:
     try:
         import imageio_ffmpeg  # type: ignore
@@ -1892,375 +1512,12 @@ def _duration_guard(
     }
 
 
-def _duration_ok(
-    actual: float | None,
-    expected: float,
-    slack_seconds: float | None = None,
-) -> bool:
-    if actual is None or actual <= 0:
-        return False
-    if expected <= 0:
-        return actual > 0
-    guard = _duration_guard(actual, expected, slack_seconds)
-    lower_bound = max(0.0, expected * 0.8)
-    return actual >= lower_bound and not guard["duration_guard_failed"]
-
-
-def _clip_status_from_validation(clip_validation: dict) -> str:
-    if clip_validation.get("duration_guard_failed") is True:
-        return BUNDLE_STATUS_DURATION_GUARD_FAILED
-    if clip_validation.get("annotation_generation_failed") is True:
-        return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
-    if clip_validation.get("decode_error_count", 0) > 0:
-        return "generated_corrupt"
-    if clip_validation.get("ok") is True:
-        return "ready"
-    if clip_validation.get("ok") is False:
-        return "generated_corrupt"
-    return "generated_unverified"
-
-
 def _stop_condition_mode(stop_condition: dict) -> str:
     if "ts_delta_sec" in stop_condition:
         return "ts_delta_sec"
     if "frame_count" in stop_condition:
         return "frame_count_fallback"
     return "unknown"
-
-
-def _build_business_metadata(
-    *,
-    event_context: dict,
-    replay_job_id: str,
-    replay_job_request: dict,
-    sink_metadata_path: str,
-    sink_video_path: str,
-    sink_output_dir: str,
-    raw_clip_path: str,
-    event_annotation_path: str,
-    annotations_jsonl_path: str = "",
-    summary_json_path: str = "",
-    annotation_summary: dict | None = None,
-    sanitize_info: dict | None = None,
-) -> dict:
-    payload = event_context.get("payload", {})
-    media = payload.get("media", {}) if isinstance(payload, dict) else {}
-    if not isinstance(media, dict):
-        media = {}
-    stop_condition = replay_job_request.get("stop_condition") or {}
-    configuration = replay_job_request.get("configuration") or {}
-    replay_labels = configuration.get("labels") or {}
-    if not isinstance(replay_labels, dict):
-        replay_labels = {}
-    anchor_metadata = _uuid_first_anchor_metadata(
-        replay_labels=replay_labels,
-        replay_job_request=replay_job_request,
-        time_window=summary.get("time_window") if isinstance(summary, dict) else {},
-    )
-    offset = replay_job_request.get("offset") or {}
-    raw_clip_size = 0
-    if raw_clip_path:
-        try:
-            raw_clip_size = Path(raw_clip_path).stat().st_size
-        except OSError:
-            raw_clip_size = 0
-    raw_clip_duration = (
-        _probe_video_duration_seconds(raw_clip_path) if raw_clip_path else None
-    )
-    duration_probe_status = "ok" if raw_clip_duration is not None else "failed"
-    expected_duration_seconds = _expected_clip_seconds(
-        stop_condition,
-        configuration,
-        offset.get("seconds", 0),
-    )
-    decode_probe = _probe_clip_decode(raw_clip_path) if raw_clip_path else {
-        "decode_error_count": 0,
-        "decode_error_sample": [],
-        "decode_ok": None,
-        "probe_tool": None,
-        "probe_error": "clip file not found",
-    }
-    sanitize_info = sanitize_info or {}
-    duration_guard = _duration_guard(raw_clip_duration, expected_duration_seconds)
-    duration_ok = _duration_ok(
-        raw_clip_duration,
-        expected_duration_seconds,
-        duration_guard.get("duration_guard_slack_seconds"),
-    )
-    annotation_summary = annotation_summary or {}
-    annotation_generation_failed = (
-        annotation_summary.get("annotation_generation_failed") is True
-        or annotation_summary.get("annotation_status") == ANNOTATION_STATUS_UNAVAILABLE
-    )
-    if decode_probe.get("decode_ok") is None or raw_clip_duration is None:
-        validation_ok = None
-    else:
-        validation_ok = (
-            bool(decode_probe.get("decode_ok"))
-            and duration_ok
-            and not annotation_generation_failed
-        )
-    clip_validation = {
-        "ok": validation_ok,
-        "decode_error_count": decode_probe.get("decode_error_count", 0),
-        "decode_error_sample": decode_probe.get("decode_error_sample", []),
-        "duration_ok": duration_ok,
-        **duration_guard,
-        "annotation_generation_failed": annotation_generation_failed,
-        "probe_tool": decode_probe.get("probe_tool"),
-        "probe_error": decode_probe.get("probe_error", ""),
-    }
-    clip_status = _clip_status_from_validation(clip_validation)
-    event_created_at = _json_isoformat(event_context.get("created_at"))
-
-    return {
-        "schema_version": "1.0",
-        "project_version": _evidence_version("midterm"),
-        **_legacy_metadata_fields("midterm"),
-        "run_id": os.getenv("EVIDENCE_RUN_ID", ""),
-        "evidence_type": "security_event_replay_clip",
-        "recording_strategy": "savant_replay",
-        "input": {
-            "input_type": os.getenv("EVIDENCE_INPUT_TYPE", ""),
-            "input_uri": os.getenv("EVIDENCE_INPUT_URI", ""),
-            "local_file_used": _env_bool("EVIDENCE_LOCAL_FILE_USED"),
-            "test_video_used": _env_bool("EVIDENCE_TEST_VIDEO_USED"),
-            "source_extraction_fallback": _env_bool(
-                "EVIDENCE_SOURCE_EXTRACTION_FALLBACK"
-            ),
-            "second_rtsp_pull": _env_bool("EVIDENCE_SECOND_RTSP_PULL"),
-        },
-        "event": {
-            "event_id": event_context.get("event_id", ""),
-            "source_event_id": event_context.get("source_event_id", ""),
-            "event_type": event_context.get("event_type", ""),
-            "camera_id": event_context.get("camera_id", ""),
-            "source_id": event_context.get("source_id", ""),
-            "track_id": event_context.get("track_id", ""),
-            "created_at": event_created_at,
-            "alarm_machine_time": event_created_at,
-            "alarm_machine_time_source": "events.created_at" if event_created_at else "",
-            "event_ts_ms": event_context.get("event_ts_ms", 0),
-            "frame_uuid": (
-                anchor_metadata.get("event_frame_uuid")
-                or event_context.get("frame_uuid", "")
-            ),
-            "event_frame_uuid": (
-                anchor_metadata.get("event_frame_uuid")
-                or event_context.get("event_frame_uuid", "")
-                or event_context.get("frame_uuid", "")
-            ),
-            "event_frame_pts": anchor_metadata.get("event_frame_pts", ""),
-            "keyframe_uuid": event_context.get("keyframe_uuid", ""),
-            "previous_keyframe_uuid": event_context.get("previous_keyframe_uuid", ""),
-        },
-        "replay": {
-            "replay_job_id": replay_job_id,
-            "anchor_keyframe_uuid": replay_job_request.get("anchor_keyframe", ""),
-            "offset_seconds": offset.get("seconds", 0),
-            "stop_condition": stop_condition,
-            "stop_condition_mode": _stop_condition_mode(stop_condition),
-            "fallback_reason": replay_job_request.get("fallback_reason", ""),
-            "stored_stream_id": configuration.get("stored_stream_id", ""),
-            "resulting_stream_id": configuration.get("resulting_stream_id", ""),
-        },
-        "media": {
-            "sink_output_dir": sink_output_dir,
-            "sink_metadata_path": sink_metadata_path,
-            "sink_video_path": sink_video_path,
-            "raw_clip_path": raw_clip_path,
-            "annotated_clip_path": None,
-            "annotated_clip_status": "not_generated",
-            "event_annotation_path": event_annotation_path,
-            "raw_clip_size": raw_clip_size,
-            "raw_clip_duration": raw_clip_duration,
-            "expected_duration_seconds": round(expected_duration_seconds, 3),
-            "duration_probe_status": duration_probe_status,
-            "raw_clip_sanitize_method": sanitize_info.get("method", ""),
-            "raw_clip_sanitize_decode_ok": sanitize_info.get("decode_ok"),
-            "raw_clip_sanitize_decode_error_count": sanitize_info.get(
-                "decode_error_count", 0
-            ),
-            "raw_clip_sanitize_decode_error_sample": sanitize_info.get(
-                "decode_error_sample", []
-            ),
-            "raw_clip_sanitize_fallback_used": bool(
-                sanitize_info.get("fallback_used", False)
-            ),
-            "raw_clip_sanitize_error": sanitize_info.get("sanitize_error", ""),
-            "clip_validation": clip_validation,
-        },
-        "annotations": {
-            "annotations_jsonl_path": annotations_jsonl_path,
-            "summary_json_path": summary_json_path,
-            "annotation_status": annotation_summary.get("annotation_status"),
-            "annotation_lines": annotation_summary.get("annotation_lines"),
-            "annotation_empty_reason": annotation_summary.get(
-                "annotation_empty_reason"
-            ),
-            "annotation_unavailable_reason": annotation_summary.get(
-                "annotation_unavailable_reason"
-            ),
-            "overlay_available": bool(annotation_summary.get("overlay_available")),
-            "frontend_overlay_required": bool(
-                annotation_summary.get("frontend_overlay_required")
-            ),
-            "annotation_mode": "continuous_jsonl",
-        },
-        "status": {
-            "clip_status": clip_status,
-        },
-        "limitations": [
-            "single-event evidence POC",
-            "not incident coalescing",
-            "not continuous recording",
-            "no annotated_clip generated",
-        ],
-    }
-
-
-def _finalize_midterm_evidence_bundle(
-    pg_conn: psycopg.Connection,
-    *,
-    event_id: str,
-    meta_dir: str,
-    video_file: str,
-    metadata_file: str,
-    evidence_output_dir: str,
-) -> dict:
-    """Copy Replay sink output into the midterm raw evidence bundle."""
-    evidence_dir = Path(evidence_output_dir) / event_id
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-
-    raw_clip = evidence_dir / f"raw_clip{Path(video_file).suffix}"
-    metadata_out = evidence_dir / "metadata.json"
-    sink_metadata_out = evidence_dir / "sink_metadata.json"
-    annotation_out = evidence_dir / "event_annotation.json"
-    annotations_jsonl_out = evidence_dir / "annotations.jsonl"
-    summary_out = evidence_dir / "summary.json"
-
-    if not raw_clip.exists():
-        sanitize_info = sanitize_raw_clip(video_file, str(raw_clip))
-        logger.info(
-            "raw_clip_sanitized event_id=%s source=%s raw_clip=%s method=%s "
-            "decode_ok=%s decode_errors=%s fallback_used=%s sanitize_error=%s",
-            event_id,
-            video_file,
-            raw_clip,
-            sanitize_info.get("method"),
-            sanitize_info.get("decode_ok"),
-            sanitize_info.get("decode_error_count"),
-            sanitize_info.get("fallback_used"),
-            sanitize_info.get("sanitize_error", ""),
-        )
-    else:
-        sanitize_info = {
-            "method": "existing",
-            "decode_ok": None,
-            "decode_error_count": 0,
-            "decode_error_sample": [],
-            "fallback_used": False,
-            "sanitize_error": "raw_clip already existed; sanitizer skipped",
-        }
-    shutil.copy2(metadata_file, sink_metadata_out)
-
-    event_context = _load_event_context(pg_conn, event_id)
-    annotation = _event_annotation_from_context(
-        event_context,
-        cameras_config_path=os.getenv("CAMERAS_CONFIG_PATH"),
-    )
-    with open(annotation_out, "w") as f:
-        json.dump(annotation, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-
-    annotation_summary = write_continuous_annotation_bundle(
-        pg_conn,
-        event_context,
-        annotations_path=str(annotations_jsonl_out),
-        summary_path=str(summary_out),
-        replay_metadata_path=str(sink_metadata_out),
-    )
-    logger.info(
-        "continuous_annotations_written event_id=%s lines=%s faces=%s matched=%s",
-        event_id,
-        annotation_summary.get("annotation_lines", 0),
-        annotation_summary.get("face_objects", 0),
-        annotation_summary.get("matched_objects", 0),
-    )
-
-    payload = event_context.get("payload", {})
-    media = payload.get("media", {}) if isinstance(payload, dict) else {}
-    if not isinstance(media, dict):
-        media = {}
-    sink_metadata = _load_sink_metadata_file(metadata_file)
-    replay_job_id = (
-        media.get("replay_job_id")
-        or sink_metadata.get("job_id")
-        or sink_metadata.get("new_job")
-        or ""
-    )
-    replay_job_request = media.get("replay_job_request") or {}
-    if not isinstance(replay_job_request, dict):
-        replay_job_request = {}
-    business_metadata = _build_business_metadata(
-        event_context=event_context,
-        replay_job_id=replay_job_id,
-        replay_job_request=replay_job_request,
-        sink_metadata_path=str(sink_metadata_out),
-        sink_video_path=video_file,
-        sink_output_dir=meta_dir,
-        raw_clip_path=str(raw_clip),
-        event_annotation_path=str(annotation_out),
-        annotations_jsonl_path=str(annotations_jsonl_out),
-        summary_json_path=str(summary_out),
-        annotation_summary=annotation_summary,
-        sanitize_info=sanitize_info,
-    )
-    annotation_summary = _update_summary_with_bundle_validation(
-        summary_out,
-        business_metadata,
-    )
-    _atomic_write_json(metadata_out, business_metadata)
-    annotations_meta = business_metadata.get("annotations", {})
-    clip_validation = business_metadata.get("media", {}).get("clip_validation", {})
-
-    return {
-        "evidence_dir": str(evidence_dir),
-        "raw_clip": str(raw_clip),
-        "metadata": str(metadata_out),
-        "sink_metadata": str(sink_metadata_out),
-        "event_annotation": str(annotation_out),
-        "annotations_jsonl": str(annotations_jsonl_out),
-        "summary": str(summary_out),
-        "sink_output_path": meta_dir,
-        "clip_status": business_metadata.get("status", {}).get(
-            "clip_status", "generated_unverified"
-        ),
-        "annotation_status": annotations_meta.get("annotation_status"),
-        "annotation_lines": annotations_meta.get("annotation_lines"),
-        "annotation_empty_reason": annotations_meta.get("annotation_empty_reason"),
-        "annotation_unavailable_reason": annotations_meta.get(
-            "annotation_unavailable_reason"
-        ),
-        "overlay_available": annotations_meta.get("overlay_available"),
-        "frontend_overlay_required": annotations_meta.get(
-            "frontend_overlay_required"
-        ),
-        "duration_guard_status": clip_validation.get("duration_guard_status"),
-        "duration_guard_failed": clip_validation.get("duration_guard_failed"),
-        "max_allowed_duration_seconds": clip_validation.get(
-            "max_allowed_duration_seconds"
-        ),
-        "raw_clip_sanitize_method": sanitize_info.get("method", ""),
-        "raw_clip_sanitize_decode_ok": sanitize_info.get("decode_ok"),
-        "raw_clip_sanitize_decode_error_count": sanitize_info.get(
-            "decode_error_count", 0
-        ),
-        "raw_clip_sanitize_fallback_used": bool(
-            sanitize_info.get("fallback_used", False)
-        ),
-        "raw_clip_sanitize_error": sanitize_info.get("sanitize_error", ""),
-    }
 
 
 def _env_text(name: str, default: str = "") -> str:
@@ -2787,11 +2044,7 @@ def _build_frame_cache_summary(
         "visual_binding_reason": "frame_annotation_cache_aligned_to_replay_metadata" if production_ready else sidecar_summary.get("visual_binding_reason", "frame_annotation_cache_partial"),
         "visual_evidence_status": "verified" if production_ready else "unverified",
         "evidence_visual_status": "verified" if production_ready else "unverified",
-        "legacy_fallback_allowed": False,
-        "legacy_used_for_visual_binding": False,
         "fallback_used": False,
-        "allow_db_annotation_fallback": False,
-        "allow_legacy_annotation_fallback": False,
         "raw_video_binding": "continuous_replay_video",
         "annotation_binding": "frame_annotation_cache_pts_sidecar",
         "raw_clip_path": RAW_CLIP_FILE,
@@ -3075,10 +2328,6 @@ def _build_event_metadata(
             "summary_json_path": summary_path,
             "annotation_status": summary.get("annotation_status"),
             "production_ready": bool(summary.get("production_ready")),
-            "legacy_used_for_visual_binding": bool(
-                summary.get("legacy_used_for_visual_binding")
-            ),
-            "legacy_fallback_allowed": bool(summary.get("legacy_fallback_allowed")),
             "visual_evidence_status": summary.get("visual_evidence_status"),
             "frame_count": int(summary.get("frame_count") or 0),
             "sidecar_frame_count": int(summary.get("sidecar_frame_count") or 0),
@@ -3290,12 +2539,6 @@ def _finalize_post_savant_evidence_bundle(
                 frame_cache_time_window.get("time_domain_crop_applied")
             ),
             "annotation_source_policy": replay_labels.get("annotation_source_policy"),
-            "allow_db_annotation_fallback": (
-                replay_labels.get("allow_db_annotation_fallback") == "true"
-            ),
-            "allow_legacy_annotation_fallback": (
-                replay_labels.get("allow_legacy_annotation_fallback") == "true"
-            ),
             "replay_stored_stream_id": replay_configuration.get("stored_stream_id"),
             "replay_resulting_stream_id": replay_configuration.get("resulting_stream_id"),
         }
@@ -3503,7 +2746,6 @@ def _finalize_post_savant_evidence_bundle(
         "raw_clip": _path_for_metadata(result.raw_clip_path),
         "metadata": str(metadata_out),
         "sink_metadata": str(result.sink_metadata_path),
-        "event_annotation": "",
         "annotations_jsonl": str(result.production_sidecar_path),
         "summary": str(result.summary_path),
         "sink_output_path": meta_dir,
@@ -3531,9 +2773,6 @@ def _finalize_post_savant_evidence_bundle(
         "evidence_topology": POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
         "annotation_source": summary.get("annotation_source"),
         "production_ready": bool(summary.get("production_ready")),
-        "legacy_used_for_visual_binding": bool(
-            summary.get("legacy_used_for_visual_binding")
-        ),
         "person_count": int(object_counts.get("person") or 0),
         "face_count": int(object_counts.get("face") or 0),
         "known_face_count": int(object_counts.get("known_face") or 0),
@@ -3547,7 +2786,6 @@ def _process_sink_output(
     processed_dirs: set[str],
     *,
     evidence_output_dir: str | None = None,
-    midterm_raw_clip_finalizer_enabled: bool = False,
     candidate_dirs: dict[str, tuple[int, int]] | None = None,
     invalid_output_failures: dict[str, int] | None = None,
     midterm_sink_stability_checks: int = 2,
@@ -3605,9 +2843,7 @@ def _process_sink_output(
             continue
 
         post_savant_finalizer_enabled = _post_savant_finalizer_enabled()
-        finalizer_enabled = (
-            midterm_raw_clip_finalizer_enabled or post_savant_finalizer_enabled
-        )
+        finalizer_enabled = post_savant_finalizer_enabled
 
         video_file = _find_video_file(meta_dir)
         if not video_file:
@@ -3851,20 +3087,6 @@ def _process_sink_output(
                     continue
                 clip_path = bundle["raw_clip"]
                 clip_status = bundle.get("clip_status", "generated_unverified")
-            elif midterm_raw_clip_finalizer_enabled:
-                if not evidence_output_dir:
-                    logger.error("midterm_finalizer enabled but no evidence_output_dir")
-                    continue
-                bundle = _finalize_midterm_evidence_bundle(
-                    pg_conn,
-                    event_id=event_id,
-                    meta_dir=meta_dir,
-                    video_file=video_file,
-                    metadata_file=metadata_file,
-                    evidence_output_dir=evidence_output_dir,
-                )
-                clip_path = bundle["raw_clip"]
-                clip_status = bundle.get("clip_status", "generated_unverified")
             else:
                 clip_path = video_file
                 clip_status = "ready"
@@ -3976,7 +3198,6 @@ def _process_sink_output(
                                     || jsonb_build_object(
                                         'evidence_dir', %(evidence_dir)s::text,
                                         'metadata_path', %(metadata_path)s::text,
-                                        'event_annotation_path', %(annotation_path)s::text,
                                         'sink_metadata_path', %(sink_metadata_path)s::text,
                                         'annotations_jsonl_path', %(annotations_path)s::text,
                                         'summary_json_path', %(summary_path)s::text,
@@ -3989,8 +3210,6 @@ def _process_sink_output(
                                             %(annotation_source)s::text,
                                         'production_ready',
                                             %(production_ready)s::boolean,
-                                        'legacy_used_for_visual_binding',
-                                            %(legacy_used_for_visual_binding)s::boolean,
                                         'person_count',
                                             %(person_count)s::int,
                                         'face_count',
@@ -4042,7 +3261,6 @@ def _process_sink_output(
                             "event_id": event_id,
                             "evidence_dir": bundle["evidence_dir"],
                             "metadata_path": bundle["metadata"],
-                            "annotation_path": bundle["event_annotation"],
                             "sink_metadata_path": bundle["sink_metadata"],
                             "annotations_path": bundle["annotations_jsonl"],
                             "summary_path": bundle["summary"],
@@ -4054,9 +3272,6 @@ def _process_sink_output(
                             "annotation_source": bundle.get("annotation_source", ""),
                             "production_ready": bool(
                                 bundle.get("production_ready", False)
-                            ),
-                            "legacy_used_for_visual_binding": bool(
-                                bundle.get("legacy_used_for_visual_binding", False)
                             ),
                             "person_count": int(bundle.get("person_count") or 0),
                             "face_count": int(bundle.get("face_count") or 0),
@@ -4790,7 +4005,7 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
-        "midterm_finalizer=%s sink_stability_checks=%d poll_interval=%ds "
+        "sink_stability_checks=%d poll_interval=%ds "
         "default_pre_seconds=%.1f evidence_max_duration_slack_sec=%.1f "
         "state_path=%s sink_scan_max_metadata_files=%d "
         "media_probe_timeout_s=%.1f media_decode_timeout_s=%.1f "
@@ -4801,7 +4016,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
         cfg.evidence_output_dir,
-        cfg.midterm_raw_clip_finalizer_enabled,
         cfg.midterm_sink_stability_checks,
         cfg.poll_interval_s,
         cfg.default_pre_seconds,
@@ -4834,7 +4048,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 active_sink_output_dir,
                 processed_dirs,
                 evidence_output_dir=cfg.evidence_output_dir,
-                midterm_raw_clip_finalizer_enabled=cfg.midterm_raw_clip_finalizer_enabled,
                 candidate_dirs=candidate_dirs,
                 invalid_output_failures=invalid_output_failures,
                 midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,

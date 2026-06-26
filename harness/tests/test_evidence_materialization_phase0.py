@@ -420,7 +420,6 @@ def _fake_builder(fake_crop):
             "annotation_status": "complete",
             "annotation_source": "post_savant_sink_metadata",
             "production_ready": True,
-            "legacy_used_for_visual_binding": False,
             "sidecar_frame_count": 1,
             "frame_count": 1,
             "object_counts": {"person": 1, "face": 0, "known_face": 0},

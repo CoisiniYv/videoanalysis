@@ -42,15 +42,12 @@ OPERATOR_PROXY_ALLOWED_PREFIXES = (
     "runtime",
     "ws",
 )
-LEGACY_ANNOTATIONS_FILE = "annotations.jsonl"
 SIDECAR_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
-SIDECAR_PREVIEW_ANNOTATIONS_FILE = "annotations.frame_cache.identity.rebased.preview.jsonl"
-LEGACY_SUMMARY_FILE = "summary.json"
+BUNDLE_SUMMARY_FILE = "summary.json"
 SIDECAR_SUMMARY_FILE = "summary.frame_cache.identity.json"
-SIDECAR_PREVIEW_SUMMARY_FILE = "summary.frame_cache.identity.rebased.preview.json"
-AnnotationSource = Literal["auto", "sidecar", "sidecar_preview", "legacy"]
+AnnotationSource = Literal["auto", "sidecar"]
 ANNOTATION_SOURCE_UNAVAILABLE = "unavailable"
-AnnotationSourceKind = Literal["production_sidecar", "legacy_debug", "preview_debug", "unavailable"]
+AnnotationSourceKind = Literal["production_sidecar", "unavailable"]
 WATCHLIST_EVENT_TYPE = "watchlist_hit"
 PRODUCTION_TIMELINE_DOMAIN = "final_canonical_clip"
 
@@ -280,20 +277,13 @@ def api_annotations(
                 "fallback_used": False,
                 "fallback_reason": None,
                 "reason": selected["reason"],
-                "legacy_available": selected["legacy_available"],
                 "sidecar_available": selected["sidecar_available"],
                 "sidecar_summary_available": selected["sidecar_summary_available"],
                 "production_ready": False,
                 **visual_summary,
-                "explicit_legacy_url": f"/api/bundles/{event_id}/annotations?source=legacy"
-                if selected["legacy_available"]
-                else None,
-                "source_hint": "source=legacy" if selected["legacy_available"] else None,
                 "preview": False,
                 "production_file_overwritten": False,
-                "legacy_warning": None,
-                "preview_warning": None,
-                "warnings": [selected["reason"], "legacy_annotations_debug_only"],
+                "warnings": [selected["reason"]],
             }
         )
 
@@ -310,13 +300,7 @@ def api_annotations(
 
     records, warnings = parse_jsonl_records(path)
     raw_count = len(records)
-    records, legacy_known_face_blocked = _filter_displayable_records(records, selected)
-    if selected["annotation_source"] == "legacy":
-        warnings = warnings + ["legacy_annotations_may_contain_sql_window_track_propagation_artifacts"]
-        if legacy_known_face_blocked:
-            warnings = warnings + ["legacy_known_face_visual_confirmation_blocked"]
-    if selected["annotation_source"] == "sidecar_preview":
-        warnings = warnings + ["preview_sidecar_source_not_production_evidence"]
+    records = _filter_displayable_records(records, selected)
     visual_summary = visual_evidence_summary(bundle_dir)
     return JSONResponse(
         {
@@ -337,19 +321,7 @@ def api_annotations(
             "timeline_domain": selected.get("timeline_domain"),
             "sidecar_type": selected.get("sidecar_type"),
             "canonical_clip": selected.get("canonical_clip"),
-            "legacy_fallback_allowed": selected.get("legacy_fallback_allowed"),
             "production_file_overwritten": False,
-            "legacy_known_face_blocked": legacy_known_face_blocked,
-            "legacy_warning": (
-                "Legacy annotations may contain SQL/window/track-propagation artifacts."
-                if selected["annotation_source"] == "legacy"
-                else None
-            ),
-            "preview_warning": (
-                "Preview sidecar source - not production evidence."
-                if selected["annotation_source"] == "sidecar_preview"
-                else None
-            ),
             "warnings": warnings,
         }
     )
@@ -410,14 +382,8 @@ def api_bundle_manifest(event_id: str) -> JSONResponse:
 
 def annotation_source_summary(bundle_dir: Path) -> dict:
     sidecar_path = bundle_dir / SIDECAR_ANNOTATIONS_FILE
-    sidecar_preview_path = bundle_dir / SIDECAR_PREVIEW_ANNOTATIONS_FILE
-    legacy_path = bundle_dir / LEGACY_ANNOTATIONS_FILE
     sidecar_summary = bundle_dir / SIDECAR_SUMMARY_FILE
-    sidecar_preview_summary = bundle_dir / SIDECAR_PREVIEW_SUMMARY_FILE
-    legacy_summary = bundle_dir / LEGACY_SUMMARY_FILE
     sidecar_available = sidecar_path.is_file()
-    sidecar_preview_available = sidecar_preview_path.is_file()
-    legacy_available = legacy_path.is_file()
     watchlist_event = _is_watchlist_bundle(bundle_dir)
     sidecar_ready, sidecar_not_ready_reason = _production_sidecar_ready(bundle_dir)
     default_source = "sidecar" if sidecar_ready else ANNOTATION_SOURCE_UNAVAILABLE
@@ -426,10 +392,6 @@ def annotation_source_summary(bundle_dir: Path) -> dict:
         "sidecar_available": sidecar_available,
         "production_sidecar_ready": sidecar_ready,
         "production_sidecar_not_ready_reason": None if sidecar_ready else sidecar_not_ready_reason,
-        "sidecar_preview_available": sidecar_preview_available,
-        "legacy_available": legacy_available,
-        "legacy_debug_only": legacy_available,
-        "preview_debug_only": sidecar_preview_available,
         "auto_requires_production_sidecar": True,
         "watchlist_auto_requires_production_sidecar": watchlist_event,
         "default_annotation_source": default_source,
@@ -439,34 +401,20 @@ def annotation_source_summary(bundle_dir: Path) -> dict:
         "default_annotation_file": (
             SIDECAR_ANNOTATIONS_FILE
             if default_source == "sidecar"
-            else LEGACY_ANNOTATIONS_FILE
-            if default_source == "legacy"
             else None
         ),
         "sidecar_summary_path": SIDECAR_SUMMARY_FILE if sidecar_summary.is_file() else None,
-        "sidecar_preview_summary_path": SIDECAR_PREVIEW_SUMMARY_FILE if sidecar_preview_summary.is_file() else None,
-        "legacy_summary_path": LEGACY_SUMMARY_FILE if legacy_summary.is_file() else None,
         **visual_summary,
     }
 
 
 def select_annotation_file(bundle_dir: Path, source: AnnotationSource = "auto") -> dict:
     sidecar_path = bundle_dir / SIDECAR_ANNOTATIONS_FILE
-    sidecar_preview_path = bundle_dir / SIDECAR_PREVIEW_ANNOTATIONS_FILE
-    legacy_path = bundle_dir / LEGACY_ANNOTATIONS_FILE
     sidecar_ready, not_ready_reason = _production_sidecar_ready(bundle_dir)
     if source == "sidecar":
         if not sidecar_path.is_file():
             raise FileNotFoundError(f"{SIDECAR_ANNOTATIONS_FILE} not found")
         return _annotation_selection("sidecar", sidecar_path, fallback_used=False, fallback_reason=None, bundle_dir=bundle_dir)
-    if source == "sidecar_preview":
-        if not sidecar_preview_path.is_file():
-            raise FileNotFoundError(f"{SIDECAR_PREVIEW_ANNOTATIONS_FILE} not found")
-        return _annotation_selection("sidecar_preview", sidecar_preview_path, fallback_used=False, fallback_reason=None, preview=True)
-    if source == "legacy":
-        if not legacy_path.is_file():
-            raise FileNotFoundError(f"{LEGACY_ANNOTATIONS_FILE} not found")
-        return _annotation_selection("legacy", legacy_path, fallback_used=False, fallback_reason=None, bundle_dir=bundle_dir)
     if sidecar_ready and sidecar_path.is_file():
         return _annotation_selection("sidecar", sidecar_path, fallback_used=False, fallback_reason=None, bundle_dir=bundle_dir)
     return {
@@ -478,7 +426,6 @@ def select_annotation_file(bundle_dir: Path, source: AnnotationSource = "auto") 
         "fallback_reason": None,
         "preview": False,
         "reason": not_ready_reason or "production_sidecar_not_ready",
-        "legacy_available": legacy_path.is_file(),
         "sidecar_available": sidecar_path.is_file(),
         "sidecar_summary_available": (bundle_dir / SIDECAR_SUMMARY_FILE).is_file(),
         "sidecar_not_ready_reason": not_ready_reason,
@@ -502,7 +449,7 @@ def _production_sidecar_ready(bundle_dir: Path) -> tuple[bool, str]:
 
 def _is_watchlist_bundle(bundle_dir: Path) -> bool:
     metadata, _metadata_warnings = load_json_object(bundle_dir / "metadata.json")
-    summary, _summary_warnings = load_json_object(bundle_dir / "summary.json")
+    summary, _summary_warnings = load_json_object(bundle_dir / BUNDLE_SUMMARY_FILE)
     sidecar_summary, _sidecar_warnings = load_json_object(bundle_dir / SIDECAR_SUMMARY_FILE)
     event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
     for value in (
@@ -518,14 +465,14 @@ def _is_watchlist_bundle(bundle_dir: Path) -> bool:
 
 def visual_evidence_summary(bundle_dir: Path) -> dict:
     metadata, _metadata_warnings = load_json_object(bundle_dir / "metadata.json")
-    legacy_summary, _legacy_warnings = load_json_object(bundle_dir / LEGACY_SUMMARY_FILE)
+    bundle_summary, _summary_warnings = load_json_object(bundle_dir / BUNDLE_SUMMARY_FILE)
     sidecar_summary, _sidecar_warnings = load_json_object(bundle_dir / SIDECAR_SUMMARY_FILE)
     event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
     event_status = _first_text(
         event.get("event_type"),
         metadata.get("event_type"),
         sidecar_summary.get("event_type"),
-        legacy_summary.get("event_type"),
+        bundle_summary.get("event_type"),
     )
     sidecar_file_available = (bundle_dir / SIDECAR_ANNOTATIONS_FILE).is_file()
     source_observation_id = _first_text(
@@ -571,18 +518,13 @@ def visual_evidence_summary(bundle_dir: Path) -> dict:
         "trigger_face_row_passed_freshness_guard": bool(
             sidecar_summary.get("trigger_face_row_passed_freshness_guard")
         ),
-        "legacy_used_for_visual_binding": False,
     }
 
 
-def _filter_displayable_records(records: list[dict[str, Any]], selected: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
-    if selected.get("annotation_source") == "legacy" and selected.get("event_status") == WATCHLIST_EVENT_TYPE:
-        filtered = [_strip_legacy_known_face_visual_confirmation(record) for record in records]
-        blocked = sum(1 for record in filtered if record.get("legacy_known_face_blocked") is True)
-        return filtered, blocked
-    if selected.get("annotation_source") not in {"sidecar", "sidecar_preview"}:
-        return records, 0
-    return [record for record in records if record.get("displayable") is not False], 0
+def _filter_displayable_records(records: list[dict[str, Any]], selected: dict[str, Any]) -> list[dict[str, Any]]:
+    if selected.get("annotation_source") != "sidecar":
+        return records
+    return [record for record in records if record.get("displayable") is not False]
 
 
 def _bundle_contains_person(
@@ -607,12 +549,9 @@ def _bundle_contains_person(
     if selected.get("annotation_source") == ANNOTATION_SOURCE_UNAVAILABLE:
         return False
     try:
-        if selected.get("annotation_source") in {"sidecar", "sidecar_preview"}:
-            records, _warnings = parse_jsonl_records(selected["path"])
-            records, _blocked = _filter_displayable_records(records, selected)
-            haystack = str(records).lower()
-        else:
-            haystack = selected["path"].read_text(encoding="utf-8").lower()
+        records, _warnings = parse_jsonl_records(selected["path"])
+        records = _filter_displayable_records(records, selected)
+        haystack = str(records).lower()
         if needle in haystack:
             return True
     except OSError:
@@ -621,12 +560,11 @@ def _bundle_contains_person(
 
 
 def _annotation_selection(
-    annotation_source: Literal["sidecar", "sidecar_preview", "legacy"],
+    annotation_source: Literal["sidecar"],
     path: Path,
     *,
     fallback_used: bool,
     fallback_reason: str | None,
-    preview: bool = False,
     bundle_dir: Path | None = None,
 ) -> dict:
     summary = _selection_sidecar_summary(bundle_dir, annotation_source)
@@ -637,80 +575,8 @@ def _annotation_selection(
         "path": path,
         "fallback_used": fallback_used,
         "fallback_reason": fallback_reason,
-        "preview": preview,
+        "preview": False,
         **summary,
-    }
-
-
-def _strip_legacy_known_face_visual_confirmation(record: dict[str, Any]) -> dict[str, Any]:
-    output = {**record}
-    blocked = False
-    if _is_known_face_annotation(output):
-        _mark_legacy_face_unverified(output)
-        blocked = True
-    objects = output.get("objects")
-    if isinstance(objects, list):
-        clean_objects = []
-        for obj in objects:
-            if isinstance(obj, dict) and _is_known_face_annotation(obj):
-                clean = {**obj}
-                _mark_legacy_face_unverified(clean)
-                clean_objects.append(clean)
-                blocked = True
-            else:
-                clean_objects.append(obj)
-        output["objects"] = clean_objects
-    if blocked:
-        output["legacy_known_face_blocked"] = True
-        output["visual_binding_status"] = "unverified"
-        output["visual_binding_reason"] = "legacy_debug_not_allowed_for_watchlist_trigger"
-    return output
-
-
-def _is_known_face_annotation(item: dict[str, Any]) -> bool:
-    if item.get("object_type") != "face":
-        return False
-    if item.get("annotation_role") == "watchlist_trigger_face":
-        return True
-    label = item.get("label") if isinstance(item.get("label"), dict) else {}
-    identity = item.get("identity") if isinstance(item.get("identity"), dict) else {}
-    return bool(
-        label.get("kind") == "known_face"
-        or identity.get("status") == "matched"
-        or identity.get("match_status") == "above_threshold"
-        or label.get("display_name")
-        or identity.get("display_name")
-        or label.get("external_person_id")
-        or identity.get("external_person_id")
-    )
-
-
-def _mark_legacy_face_unverified(item: dict[str, Any]) -> None:
-    item.pop("annotation_role", None)
-    label = item.get("label") if isinstance(item.get("label"), dict) else {}
-    item["label"] = {"kind": "unknown_face"}
-    identity = item.get("identity") if isinstance(item.get("identity"), dict) else {}
-    threshold = identity.get("threshold") or label.get("threshold")
-    item["identity"] = {
-        "status": "unknown",
-        "match_status": "not_searched",
-        "person_id": None,
-        "external_person_id": None,
-        "display_name": "",
-        "similarity": None,
-        "rank": None,
-        "threshold": threshold,
-        "identity_skip_reason": "legacy_debug_not_allowed_for_watchlist_trigger",
-    }
-    item["identity_skip_reason"] = "legacy_debug_not_allowed_for_watchlist_trigger"
-    style = item.get("style") if isinstance(item.get("style"), dict) else {}
-    item["style"] = {
-        **style,
-        "bbox_color": "#9E9E9E",
-        "label_color": "#9E9E9E",
-        "reason": "legacy_debug_unverified_face",
-        "label": "Unverified face",
-        "priority": 10,
     }
 
 
@@ -731,10 +597,6 @@ def _first_text(*values: Any) -> str | None:
 def _annotation_source_kind(annotation_source: str) -> AnnotationSourceKind:
     if annotation_source == "sidecar":
         return "production_sidecar"
-    if annotation_source == "legacy":
-        return "legacy_debug"
-    if annotation_source == "sidecar_preview":
-        return "preview_debug"
     return "unavailable"
 
 
@@ -745,25 +607,14 @@ def _selection_sidecar_summary(bundle_dir: Path | None, annotation_source: str) 
             "timeline_domain": None,
             "sidecar_type": None,
             "canonical_clip": None,
-            "legacy_fallback_allowed": None,
             "event_status": None,
         }
     visual = visual_evidence_summary(bundle_dir)
-    if annotation_source != "sidecar":
-        return {
-            "production_ready": None,
-            "timeline_domain": None,
-            "sidecar_type": None,
-            "canonical_clip": None,
-            "legacy_fallback_allowed": None,
-            "event_status": visual.get("event_status"),
-        }
     summary, _warnings = load_json_object(bundle_dir / SIDECAR_SUMMARY_FILE)
     return {
         "production_ready": summary.get("production_ready"),
         "timeline_domain": summary.get("timeline_domain"),
         "sidecar_type": summary.get("sidecar_type"),
         "canonical_clip": summary.get("canonical_clip"),
-        "legacy_fallback_allowed": summary.get("legacy_fallback_allowed"),
         "event_status": visual.get("event_status"),
     }

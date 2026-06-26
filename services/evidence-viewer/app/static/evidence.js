@@ -169,8 +169,6 @@ function annotationSourceLabel(source) {
   const labels = {
     auto: "Auto",
     sidecar: "Production Sidecar",
-    sidecar_preview: "Preview Sidecar",
-    legacy: "Legacy Debug",
     unavailable: "Auto unavailable"
   };
   return labels[source] || source || "unknown";
@@ -271,8 +269,6 @@ function annotationSourceKind(payload = {}) {
   }
   const kinds = {
     sidecar: "production_sidecar",
-    sidecar_preview: "preview_debug",
-    legacy: "legacy_debug",
     unavailable: "unavailable"
   };
   return kinds[payload.annotation_source] || "unavailable";
@@ -754,13 +750,6 @@ async function selectBundle(eventId, options = {}) {
   ]) {
     addWarning(warning);
   }
-  if (annotationsPayload.legacy_warning) {
-    addWarning(annotationsPayload.legacy_warning);
-  }
-  if (annotationsPayload.preview_warning) {
-    addWarning(annotationsPayload.preview_warning);
-  }
-
   const first = firstFrameWithPts(state.sinkRecords);
   state.firstVideoFramePts = first ? Number(first.pts) : null;
   state.frameDurationMs = inferFrameDurationMs(state.sinkRecords);

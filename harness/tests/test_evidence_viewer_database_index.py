@@ -177,6 +177,30 @@ def test_database_row_uses_camera_table_name_when_payload_lacks_name() -> None:
     assert summary["camera_name"] == "Lab Camera"
 
 
+def test_database_row_does_not_treat_legacy_annotations_as_available() -> None:
+    row = {
+        "event_id": "22222222-2222-4222-8222-222222222224",
+        "source_event_id": "source-event-legacy-annotations",
+        "event_type": "intrusion",
+        "camera_id": "camera-1",
+        "source_id": "source-1",
+        "media_status": "ready",
+        "created_at": datetime(2026, 6, 15, 4, 5, 6, tzinfo=timezone.utc),
+        "start_ts": None,
+        "event_ts_ms": 0,
+        "clip_status": "ready",
+        "raw_clip_path": "/data/video-analytics/media/evidence/event/raw_clip.mov",
+        "annotations_jsonl_path": "/data/video-analytics/media/evidence/event/annotations.jsonl",
+        "evidence_task_count": 1,
+        "latest_task_status": "ready",
+        "payload": {"media": {}},
+    }
+
+    summary = _bundle_summary_from_row(row)
+
+    assert summary["annotations_available"] is False
+
+
 def test_database_row_exposes_reviewable_raw_clip_when_path_exists() -> None:
     row = {
         "event_id": "33333333-3333-4333-8333-333333333333",
@@ -263,8 +287,6 @@ def test_database_row_marks_deleted_media_not_playable() -> None:
 def test_8090_evidence_frontend_uses_db_index_and_file_details() -> None:
     scripts = [
         ROOT / "services" / "evidence-viewer" / "app" / "static" / "evidence.js",
-        ROOT / "services" / "evidence-viewer" / "app" / "static" / "app.js",
-        ROOT / "services" / "api" / "app" / "static" / "operator" / "evidence.js",
     ]
 
     for script in scripts:
@@ -282,6 +304,10 @@ def test_8090_evidence_frontend_uses_db_index_and_file_details() -> None:
         assert "`/api/bundles?${bundleQueryString()}`" not in text
         assert "bundle.source_id || bundle.camera_id" not in text
         assert 'fetchJson("/health")' not in text
+    assert not (ROOT / "services" / "evidence-viewer" / "app" / "static" / "app.js").exists()
+    assert not (
+        ROOT / "services" / "api" / "app" / "static" / "operator" / "evidence.js"
+    ).exists()
 
 
 def test_8090_operator_proxy_allows_evidence_index() -> None:
@@ -294,8 +320,6 @@ def test_8090_operator_proxy_allows_evidence_index() -> None:
 def test_evidence_click_clears_stale_video_and_ignores_late_responses() -> None:
     scripts = [
         ROOT / "services" / "evidence-viewer" / "app" / "static" / "evidence.js",
-        ROOT / "services" / "evidence-viewer" / "app" / "static" / "app.js",
-        ROOT / "services" / "api" / "app" / "static" / "operator" / "evidence.js",
     ]
 
     for script in scripts:

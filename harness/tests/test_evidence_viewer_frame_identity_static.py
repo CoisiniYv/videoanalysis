@@ -7,7 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VIEWER_JS = ROOT / "services" / "evidence-viewer" / "app" / "static" / "evidence.js"
-OPERATOR_JS = ROOT / "services" / "api" / "app" / "static" / "operator" / "evidence.js"
+OBSOLETE_VIEWER_JS = ROOT / "services" / "evidence-viewer" / "app" / "static" / "app.js"
+OBSOLETE_API_OPERATOR_JS = ROOT / "services" / "api" / "app" / "static" / "operator" / "evidence.js"
 
 
 def _text(path: Path) -> str:
@@ -27,5 +28,6 @@ def test_evidence_viewer_overlay_uses_frame_identity_before_time_offsets() -> No
     _assert_frame_identity_first(_text(VIEWER_JS))
 
 
-def test_operator_overlay_uses_frame_identity_before_time_offsets() -> None:
-    _assert_frame_identity_first(_text(OPERATOR_JS))
+def test_obsolete_duplicate_evidence_frontends_are_removed() -> None:
+    assert not OBSOLETE_VIEWER_JS.exists()
+    assert not OBSOLETE_API_OPERATOR_JS.exists()

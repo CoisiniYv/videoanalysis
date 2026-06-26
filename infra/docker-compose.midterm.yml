@@ -774,7 +774,6 @@ services:
       SNAPSHOT_OUTPUT_DIR: /media/midterm-snapshots
       ANNOTATED_OUTPUT_DIR: /media/midterm-snapshots/annotated
       EVIDENCE_OUTPUT_DIR: /media/evidence
-      MIDTERM_RAW_CLIP_FINALIZER_ENABLED: "true"
       MIDTERM_SINK_STABILITY_CHECKS: "2"
       MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES: "${MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES:-3}"
       MEDIA_WORKER_STATE_PATH: "${MEDIA_WORKER_STATE_PATH:-/media/replay-sink-output/midterm/.media-worker.processed.json}"

@@ -192,6 +192,7 @@ def test_stable_invalid_sink_output_is_marked_failed_and_not_retried(
     )
     failures: list[dict[str, str]] = []
 
+    monkeypatch.setenv("EVIDENCE_TOPOLOGY", "post_savant_replay")
     monkeypatch.setenv("MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES", "2")
     monkeypatch.setattr(worker, "_is_already_ready", lambda _conn, _event_id: False)
     monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: None)
@@ -209,7 +210,6 @@ def test_stable_invalid_sink_output_is_marked_failed_and_not_retried(
         None,
         str(tmp_path / "sink"),
         processed,
-        midterm_raw_clip_finalizer_enabled=True,
         candidate_dirs=candidate_dirs,
         invalid_output_failures=invalid_failures,
         midterm_sink_stability_checks=1,
@@ -218,7 +218,6 @@ def test_stable_invalid_sink_output_is_marked_failed_and_not_retried(
         None,
         str(tmp_path / "sink"),
         processed,
-        midterm_raw_clip_finalizer_enabled=True,
         candidate_dirs=candidate_dirs,
         invalid_output_failures=invalid_failures,
         midterm_sink_stability_checks=1,
@@ -227,7 +226,6 @@ def test_stable_invalid_sink_output_is_marked_failed_and_not_retried(
         None,
         str(tmp_path / "sink"),
         processed,
-        midterm_raw_clip_finalizer_enabled=True,
         candidate_dirs=candidate_dirs,
         invalid_output_failures=invalid_failures,
         midterm_sink_stability_checks=1,

@@ -313,8 +313,8 @@ bundle，先等 media-worker 完成 sink 稳定检查和长源文件探测；现
 - 视频播放使用 bundle 内 `raw_clip.*`。
 - 画面框、关键点、命中人脸等 overlay 使用 `annotations.frame_cache.identity.jsonl`
   生产 sidecar。
-- `annotations.jsonl` legacy 文件被标记为 debug-only；默认自动模式要求生产
-  sidecar ready。
+- `annotations.jsonl` legacy 输出已从当前 8090 读取路径移除；默认自动模式只接受
+  生产 sidecar ready。
 - 页面分类包括名单布控、周界入侵、行为异常、聚集风险。
 - 页面证据列表会在摄像头和录像状态之间显示 `报警 YYYY-MM-DD HH:mm:ss`；
   详情页“事件信息”中显示“报警机器时间”。

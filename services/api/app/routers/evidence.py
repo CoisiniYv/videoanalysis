@@ -35,6 +35,7 @@ RAW_CLIP_UNAVAILABLE_STATUSES = {
     "replaying",
     "finalizing",
 }
+PRODUCTION_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
 
 
 def _request_id(request: Request) -> str:
@@ -140,7 +141,9 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "raw_clip_name": _basename(raw_clip_path),
         "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip" if raw_clip_path else None,
-        "annotations_available": bool(_text(row.get("annotations_jsonl_path"))),
+        "annotations_available": _is_production_annotations_path(
+            row.get("annotations_jsonl_path")
+        ),
         "annotation_lines": _int_or_none(media.get("annotation_lines")),
         "clip_status": clip_status,
         "visual_evidence_status": _text(media.get("visual_evidence_status")),
@@ -216,6 +219,13 @@ def _camera_name(
 
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _is_production_annotations_path(value: Any) -> bool:
+    text = _text(value)
+    if not text:
+        return False
+    return text.rsplit("/", 1)[-1] == PRODUCTION_ANNOTATIONS_FILE
 
 
 def _text(value: Any) -> str:

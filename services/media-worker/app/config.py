@@ -13,7 +13,6 @@ class Config:
     snapshot_output_dir: str
     annotated_output_dir: str
     evidence_output_dir: str
-    midterm_raw_clip_finalizer_enabled: bool
     midterm_sink_stability_checks: int
     poll_interval_s: int
     default_pre_seconds: float
@@ -51,9 +50,6 @@ def load_config() -> Config:
             "ANNOTATED_OUTPUT_DIR", "/media/snapshots/annotated"
         ),
         evidence_output_dir=os.getenv("EVIDENCE_OUTPUT_DIR", "/media/evidence"),
-        midterm_raw_clip_finalizer_enabled=os.getenv(
-            "MIDTERM_RAW_CLIP_FINALIZER_ENABLED", "false"
-        ).lower() in ("1", "true", "yes"),
         midterm_sink_stability_checks=int(
             os.getenv("MIDTERM_SINK_STABILITY_CHECKS", "2")
         ),

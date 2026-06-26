@@ -226,8 +226,6 @@ def build_annotations_from_metadata(
         "annotation_status": annotation_status,
         "production_ready": production_ready,
         "canonical_clip": production_ready,
-        "legacy_fallback_allowed": False,
-        "legacy_used_for_visual_binding": False,
         "visual_binding_status": "verified" if production_ready else "unverified",
         "visual_binding_reason": (
             "verified_same_stream_metadata" if production_ready else "no_post_savant_objects"

@@ -588,7 +588,6 @@ Likely implementation files:
 - `services/media-worker/app/worker.py`
 - `services/media-worker/app/post_savant_evidence_bundle.py`
 - `services/media-worker/app/frame_cache_sidecar_writer.py`
-- `services/media-worker/app/clip_sanitizer.py`
 - `services/evidence-viewer/`
 - `services/api/`
 - `harness/tests/test_midterm_deployment_contract.py`

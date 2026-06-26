@@ -52,12 +52,6 @@ def _apply_post_savant_policy(record: Dict[str, Any], event: Dict[str, Any]) -> 
         _first_policy_value(event, "annotation_source_policy")
         or "post_savant_sink_metadata_only"
     )
-    record["allow_db_annotation_fallback"] = bool(
-        _first_policy_value(event, "allow_db_annotation_fallback") is True
-    )
-    record["allow_legacy_annotation_fallback"] = bool(
-        _first_policy_value(event, "allow_legacy_annotation_fallback") is True
-    )
     for key in (
         "frame_pts",
         "frame_num",

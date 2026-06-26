@@ -247,11 +247,11 @@ Replay 锚点判断：
 | `raw_clip.mov` | 成功收尾时生成 | Replay 任务经 video-file-sink 输出 | Replay 关键帧和请求 PTS 窗口 | 可能被时长、运行代次、完整性保护拒绝 |
 | `sink_metadata.json` | 生成 | video-file-sink 原生元数据 | Replay 任务输出视频帧域 | 字段时间域需要一致 |
 | `metadata.json` | 生成 | media-worker | 事件、Replay、运行代次 | 数据库和文件可能不一致 |
-| `summary.json` | 生成 | media-worker | 证据包摘要 | 历史旁路文件和生产旁路文件语义容易混 |
+| `summary.json` | 生成 | media-worker | 证据包摘要 | 需要与 sidecar summary 保持一致 |
 | `annotations.frame_cache.identity.jsonl` | 旁路元数据成功时生成 | `security.frame_annotations` 和事件锚点 | 帧 PTS、会话、运行代次、source_observation_id | Redis 缓存有长度和 TTL 限制 |
 | `summary.frame_cache.identity.json` | 旁路元数据成功时生成 | media-worker 旁路文件写入器 | 生产时间线域 | 页面可信度依赖这个文件 |
-| `annotations.jsonl` | 历史或调试产物可能存在 | 旧链路 | 不统一 | 不应当当成生产证据 |
-| 查看器页面 | 有 | 8090 静态页面 | 原始片段加动态叠框 | 需要识别生产旁路文件和历史旁路文件 |
+| `annotations.jsonl` | 不再作为当前输出生成或读取 | 已移除旧链路 | 不适用 | 仅保留负向保护，不能当成生产证据 |
+| 查看器页面 | 有 | 8090 静态页面 | 原始片段加动态叠框 | 只认生产 sidecar |
 
 结论：
 
