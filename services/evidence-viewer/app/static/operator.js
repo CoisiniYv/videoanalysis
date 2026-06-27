@@ -18,6 +18,7 @@ let currentZones = [];
 let currentRules = [];
 let runtimeOverview = null;
 let runtimeControl = null;
+let runtimePerformance = null;
 let lastRuntimeApplyResult = null;
 let selectedRuntimeConfig = null;
 let roiPreviewObjectUrl = "";
@@ -52,11 +53,16 @@ const runtimeForwarderTableEl = document.getElementById("runtime-forwarder-table
 const runtimeEvidenceTableEl = document.getElementById("runtime-evidence-table");
 const runtimeContainerTableEl = document.getElementById("runtime-container-table");
 const runtimeControlStatusEl = document.getElementById("runtime-control-status");
+const runtimePerformanceForm = document.getElementById("runtime-performance-form");
+const runtimePerformanceStatusEl = document.getElementById("runtime-performance-status");
+const runtimePerformanceDiffEl = document.getElementById("runtime-performance-diff");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
 const startSingleRuntimeBtn = document.getElementById("start-single-runtime");
 const stopSingleRuntimeBtn = document.getElementById("stop-single-runtime");
 const restartSingleRuntimeBtn = document.getElementById("restart-single-runtime");
 const stopDualRuntimeBtn = document.getElementById("stop-dual-runtime");
+const saveRuntimePerformanceBtn = document.getElementById("save-runtime-performance");
+const applyRuntimePerformanceBtn = document.getElementById("apply-runtime-performance");
 const camerasEl = document.getElementById("cameras");
 const zonesEl = document.getElementById("zones");
 const rulesEl = document.getElementById("rules");
@@ -1605,6 +1611,78 @@ function renderRuntimeControlStatus() {
     `</div>`;
 }
 
+function renderRuntimePerformanceConfig() {
+  if (!runtimePerformanceForm || !runtimePerformanceStatusEl || !runtimePerformanceDiffEl) return;
+  const data = runtimePerformance || {};
+  const config = data.saved_config || {};
+  for (const [key, value] of Object.entries(config)) {
+    const field = runtimePerformanceForm.elements[key];
+    if (!field) continue;
+    if (field.type === "checkbox") {
+      field.checked = value === true;
+    } else {
+      field.value = value ?? "";
+    }
+  }
+  const runtime = data.runtime || {};
+  const forwarder = runtime.forwarder || {};
+  const savant = runtime.savant || {};
+  const diff = Array.isArray(data.diff) ? data.diff : [];
+  const pending = diff.filter((item) => item.pending);
+  runtimePerformanceStatusEl.innerHTML =
+    `<div class="runtime-kv-grid">` +
+      `<div><span>保存来源</span><strong>${escapeHtml(performanceSourceLabel(data.source))}</strong></div>` +
+      `<div><span>待应用</span><strong>${formatInteger(pending.length)}</strong></div>` +
+      `<div><span>Forwarder</span><strong>${escapeHtml(containerStateLabel(forwarder))}</strong></div>` +
+      `<div><span>Savant</span><strong>${escapeHtml(containerStateLabel(savant))}</strong></div>` +
+    `</div>`;
+  renderRuntimePerformanceDiff(diff);
+}
+
+function performanceSourceLabel(source) {
+  const labels = {
+    file: "已保存",
+    runtime: "运行中",
+    default: "默认值",
+  };
+  return labels[source] || source || "--";
+}
+
+function containerStateLabel(container) {
+  if (!container?.present) return container?.state || "missing";
+  return container.running ? "running" : (container.state || "stopped");
+}
+
+function renderRuntimePerformanceDiff(diff) {
+  if (!runtimePerformanceDiffEl) return;
+  if (!Array.isArray(diff) || !diff.length) {
+    runtimePerformanceDiffEl.innerHTML = `<div class="empty-state">暂无性能配置。</div>`;
+    return;
+  }
+  const rows = diff.map((item) =>
+    `<tr class="${item.pending ? "warn-row" : ""}">` +
+      `<td>${escapeHtml(item.label || item.key)}</td>` +
+      `<td>${escapeHtml(item.target || "--")}</td>` +
+      `<td>${escapeHtml(item.env || "--")}</td>` +
+      `<td>${escapeHtml(formatPerformanceValue(item.saved_value))}</td>` +
+      `<td>${escapeHtml(formatPerformanceValue(item.runtime_value))}</td>` +
+      `<td>${item.pending ? "待应用" : "已生效"}</td>` +
+    `</tr>`
+  ).join("");
+  runtimePerformanceDiffEl.innerHTML =
+    `<table class="runtime-table runtime-performance-table">` +
+      `<thead><tr><th>参数</th><th>目标</th><th>env</th><th>保存值</th><th>运行值</th><th>状态</th></tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+    `</table>`;
+}
+
+function formatPerformanceValue(value) {
+  if (value === true) return "true";
+  if (value === false) return "false";
+  if (value == null) return "--";
+  return String(value);
+}
+
 function renderRuntimeOverview() {
   if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
   const overview = runtimeOverview || {};
@@ -1652,6 +1730,7 @@ function renderRuntimeOverview() {
   renderRuntimeEvidenceTable(overview.evidence || {});
   renderRuntimeContainerTable(containers);
   renderRuntimeControlStatus();
+  renderRuntimePerformanceConfig();
 }
 
 function renderRuntimeSourceTable(sources) {
@@ -1991,12 +2070,14 @@ async function loadPeople() {
 }
 
 async function loadRuntimeOverview() {
-  const [overviewData, controlData] = await Promise.all([
+  const [overviewData, controlData, performanceData] = await Promise.all([
     request(`${API}/runtime/overview`),
     request(`${API}/runtime/control`),
+    request(`${API}/runtime/performance-config`),
   ]);
   runtimeOverview = overviewData || {};
   runtimeControl = controlData || {};
+  runtimePerformance = performanceData || {};
   renderRuntimeOverview();
   setStatus("运行状态已刷新");
 }
@@ -2227,9 +2308,71 @@ function setRuntimeControlButtonsBusy(busy) {
     restartSingleRuntimeBtn,
     stopDualRuntimeBtn,
     refreshRuntimeOverviewBtn,
+    saveRuntimePerformanceBtn,
+    applyRuntimePerformanceBtn,
   ]) {
     if (button) button.disabled = busy;
   }
+}
+
+function runtimePerformanceFormBody() {
+  if (!runtimePerformanceForm) return {};
+  const fields = runtimePerformance?.fields || [];
+  const body = {};
+  for (const field of fields) {
+    const key = field.key;
+    const control = runtimePerformanceForm.elements[key];
+    if (!key || !control) continue;
+    if (field.kind === "bool" || control.type === "checkbox") {
+      body[key] = control.checked === true;
+    } else if (field.kind === "int") {
+      body[key] = asInt(control.value, field.default ?? 0);
+    } else {
+      body[key] = String(control.value || "").trim();
+    }
+  }
+  return body;
+}
+
+async function saveRuntimePerformanceConfig({ apply = false } = {}) {
+  clearMessages();
+  setRuntimeControlButtonsBusy(true);
+  try {
+    const body = runtimePerformanceFormBody();
+    const saved = await request(`${API}/runtime/performance-config`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    runtimePerformance = saved || {};
+    renderRuntimePerformanceConfig();
+    if (!apply) {
+      showSuccess("性能配置已保存");
+      setStatus("性能配置已保存");
+      return saved;
+    }
+    const confirmText = "确认应用推理性能配置？会重建 analysis-forwarder 和/或 Savant，证据生成中时会被阻止。";
+    if (!window.confirm(confirmText)) {
+      showSuccess("性能配置已保存，未应用");
+      setStatus("性能配置已保存");
+      return saved;
+    }
+    const applied = await request(`${API}/runtime/performance-config/apply`, { method: "POST" });
+    runtimePerformance = applied.status || runtimePerformance;
+    renderRuntimePerformanceConfig();
+    showSuccess(runtimePerformanceApplyMessage(applied));
+    await loadRuntimeOverview();
+    return applied;
+  } finally {
+    setRuntimeControlButtonsBusy(false);
+  }
+}
+
+function runtimePerformanceApplyMessage(data) {
+  if (!data?.changed) return "性能配置已保存，运行中配置无需变更";
+  const actions = Array.isArray(data.actions) ? data.actions : [];
+  const recreated = actions.filter((item) => item.action === "recreated").map((item) => item.container);
+  const targets = Array.isArray(data.pending_targets) ? data.pending_targets.join(", ") : "";
+  return `性能配置已应用：${recreated.length} 个容器已重建${targets ? `（${targets}）` : ""}`;
 }
 
 function runtimeControlActionMessage(data) {
@@ -2850,6 +2993,12 @@ previewDeleteSelectedPersonBtn?.addEventListener("click", () => {
 refreshRuntimeOverviewBtn?.addEventListener("click", () => {
   clearMessages();
   loadRuntimeOverview().catch((e) => showError(`运行状态刷新失败：${e.message}`));
+});
+saveRuntimePerformanceBtn?.addEventListener("click", () => {
+  saveRuntimePerformanceConfig().catch((e) => showError(`性能配置保存失败：${apiErrorMessage(e)}`));
+});
+applyRuntimePerformanceBtn?.addEventListener("click", () => {
+  saveRuntimePerformanceConfig({ apply: true }).catch((e) => showError(`性能配置应用失败：${apiErrorMessage(e)}`));
 });
 refreshRuntimeConfigBtn?.addEventListener("click", () => {
   if (!selectedCameraId) {

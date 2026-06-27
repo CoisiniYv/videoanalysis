@@ -152,6 +152,46 @@ http://127.0.0.1:8090/operator
 
 ---
 
+### 4. 运行控制
+
+**功能：**
+- 查看运行健康、source adapter、Forwarder、证据任务和容器状态
+- 执行受控运行时操作
+- 保存并应用推理性能配置
+
+#### 推理性能配置
+在"推理性能"区域可以配置：
+
+- **Forwarder 采样**：是否启用 forwarder 采样限速
+- **Forwarder 最大 FPS**：`ANALYSIS_FPS`，例如 `8/1`、`3/1`
+- **Forwarder 最小 FPS**：`ANALYSIS_MIN_FPS`
+- **Savant 入流限速**：是否启用 Savant 入流 FPS gate
+- **Savant 最大 FPS**：`MAX_FPS`
+- **Savant 最小 FPS**：`MIN_FPS`
+- **姿态 interval**：`POSE_INFER_INTERVAL`
+- **人脸 interval**：`FACE_INFER_INTERVAL`
+- **AdaFace interval**：`FACE_EMBEDDING_INFER_INTERVAL`
+- **Batched push timeout**：`BATCHED_PUSH_TIMEOUT`
+
+操作方式：
+
+1. 修改字段后点击 **"保存配置"**，只写入保存文件，不重建容器。
+2. 点击 **"保存并应用"**，页面会二次确认。
+3. 应用时系统只按差异重建 `analysis-forwarder` 和/或 `savant-security`。
+4. 如果存在进行中的证据任务，默认会阻止应用，避免中断证据生成。
+5. 页面会展示每个参数的保存值、运行值和"待应用 / 已生效"状态。
+
+配置保存位置：
+
+```text
+/data/video-analytics/media/.runtime/performance_config.json
+```
+
+该功能适合现场按档位降低 30/60 路压力，例如先从 `3/1` 或 `2/1` 起测。
+真实 T4 的最终档位仍需要压测报告确认。
+
+---
+
 ## 顶部概览面板
 
 主界面顶部始终显示系统概览：

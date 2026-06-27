@@ -14,6 +14,13 @@ from abc import ABC, abstractmethod
 from typing import Dict, Optional
 
 from custom.models.face_events import FaceObservationEventDraft
+from custom.services.redis_stream_writer import (
+    DEFAULT_CONNECT_TIMEOUT_MS,
+    DEFAULT_QUEUE_MAXSIZE,
+    DEFAULT_SOCKET_TIMEOUT_MS,
+    AsyncRedisStreamWriter,
+    env_int,
+)
 
 
 class ExportThrottleMap:
@@ -97,7 +104,25 @@ class RedisStreamFaceObservationExporter(FaceObservationExporter):
             else int(os.environ.get("FACE_OBSERVATION_MAXLEN", "10000"))
         )
 
-        self._client: _redis.Redis = _redis.Redis.from_url(self._redis_url)
+        self._writer = AsyncRedisStreamWriter(
+            redis_url=self._redis_url,
+            stream=self._stream,
+            maxlen=self._maxlen,
+            component="savant_security_face_obs_redis_writer",
+            socket_timeout_ms=env_int(
+                "FACE_OBSERVATION_REDIS_WRITE_TIMEOUT_MS",
+                env_int("SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS", DEFAULT_SOCKET_TIMEOUT_MS),
+            ),
+            connect_timeout_ms=env_int(
+                "FACE_OBSERVATION_REDIS_CONNECT_TIMEOUT_MS",
+                env_int("SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS),
+            ),
+            queue_maxsize=env_int(
+                "FACE_OBSERVATION_REDIS_QUEUE_MAXSIZE",
+                env_int("SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE", DEFAULT_QUEUE_MAXSIZE),
+            ),
+            redis_module=_redis,
+        )
 
         print(
             f"stage=savant_security_face_obs_exporter_init "
@@ -127,21 +152,11 @@ class RedisStreamFaceObservationExporter(FaceObservationExporter):
             "data": obs_json,
         }
 
-        try:
-            self._client.xadd(
-                self._stream,
-                fields,
-                maxlen=self._maxlen,
-                approximate=True,
-            )
-        except Exception:
-            import traceback
-
+        if not self._writer.enqueue(fields):
             print(
-                f"stage=savant_security_face_obs_export_error "
+                f"stage=savant_security_face_obs_export_drop "
                 f"source_observation_id={observation.source_observation_id} "
-                f"stream={self._stream} "
-                f"traceback={traceback.format_exc().replace(chr(10), ' | ')}",
+                f"stream={self._stream}",
                 flush=True,
             )
 

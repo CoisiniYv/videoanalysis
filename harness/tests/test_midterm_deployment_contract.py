@@ -24,6 +24,7 @@ CAMERA_CONFIG = ROOT / "modules" / "savant_security" / "config" / "cameras.midte
 SAVANT_MODULE = ROOT / "modules" / "savant_security" / "module.yml"
 SAVANT_PATCH_DIR = ROOT / "modules" / "savant_security" / "savant_patches"
 API_SAVANT_SUPERVISOR = ROOT / "services" / "api" / "app" / "services" / "savant_supervisor.py"
+SAVANT_CUSTOM_SERVICES = ROOT / "modules" / "savant_security" / "custom" / "services"
 VIDEO_FILE_SINK_ENTRYPOINT = ROOT / "scripts" / "runtime" / "video_file_sink_entrypoint.sh"
 CURRENT_SMOKE_DIR = ROOT / "scripts" / "smoke" / "current"
 RUNTIME_DOCTOR = ROOT / "scripts" / "runtime" / "doctor_midterm.sh"
@@ -412,13 +413,13 @@ def test_replay_first_topology_is_preserved() -> None:
     )
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"
-    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-1}"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-2}"
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"
-    ] == "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-0}"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-180}"
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"
-    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-0}"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-200}"
     assert services["clip-worker"]["environment"][
         "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"
     ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-2}"
@@ -473,6 +474,31 @@ def test_midterm_savant_source_reset_patch_is_wired() -> None:
     assert _md5(patch_root / "pipeline.py") == "7c5eabbe84697e591a0a31a1c3977f2c"
 
 
+def test_midterm_production_savant_hot_path_excludes_debug_and_unused_encoding() -> None:
+    compose = _compose()
+    module = yaml.safe_load(_text(SAVANT_MODULE))
+    debug_elements = {
+        "face_embedding_debug",
+        "same_frame_detection_debug",
+        "face_debug",
+    }
+    element_names = {
+        element.get("name")
+        for element in module["pipeline"]["elements"]
+    }
+
+    assert element_names.isdisjoint(debug_elements)
+
+    for service_name in ("savant-security", "savant-a", "savant-b"):
+        env = compose["services"][service_name]["environment"]
+        assert env["OUTPUT_FRAME"] == '{"codec":"copy"}'
+
+    savant_env = compose["services"]["savant-security"]["environment"]
+    assert savant_env["SAME_FRAME_DEBUG_ENABLED"] == "${SAME_FRAME_DEBUG_ENABLED:-false}"
+    assert "nvenc" not in _text(COMPOSE)
+    assert "h264" not in savant_env["OUTPUT_FRAME"]
+
+
 def test_midterm_savant_supervisor_is_owned_by_api() -> None:
     compose = _compose()
     services = compose["services"]
@@ -515,7 +541,9 @@ def test_midterm_source_id_and_camera_config_are_neutral() -> None:
         "MAX_PARALLEL_STREAMS"
     ]
     assert max_parallel_streams == "${MAX_PARALLEL_STREAMS:-4}"
-    assert compose["services"]["savant-security"]["environment"]["BATCH_SIZE"] == "1"
+    assert compose["services"]["savant-security"]["environment"]["BATCH_SIZE"] == (
+        "${BATCH_SIZE:-1}"
+    )
     assert _compose_env_default_int(max_parallel_streams, "MAX_PARALLEL_STREAMS") >= max(
         2,
         _enabled_rtsp_source_count() * 2,
@@ -546,6 +574,12 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["INGRESS_FPS_GATE_ENABLED"] == "true"
     assert env_file["MAX_FPS"] == "8/1"
     assert env_file["MIN_FPS"] == "2/1"
+    assert env_file["BATCH_SIZE"] == "1"
+    assert env_file["POSE_BATCH_SIZE"] == "1"
+    assert env_file["FACE_DETECTOR_BATCH_SIZE"] == "1"
+    assert env_file["FACE_EMBEDDING_BATCH_SIZE"] == "16"
+    assert env_file["MAX_PARALLEL_STREAMS"] == "4"
+    assert env_file["BATCHED_PUSH_TIMEOUT"] == "40000"
     assert env_file["STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS"] == "5000000000"
     assert env_file["POSE_INFER_INTERVAL"] == "1"
     assert env_file["POSE_CONFIDENCE_THRESHOLD"] == "0.50"
@@ -568,6 +602,11 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert savant_env["FACE_EMBEDDING_INFER_INTERVAL"] == (
         "${FACE_EMBEDDING_INFER_INTERVAL:-2}"
     )
+    assert savant_env["BATCH_SIZE"] == "${BATCH_SIZE:-1}"
+    assert savant_env["POSE_BATCH_SIZE"] == "${POSE_BATCH_SIZE:-1}"
+    assert savant_env["FACE_DETECTOR_BATCH_SIZE"] == "${FACE_DETECTOR_BATCH_SIZE:-1}"
+    assert savant_env["FACE_EMBEDDING_BATCH_SIZE"] == "${FACE_EMBEDDING_BATCH_SIZE:-16}"
+    assert savant_env["BATCHED_PUSH_TIMEOUT"] == "${BATCHED_PUSH_TIMEOUT:-40000}"
     assert module["parameters"]["face_infer_interval"] == (
         "${oc.decode:${oc.env:FACE_INFER_INTERVAL, 0}}"
     )
@@ -590,6 +629,39 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
         "${parameters.face_embedding_infer_interval}"
     )
     assert face_worker_env["WATCHLIST_THRESHOLD"] == "${WATCHLIST_THRESHOLD:-0.60}"
+
+
+def test_midterm_savant_redis_exporters_are_async_and_bounded() -> None:
+    compose = _compose()
+    env_file = _env()
+    savant_env = compose["services"]["savant-security"]["environment"]
+    writer = _text(SAVANT_CUSTOM_SERVICES / "redis_stream_writer.py")
+
+    assert env_file["SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS"] == "50"
+    assert env_file["SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS"] == "50"
+    assert env_file["SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE"] == "1024"
+    assert savant_env["SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS"] == (
+        "${SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS:-50}"
+    )
+    assert savant_env["SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS"] == (
+        "${SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS:-50}"
+    )
+    assert savant_env["SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE"] == (
+        "${SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE:-1024}"
+    )
+    assert "queue.Queue" in writer
+    assert "put_nowait" in writer
+    assert "socket_connect_timeout" in writer
+    assert "socket_timeout" in writer
+    for filename in (
+        "event_exporter.py",
+        "person_observation_exporter.py",
+        "face_observation_exporter.py",
+        "frame_annotation_exporter.py",
+    ):
+        service = _text(SAVANT_CUSTOM_SERVICES / filename)
+        assert "AsyncRedisStreamWriter" in service
+        assert ".xadd(" not in service
 
 
 def test_midterm_savant_performance_observability_is_wired() -> None:
@@ -671,6 +743,25 @@ def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
     assert env_file["POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S"] == "0.5"
 
 
+def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
+    compose = _compose()
+    env_file = _env()
+    media_env = compose["services"]["media-worker"]["environment"]
+
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "2"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-2}"
+    )
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-180}"
+    )
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-200}"
+    )
+
+
 def test_midterm_evidence_version_is_project_named() -> None:
     compose = _compose()
     env_file = _env()
@@ -710,9 +801,9 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "2000"
     assert env_file["MEDIA_PROBE_TIMEOUT_S"] == "30"
     assert env_file["MEDIA_DECODE_TIMEOUT_S"] == "120"
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "1"
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "0"
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "0"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "2"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["EVIDENCE_MATERIALIZATION_POLICY"] == "priority"
     assert env_file["EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY"] == "false"
     assert env_file["EVIDENCE_REPLAY_TTL_SECONDS"] == "300"

@@ -95,9 +95,10 @@ Still open:
 for the two-source runtime, but this does not change the Phase 2/3 gate. The
 remaining production risk set is tracked in
 `specs/22_midterm_60_stream_readiness_risk_closure_plan.md`: Savant batch/T4
-operating point, Redis exporter hot-path blocking, production debug/output
-cost, evidence materialization latency, Redis annotation retention, and
-30-source forwarder fairness.
+operating point, Redis exporter fault metrics after async isolation, evidence
+materialization latency, Redis annotation retention, and 30-source forwarder
+fairness. Production debug/output cost has been removed from the midterm hot
+path.
 
 The detailed phase records are under `docs/repair_goal/`:
 

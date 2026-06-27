@@ -20,6 +20,12 @@ from custom.services.frame_annotation_builder import (
     build_frame_annotation_message,
     count_frame_annotation_objects,
 )
+from custom.services.redis_stream_writer import (
+    DEFAULT_CONNECT_TIMEOUT_MS,
+    DEFAULT_QUEUE_MAXSIZE,
+    AsyncRedisStreamWriter,
+    env_int,
+)
 from custom.services.stream_session import stream_session_id_for_frame
 from custom.services.time_utils import normalize_pts_to_ms
 
@@ -134,10 +140,21 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
         )
         self._stream = stream or DEFAULT_STREAM
         self._maxlen = int(maxlen)
-        timeout_seconds = max(float(write_timeout_ms) / 1000.0, 0.001)
-        self._client: _redis.Redis = _redis.Redis.from_url(
-            self._redis_url,
-            socket_timeout=timeout_seconds,
+        self._writer = AsyncRedisStreamWriter(
+            redis_url=self._redis_url,
+            stream=self._stream,
+            maxlen=self._maxlen,
+            component="savant_security_frame_annotation_redis_writer",
+            socket_timeout_ms=int(write_timeout_ms),
+            connect_timeout_ms=env_int(
+                "FRAME_ANNOTATION_CONNECT_TIMEOUT_MS",
+                env_int("SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS),
+            ),
+            queue_maxsize=env_int(
+                "FRAME_ANNOTATION_REDIS_QUEUE_MAXSIZE",
+                env_int("SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE", DEFAULT_QUEUE_MAXSIZE),
+            ),
+            redis_module=_redis,
         )
 
         print(
@@ -181,24 +198,16 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             "face_count": str(counts["face"]),
             "data": payload_json,
         }
-        try:
-            self._client.xadd(
-                self._stream,
-                fields,
-                maxlen=self._maxlen,
-                approximate=True,
-            )
+        if self._writer.enqueue(fields):
             return True
-        except Exception as exc:
-            print(
-                "component=savant_security_frame_annotation_redis_warning "
-                f"stream={self._stream} "
-                f"source_id={message.get('source_id', '')} "
-                f"frame_pts={message.get('frame_pts')} "
-                f"error={type(exc).__name__}:{str(exc).replace(chr(10), ' | ')}",
-                flush=True,
-            )
-            return False
+        print(
+            "component=savant_security_frame_annotation_redis_drop "
+            f"stream={self._stream} "
+            f"source_id={message.get('source_id', '')} "
+            f"frame_pts={message.get('frame_pts')}",
+            flush=True,
+        )
+        return False
 
 
 class FrameAnnotationExportRuntime:

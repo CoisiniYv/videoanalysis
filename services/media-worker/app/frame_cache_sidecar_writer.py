@@ -92,6 +92,7 @@ def write_frame_cache_identity_sidecar(
     config: dict[str, Any],
     state: Any | None = None,
     final_clip_context: dict[str, Any] | None = None,
+    identity_continuations: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Write frame-cache frame-cache identity sidecar files when enabled."""
 
@@ -157,6 +158,7 @@ def write_frame_cache_identity_sidecar(
             pre_seconds=pre_seconds,
             post_seconds=post_seconds,
             max_frames=int(config.get("max_frames") or 300),
+            identity_continuations=identity_continuations,
         )
         clip_timeline_summary = _align_sidecar_annotations_to_metadata(
             identity_annotations,
@@ -247,6 +249,9 @@ def write_frame_cache_identity_sidecar(
             "known_face_count": counts["known_face_count"],
             "unknown_face_count": counts["unknown_face_count"],
             "trigger_known_face_present": counts["trigger_known_face_present"],
+            "known_face_threshold_continuation_count": counts[
+                "known_face_threshold_continuation_count"
+            ],
             "annotation_status": annotation_status,
             "embedding_vectors_in_output": _count_forbidden(identity_annotations, FORBIDDEN_VECTOR_FIELDS),
             "image_bytes_in_output": _count_forbidden(identity_annotations, FORBIDDEN_IMAGE_FIELDS),
@@ -297,6 +302,7 @@ def build_sidecar_identity_annotations(
     pre_seconds: float = 5.0,
     post_seconds: float = 5.0,
     max_frames: int = 300,
+    identity_continuations: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build sidecar annotations from frame cache messages and event payload."""
 
@@ -339,6 +345,14 @@ def build_sidecar_identity_annotations(
         frame_cache_annotations,
         patch,
         trigger_source_observation_id=source_observation_id,
+        continuation_identities=identity_continuations,
+    )
+    continuation_count = len(
+        {
+            str(key)
+            for key in (identity_continuations or {})
+            if str(key) and str(key) != str(source_observation_id or "")
+        }
     )
     return identity_annotations, {
         "event_anchor": anchor,
@@ -347,7 +361,14 @@ def build_sidecar_identity_annotations(
         "frame_cache_summary": frame_cache_summary,
         "anchor_found_by": window_summary.get("anchor_found_by"),
         "event_window_messages": int(window_summary.get("window_messages") or 0),
-        "identity_source": "event_payload_bridge" if patch else "none",
+        "identity_source": (
+            "event_payload_bridge+threshold_continuation"
+            if patch and continuation_count
+            else "event_payload_bridge"
+            if patch
+            else "none"
+        ),
+        "identity_continuation_count": continuation_count,
     }
 
 
@@ -960,38 +981,91 @@ def _apply_event_payload_identity(
     patch: dict[str, Any] | None,
     *,
     trigger_source_observation_id: str | None,
+    continuation_identities: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
+    continuations = {
+        str(key): value
+        for key, value in (continuation_identities or {}).items()
+        if str(key) and isinstance(value, dict)
+    }
     for row in copy.deepcopy(annotations):
         if not isinstance(row, dict):
             continue
-        if (
-            patch
-            and row.get("object_type") == "face"
-            and row.get("source_observation_id") == patch.get("source_observation_id")
+        source_observation_id = str(row.get("source_observation_id") or "")
+        if row.get("object_type") == "face" and patch and source_observation_id == str(
+            patch.get("source_observation_id") or ""
         ):
-            label = row.get("label") if isinstance(row.get("label"), dict) else {}
-            label["kind"] = "known_face"
-            label["person_id"] = patch.get("person_id")
-            label["external_person_id"] = patch.get("external_person_id")
-            display = patch.get("display_name") or patch.get("external_person_id") or patch.get("person_id")
-            if display is not None:
-                label["display_name"] = str(display)
-            label["similarity"] = patch.get("similarity")
-            label["threshold"] = patch.get("threshold")
-            row["label"] = label
-            row["identity_source"] = "event_payload_bridge"
-            row["source"] = "frame_annotation_cache + event_payload_identity_bridge"
-            if trigger_source_observation_id and row.get("source_observation_id") == trigger_source_observation_id:
-                row["annotation_role"] = "watchlist_trigger_face"
+            row = _mark_known_face_annotation(
+                row,
+                patch,
+                identity_source="event_payload_bridge",
+                annotation_role="watchlist_trigger_face",
+            )
+        elif (
+            row.get("object_type") == "face"
+            and source_observation_id
+            and source_observation_id != str(trigger_source_observation_id or "")
+            and source_observation_id in continuations
+        ):
+            row = _mark_known_face_annotation(
+                row,
+                continuations[source_observation_id],
+                identity_source="threshold_continuation",
+                annotation_role="watchlist_threshold_continuation_face",
+            )
         output.append(_sanitize_value(row))
     return output
+
+
+def _mark_known_face_annotation(
+    row: dict[str, Any],
+    identity: dict[str, Any],
+    *,
+    identity_source: str,
+    annotation_role: str,
+) -> dict[str, Any]:
+    label = row.get("label") if isinstance(row.get("label"), dict) else {}
+    label["kind"] = "known_face"
+    label["person_id"] = identity.get("person_id")
+    label["external_person_id"] = identity.get("external_person_id")
+    display = (
+        identity.get("display_name")
+        or identity.get("person_name")
+        or identity.get("external_person_id")
+        or identity.get("person_id")
+    )
+    if display is not None:
+        label["display_name"] = str(display)
+    label["similarity"] = identity.get("similarity")
+    label["threshold"] = identity.get("threshold")
+    gallery_embedding_id = identity.get("gallery_embedding_id")
+    if gallery_embedding_id is not None:
+        label["gallery_embedding_id"] = gallery_embedding_id
+    row["label"] = label
+    row["identity"] = {
+        "status": identity.get("status") or "matched",
+        "person_id": identity.get("person_id"),
+        "external_person_id": identity.get("external_person_id"),
+        "display_name": label.get("display_name") or "",
+        "similarity": identity.get("similarity"),
+        "threshold": identity.get("threshold"),
+        "gallery_embedding_id": gallery_embedding_id,
+        "source_observation_id": row.get("source_observation_id"),
+        "identity_source": identity_source,
+        "match_status": identity.get("match_status") or "above_threshold",
+    }
+    row["identity_source"] = identity_source
+    row["source"] = "frame_annotation_cache + event_payload_identity_bridge"
+    row["annotation_role"] = annotation_role
+    return row
 
 
 def _count_identity_annotations(annotations: list[dict[str, Any]]) -> dict[str, Any]:
     known = 0
     unknown = 0
     trigger = False
+    continuation = 0
     for row in _iter_annotation_objects(annotations):
         if row.get("object_type") != "face":
             continue
@@ -1000,12 +1074,15 @@ def _count_identity_annotations(annotations: list[dict[str, Any]]) -> dict[str, 
             known += 1
             if row.get("annotation_role") == "watchlist_trigger_face":
                 trigger = True
+            elif row.get("annotation_role") == "watchlist_threshold_continuation_face":
+                continuation += 1
         elif label.get("kind") == "unknown_face":
             unknown += 1
     return {
         "known_face_count": known,
         "unknown_face_count": unknown,
         "trigger_known_face_present": trigger,
+        "known_face_threshold_continuation_count": continuation,
     }
 
 
@@ -1166,8 +1243,11 @@ def _production_sidecar_contract_summary(
     if stale_timing_rows > 0:
         failures.append("stale_timing_on_non_displayable_rows")
     identity_event = _event_requires_identity_trigger(event)
-    if identity_event and identity_scope_status != "trigger_only":
-        failures.append("known_face_not_trigger_only")
+    if identity_event and identity_scope_status not in {
+        "trigger_only",
+        "trigger_plus_threshold_continuations",
+    }:
+        failures.append("known_face_scope_invalid")
     if int(written_contract.get("person_context_rows") or 0) <= 0:
         failures.append("person_context_missing")
     if vector_count > 0:
@@ -1246,6 +1326,9 @@ def _production_sidecar_contract_summary(
         "clip_timeline_match_distribution": dict(match_distribution),
         "identity_scope_status": identity_scope_status,
         "known_face_trigger_only": identity_scope_status == "trigger_only",
+        "known_face_threshold_continuation_count": int(
+            identity_counts.get("known_face_threshold_continuation_count") or 0
+        ),
         "identity_trigger_required": identity_event,
         "person_context_rows": int(written_contract.get("person_context_rows") or 0),
         "production_ready_failures": failures,
@@ -1470,6 +1553,9 @@ def filtered_production_sidecar_summary(
         "known_face_count": counts["known_face_count"],
         "unknown_face_count": counts["unknown_face_count"],
         "trigger_known_face_present": counts["trigger_known_face_present"],
+        "known_face_threshold_continuation_count": counts[
+            "known_face_threshold_continuation_count"
+        ],
         "annotation_status": "complete" if written else "missing_frame_metadata",
     }
     updated["clip_timeline_alignment"] = {
@@ -1721,7 +1807,8 @@ def _identity_scope_status(
     identity_counts: dict[str, Any],
 ) -> str:
     known_rows = []
-    non_trigger_known_rows = []
+    continuation_known_rows = []
+    invalid_known_rows = []
     for row in _iter_annotation_objects(annotations):
         if not isinstance(row, dict):
             continue
@@ -1729,11 +1816,16 @@ def _identity_scope_status(
         if label.get("kind") != "known_face":
             continue
         known_rows.append(row)
-        if row.get("annotation_role") != "watchlist_trigger_face":
-            non_trigger_known_rows.append(row)
-    if non_trigger_known_rows:
+        role = row.get("annotation_role")
+        if role == "watchlist_threshold_continuation_face":
+            continuation_known_rows.append(row)
+        elif role != "watchlist_trigger_face":
+            invalid_known_rows.append(row)
+    if invalid_known_rows:
         return "known_face_scope_leak"
     if known_rows and identity_counts.get("trigger_known_face_present") is True:
+        if continuation_known_rows:
+            return "trigger_plus_threshold_continuations"
         return "trigger_only"
     return "missing_trigger_known_face"
 

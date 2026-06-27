@@ -356,6 +356,39 @@
             <div id="runtime-supervisor-summary" class="result-card runtime-supervisor-summary"></div>
           </section>
 
+          <section class="pane runtime-performance-pane">
+            <div class="pane-title">
+              <div>
+                <h2>推理性能</h2>
+                <p>Forwarder 采样、Savant 入流限速和模型 interval。</p>
+              </div>
+              <div class="button-group">
+                <button id="save-runtime-performance" type="button">保存配置</button>
+                <button id="apply-runtime-performance" type="button" class="primary">保存并应用</button>
+              </div>
+            </div>
+            <div id="runtime-performance-status" class="result-card runtime-performance-status">性能配置待刷新</div>
+            <form id="runtime-performance-form" class="runtime-performance-form">
+              <label class="toggle-field">
+                <input name="forwarder_sampler_enabled" type="checkbox" />
+                <span>Forwarder 采样</span>
+              </label>
+              <label>Forwarder 最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+              <label>Forwarder 最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+              <label class="toggle-field">
+                <input name="ingress_fps_gate_enabled" type="checkbox" />
+                <span>Savant 入流限速</span>
+              </label>
+              <label>Savant 最大 FPS<input name="savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+              <label>Savant 最小 FPS<input name="savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+              <label>姿态 interval<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
+              <label>人脸 interval<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
+              <label>AdaFace interval<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
+              <label>Batched push timeout<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+            </form>
+            <div id="runtime-performance-diff" class="runtime-table-wrap"></div>
+          </section>
+
           <section class="pane runtime-source-pane">
             <div class="pane-title">
               <div>

@@ -13,6 +13,7 @@ Redis configuration::
     REDIS_URL      → default ``redis://redis:6379/0``
     EVENT_STREAM   → default ``security.events``
     EVENT_MAXLEN   → optional max stream length (default 10000)
+    EVENT_REDIS_QUEUE_MAXSIZE → async writer queue length (default 1024)
 """
 
 from __future__ import annotations
@@ -21,6 +22,13 @@ import os
 from abc import ABC, abstractmethod
 
 from custom.models.events import SecurityEvent
+from custom.services.redis_stream_writer import (
+    DEFAULT_CONNECT_TIMEOUT_MS,
+    DEFAULT_QUEUE_MAXSIZE,
+    DEFAULT_SOCKET_TIMEOUT_MS,
+    AsyncRedisStreamWriter,
+    env_int,
+)
 
 
 class EventExporter(ABC):
@@ -90,7 +98,25 @@ class RedisStreamEventExporter(EventExporter):
             else int(os.environ.get("EVENT_MAXLEN", "10000"))
         )
 
-        self._client: _redis.Redis = _redis.Redis.from_url(self._redis_url)
+        self._writer = AsyncRedisStreamWriter(
+            redis_url=self._redis_url,
+            stream=self._stream,
+            maxlen=self._maxlen,
+            component="savant_security_event_redis_writer",
+            socket_timeout_ms=env_int(
+                "EVENT_REDIS_WRITE_TIMEOUT_MS",
+                env_int("SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS", DEFAULT_SOCKET_TIMEOUT_MS),
+            ),
+            connect_timeout_ms=env_int(
+                "EVENT_REDIS_CONNECT_TIMEOUT_MS",
+                env_int("SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS),
+            ),
+            queue_maxsize=env_int(
+                "EVENT_REDIS_QUEUE_MAXSIZE",
+                env_int("SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE", DEFAULT_QUEUE_MAXSIZE),
+            ),
+            redis_module=_redis,
+        )
 
         print(
             f"stage=savant_security_redis_exporter_init "
@@ -118,21 +144,11 @@ class RedisStreamEventExporter(EventExporter):
             "data": event_json,
         }
 
-        try:
-            self._client.xadd(
-                self._stream,
-                fields,
-                maxlen=self._maxlen,
-                approximate=True,
-            )
-        except Exception:
-            import traceback
-
+        if not self._writer.enqueue(fields):
             print(
-                f"stage=savant_security_redis_export_error "
+                f"stage=savant_security_redis_export_drop "
                 f"source_event_id={event.source_event_id} "
-                f"stream={self._stream} "
-                f"traceback={traceback.format_exc().replace(chr(10), ' | ')}",
+                f"stream={self._stream}",
                 flush=True,
             )
 

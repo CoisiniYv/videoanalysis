@@ -375,13 +375,13 @@ Savant batching has two relevant layers:
 Current project configuration:
 
 ```text
-module parameters:
+module parameters (env-backed defaults):
 BATCH_SIZE=1
 MAX_PARALLEL_STREAMS=4
 max_same_source_frames=1
 BATCHED_PUSH_TIMEOUT=40000
 
-model batches:
+model batches (env-backed defaults):
 POSE_BATCH_SIZE=1
 FACE_DETECTOR_BATCH_SIZE=1
 FACE_EMBEDDING_BATCH_SIZE=16
@@ -389,7 +389,8 @@ FACE_EMBEDDING_BATCH_SIZE=16
 
 Implication:
 
-- the current pipeline is not using multi-frame muxer batching;
+- the current default pipeline is not using multi-frame muxer batching;
+- these values are deployment env defaults, not compose literals;
 - YOLO26 pose and YOLOv8 face detector are currently single-batch;
 - AdaFace is already using model-level object batching with batch size 16.
 

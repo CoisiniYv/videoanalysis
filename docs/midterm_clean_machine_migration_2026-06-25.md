@@ -223,31 +223,57 @@ bash midterm-clean-YYYYMMDDTHHMMSSZ_deploy_clean.sh \
 http://127.0.0.1:8090/operator
 ```
 
-后续摄像头、人脸、证据、存储维护和受控运行时重启都在 8090 页面管理。
+后续摄像头、人脸、证据、存储维护、受控运行时重启和推理 FPS/interval
+性能档位都在 8090 页面管理。
 
 ## 10. 批处理参数说明
 
 当前模型推理 batch 不是全部“只改 env 就生效”。
 
+8090 当前可以保存并应用 Forwarder/Savant FPS、模型 infer interval 和
+`BATCHED_PUSH_TIMEOUT`；应用时会按差异重建 `analysis-forwarder` 和/或
+`savant-security`，并复用 evidence restart guard。模型 batch 和
+`MAX_PARALLEL_STREAMS` 仍建议通过 env 加压测验证，不应在迁移时顺手调大。
+
 可以直接通过 env 调整的是：
 
 ```text
 MAX_PARALLEL_STREAMS
+BATCH_SIZE
+POSE_BATCH_SIZE
+FACE_DETECTOR_BATCH_SIZE
+FACE_EMBEDDING_BATCH_SIZE
+BATCHED_PUSH_TIMEOUT
 ANALYSIS_FPS
 MAX_FPS
 POSE_INFER_INTERVAL
 FACE_INFER_INTERVAL
 FACE_EMBEDDING_INFER_INTERVAL
+SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS
+SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS
+SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE
+MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE
+MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S
+MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG
 ```
 
-当前 compose 中以下 batch 仍是写死值：
+当前 compose 中 batch 已不是写死值，默认值在 `infra/env/midterm.env`：
 
 ```text
 BATCH_SIZE=1
 POSE_BATCH_SIZE=1
 FACE_DETECTOR_BATCH_SIZE=1
 FACE_EMBEDDING_BATCH_SIZE=16
+MAX_PARALLEL_STREAMS=4
+BATCHED_PUSH_TIMEOUT=40000
+SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS=50
+SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS=50
+SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE=1024
+MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=2
+MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=180
+MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=200
 ```
 
 其中 YOLOv8-Face detector 当前按静态 batch=1 使用。模型 batch 调大涉及 TensorRT
 engine、显存、延迟和模型约束，应该作为单独性能任务验证，不应在迁移时顺手修改。
+Redis exporter 已使用有界异步 writer，以上 Redis 参数只控制写入线程和队列的保护边界。

@@ -98,15 +98,27 @@ PHASE2_SINGLE_T4_READY=false
 
 - 当前主机不是 T4，不能产出 T4 readiness token。
 - 当前实际运行只有 2 路，不是 30/60 路压力输入。
-- 单 shard 默认 `BATCH_SIZE=1`、`POSE_BATCH_SIZE=1`、`FACE_DETECTOR_BATCH_SIZE=1`、`MAX_PARALLEL_STREAMS=4`，不适合直接推到 30 路每 shard。
-- Redis exporter 仍在 Savant 热路径上，60 路下需要异步队列、超时、drop/error metrics。
-- single-shard `savant-security` 仍有 debug PyFunc 和 h264/nvenc 输出成本，生产 60 路前应 gate 或移出。
-- 证据物化当前是潜在瓶颈：`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=1`，annotation Redis maxlen/TTL 对 60 路保留窗口不足。
+- 8090 已新增推理性能配置入口，可保存并应用 `ANALYSIS_FPS`、`MAX_FPS`、
+  `MIN_FPS`、模型 interval 和 `BATCHED_PUSH_TIMEOUT`，但这只解决现场调档问题，
+  不能替代真实 T4 压测。
+- batch / parallel-stream 参数已从 compose 硬编码改成 env 默认，但当前默认仍是保守档：
+  `BATCH_SIZE=1`、`POSE_BATCH_SIZE=1`、`FACE_DETECTOR_BATCH_SIZE=1`、
+  `FACE_EMBEDDING_BATCH_SIZE=16`、`MAX_PARALLEL_STREAMS=4`。真实 T4
+  operating point 仍未产出。
+- Redis exporter 已接入有界异步 writer 和 50ms connect/socket timeout；60 路前仍需要
+  Redis 故障注入、drop/error metrics 和 degraded evidence 验证。
+- single-shard `savant-security` 的生产 debug PyFunc 与 h264/nvenc 输出成本已移除。
+- 证据物化默认已从单并发改成保守有界并发：
+  `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=2`、
+  `MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=180`、
+  `MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=200`。annotation Redis maxlen/TTL 对
+  60 路保留窗口不足，后续应由 8090 配置化。
 - 30 路同 shard 的 forwarder fairness 尚未证明。
 
 因此，“从 2 路扩到 60 路”的便利程度可以分成两层：
 
-- 管理平面：通过 8090 增加摄像头、导出 runtime config，路径已经有。
+- 管理平面：通过 8090 增加摄像头、导出 runtime config、调整 FPS/interval
+  性能档位，路径已经有。
 - 生产吞吐：还需要 Step A-D 的工程闭环，不应直接承诺 60 路 ready。
 
 ## 2. 程序完整度分析
@@ -210,10 +222,10 @@ clean 脚本不够，需要新增状态迁移包，至少包括：
 建议按 `specs/22_midterm_60_stream_readiness_risk_closure_plan.md` 的顺序推进：
 
 1. Step 0：先做可迁移 baseline，输出 `PASS_60R_STEP_0_MIGRATION_BASELINE`。
-2. Step A：移除/隔离热路径成本，重点是 debug PyFunc、unused output encoding、Redis exporter 异步化。
+2. Step A：移除/隔离热路径成本，debug PyFunc、unused output encoding、Redis exporter 异步化已完成；继续补 Redis fault metrics。
 3. Step B：补 per-source fairness 指标，做 30 路同 shard 压力。
 4. Step C：在真实 T4 上测 batch/interval/MAX_PARALLEL_STREAMS，产出 `PASS_PHASE2_SINGLE_T4_30`。
-5. Step D：证据物化、annotation retention、Replay TTL、存储 quota 和 10 -> 30 -> 60 压力闭环。
+5. Step D：证据物化默认并发已提升到保守有界档；annotation retention、Replay TTL、存储 quota 和 10 -> 30 -> 60 压力闭环仍需完成。
 
 当前可以做的低风险前置项：
 

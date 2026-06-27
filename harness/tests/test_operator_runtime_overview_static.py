@@ -22,6 +22,11 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert 'id="runtime-evidence-table"' in html
     assert 'id="runtime-container-table"' in html
     assert 'id="runtime-control-status"' in html
+    assert 'id="runtime-performance-form"' in html
+    assert 'id="runtime-performance-status"' in html
+    assert 'id="runtime-performance-diff"' in html
+    assert 'id="save-runtime-performance"' in html
+    assert 'id="apply-runtime-performance"' in html
     assert 'id="start-single-runtime"' in html
     assert 'id="stop-single-runtime"' in html
     assert 'id="restart-single-runtime"' in html
@@ -29,6 +34,9 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert "运行控制" in html
     assert "启动单路链路" in html
     assert "关闭双路扩展" in html
+    assert "推理性能" in html
+    assert "保存并应用" in html
+    assert "Savant 最大 FPS" in html
     assert "摄像头性能" in html
     assert "证据生成" in html
 
@@ -41,6 +49,10 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "loadRuntimeOverview" in js
     assert "`${API}/runtime/overview`" in js
     assert "`${API}/runtime/control`" in js
+    assert "`${API}/runtime/performance-config`" in js
+    assert "runtime/performance-config/apply" in js
+    assert "renderRuntimePerformanceConfig" in js
+    assert "runtimePerformanceFormBody" in js
     assert "runtime/control/single/start" in js
     assert "runtime/control/single/stop" in js
     assert "runtime/control/single/restart" in js
@@ -78,6 +90,8 @@ def test_operator_runtime_overview_has_stable_table_styles() -> None:
     assert ".runtime-workspace" in css
     assert ".runtime-table" in css
     assert ".runtime-health-grid" in css
+    assert ".runtime-performance-form" in css
+    assert ".runtime-performance-table" in css
     assert ".runtime-evidence-pane" in css
     assert ".runtime-failure-list" in css
     assert ".warn-row" in css

@@ -27,6 +27,7 @@ class Redis:
     port: int = 6379
     db: int = 0
     socket_timeout: float | None = 5.0
+    socket_connect_timeout: float | None = None
     decode_responses: bool = False
 
     @classmethod
@@ -61,7 +62,14 @@ class Redis:
 
     def _request(self, parts: Iterable[bytes]) -> str | bytes | list[Any] | None:
         payload = self._encode_resp_array(list(parts))
-        with socket.create_connection((self.host, self.port), timeout=self.socket_timeout) as sock:
+        connect_timeout = (
+            self.socket_connect_timeout
+            if self.socket_connect_timeout is not None
+            else self.socket_timeout
+        )
+        with socket.create_connection((self.host, self.port), timeout=connect_timeout) as sock:
+            if self.socket_timeout is not None:
+                sock.settimeout(self.socket_timeout)
             sock.sendall(payload)
             reply = self._read_reply(sock)
         return self._decode_response(reply)
@@ -121,4 +129,3 @@ class Redis:
         if isinstance(value, bool):
             return "1" if value else "0"
         return str(value)
-

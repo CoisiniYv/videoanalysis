@@ -1951,6 +1951,124 @@ def _event_for_frame_cache_sidecar(event_context: dict) -> dict:
     }
 
 
+def _watchlist_identity_continuations(
+    pg_conn: psycopg.Connection,
+    event_context: dict,
+    *,
+    post_seconds: float,
+) -> dict[str, dict]:
+    """Return same-track watchlist identities that also pass the event threshold."""
+
+    if not _env_bool("WATCHLIST_EVIDENCE_CONTINUATION_ENABLED", default=True):
+        return {}
+    if str(event_context.get("event_type") or "") not in {"watchlist_hit", "live_search_hit"}:
+        return {}
+    payload = event_context.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    match = payload.get("match")
+    observation = payload.get("observation")
+    matched_person = payload.get("matched_person")
+    if not isinstance(match, dict) or not isinstance(observation, dict):
+        return {}
+    if not isinstance(matched_person, dict):
+        matched_person = {}
+
+    gallery_embedding_id = _to_int(match.get("gallery_embedding_id"))
+    threshold = _to_float(match.get("threshold") or payload.get("threshold"))
+    trigger_source_observation_id = str(match.get("source_observation_id") or "").strip()
+    trigger_timestamp_ms = _to_int(observation.get("timestamp_ms"))
+    source_id = str(observation.get("source_id") or event_context.get("source_id") or "").strip()
+    camera_id = str(observation.get("camera_id") or event_context.get("camera_id") or "").strip()
+    track_id = str(
+        observation.get("person_track_id")
+        or observation.get("track_id")
+        or event_context.get("track_id")
+        or ""
+    ).strip()
+    if (
+        gallery_embedding_id is None
+        or threshold is None
+        or not trigger_source_observation_id
+        or trigger_timestamp_ms is None
+        or not source_id
+        or not camera_id
+        or not track_id
+    ):
+        return {}
+
+    post_ms = max(0, int(float(post_seconds) * 1000))
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidates AS (
+                    SELECT
+                        fo.source_observation_id,
+                        fo.timestamp_ms,
+                        pge.id AS gallery_embedding_id,
+                        pge.person_id,
+                        p.external_person_id,
+                        p.name AS person_name,
+                        1 - (fo.embedding <=> pge.embedding) AS similarity
+                    FROM face_observations fo
+                    JOIN person_gallery_embeddings pge
+                      ON pge.id = %(gallery_embedding_id)s
+                     AND pge.is_active IS TRUE
+                    JOIN persons p
+                      ON p.id = pge.person_id
+                     AND p.is_active IS TRUE
+                    WHERE fo.embedding IS NOT NULL
+                      AND fo.source_id = %(source_id)s
+                      AND fo.camera_id = %(camera_id)s
+                      AND fo.track_id = %(track_id)s
+                      AND fo.timestamp_ms BETWEEN %(start_ms)s AND %(end_ms)s
+                )
+                SELECT source_observation_id, timestamp_ms, gallery_embedding_id,
+                       person_id, external_person_id, person_name, similarity
+                FROM candidates
+                WHERE similarity >= %(threshold)s
+                ORDER BY timestamp_ms ASC
+                LIMIT 200
+                """,
+                {
+                    "gallery_embedding_id": gallery_embedding_id,
+                    "source_id": source_id,
+                    "camera_id": camera_id,
+                    "track_id": track_id,
+                    "start_ms": trigger_timestamp_ms,
+                    "end_ms": trigger_timestamp_ms + post_ms,
+                    "threshold": threshold,
+                },
+            )
+            rows = cur.fetchall()
+    except Exception:
+        logger.exception(
+            "watchlist_identity_continuation_query_failed event_id=%s "
+            "source_observation_id=%s",
+            event_context.get("event_id", ""),
+            trigger_source_observation_id,
+        )
+        return {}
+
+    continuations: dict[str, dict] = {}
+    for row in rows:
+        source_observation_id = str(row[0] or "").strip()
+        if not source_observation_id:
+            continue
+        continuations[source_observation_id] = {
+            "source_observation_id": source_observation_id,
+            "person_id": int(row[3]) if row[3] is not None else matched_person.get("person_id"),
+            "external_person_id": row[4] or matched_person.get("external_person_id"),
+            "display_name": row[5] or matched_person.get("name"),
+            "gallery_embedding_id": int(row[2]) if row[2] is not None else gallery_embedding_id,
+            "similarity": float(row[6]) if row[6] is not None else None,
+            "threshold": float(threshold),
+            "match_status": "above_threshold",
+        }
+    return continuations
+
+
 def _is_sink_video_frame(row: dict) -> bool:
     return row.get("type") == "VideoFrame"
 
@@ -2670,6 +2788,11 @@ def _finalize_post_savant_evidence_bundle(
                 "post_seconds": float(os.getenv("DEFAULT_POST_SECONDS", "5")),
             }
         )
+        identity_continuations = _watchlist_identity_continuations(
+            pg_conn,
+            event_context,
+            post_seconds=float(sidecar_config.get("post_seconds") or 5.0),
+        )
         raw_clip_duration = (
             _probe_video_duration_seconds(str(raw_clip_path))
             if raw_clip_available
@@ -2682,6 +2805,7 @@ def _finalize_post_savant_evidence_bundle(
             metadata_path=str(sink_metadata_path),
             redis_client=None,
             config=sidecar_config,
+            identity_continuations=identity_continuations,
             final_clip_context={
                 "raw_clip_path": str(raw_clip_path) if raw_clip_available else None,
                 "sink_metadata_path": str(sink_metadata_path),

@@ -584,6 +584,40 @@ p {
   margin-top: 12px;
 }
 
+.runtime-performance-status {
+  margin-bottom: 12px;
+}
+
+.runtime-performance-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.runtime-performance-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.runtime-performance-form .toggle-field {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 56px;
+}
+
+.runtime-performance-form .toggle-field input {
+  width: 18px;
+  height: 18px;
+}
+
+.runtime-performance-table {
+  min-width: 720px;
+}
+
 .runtime-kv-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1741,13 +1775,16 @@ textarea[readonly] {
 @media (max-width: 1260px) {
   .camera-workspace,
   .people-workspace,
-  .evidence-workspace {
+  .evidence-workspace,
+  .runtime-workspace {
     grid-template-columns: 280px minmax(0, 1fr);
   }
 
   .rules,
   .people-detail,
-  .evidence-detail-pane {
+  .evidence-detail-pane,
+  .runtime-source-pane,
+  .runtime-forwarder-pane {
     grid-column: 1 / -1;
   }
 
@@ -1806,6 +1843,7 @@ textarea[readonly] {
   .camera-workspace,
   .people-workspace,
   .evidence-workspace,
+  .runtime-workspace,
   .maintenance-workspace,
   .evidence-details-grid {
     grid-template-columns: 1fr;
@@ -1813,6 +1851,10 @@ textarea[readonly] {
 
   .maintenance-target-grid,
   .maintenance-confirm {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-performance-form {
     grid-template-columns: 1fr;
   }
 

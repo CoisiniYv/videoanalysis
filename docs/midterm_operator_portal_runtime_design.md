@@ -38,6 +38,8 @@ The 8090 portal provides four customer-facing work areas:
 - 告警证据: browse file-based evidence bundles through the existing 8090
   `/api/bundles` APIs, with front-end alarm category grouping and an
   operator-visible alarm machine time.
+- 运行控制: inspect runtime health, source adapters, forwarder metrics,
+  evidence task state, runtime containers, and performance throttling settings.
 - 存储维护: preview storage cleanup jobs through the internal API proxy.
 
 Camera and people calls are same-origin `/api/v1/*` requests from the browser.
@@ -50,6 +52,55 @@ current stage boundary is documented in
 fully implemented behavior evidence path, some behavior rules are partial or
 config-only, and face algorithm switches are currently saved/exported but not
 per-camera runtime gates.
+
+## Runtime Performance Controls
+
+The 8090 runtime workspace now includes a "推理性能" panel. Its backend API is:
+
+```text
+GET  /api/v1/runtime/performance-config
+PUT  /api/v1/runtime/performance-config
+POST /api/v1/runtime/performance-config/apply
+```
+
+The saved config is stored at:
+
+```text
+/data/video-analytics/media/.runtime/performance_config.json
+```
+
+Supported fields:
+
+| Field | Runtime env | Target |
+| --- | --- | --- |
+| `forwarder_sampler_enabled` | `FORWARDER_SAMPLER_ENABLED` | `analysis-forwarder` |
+| `analysis_fps` | `ANALYSIS_FPS` | `analysis-forwarder` |
+| `analysis_min_fps` | `ANALYSIS_MIN_FPS` | `analysis-forwarder` |
+| `ingress_fps_gate_enabled` | `INGRESS_FPS_GATE_ENABLED` | `savant-security` |
+| `savant_max_fps` | `MAX_FPS` | `savant-security` |
+| `savant_min_fps` | `MIN_FPS` | `savant-security` |
+| `pose_infer_interval` | `POSE_INFER_INTERVAL` | `savant-security` |
+| `face_infer_interval` | `FACE_INFER_INTERVAL` | `savant-security` |
+| `face_embedding_infer_interval` | `FACE_EMBEDDING_INFER_INTERVAL` | `savant-security` |
+| `batched_push_timeout` | `BATCHED_PUSH_TIMEOUT` | `savant-security` |
+
+`PUT` only saves the desired configuration and returns a diff between saved and
+runtime values. `POST /apply` recreates only the affected runtime containers:
+
+- forwarder-only changes recreate `video-analytics-midterm-analysis-forwarder`;
+- Savant-only changes recreate `video-analytics-midterm-savant` and wait for
+  readiness;
+- mixed changes stop forwarder first, recreate Savant, wait for readiness, then
+  recreate forwarder.
+
+The apply endpoint is disabled unless `RUNTIME_PERFORMANCE_APPLY_ENABLED` or
+`CAMERA_RUNTIME_APPLY_ENABLED` is enabled. It also reuses the evidence restart
+guard, so active evidence tasks block apply unless the caller explicitly forces
+the operation.
+
+This is an operator pressure-control surface, not a production-capacity proof.
+The final T4 30/60-stream FPS and interval operating point still requires a
+separate pressure-test artifact.
 
 ## Alarm Machine Time
 

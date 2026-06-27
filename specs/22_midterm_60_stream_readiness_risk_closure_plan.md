@@ -81,9 +81,15 @@ Migration boundary:
 
 Current facts:
 
-- single-shard `savant-security` sets `BATCH_SIZE=1`, `POSE_BATCH_SIZE=1`,
-  `FACE_DETECTOR_BATCH_SIZE=1`, and `MAX_PARALLEL_STREAMS=4`;
-- `module.yml` defaults match those batch sizes;
+- single-shard `savant-security` now reads `BATCH_SIZE`, `POSE_BATCH_SIZE`,
+  `FACE_DETECTOR_BATCH_SIZE`, `FACE_EMBEDDING_BATCH_SIZE`,
+  `MAX_PARALLEL_STREAMS`, and `BATCHED_PUSH_TIMEOUT` from env-backed compose
+  defaults;
+- `infra/env/midterm.env` currently keeps conservative defaults:
+  `BATCH_SIZE=1`, `POSE_BATCH_SIZE=1`, `FACE_DETECTOR_BATCH_SIZE=1`,
+  `FACE_EMBEDDING_BATCH_SIZE=16`, `MAX_PARALLEL_STREAMS=4`, and
+  `BATCHED_PUSH_TIMEOUT=40000`;
+- `module.yml` defaults still match those conservative batch sizes;
 - the dual 4090 profile changes output codec to `copy`, but still leaves model
   batch and parallel-stream sizing as T4-unproven defaults;
 - no T4 TensorRT batch/latency operating point is recorded.
@@ -112,34 +118,36 @@ Acceptance:
 - `PASS_PHASE2_SINGLE_T4_30` after a 30-minute 30-stream shard pressure run;
 - no 4090-only result may be used as the T4 acceptance token.
 
-### R2 - Redis exporters still run on the Savant hot path
+### R2 - Redis exporters have hot-path isolation, but fault validation remains
 
 Current facts:
 
-- frame annotation exporter performs per-frame Redis `XADD` from the Savant
-  PyFunc path with `FRAME_ANNOTATION_WRITE_TIMEOUT_MS=50`;
-- face and person observation exporters also perform synchronous Redis `XADD`;
-- face and person Redis clients do not set explicit socket/connect timeout in
-  the current implementation;
-- exceptions are caught, but a slow Redis call can still add jitter before it
-  fails.
+- `event_exporter`, `face_observation_exporter`,
+  `person_observation_exporter`, and `frame_annotation_exporter` now enqueue
+  Redis Stream writes through `AsyncRedisStreamWriter`;
+- the writer uses bounded drop-on-full queues and performs `XADD` from a
+  daemon thread, outside the Savant pyfunc hot path;
+- defaults are `SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS=50`,
+  `SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS=50`, and
+  `SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE=1024`;
+- `FRAME_ANNOTATION_WRITE_TIMEOUT_MS=50` remains the frame-annotation
+  socket timeout default.
 
 Risk:
 
-At 480 analyzed frames/s, a Redis pause or network stall can turn exporter work
-into inference-pipeline jitter. A 50ms timeout bounds the worst single frame
-annotation write, but it is still inside the hot path and can accumulate. Face
-and person exporters currently have a larger blocking-risk surface because they
-have no explicit client timeout.
+At 480 analyzed frames/s, Redis pause or network stall should no longer block
+Savant frame processing directly. The remaining risk is operational: queue
+depth, enqueue drops, write failures, and degraded evidence behavior still need
+production-style fault injection and metrics.
 
 Required closure:
 
-- give every Redis exporter explicit `socket_timeout` and `socket_connect_timeout`
-  defaults;
-- move Redis writes behind an in-process bounded async queue or a proven
-  non-blocking writer;
-- use drop-on-full semantics for Redis fault containment, with counters, rather
-  than blocking Savant;
+- keep every Redis exporter on explicit `socket_timeout` and
+  `socket_connect_timeout` defaults;
+- keep Redis writes behind the bounded async writer, not directly in pyfunc
+  processing;
+- use drop-on-full semantics for Redis fault containment, with counters/logs,
+  rather than blocking Savant;
 - distinguish normal-pressure behavior from fault behavior:
   - normal 30/60-stream pressure runs must show zero frame-annotation enqueue
     drops, or a documented non-zero threshold that is accepted by the evidence
@@ -147,8 +155,8 @@ Required closure:
   - Redis fault injection may drop derived observations and frame annotations,
     but affected evidence must be marked degraded / annotation-missing instead
     of being silently treated as a complete bbox/proof bundle;
-- expose metrics for queue depth, enqueue drops, write failures, write latency,
-  enqueue latency, and last Redis error by exporter and source.
+- expose runtime metrics for queue depth, enqueue drops, write failures, write
+  latency, enqueue latency, and last Redis error by exporter and source.
 
 Acceptance:
 
@@ -224,9 +232,9 @@ Current facts:
   queue current depth 115, queue wait avg 44.427s, queue wait p95 52.793s,
   ffmpeg child CPU avg 13.326s, p95 16.102s. Evidence artifact:
   `/data/video-analytics/artifacts/phase2plus/evidence_materialization_phase2plus_report.json`;
-- `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=1`;
-- `MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=0`,
-  `MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=0`,
+- `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=2`;
+- `MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=180`,
+  `MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=200`,
   `EVIDENCE_FINAL_ROOT_MAX_BYTES=0`,
   `EVIDENCE_INCOMING_ROOT_MAX_BYTES=0`, and `REPLAY_SINK_OUTPUT_MAX_BYTES=0`.
 
@@ -393,6 +401,14 @@ Scope:
 - disable or change unused Savant output encoding after confirming no consumer;
 - add Redis exporter timeouts, bounded async queues, and metrics.
 
+Current status:
+
+- production debug PyFuncs and unused NVENC output have been removed from the
+  midterm production path;
+- Redis exporter timeouts and bounded async queues are in place;
+- Redis exporter runtime metrics and fault-injection evidence remain to close
+  the full production gate.
+
 Why first:
 
 These changes reduce avoidable jitter and waste without changing model weights,
@@ -442,6 +458,28 @@ Scope:
 - build/validate dynamic TensorRT engines;
 - set production batch, intervals, and parallel-stream values;
 - record spec 16 Appendix A.
+
+Runtime performance control update - 2026-06-27:
+
+The 8090 runtime control page now has a performance configuration surface backed
+by:
+
+```text
+GET  /api/v1/runtime/performance-config
+PUT  /api/v1/runtime/performance-config
+POST /api/v1/runtime/performance-config/apply
+```
+
+It can save and apply Forwarder sampling FPS, Savant ingress FPS, pose/face/
+AdaFace infer intervals, and `BATCHED_PUSH_TIMEOUT`. Apply is intentionally a
+controlled runtime operation: it recreates only `analysis-forwarder` and/or
+`savant-security`, waits for Savant readiness when needed, and uses the existing
+evidence restart guard.
+
+This closes the operator-control gap for FPS/interval tuning, but does not close
+the production readiness gate. The remaining required evidence is a real T4
+pressure run at the selected 2/3/4 FPS operating points, plus annotation
+retention configuration and Redis exporter fault metrics.
 
 Exit gate:
 
