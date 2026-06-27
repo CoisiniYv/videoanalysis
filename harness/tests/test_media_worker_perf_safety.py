@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,47 @@ def test_active_epoch_scan_uses_incremental_children_and_ignores_old_epoch(
     assert [row["source_id"] for row in rows] == ["current-source"]
     assert stats["scan_mode"] == "active_epoch_incremental"
     assert stats["rglob_fallback_used"] is False
+    assert stats["metadata_files_visited"] == 1
+
+
+def test_metadata_scan_limit_prefers_newest_candidates(tmp_path: Path) -> None:
+    worker = _activate("media-worker", "app.worker")
+    root = tmp_path / "sink"
+    old_dir = root / "old"
+    new_dir = root / "new"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    old_meta = old_dir / "metadata.json"
+    new_meta = new_dir / "metadata.json"
+    old_meta.write_text(
+        json.dumps({"labels": {"event_id": EVENT_ID}, "source_id": "old-source"})
+        + "\n",
+        encoding="utf-8",
+    )
+    new_meta.write_text(
+        json.dumps({"labels": {"event_id": EVENT_ID}, "source_id": "new-source"})
+        + "\n",
+        encoding="utf-8",
+    )
+    old_ns = 1_800_000_000_000_000_000
+    new_ns = old_ns + 10_000_000_000
+    old_meta.touch()
+    new_meta.touch()
+    old_dir.touch()
+    new_dir.touch()
+    os.utime(old_meta, ns=(old_ns, old_ns))
+    os.utime(new_meta, ns=(new_ns, new_ns))
+    os.utime(old_dir, ns=(old_ns, old_ns))
+    os.utime(new_dir, ns=(new_ns, new_ns))
+
+    rows, stats = worker._scan_metadata_files(
+        str(root),
+        processed_dirs=set(),
+        max_metadata_files=1,
+    )
+
+    assert [row["source_id"] for row in rows] == ["new-source"]
+    assert stats["metadata_files_truncated"] is True
     assert stats["metadata_files_visited"] == 1
 
 

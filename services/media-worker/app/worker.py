@@ -53,7 +53,7 @@ DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
 DEFAULT_MEDIA_WORKER_STATE_PATH = (
     "/media/replay-sink-output/midterm/.media-worker.processed.json"
 )
-DEFAULT_SINK_SCAN_MAX_METADATA_FILES = 2000
+DEFAULT_SINK_SCAN_MAX_METADATA_FILES = 20000
 DEFAULT_MEDIA_PROBE_TIMEOUT_S = 30.0
 DEFAULT_MEDIA_DECODE_TIMEOUT_S = 120.0
 DEFAULT_MATERIALIZATION_MAX_ACTIVE = 1
@@ -236,7 +236,11 @@ def _incremental_metadata_paths(
     if root_metadata.is_file():
         paths.append(root_metadata)
     try:
-        children = sorted(sink_path.iterdir(), key=lambda path: path.name)
+        children = sorted(
+            sink_path.iterdir(),
+            key=lambda path: _path_mtime_ns(path),
+            reverse=True,
+        )
     except FileNotFoundError:
         return [], False
     except OSError:
@@ -255,6 +259,13 @@ def _incremental_metadata_paths(
             continue
         paths.append(meta_file)
     return paths, bool(paths or direct_child_candidates_seen)
+
+
+def _path_mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
 
 
 def _scan_metadata_files(
@@ -306,6 +317,7 @@ def _scan_metadata_files(
             for path in sink_path.rglob("metadata.json")
             if processed_dirs is None or str(path.parent) not in processed_dirs
         ]
+        paths.sort(key=lambda path: _path_mtime_ns(path), reverse=True)
 
     if len(paths) > limit:
         stats["metadata_files_truncated"] = True

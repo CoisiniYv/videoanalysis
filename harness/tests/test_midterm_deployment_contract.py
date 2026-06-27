@@ -244,8 +244,9 @@ def test_midterm_compose_uses_midterm_config_files() -> None:
     services = compose["services"]
     expected_env = ["./env/midterm.env"]
 
-    for service_name in ("savant-security", "source-adapter", "event-worker", "media-worker"):
+    for service_name in ("savant-security", "event-worker", "media-worker"):
         assert services[service_name]["env_file"] == expected_env
+    assert "env_file" not in services["source-adapter"]
 
     assert (
         "../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro"
@@ -403,7 +404,7 @@ def test_replay_first_topology_is_preserved() -> None:
         "${MEDIA_WORKER_STATE_PATH:-/media/replay-sink-output/midterm/.media-worker.processed.json}"
     )
     assert services["media-worker"]["environment"]["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == (
-        "${MEDIA_SINK_SCAN_MAX_METADATA_FILES:-2000}"
+        "${MEDIA_SINK_SCAN_MAX_METADATA_FILES:-20000}"
     )
     assert services["media-worker"]["environment"]["MEDIA_PROBE_TIMEOUT_S"] == (
         "${MEDIA_PROBE_TIMEOUT_S:-30}"
@@ -431,7 +432,7 @@ def test_replay_first_topology_is_preserved() -> None:
     ] == "${EVIDENCE_REPLAY_TTL_SECONDS:-300}"
     assert services["event-worker"]["environment"][
         "EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"
-    ] == "${EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS:-120}"
+    ] == "${EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS:-600}"
     assert services["media-worker"]["environment"][
         "EVIDENCE_FINAL_ROOT_MAX_BYTES"
     ] == "${EVIDENCE_FINAL_ROOT_MAX_BYTES:-0}"
@@ -550,6 +551,7 @@ def test_midterm_source_id_and_camera_config_are_neutral() -> None:
     )
     assert compose["services"]["source-adapter"]["environment"]["SOURCE_ID"] == "primary_rtsp"
     assert compose["services"]["source-adapter"]["environment"]["SYNC_OUTPUT"] == "false"
+    assert "env_file" not in compose["services"]["source-adapter"]
     assert compose["services"]["event-worker"]["environment"]["RECORDING_SOURCE_ID"] == "${RECORDING_SOURCE_ID:-}"
     assert compose["services"]["event-worker"]["environment"]["DEFAULT_REPLAY_SOURCE_ID"] == "primary_rtsp"
     assert len(primary_cameras) == 1
@@ -798,7 +800,7 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_WORKER_STATE_PATH"] == (
         "/media/replay-sink-output/midterm/.media-worker.processed.json"
     )
-    assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "2000"
+    assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "20000"
     assert env_file["MEDIA_PROBE_TIMEOUT_S"] == "30"
     assert env_file["MEDIA_DECODE_TIMEOUT_S"] == "120"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "2"
@@ -807,7 +809,7 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["EVIDENCE_MATERIALIZATION_POLICY"] == "priority"
     assert env_file["EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY"] == "false"
     assert env_file["EVIDENCE_REPLAY_TTL_SECONDS"] == "300"
-    assert env_file["EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"] == "120"
+    assert env_file["EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"] == "600"
     assert env_file["EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"] == "true"
     assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"] == "2"
     assert env_file["EVIDENCE_FINAL_ROOT_MAX_BYTES"] == "0"

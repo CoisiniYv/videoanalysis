@@ -223,6 +223,15 @@ def test_apply_performance_config_recreates_only_forwarder_and_savant(
     tmp_path: Path,
 ) -> None:
     fake = _fake_runtime()
+    fake.add_container(
+        "video-analytics-source-source_lab",
+        env={
+            "SOURCE_ID": "source_lab",
+            "RTSP_URI": "rtsp://lab/stream",
+            "ZMQ_ENDPOINT": "dealer+connect:tcp://replay-service:5555",
+            "EOS_ON_START": "false",
+        },
+    )
     monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
     monkeypatch.setattr(
         runtime_performance,
@@ -269,6 +278,7 @@ def test_apply_performance_config_recreates_only_forwarder_and_savant(
     assert "video-analytics-midterm-event-worker" not in all_paths
     assert "video-analytics-midterm-replay-service" not in all_paths
     assert "video-analytics-midterm-video-file-sink" not in all_paths
+    assert "video-analytics-source-source_lab" not in all_paths
     create_bodies = {
         parse_qs(urlparse(path).query)["name"][0]: body
         for method, path, body in fake.calls

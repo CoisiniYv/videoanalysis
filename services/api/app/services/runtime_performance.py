@@ -681,13 +681,18 @@ def _recreate_container_with_env(
     env_updates: dict[str, str],
     *,
     force_start: bool = False,
+    restart_policy_name: str | None = None,
 ) -> dict[str, Any]:
     inspect_doc = _inspect_required(client, container_name)
     state = inspect_doc.get("State") if isinstance(inspect_doc, dict) else {}
     was_running = bool(state.get("Running")) if isinstance(state, dict) else False
     should_start = force_start or was_running
     backup_name = f"{container_name}.perf-backup-{int(time.time())}"
-    create_body = _create_body_from_inspect(inspect_doc, env_updates)
+    create_body = _create_body_from_inspect(
+        inspect_doc,
+        env_updates,
+        restart_policy_name=restart_policy_name,
+    )
     encoded = quote(container_name, safe="")
     backup_encoded = quote(backup_name, safe="")
     renamed = False
@@ -758,6 +763,7 @@ def _recreate_container_with_env(
         "start_requested": should_start,
         "create_status": create_status,
         "start_status": start_status,
+        "restart_policy": restart_policy_name,
     }
 
 
@@ -791,6 +797,8 @@ def _inspect_required(client: DockerSocketClient, container_name: str) -> dict[s
 def _create_body_from_inspect(
     inspect_doc: dict[str, Any],
     env_updates: dict[str, str],
+    *,
+    restart_policy_name: str | None = None,
 ) -> dict[str, Any]:
     config = inspect_doc.get("Config") if isinstance(inspect_doc, dict) else {}
     if not isinstance(config, dict):
@@ -823,6 +831,8 @@ def _create_body_from_inspect(
     host_config = inspect_doc.get("HostConfig")
     if isinstance(host_config, dict):
         body["HostConfig"] = copy.deepcopy(host_config)
+        if restart_policy_name is not None:
+            body["HostConfig"]["RestartPolicy"] = {"Name": restart_policy_name}
     networking_config = _networking_config_from_inspect(inspect_doc)
     if networking_config:
         body["NetworkingConfig"] = networking_config

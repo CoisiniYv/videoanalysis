@@ -56,6 +56,8 @@ SOURCE_CONTAINER_PREFIX = "video-analytics-source-"
 RUNTIME_EPOCH_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SOURCE_ID_MAX_LENGTH = 96
+DEFAULT_SOURCE_RESTART_POLICY = "no"
+DEFAULT_SOURCE_EOS_ON_START = True
 SAVANT_READY_PATTERNS = (
     re.compile(r"\bPLAYING\b", re.IGNORECASE),
     re.compile(r"\bmodule\b.*\bstarted\b", re.IGNORECASE),
@@ -276,11 +278,7 @@ def converge_camera_sources(
 
         if action in {"remove_disabled", "remove_stale"}:
             container_name = str(item.get("container_name") or "")
-            delete_status, _ = client.request(
-                "DELETE",
-                f"/containers/{quote(container_name, safe='')}?force=true",
-                ok_statuses={204, 404},
-            )
+            delete_status = _remove_container(client, container_name)
             diag.update(action="removed", delete_status=delete_status)
             dynamic_sources_stopped.append(source_id or container_name)
         elif action == "stop_compose_disabled":
@@ -1111,6 +1109,17 @@ def _stop_container(client: DockerSocketClient, container_name: str) -> None:
     )
 
 
+def _remove_container(client: DockerSocketClient, container_name: str) -> int | None:
+    if not container_name:
+        return None
+    status, _ = client.request(
+        "DELETE",
+        f"/containers/{quote(container_name, safe='')}?force=true",
+        ok_statuses={204, 404},
+    )
+    return status
+
+
 def _stop_containers(client: DockerSocketClient, container_names: list[str]) -> None:
     for container_name in container_names:
         _stop_container(client, container_name)
@@ -1345,7 +1354,10 @@ def _source_lifecycle_base(
         "compose_source": source_id == compose_source_id,
         "dynamic_source": source_id != compose_source_id,
         "ffmpeg_timeout_ms": 20000 if uri.startswith(("rtsp://", "rtsps://")) else None,
-        "restart_policy": "unless-stopped" if uri.startswith(("rtsp://", "rtsps://")) else "",
+        "restart_policy": (
+            _source_restart_policy_name() if uri.startswith(("rtsp://", "rtsps://")) else ""
+        ),
+        "eos_on_start": _source_eos_on_start(),
     }
     camera_name = str(source.get("camera_name") or "")
     if camera_name:
@@ -1427,6 +1439,8 @@ def _recreate_rtsp_adapter(
         f"/containers/{encoded_name}?force=true",
         ok_statuses={204, 404},
     )
+    restart_policy_name = _source_restart_policy_name()
+    eos_on_start = _source_eos_on_start()
     body = {
         "Image": adapter_image,
         "Entrypoint": ["/opt/savant/adapters/gst/sources/rtsp.sh"],
@@ -1438,13 +1452,13 @@ def _recreate_rtsp_adapter(
             f"ZMQ_ENDPOINT={zmq_endpoint}",
             "SYNC_OUTPUT=false",
             "BUFFER_LEN=2000",
-            "EOS_ON_START=false",
+            f"EOS_ON_START={str(eos_on_start).lower()}",
             "FFMPEG_TIMEOUT_MS=20000",
             "DOWNLOAD_PATH=/tmp/video-loop-cache",
         ],
         "HostConfig": {
             "NetworkMode": network,
-            "RestartPolicy": {"Name": "unless-stopped"},
+            "RestartPolicy": {"Name": restart_policy_name},
         },
     }
     create_status, _ = client.request(
@@ -1465,9 +1479,24 @@ def _recreate_rtsp_adapter(
         "delete_status": delete_status,
         "create_status": create_status,
         "start_status": start_status,
-        "restart_policy": "unless-stopped",
+        "restart_policy": restart_policy_name,
+        "eos_on_start": eos_on_start,
         "ffmpeg_timeout_ms": 20000,
     }
+
+
+def _source_restart_policy_name() -> str:
+    value = os.getenv("CAMERA_RUNTIME_SOURCE_RESTART_POLICY", DEFAULT_SOURCE_RESTART_POLICY)
+    value = str(value or "").strip().lower()
+    if value in {"", "none", "no", "disabled", "false", "0"}:
+        return "no"
+    if value in {"unless-stopped", "on-failure", "always"}:
+        return value
+    return DEFAULT_SOURCE_RESTART_POLICY
+
+
+def _source_eos_on_start() -> bool:
+    return _env_bool("CAMERA_RUNTIME_SOURCE_EOS_ON_START", default=DEFAULT_SOURCE_EOS_ON_START)
 
 
 def _source_only_convergence_plan(
@@ -1612,12 +1641,18 @@ def _source_adapter_state_by_name(client: DockerSocketClient) -> dict[str, dict[
 def _rtsp_adapter_container_matches(inspect_doc: dict[str, Any], source: dict[str, Any]) -> bool:
     env = _container_env_map(inspect_doc)
     uri = str(source.get("uri") or "")
+    restart_policy = (
+        (inspect_doc.get("HostConfig") or {}).get("RestartPolicy") or {}
+        if isinstance(inspect_doc, dict)
+        else {}
+    )
     return (
         env.get("SOURCE_ID") == str(source.get("source_id") or "")
         and env.get("ZMQ_ENDPOINT") == str(source.get("zmq_endpoint") or "")
         and env.get("RTSP_URI", env.get("LOCATION", "")) == uri
-        and env.get("EOS_ON_START") == "false"
+        and env.get("EOS_ON_START") == str(_source_eos_on_start()).lower()
         and env.get("FFMPEG_TIMEOUT_MS") == "20000"
+        and restart_policy.get("Name") == _source_restart_policy_name()
     )
 
 

@@ -63,7 +63,7 @@ def load_config() -> Config:
             "/media/replay-sink-output/midterm/.media-worker.processed.json",
         ),
         sink_scan_max_metadata_files=int(
-            os.getenv("MEDIA_SINK_SCAN_MAX_METADATA_FILES", "2000")
+            os.getenv("MEDIA_SINK_SCAN_MAX_METADATA_FILES", "20000")
         ),
         media_probe_timeout_s=float(os.getenv("MEDIA_PROBE_TIMEOUT_S", "30")),
         media_decode_timeout_s=float(os.getenv("MEDIA_DECODE_TIMEOUT_S", "120")),

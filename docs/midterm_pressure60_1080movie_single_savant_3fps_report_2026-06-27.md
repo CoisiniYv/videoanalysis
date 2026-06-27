@@ -6,7 +6,7 @@ Artifact：`/data/video-analytics/artifacts/pressure60_3fps_20260627T125357Z`
 
 ## 结论
 
-本轮 60 路 `1080movie` 单 Savant、`BATCH_SIZE=4`、目标 3 FPS 压测没有达到稳定生产态。前两轮 8090 runtime metrics 接近 3 FPS，但中间采样掉到 0.1 FPS，最后一轮又冲到 4.49 FPS，说明运行链路存在明显抖动。Savant 日志中出现 `validate_seq_iq` 51804 次，60 路压测 source 基本都有大量序列跳变，符合“源适配器/Ingress 消息丢失或无 EOS 终止”的瓶颈判断。
+本轮 60 路 `1080movie` 单 Savant、`BATCH_SIZE=4`、目标 3 FPS 压测没有达到稳定生产态。前两轮 8090 runtime metrics 接近 3 FPS，但中间采样掉到 0.1 FPS，最后一轮又冲到 4.49 FPS，说明运行链路存在明显抖动。Savant 日志中出现 `validate_seq_iq` 51804 次；复盘后确认该指标不能单独作为 source adapter 崩溃或证据输入丢帧的判据，因为当前 topology 是 source adapter 全量进入 Replay、analysis-forwarder 抽样送 Savant，抽样丢弃未分析帧时会让 Savant 看到非连续 seq_id。
 
 证据链路方面，本轮最终没有生成任何 `evidence_bundles`。压测停止后的第一次统计为 461 个事件、466 个 evidence task，其中 222 expired、110 pending、134 skipped；worker drain 到清理前 DB 累计达到 1014 个事件/任务，但 bundle 仍为 0。结论是 3 FPS/60 路下不仅输入链路不稳定，证据物化链路也没有在事件风暴下完成可播放证据生成。
 
@@ -33,7 +33,7 @@ Artifact：`/data/video-analytics/artifacts/pressure60_3fps_20260627T125357Z`
 | runtime_5 | 49 | 0.10 | 0.10 | 0.10 |
 | runtime_6 | 60 | 4.49 | 2.00 | 5.80 |
 
-GPU 采样文件的瞬时 `nvidia-smi` 大多没有捕捉到 GPU 忙时：7 个样本 GPU0 平均/峰值利用率都是 0%，但清理前最终快照显示 GPU0 为 44%，decoder 13%，显存 4857 MiB。这里更可信的是 Savant runtime metrics 和 `validate_seq_iq` 日志，而不是低频 `nvidia-smi` 瞬时采样。
+GPU 采样文件的瞬时 `nvidia-smi` 大多没有捕捉到 GPU 忙时：7 个样本 GPU0 平均/峰值利用率都是 0%，但清理前最终快照显示 GPU0 为 44%，decoder 13%，显存 4857 MiB。这里更可信的是 Savant runtime metrics、forwarder `seen/forwarded/dropped/send_failures`、source restart 计数和证据 bundle 产出，而不是低频 `nvidia-smi` 瞬时采样或单独的 `validate_seq_iq` 计数。
 
 ## 事件与证据
 
@@ -65,10 +65,10 @@ GPU 采样文件的瞬时 `nvidia-smi` 大多没有捕捉到 GPU 忙时：7 个�
 
 ## 已确认的缺陷
 
-1. `validate_seq_iq` 仍是 P0 输入链路问题。
+1. `validate_seq_iq` 不能单独作为 P0 输入链路失败。
    - 本轮计数：51804 次。
    - 单 source 最高：`pressure60_3fps_20260627T125357Z_18` 为 951 次。
-   - 说明 60 路 3 FPS 下源适配器/Ingress 序列稳定性不足，且 source 容器有重启/重连抖动。
+   - 复盘结论：analysis-forwarder 按 3 FPS 抽样、丢弃未选中帧时，保留原始 frame/PTS/UUID/seq 域转发给 Savant，Savant 会看到 seq gap。这是抽样拓扑的预期副作用之一。后续压测报告应同时记录 forwarder drop/send failure、source 容器 restart、Replay/video-file-sink metadata、effective FPS，不能只用该日志判定 source 输入失败。
 
 2. 证据物化仍是 P0 事件风暴问题。
    - 1014 个事件/任务没有生成任何 `evidence_bundles`。
@@ -108,6 +108,6 @@ GPU 采样文件的瞬时 `nvidia-smi` 大多没有捕捉到 GPU 忙时：7 个�
 
 3 FPS/60 路不建议继续作为当前单 4090 主机的稳定目标。下一步应优先修两个瓶颈，而不是继续上调 batch size：
 
-1. 修 `validate_seq_iq`/source adapter 重连与 EOS 处理，确认 60 路 source 不再频繁序列跳变。
-2. 修 evidence materialization 在事件风暴下的调度、deadline、replay metadata 生产与扫描链路，先保证 2 FPS/60 路能稳定生成 5s/5s bundle。
-3. 修完上述两项后，再重新跑 2 FPS 对照，再跑 3 FPS，避免用不稳定输入链路误判模型 batch size。
+1. 修 evidence materialization 在事件风暴下的调度、deadline、Replay metadata 生产与扫描链路，先保证 2 FPS/60 路能稳定生成 5s/5s bundle。
+2. 压测输入侧改用 forwarder `seen/forwarded/dropped/send_failures`、source restart、Replay/video-file-sink metadata 作为验收指标；`validate_seq_iq` 只作为辅助日志。
+3. 修完上述链路后，再重新跑 2 FPS 对照，再跑 3 FPS，避免用不可查看证据的压测结果误判模型 batch size。

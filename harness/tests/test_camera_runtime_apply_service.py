@@ -257,9 +257,12 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert "SOURCE_ID=source_lab" in env
     assert "RTSP_URI=rtsp://lab/stream" in env
     assert "SYNC_OUTPUT=false" in env
-    assert "EOS_ON_START=false" in env
+    assert "EOS_ON_START=true" in env
+    assert "MAX_FPS=8/1" not in env
+    assert "MIN_FPS=2/1" not in env
     assert not any(item.startswith("USE_ABSOLUTE_TIMESTAMPS=") for item in env)
     assert source_create["HostConfig"]["NetworkMode"] == "video-analytics-midterm_default"
+    assert source_create["HostConfig"]["RestartPolicy"] == {"Name": "no"}
     assert result["source_lifecycle"] == [
         {
             "source_id": "primary_rtsp",
@@ -270,7 +273,8 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
             "compose_source": True,
             "dynamic_source": False,
             "ffmpeg_timeout_ms": 20000,
-            "restart_policy": "unless-stopped",
+            "restart_policy": "no",
+            "eos_on_start": True,
             "action": "started",
             "container_name": "video-analytics-midterm-source-adapter",
             "start_status": 204,
@@ -284,7 +288,8 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
             "compose_source": False,
             "dynamic_source": True,
             "ffmpeg_timeout_ms": 20000,
-            "restart_policy": "unless-stopped",
+            "restart_policy": "no",
+            "eos_on_start": True,
             "container_name": "video-analytics-source-source_lab",
             "delete_status": 204,
             "create_status": 201,
@@ -601,6 +606,9 @@ def test_source_only_converge_recreates_changed_dynamic_and_removes_disabled(
     env = set(create_calls[0]["Env"])
     assert "SOURCE_ID=source_lab" in env
     assert "RTSP_URI=rtsp://new-lab/stream" in env
+    assert "EOS_ON_START=true" in env
+    assert "MAX_FPS=8/1" not in env
+    assert create_calls[0]["HostConfig"]["RestartPolicy"] == {"Name": "no"}
     sources_doc = yaml.safe_load((tmp_path / "sources.generated.yml").read_text())
     assert sources_doc["sources"]["lab"]["camera_name"] == "lab"
 
@@ -645,7 +653,8 @@ def test_source_only_converge_stops_disabled_compose_source(
             "compose_source": True,
             "dynamic_source": False,
             "ffmpeg_timeout_ms": 20000,
-            "restart_policy": "unless-stopped",
+            "restart_policy": "no",
+            "eos_on_start": True,
             "camera_name": "Primary",
             "container_name": "video-analytics-midterm-source-adapter",
             "actual_state": "running",

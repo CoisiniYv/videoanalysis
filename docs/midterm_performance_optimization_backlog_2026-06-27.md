@@ -33,8 +33,9 @@
 该入口会按配置差异重建 `analysis-forwarder` 和/或 `savant-security`，并复用
 evidence restart guard，避免证据任务进行中时直接重建运行时容器。
 
-最后一个 P1，也就是 frame annotation retention，不在本轮硬编码处理，后续仍应由
-8090 运行控制面板配置。
+最后一个 P1，也就是 frame annotation retention，原计划后续交给 8090 配置；
+但 3 FPS 复跑失败后，为避免复跑时 annotation 过早过期，本轮先提高默认
+retention。长期仍应再做成 8090 可配置项。
 
 2026-06-27 60 路 `1080movie` / 单 Savant / 2 FPS 模拟压测后新增发现：
 
@@ -42,9 +43,26 @@ evidence restart guard，避免证据任务进行中时直接重建运行时容�
   Forwarder queue depth 保持 0，因此当前不应盲目升到 8；
 - 代码侧优先瓶颈不是 batch size，而是：
   - evidence materialization 在事件风暴下跟不上；
-  - Savant ingress / source adapter 出现大量 `validate_seq_iq` warning。
+  - Savant 日志出现大量 `validate_seq_iq` warning；复盘后确认这在
+    analysis-forwarder 抽样拓扑下不能单独等同 source adapter 崩溃或证据输入丢帧。
 
 后续复跑必须随机保留 50 个可查看事件/证据，避免再次清理到 8090 无样本可查。
+
+2026-06-27 3 FPS 复跑失败后，先完成一轮代码侧修复，等待重新压测验证：
+
+- 动态 source adapter 默认 `restart_policy=no`，不再 `unless-stopped` 自动复活；
+- source adapter 默认 `EOS_ON_START=true`，重建/重连时先给 Savant 明确 source
+  生命周期边界；
+- 8090 performance apply 只重建真正消费 FPS / interval 参数的
+  analysis-forwarder 和 Savant。source adapter 保持 full-rate 写入 Replay，
+  不再下发误导性的 `MAX_FPS/MIN_FPS` env，因为 `rtsp.sh` 不消费这些参数，
+  且证据链要求 Replay 保留全量输入；
+- media-worker metadata 扫描默认上限从 2000 提高到 20000，并按 mtime 新文件优先，
+  避免大目录中旧 metadata 抢占扫描窗口；
+- frame annotation retention 默认从 `120s / 20000` 提高到 `600s / 200000`，
+  `EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS` 同步提高到 600 秒。
+
+这些修复只说明前置代码缺陷已处理，60 路 2 FPS / 3 FPS 是否通过仍以重新压测为准。
 
 ## 2. 当前结论
 
@@ -91,9 +109,9 @@ evidence restart guard，避免证据任务进行中时直接重建运行时容�
 | DONE（原 P1） | Redis exporter 仍可能同步阻塞 Savant 热路径 | 已修复：`event_exporter`、`face_observation_exporter`、`person_observation_exporter`、`frame_annotation_exporter` 均使用 `AsyncRedisStreamWriter`；默认 `socket/connect timeout=50ms`，队列 `maxsize=1024` | Redis 抖动不再直接阻塞 Savant 热路径；队列满时按 drop-on-full 记录 | Phase C | 已由 `harness/tests/test_savant_redis_stream_writer.py` 和 `harness/tests/test_midterm_deployment_contract.py::test_midterm_savant_redis_exporters_are_async_and_bounded` 固化；仍需生产 Redis 故障注入压测 |
 | PARTIAL（原 P1） | 批量与并发参数未针对 T4 调优 | 已处理硬编码：`BATCH_SIZE`、`POSE_BATCH_SIZE`、`FACE_DETECTOR_BATCH_SIZE`、`FACE_EMBEDDING_BATCH_SIZE`、`MAX_PARALLEL_STREAMS`、`BATCHED_PUSH_TIMEOUT` 已进入 `infra/env/midterm.env` 与 compose env 默认 | 现场可以先按 env 覆盖调参，不再改 compose；但最终 T4 operating point 仍必须实测 | Phase D | 已由 `harness/tests/test_midterm_deployment_contract.py::test_midterm_runtime_calibration_is_explicit` 固化；真实 T4 batch / latency / GPU 利用率结论仍待压测 |
 | DONE（原 P1） | 证据物化仍是队列瓶颈 | 已修复默认值：`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=2`、`MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=180`、`MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=200` | 不再默认单并发串行物化；同时保留 timeout/backlog guardrail，避免无限堆积 | Phase E | 已由 `harness/tests/test_midterm_deployment_contract.py::test_midterm_media_worker_materialization_defaults_are_bounded` 固化；仍需用 30/60 路压测验证 p99 evidence lifecycle |
-| P0（60 路复跑新增） | Evidence materialization 在事件风暴下跟不上 | `docs/midterm_pressure60_1080movie_single_savant_report_2026-06-27.md`：60 路 / 2 FPS 下事件链路跑通，但大量任务进入 `materialization_skipped`、`materialization_expired`、`materialization_failed`，generated bundle 只有几十个量级 | 事件能产生但证据无法稳定跟上，8090 可复核样本不足，生产上会表现为告警有了但证据缺失或延迟过大 | Phase E | 复跑保留随机 50 个事件；p95/p99 evidence lifecycle 可解释；Replay job、annotation wait、ffmpeg materialization 均有分段耗时；50 个样本在 8090 可打开 |
-| P0（60 路复跑新增） | Savant ingress / source adapter 序列跳变 | 同一报告记录 `validate_seq_iq` warning 20 分钟窗口约 8 万级，warning 指向 message loss 或 stream termination without EOS | 说明 60 路 2 FPS 虽然吞吐跑通，但输入链路稳定性不足；继续升 FPS 或 batch 可能掩盖丢帧/重连问题 | Phase F | 压测报告包含 `seq_warning_count_by_source`；同等 60 路 / 2 FPS 下 warning 显著下降，且 effective FPS、last-frame-age、事件数量不回退 |
-| P1（保留给 8090） | Frame annotation retention 对 60 路偏小 | `FRAME_ANNOTATION_REDIS_MAXLEN=20000`、`FRAME_ANNOTATION_TTL_SECONDS=120`；60 路 8 FPS 时长度约只够 42 秒 | 检测事件存在，但证据生成时 bbox/proof annotation 可能已经被 trim 或 TTL 清理 | Phase E / 8090 | retention 按 p99 证据生命周期重新计算，并可在 8090 配置；30/60 路压测无 annotation 缺失 |
+| PARTIAL（60 路复跑新增） | Evidence materialization 在事件风暴下跟不上 | 代码侧已处理扫描/retention/deadline：`MEDIA_SINK_SCAN_MAX_METADATA_FILES=20000`、metadata mtime 新优先、`FRAME_ANNOTATION_TTL_SECONDS=600`、`FRAME_ANNOTATION_REDIS_MAXLEN=200000`、`EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS=600`；3 FPS 失败报告中 1014 个事件/任务仍无 bundle | 事件能产生但证据无法稳定跟上，8090 可复核样本不足，生产上会表现为告警有了但证据缺失或延迟过大 | Phase E | 复跑保留随机 50 个事件/证据；p95/p99 evidence lifecycle 可解释；Replay job、annotation wait、ffmpeg materialization 均有分段耗时；50 个样本在 8090 可打开 |
+| PARTIAL（60 路复跑新增） | 抽样拓扑下的输入稳定性验收口径不清 | 代码侧已处理：动态 source 默认 `restart_policy=no`、`EOS_ON_START=true`、停用/删除动态 source 使用 `rm -f`；同时撤回 source FPS env 同步，明确 source adapter full-rate 写 Replay、analysis-forwarder/Savant 负责抽样与推理速度控制。3 FPS 失败报告中 `validate_seq_iq=51804`，但该指标会被 forwarder 抽样天然放大 | 继续把 `validate_seq_iq` 当唯一 P0 会误判 forwarder 设计内丢分析帧；真正要看 source restart、forwarder send failure、effective FPS、Replay/video-file-sink metadata 和证据 bundle | Phase F | 压测报告包含 forwarder `seen/forwarded/dropped/send_failures`、source restart、Replay/video-file-sink metadata、bundle 成功率；`validate_seq_iq` 仅作为辅助日志 |
+| DONE（原 P1） | Frame annotation retention 对 60 路偏小 | 已提高默认值：`FRAME_ANNOTATION_REDIS_MAXLEN=200000`、`FRAME_ANNOTATION_TTL_SECONDS=600`，并同步 `EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS=600` | 60 路 3 FPS 下约 180 frame annotations/s，200000 长度约覆盖 18 分钟，先满足复跑验证窗口 | Phase E / 8090 | 已由部署契约固化；长期仍可再做 8090 可配置化 |
 | P2 | Forwarder 公平性还没有真实 30/60 路证明 | 已有 30 路离线 forwarder 压测通过，但不是完整 RTSP + Savant + Replay + Redis 链路 | 全局队列在两路或离线合成时健康，不代表 30 路真实抖动下每路都公平 | Phase F | 每路 forwarded fps、drop ratio、last-forwarded age 都在阈值内 |
 | P2 | 观测指标仍需服务于长时间压测 | 现有性能观测规格已有方向，但生产压测还需要统一采集与留档 | 没有指标就无法区分 GPU 瓶颈、Redis 抖动、Replay/证据 IO、RTSP 输入问题 | Phase F | 每次压测产出固定 artifact，包含配置、指标、日志摘要、PASS/FAIL token |
 
@@ -198,8 +216,8 @@ MIN_FPS=1/1 或 2/1
 目标是检测成功后，证据生成不能被后处理队列和 Redis retention 拖垮。
 
 当前已完成的是证据物化默认值调整：media-worker 默认 `max_active=2`、
-`timeout=180s`、`max_backlog=200`。frame annotation retention 保留给 8090
-配置化，不在本轮写死。
+`timeout=180s`、`max_backlog=200`。本轮为复跑先把 frame annotation retention
+默认值提高到 `600s / 200000`，长期仍应纳入 8090 配置化。
 
 范围：
 
