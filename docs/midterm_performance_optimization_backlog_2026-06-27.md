@@ -92,9 +92,25 @@ retention。长期仍应再做成 8090 可配置项。
   或 source 可见性失败时才作为 failure reason；
 - 容器内确认 `VideoFrame.previous_frame_seq_id` 是只读字段，当前不能安全在
   analysis-forwarder 里重写 Savant seq，因此 Savant 日志源头降噪仍是后续项；
-- media-worker 当前运行容器和本地 `video-analytics-midterm-media-worker:latest`
-  镜像仍缺 `ffmpeg` / `ffprobe`。Dockerfile 已包含安装命令，但这必须通过
-  rebuild / 正确镜像加载 / recreate 单独修复，本轮没有默认 rebuild。
+- 当时 media-worker 运行容器和本地 `video-analytics-midterm-media-worker:latest`
+  镜像缺 `ffmpeg` / `ffprobe`。Dockerfile 已包含安装命令，但该问题必须通过
+  rebuild / 正确镜像加载 / recreate 单独修复，不能靠普通 Python recreate 解决。
+
+2026-06-28 下游证据链路修复后，60 路 3 FPS 已有一次通过结果：
+
+- 成功 run：`pressure60_3fps_playabledrain_20260628T100531Z`
+- Artifact：`/data/video-analytics/artifacts/pressure60_3fps_playabledrain_20260628T100531Z`
+- 60 个 source 全部 active，source exited=0，restart=0，negative PTS=0；
+- Forwarder send failures=0；
+- 清理后保留 50 条 pressure evidence，50/50 raw clip playable；
+- 压测脚本 drain 条件已从 `bundles >= keep_evidence` 修正为
+  `playable_bundles >= keep_evidence`，避免 total bundle 够但 playable 不够时提前 cleanup；
+- 本轮完整报告见
+  `docs/midterm_downstream_evidence_performance_2026-06-28.md`。
+
+仍需继续跟踪：最终 50 条中 26 条 annotation complete、24 条
+`missing_frame_metadata`。这已不是之前“全部 missing”的失败模式，但 annotation
+完整率仍是 Phase E 后续优化项。
 
 ## 2. 当前结论
 
@@ -143,8 +159,8 @@ retention。长期仍应再做成 8090 可配置项。
 | DONE（原 P1） | 证据物化仍是队列瓶颈 | 已修复默认值：`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=2`、`MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=180`、`MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=200` | 不再默认单并发串行物化；同时保留 timeout/backlog guardrail，避免无限堆积 | Phase E | 已由 `harness/tests/test_midterm_deployment_contract.py::test_midterm_media_worker_materialization_defaults_are_bounded` 固化；仍需用 30/60 路压测验证 p99 evidence lifecycle |
 | DONE（2026-06-28 review 新增） | clip-worker 处理已不存在 DB event/task 的 Redis pending 请求 | 已修复：缺失 event/task 的 record request 会记录 `clip_worker_acked_stale_request` 并 `XACK`；运行态验证旧 `primary_rtsp` pending 已清零 | 不再每 5 秒 reclaim 旧消息，CPU、Redis、PostgreSQL 空转和 runtime 诊断污染解除 | Phase E | 已由 `harness/tests/test_clip_worker_queue_safety.py::test_stale_pending_entry_without_db_target_is_acked_without_replay` 固化；运行态 `XPENDING security.record_requests clip-workers-midterm` 为 0 |
 | PARTIAL（2026-06-28 review 新增） | 抽样后 Savant `validate_seq_iq` 高频 WARN | 已修复压测误判：纯 sampling seq gap 进入 warning，叠加 send failure、queue/source 异常才进入 failure；容器内确认 `previous_frame_seq_id` 只读，不能安全重写 | 避免把预期抽样缺口误判为 60 路压测失败；但 Savant 日志源头降噪仍未彻底关闭 | Phase F | 已由 `harness/tests/test_midterm_pressure60_script.py` 固化 warning/failure 分类；后续仍需 Savant 日志等级、限频或协议层支持 |
-| P0（2026-06-28 review 新增，镜像层） | media-worker 运行容器缺 `ffmpeg` / `ffprobe` | Dockerfile 已安装 `ffmpeg`，但当前容器内 `which ffprobe` / `which ffmpeg` 为空 | 证据物化继续走 fallback probe / fallback scan，事件风暴下 playable bundle 生成可能继续落后 | Phase E / Deploy | 明确 rebuild 或加载正确镜像并 recreate；容器内 `which ffprobe`、`which ffmpeg` 有输出；复跑 50 个 5s/5s playable evidence 达标 |
-| PARTIAL（60 路复跑新增） | Evidence materialization 在事件风暴下跟不上 | 代码侧已处理扫描/retention/deadline：`MEDIA_SINK_SCAN_MAX_METADATA_FILES=20000`、metadata mtime 新优先、`FRAME_ANNOTATION_TTL_SECONDS=600`、`FRAME_ANNOTATION_REDIS_MAXLEN=200000`、`EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS=600`；3 FPS 失败报告中 1014 个事件/任务仍无 bundle | 事件能产生但证据无法稳定跟上，8090 可复核样本不足，生产上会表现为告警有了但证据缺失或延迟过大 | Phase E | 复跑保留随机 50 个事件/证据；p95/p99 evidence lifecycle 可解释；Replay job、annotation wait、ffmpeg materialization 均有分段耗时；50 个样本在 8090 可打开 |
+| DONE（2026-06-28 review 新增，镜像层） | media-worker 运行容器缺 `ffmpeg` / `ffprobe` | 当前容器内已确认 `/usr/bin/ffmpeg` 和 `/usr/bin/ffprobe` 存在；60 路 3 FPS 成功 run 中未出现非零 `imageio_ffmpeg_fallback_count` | 证据物化不再因缺二进制进入 imageio fallback 探测路径 | Phase E / Deploy | 容器内 `which ffprobe`、`which ffmpeg` 有输出；`pressure60_3fps_playabledrain_20260628T100531Z` 保留 50/50 playable evidence |
+| DONE / FOLLOW-UP（60 路复跑新增） | Evidence materialization 在事件风暴下跟不上 | 已处理 Redis 有界分页、admission budget、PostgreSQL 热路径索引、`generated_unverified` 降级语义和压测 drain 判定；`pressure60_3fps_playabledrain_20260628T100531Z` 达到 50/50 playable | 60 路 3 FPS 下可生成可播放证据；但 annotation 完整率仍需提高，最终 50 条中 26 complete、24 missing metadata | Phase E | 复跑已保留 50 条 playable evidence；后续验收应继续提高 annotation complete 比例并保留 p95/p99 evidence lifecycle 分段耗时 |
 | PARTIAL（60 路复跑新增） | 抽样拓扑下的输入稳定性验收口径不清 | 代码侧已处理：动态 source 默认 `restart_policy=no`、`EOS_ON_START=true`、停用/删除动态 source 使用 `rm -f`；同时撤回 source FPS env 同步，明确 source adapter full-rate 写 Replay、analysis-forwarder/Savant 负责抽样与推理速度控制。3 FPS 失败报告中 `validate_seq_iq=51804`，但该指标会被 forwarder 抽样天然放大 | 继续把 `validate_seq_iq` 当唯一 P0 会误判 forwarder 设计内丢分析帧；真正要看 source restart、forwarder send failure、effective FPS、Replay/video-file-sink metadata 和证据 bundle | Phase F | 压测报告包含 forwarder `seen/forwarded/dropped/send_failures`、source restart、Replay/video-file-sink metadata、bundle 成功率；`validate_seq_iq` 仅作为辅助日志 |
 | DONE（原 P1） | Frame annotation retention 对 60 路偏小 | 已提高默认值：`FRAME_ANNOTATION_REDIS_MAXLEN=200000`、`FRAME_ANNOTATION_TTL_SECONDS=600`，并同步 `EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS=600` | 60 路 3 FPS 下约 180 frame annotations/s，200000 长度约覆盖 18 分钟，先满足复跑验证窗口 | Phase E / 8090 | 已由部署契约固化；长期仍可再做 8090 可配置化 |
 | P1（2026-06-28 review 新增） | 陈旧 `materializing` evidence task 未终态化 | 仍有 1 条 2026-06-26 创建、deadline 已过的 active task，事件 payload 仍是 `media_status=materializing` / `clip_status=replay_job_created` | 虽然 runtime guard 可把过期 active task 视为 stale，但它会污染运行态判断，说明终态收敛还有漏网路径 | Phase E | deadline 已过的 active materialization 能自动收敛为 terminal/stale；runtime overview 不再把旧任务当活动证据 |

@@ -46,6 +46,7 @@ class Config:
     post_savant_allow_truncated_pre_window_proof: bool
     frame_annotation_stream: str
     frame_annotation_anchor_lookback_count: int
+    frame_annotation_anchor_page_count: int
     frame_annotation_anchor_wall_clock_slack_s: float
     frame_annotation_anchor_pts_tolerance_s: float
     evidence_materialization_policy: str
@@ -205,6 +206,9 @@ def load_config() -> Config:
         ),
         frame_annotation_anchor_lookback_count=int(
             os.getenv("FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT", "20000")
+        ),
+        frame_annotation_anchor_page_count=int(
+            os.getenv("FRAME_ANNOTATION_ANCHOR_PAGE_COUNT", "2000")
         ),
         frame_annotation_anchor_wall_clock_slack_s=float(
             os.getenv("FRAME_ANNOTATION_ANCHOR_WALL_CLOCK_SLACK_S", "1.0")

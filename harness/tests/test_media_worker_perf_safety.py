@@ -208,6 +208,120 @@ def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> 
     assert summary["messages_filtered_source"] == 1
     assert summary["messages_filtered_camera"] == 1
     assert summary["messages_retained"] == 1
+    assert summary["pages_read"] == 1
+    assert summary["entries_scanned_total"] == 4
+    assert summary["stop_reason"] == "range_exhausted"
+
+
+def test_frame_cache_reader_paginates_bounded_range_until_source_anchor() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    event_ms = 1781226000000
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def xrevrange(
+            self,
+            name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            self.calls.append({"name": name, "max": max, "min": min, "count": count})
+            if len(self.calls) == 1:
+                return [
+                    (
+                        f"{event_ms + 19000}-0",
+                        {"data": json.dumps(_frame_annotation("wrong-source-1", source_id="source-2"))},
+                    ),
+                    (
+                        f"{event_ms + 18000}-0",
+                        {"data": json.dumps(_frame_annotation("wrong-source-2", source_id="source-3"))},
+                    ),
+                    (
+                        f"{event_ms + 17000}-0",
+                        {"data": json.dumps(_frame_annotation("wrong-source-3", source_id="source-4"))},
+                    ),
+                ]
+            return [
+                (
+                    f"{event_ms + 6000}-0",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                "post-frame",
+                                frame_pts=105_000_000_000,
+                                timestamp_ms=event_ms + 6000,
+                            )
+                        )
+                    },
+                ),
+                (
+                    f"{event_ms}-0",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                "anchor-frame",
+                                frame_pts=100_000_000_000,
+                                timestamp_ms=event_ms,
+                            )
+                        )
+                    },
+                ),
+                (
+                    f"{event_ms - 6000}-0",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                "pre-frame",
+                                frame_pts=95_000_000_000,
+                                timestamp_ms=event_ms - 6000,
+                            )
+                        )
+                    },
+                ),
+            ]
+
+    redis = FakeRedis()
+    messages, summary = writer._read_frame_annotations(
+        redis_client=redis,
+        config={
+            "stream_name": "security.frame_annotations",
+            "range_count": 3,
+            "max_scan": 9,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "anchor-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {
+                "runtime_epoch_id": CURRENT_EPOCH,
+                "stream_session_id": "session-1",
+            },
+        },
+    )
+
+    assert [message["frame_uuid"] for message in messages] == [
+        "pre-frame",
+        "anchor-frame",
+        "post-frame",
+    ]
+    assert len(redis.calls) == 2
+    assert redis.calls[0]["count"] == 3
+    assert str(redis.calls[1]["max"]).startswith("(")
+    assert summary["pages_read"] == 2
+    assert summary["entries_scanned_total"] == 6
+    assert summary["messages_filtered_source"] == 3
+    assert summary["messages_retained"] == 3
+    assert summary["anchor_found"] is True
+    assert summary["stop_reason"] == "event_window_satisfied"
 
 
 def test_frame_cache_reader_event_window_mode_retains_same_source_session_mismatch() -> None:
@@ -388,6 +502,26 @@ def test_frame_cache_window_uses_effective_start_for_truncated_pre_window() -> N
     assert window["pre_window_truncated_seconds"] == 4.25
 
 
+def test_missing_frame_metadata_keeps_playable_clip_degraded_not_failed() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    summary = {
+        "production_ready": False,
+        "annotation_status": "missing_frame_metadata",
+        "duration_guard_status": "passed",
+        "duration_guard_failed": False,
+        "epoch_guard_status": "passed",
+        "epoch_guard_failed": False,
+        "sink_window_guard_status": "passed",
+        "sink_window_guard_failed": False,
+    }
+
+    clip_status = worker._summary_clip_status(summary)
+
+    assert clip_status == "generated_unverified"
+    assert worker._evidence_state_for_clip_status(clip_status) == "materialized"
+
+
 def _frame_annotation(
     frame_uuid: str,
     *,
@@ -396,6 +530,7 @@ def _frame_annotation(
     source_id: str = "source-1",
     camera_id: str = "camera-1",
     frame_pts: int = 100_000_000_000,
+    timestamp_ms: int = 1781197200000,
 ) -> dict[str, object]:
     return {
         "message_type": "frame_annotation",
@@ -403,7 +538,7 @@ def _frame_annotation(
         "camera_id": camera_id,
         "frame_uuid": frame_uuid,
         "frame_pts": frame_pts,
-        "timestamp_ms": 1781197200000,
+        "timestamp_ms": timestamp_ms,
         "runtime_epoch_id": runtime_epoch_id,
         "stream_session_id": stream_session_id,
         "objects": [],

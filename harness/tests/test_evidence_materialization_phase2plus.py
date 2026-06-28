@@ -73,6 +73,7 @@ def _clip_config(**overrides: Any):
         "post_savant_allow_truncated_pre_window_proof": True,
         "frame_annotation_stream": "security.frame_annotations",
         "frame_annotation_anchor_lookback_count": 100,
+        "frame_annotation_anchor_page_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,
         "frame_annotation_anchor_pts_tolerance_s": 1.0,
         "evidence_materialization_policy": "priority",
@@ -124,6 +125,172 @@ def test_manifest_first_initial_status_and_ttl_metadata(monkeypatch) -> None:
     assert ttl["replay_ttl_seconds"] == 300
     assert ttl["frame_annotation_ttl_seconds"] == 120
     assert ttl["materialization_deadline_at"] == ttl["annotation_deadline_at"]
+
+
+def test_event_worker_evidence_admission_limits_active_pending_by_source(
+    monkeypatch,
+) -> None:
+    _activate(EVENT_WORKER_DIR)
+    from app import repository
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.params: dict[str, Any] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, _sql: str, params: dict[str, Any]) -> None:
+            self.params = params
+
+        def fetchone(self) -> tuple[int]:
+            if self.params.get("source_id") == "source-1":
+                return (2,)
+            return (0,)
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "10")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "2")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "")
+
+    decision = repository._evidence_admission_decision(
+        FakeConn(),
+        {"event_type": "intrusion"},
+        initial_status="materialization_pending",
+        source_id="source-1",
+        event_type="intrusion",
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "admission_source_active_limit_reached"
+    assert decision["scope"] == "source"
+    assert decision["observed"] == 2
+
+
+def test_event_worker_evidence_admission_source_limit_allows_watchlist_priority(
+    monkeypatch,
+) -> None:
+    _activate(EVENT_WORKER_DIR)
+    from app import repository
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.params: dict[str, Any] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, _sql: str, params: dict[str, Any]) -> None:
+            self.params = params
+
+        def fetchone(self) -> tuple[int]:
+            if self.params.get("source_id") == "source-1":
+                return (2,)
+            return (0,)
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "10")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "2")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "")
+
+    decision = repository._evidence_admission_decision(
+        FakeConn(),
+        {"event_type": "watchlist_hit"},
+        initial_status="materialization_pending",
+        source_id="source-1",
+        event_type="watchlist_hit",
+    )
+
+    assert decision["allowed"] is True
+    assert decision["high_priority"] is True
+    assert decision["source_limit_bypassed_for_priority"] is True
+    assert decision["source_observed"] == 2
+
+
+def test_event_worker_evidence_admission_event_type_budget_prioritizes_watchlist(
+    monkeypatch,
+) -> None:
+    _activate(EVENT_WORKER_DIR)
+    from app import repository
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.params: dict[str, Any] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, _sql: str, params: dict[str, Any]) -> None:
+            self.params = params
+
+        def fetchone(self) -> tuple[int]:
+            if self.params.get("event_type") == "intrusion":
+                return (40,)
+            return (0,)
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+
+        def cursor(self):
+            return self.cursor_obj
+
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "0")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "0")
+    monkeypatch.setenv(
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE",
+        "intrusion:40",
+    )
+
+    intrusion = repository._evidence_admission_decision(
+        FakeConn(),
+        {"event_type": "intrusion"},
+        initial_status="materialization_pending",
+        source_id="source-1",
+        event_type="intrusion",
+    )
+    watchlist = repository._evidence_admission_decision(
+        FakeConn(),
+        {"event_type": "watchlist_hit"},
+        initial_status="materialization_pending",
+        source_id="source-1",
+        event_type="watchlist_hit",
+    )
+
+    assert intrusion["allowed"] is False
+    assert intrusion["reason"] == "admission_event_type_active_limit_reached"
+    assert watchlist["allowed"] is True
+    assert watchlist["reason"] == "admitted"
+
+
+def test_event_worker_create_task_persists_admission_decision() -> None:
+    source = (EVENT_WORKER_DIR / "app" / "repository.py").read_text(encoding="utf-8")
+
+    assert "admission_decision = _evidence_admission_decision" in source
+    assert "evidence_admission_skipped:" in source
+    assert '"admission_decision": admission_decision' in source
+    assert '"materialization_skipped"' in source
 
 
 def test_clip_gate_enforces_per_shard_source_quota_and_degrade() -> None:

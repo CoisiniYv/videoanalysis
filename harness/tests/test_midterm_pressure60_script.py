@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -206,3 +207,46 @@ def test_evidence_policy_groups_assign_ten_cameras_per_group() -> None:
     assert module.evidence_policy_for_index(cfg, 10)["post_seconds"] == 3
     assert module.evidence_policy_for_index(cfg, 59)["pressure_group_index"] == 5
     assert module.evidence_policy_for_index(cfg, 59)["pressure_total_seconds"] == 30
+
+
+def test_wait_for_drain_waits_for_playable_evidence(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, keep_evidence=50, drain_s=60)
+    summaries = [
+        {
+            "cameras": 60,
+            "events": 100,
+            "tasks": 100,
+            "bundles": 59,
+            "playable_bundles": 42,
+            "task_statuses": [],
+            "event_types": [],
+        },
+        {
+            "cameras": 60,
+            "events": 100,
+            "tasks": 100,
+            "bundles": 65,
+            "playable_bundles": 50,
+            "task_statuses": [],
+            "event_types": [],
+        },
+    ]
+    observed: list[dict] = []
+
+    def fake_db_summary_connect(_cfg):
+        summary = summaries.pop(0)
+        observed.append(summary)
+        return summary
+
+    now = [1_000.0]
+
+    monkeypatch.setattr(module, "db_summary_connect", fake_db_summary_connect)
+    monkeypatch.setattr(module.time, "time", lambda: now[0])
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+    module.wait_for_drain(cfg)
+
+    assert [item["playable_bundles"] for item in observed] == [42, 50]
+    snapshots = json.loads((tmp_path / "drain_snapshots.json").read_text())
+    assert len(snapshots) == 2

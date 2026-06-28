@@ -303,6 +303,100 @@ def _redis_stream_id_ms(value: object) -> int | None:
     return _int_or_none(text)
 
 
+def _redis_stream_id_from_ms(value: int | None, *, upper: bool = False) -> str:
+    if value is None:
+        return "+" if upper else "-"
+    suffix = "999999" if upper else "0"
+    return f"{max(0, int(value))}-{suffix}"
+
+
+def _exclusive_older_stream_id(stream_id: object) -> str:
+    value = _decode_text(stream_id).strip()
+    if not value:
+        return value
+    if value.startswith("("):
+        return value
+    return f"({value}"
+
+
+def _pts_epoch_ms_or_none(value: object) -> int | None:
+    pts = _int_or_none(value)
+    if pts is None:
+        return None
+    ms = int(pts // 1_000_000)
+    return ms if ms >= _MIN_EPOCH_MS else None
+
+
+def _frame_annotation_stream_bounds(
+    *,
+    requested_start_pts: int | None,
+    requested_end_pts: int | None,
+    min_start_stream_ms: int | None = None,
+    min_post_stream_ms: int | None = None,
+    slack_seconds: float = 1.0,
+) -> tuple[str, str]:
+    slack_ms = int(max(float(slack_seconds), 0.0) * 1000)
+    lower_candidates: list[int] = []
+    upper_candidates: list[int] = []
+    start_ms = _pts_epoch_ms_or_none(requested_start_pts)
+    end_ms = _pts_epoch_ms_or_none(requested_end_pts)
+    if start_ms is not None:
+        lower_candidates.append(start_ms - slack_ms)
+    if end_ms is not None:
+        upper_candidates.append(end_ms + max(slack_ms, 15_000))
+    if min_start_stream_ms is not None:
+        lower_candidates.append(int(min_start_stream_ms) - slack_ms)
+    if min_post_stream_ms is not None:
+        fallback_post_window_ms = 60_000 if end_ms is None else 0
+        upper_candidates.append(
+            int(min_post_stream_ms) + max(slack_ms, fallback_post_window_ms)
+        )
+    range_min = _redis_stream_id_from_ms(min(lower_candidates), upper=False) if lower_candidates else "-"
+    range_max = _redis_stream_id_from_ms(max(upper_candidates), upper=True) if upper_candidates else "+"
+    return range_min, range_max
+
+
+def _iter_frame_annotation_entries(
+    redis_client: Redis,
+    *,
+    stream_name: str,
+    max_scan: int,
+    page_count: int,
+    range_min: str = "-",
+    range_max: str = "+",
+):
+    scanned = 0
+    next_max = range_max or "+"
+    limit = max(1, int(max_scan))
+    page_size = max(1, min(int(page_count), limit))
+    while scanned < limit:
+        remaining = limit - scanned
+        count = min(page_size, remaining)
+        entries = list(
+            redis_client.xrevrange(
+                stream_name,
+                max=next_max,
+                min=range_min or "-",
+                count=count,
+            )
+        )
+        if not entries:
+            break
+        last_stream_id: object | None = None
+        for entry in entries[:count]:
+            scanned += 1
+            last_stream_id = entry[0] if isinstance(entry, (list, tuple)) and entry else None
+            yield entry
+            if scanned >= limit:
+                break
+        if len(entries) < count or not last_stream_id:
+            break
+        previous_max = next_max
+        next_max = _exclusive_older_stream_id(last_stream_id)
+        if not next_max or next_max == previous_max:
+            break
+
+
 def _fields_to_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {_decode_text(k): _decode_maybe_text(v) for k, v in value.items()}
@@ -403,6 +497,12 @@ def _find_cross_session_post_window_candidate(
     max_post_pts_delta_ns = int(
         max(cfg.frame_annotation_anchor_pts_tolerance_s, 0.0) * PTS_TIME_BASE
     )
+    range_min, range_max = _frame_annotation_stream_bounds(
+        requested_start_pts=None,
+        requested_end_pts=requested_end_pts,
+        min_post_stream_ms=min_post_stream_ms,
+        slack_seconds=cfg.frame_annotation_anchor_wall_clock_slack_s,
+    )
     anchor = _find_frame_annotation_anchor(
         redis_client,
         stream_name=cfg.frame_annotation_stream,
@@ -410,6 +510,9 @@ def _find_cross_session_post_window_candidate(
         camera_id=camera_id,
         target_pts=requested_end_pts,
         count=cfg.frame_annotation_anchor_lookback_count,
+        page_count=cfg.frame_annotation_anchor_page_count,
+        range_min=range_min,
+        range_max=range_max,
         direction="at_or_after",
         min_stream_ms=min_post_stream_ms,
         max_pts_delta_ns=max_post_pts_delta_ns,
@@ -472,11 +575,21 @@ def _post_savant_frame_proof_diagnostics(
     )
     min_anchor_frame_uuid_ms = _uuid7_timestamp_ms(str(req.get("frame_uuid") or ""))
     try:
-        entries = redis_client.xrevrange(
-            cfg.frame_annotation_stream,
-            max="+",
-            min="-",
-            count=max(1, int(cfg.frame_annotation_anchor_lookback_count)),
+        range_min, range_max = _frame_annotation_stream_bounds(
+            requested_start_pts=requested_start_pts,
+            requested_end_pts=requested_end_pts,
+            min_post_stream_ms=min_anchor_stream_ms,
+            slack_seconds=cfg.frame_annotation_anchor_wall_clock_slack_s,
+        )
+        entries = list(
+            _iter_frame_annotation_entries(
+                redis_client,
+                stream_name=cfg.frame_annotation_stream,
+                max_scan=max(1, int(cfg.frame_annotation_anchor_lookback_count)),
+                page_count=max(1, int(cfg.frame_annotation_anchor_page_count)),
+                range_min=range_min,
+                range_max=range_max,
+            )
         )
     except Exception as exc:
         diagnostics["frame_annotation_lookup_error"] = str(exc)
@@ -524,6 +637,9 @@ def _post_savant_frame_proof_diagnostics(
             requested_start_pts=int(requested_start_pts),
             event_frame_pts=int(event_frame_pts),
             count=cfg.frame_annotation_anchor_lookback_count,
+            page_count=cfg.frame_annotation_anchor_page_count,
+            range_min=range_min,
+            range_max=range_max,
             min_stream_ms=min_start_stream_ms,
             max_keyframe_pts_delta_ns=int(
                 max(float(cfg.keyframe_lookup_window_s), 0.0) * PTS_TIME_BASE
@@ -594,6 +710,9 @@ def _find_frame_annotation_anchor(
     camera_id: str,
     target_pts: int,
     count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
     direction: str = "at_or_after",
     min_stream_ms: int | None = None,
     max_pts_delta_ns: int | None = None,
@@ -602,14 +721,15 @@ def _find_frame_annotation_anchor(
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
 ) -> FrameAnnotationAnchor | None:
-    entries = redis_client.xrevrange(
-        stream_name,
-        max="+",
-        min="-",
-        count=max(1, int(count)),
-    )
     candidates: list[FrameAnnotationAnchor] = []
-    for entry in entries:
+    for entry in _iter_frame_annotation_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+    ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
         stream_id = _decode_text(entry[0])
@@ -716,6 +836,9 @@ def _find_anchor_keyframe_pts(
     camera_id: str,
     anchor_keyframe_uuid: str,
     count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
 ) -> int | None:
@@ -727,6 +850,9 @@ def _find_anchor_keyframe_pts(
         camera_id=camera_id,
         anchor_keyframe_uuid=anchor_keyframe_uuid,
         count=count,
+        page_count=page_count,
+        range_min=range_min,
+        range_max=range_max,
         runtime_epoch_id=runtime_epoch_id,
         stream_session_id=stream_session_id,
     )
@@ -741,20 +867,24 @@ def _find_anchor_keyframe_pts_match(
     camera_id: str,
     anchor_keyframe_uuid: str,
     count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
 ) -> tuple[int, int] | None:
     """Return ``(match_rank, pts)`` for the exact Replay keyframe UUID."""
     if not anchor_keyframe_uuid:
         return None
-    entries = redis_client.xrevrange(
-        stream_name,
-        max="+",
-        min="-",
-        count=max(1, int(count)),
-    )
     candidates: list[tuple[int, int]] = []
-    for entry in entries:
+    for entry in _iter_frame_annotation_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+    ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
         message = _message_from_frame_annotation_fields(entry[1])
@@ -800,18 +930,22 @@ def _anchor_keyframe_uuid_is_proven_keyframe(
     camera_id: str,
     anchor_keyframe_uuid: str,
     count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
 ) -> bool:
     if not anchor_keyframe_uuid:
         return False
-    entries = redis_client.xrevrange(
-        stream_name,
-        max="+",
-        min="-",
-        count=max(1, int(count)),
-    )
-    for entry in entries:
+    for entry in _iter_frame_annotation_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+    ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
         message = _message_from_frame_annotation_fields(entry[1])
@@ -1344,6 +1478,9 @@ def _derive_start_window_frame_from_keyframe_reference(
     camera_id: str,
     requested_start_pts: int,
     count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
     min_stream_ms: int | None = None,
     max_pts_delta_ns: int | None = None,
     max_keyframe_pts_delta_ns: int | None = None,
@@ -1358,14 +1495,15 @@ def _derive_start_window_frame_from_keyframe_reference(
     proof is recorded for coverage/crop diagnostics only; it never replaces the
     event/record_request ``anchor_keyframe_uuid``.
     """
-    entries = redis_client.xrevrange(
-        stream_name,
-        max="+",
-        min="-",
-        count=max(1, int(count)),
-    )
     candidates: list[FrameAnnotationAnchor] = []
-    for entry in entries:
+    for entry in _iter_frame_annotation_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+    ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
         stream_id = _decode_text(entry[0])
@@ -1445,6 +1583,9 @@ def _derive_truncated_start_window_frame(
     requested_start_pts: int,
     event_frame_pts: int,
     count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
     min_stream_ms: int | None = None,
     max_keyframe_pts_delta_ns: int | None = None,
     min_frame_uuid_ms: int | None = None,
@@ -1452,14 +1593,15 @@ def _derive_truncated_start_window_frame(
     stream_session_id: str = "",
 ) -> FrameAnnotationAnchor | None:
     """Find the earliest current-session decodable point before the event."""
-    entries = redis_client.xrevrange(
-        stream_name,
-        max="+",
-        min="-",
-        count=max(1, int(count)),
-    )
     candidates: list[FrameAnnotationAnchor] = []
-    for entry in entries:
+    for entry in _iter_frame_annotation_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+    ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
         stream_id = _decode_text(entry[0])
@@ -1547,6 +1689,9 @@ def _find_replay_frame_domain_proofs(
     requested_start_pts: int,
     requested_end_pts: int,
     count: int,
+    page_count: int | None = None,
+    range_min: str | None = None,
+    range_max: str | None = None,
     min_start_stream_ms: int | None = None,
     min_post_stream_ms: int | None = None,
     max_start_pts_delta_ns: int | None = None,
@@ -1560,6 +1705,13 @@ def _find_replay_frame_domain_proofs(
     allow_truncated_pre_window: bool = False,
     event_frame_pts: int | None = None,
 ) -> ReplayFrameDomainProofs | None:
+    if range_min is None or range_max is None:
+        range_min, range_max = _frame_annotation_stream_bounds(
+            requested_start_pts=requested_start_pts,
+            requested_end_pts=requested_end_pts,
+            min_start_stream_ms=min_start_stream_ms,
+            min_post_stream_ms=min_post_stream_ms,
+        )
     post_window_frame = _find_frame_annotation_anchor(
         redis_client,
         stream_name=stream_name,
@@ -1567,6 +1719,9 @@ def _find_replay_frame_domain_proofs(
         camera_id=camera_id,
         target_pts=requested_end_pts,
         count=count,
+        page_count=page_count,
+        range_min=range_min,
+        range_max=range_max,
         direction="at_or_after",
         min_stream_ms=min_post_stream_ms,
         max_pts_delta_ns=max_post_pts_delta_ns,
@@ -1582,6 +1737,9 @@ def _find_replay_frame_domain_proofs(
             camera_id=camera_id,
             target_pts=requested_end_pts,
             count=count,
+            page_count=page_count,
+            range_min=range_min,
+            range_max=range_max,
             direction="at_or_after",
             min_stream_ms=min_post_stream_ms,
             max_pts_delta_ns=max_post_pts_delta_ns,
@@ -1603,6 +1761,9 @@ def _find_replay_frame_domain_proofs(
         camera_id=camera_id,
         target_pts=requested_start_pts,
         count=count,
+        page_count=page_count,
+        range_min=range_min,
+        range_max=range_max,
         direction="at_or_before",
         min_stream_ms=min_start_stream_ms,
         max_pts_delta_ns=max_start_pts_delta_ns,
@@ -1619,6 +1780,9 @@ def _find_replay_frame_domain_proofs(
             camera_id=camera_id,
             requested_start_pts=requested_start_pts,
             count=count,
+            page_count=page_count,
+            range_min=range_min,
+            range_max=range_max,
             min_stream_ms=min_start_stream_ms,
             max_pts_delta_ns=max_start_pts_delta_ns,
             max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
@@ -1637,6 +1801,9 @@ def _find_replay_frame_domain_proofs(
             requested_start_pts=requested_start_pts,
             event_frame_pts=event_frame_pts,
             count=count,
+            page_count=page_count,
+            range_min=range_min,
+            range_max=range_max,
             min_stream_ms=min_start_stream_ms,
             max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
             min_frame_uuid_ms=min_start_frame_uuid_ms,
@@ -1996,6 +2163,13 @@ def _prepare_post_savant_replay_request(
     wait_started_at = time.monotonic()
     wait_deadline_at = wait_started_at + wait_budget_s if wait_budget_s > 0.0 else None
     last_error = f"{POST_SAVANT_MISSING_FRAME_TIMELINE_ERROR} source_id={source_id}"
+    range_min, range_max = _frame_annotation_stream_bounds(
+        requested_start_pts=requested_start_pts,
+        requested_end_pts=requested_end_pts,
+        min_start_stream_ms=min_start_keyframe_stream_ms,
+        min_post_stream_ms=min_anchor_stream_ms,
+        slack_seconds=cfg.frame_annotation_anchor_wall_clock_slack_s,
+    )
     for attempt in range(attempts):
         proofs = _find_replay_frame_domain_proofs(
             redis_client,
@@ -2005,6 +2179,9 @@ def _prepare_post_savant_replay_request(
             requested_start_pts=requested_start_pts,
             requested_end_pts=requested_end_pts,
             count=cfg.frame_annotation_anchor_lookback_count,
+            page_count=cfg.frame_annotation_anchor_page_count,
+            range_min=range_min,
+            range_max=range_max,
             min_start_stream_ms=min_start_keyframe_stream_ms,
             min_post_stream_ms=min_anchor_stream_ms,
             max_start_pts_delta_ns=(
@@ -2077,6 +2254,9 @@ def _prepare_post_savant_replay_request(
                     camera_id=str(camera_id or source_id),
                     anchor_keyframe_uuid=candidate_uuid_text,
                     count=cfg.frame_annotation_anchor_lookback_count,
+                    page_count=cfg.frame_annotation_anchor_page_count,
+                    range_min=range_min,
+                    range_max=range_max,
                     runtime_epoch_id=runtime_epoch_id,
                     stream_session_id=stream_session_id,
                 )
@@ -2107,6 +2287,9 @@ def _prepare_post_savant_replay_request(
                     camera_id=str(camera_id or source_id),
                     anchor_keyframe_uuid=candidate_uuid_text,
                     count=cfg.frame_annotation_anchor_lookback_count,
+                    page_count=cfg.frame_annotation_anchor_page_count,
+                    range_min=range_min,
+                    range_max=range_max,
                     runtime_epoch_id=runtime_epoch_id,
                     stream_session_id=stream_session_id,
                 )

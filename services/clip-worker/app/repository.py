@@ -50,7 +50,7 @@ _STATUS_TO_EVIDENCE_STATE = {
     "generated": "materialized",
     "ready": "materialized",
     "generated_corrupt": "materialization_failed",
-    "generated_unverified": "materialization_failed",
+    "generated_unverified": "materialized",
     "duration_guard_failed": "materialization_failed",
     "generated_annotation_failed": "materialization_failed",
     "skipped_by_poc_limit": "materialization_failed",

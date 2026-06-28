@@ -423,7 +423,7 @@ def test_replay_first_topology_is_preserved() -> None:
     )
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"
-    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-2}"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"
     ] == "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-180}"
@@ -432,7 +432,7 @@ def test_replay_first_topology_is_preserved() -> None:
     ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-200}"
     assert services["clip-worker"]["environment"][
         "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"
-    ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-2}"
+    ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-4}"
     assert services["clip-worker"]["environment"][
         "EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"
     ] == "${EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED:-true}"
@@ -758,19 +758,30 @@ def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
         "${CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS:-12}"
     )
     assert clip_env["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == (
-        "${CLIP_WORKER_MAX_CONCURRENT_JOBS:-4}"
+        "${CLIP_WORKER_MAX_CONCURRENT_JOBS:-8}"
     )
     assert clip_env["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == (
         "${POST_SAVANT_FRAME_PROOF_ATTEMPTS:-1}"
+    )
+    assert clip_env["POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S"] == (
+        "${POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S:-3}"
+    )
+    assert clip_env["POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S"] == (
+        "${POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S:-0.5}"
+    )
+    assert clip_env["FRAME_ANNOTATION_ANCHOR_PAGE_COUNT"] == (
+        "${FRAME_ANNOTATION_ANCHOR_PAGE_COUNT:-2000}"
     )
     assert env_file["CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS"] == "5000"
     assert env_file["CLIP_WORKER_PENDING_CLAIM_COUNT"] == "10"
     assert env_file["CLIP_WORKER_PENDING_CLAIM_INTERVAL_S"] == "5"
     assert env_file["CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS"] == "12"
-    assert env_file["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "4"
+    assert env_file["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "8"
     assert env_file["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == "1"
     assert env_file["POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S"] == "3"
     assert env_file["POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S"] == "0.5"
+    assert env_file["FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT"] == "20000"
+    assert env_file["FRAME_ANNOTATION_ANCHOR_PAGE_COUNT"] == "2000"
 
 
 def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
@@ -778,11 +789,11 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     env_file = _env()
     media_env = compose["services"]["media-worker"]["environment"]
 
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "2"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "4"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == (
-        "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-2}"
+        "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == (
         "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-180}"
@@ -831,7 +842,7 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_SINK_SCAN_MAX_METADATA_FILES"] == "20000"
     assert env_file["MEDIA_PROBE_TIMEOUT_S"] == "30"
     assert env_file["MEDIA_DECODE_TIMEOUT_S"] == "120"
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "2"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "4"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["EVIDENCE_MATERIALIZATION_POLICY"] == "priority"
@@ -839,7 +850,8 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["EVIDENCE_REPLAY_TTL_SECONDS"] == "300"
     assert env_file["EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"] == "600"
     assert env_file["EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"] == "true"
-    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"] == "2"
+    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY"] == "8"
+    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"] == "4"
     assert env_file["EVIDENCE_FINAL_ROOT_MAX_BYTES"] == "0"
     assert env_file["REPLAY_SINK_OUTPUT_MAX_BYTES"] == "0"
     assert env_file["RAW_CLIP_SANITIZE_MODE"] == "auto"

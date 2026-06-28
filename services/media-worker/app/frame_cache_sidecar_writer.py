@@ -686,6 +686,78 @@ def _stream_session_filter_mode(config: dict[str, Any]) -> str:
     return "strict"
 
 
+def _exclusive_older_stream_id(stream_id: Any) -> str:
+    value = str(stream_id or "").strip()
+    if not value:
+        return value
+    if value.startswith("("):
+        return value
+    return f"({value}"
+
+
+def _message_matches_source_observation(
+    message: dict[str, Any],
+    source_observation_id: str,
+) -> bool:
+    objects = message.get("objects")
+    if not isinstance(objects, list):
+        return False
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get("source_observation_id") or "") == source_observation_id:
+            return True
+    return False
+
+
+def _frame_annotation_anchor_found(
+    messages: list[dict[str, Any]],
+    *,
+    anchor: dict[str, Any] | None,
+) -> bool:
+    if not anchor:
+        return False
+    source_observation_id = str(anchor.get("source_observation_id") or "").strip()
+    frame_uuid = str(anchor.get("frame_uuid") or "").strip()
+    frame_pts = _int_or_none(anchor.get("frame_pts"))
+    for message in messages:
+        if source_observation_id and _message_matches_source_observation(
+            message, source_observation_id
+        ):
+            return True
+        if frame_uuid and str(message.get("frame_uuid") or "") == frame_uuid:
+            return True
+        if frame_pts is not None and _int_or_none(message.get("frame_pts")) == frame_pts:
+            return True
+    return False
+
+
+def _frame_annotation_window_satisfied(
+    messages: list[dict[str, Any]],
+    *,
+    anchor: dict[str, Any] | None,
+    event_ms: int | None,
+    pre_seconds: float,
+    post_seconds: float,
+) -> bool:
+    if not _frame_annotation_anchor_found(messages, anchor=anchor):
+        return False
+    if event_ms is None:
+        return True
+    timestamps = [
+        _int_or_none(message.get("timestamp_ms"))
+        for message in messages
+    ]
+    timestamps = [value for value in timestamps if value is not None]
+    if not timestamps:
+        return True
+    lower = int(event_ms - max(float(pre_seconds), 0.0) * 1000.0)
+    upper = int(event_ms + max(float(post_seconds), 0.0) * 1000.0)
+    has_pre = min(timestamps) <= lower or pre_seconds <= 0
+    has_post = max(timestamps) >= upper or post_seconds <= 0
+    return has_pre and has_post
+
+
 def _read_frame_annotations(
     *,
     redis_client: Any | None,
@@ -711,8 +783,19 @@ def _read_frame_annotations(
     else:
         count = min(lookback_count, max_scan)
     client = redis_client or RedisStreamReadClient(str(config.get("redis_url") or "redis://redis:6379/0"))
-    entries = client.xrevrange(stream_name, max=range_max, min=range_min, count=count)
     messages: list[dict[str, Any]] = []
+    event_ms = (
+        _event_wall_clock_epoch_ms(event)
+        or (anchor or {}).get("event_ts_ms")
+        or (anchor or {}).get("timestamp_ms")
+    )
+    event_ms = _int_or_none(event_ms)
+    pre_seconds = _float_or_none(config.get("pre_seconds"))
+    if pre_seconds is None:
+        pre_seconds = 5.0
+    post_seconds = _float_or_none(config.get("post_seconds"))
+    if post_seconds is None:
+        post_seconds = 5.0
     summary = {
         "stream_name": stream_name,
         "read_mode": read_mode,
@@ -745,42 +828,94 @@ def _read_frame_annotations(
         "range_count": range_count,
         "read_count": count,
         "max_scan": max_scan,
+        "pages_read": 0,
+        "page_size": count,
+        "entries_scanned_total": 0,
+        "anchor_found": False,
+        "stop_reason": "not_started",
         "consumer_group_used": False,
         "stream_mutated": False,
         "ack_used": False,
         "xdel_used": False,
     }
-    for index, entry in enumerate(list(entries)[:count]):
-        summary["entries_scanned"] += 1
-        stream_id, fields = _split_entry(entry)
-        message = _message_from_fields(fields)
-        if not isinstance(message, dict):
-            summary["messages_invalid"] += 1
-            continue
-        if (
-            runtime_epoch_id
-            and str(message.get("runtime_epoch_id") or "").strip() != runtime_epoch_id
-        ):
-            summary["messages_filtered_runtime_epoch"] += 1
-            continue
-        if source_id is not None and message.get("source_id") != source_id:
-            summary["messages_filtered_source"] += 1
-            continue
-        if camera_id is not None and message.get("camera_id") != camera_id:
-            summary["messages_filtered_camera"] += 1
-            continue
-        if stream_session_id_set and (
-            str(message.get("stream_session_id") or "").strip()
-            not in stream_session_id_set
-        ):
-            if stream_session_filter_strict:
-                summary["messages_filtered_stream_session"] += 1
+
+    next_max = range_max
+    stop_reason = "max_scan_reached"
+    stream_order = 0
+    while summary["entries_scanned_total"] < max_scan:
+        page_remaining = max_scan - int(summary["entries_scanned_total"])
+        page_count = min(max(count, 1), page_remaining)
+        entries = list(
+            client.xrevrange(
+                stream_name,
+                max=next_max,
+                min=range_min,
+                count=page_count,
+            )
+        )
+        if not entries:
+            stop_reason = "range_exhausted"
+            break
+        summary["pages_read"] += 1
+        last_stream_id: Any | None = None
+        for entry in entries[:page_count]:
+            summary["entries_scanned"] += 1
+            summary["entries_scanned_total"] += 1
+            stream_id, fields = _split_entry(entry)
+            last_stream_id = stream_id
+            message = _message_from_fields(fields)
+            if not isinstance(message, dict):
+                summary["messages_invalid"] += 1
                 continue
-            summary["messages_stream_session_mismatch"] += 1
-        normalized = copy.deepcopy(message)
-        normalized["_stream_id"] = stream_id
-        normalized["_stream_order"] = index
-        messages.append(normalized)
+            if (
+                runtime_epoch_id
+                and str(message.get("runtime_epoch_id") or "").strip() != runtime_epoch_id
+            ):
+                summary["messages_filtered_runtime_epoch"] += 1
+                continue
+            if source_id is not None and message.get("source_id") != source_id:
+                summary["messages_filtered_source"] += 1
+                continue
+            if camera_id is not None and message.get("camera_id") != camera_id:
+                summary["messages_filtered_camera"] += 1
+                continue
+            if stream_session_id_set and (
+                str(message.get("stream_session_id") or "").strip()
+                not in stream_session_id_set
+            ):
+                if stream_session_filter_strict:
+                    summary["messages_filtered_stream_session"] += 1
+                    continue
+                summary["messages_stream_session_mismatch"] += 1
+            normalized = copy.deepcopy(message)
+            normalized["_stream_id"] = stream_id
+            normalized["_stream_order"] = stream_order
+            stream_order += 1
+            messages.append(normalized)
+
+        summary["anchor_found"] = _frame_annotation_anchor_found(messages, anchor=anchor)
+        if read_mode != "bounded_stream_id_range":
+            stop_reason = "single_page"
+            break
+        if _frame_annotation_window_satisfied(
+            messages,
+            anchor=anchor,
+            event_ms=event_ms,
+            pre_seconds=pre_seconds,
+            post_seconds=post_seconds,
+        ):
+            stop_reason = "event_window_satisfied"
+            break
+        if len(entries) < page_count:
+            stop_reason = "range_exhausted"
+            break
+        previous_max = next_max
+        next_max = _exclusive_older_stream_id(last_stream_id)
+        if not next_max or next_max == previous_max:
+            stop_reason = "range_cursor_stalled"
+            break
+    summary["stop_reason"] = stop_reason
+    summary["anchor_found"] = _frame_annotation_anchor_found(messages, anchor=anchor)
 
     messages.sort(key=lambda item: (item.get("frame_pts") is None, int(item.get("frame_pts") or 0), str(item.get("frame_uuid") or "")))
     pts_values = [int(item["frame_pts"]) for item in messages if isinstance(item.get("frame_pts"), int)]

@@ -156,7 +156,7 @@ _STATUS_TO_EVIDENCE_STATE = {
     "generated": "materialized",
     "ready": "materialized",
     "generated_corrupt": "materialization_failed",
-    "generated_unverified": "materialization_failed",
+    "generated_unverified": "materialized",
     "duration_guard_failed": "materialization_failed",
     "generated_annotation_failed": "materialization_failed",
     "skipped_by_poc_limit": "materialization_failed",
@@ -183,6 +183,26 @@ def _int_env(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _int_map_env(name: str, default: str = "") -> dict[str, int]:
+    raw = os.getenv(name, default)
+    result: dict[str, int] = {}
+    for part in raw.split(","):
+        item = part.strip()
+        if not item or ":" not in item:
+            continue
+        key, value = item.split(":", 1)
+        key = key.strip()
+        if not key:
+            continue
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            continue
+        if parsed > 0:
+            result[key] = parsed
+    return result
 
 
 def _is_high_priority_event(event: Dict[str, Any]) -> bool:
@@ -218,6 +238,117 @@ def _materialization_priority(event: Dict[str, Any]) -> int:
     if text == "low":
         return 10
     return 50
+
+
+ACTIVE_ADMISSION_STATUSES = (
+    "pending",
+    "materialization_pending",
+    "waiting_proof",
+    "queued",
+    "replay_job_created",
+    "replaying",
+    "materializing",
+    "finalizing",
+    "materialization_deferred",
+)
+
+
+def _active_admission_count(
+    conn: psycopg.Connection,
+    *,
+    source_id: str = "",
+    event_type: str = "",
+) -> int:
+    clauses = ["status = ANY(%(statuses)s)"]
+    params: dict[str, Any] = {"statuses": list(ACTIVE_ADMISSION_STATUSES)}
+    if source_id:
+        clauses.append("source_id = %(source_id)s")
+        params["source_id"] = source_id
+    if event_type:
+        clauses.append("event_type = %(event_type)s")
+        params["event_type"] = event_type
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM evidence_tasks
+            WHERE {' AND '.join(clauses)}
+            """,
+            params,
+        )
+        row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _evidence_admission_decision(
+    conn: psycopg.Connection,
+    event: Dict[str, Any],
+    *,
+    initial_status: str,
+    source_id: str,
+    event_type: str,
+) -> dict[str, Any]:
+    if initial_status not in {"pending", "materialization_pending"}:
+        return {"allowed": True, "reason": "not_recordable_initial_status"}
+    global_limit = _int_env("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", 0)
+    source_limit = _int_env("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", 0)
+    event_type_limits = _int_map_env("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE")
+    high_priority = _is_high_priority_event(event)
+    source_limit_observed: int | None = None
+    try:
+        if global_limit > 0:
+            observed = _active_admission_count(conn)
+            if observed >= global_limit:
+                return {
+                    "allowed": False,
+                    "reason": "admission_global_active_limit_reached",
+                    "scope": "global",
+                    "limit": global_limit,
+                    "observed": observed,
+                }
+        if source_limit > 0 and source_id:
+            observed = _active_admission_count(conn, source_id=source_id)
+            source_limit_observed = observed
+            if observed >= source_limit and not high_priority:
+                return {
+                    "allowed": False,
+                    "reason": "admission_source_active_limit_reached",
+                    "scope": "source",
+                    "source_id": source_id,
+                    "limit": source_limit,
+                    "observed": observed,
+                }
+        event_type_limit = event_type_limits.get(event_type, 0)
+        if event_type_limit > 0 and event_type:
+            observed = _active_admission_count(conn, event_type=event_type)
+            if observed >= event_type_limit:
+                return {
+                    "allowed": False,
+                    "reason": "admission_event_type_active_limit_reached",
+                    "scope": "event_type",
+                    "event_type": event_type,
+                    "limit": event_type_limit,
+                    "observed": observed,
+                }
+    except Exception as exc:
+        return {
+            "allowed": True,
+            "reason": "admission_check_failed_open",
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+    return {
+        "allowed": True,
+        "reason": "admitted",
+        "high_priority": high_priority,
+        "source_limit_bypassed_for_priority": bool(
+            high_priority
+            and source_limit > 0
+            and source_limit_observed is not None
+            and source_limit_observed >= source_limit
+        ),
+        "source_limit": source_limit,
+        "source_observed": source_limit_observed,
+    }
 
 
 def _event_datetime(event: Dict[str, Any]) -> datetime:
@@ -389,6 +520,19 @@ class EventRepository:
         materialization_policy = os.getenv("EVIDENCE_MATERIALIZATION_POLICY", "priority")
         priority = _materialization_priority(event)
         source_id = event.get("source_id", "")
+        event_type = event.get("event_type", "")
+        admission_decision = _evidence_admission_decision(
+            self._conn,
+            event,
+            initial_status=initial_status,
+            source_id=str(source_id or ""),
+            event_type=str(event_type or ""),
+        )
+        if not bool(admission_decision.get("allowed", True)):
+            initial_status = "materialization_skipped"
+            error_message = "evidence_admission_skipped:" + str(
+                admission_decision.get("reason") or "admission_denied"
+            )
 
         params = {
             "task_id": task_id,
@@ -396,7 +540,7 @@ class EventRepository:
             "source_event_id": event.get("source_event_id", ""),
             "camera_id": event.get("camera_id", ""),
             "source_id": source_id,
-            "event_type": event.get("event_type", ""),
+            "event_type": event_type,
             "event_ts_ms": int(
                 event.get("event_ts_ms") or event.get("start_ts_ms", 0)
             ),
@@ -423,6 +567,7 @@ class EventRepository:
                         "frame_annotation_ttl_seconds"
                     ],
                     "high_priority": _is_high_priority_event(event),
+                    "admission_decision": admission_decision,
                 },
                 ensure_ascii=False,
             ),
@@ -470,7 +615,11 @@ class EventRepository:
         # For pending tasks, the media-worker will update the status after
         # generating the bundle. Setting clip_status="pending" here would
         # block the record_request gate in _handle_event.
-        if initial_status in {"not_implemented", "manifest_ready"}:
+        if initial_status in {
+            "not_implemented",
+            "manifest_ready",
+            "materialization_skipped",
+        }:
             self.set_evidence_status(
                 event_id=event_id,
                 status=initial_status,
@@ -481,6 +630,7 @@ class EventRepository:
                     "priority": priority,
                     "replay_source_id": source_id,
                     "replay_window": replay_window,
+                    "admission_decision": admission_decision,
                 },
             )
         return task_id_out

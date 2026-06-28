@@ -913,7 +913,7 @@ def wait_for_drain(cfg: PressureConfig) -> None:
     while time.time() < deadline:
         summary = db_summary_connect(cfg)
         snapshots.append({"observed_at": datetime.now(timezone.utc).isoformat(), "summary": summary})
-        if summary["bundles"] >= cfg.keep_evidence:
+        if summary["playable_bundles"] >= cfg.keep_evidence:
             break
         time.sleep(10)
     write_json(cfg.artifact_dir / "drain_snapshots.json", snapshots)

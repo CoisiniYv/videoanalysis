@@ -66,6 +66,7 @@ def _clip_config(**overrides: Any):
         "post_savant_allow_truncated_pre_window_proof": True,
         "frame_annotation_stream": "security.frame_annotations",
         "frame_annotation_anchor_lookback_count": 100,
+        "frame_annotation_anchor_page_count": 100,
         "frame_annotation_anchor_wall_clock_slack_s": 1.0,
         "frame_annotation_anchor_pts_tolerance_s": 1.0,
         "evidence_materialization_policy": "priority",
@@ -139,10 +140,42 @@ class _FakeRedis:
         self.acked.append(msg_id.decode("utf-8") if isinstance(msg_id, bytes) else msg_id)
         return 1
 
+    @staticmethod
+    def _stream_id_tuple(value: object) -> tuple[int, int]:
+        text = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        text = text[1:] if text.startswith("(") else text
+        first, _, second = text.partition("-")
+        try:
+            ms = int(first)
+        except ValueError:
+            ms = 0
+        try:
+            seq = int(second or 0)
+        except ValueError:
+            seq = 0
+        return ms, seq
+
+    @classmethod
+    def _lte_max(cls, stream_id: str, value: object) -> bool:
+        text = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        if text in {"", "+"}:
+            return True
+        exclusive = text.startswith("(")
+        target = cls._stream_id_tuple(text)
+        current = cls._stream_id_tuple(stream_id)
+        return current < target if exclusive else current <= target
+
+    @classmethod
+    def _gte_min(cls, stream_id: str, value: object) -> bool:
+        text = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        if text in {"", "-"}:
+            return True
+        return cls._stream_id_tuple(stream_id) >= cls._stream_id_tuple(text)
+
     def xrevrange(self, *_args, **_kwargs):
         self.proof_reads += 1
         entries = []
-        for index, message in enumerate(reversed(self.frame_annotations)):
+        for index, message in enumerate(self.frame_annotations):
             stream_id = str(message.get("_stream_id", f"{index + 1}-0"))
             entries.append(
                 (
@@ -150,7 +183,17 @@ class _FakeRedis:
                     {b"data": json.dumps(message).encode("utf-8")},
                 )
             )
-        return entries
+        entries.sort(key=lambda item: self._stream_id_tuple(item[0]), reverse=True)
+        max_value = _kwargs.get("max", "+")
+        min_value = _kwargs.get("min", "-")
+        count = _kwargs.get("count")
+        filtered = [
+            entry
+            for entry in entries
+            if self._lte_max(entry[0].decode("utf-8"), max_value)
+            and self._gte_min(entry[0].decode("utf-8"), min_value)
+        ]
+        return filtered[: int(count)] if count is not None else filtered
 
     def xpending(self, *_args, **_kwargs):
         return {"pending": len(self.pending_requests)}
@@ -279,6 +322,113 @@ def _frame_annotation(
     if keyframe_pts is not None:
         message["keyframe_pts"] = keyframe_pts
     return message
+
+
+def test_generated_unverified_maps_to_materialized_state() -> None:
+    _activate()
+    from app.repository import evidence_state_for_status
+
+    assert evidence_state_for_status("generated_unverified") == "materialized"
+
+
+def test_post_savant_frame_proof_pages_bounded_event_window(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    base_ms = 1_780_000_000_000
+    start_pts = base_ms * 1_000_000
+    event_pts = (base_ms + 5_000) * 1_000_000
+    end_pts = (base_ms + 10_000) * 1_000_000
+    request = {
+        **_request("020"),
+        "replay_source_kind": "post_savant",
+        "event_ts_ms": base_ms + 5_000,
+        "frame_uuid": "event-frame",
+        "event_frame_uuid": "event-frame",
+        "event_frame_pts": event_pts,
+        "requested_start_pts": start_pts,
+        "requested_end_pts": end_pts,
+        "stream_session_id": "session-1",
+        "runtime_epoch_id": "epoch-1",
+        "keyframe_uuid": "start-keyframe",
+        "keyframe_pts": start_pts,
+    }
+    redis_client = _FakeRedis(
+        [request],
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="wrong-source-newest-1",
+                frame_pts=(base_ms + 10_900) * 1_000_000,
+                stream_id=f"{base_ms + 10900}-0",
+                source_id="source-other",
+                camera_id="camera-other",
+                keyframe_uuid="wrong-source-newest-1",
+                keyframe_pts=(base_ms + 10_900) * 1_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="wrong-source-newest-2",
+                frame_pts=(base_ms + 10_800) * 1_000_000,
+                stream_id=f"{base_ms + 10800}-0",
+                source_id="source-other",
+                camera_id="camera-other",
+                keyframe_uuid="wrong-source-newest-2",
+                keyframe_pts=(base_ms + 10_800) * 1_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="post-window-frame",
+                frame_pts=end_pts,
+                # Redis stream insertion can lag the frame PTS by several seconds
+                # under 60-source pressure; the proof range must include it.
+                stream_id=f"{base_ms + 22000}-0",
+                keyframe_uuid="post-keyframe",
+                keyframe_pts=(base_ms + 9_900) * 1_000_000,
+            ),
+            _frame_annotation(
+                frame_uuid="event-frame",
+                frame_pts=event_pts,
+                stream_id=f"{base_ms + 5000}-0",
+                keyframe_uuid="start-keyframe",
+                keyframe_pts=start_pts,
+            ),
+            _frame_annotation(
+                frame_uuid="start-keyframe",
+                frame_pts=start_pts,
+                stream_id=f"{base_ms}-0",
+                keyframe_uuid="start-keyframe",
+                keyframe_pts=start_pts,
+            ),
+        ],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(
+            max_concurrent_jobs=0,
+            pending_claim_count=0,
+            frame_annotation_anchor_lookback_count=10,
+            frame_annotation_anchor_page_count=2,
+            post_savant_frame_proof_wait_budget_s=0.0,
+            post_savant_frame_proof_poll_interval_s=0.0,
+        ),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.proof_reads > 1
+    assert redis_client.acked == ["1-0"]
+    assert updates[-1]["status"] == "replay_job_created"
+    labels = _FakeReplay.instances[-1].last_job_request["labels"]
+    assert labels["post_window_frame_uuid"] == "post-window-frame"
+    assert labels["start_window_frame_uuid"] == "start-keyframe"
 
 
 def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None:

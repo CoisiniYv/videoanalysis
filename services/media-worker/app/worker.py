@@ -515,13 +515,12 @@ def _is_already_ready(pg_conn: psycopg.Connection, event_id: str) -> bool:
 
 
 def _evidence_state_for_clip_status(clip_status: str) -> str:
-    if clip_status in {"ready", "generated"}:
+    if clip_status in {"ready", "generated", "generated_unverified"}:
         return "materialized"
     if clip_status in {
         BUNDLE_STATUS_DURATION_GUARD_FAILED,
         BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED,
         "generated_corrupt",
-        "generated_unverified",
         "failed",
     }:
         return "materialization_failed"
@@ -1673,7 +1672,7 @@ def _summary_clip_status(summary: dict) -> str:
     if summary.get("production_ready") is True:
         return "ready"
     status = str(summary.get("annotation_status") or "")
-    if status in {"complete", "partial"}:
+    if status in {"complete", "partial", "missing_frame_metadata"}:
         return "generated_unverified"
     return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
 
