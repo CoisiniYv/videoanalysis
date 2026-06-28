@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +291,69 @@ def test_media_worker_frame_cache_sidecar_filters_runtime_epoch() -> None:
     assert summary["messages_filtered_runtime_epoch"] == 2
 
 
+def test_media_worker_frame_cache_reader_uses_event_ts_when_created_at_lags() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    event_ts_ms = 1_782_641_303_618
+    delayed_created_at_ms = event_ts_ms + 30_000
+    entry_stream_id = f"{event_ts_ms + 5_980}-0"
+
+    class FakeRedis:
+        calls: list[tuple[str, str]] = []
+
+        def xrevrange(
+            self,
+            _name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            self.calls.append((max, min))
+            _ = count
+            if _stream_id_contains(entry_stream_id, min=min, max=max):
+                return [
+                    (
+                        entry_stream_id,
+                        {"data": json.dumps(_frame_annotation("event-frame", CURRENT_EPOCH))},
+                    )
+                ]
+            return []
+
+    fake_redis = FakeRedis()
+    messages, summary = writer._read_frame_annotations(
+        redis_client=fake_redis,
+        config={
+            "stream_name": "security.frame_annotations",
+            "pre_seconds": 3,
+            "post_seconds": 3,
+            "range_count": 10,
+            "max_scan": 10,
+        },
+        event={
+            "event_type": "watchlist_hit",
+            "source_id": "primary_rtsp",
+            "camera_id": "primary_rtsp",
+            "event_ts_ms": event_ts_ms,
+            "created_at": datetime.fromtimestamp(
+                delayed_created_at_ms / 1000.0,
+                tz=timezone.utc,
+            ),
+            "frame_uuid": "event-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {
+                "runtime_epoch_id": CURRENT_EPOCH,
+                "match": {"source_observation_id": "face:primary_rtsp:1:100000"},
+                "media": {"frame_uuid": "event-frame", "frame_pts": 100_000_000_000},
+            },
+        },
+    )
+
+    assert [message["frame_uuid"] for message in messages] == ["event-frame"]
+    assert summary["anchor_found"] is True
+    assert summary["range_min"] == f"{event_ts_ms - 18_000}-0"
+    assert summary["range_max"] == f"{event_ts_ms + 18_000}-999999"
+    assert fake_redis.calls[0] == (summary["range_max"], summary["range_min"])
+
+
 def test_media_worker_uses_active_epoch_root(monkeypatch, tmp_path: Path) -> None:
     worker = _activate("media-worker", "app.worker")
     root = tmp_path / "replay-sink-output" / "midterm"
@@ -543,6 +607,13 @@ def _frame_annotation(frame_uuid: str, runtime_epoch_id: str) -> dict[str, Any]:
         "frame_uuid": frame_uuid,
         "runtime_epoch_id": runtime_epoch_id,
     }
+
+
+def _stream_id_contains(stream_id: str, *, min: str, max: str) -> bool:
+    value = int(stream_id.split("-", 1)[0])
+    lower = 0 if min == "-" else int(min.split("-", 1)[0])
+    upper = value if max == "+" else int(max.split("-", 1)[0])
+    return lower <= value <= upper
 
 
 def _write_valid_duration_crop(**kwargs: object) -> dict[str, Any]:

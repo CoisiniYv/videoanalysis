@@ -2127,6 +2127,11 @@ def _event_created_at_candidate_items(event: dict[str, Any]) -> list[tuple[str, 
     media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
     request = media.get("replay_job_request") if isinstance(media.get("replay_job_request"), dict) else {}
     return [
+        ("event.event_ts_ms", event.get("event_ts_ms")),
+        ("event.start_ts_ms", event.get("start_ts_ms")),
+        ("payload.event_ts_ms", payload.get("event_ts_ms")),
+        ("payload.start_ts_ms", payload.get("start_ts_ms")),
+        ("payload.media.event_ts_ms", media.get("event_ts_ms")),
         ("event.created_at", event.get("created_at")),
         ("payload.created_at", payload.get("created_at")),
         ("payload.media.created_at", media.get("created_at")),
