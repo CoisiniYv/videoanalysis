@@ -426,6 +426,57 @@ def test_runtime_apply_blocks_before_docker_when_evidence_active(monkeypatch, tm
     assert not (tmp_path / "sources.generated.yml").exists()
 
 
+def test_evidence_guard_ignores_terminal_materialization_before_clip_pending(
+    monkeypatch,
+) -> None:
+    class FakeCursor:
+        sql = ""
+        params: dict[str, Any] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, params: dict[str, Any]) -> None:
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    class FakeConn:
+        cursor_obj = FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self) -> FakeCursor:
+            return self.cursor_obj
+
+    fake_conn = FakeConn()
+    monkeypatch.setattr(runtime_apply.psycopg, "connect", lambda *_args, **_kwargs: fake_conn)
+
+    snapshot = runtime_apply._active_evidence_tasks_snapshot(
+        limit=12,
+        states=list(runtime_apply.RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES),
+        stale_after_s=900,
+    )
+
+    assert snapshot["active_count"] == 0
+    assert "terminal_evidence_state" in fake_conn.cursor_obj.sql
+    assert "WHEN terminal_evidence_state THEN NULL" in fake_conn.cursor_obj.sql
+    assert "FROM base" in fake_conn.cursor_obj.sql
+    assert "NOT terminal_evidence_state" in fake_conn.cursor_obj.sql
+    assert fake_conn.cursor_obj.params["terminal_states"] == list(
+        runtime_apply.RUNTIME_RESTART_TERMINAL_EVIDENCE_STATES
+    )
+
+
 def test_runtime_apply_force_records_evidence_guard_and_continues(
     monkeypatch,
     tmp_path: Path,

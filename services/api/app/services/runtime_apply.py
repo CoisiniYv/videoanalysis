@@ -73,6 +73,11 @@ RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES = (
     "materializing",
     "finalizing",
 )
+RUNTIME_RESTART_TERMINAL_EVIDENCE_STATES = (
+    "materialization_expired",
+    "materialization_failed",
+    "materialization_skipped",
+)
 DEFAULT_EVIDENCE_GUARD_LIMIT = 12
 DEFAULT_EVIDENCE_GUARD_STALE_AFTER_S = 900.0
 
@@ -764,7 +769,7 @@ def _active_evidence_tasks_snapshot(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                WITH candidates AS (
+                WITH base AS (
                     SELECT
                         et.task_id,
                         et.event_id::text AS event_id,
@@ -781,6 +786,12 @@ def _active_evidence_tasks_snapshot(
                         e.media_status,
                         e.payload->'media'->>'clip_status' AS event_clip_status,
                         (
+                            et.status = ANY(%(terminal_states)s::text[])
+                            OR et.materialization_status = ANY(%(terminal_states)s::text[])
+                            OR e.payload->'media'->>'evidence_state' = ANY(%(terminal_states)s::text[])
+                            OR e.media_status = ANY(%(terminal_states)s::text[])
+                        ) AS terminal_evidence_state,
+                        (
                             SELECT max(deadline_at)
                             FROM (
                                 VALUES
@@ -788,26 +799,37 @@ def _active_evidence_tasks_snapshot(
                                     (et.replay_deadline_at),
                                     (et.annotation_deadline_at)
                             ) AS deadlines(deadline_at)
-                        ) AS latest_deadline_at,
-                        CASE
-                            WHEN et.status = ANY(%(states)s::text[]) THEN et.status
-                            WHEN et.materialization_status = ANY(%(states)s::text[])
-                                THEN et.materialization_status
-                            WHEN e.payload->'media'->>'evidence_state' = ANY(%(states)s::text[])
-                                THEN e.payload->'media'->>'evidence_state'
-                            WHEN e.media_status = ANY(%(states)s::text[]) THEN e.media_status
-                            WHEN e.payload->'media'->>'clip_status' = ANY(%(states)s::text[])
-                                THEN e.payload->'media'->>'clip_status'
-                            ELSE NULL
-                        END AS blocking_state
+                        ) AS latest_deadline_at
                     FROM evidence_tasks et
                     LEFT JOIN events e ON e.id = et.event_id
+                ),
+                candidates AS (
+                    SELECT
+                        *,
+                        CASE
+                            WHEN terminal_evidence_state THEN NULL
+                            WHEN status = ANY(%(states)s::text[]) THEN status
+                            WHEN materialization_status = ANY(%(states)s::text[])
+                                THEN materialization_status
+                            WHEN event_evidence_state = ANY(%(states)s::text[])
+                                THEN event_evidence_state
+                            WHEN media_status = ANY(%(states)s::text[]) THEN media_status
+                            WHEN event_clip_status = ANY(%(states)s::text[])
+                                THEN event_clip_status
+                            ELSE NULL
+                        END AS blocking_state
+                    FROM base
                     WHERE
-                        et.status = ANY(%(states)s::text[])
-                        OR et.materialization_status = ANY(%(states)s::text[])
-                        OR e.payload->'media'->>'evidence_state' = ANY(%(states)s::text[])
-                        OR e.media_status = ANY(%(states)s::text[])
-                        OR e.payload->'media'->>'clip_status' = ANY(%(states)s::text[])
+                        status = ANY(%(states)s::text[])
+                        OR materialization_status = ANY(%(states)s::text[])
+                        OR (
+                            NOT terminal_evidence_state
+                            AND (
+                                event_evidence_state = ANY(%(states)s::text[])
+                                OR media_status = ANY(%(states)s::text[])
+                                OR event_clip_status = ANY(%(states)s::text[])
+                            )
+                        )
                 ),
                 marked AS (
                     SELECT
@@ -830,6 +852,7 @@ def _active_evidence_tasks_snapshot(
                 """,
                 {
                     "states": states,
+                    "terminal_states": list(RUNTIME_RESTART_TERMINAL_EVIDENCE_STATES),
                     "limit": bounded_limit,
                     "stale_after_s": stale_after_s,
                 },

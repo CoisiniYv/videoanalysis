@@ -64,6 +64,38 @@ retention。长期仍应再做成 8090 可配置项。
 
 这些修复只说明前置代码缺陷已处理，60 路 2 FPS / 3 FPS 是否通过仍以重新压测为准。
 
+2026-06-28 运行态 review 后，新增当前必须先处理的阻塞项：
+
+- `clip-worker` 正在反复 reclaim 一条已不存在 DB event/task 的
+  `security.record_requests` pending 消息，造成 CPU 空转和 evidence guard 诊断污染；
+- Savant 高频 `validate_seq_iq` 更像是 forwarder 抽样导致的 seq 缺口，而不是当前
+  queue / send failure 背压，需要做语义对齐或日志降噪；
+- media-worker 当前运行镜像仍缺 `ffmpeg` / `ffprobe`，源码 Dockerfile 已修但容器
+  不是新镜像，必须作为镜像层问题单独处理；
+- 仍有陈旧 `materializing` evidence task、frame annotation 常驻成本、observation
+  表增长和 `runtime/overview` disabled compose source 误报等后续清理项。
+
+因此下一轮复跑前，当前优先级调整为：先修 clip-worker stale pending，再处理
+`validate_seq_iq` 抽样语义 / 降噪，再单独确认 media-worker 镜像二进制，最后回到
+2 FPS / 60 路压测。
+
+2026-06-28 本轮已开始修复：
+
+- `clip-worker` 已新增 stale record request 保护：当 Redis 请求指向的
+  PostgreSQL `events` / `evidence_tasks` 都不存在时，直接记录
+  `clip_worker_acked_stale_request` 并 `XACK`，不再进入 Replay / proof 重试；
+- 运行态已 recreate `clip-worker`（无 rebuild），旧 `primary_rtsp`
+  pending 消息已被 ack，`XPENDING security.record_requests clip-workers-midterm`
+  已从 1 降为 0；
+- 压测脚本已调整 `validate_seq_iq` 验收语义：纯抽样导致的 seq gap 记录为
+  warning，只有同时出现 send failure、queue 积压、source 退出/重启、负 PTS
+  或 source 可见性失败时才作为 failure reason；
+- 容器内确认 `VideoFrame.previous_frame_seq_id` 是只读字段，当前不能安全在
+  analysis-forwarder 里重写 Savant seq，因此 Savant 日志源头降噪仍是后续项；
+- media-worker 当前运行容器和本地 `video-analytics-midterm-media-worker:latest`
+  镜像仍缺 `ffmpeg` / `ffprobe`。Dockerfile 已包含安装命令，但这必须通过
+  rebuild / 正确镜像加载 / recreate 单独修复，本轮没有默认 rebuild。
+
 ## 2. 当前结论
 
 ### 2.1 单 T4 60 路不能按当前 8 FPS 直接扩展
@@ -109,11 +141,18 @@ retention。长期仍应再做成 8090 可配置项。
 | DONE（原 P1） | Redis exporter 仍可能同步阻塞 Savant 热路径 | 已修复：`event_exporter`、`face_observation_exporter`、`person_observation_exporter`、`frame_annotation_exporter` 均使用 `AsyncRedisStreamWriter`；默认 `socket/connect timeout=50ms`，队列 `maxsize=1024` | Redis 抖动不再直接阻塞 Savant 热路径；队列满时按 drop-on-full 记录 | Phase C | 已由 `harness/tests/test_savant_redis_stream_writer.py` 和 `harness/tests/test_midterm_deployment_contract.py::test_midterm_savant_redis_exporters_are_async_and_bounded` 固化；仍需生产 Redis 故障注入压测 |
 | PARTIAL（原 P1） | 批量与并发参数未针对 T4 调优 | 已处理硬编码：`BATCH_SIZE`、`POSE_BATCH_SIZE`、`FACE_DETECTOR_BATCH_SIZE`、`FACE_EMBEDDING_BATCH_SIZE`、`MAX_PARALLEL_STREAMS`、`BATCHED_PUSH_TIMEOUT` 已进入 `infra/env/midterm.env` 与 compose env 默认 | 现场可以先按 env 覆盖调参，不再改 compose；但最终 T4 operating point 仍必须实测 | Phase D | 已由 `harness/tests/test_midterm_deployment_contract.py::test_midterm_runtime_calibration_is_explicit` 固化；真实 T4 batch / latency / GPU 利用率结论仍待压测 |
 | DONE（原 P1） | 证据物化仍是队列瓶颈 | 已修复默认值：`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=2`、`MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S=180`、`MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG=200` | 不再默认单并发串行物化；同时保留 timeout/backlog guardrail，避免无限堆积 | Phase E | 已由 `harness/tests/test_midterm_deployment_contract.py::test_midterm_media_worker_materialization_defaults_are_bounded` 固化；仍需用 30/60 路压测验证 p99 evidence lifecycle |
+| DONE（2026-06-28 review 新增） | clip-worker 处理已不存在 DB event/task 的 Redis pending 请求 | 已修复：缺失 event/task 的 record request 会记录 `clip_worker_acked_stale_request` 并 `XACK`；运行态验证旧 `primary_rtsp` pending 已清零 | 不再每 5 秒 reclaim 旧消息，CPU、Redis、PostgreSQL 空转和 runtime 诊断污染解除 | Phase E | 已由 `harness/tests/test_clip_worker_queue_safety.py::test_stale_pending_entry_without_db_target_is_acked_without_replay` 固化；运行态 `XPENDING security.record_requests clip-workers-midterm` 为 0 |
+| PARTIAL（2026-06-28 review 新增） | 抽样后 Savant `validate_seq_iq` 高频 WARN | 已修复压测误判：纯 sampling seq gap 进入 warning，叠加 send failure、queue/source 异常才进入 failure；容器内确认 `previous_frame_seq_id` 只读，不能安全重写 | 避免把预期抽样缺口误判为 60 路压测失败；但 Savant 日志源头降噪仍未彻底关闭 | Phase F | 已由 `harness/tests/test_midterm_pressure60_script.py` 固化 warning/failure 分类；后续仍需 Savant 日志等级、限频或协议层支持 |
+| P0（2026-06-28 review 新增，镜像层） | media-worker 运行容器缺 `ffmpeg` / `ffprobe` | Dockerfile 已安装 `ffmpeg`，但当前容器内 `which ffprobe` / `which ffmpeg` 为空 | 证据物化继续走 fallback probe / fallback scan，事件风暴下 playable bundle 生成可能继续落后 | Phase E / Deploy | 明确 rebuild 或加载正确镜像并 recreate；容器内 `which ffprobe`、`which ffmpeg` 有输出；复跑 50 个 5s/5s playable evidence 达标 |
 | PARTIAL（60 路复跑新增） | Evidence materialization 在事件风暴下跟不上 | 代码侧已处理扫描/retention/deadline：`MEDIA_SINK_SCAN_MAX_METADATA_FILES=20000`、metadata mtime 新优先、`FRAME_ANNOTATION_TTL_SECONDS=600`、`FRAME_ANNOTATION_REDIS_MAXLEN=200000`、`EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS=600`；3 FPS 失败报告中 1014 个事件/任务仍无 bundle | 事件能产生但证据无法稳定跟上，8090 可复核样本不足，生产上会表现为告警有了但证据缺失或延迟过大 | Phase E | 复跑保留随机 50 个事件/证据；p95/p99 evidence lifecycle 可解释；Replay job、annotation wait、ffmpeg materialization 均有分段耗时；50 个样本在 8090 可打开 |
 | PARTIAL（60 路复跑新增） | 抽样拓扑下的输入稳定性验收口径不清 | 代码侧已处理：动态 source 默认 `restart_policy=no`、`EOS_ON_START=true`、停用/删除动态 source 使用 `rm -f`；同时撤回 source FPS env 同步，明确 source adapter full-rate 写 Replay、analysis-forwarder/Savant 负责抽样与推理速度控制。3 FPS 失败报告中 `validate_seq_iq=51804`，但该指标会被 forwarder 抽样天然放大 | 继续把 `validate_seq_iq` 当唯一 P0 会误判 forwarder 设计内丢分析帧；真正要看 source restart、forwarder send failure、effective FPS、Replay/video-file-sink metadata 和证据 bundle | Phase F | 压测报告包含 forwarder `seen/forwarded/dropped/send_failures`、source restart、Replay/video-file-sink metadata、bundle 成功率；`validate_seq_iq` 仅作为辅助日志 |
 | DONE（原 P1） | Frame annotation retention 对 60 路偏小 | 已提高默认值：`FRAME_ANNOTATION_REDIS_MAXLEN=200000`、`FRAME_ANNOTATION_TTL_SECONDS=600`，并同步 `EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS=600` | 60 路 3 FPS 下约 180 frame annotations/s，200000 长度约覆盖 18 分钟，先满足复跑验证窗口 | Phase E / 8090 | 已由部署契约固化；长期仍可再做 8090 可配置化 |
+| P1（2026-06-28 review 新增） | 陈旧 `materializing` evidence task 未终态化 | 仍有 1 条 2026-06-26 创建、deadline 已过的 active task，事件 payload 仍是 `media_status=materializing` / `clip_status=replay_job_created` | 虽然 runtime guard 可把过期 active task 视为 stale，但它会污染运行态判断，说明终态收敛还有漏网路径 | Phase E | deadline 已过的 active materialization 能自动收敛为 terminal/stale；runtime overview 不再把旧任务当活动证据 |
+| P1（2026-06-28 review 新增） | Redis frame annotation 常驻成本偏高 | `security.frame_annotations` 约 200002 条、约 307MB | 60 路时如果按源放大 maxlen 会快速膨胀；如果全局固定，需要确认取证窗口是否仍足够 | Phase E / 8090 | retention 由实际 p99 evidence lifecycle 反推；Redis 内存、跨源查询和证据命中窗口都在阈值内 |
+| P1（2026-06-28 review 新增） | observation 表增长与 8090 查询成本需验证 | `person_bbox_observations`、`face_observations` 已约 1GB 级，部分事件索引读 tuple 很高 | 长跑后 8090 列表/证据查询可能成为数据库瓶颈 | Phase F | 对 8090 事件列表、证据详情、按 camera 查询补 `EXPLAIN ANALYZE`，必要时补索引或归档策略 |
 | P2 | Forwarder 公平性还没有真实 30/60 路证明 | 已有 30 路离线 forwarder 压测通过，但不是完整 RTSP + Savant + Replay + Redis 链路 | 全局队列在两路或离线合成时健康，不代表 30 路真实抖动下每路都公平 | Phase F | 每路 forwarded fps、drop ratio、last-forwarded age 都在阈值内 |
 | P2 | 观测指标仍需服务于长时间压测 | 现有性能观测规格已有方向，但生产压测还需要统一采集与留档 | 没有指标就无法区分 GPU 瓶颈、Redis 抖动、Replay/证据 IO、RTSP 输入问题 | Phase F | 每次压测产出固定 artifact，包含配置、指标、日志摘要、PASS/FAIL token |
+| P2（2026-06-28 review 新增） | `runtime/overview` 把 disabled compose source 报为 not running | `primary_rtsp` 当前 disabled，但 overview 仍可出现 `compose_source_not_running`；supervisor dynamic source convergence 实际 healthy | 会误导 8090 运行态排查，让用户以为未启用摄像头也是故障 | 8090 / Runtime Health | disabled compose source 从健康问题中排除或降级为 info；active source 健康仍严格告警 |
 
 ## 4. 分阶段执行建议
 

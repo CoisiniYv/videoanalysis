@@ -20,6 +20,7 @@ from app.replay_shards import ReplayShard, ReplayShardConfigError
 from app.repository import (
     expire_materialization_deadlines,
     get_evidence_diagnostics,
+    record_request_target_exists,
     terminal_evidence_state,
     update_clip_status,
 )
@@ -2649,6 +2650,26 @@ def run_worker(
                             request_id,
                             event_id,
                             terminal_state,
+                            msg_id,
+                        )
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
+
+                    target_exists = record_request_target_exists(
+                        pg_conn,
+                        event_id=event_id,
+                        source_event_id=str(source_event_id or ""),
+                    )
+                    if target_exists is False:
+                        logger.warning(
+                            "clip_worker_acked_stale_request request_id=%s "
+                            "event_id=%s source_event_id=%s msg_id=%s "
+                            "reason=missing_db_event_and_evidence_task",
+                            request_id,
+                            event_id,
+                            source_event_id,
                             msg_id,
                         )
                         seen_requests.add(request_id)

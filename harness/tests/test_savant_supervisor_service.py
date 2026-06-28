@@ -231,6 +231,106 @@ sources:
     assert "/containers/video-analytics-midterm-replay-service/restart?t=30" not in called_paths
 
 
+def test_supervisor_does_not_auto_repair_stopped_dynamic_source_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sources_path = tmp_path / "sources.generated.yml"
+    module_path = tmp_path / "cameras.midterm.yml"
+    sources_path.write_text(
+        """
+sources:
+  lab:
+    camera_id: lab
+    source_id: source_lab
+    camera_name: lab
+    uri: rtsp://lab/stream
+    enabled: true
+    adapter_type: gstreamer
+    zmq_endpoint: dealer+connect:tcp://replay-service:5555
+""".lstrip(),
+        encoding="utf-8",
+    )
+    module_path.write_text("cameras: {}\n", encoding="utf-8")
+    fake = FakeDockerClient()
+    fake.containers = [
+        {"Names": ["/video-analytics-source-source_lab"], "State": "exited"},
+    ]
+
+    def fail_converge(*, cameras):
+        raise AssertionError(f"stopped dynamic source should not auto converge: {cameras}")
+
+    monkeypatch.setattr(savant_supervisor_module, "converge_camera_sources", fail_converge)
+    supervisor = SavantSupervisor(
+        config=_config(
+            module_config_path=str(module_path),
+            sources_config_path=str(sources_path),
+            source_convergence_cooldown_s=0.0,
+            auto_repair_stopped_sources=False,
+        ),
+        docker_client=fake,  # type: ignore[arg-type]
+        redis_client=FakeRedis(last_generated_id="119000-0", now_s=120),
+    )
+
+    result = supervisor.run_once(now=1000.0)
+
+    assert result["action"] == "observe"
+    convergence = result["source_convergence"]
+    assert convergence["healthy"] is False
+    assert convergence["stopped_adapters"] == ["video-analytics-source-source_lab"]
+    assert convergence["auto_repair_required"] is False
+
+
+def test_supervisor_can_opt_in_to_auto_repair_stopped_dynamic_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sources_path = tmp_path / "sources.generated.yml"
+    module_path = tmp_path / "cameras.midterm.yml"
+    sources_path.write_text(
+        """
+sources:
+  lab:
+    camera_id: lab
+    source_id: source_lab
+    camera_name: lab
+    uri: rtsp://lab/stream
+    enabled: true
+    adapter_type: gstreamer
+    zmq_endpoint: dealer+connect:tcp://replay-service:5555
+""".lstrip(),
+        encoding="utf-8",
+    )
+    module_path.write_text("cameras: {}\n", encoding="utf-8")
+    fake = FakeDockerClient()
+    fake.containers = [
+        {"Names": ["/video-analytics-source-source_lab"], "State": "exited"},
+    ]
+    captured: dict[str, Any] = {}
+
+    def fake_converge(*, cameras):
+        captured["cameras"] = cameras
+        return {"runtime_action": "source_converge", "dynamic_sources_started": ["source_lab"]}
+
+    monkeypatch.setattr(savant_supervisor_module, "converge_camera_sources", fake_converge)
+    supervisor = SavantSupervisor(
+        config=_config(
+            module_config_path=str(module_path),
+            sources_config_path=str(sources_path),
+            source_convergence_cooldown_s=0.0,
+            auto_repair_stopped_sources=True,
+        ),
+        docker_client=fake,  # type: ignore[arg-type]
+        redis_client=FakeRedis(last_generated_id="119000-0", now_s=120),
+    )
+
+    result = supervisor.run_once(now=1000.0)
+
+    assert result["action"] == "source_converged"
+    assert result["source_convergence"]["auto_repair_required"] is True
+    assert captured["cameras"][0]["source_id"] == "source_lab"
+
+
 def test_supervisor_reports_desired_and_missing_dynamic_sources(tmp_path: Path) -> None:
     sources_path = tmp_path / "sources.generated.yml"
     module_path = tmp_path / "cameras.midterm.yml"

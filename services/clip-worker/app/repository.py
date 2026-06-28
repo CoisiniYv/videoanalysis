@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 
 import psycopg
 
@@ -246,6 +247,84 @@ def terminal_evidence_state(pg_conn: psycopg.Connection, event_id: str) -> str:
         if state in TERMINAL_EVIDENCE_STATES:
             return state
     return ""
+
+
+def record_request_target_exists(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    source_event_id: str = "",
+) -> bool | None:
+    """Return whether a record request still has a DB event/task target.
+
+    ``None`` means the target could not be checked safely, so callers should
+    keep the existing retry/failure behavior instead of acking the message.
+    """
+    event_id_text = str(event_id or "")
+    source_event_id_text = str(source_event_id or "")
+    if not event_id_text and not source_event_id_text:
+        return None
+    cursor_factory = getattr(pg_conn, "cursor", None)
+    if not callable(cursor_factory):
+        return None
+    event_id_uuid = None
+    if event_id_text:
+        try:
+            event_id_uuid = str(uuid.UUID(event_id_text))
+        except ValueError:
+            event_id_uuid = None
+    try:
+        with cursor_factory() as cur:
+            cur.execute(
+                """
+                SELECT
+                    EXISTS (
+                        SELECT 1
+                        FROM events
+                        WHERE (
+                            %(event_id_uuid)s::uuid IS NOT NULL
+                            AND id = %(event_id_uuid)s::uuid
+                        )
+                        OR (
+                            %(source_event_id)s::text <> ''
+                            AND source_event_id = %(source_event_id)s::text
+                        )
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM evidence_tasks
+                        WHERE (
+                            %(event_id_uuid)s::uuid IS NOT NULL
+                            AND event_id = %(event_id_uuid)s::uuid
+                        )
+                        OR (
+                            %(source_event_id)s::text <> ''
+                            AND source_event_id = %(source_event_id)s::text
+                        )
+                    ) AS target_exists
+                """,
+                {
+                    "event_id_uuid": event_id_uuid,
+                    "source_event_id": source_event_id_text,
+                },
+            )
+            row = cur.fetchone()
+    except Exception:
+        logger.exception(
+            "record_request_target_exists failed event_id=%s source_event_id=%s",
+            event_id_text,
+            source_event_id_text,
+        )
+        return None
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        value = row.get("target_exists")
+    else:
+        value = row[0] if row else None
+    if value is None:
+        return None
+    return bool(value)
 
 
 def update_clip_status(

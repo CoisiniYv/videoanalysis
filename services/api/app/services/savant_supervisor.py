@@ -71,6 +71,7 @@ class SavantSupervisorConfig:
     restart_wait_s: float = 1800.0
     restart_replay: bool = False
     source_convergence_cooldown_s: float = 60.0
+    auto_repair_stopped_sources: bool = False
 
 
 def config_from_env() -> SavantSupervisorConfig:
@@ -125,6 +126,10 @@ def config_from_env() -> SavantSupervisorConfig:
         source_convergence_cooldown_s=_env_float(
             "SAVANT_SUPERVISOR_SOURCE_CONVERGENCE_COOLDOWN_S",
             60.0,
+        ),
+        auto_repair_stopped_sources=_env_bool(
+            "SAVANT_SUPERVISOR_AUTO_REPAIR_STOPPED_SOURCES",
+            default=False,
         ),
     )
 
@@ -210,6 +215,7 @@ class SavantSupervisor:
             "annotation_age_s": annotation_age,
             "stall_check_enabled": self.config.stall_check_enabled,
             "restart_replay": self.config.restart_replay,
+            "auto_repair_stopped_sources": self.config.auto_repair_stopped_sources,
             "in_cooldown": in_cooldown,
             "source_convergence_in_cooldown": source_convergence_in_cooldown,
             "last_source_convergence": self._last_source_convergence,
@@ -245,7 +251,10 @@ class SavantSupervisor:
             self._starting_since = None
             convergence = self.source_convergence()
             status["source_convergence"] = convergence
-            if not convergence.get("healthy", True):
+            if (
+                not convergence.get("healthy", True)
+                and convergence.get("auto_repair_required", True)
+            ):
                 repair = self.converge_sources("source_adapter_convergence", now=now)
                 status.update(action="source_converged", source_convergence_repair=repair)
                 self._last_status = status
@@ -315,7 +324,9 @@ class SavantSupervisor:
                 self._restart_container(self.config.replay_container, timeout_s=30)
                 restarted.append(self.config.replay_container)
 
-            source_adapters = self.source_adapter_names()
+            source_adapters = self.source_adapter_names(
+                running_only=not self.config.auto_repair_stopped_sources
+            )
             for name in source_adapters:
                 self._restart_container(name, timeout_s=15)
                 restarted.append(name)
@@ -519,6 +530,11 @@ class SavantSupervisor:
             if item["container_name"].startswith(self.config.dynamic_source_prefix)
             and item["container_name"] not in expected_names
         ]
+        auto_repair_required = bool(
+            missing_adapters
+            or stale_adapters
+            or (self.config.auto_repair_stopped_sources and stopped_adapters)
+        )
         return {
             "sources_config_path": self.config.sources_config_path,
             "module_config_path": self.config.module_config_path,
@@ -529,6 +545,8 @@ class SavantSupervisor:
             "stale_adapters": stale_adapters,
             "actual_source_adapters": actual,
             "source_states": source_states,
+            "auto_repair_stopped_sources": self.config.auto_repair_stopped_sources,
+            "auto_repair_required": auto_repair_required,
             "healthy": not missing_adapters and not stopped_adapters and not stale_adapters,
         }
 

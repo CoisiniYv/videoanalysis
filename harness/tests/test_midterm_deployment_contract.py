@@ -514,6 +514,9 @@ def test_midterm_savant_supervisor_is_owned_by_api() -> None:
     assert env["SAVANT_SUPERVISOR_RESTART_REPLAY"] == (
         "${SAVANT_SUPERVISOR_RESTART_REPLAY:-false}"
     )
+    assert env["SAVANT_SUPERVISOR_AUTO_REPAIR_STOPPED_SOURCES"] == (
+        "${SAVANT_SUPERVISOR_AUTO_REPAIR_STOPPED_SOURCES:-false}"
+    )
     assert env["SAVANT_SUPERVISOR_STATUS_FILE"] == "/opt/savant/status.txt"
     assert env["SAVANT_SUPERVISOR_ANNOTATION_STREAM"] == "security.frame_annotations"
     assert env["SAVANT_SUPERVISOR_COMPOSE_SOURCE_CONTAINER"] == (

@@ -413,6 +413,44 @@ def test_terminal_pending_entry_is_acked_without_replay(monkeypatch) -> None:
     assert _FakeReplay.instances == []
 
 
+def test_stale_pending_entry_without_db_target_is_acked_without_replay(
+    monkeypatch,
+) -> None:
+    _activate()
+    import app.worker as worker
+
+    redis_client = _FakeRedis(
+        pending_requests=[("9-0", _request("023"), 8)],
+    )
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+    monkeypatch.setattr(worker, "terminal_evidence_state", lambda *_args: "")
+    monkeypatch.setattr(
+        worker,
+        "record_request_target_exists",
+        lambda *_args, **_kwargs: False,
+    )
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=0),
+        redis_client,
+        object(),
+    )
+
+    assert redis_client.claims == 1
+    assert redis_client.acked == ["9-0"]
+    assert updates == []
+    assert _FakeReplay.instances == []
+
+
 def test_replay_job_routes_to_source_shard(monkeypatch) -> None:
     _activate()
     import app.worker as worker
