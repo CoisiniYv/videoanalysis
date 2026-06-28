@@ -211,8 +211,39 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
     assert dynamic_source["restart_count_warning"] is True
     assert dynamic_source["restart_rate_per_min"] is None
     assert overview["health"]["ok"] is False
+    assert overview["health"]["source_count"] == 2
     assert "source_frame_age_high" in overview["health"]["issues"]
     assert "container_restart_count_high" in overview["health"]["issues"]
+
+
+def test_runtime_health_source_count_prefers_active_source_gauge() -> None:
+    metrics_text = """
+va_savant_sources_active 1
+va_savant_frames_seen_total{source_id="old_pressure_01"} 100
+va_savant_last_frame_age_seconds{source_id="old_pressure_01"} 9
+va_savant_frames_seen_total{source_id="old_pressure_02"} 120
+va_savant_last_frame_age_seconds{source_id="old_pressure_02"} 9
+va_savant_frames_seen_total{source_id="lab"} 20
+va_savant_last_frame_age_seconds{source_id="lab"} 0
+"""
+
+    overview = build_runtime_overview(
+        config=RuntimeOverviewConfig(metrics_url="http://savant-security:8080/metrics"),
+        docker_client=FakeDockerClient(compose_source_restart_count=0, dynamic_restart_count=0),
+        metrics_text=metrics_text,
+        forwarder_metrics_text=FORWARDER_METRICS_TEXT,
+        evidence_summary=EVIDENCE_SUMMARY,
+        supervisor_snapshot={
+            "enabled": True,
+            "savant_container_running": True,
+            "annotation_age_s": 2,
+        },
+    )
+
+    assert len(overview["metrics"]["sources"]) == 3
+    assert overview["metrics"]["sources_active"] == 1
+    assert overview["health"]["source_count"] == 1
+    assert "source_frame_age_high" not in overview["health"]["issues"]
 
 
 def test_runtime_overview_computes_short_window_restart_rate() -> None:

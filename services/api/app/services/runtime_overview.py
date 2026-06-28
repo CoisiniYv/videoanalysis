@@ -618,10 +618,11 @@ def summarize_runtime_health(
         issues.append("container_restart_count_high")
     if restart_rate_high:
         issues.append("container_restart_rate_high")
+    active_source_count = _float_or_none(metrics.get("sources_active"))
     return {
         "ok": not issues,
         "issues": issues,
-        "source_count": len(source_rows),
+        "source_count": int(active_source_count) if active_source_count is not None else len(source_rows),
         "stale_sources": stale_sources,
         "restart_count_high_containers": restart_count_high,
         "restart_rate_high_containers": restart_rate_high,

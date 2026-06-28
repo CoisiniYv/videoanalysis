@@ -166,3 +166,18 @@ compose override pin 到同一张 GPU 0，`savant-b` 也复用
 - 本轮仍是 `keep-evidence=0` 的前端推理入口压测，不代表证据链路也在同样拓扑下完成
   replay shard 取证。若后续要把双分支拓扑用于证据物化，需要同时让 clip-worker 使用
   对应 replay shard plan。
+
+## 8. 8090 拓扑管理路径复测
+
+后续已把双分支拓扑控制接入 8090 管理端，并通过 8090 API 路径复测 60 路 8fps：
+
+| 档位 | 拓扑入口 | Artifact | 状态 | max queue | send failures | forwarded/target | source restart / negative PTS |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 60 路 * 8fps | 8090 `topology-config/apply`，双分支同卡 GPU0 | `pressure60_8090topology_dual1gpu_batch4_8fps_20260628T160720Z` | passed | 0 | 0 | 0.965 | 0 / 0 |
+
+本次复测说明：旧的手工 compose override 双分支路径已经可以被 8090 拓扑管理路径替代。
+详细报告见 `docs/midterm_8090_topology_management_8fps_report_2026-06-29.md`。
+
+仍需保持边界清晰：该复测依旧是 `keep-evidence=0` 的前端推理入口压测，不是双分支
+证据链路闭环。双分支证据链路还需要 retained evidence、Replay shard、clip-worker
+routing、media-worker finalization 一起验收。

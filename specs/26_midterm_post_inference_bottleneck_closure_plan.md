@@ -26,6 +26,7 @@ This is not a Savant model-chain tuning spec. It must be coordinated with:
 - `specs/22_midterm_60_stream_readiness_risk_closure_plan.md`
 - `docs/midterm_post_inference_bottleneck_static_review_2026-06-28.md`
 - `docs/midterm_downstream_evidence_performance_2026-06-28.md`
+- `docs/midterm_frontend_inference_performance_2026-06-28.md`
 
 ## 2. Current Finding And Checkout Status
 
@@ -51,6 +52,12 @@ Already mitigated:
 - Admission/backpressure now keeps low-value events from overwhelming
   clip/media workers by using `materialization_skipped`; playable-but-missing
   annotation cases are surfaced as degraded instead of silent hard failure.
+- The 8090 runtime control surface now exposes performance and topology config
+  endpoints, including single runtime control, dual runtime stop, and
+  `topology-config` save/apply paths.
+- `clip-worker` already has replay shard routing support through
+  `REPLAY_SHARDS_CONFIG_PATH` / `REPLAY_SHARDS_JSON`; this spec must not treat
+  replay shard routing as absent code.
 
 Still open:
 
@@ -62,9 +69,26 @@ Still open:
   `XRANGE - +`;
 - media-worker materialization is still organized around one polling process and
   ffprobe/ffmpeg/decode finalization.
+- dual-branch topology has front-end inference evidence, but the same topology
+  has not yet been proven as a full replay/clip/media evidence-chain profile.
+- topology apply writes a replay shard file, while clip-worker reads
+  `REPLAY_SHARDS_JSON` or `REPLAY_SHARDS_CONFIG_PATH`; deployment must prove
+  those paths are wired to the same shard plan before dual evidence closure.
 - downstream observability still does not fully expose gallery query p95,
   record-request dedupe latency, PostgreSQL hot query-plan deltas, and media
   lifecycle p95/p99 in one report schema.
+
+Important boundary:
+
+- The 60-stream 3 FPS downstream evidence run proves the current downstream
+  evidence chain for that pressure profile.
+- The 60-stream 16/1 run proves high-input evidence-chain resilience, not
+  16 FPS inference throughput.
+- The same-GPU dual-branch 30+30 run proves front-end inference entry pressure
+  at 4 FPS and 8 FPS with `keep-evidence=0`; it does not close this
+  post-inference spec until replay shard routing, clip-worker materialization,
+  media finalization, and 8090 evidence queries are verified on the same
+  topology.
 
 ## 3. Coordination Gate
 
@@ -81,6 +105,8 @@ Required input for each implementation stage:
 - exact git SHA or dirty diff summary;
 - runtime epoch;
 - enabled sources and source count;
+- selected runtime topology: single, dual same GPU, or dual GPU;
+- replay shard plan path and source-to-shard assignment when topology is dual;
 - enabled rules and support matrix snapshot;
 - FPS, interval, batch, and `MAX_PARALLEL_STREAMS` settings;
 - forwarder, Savant, Redis, PostgreSQL, face-worker, event-worker, clip-worker,
@@ -100,7 +126,20 @@ Current status:
 - `PASS_POST_INFERENCE_SPEC0_PRESSURE_RESULT_CAPTURED` is satisfied for the
   2026-06-28 downstream evidence pressure result.
 - This is not the final closure token. The current checkout still has open code
-  work in Spec 1, Spec 2, Spec 3, and Spec 5.
+  work in Spec 1, Spec 2, Spec 3, Spec 5, and dual-topology evidence-chain
+  verification in Spec 6.
+
+Runtime topology note:
+
+- `services/api/app/routers/runtime.py` exposes `/api/v1/runtime/topology-config`
+  GET/PUT/apply endpoints.
+- `services/api/app/services/runtime_topology.py` can build single, automatic
+  dual, same-GPU dual, or dual-GPU plans; dual apply writes camera/module/source
+  config plus a replay shard plan, recreates branch Savant/forwarder containers,
+  starts branch Replay/video-sink containers, and starts source adapters.
+- The apply path is protected by the evidence restart guard, but it is still an
+  operator-visible disruptive action. Pressure artifacts must record whether it
+  was applied, skipped, or blocked.
 
 ## 4. Problem Breakdown
 
@@ -109,6 +148,7 @@ Current status:
 | face-worker | Single consumer does Postgres insert and synchronous watchlist/gallery pgvector search per face observation | Face observation rate and gallery size can linearly amplify latency after Redis |
 | event-worker | `RecordRequestPublisher.has_request()` scans the full `security.record_requests` stream | Every recordable event pays O(N) Redis/JSON cost as stream length grows |
 | media-worker | Materialization active count is a guard, not a finalizer worker pool | ffprobe/ffmpeg/decode work can dominate evidence lifecycle even if inference is healthy |
+| topology/replay shards | 8090 can apply dual-branch plans and clip-worker can route by replay shard, but the dual evidence-chain profile is not yet proven end-to-end | Front-end 8 FPS success can be misread as proof that evidence materialization is also production-ready |
 | annotation/evidence windows | Retention and admission are now partially sized, but still need lifecycle and memory-margin proof | Evidence can become playable but annotation-missing, or expire before materialization |
 | observability | Pressure reports need more downstream split metrics to rank bottlenecks | Without split metrics, fixes may only move backlog between queues |
 
@@ -150,6 +190,10 @@ Current checkout status:
   evidence playable, and 8090 evidence API could query retained bundles.
 - Follow-up run `pressure60_16p1_20260628T112109Z` is evidence-chain pressure,
   not proof of 60 streams at 16 FPS inference throughput.
+- Front-end runs in `docs/midterm_frontend_inference_performance_2026-06-28.md`
+  show that single 4090 dual branch 30+30 can pass 4 FPS and 8 FPS entry
+  pressure with `keep-evidence=0`; these runs do not replace downstream
+  evidence-chain closure.
 - Missing from the current report schema: face-worker gallery query p95,
   event-worker record-request dedupe latency, and PostgreSQL hot query-plan
   deltas.
@@ -408,6 +452,80 @@ Acceptance:
 PASS_POST_INFERENCE_SPEC5_DOWNSTREAM_OBSERVABILITY
 ```
 
+### Spec 6 - Dual Topology Evidence-Chain Closure
+
+Problem:
+
+The current checkout has two related but separate capabilities:
+
+- the 8090 control plane can save/apply dual topology plans;
+- clip-worker can route record requests through replay shard config.
+
+The pressure evidence so far is split: downstream evidence-chain closure was
+captured on the selected 60-stream 3 FPS profile, while same-GPU dual branch
+4 FPS/8 FPS runs were front-end inference entry tests with `keep-evidence=0`.
+That split is useful for diagnosis, but it is not sufficient to claim the dual
+topology is post-inference closed.
+
+Current code verification:
+
+- `services/api/app/services/runtime_topology.py` writes a replay shard document
+  for dual plans and starts branch Replay/video-sink containers.
+- `services/clip-worker/app/replay_shards.py` loads shard config from
+  `REPLAY_SHARDS_JSON` or `REPLAY_SHARDS_CONFIG_PATH`.
+- `services/clip-worker/app/worker.py` resolves the replay route per
+  `source_id` before starting Replay jobs and records shard diagnostics on
+  evidence tasks.
+- `infra/docker-compose.midterm.yml` exposes `REPLAY_SHARDS_CONFIG_PATH` to the
+  API and clip-worker with an empty default, while runtime topology writes to
+  `RUNTIME_TOPOLOGY_REPLAY_SHARDS_PATH` or its default path. A pressure run must
+  prove the active clip-worker used the intended file and source-to-shard
+  mapping.
+
+Modification direction:
+
+- Make topology pressure artifacts capture:
+  - saved topology config;
+  - effective topology mode;
+  - runtime epoch;
+  - topology replay shard output path;
+  - clip-worker replay shard input path;
+  - replay shard file content hash;
+  - branch container states;
+  - per-branch forwarder/Savant metrics;
+  - clip-worker replay shard diagnostics for retained evidence.
+- For dual topology runs, require retained evidence from both branches.
+- Keep front-end inference pressure and downstream evidence pressure separate
+  in reports, but add one end-to-end run when claiming dual topology production
+  readiness.
+
+Target effect:
+
+- A successful dual topology claim proves both front-end inference routing and
+  post-inference Replay/clip/media/evidence behavior.
+- 8090 topology apply cannot silently leave clip-worker using the default Replay
+  route while source adapters write to branch Replay instances.
+- Same-GPU and dual-GPU modes have separate evidence artifacts and acceptance
+  tokens.
+
+Acceptance:
+
+```text
+PASS_POST_INFERENCE_SPEC6_DUAL_TOPOLOGY_EVIDENCE_CHAIN
+```
+
+Required verification:
+
+- topology config GET/PUT/apply targeted tests or smoke proof;
+- replay shard parser/routing tests for duplicate, missing, and default shard
+  cases;
+- one pressure run for the selected dual topology with evidence retention
+  enabled;
+- retained samples include both branches and are queryable through 8090 list and
+  detail APIs;
+- no replay shard routing failures, duplicate terminal bundles, or branch-only
+  evidence gaps.
+
 ## 6. Final Acceptance
 
 The post-inference closure is complete only when all of the following are true
@@ -423,6 +541,8 @@ for the selected pressure profile:
 - event-worker record request idempotency does not scan the whole stream;
 - face-worker gallery/watchlist p95 is bounded under the selected gallery size;
 - media-worker queue wait and evidence lifecycle p95/p99 are within target;
+- if the selected runtime topology is dual, retained evidence proves both
+  branches and clip-worker replay shard routing used the intended shard map;
 - retained evidence bundles meet the playable target;
 - annotation complete ratio meets the selected threshold, and missing annotation
   cases surface as degraded;
@@ -442,6 +562,10 @@ Current checkout status:
   full-stream scan, bounding face-worker gallery/watchlist p95 for the selected
   gallery size, choosing and proving the media-finalizer concurrency model, and
   extending pressure observability.
+- If the target deployment uses same-GPU or dual-GPU topology, final closure
+  also requires Spec 6 evidence-chain proof on that topology. The current
+  same-GPU dual-branch 8 FPS result is a front-end inference-entry proof, not a
+  downstream evidence-chain closure token.
 
 ## 7. Non-Goals
 

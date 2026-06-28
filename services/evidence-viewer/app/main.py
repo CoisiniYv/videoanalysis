@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 from pathlib import Path
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
@@ -32,7 +34,7 @@ from app.evidence_index import (
 
 settings = load_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-OPERATOR_PROXY_TIMEOUT_SECONDS = 120.0
+OPERATOR_PROXY_TIMEOUT_SECONDS = float(os.getenv("OPERATOR_PROXY_TIMEOUT_SECONDS", "900"))
 OPERATOR_PROXY_ALLOWED_PREFIXES = (
     "cameras",
     "algorithms",
@@ -143,14 +145,15 @@ def _proxy_request(method: str, target: str, request: Request, body: bytes) -> R
             headers=_response_headers(exc.headers),
             media_type=exc.headers.get("content-type"),
         )
-    except URLError as exc:
+    except (URLError, TimeoutError, socket.timeout) as exc:
+        reason = getattr(exc, "reason", str(exc))
         return JSONResponse(
-            status_code=502,
+            status_code=504 if isinstance(exc, (TimeoutError, socket.timeout)) else 502,
             content={
                 "data": None,
                 "error": {
-                    "message": f"operator api unavailable: {exc.reason}",
-                    "code": 502,
+                    "message": f"operator api unavailable: {reason}",
+                    "code": 504 if isinstance(exc, (TimeoutError, socket.timeout)) else 502,
                 },
                 "request_id": None,
             },

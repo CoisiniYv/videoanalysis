@@ -23,6 +23,12 @@ from app.services.runtime_performance import (
     get_runtime_performance_config,
     save_runtime_performance_config,
 )
+from app.services.runtime_topology import (
+    RuntimeTopologyError,
+    apply_runtime_topology_config,
+    get_runtime_topology_config,
+    save_runtime_topology_config,
+)
 
 
 router = APIRouter(prefix="/api/v1/runtime", tags=["runtime"])
@@ -80,6 +86,18 @@ def _runtime_performance_error_response(
     )
 
 
+def _runtime_topology_error_response(
+    exc: RuntimeTopologyError,
+    request_id: str,
+) -> JSONResponse:
+    return _err_response(
+        exc.status_code,
+        str(exc),
+        request_id,
+        details=exc.details or None,
+    )
+
+
 @router.get("/overview")
 def runtime_overview(request_id: str = Depends(_request_id)):
     try:
@@ -127,6 +145,39 @@ def runtime_performance_config_apply(
         return _ok(apply_runtime_performance_config(force=force), request_id)
     except RuntimePerformanceError as exc:
         return _runtime_performance_error_response(exc, request_id)
+
+
+@router.get("/topology-config")
+def runtime_topology_config(request_id: str = Depends(_request_id)):
+    try:
+        return _ok(get_runtime_topology_config(), request_id)
+    except RuntimeTopologyError as exc:
+        return _runtime_topology_error_response(exc, request_id)
+
+
+@router.put("/topology-config")
+def runtime_topology_config_save(
+    body: dict = Body(...),
+    request_id: str = Depends(_request_id),
+):
+    try:
+        return _ok(save_runtime_topology_config(body), request_id)
+    except RuntimeTopologyError as exc:
+        return _runtime_topology_error_response(exc, request_id)
+
+
+@router.post("/topology-config/apply")
+def runtime_topology_config_apply(
+    force: bool = Query(
+        False,
+        description="Force topology apply even when active evidence tasks would be interrupted.",
+    ),
+    request_id: str = Depends(_request_id),
+):
+    try:
+        return _ok(apply_runtime_topology_config(force=force), request_id)
+    except RuntimeTopologyError as exc:
+        return _runtime_topology_error_response(exc, request_id)
 
 
 @router.post("/control/single/start")

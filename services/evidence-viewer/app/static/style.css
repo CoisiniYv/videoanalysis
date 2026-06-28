@@ -618,6 +618,62 @@ p {
   min-width: 720px;
 }
 
+.runtime-topology-pane {
+  grid-column: 1 / -1;
+}
+
+.runtime-topology-status {
+  margin-bottom: 12px;
+}
+
+.runtime-topology-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.runtime-topology-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.runtime-topology-form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  grid-column: span 3;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin: 0;
+  padding: 12px;
+}
+
+.runtime-topology-form legend {
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.runtime-topology-assignments {
+  grid-column: 1 / -1;
+  overflow-x: auto;
+}
+
+.runtime-subtitle {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 2px 0 8px;
+}
+
+.runtime-topology-table {
+  min-width: 980px;
+}
+
+.runtime-topology-assignment-table {
+  min-width: 720px;
+}
+
 .runtime-kv-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1855,6 +1911,11 @@ textarea[readonly] {
   }
 
   .runtime-performance-form {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-topology-form,
+  .runtime-topology-form fieldset {
     grid-template-columns: 1fr;
   }
 

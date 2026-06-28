@@ -1,0 +1,597 @@
+# Midterm 当前程序技术分析报告 - 2026-06-28
+
+## 1. 报告范围
+
+本报告基于当前 checkout 的代码、配置和 2026-06-28 已沉淀的压测文档进行静态技术分析。
+未在本次报告编写过程中重启服务、读取 live runtime 指标或重新运行压测。
+
+当前工作区包含未提交改动，因此本文描述的是“当前工作树状态”，不是某个干净 git commit：
+
+- `scripts/runtime/run_midterm_pressure60.py`
+- `services/api/app/routers/runtime.py`
+- `services/api/app/services/runtime_topology.py`
+- `services/evidence-viewer/app/static/index.html`
+- `services/evidence-viewer/app/static/operator.js`
+- `services/evidence-viewer/app/static/style.css`
+- `specs/26_midterm_post_inference_bottleneck_closure_plan.md`
+
+本文不分析归档阶段文件作为当前部署入口。当前部署入口以 midterm 栈为准：
+
+- 启动脚本：`scripts/midterm_start.sh`
+- Compose：`infra/docker-compose.midterm.yml`
+- Env：`infra/env/midterm.env`
+- Savant module：`modules/savant_security/module.yml`
+- 8090 操作台：`http://127.0.0.1:8090/operator`
+
+## 2. 执行摘要
+
+当前程序已经从早期单点实验演进为一套面向中期交付的实时视频分析系统。核心链路是：
+
+```text
+RTSP source
+  -> Replay storage
+  -> analysis-forwarder sampled branch
+  -> Savant inference
+  -> Redis streams
+  -> event-worker / face-worker
+  -> PostgreSQL / pgvector
+  -> clip-worker Replay job
+  -> video-file-sink raw clip
+  -> media-worker evidence indexing/finalization
+  -> 8090 operator / evidence APIs
+```
+
+系统的产品面已经比较完整：8090 操作台覆盖摄像头配置、ROI/规则、人员和人脸库、证据浏览、
+存储维护、运行时状态、性能配置和拓扑配置。后端 API 通过 evidence-viewer 代理暴露到 8090，
+内部 API 服务继续只在 compose 网络内监听。
+
+当前最强的运行证据来自 2026-06-28 的压测文档：
+
+- 60 路 3 FPS 下游证据链压测通过，保留 50 条 evidence，50/50 playable，8090 API 可查询。
+- 60 路 16/1 配置压测证明高入口压力下证据链能保住样本，但没有证明 16 FPS 推理吞吐。
+- 单 4090 双分支 30+30 前端推理入口压测在 4 FPS 和 8 FPS 档位通过，但 `keep-evidence=0`，
+  不能替代双分支证据链验收。
+
+当前主要技术风险不再是“是否能跑通一个告警证据”，而是扩展性和验收边界：
+
+- event-worker record request 去重仍是 `XRANGE security.record_requests - +` 全流扫描。
+- face-worker 仍在单消费 loop 中同步做 DB insert 和 watchlist/gallery pgvector 匹配。
+- gallery 和 face observation 向量查询目前没有 ANN 索引。
+- media-worker 仍是单进程轮询 finalizer，`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` 是本进程 guard，
+  不是完整 worker pool。
+- 8090 runtime topology 已能写双分支计划，但 replay shard 输出路径和 clip-worker 读取路径需要在部署和压测中证明一致。
+- 双分支 8 FPS 目前是前端推理入口证据，不是完整 Replay/clip/media/evidence 闭环证据。
+
+## 3. 当前部署边界
+
+### 3.1 默认部署形态
+
+默认 compose 项目名是 `video-analytics-midterm`。默认服务包括：
+
+| 层级 | 服务 | 职责 |
+| --- | --- | --- |
+| 存储/队列 | `redis` | Redis Streams、告警流、frame annotation stream |
+| API | `api` | 内部 FastAPI，业务 API、运行时控制、Savant supervisor |
+| 前端入口 | `evidence-viewer` | 8090 静态 UI、API/media 代理、旧 evidence 文件兼容接口 |
+| 视频回放 | `replay-service` | 全速接入、RocksDB 存储、Replay job source |
+| 入口采样 | `analysis-forwarder` | 从 Replay 取分析分支，按 PTS/FPS 采样并写 Savant |
+| 推理 | `savant-security` | DeepStream/Savant 模型链、规则和 Redis exporter |
+| 源接入 | `source-adapter` 和动态 `video-analytics-source-*` | RTSP 到 Replay |
+| 事件处理 | `event-worker` | Redis event 入库、告警、录像请求发布 |
+| 人脸处理 | `face-worker` | face observation 入库、gallery/watchlist 匹配、watchlist hit 事件 |
+| 取证调度 | `clip-worker` | 消费 record requests，调用 Replay，写 evidence task 状态 |
+| 原始视频 | `video-file-sink` | Replay job 输出 `raw_clip.mov` 相关 sink 文件 |
+| 证据最终化 | `media-worker` | 扫描 sink 输出、校验 raw clip、写 DB-backed evidence 索引 |
+
+默认 PostgreSQL 使用宿主机 `host.docker.internal:5432`，compose 内置 `postgres` 仅在
+`local-postgres` profile 下启用并映射到主机 `5439`。
+
+### 3.2 默认端口
+
+| 端口 | 服务 |
+| --- | --- |
+| 6396 | Redis |
+| 8090 | 8090 操作台 / evidence-viewer |
+| 8098 | Replay API |
+| 18080 | Savant metrics |
+| 18081 | analysis-forwarder metrics |
+| 5439 | 可选 local PostgreSQL profile |
+
+API 服务的 8000 端口只在 compose 网络内暴露，8090 通过 `/api/v1/*` 代理访问。
+
+### 3.3 当前关键运行参数
+
+`infra/env/midterm.env` 和 compose 当前默认运行参数主要是：
+
+| 参数 | 当前值 | 含义 |
+| --- | --- | --- |
+| `ANALYSIS_FPS` | `8/1` | forwarder 默认采样上限 |
+| `MAX_FPS` | `8/1` | Savant PTS gate 默认上限 |
+| `MIN_FPS` | `2/1` | Savant PTS gate 最小目标 |
+| `BATCH_SIZE` | `1` | 默认 Savant pipeline batch |
+| `MAX_PARALLEL_STREAMS` | `4` | 默认 Savant 并行流上限 |
+| `FACE_INFER_INTERVAL` | `2` | 人脸检测 interval |
+| `FACE_EMBEDDING_INFER_INTERVAL` | `2` | AdaFace embedding interval |
+| `FACE_REID_MIN_INTERVAL_MS` | `1000` | 同 track ReID/export 节流 |
+| `FRAME_ANNOTATION_REDIS_MAXLEN` | `200000` | frame annotation stream 近似保留上限 |
+| `FRAME_ANNOTATION_TTL_SECONDS` | `600` | annotation 消息语义 TTL，不是 Redis EXPIRE |
+| `EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL` | `240` | evidence admission 全局活跃预算 |
+| `EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE` | `2` | evidence admission 单 source 活跃预算 |
+| `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY` | `8` | clip-worker 物化并发预算 |
+| `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD` | `4` | 单 Replay shard 并发预算 |
+| `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE` | `1` | 单 source 并发预算 |
+| `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` | `4` | media-worker 本进程 materialization guard |
+
+注意：`STORAGE_MAINTENANCE_EXECUTE_ENABLED=true` 写在 env 中；compose API 服务有 false 默认值，
+但 env 渲染时会覆盖。8090 存储删除能力因此是强能力，需要执行控制、确认 token 和审计配合。
+
+## 4. 核心推理链路
+
+### 4.1 Source -> Replay -> Forwarder
+
+RTSP 源默认由 Savant 官方 GStreamer adapter 接入 Replay。当前运行时也支持通过 8090/API
+动态创建 `video-analytics-source-*` 容器。`RTSP_TRANSPORT` 默认已对齐为：
+
+```text
+tcp,use_wallclock_as_timestamps=1,fflags=+genpts
+```
+
+`replay-service` 是证据链的全速权威存储，analysis-forwarder 只负责分析分支采样。forwarder 当前实现包括：
+
+- `ZeroMQSource` 读取 Replay 输出；
+- PTS/FPS 采样器 `AnalysisFrameSampler`；
+- bounded drop queue，默认 `FORWARDER_QUEUE_MAX_SIZE=2048`；
+- `BlockingWriter` 写 Savant；
+- Prometheus metrics：seen、forwarded、dropped、send failures、queue depth；
+- `FORWARDER_OUT_ENDPOINT=null://...` 诊断模式，用于隔离 forwarder 自身能力。
+
+这使前端性能定位可以拆成两步：先测 Replay/forwarder/null sink，再接回 Savant 测真实推理消费。
+
+### 4.2 Savant/DeepStream module
+
+`modules/savant_security/module.yml` 当前模型链包括：
+
+```text
+zeromq_source_bin
+  -> PtsFpsGate
+  -> optional replay_savant_frame_dump
+  -> yolo26_pose
+  -> nvtracker
+  -> behavior_rules
+  -> yolov8_face
+  -> face_person_associator
+  -> adaface
+  -> face_reid_gate
+  -> face_observation_exporter
+  -> frame_annotation_exporter
+  -> savant_perf_metrics
+```
+
+主要能力：
+
+- 姿态检测：YOLO26 pose，按阈值过滤人形框和关键点。
+- 跟踪：`nvtracker` 给 person 分配 track id。
+- 行为规则：`behavior_rules` 从摄像头规则配置中执行入侵等行为检测。
+- 人脸检测：YOLOv8-Face。
+- 人脸和 person 关联：将 face 绑定到同帧 person/track。
+- AdaFace embedding：生成 512 维向量。
+- ReID gate：按时间、置信度、脸尺寸和 embedding norm 节流导出。
+- Redis exporters：导出 `security.events`、`security.face_observations`、`security.person_observations`
+  和 `security.frame_annotations`。
+- 性能指标：暴露 Savant effective FPS、annotation export 等 runtime metrics。
+
+Redis exporter 使用有界异步 writer；正常情况下 Redis 写入抖动不应直接阻塞 Savant `process_frame`。
+
+### 4.3 Redis -> workers
+
+推理结果进入 Redis Streams 后，由 worker 承接：
+
+- `event-worker` 消费 `security.events`，写 PostgreSQL `events`，发告警和 record request。
+- `face-worker` 消费 `security.face_observations`，写 `face_observations`，同步进行 gallery/watchlist 匹配。
+- `clip-worker` 消费 `security.record_requests`，对 Replay 发起取证 job，更新 `evidence_tasks`。
+- `media-worker` 扫描 video-file-sink 输出，生成或校验证据，并将 evidence metadata、timeline、overlay 写入 PostgreSQL。
+
+## 5. API 与 8090 控制面
+
+### 5.1 API 结构
+
+内部 API 是 FastAPI 应用，包含：
+
+- `/health`、`/ready`
+- `/api/v1/events/*`
+- `/api/v1/evidence/*`
+- `/api/v1/cameras/*`
+- `/api/v1/algorithms/*`
+- `/api/v1/people/*`
+- `/api/v1/maintenance/*`
+- `/api/v1/runtime/*`
+- `/api/v1/ws/alerts`
+
+8090 evidence-viewer 代理 `/api/v1/{path}` 到内部 API，并代理 `/media/{path}` 到内部 API 的
+media mount。这个设计让用户入口集中在 8090，而不是直接暴露 API 8000。
+
+### 5.2 摄像头和算法规则
+
+摄像头、ROI、规则等以 PostgreSQL 为 source of truth。API 可以导出 Savant runtime 配置：
+
+- `modules/savant_security/config/cameras.midterm.yml`
+- `infra/generated/sources.generated.yml`
+
+这些 YAML 是运行时快照，不应单独当作人工配置源。8090 的摄像头页面能编辑 RTSP、启停摄像头、
+配置 ROI 和规则，并可执行 runtime apply/restart。
+
+### 5.3 人员和人脸库
+
+人员、人脸注册和图库都在 `/api/v1/people` 下。API 镜像基于 face-worker 基础镜像构建，
+复用 ONNX Runtime/OpenCV/Numpy 层来支持人脸注册。图库 embedding 存储在
+`person_gallery_embeddings.embedding vector(512)`。
+
+当前 watchlist 规则有两层：
+
+- Savant/摄像头规则层生成算法事件；
+- face-worker 通过 env 和图库做全局 watchlist/gallery matching。
+
+报告使用当前代码观察：face-worker 仍会对每条新插入 observation 同步调用 watchlist emitter。
+
+### 5.4 Evidence API
+
+当前 evidence list/detail 语义已经 DB-backed：
+
+- `evidence_bundles` 保存证据概览、状态、路径、camera/source 元数据；
+- `evidence_artifacts` 保存 artifact 元数据；
+- `evidence_frame_timeline` 保存 timeline；
+- `evidence_overlay_segments` 保存 overlay；
+- `raw_clip.mov` 仍是文件系统视频 artifact。
+
+8090 仍保留旧 `/api/bundles*` 文件扫描兼容接口，但当前主语义应优先使用 `/api/v1/evidence/*`。
+
+### 5.5 Runtime control、performance 和 topology
+
+当前 runtime API 包括：
+
+- `/api/v1/runtime/overview`
+- `/api/v1/runtime/control`
+- `/api/v1/runtime/performance-config` GET/PUT/apply
+- `/api/v1/runtime/topology-config` GET/PUT/apply
+- `/api/v1/runtime/control/single/start|stop|restart`
+- `/api/v1/runtime/control/dual/stop`
+
+`runtime_performance.py` 可以保存并应用 forwarder/Savant 性能参数，应用时重建相关容器并等待
+Savant ready。
+
+`runtime_topology.py` 是当前工作树新增能力，支持：
+
+- `auto`
+- `single`
+- `dual_same_gpu`
+- `dual_dual_gpu`
+
+它会根据摄像头生成分支 plan，支持 balanced、gpu_id、manual 分片策略。dual apply 会：
+
+1. 检查 evidence restart guard；
+2. 停止 source adapters、单路 forwarder、单路 Savant、compose source；
+3. 创建新的 runtime epoch；
+4. 写 Savant camera config、source manifest 和 replay shard plan；
+5. 重建 branch Savant/forwarder；
+6. 启动 branch Replay/video-file-sink；
+7. 按 plan 创建动态 source adapter。
+
+需要注意的风险：topology 写出的 shard plan 默认路径是
+`/data/video-analytics/media/.runtime/replay_shards.topology.json`，而 clip-worker 读取
+`REPLAY_SHARDS_JSON` 或 `REPLAY_SHARDS_CONFIG_PATH`。当前 compose 中
+`REPLAY_SHARDS_CONFIG_PATH` 默认空，因此双分支证据链验收必须证明 clip-worker 实际读取了
+topology 写出的 shard 文件。
+
+## 6. 数据模型
+
+### 6.1 摄像头/规则
+
+核心表：
+
+- `cameras`
+- `camera_zones`
+- `camera_rules`
+
+迁移 010/012/016 给 operator schema 和 rule/zone ID 做兼容，`cameras.source_id` 有唯一索引。
+当前运行配置从 DB 导出到 YAML，YAML 不是最终事实源。
+
+### 6.2 事件和告警
+
+核心表：
+
+- `events`
+- `audit_logs`
+
+事件表按 event type、source/camera、时间和状态建索引。018 增加了面向 recent/list 查询的性能索引。
+事件入库由 event-worker 和 face-worker 共同产生，watchlist hit 可由 face-worker 写回
+`security.events` 后再进入 event-worker 处理。
+
+### 6.3 人脸和图库
+
+核心表：
+
+- `face_observations.embedding vector(512)`
+- `persons`
+- `person_gallery_embeddings.embedding vector(512)`
+- `match_results`
+- `person_bbox_observations`
+
+当前 btree/person-active 索引用于过滤和关联，但 `face_observations.embedding` 与
+`person_gallery_embeddings.embedding` 没有 ANN vector index。`vector_store.py` 使用
+`ORDER BY embedding <=> %(query_embedding)s` 做 exact pgvector 查询。图库规模增大后，
+watchlist/gallery latency 会随图库规模放大。
+
+### 6.4 Evidence
+
+核心表：
+
+- `evidence_tasks`
+- `evidence_bundles`
+- `evidence_artifacts`
+- `evidence_frame_timeline`
+- `evidence_overlay_segments`
+
+015 增加 materialization state；017 将 evidence artifact/timeline/overlay 写入 DB；
+019/020 增加 media queue 和 playable bundle 热路径索引。当前 evidence admission/backpressure
+可以把低价值事件标记为 `materialization_skipped`，避免无限制堆积。
+
+## 7. 证据链语义
+
+当前证据链的目标不是生成带烧录标注的视频，而是保留可播放 `raw_clip.mov`，并将 metadata、
+annotation、timeline、overlay 写入 DB 或 sidecar/DB 索引供 8090 展示。
+
+关键语义：
+
+- Replay 是证据时间窗的来源。
+- clip-worker 负责从 record request 到 Replay job 的调度。
+- video-file-sink 写 raw clip 和 sink metadata。
+- media-worker 校验 raw clip 可播放性、生成 evidence bundle/index。
+- raw clip 可播放但 annotation 缺失时可以降级成功，而不是把视频证据误判成完全失败。
+- 成功 evidence bundle 只需要保留 `raw_clip.mov`，metadata/annotation 以 DB-backed 语义服务。
+
+当前 60 路 3 FPS 压测中，50/50 retained evidence playable；annotation complete 是 26/50，
+剩余 24 条为 `missing_frame_metadata`，说明可播放性和标注完整性应分开验收。
+
+## 8. 性能证据和当前能力边界
+
+### 8.1 下游证据链
+
+`pressure60_3fps_playabledrain_20260628T100531Z` 证明：
+
+- 60 个 source active；
+- source exited=0、restart=0、negative PTS=0；
+- forwarder send failures=0；
+- 保留 evidence 50；
+- playable evidence 50/50；
+- 8090 evidence API 可按 pressure source 查到保留 bundle；
+- `XPENDING security.record_requests clip-workers-midterm` 最终为 0。
+
+这说明当前后段 evidence admission、clip-worker、media-worker、DB 索引和 8090 查询可以支撑
+所选 60 路 3 FPS 压力 profile。但它不等于真实 T4 生产 60 路结论，也不等于 60 路 8/16 FPS
+推理吞吐已经闭环。
+
+### 8.2 16/1 配置压测
+
+`pressure60_16p1_20260628T112109Z` 证明高入口压力下证据链仍保住 50 条证据，且最终
+50/50 playable、50/50 annotation complete。
+
+但它不是 16 FPS 推理通过证明，原因是：
+
+- Savant effective FPS 平均约 4.386；
+- forwarder queue 多次达到 2048；
+- forwarded/seen 比例约 19.8%；
+- forwarder 到 Savant 出现 ZeroMQ backpressure；
+- source adapter 侧有足够输入帧，瓶颈在 source adapter 之后、Savant 完成推理之前。
+
+### 8.3 前端推理入口
+
+forwarder null sink 结果：
+
+- 60 路 4 FPS：passed，max queue 0，send failures 0；
+- 60 路 8 FPS：passed，max queue 1，send failures 0；
+- 60 路 16 FPS：passed，但 forwarded/target 约 0.72。
+
+接回单 Savant：
+
+- 60 路 4 FPS、`BATCH_SIZE=4`：passed；
+- 60 路 8 FPS、`BATCH_SIZE=4/8/16`：queue full，failed；
+- 60 路 8 FPS、`BATCH_SIZE=32`：脚本门槛 passed，但 effective FPS 平均约 5.82，
+  不能宣称稳定达到 8 FPS。
+
+同卡双分支 30+30：
+
+- 4 FPS、`BATCH_SIZE=4`：passed，queue 0，send failures 0；
+- 8 FPS、`BATCH_SIZE=4`：passed，max queue 771，send failures 0，avg effective FPS 7.41。
+
+这说明单 4090 双分支显著改善 8 FPS 前端入口背压，但该压测 `keep-evidence=0`，
+不是完整证据链验收。
+
+### 8.4 当前建议 operating point
+
+基于现有证据：
+
+- 稳妥生产基线：60 路 4 FPS，仍需按目标部署形态复跑端到端证据验收。
+- 4090 优化档：60 路 8 FPS，优先使用双分支继续验证；单实例 `BATCH_SIZE=32` 不足以作为稳定承诺。
+- 16 FPS：只能作为极限观察，不应作为默认生产目标。
+- T4/弱卡生产结论：当前证据不足，必须按 T4 / 30-per-shard 计划单独验收。
+
+## 9. 主要代码级风险
+
+### 9.1 Record request 去重是 O(N)
+
+`event-worker` 在发布 record request 前调用：
+
+```text
+record_publisher.has_request(source_event_id, "savant_replay")
+```
+
+`RecordRequestPublisher.has_request()` 仍对 `security.record_requests` 做：
+
+```text
+XRANGE security.record_requests - +
+```
+
+每个可录像事件都会按 stream 长度线性扫描并解析 JSON。随着事件数增加，这会变成 Redis/CPU
+热点。应替换为 Redis set/key、PostgreSQL 唯一键或其他 O(1)/indexed idempotency 机制。
+
+### 9.2 face-worker 同步匹配路径
+
+`face-worker` 当前在 `_process_batch()` 中逐条处理 face observation：
+
+1. 解析 observation；
+2. 校验 embedding；
+3. 插入 PostgreSQL；
+4. 对新插入 observation 同步调用 `watchlist_emitter.emit_for_observation()`。
+
+`vector_store.py` 的 gallery/observation 查询使用 exact pgvector ordering。图库规模、每人 embedding
+数量、face observation 速率增加后，单 consumer loop 会被 DB insert 和向量检索共同拖慢。
+
+### 9.3 media-worker 并发模型不清晰
+
+`media-worker` 有 `_MaterializationGuard(max_active)`，但主流程仍是一个进程内的轮询 loop，
+调用 `_process_sink_output(...)`。该 guard 能限制本进程进入物化的活跃数，但不等于真正的
+多 worker finalizer pool。
+
+如果后续提升证据吞吐，必须先明确并发模型：
+
+- 多 media-worker 容器 + DB-backed claim；
+- 单进程内部 worker pool；
+- 独立 finalizer service。
+
+否则会有重复终态、磁盘膨胀、Replay sink 堆积和 cleanup 竞态风险。
+
+### 9.4 双拓扑和 replay shard 接线风险
+
+当前代码已经支持 topology plan 和 replay shard routing，但默认 compose 中 clip-worker 的
+`REPLAY_SHARDS_CONFIG_PATH` 为空。8090 topology apply 写出的 shard 文件不会自动证明 clip-worker
+读取了同一个文件。
+
+如果目标部署采用同卡双分支或双卡双分支，必须补一个带 evidence retention 的端到端压力 run，
+并在 artifact 中记录：
+
+- topology config；
+- runtime epoch；
+- topology 写出的 replay shard 文件路径和 hash；
+- clip-worker 读取的 replay shard 输入路径；
+- retained evidence 的 branch/shard 分布；
+- 8090 list/detail 查询证明。
+
+### 9.5 观测指标缺口
+
+当前 pressure 报告已经覆盖 forwarder、Savant、source 状态、保留 evidence、playable 数、
+Redis pending 和 8090 查询证明。但仍缺：
+
+- face-worker gallery query p95；
+- event-worker record-request dedupe latency；
+- PostgreSQL hot query plan/stat deltas；
+- media-worker queue wait p95/p99；
+- ffmpeg elapsed/CPU；
+- evidence lifecycle p95/p99；
+- Savant 模型阶段级 latency，例如 pose、face、AdaFace、pyfunc 后处理耗时。
+
+没有这些指标，后续优化顺序容易从“测得瓶颈”退化成“静态猜测”。
+
+## 10. 运维和迁移风险
+
+### 10.1 运行态 source of truth
+
+PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事实源。`cameras.midterm.yml` 和
+`sources.generated.yml` 是生成的运行时快照。只看 YAML diff 不能证明人工配置漂移。
+
+### 10.2 数据目录
+
+`/data/video-analytics` 承载模型、media、Replay RocksDB、artifact、可选 PostgreSQL 数据等运行数据。
+干净迁移应携带代码和模型，通常不应把 live Redis/PostgreSQL/Replay/evidence/person 状态直接带到新机器，
+除非迁移目标明确需要保留业务数据并配套校验。
+
+### 10.3 8090 强操作
+
+8090 当前不仅是浏览器 UI，也是运行控制面：
+
+- 摄像头源 apply/restart；
+- runtime performance apply；
+- topology apply；
+- 单路/双路容器启停；
+- storage maintenance delete。
+
+这些操作都可能影响正在生成的证据。生产使用时必须保留 evidence guard、确认 token、审计日志和操作前健康摘要。
+
+### 10.4 默认 DB 依赖
+
+默认 worker/API 指向宿主 PostgreSQL。部署诊断时，worker 重启循环可能是宿主 DB 未启动或端口不可达，
+不一定是 worker 镜像损坏。
+
+## 11. 建议路线图
+
+### P0 - 固化验收边界
+
+- 将“60 路 3 FPS 下游证据链通过”“60 路 16/1 不是 16 FPS 推理证明”“双分支 8 FPS 是前端入口证明”
+  作为文档和验收口径固定下来。
+- 对所有 runtime/topology 压测 artifact 记录 dirty diff、runtime epoch、source count、规则集、FPS/batch、
+  forwarder/Savant/worker/DB 指标。
+
+### P1 - 去除 O(N) 热点
+
+- 替换 `RecordRequestPublisher.has_request()` 全 stream 扫描。
+- 为 face gallery/observation 查询补 `EXPLAIN ANALYZE` 基线。
+- 根据基线添加 pgvector ANN index，并决定是否需要 exact rerank。
+
+### P2 - 证明 media finalizer 扩展模型
+
+- 明确 media-worker 并发架构。
+- 拆分 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段。
+- 添加重复 finalizer、终态收敛和 cleanup 竞态测试。
+- 用 pressure rerun 验证 queue wait 和 lifecycle p95/p99。
+
+### P3 - 双分支证据链闭环
+
+- 让 8090 topology 写出的 replay shard plan 和 clip-worker 读取路径在部署层明确接通。
+- 对同卡双分支跑一轮带 evidence retention 的端到端压力测试。
+- 保留两个分支的 retained evidence，并通过 8090 list/detail 验证。
+
+### P4 - Savant 阶段级指标
+
+- 补 pose、face detector、AdaFace、pyfunc 后处理、DeepStream queue/batch wait 的低频指标。
+- 在 8 FPS 优化中用阶段指标判断是调 interval、减少 annotation 输出、提高 batch，还是继续拆 shard。
+
+## 12. 结论
+
+当前程序已经具备中期交付所需的完整产品面和端到端证据链：8090 能完成配置、人员库、证据复核和运行控制；
+Savant pipeline 覆盖姿态、人脸、行为规则和人脸识别；Replay + clip/media worker 能生成可审查证据；
+DB-backed evidence 语义已经替代单纯 sidecar 读取。
+
+但当前还不能把“压测通过”扩大解释为所有生产目标完成。准确边界是：
+
+- 60 路 3 FPS 下游证据链已经有通过证据；
+- 60 路 4 FPS 前端推理入口在单 4090 上可作为稳妥目标继续端到端验收；
+- 60 路 8 FPS 在同卡双分支上显示出可行性，但还缺同拓扑证据链闭环；
+- 16 FPS 不应作为当前默认生产承诺；
+- T4/弱卡 60 路仍需要按单独计划验收。
+
+下一阶段应避免继续扩大配置面，而应优先关闭 record request 幂等、face-worker 向量检索、
+media finalizer 并发模型、双拓扑 replay shard 接线和观测指标缺口。只有这些闭环后，
+`PASS_POST_INFERENCE_60_STREAM_CLOSURE` 或更高层的生产 readiness 才有足够证据支撑。
+
+## 13. 参考依据
+
+- `README.md`
+- `README_MIDTERM.md`
+- `infra/docker-compose.midterm.yml`
+- `infra/env/midterm.env`
+- `modules/savant_security/module.yml`
+- `services/analysis-forwarder/app/main.py`
+- `services/api/app/main.py`
+- `services/api/app/routers/runtime.py`
+- `services/api/app/services/runtime_topology.py`
+- `services/evidence-viewer/app/main.py`
+- `services/event-worker/app/worker.py`
+- `services/event-worker/app/record_request.py`
+- `services/face-worker/app/worker.py`
+- `services/face-worker/app/vector_store.py`
+- `services/clip-worker/app/replay_shards.py`
+- `services/media-worker/app/worker.py`
+- `db/migrations/*.sql`
+- `docs/midterm_downstream_evidence_performance_2026-06-28.md`
+- `docs/midterm_frontend_inference_performance_2026-06-28.md`
+- `docs/midterm_post_inference_bottleneck_static_review_2026-06-28.md`
+- `specs/26_midterm_post_inference_bottleneck_closure_plan.md`

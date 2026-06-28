@@ -19,6 +19,7 @@ let currentRules = [];
 let runtimeOverview = null;
 let runtimeControl = null;
 let runtimePerformance = null;
+let runtimeTopology = null;
 let lastRuntimeApplyResult = null;
 let selectedRuntimeConfig = null;
 let roiPreviewObjectUrl = "";
@@ -56,6 +57,10 @@ const runtimeControlStatusEl = document.getElementById("runtime-control-status")
 const runtimePerformanceForm = document.getElementById("runtime-performance-form");
 const runtimePerformanceStatusEl = document.getElementById("runtime-performance-status");
 const runtimePerformanceDiffEl = document.getElementById("runtime-performance-diff");
+const runtimeTopologyForm = document.getElementById("runtime-topology-form");
+const runtimeTopologyStatusEl = document.getElementById("runtime-topology-status");
+const runtimeTopologyPlanEl = document.getElementById("runtime-topology-plan");
+const runtimeTopologyAssignmentsEl = document.getElementById("runtime-topology-assignments");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
 const startSingleRuntimeBtn = document.getElementById("start-single-runtime");
 const stopSingleRuntimeBtn = document.getElementById("stop-single-runtime");
@@ -63,6 +68,8 @@ const restartSingleRuntimeBtn = document.getElementById("restart-single-runtime"
 const stopDualRuntimeBtn = document.getElementById("stop-dual-runtime");
 const saveRuntimePerformanceBtn = document.getElementById("save-runtime-performance");
 const applyRuntimePerformanceBtn = document.getElementById("apply-runtime-performance");
+const saveRuntimeTopologyBtn = document.getElementById("save-runtime-topology");
+const applyRuntimeTopologyBtn = document.getElementById("apply-runtime-topology");
 const camerasEl = document.getElementById("cameras");
 const zonesEl = document.getElementById("zones");
 const rulesEl = document.getElementById("rules");
@@ -1309,6 +1316,9 @@ function renderCameras() {
     camerasEl.appendChild(item);
   }
   updateSummary();
+  if (runtimeTopology) {
+    renderRuntimeTopologyAssignments(runtimeTopology.saved_config || {}, runtimeTopology.plan || {});
+  }
 }
 
 function zoneTypeLabel(zone) {
@@ -1851,6 +1861,125 @@ function formatPerformanceValue(value) {
   return String(value);
 }
 
+function renderRuntimeTopologyConfig() {
+  if (!runtimeTopologyForm || !runtimeTopologyStatusEl || !runtimeTopologyPlanEl) return;
+  const data = runtimeTopology || {};
+  const config = data.saved_config || {};
+  for (const [key, value] of Object.entries(config)) {
+    if (key === "branches" || key === "manual_assignments") continue;
+    const control = runtimeTopologyForm.elements[key];
+    if (control) control.value = value ?? "";
+  }
+  const branches = config.branches || {};
+  for (const branchId of ["a", "b"]) {
+    const branch = branches[branchId] || {};
+    for (const [key, value] of Object.entries(branch)) {
+      const control = runtimeTopologyForm.elements[`${branchId}.${key}`];
+      if (control) control.value = value ?? "";
+    }
+  }
+  const plan = data.plan || {};
+  const preflight = data.preflight || {};
+  const branchCount = Array.isArray(plan.branches) ? plan.branches.length : 0;
+  runtimeTopologyStatusEl.innerHTML =
+    `<div class="runtime-kv-grid">` +
+      `<div><span>模式</span><strong>${escapeHtml(plan.effective_mode || config.topology_mode || "--")}</strong></div>` +
+      `<div><span>启用摄像头</span><strong>${formatInteger(plan.enabled_source_count || 0)}</strong></div>` +
+      `<div><span>分支数</span><strong>${formatInteger(branchCount)}</strong></div>` +
+      `<div><span>预检</span><strong>${preflight.ok === false ? "异常" : "通过"}</strong></div>` +
+    `</div>`;
+  renderRuntimeTopologyAssignments(config, plan);
+  renderRuntimeTopologyPlan(plan, data.runtime || {}, preflight);
+}
+
+function renderRuntimeTopologyAssignments(config, plan) {
+  if (!runtimeTopologyAssignmentsEl) return;
+  const enabledCameras = (cameras || []).filter((camera) => camera.enabled !== false);
+  if (!enabledCameras.length) {
+    runtimeTopologyAssignmentsEl.innerHTML = `<div class="empty-state">暂无启用摄像头。</div>`;
+    return;
+  }
+  const plannedBranch = new Map();
+  for (const branch of plan?.branches || []) {
+    const branchId = String(branch.branch_id || "");
+    for (const sourceId of branch.source_ids || []) {
+      plannedBranch.set(String(sourceId), branchId);
+    }
+  }
+  const manual = config?.manual_assignments || {};
+  const rows = enabledCameras.map((camera) => {
+    const sourceId = String(camera.source_id || "");
+    const selected = String(manual[sourceId] || plannedBranch.get(sourceId) || "a");
+    const planned = plannedBranch.get(sourceId) || "--";
+    return `<tr>` +
+      `<td>${escapeHtml(camera.name || sourceId || "--")}</td>` +
+      `<td>${escapeHtml(sourceId || "--")}</td>` +
+      `<td>${escapeHtml(planned)}</td>` +
+      `<td>` +
+        `<select name="manual.${escapeHtml(sourceId)}" data-topology-branch="${escapeHtml(sourceId)}">` +
+          `<option value="a"${selected === "a" ? " selected" : ""}>A</option>` +
+          `<option value="b"${selected === "b" ? " selected" : ""}>B</option>` +
+        `</select>` +
+      `</td>` +
+    `</tr>`;
+  }).join("");
+  runtimeTopologyAssignmentsEl.innerHTML =
+    `<div class="runtime-subtitle">手动分配（分片策略为手动覆盖时生效）</div>` +
+    `<table class="runtime-table runtime-topology-assignment-table">` +
+      `<thead><tr><th>摄像头</th><th>source</th><th>计划分支</th><th>手动分支</th></tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+    `</table>`;
+}
+
+function renderRuntimeTopologyPlan(plan, runtime, preflight) {
+  if (!runtimeTopologyPlanEl) return;
+  const branches = Array.isArray(plan?.branches) ? plan.branches : [];
+  if (!branches.length) {
+    runtimeTopologyPlanEl.innerHTML = `<div class="empty-state">暂无拓扑计划。</div>`;
+    return;
+  }
+  const runtimeBranches = new Map((runtime.branches || []).map((item) => [String(item.branch_id), item]));
+  const rows = branches.map((branch) => {
+    const branchId = String(branch.branch_id || "");
+    const live = runtimeBranches.get(branchId) || {};
+    const metrics = live.metrics || {};
+    const savant = metrics.savant || {};
+    const forwarder = metrics.forwarder || {};
+    const sourceIds = Array.isArray(branch.source_ids) ? branch.source_ids : [];
+    const containers = live.containers || {};
+    const savantState = containers.savant?.running ? "running" : (containers.savant?.state || "--");
+    const forwarderState = containers.forwarder?.running ? "running" : (containers.forwarder?.state || "--");
+    const sendFailures = (forwarder.sources || []).reduce((sum, item) => sum + Number(item.savant_send_failures_total || 0), 0);
+    return `<tr>` +
+      `<td>${escapeHtml(branchId)}</td>` +
+      `<td>${escapeHtml(String(branch.gpu_id ?? "--"))}</td>` +
+      `<td>${formatInteger(branch.source_count || 0)}</td>` +
+      `<td>${formatInteger(savant.global?.va_savant_sources_active ?? (savant.sources || []).length)}</td>` +
+      `<td>${escapeHtml(savantState)}</td>` +
+      `<td>${escapeHtml(forwarderState)}</td>` +
+      `<td>${formatNumber(forwarder.global?.queue_depth)}</td>` +
+      `<td>${formatInteger(sendFailures)}</td>` +
+      `<td>${escapeHtml(sourceIds.slice(0, 6).join(", "))}${sourceIds.length > 6 ? " ..." : ""}</td>` +
+    `</tr>`;
+  }).join("");
+  const checks = (preflight?.checks || []).map((item) =>
+    `<tr class="${item.ok ? "" : "warn-row"}">` +
+      `<td>${escapeHtml(item.name || "")}</td>` +
+      `<td>${item.ok ? "通过" : "异常"}</td>` +
+      `<td>${escapeHtml(item.container || item.gpu_id || "")}</td>` +
+    `</tr>`
+  ).join("");
+  runtimeTopologyPlanEl.innerHTML =
+    `<table class="runtime-table runtime-topology-table">` +
+      `<thead><tr><th>分支</th><th>GPU</th><th>计划路数</th><th>Savant 路数</th><th>Savant</th><th>Forwarder</th><th>队列</th><th>发送失败</th><th>source</th></tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+    `</table>` +
+    `<table class="runtime-table runtime-topology-table">` +
+      `<thead><tr><th>预检项</th><th>状态</th><th>对象</th></tr></thead>` +
+      `<tbody>${checks || `<tr><td colspan="3">暂无预检项</td></tr>`}</tbody>` +
+    `</table>`;
+}
+
 function renderRuntimeOverview() {
   if (!runtimeHealthSummaryEl || !runtimeSourceTableEl || !runtimeContainerTableEl) return;
   const overview = runtimeOverview || {};
@@ -1899,6 +2028,7 @@ function renderRuntimeOverview() {
   renderRuntimeContainerTable(containers);
   renderRuntimeControlStatus();
   renderRuntimePerformanceConfig();
+  renderRuntimeTopologyConfig();
 }
 
 function renderRuntimeSourceTable(sources) {
@@ -2238,14 +2368,16 @@ async function loadPeople() {
 }
 
 async function loadRuntimeOverview() {
-  const [overviewData, controlData, performanceData] = await Promise.all([
+  const [overviewData, controlData, performanceData, topologyData] = await Promise.all([
     request(`${API}/runtime/overview`),
     request(`${API}/runtime/control`),
     request(`${API}/runtime/performance-config`),
+    request(`${API}/runtime/topology-config`),
   ]);
   runtimeOverview = overviewData || {};
   runtimeControl = controlData || {};
   runtimePerformance = performanceData || {};
+  runtimeTopology = topologyData || {};
   renderRuntimeOverview();
   setStatus("运行状态已刷新");
 }
@@ -2478,6 +2610,8 @@ function setRuntimeControlButtonsBusy(busy) {
     refreshRuntimeOverviewBtn,
     saveRuntimePerformanceBtn,
     applyRuntimePerformanceBtn,
+    saveRuntimeTopologyBtn,
+    applyRuntimeTopologyBtn,
   ]) {
     if (button) button.disabled = busy;
   }
@@ -2541,6 +2675,89 @@ function runtimePerformanceApplyMessage(data) {
   const recreated = actions.filter((item) => item.action === "recreated").map((item) => item.container);
   const targets = Array.isArray(data.pending_targets) ? data.pending_targets.join(", ") : "";
   return `性能配置已应用：${recreated.length} 个容器已重建${targets ? `（${targets}）` : ""}`;
+}
+
+function runtimeTopologyFormBody() {
+  if (!runtimeTopologyForm) return {};
+  const branchKeys = [
+    "gpu_id",
+    "savant_batch_size",
+    "pose_batch_size",
+    "face_detector_batch_size",
+    "face_embedding_batch_size",
+    "max_parallel_streams",
+    "analysis_fps",
+    "analysis_min_fps",
+    "savant_max_fps",
+    "savant_min_fps",
+    "batched_push_timeout",
+  ];
+  const body = {
+    topology_mode: runtimeTopologyForm.elements.topology_mode?.value || "auto",
+    shard_strategy: runtimeTopologyForm.elements.shard_strategy?.value || "balanced",
+    streams_per_branch: asInt(runtimeTopologyForm.elements.streams_per_branch?.value, 30),
+    branches: { a: {}, b: {} },
+    manual_assignments: {},
+  };
+  for (const branchId of ["a", "b"]) {
+    for (const key of branchKeys) {
+      const control = runtimeTopologyForm.elements[`${branchId}.${key}`];
+      if (!control) continue;
+      if (control.type === "number") {
+        body.branches[branchId][key] = asInt(control.value, 0);
+      } else {
+        body.branches[branchId][key] = String(control.value || "").trim();
+      }
+    }
+  }
+  for (const control of runtimeTopologyForm.querySelectorAll("[data-topology-branch]")) {
+    const sourceId = control.dataset.topologyBranch || "";
+    const branchId = String(control.value || "").trim();
+    if (sourceId && ["a", "b"].includes(branchId)) {
+      body.manual_assignments[sourceId] = branchId;
+    }
+  }
+  return body;
+}
+
+async function saveRuntimeTopologyConfig({ apply = false } = {}) {
+  clearMessages();
+  setRuntimeControlButtonsBusy(true);
+  try {
+    const body = runtimeTopologyFormBody();
+    const saved = await request(`${API}/runtime/topology-config`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    runtimeTopology = saved || {};
+    renderRuntimeTopologyConfig();
+    if (!apply) {
+      showSuccess("拓扑配置已保存");
+      setStatus("拓扑配置已保存");
+      return saved;
+    }
+    const confirmText = "确认应用推理拓扑？会切换 source、forwarder 和 Savant，证据生成中时会被阻止。";
+    if (!window.confirm(confirmText)) {
+      showSuccess("拓扑配置已保存，未应用");
+      setStatus("拓扑配置已保存");
+      return saved;
+    }
+    const applied = await request(`${API}/runtime/topology-config/apply`, { method: "POST" });
+    runtimeTopology = applied.status || runtimeTopology;
+    renderRuntimeTopologyConfig();
+    showSuccess(runtimeTopologyApplyMessage(applied));
+    await loadRuntimeOverview();
+    return applied;
+  } finally {
+    setRuntimeControlButtonsBusy(false);
+  }
+}
+
+function runtimeTopologyApplyMessage(data) {
+  const mode = data?.mode || data?.status?.plan?.effective_mode || "--";
+  const actions = Array.isArray(data?.actions) ? data.actions.length : 0;
+  const sources = Array.isArray(data?.source_lifecycle) ? data.source_lifecycle.length : 0;
+  return `拓扑已应用：${mode}，容器动作 ${actions} 个，source ${sources} 路`;
 }
 
 function runtimeControlActionMessage(data) {
@@ -3182,6 +3399,12 @@ saveRuntimePerformanceBtn?.addEventListener("click", () => {
 });
 applyRuntimePerformanceBtn?.addEventListener("click", () => {
   saveRuntimePerformanceConfig({ apply: true }).catch((e) => showError(`性能配置应用失败：${apiErrorMessage(e)}`));
+});
+saveRuntimeTopologyBtn?.addEventListener("click", () => {
+  saveRuntimeTopologyConfig().catch((e) => showError(`拓扑配置保存失败：${apiErrorMessage(e)}`));
+});
+applyRuntimeTopologyBtn?.addEventListener("click", () => {
+  saveRuntimeTopologyConfig({ apply: true }).catch((e) => showError(`拓扑配置应用失败：${apiErrorMessage(e)}`));
 });
 refreshRuntimeConfigBtn?.addEventListener("click", () => {
   if (!selectedCameraId) {

@@ -60,6 +60,7 @@ def _config(module, **overrides):
         "max_validate_seq_iq": 0,
         "forwarder_null_sink": False,
         "dual_shard_same_gpu": False,
+        "dual_shard_api": False,
         "dual_shard_gpu": "0",
         "cleanup": True,
     }
@@ -109,6 +110,47 @@ def test_rtsp_republish_command_normalizes_timestamps_without_rebuild() -> None:
     assert "-c:v" in command
     assert "copy" in command
     assert "rtsp://127.0.0.1:8554/pressure/out" == command[-1]
+
+
+def test_default_run_id_marks_8090_topology_dual_shard() -> None:
+    module = _load_module()
+
+    run_id = module._default_run_id(
+        "8/1",
+        dual_shard_same_gpu=True,
+        dual_shard_api=True,
+    )
+
+    assert run_id.startswith("pressure60_8090topology_dual1gpu_8p1_")
+
+
+def test_topology_pressure_payload_uses_8090_dual_same_gpu_shape() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=60,
+        fps="8/1",
+        min_fps="2/1",
+        batch_size=4,
+        pose_batch_size=4,
+        face_detector_batch_size=4,
+        face_embedding_batch_size=16,
+        max_parallel_streams=32,
+        dual_shard_same_gpu=True,
+        dual_shard_api=True,
+        dual_shard_gpu="0",
+        keep_evidence=0,
+    )
+
+    payload = module.topology_pressure_payload(cfg)
+
+    assert payload["topology_mode"] == "dual_same_gpu"
+    assert payload["shard_strategy"] == "balanced"
+    assert payload["streams_per_branch"] == 30
+    assert payload["branches"]["a"]["gpu_id"] == 0
+    assert payload["branches"]["b"]["gpu_id"] == 0
+    assert payload["branches"]["a"]["savant_batch_size"] == 4
+    assert payload["branches"]["a"]["analysis_fps"] == "8/1"
 
 
 def test_validate_seq_iq_from_sampling_is_warning_without_ingress_failure() -> None:

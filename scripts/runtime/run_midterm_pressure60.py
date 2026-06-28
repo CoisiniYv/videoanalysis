@@ -159,6 +159,7 @@ class PressureConfig:
     max_validate_seq_iq: int
     forwarder_null_sink: bool
     dual_shard_same_gpu: bool
+    dual_shard_api: bool
     dual_shard_gpu: str
     cleanup: bool
 
@@ -292,6 +293,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dual-shard-api",
+        action="store_true",
+        help="Apply the dual-shard topology through the 8090 runtime topology API.",
+    )
+    parser.add_argument(
         "--dual-shard-gpu",
         default="0",
         help="Physical GPU id used by both Savant branches in --dual-shard-same-gpu mode.",
@@ -304,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.dual_shard_same_gpu and args.forwarder_null_sink:
         raise SystemExit("--dual-shard-same-gpu cannot be combined with --forwarder-null-sink")
+    if args.dual_shard_api and not args.dual_shard_same_gpu:
+        raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
     if args.dual_shard_same_gpu and args.keep_evidence > 0:
         raise SystemExit(
             "--dual-shard-same-gpu currently requires --keep-evidence 0; "
@@ -313,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         args.fps,
         forwarder_null_sink=args.forwarder_null_sink,
         dual_shard_same_gpu=args.dual_shard_same_gpu,
+        dual_shard_api=args.dual_shard_api,
     )
     artifact_dir = (args.artifact_root / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         max_validate_seq_iq=args.max_validate_seq_iq,
         forwarder_null_sink=args.forwarder_null_sink,
         dual_shard_same_gpu=args.dual_shard_same_gpu,
+        dual_shard_api=args.dual_shard_api,
         dual_shard_gpu=str(args.dual_shard_gpu),
         cleanup=not args.no_cleanup,
     )
@@ -370,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = psycopg.connect(cfg.db_url, row_factory=dict_row, autocommit=True)
     redis_client = Redis.from_url(cfg.redis_url, decode_responses=False)
     original_perf: dict[str, Any] | None = None
+    original_topology: dict[str, Any] | None = None
     original_cameras: list[dict[str, Any]] = []
     runtime_epoch_root: str | None = None
     rtsp_republishers: list[subprocess.Popen] = []
@@ -378,9 +389,13 @@ def main(argv: list[str] | None = None) -> int:
         original_perf = api_json(cfg.api_base, "GET", "/runtime/performance-config")["data"][
             "saved_config"
         ]
+        original_topology = api_json(cfg.api_base, "GET", "/runtime/topology-config")["data"][
+            "saved_config"
+        ]
         original_cameras = fetch_cameras(conn)
         write_json(cfg.artifact_dir / "cameras_before.json", original_cameras)
         write_json(cfg.artifact_dir / "performance_before.json", original_perf)
+        write_json(cfg.artifact_dir / "topology_before.json", original_topology)
 
         active = prepare_evidence_guard(conn, cfg, report)
         if active["blocking_count"] and not cfg.force_runtime_restart:
@@ -396,7 +411,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         if cfg.dual_shard_same_gpu:
-            stop_single_inference_runtime_for_dual_pressure(cfg)
+            if not cfg.dual_shard_api:
+                stop_single_inference_runtime_for_dual_pressure(cfg)
         else:
             set_compose_operating_point(cfg)
         if cfg.dual_shard_same_gpu:
@@ -404,7 +420,11 @@ def main(argv: list[str] | None = None) -> int:
                 cfg.artifact_dir / "performance_apply_pressure.json",
                 {
                     "skipped": True,
-                    "reason": "dual_shard_same_gpu_uses_compose_env",
+                    "reason": (
+                        "dual_shard_uses_8090_topology_api"
+                        if cfg.dual_shard_api
+                        else "dual_shard_same_gpu_uses_compose_env"
+                    ),
                     "analysis_fps": cfg.fps,
                     "analysis_min_fps": cfg.min_fps,
                     "batch_size": cfg.batch_size,
@@ -432,22 +452,35 @@ def main(argv: list[str] | None = None) -> int:
         rtsp_republishers = start_rtsp_republishers(cfg)
         insert_pressure_cameras(conn, cfg)
         if cfg.dual_shard_same_gpu:
-            module_config = sync_module_config_snapshot(cfg)
-            shard_plan = write_dual_shard_pressure_sources(conn, cfg)
-            start_dual_shard_runtime(cfg)
-            start_pressure_sources_from_manifest(
-                cfg,
-                sources_path=Path(str(shard_plan["sources_path"])),
-            )
-            report["steps"].append(
-                {
-                    "name": "dual_shard_same_gpu_started",
-                    "module_config_path": module_config["module_config_path"],
-                    "sources_path": shard_plan["sources_path"],
-                    "gpu": cfg.dual_shard_gpu,
-                    "shards": shard_plan["shards"],
-                }
-            )
+            if cfg.dual_shard_api:
+                topology = save_and_apply_topology_config(cfg)
+                write_json(cfg.artifact_dir / "runtime_restart_pressure.json", topology)
+                report["steps"].append(
+                    {
+                        "name": "dual_shard_8090_topology_started",
+                        "mode": topology.get("mode"),
+                        "runtime_epoch_id": topology.get("runtime_epoch_id"),
+                        "sources_config_path": topology.get("sources_config_path"),
+                        "replay_shards_path": topology.get("replay_shards_path"),
+                    }
+                )
+            else:
+                module_config = sync_module_config_snapshot(cfg)
+                shard_plan = write_dual_shard_pressure_sources(conn, cfg)
+                start_dual_shard_runtime(cfg)
+                start_pressure_sources_from_manifest(
+                    cfg,
+                    sources_path=Path(str(shard_plan["sources_path"])),
+                )
+                report["steps"].append(
+                    {
+                        "name": "dual_shard_same_gpu_started",
+                        "module_config_path": module_config["module_config_path"],
+                        "sources_path": shard_plan["sources_path"],
+                        "gpu": cfg.dual_shard_gpu,
+                        "shards": shard_plan["shards"],
+                    }
+                )
         elif cfg.forwarder_null_sink:
             restart = apply_sources_only(cfg, "runtime_sources_apply_pressure.json")
             write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
@@ -496,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
             report["cleanup"] = cleanup
         restore_cameras(conn, original_cameras)
         restore_runtime(cfg, original_perf)
+        if original_topology is not None:
+            api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         if cfg.cleanup:
             report["cleanup_after_restore"] = cleanup_pressure_data(
                 conn,
@@ -534,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
                 restore_cameras(conn, original_cameras)
             if original_perf:
                 restore_runtime(cfg, original_perf)
+            if original_topology is not None:
+                api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         finally:
             return 130
     except Exception as exc:
@@ -554,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
                 restore_cameras(conn, original_cameras)
             if original_perf:
                 restore_runtime(cfg, original_perf)
+            if original_topology is not None:
+                api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         finally:
             return 1
     finally:
@@ -565,9 +604,12 @@ def _default_run_id(
     *,
     forwarder_null_sink: bool = False,
     dual_shard_same_gpu: bool = False,
+    dual_shard_api: bool = False,
 ) -> str:
     fps_label = fps.replace("/", "p").replace(".", "_")
-    if dual_shard_same_gpu:
+    if dual_shard_same_gpu and dual_shard_api:
+        prefix = "pressure60_8090topology_dual1gpu"
+    elif dual_shard_same_gpu:
         prefix = "pressure60_dual1gpu"
     elif forwarder_null_sink:
         prefix = "forwarder60_null"
@@ -1013,6 +1055,50 @@ def save_performance_config(cfg: PressureConfig, original: dict[str, Any]) -> No
             f"/runtime/performance-config/apply?force={str(cfg.force_runtime_restart).lower()}",
         ),
     )
+
+
+def topology_pressure_payload(cfg: PressureConfig) -> dict[str, Any]:
+    branch = {
+        "gpu_id": int(cfg.dual_shard_gpu),
+        "savant_batch_size": cfg.batch_size,
+        "pose_batch_size": cfg.pose_batch_size,
+        "face_detector_batch_size": cfg.face_detector_batch_size,
+        "face_embedding_batch_size": cfg.face_embedding_batch_size,
+        "max_parallel_streams": cfg.max_parallel_streams,
+        "analysis_fps": cfg.fps,
+        "analysis_min_fps": cfg.min_fps,
+        "savant_max_fps": cfg.fps,
+        "savant_min_fps": cfg.min_fps,
+        "batched_push_timeout": cfg.batched_push_timeout,
+    }
+    return {
+        "topology_mode": "dual_same_gpu",
+        "shard_strategy": "balanced",
+        "streams_per_branch": max(1, cfg.stream_count // 2),
+        "branches": {
+            "a": dict(branch),
+            "b": dict(branch),
+        },
+    }
+
+
+def save_and_apply_topology_config(cfg: PressureConfig) -> dict[str, Any]:
+    payload = topology_pressure_payload(cfg)
+    write_json(cfg.artifact_dir / "topology_pressure_payload.json", payload)
+    write_json(
+        cfg.artifact_dir / "topology_save_pressure.json",
+        api_json(cfg.api_base, "PUT", "/runtime/topology-config", payload, timeout_s=60),
+    )
+    response = api_json(
+        cfg.api_base,
+        "POST",
+        f"/runtime/topology-config/apply?force={str(cfg.force_runtime_restart).lower()}",
+        timeout_s=900,
+    )
+    write_json(cfg.artifact_dir / "topology_apply_pressure.json", response)
+    if response.get("error"):
+        raise RuntimeError(f"runtime topology apply failed: {response['error']}")
+    return response["data"]
 
 
 def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
@@ -2061,6 +2147,10 @@ def cleanup_after_aborted_run(
     if not cfg.cleanup:
         return
     try:
+        stop_pressure_sources(conn, cfg)
+    except Exception as exc:
+        report["stop_pressure_sources_after_abort_error"] = repr(exc)
+    try:
         report["cleanup_after_abort"] = cleanup_pressure_data(
             conn,
             redis_client,
@@ -2084,7 +2174,10 @@ def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
 
 def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
     if cfg.dual_shard_same_gpu:
-        stop_dual_shard_runtime(cfg)
+        if cfg.dual_shard_api:
+            api_json(cfg.api_base, "POST", "/runtime/control/dual/stop", timeout_s=360)
+        else:
+            stop_dual_shard_runtime(cfg)
     env = os.environ.copy()
     env.update(
         {

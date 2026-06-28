@@ -121,7 +121,7 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260628T145103Z-3b3905d0
+    runtime_epoch_id: midterm-20260628T161045Z-8aa9a0c6
   00000000-0000-4000-8000-781078565686:
     enabled: true
     source_id: source_00000000-0000-4000-8000-781078565686
@@ -336,5 +336,5 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260628T145103Z-3b3905d0
-runtime_epoch_id: midterm-20260628T145103Z-3b3905d0
+    runtime_epoch_id: midterm-20260628T161045Z-8aa9a0c6
+runtime_epoch_id: midterm-20260628T161045Z-8aa9a0c6
