@@ -1749,11 +1749,137 @@ function formatAge(value) {
   return `${formatNumber(num / 60)}m`;
 }
 
+function cameraForSourceId(sourceId) {
+  const id = String(sourceId || "");
+  if (!id) return null;
+  return (cameras || []).find((camera) => (
+    String(camera.source_id || "") === id ||
+    String(camera.id || "") === id ||
+    String(camera.camera_id || "") === id
+  )) || null;
+}
+
+function sourceDisplayName(sourceId) {
+  const id = String(sourceId || "");
+  const camera = cameraForSourceId(id);
+  return camera?.name || id || "--";
+}
+
+function sourceCellHtml(sourceId) {
+  const id = String(sourceId || "");
+  const name = sourceDisplayName(id);
+  const showId = id && name !== id;
+  return `<div class="runtime-source-cell">` +
+    `<strong>${escapeHtml(name)}</strong>` +
+    (showId ? `<small>${escapeHtml(id)}</small>` : "") +
+  `</div>`;
+}
+
+function isPressureSourceId(sourceId) {
+  const id = String(sourceId || "");
+  return id.startsWith("pressure") || id.startsWith("forwarder");
+}
+
+function runtimeIssueLabel(issue) {
+  const labels = {
+    compose_source_not_running: "固定源容器未运行；如果该摄像头已停用，可忽略",
+    savant_metrics_unavailable: "推理指标不可用",
+    analysis_forwarder_metrics_unavailable: "分析限流指标不可用",
+    forwarder_metrics_unavailable: "分析限流指标不可用",
+    source_convergence_unhealthy: "视频源生成配置与运行态未收敛",
+    no_active_sources: "当前没有活跃视频源",
+    source_count_mismatch: "活跃视频源数量与配置不一致",
+    evidence_metrics_unavailable: "证据生成指标不可用",
+    container_restart_warning: "有容器近期频繁重启",
+  };
+  if (!issue) return "--";
+  return labels[issue] || String(issue).replace(/_/g, " ");
+}
+
+function containerStateText(containerOrState) {
+  const state = typeof containerOrState === "string"
+    ? containerOrState
+    : (containerOrState?.present === false ? "missing" : (containerOrState?.running ? "running" : containerOrState?.state));
+  const labels = {
+    running: "运行中",
+    exited: "已退出",
+    stopped: "已停止",
+    missing: "未创建",
+    created: "已创建",
+    restarting: "重启中",
+    dead: "异常退出",
+    paused: "已暂停",
+  };
+  return labels[state] || state || "--";
+}
+
+function healthText(value) {
+  const labels = {
+    healthy: "健康",
+    unhealthy: "异常",
+    starting: "启动中",
+    none: "无健康检查",
+    missing: "未创建",
+  };
+  return labels[value] || value || "--";
+}
+
+function containerRoleLabel(role) {
+  const labels = {
+    api: "后端 API",
+    postgres: "PostgreSQL",
+    redis: "Redis",
+    savant: "Savant 推理",
+    source_adapter: "固定视频源",
+    compose_source: "固定视频源",
+    dynamic_source: "动态视频源",
+    analysis_forwarder: "分析限流",
+    event_worker: "事件处理",
+    clip_worker: "证据调度",
+    media_worker: "证据视频生成",
+    evidence_viewer: "8090 管理端",
+    replay: "Replay 取证",
+    runtime_supervisor: "运行监督",
+    watchdog: "Watchdog",
+  };
+  return labels[role] || String(role || "--").replace(/_/g, " ");
+}
+
+function topologyModeLabel(mode) {
+  const labels = {
+    auto: "自动选择",
+    single: "单分支",
+    dual_same_gpu: "双分支同卡",
+    dual_dual_gpu: "双分支双卡",
+  };
+  return labels[mode] || mode || "--";
+}
+
+function branchLabel(branchId) {
+  const id = String(branchId || "").toUpperCase();
+  return id ? `分支 ${id}` : "--";
+}
+
+function eventTypeLabel(eventType) {
+  const labels = {
+    watchlist_hit: "名单命中",
+    intrusion: "入侵检测",
+    line_crossing: "越线检测",
+    loitering: "徘徊",
+    crowding: "聚集",
+    abandoned_object: "遗留物",
+    unknown: "未知事件",
+  };
+  return labels[eventType] || eventType || "--";
+}
+
 function evidenceStateLabel(state) {
   const labels = {
     pending: "待处理",
     waiting_proof: "等待帧证明",
     queued: "排队",
+    materializing: "生成中",
+    materialization_skipped: "已跳过",
     replaying: "Replay 中",
     finalizing: "生成中",
     ready: "完成",
@@ -1827,8 +1953,7 @@ function performanceSourceLabel(source) {
 }
 
 function containerStateLabel(container) {
-  if (!container?.present) return container?.state || "missing";
-  return container.running ? "running" : (container.state || "stopped");
+  return containerStateText(container);
 }
 
 function renderRuntimePerformanceDiff(diff) {
@@ -1855,8 +1980,8 @@ function renderRuntimePerformanceDiff(diff) {
 }
 
 function formatPerformanceValue(value) {
-  if (value === true) return "true";
-  if (value === false) return "false";
+  if (value === true) return "开启";
+  if (value === false) return "关闭";
   if (value == null) return "--";
   return String(value);
 }
@@ -1883,7 +2008,7 @@ function renderRuntimeTopologyConfig() {
   const branchCount = Array.isArray(plan.branches) ? plan.branches.length : 0;
   runtimeTopologyStatusEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>模式</span><strong>${escapeHtml(plan.effective_mode || config.topology_mode || "--")}</strong></div>` +
+      `<div><span>当前模式</span><strong>${escapeHtml(topologyModeLabel(plan.effective_mode || config.topology_mode))}</strong></div>` +
       `<div><span>启用摄像头</span><strong>${formatInteger(plan.enabled_source_count || 0)}</strong></div>` +
       `<div><span>分支数</span><strong>${formatInteger(branchCount)}</strong></div>` +
       `<div><span>预检</span><strong>${preflight.ok === false ? "异常" : "通过"}</strong></div>` +
@@ -1914,11 +2039,11 @@ function renderRuntimeTopologyAssignments(config, plan) {
     return `<tr>` +
       `<td>${escapeHtml(camera.name || sourceId || "--")}</td>` +
       `<td>${escapeHtml(sourceId || "--")}</td>` +
-      `<td>${escapeHtml(planned)}</td>` +
+      `<td>${escapeHtml(branchLabel(planned))}</td>` +
       `<td>` +
         `<select name="manual.${escapeHtml(sourceId)}" data-topology-branch="${escapeHtml(sourceId)}">` +
-          `<option value="a"${selected === "a" ? " selected" : ""}>A</option>` +
-          `<option value="b"${selected === "b" ? " selected" : ""}>B</option>` +
+          `<option value="a"${selected === "a" ? " selected" : ""}>分支 A</option>` +
+          `<option value="b"${selected === "b" ? " selected" : ""}>分支 B</option>` +
         `</select>` +
       `</td>` +
     `</tr>`;
@@ -1926,7 +2051,7 @@ function renderRuntimeTopologyAssignments(config, plan) {
   runtimeTopologyAssignmentsEl.innerHTML =
     `<div class="runtime-subtitle">手动分配（分片策略为手动覆盖时生效）</div>` +
     `<table class="runtime-table runtime-topology-assignment-table">` +
-      `<thead><tr><th>摄像头</th><th>source</th><th>计划分支</th><th>手动分支</th></tr></thead>` +
+      `<thead><tr><th>摄像头</th><th>视频源 ID</th><th>计划分支</th><th>手动分支</th></tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>`;
 }
@@ -1947,11 +2072,11 @@ function renderRuntimeTopologyPlan(plan, runtime, preflight) {
     const forwarder = metrics.forwarder || {};
     const sourceIds = Array.isArray(branch.source_ids) ? branch.source_ids : [];
     const containers = live.containers || {};
-    const savantState = containers.savant?.running ? "running" : (containers.savant?.state || "--");
-    const forwarderState = containers.forwarder?.running ? "running" : (containers.forwarder?.state || "--");
+    const savantState = containerStateText(containers.savant);
+    const forwarderState = containerStateText(containers.forwarder);
     const sendFailures = (forwarder.sources || []).reduce((sum, item) => sum + Number(item.savant_send_failures_total || 0), 0);
     return `<tr>` +
-      `<td>${escapeHtml(branchId)}</td>` +
+      `<td>${escapeHtml(branchLabel(branchId))}</td>` +
       `<td>${escapeHtml(String(branch.gpu_id ?? "--"))}</td>` +
       `<td>${formatInteger(branch.source_count || 0)}</td>` +
       `<td>${formatInteger(savant.global?.va_savant_sources_active ?? (savant.sources || []).length)}</td>` +
@@ -1959,19 +2084,19 @@ function renderRuntimeTopologyPlan(plan, runtime, preflight) {
       `<td>${escapeHtml(forwarderState)}</td>` +
       `<td>${formatNumber(forwarder.global?.queue_depth)}</td>` +
       `<td>${formatInteger(sendFailures)}</td>` +
-      `<td>${escapeHtml(sourceIds.slice(0, 6).join(", "))}${sourceIds.length > 6 ? " ..." : ""}</td>` +
+      `<td>${escapeHtml(sourceIds.slice(0, 6).map(sourceDisplayName).join(", "))}${sourceIds.length > 6 ? " ..." : ""}</td>` +
     `</tr>`;
   }).join("");
   const checks = (preflight?.checks || []).map((item) =>
     `<tr class="${item.ok ? "" : "warn-row"}">` +
-      `<td>${escapeHtml(item.name || "")}</td>` +
+      `<td>${escapeHtml(runtimeIssueLabel(item.name || ""))}</td>` +
       `<td>${item.ok ? "通过" : "异常"}</td>` +
       `<td>${escapeHtml(item.container || item.gpu_id || "")}</td>` +
     `</tr>`
   ).join("");
   runtimeTopologyPlanEl.innerHTML =
     `<table class="runtime-table runtime-topology-table">` +
-      `<thead><tr><th>分支</th><th>GPU</th><th>计划路数</th><th>Savant 路数</th><th>Savant</th><th>Forwarder</th><th>队列</th><th>发送失败</th><th>source</th></tr></thead>` +
+      `<thead><tr><th>分支</th><th>GPU</th><th>计划路数</th><th>推理路数</th><th>推理容器</th><th>限流容器</th><th>队列</th><th>发送失败</th><th>摄像头</th></tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>` +
     `<table class="runtime-table runtime-topology-table">` +
@@ -1991,25 +2116,26 @@ function renderRuntimeOverview() {
   const issues = Array.isArray(health.issues) ? health.issues : [];
   const supervisorEnabled = supervisor.enabled === true;
   const annotationAge = supervisor.annotation_age_s;
+  const issueText = issues.length ? issues.map(runtimeIssueLabel).join("；") : "无已知异常";
 
   runtimeHealthSummaryEl.innerHTML =
     `<div class="summary-card runtime-health-card ${health.ok ? "ok" : "warn"}">` +
       `<span>整体状态</span>` +
       `<strong>${statusText(health.ok)}</strong>` +
-      `<small>${issues.length ? escapeHtml(issues.join(", ")) : "无已知异常"}</small>` +
+      `<small>${escapeHtml(issueText)}</small>` +
     `</div>` +
     `<div class="summary-card">` +
-      `<span>Savant metrics</span>` +
+      `<span>推理指标</span>` +
       `<strong>${metrics.available ? "可用" : "不可用"}</strong>` +
       `<small>${escapeHtml(overview.metrics_url || "")}</small>` +
     `</div>` +
     `<div class="summary-card">` +
-      `<span>活跃 source</span>` +
+      `<span>当前活跃视频源</span>` +
       `<strong>${formatInteger(metrics.sources_active ?? health.source_count)}</strong>` +
-      `<small>per-source 指标 ${formatInteger((metrics.sources || []).length)} 路</small>` +
+      `<small>指标中保留 ${formatInteger((metrics.sources || []).length)} 路历史标签</small>` +
     `</div>` +
     `<div class="summary-card">` +
-      `<span>annotation age</span>` +
+      `<span>标注延迟</span>` +
       `<strong>${annotationAge == null ? "--" : `${formatInteger(annotationAge)}s`}</strong>` +
       `<small>${supervisorEnabled ? "supervisor 已启用" : "supervisor 未启用"}</small>` +
     `</div>`;
@@ -2019,8 +2145,9 @@ function renderRuntimeOverview() {
       `<div><span>Savant 容器</span><strong>${escapeHtml(supervisor.savant_container || "--")}</strong></div>` +
       `<div><span>模块状态</span><strong>${escapeHtml(supervisor.savant_module_status || "--")}</strong></div>` +
       `<div><span>冷却中</span><strong>${supervisor.in_cooldown ? "是" : "否"}</strong></div>` +
-      `<div><span>source convergence</span><strong>${supervisor.source_convergence?.healthy === false ? "异常" : "正常"}</strong></div>` +
-    `</div>`;
+      `<div><span>视频源收敛</span><strong>${supervisor.source_convergence?.healthy === false ? "异常" : "正常"}</strong></div>` +
+    `</div>` +
+    `<div class="runtime-note">指标表可能保留历史视频源标签；以“最近帧延迟”和摄像头启用状态判断当前是否仍在运行。</div>`;
 
   renderRuntimeSourceTable(metrics.sources || []);
   renderRuntimeForwarderTable(forwarder);
@@ -2034,14 +2161,22 @@ function renderRuntimeOverview() {
 function renderRuntimeSourceTable(sources) {
   if (!runtimeSourceTableEl) return;
   if (!sources.length) {
-    runtimeSourceTableEl.innerHTML = `<div class="empty-state">暂无 per-source 性能指标。</div>`;
+    runtimeSourceTableEl.innerHTML = `<div class="empty-state">暂无按摄像头拆分的性能指标。</div>`;
     return;
   }
   const rows = sources.map((source) => {
     const age = Number(source.last_frame_age_seconds);
-    const stale = Number.isFinite(age) && age > 30;
+    const pressureHistory = isPressureSourceId(source.source_id);
+    const camera = cameraForSourceId(source.source_id);
+    const unknownSource = !camera;
+    const stale = pressureHistory || unknownSource || (Number.isFinite(age) && age > 30);
+    const enabled = camera?.enabled !== false;
+    const stateText = pressureHistory ? "压测历史" : (
+      unknownSource ? "未登记/历史" : (stale ? "历史指标" : (enabled ? "最近有帧" : "摄像头已停用"))
+    );
     return `<tr class="${stale ? "warn-row" : ""}">` +
-      `<td>${escapeHtml(source.source_id)}</td>` +
+      `<td>${sourceCellHtml(source.source_id)}</td>` +
+      `<td><span class="runtime-state-chip ${stale ? "warn" : "ok"}">${escapeHtml(stateText)}</span></td>` +
       `<td>${formatNumber(source.effective_fps)}</td>` +
       `<td>${formatNumber(source.last_frame_age_seconds)}</td>` +
       `<td>${formatInteger(source.frames_seen_total)}</td>` +
@@ -2054,8 +2189,8 @@ function renderRuntimeSourceTable(sources) {
   runtimeSourceTableEl.innerHTML =
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>source</th><th>FPS</th><th>frame age(s)</th><th>frames</th>` +
-        `<th>annotations</th><th>person</th><th>face</th><th>AdaFace</th>` +
+        `<th>摄像头</th><th>运行判断</th><th>有效 FPS</th><th>最近帧延迟</th><th>已处理帧</th>` +
+        `<th>标注帧</th><th>人体</th><th>人脸</th><th>人脸特征</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>`;
@@ -2065,7 +2200,7 @@ function renderRuntimeForwarderTable(forwarder) {
   if (!runtimeForwarderTableEl) return;
   const sources = forwarder.sources || [];
   if (!forwarder.available) {
-    runtimeForwarderTableEl.innerHTML = `<div class="empty-state">暂无 analysis-forwarder 指标。</div>`;
+    runtimeForwarderTableEl.innerHTML = `<div class="empty-state">暂无分析限流指标。</div>`;
     return;
   }
   const global = forwarder.global || {};
@@ -2078,7 +2213,7 @@ function renderRuntimeForwarderTable(forwarder) {
     const failed = Number(source.savant_send_failures_total);
     const warn = Number.isFinite(failed) && failed > 0;
     return `<tr class="${warn ? "warn-row" : ""}">` +
-      `<td>${escapeHtml(source.source_id)}</td>` +
+      `<td>${sourceCellHtml(source.source_id)}</td>` +
       `<td>${formatInteger(source.frames_seen_total)}</td>` +
       `<td>${formatInteger(source.frames_forwarded_total)}</td>` +
       `<td>${formatInteger(source.frames_dropped_total)}</td>` +
@@ -2088,12 +2223,12 @@ function renderRuntimeForwarderTable(forwarder) {
   }).join("");
   runtimeForwarderTableEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>queue depth</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
-      `<div><span>running</span><strong>${global.running === 1 ? "是" : "否"}</strong></div>` +
+      `<div><span>队列深度</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
+      `<div><span>运行状态</span><strong>${global.running === 1 ? "运行中" : "未运行"}</strong></div>` +
     `</div>` +
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>source</th><th>seen</th><th>forwarded</th><th>dropped</th><th>drop %</th><th>send failures</th>` +
+        `<th>摄像头</th><th>收到帧</th><th>转发帧</th><th>丢弃帧</th><th>丢弃比例</th><th>发送失败</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>`;
@@ -2117,24 +2252,24 @@ function renderRuntimeEvidenceTable(evidence) {
   const rows = recent.map((row) => {
     const warn = row.evidence_state === "failed" || row.task_status && row.task_status !== row.evidence_state;
     return `<tr class="${warn ? "warn-row" : ""}">` +
-      `<td>${escapeHtml(row.event_type || "--")}</td>` +
-      `<td>${escapeHtml(row.source_id || "--")}</td>` +
+      `<td>${escapeHtml(eventTypeLabel(row.event_type))}</td>` +
+      `<td>${sourceCellHtml(row.source_id)}</td>` +
       `<td>${escapeHtml(evidenceStateLabel(row.evidence_state))}</td>` +
-      `<td>${escapeHtml(row.task_status || "--")}</td>` +
+      `<td>${escapeHtml(evidenceStateLabel(row.task_status))}</td>` +
       `<td>${formatAge(row.age_seconds)}</td>` +
       `<td>${escapeHtml(row.evidence_reason || "--")}</td>` +
     `</tr>`;
   }).join("");
   const failureRows = failures.slice(0, 5).map((row) =>
-    `<li><strong>${escapeHtml(row.source_id || "--")}</strong> ` +
-    `${escapeHtml(row.event_type || "--")} / ${escapeHtml(row.evidence_reason || "failed")}</li>`
+    `<li><strong>${escapeHtml(sourceDisplayName(row.source_id))}</strong> ` +
+    `${escapeHtml(eventTypeLabel(row.event_type))} / ${escapeHtml(row.evidence_reason || "failed")}</li>`
   ).join("");
   runtimeEvidenceTableEl.innerHTML =
     `<div class="runtime-kv-grid evidence-state-grid">${countHtml}</div>` +
     (failureRows ? `<ul class="runtime-failure-list">${failureRows}</ul>` : "") +
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>event</th><th>source</th><th>evidence</th><th>task</th><th>age</th><th>reason</th>` +
+        `<th>事件类型</th><th>摄像头</th><th>证据状态</th><th>任务状态</th><th>耗时</th><th>原因</th>` +
       `</tr></thead>` +
       `<tbody>${rows || `<tr><td colspan="6">暂无最近证据事件。</td></tr>`}</tbody>` +
     `</table>`;
@@ -2146,10 +2281,10 @@ function renderRuntimeContainerTable(containers) {
   const rows = Object.entries(fixed).map(([role, item]) => {
     const warn = (item.present && item.state !== "running") || item.restart_warning === true;
     return `<tr class="${warn ? "warn-row" : ""}">` +
-      `<td>${escapeHtml(role)}</td>` +
+      `<td>${escapeHtml(containerRoleLabel(role))}</td>` +
       `<td>${escapeHtml(item.name || "--")}</td>` +
-      `<td>${item.present ? escapeHtml(item.state || "--") : "missing"}</td>` +
-      `<td>${escapeHtml(item.health || "--")}</td>` +
+      `<td>${escapeHtml(containerStateText(item))}</td>` +
+      `<td>${escapeHtml(healthText(item.health))}</td>` +
       `<td>${formatInteger(item.restart_count)}</td>` +
       `<td>${formatNumber(item.restart_rate_per_min)}</td>` +
     `</tr>`;
@@ -2158,9 +2293,9 @@ function renderRuntimeContainerTable(containers) {
     const warn = source.state !== "running" || source.restart_warning === true;
     rows.push(
       `<tr class="${warn ? "warn-row" : ""}">` +
-        `<td>dynamic_source</td>` +
+        `<td>${escapeHtml(containerRoleLabel("dynamic_source"))}</td>` +
         `<td>${escapeHtml(source.name || "--")}</td>` +
-        `<td>${escapeHtml(source.state || "--")}</td>` +
+        `<td>${escapeHtml(containerStateText(source.state))}</td>` +
         `<td>--</td>` +
         `<td>${formatInteger(source.restart_count)}</td>` +
         `<td>${formatNumber(source.restart_rate_per_min)}</td>` +
@@ -2169,7 +2304,7 @@ function renderRuntimeContainerTable(containers) {
   }
   runtimeContainerTableEl.innerHTML =
     `<table class="runtime-table">` +
-      `<thead><tr><th>role</th><th>container</th><th>state</th><th>health</th><th>restarts</th><th>restarts/min</th></tr></thead>` +
+      `<thead><tr><th>角色</th><th>容器</th><th>状态</th><th>健康</th><th>重启次数</th><th>每分钟重启</th></tr></thead>` +
       `<tbody>${rows.join("")}</tbody>` +
     `</table>`;
 }

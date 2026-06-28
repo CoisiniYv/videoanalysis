@@ -693,6 +693,13 @@ p {
   font-size: 14px;
 }
 
+.runtime-note {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .runtime-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -721,6 +728,46 @@ p {
 
 .runtime-table td {
   overflow-wrap: anywhere;
+}
+
+.runtime-source-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+}
+
+.runtime-source-cell strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.runtime-source-cell small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.runtime-state-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  border-radius: 999px;
+}
+
+.runtime-state-chip.ok {
+  color: var(--success);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+}
+
+.runtime-state-chip.warn {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--danger-border);
 }
 
 .runtime-table .warn-row td,

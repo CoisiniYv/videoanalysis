@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=roi-zone-stack-20260627" />
+    <link rel="stylesheet" href="/static/style.css?v=runtime-cn-20260629" />
   </head>
   <body>
     <div class="app-shell">
@@ -346,7 +346,7 @@
             <div class="pane-title">
               <div>
                 <h2>运行总览</h2>
-                <p>Savant、source adapter、worker 与 watchdog 状态。</p>
+                <p>集中查看推理链路、视频源、证据任务和管理服务状态。</p>
               </div>
               <div class="button-group">
                 <button id="start-single-runtime" type="button" class="primary">启动单路链路</button>
@@ -365,7 +365,7 @@
             <div class="pane-title">
               <div>
                 <h2>推理性能</h2>
-                <p>Forwarder 采样、Savant 入流限速和模型 interval。</p>
+                <p>配置采样限速、模型 batch、并行流和 Redis 写入参数。</p>
               </div>
               <div class="button-group">
                 <button id="save-runtime-performance" type="button">保存配置</button>
@@ -378,12 +378,12 @@
                 <input name="forwarder_sampler_enabled" type="checkbox" />
                 <span>Forwarder 采样</span>
               </label>
-              <label>Forwarder 最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-              <label>Forwarder 最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-              <label>Forwarder 队列上限<input name="forwarder_queue_max_size" type="number" min="1" max="20000" step="1" /></label>
-              <label>Forwarder 发送超时 ms<input name="forwarder_send_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-              <label>Forwarder 发送重试<input name="forwarder_send_retries" type="number" min="0" max="20" step="1" /></label>
-              <label>Forwarder 发送 HWM<input name="forwarder_send_hwm" type="number" min="1" max="20000" step="1" /></label>
+              <label>采样最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+              <label>采样最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+              <label>转发队列上限<input name="forwarder_queue_max_size" type="number" min="1" max="20000" step="1" /></label>
+              <label>发送超时 ms<input name="forwarder_send_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+              <label>发送重试次数<input name="forwarder_send_retries" type="number" min="0" max="20" step="1" /></label>
+              <label>发送高水位<input name="forwarder_send_hwm" type="number" min="1" max="20000" step="1" /></label>
               <label class="toggle-field">
                 <input name="ingress_fps_gate_enabled" type="checkbox" />
                 <span>Savant 入流限速</span>
@@ -405,7 +405,7 @@
               <label>Savant Redis 重试间隔 ms<input name="savant_redis_retry_sleep_ms" type="number" min="0" max="5000" step="10" /></label>
               <label>Frame annotation 写入超时 ms<input name="frame_annotation_write_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
               <label>Frame annotation Redis 队列上限<input name="frame_annotation_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
-              <label>Batched push timeout<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+              <label>批量推送等待 us<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
             </form>
             <div id="runtime-performance-diff" class="runtime-table-wrap"></div>
           </section>
@@ -414,7 +414,7 @@
             <div class="pane-title">
               <div>
                 <h2>推理拓扑</h2>
-                <p>管理单分支、双分支同卡和双分支双卡运行方式。</p>
+                <p>按摄像头数量和 GPU 资源切换单分支或双分支运行方式。</p>
               </div>
               <div class="button-group">
                 <button id="save-runtime-topology" type="button">保存拓扑</button>
@@ -451,7 +451,7 @@
                 <label>Forwarder 最小 FPS<input name="a.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                 <label>Savant FPS<input name="a.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
                 <label>Savant 最小 FPS<input name="a.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                <label>Batched push timeout<input name="a.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                <label>批量推送等待 us<input name="a.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
               </fieldset>
               <fieldset>
                 <legend>分支 B</legend>
@@ -465,7 +465,7 @@
                 <label>Forwarder 最小 FPS<input name="b.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                 <label>Savant FPS<input name="b.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
                 <label>Savant 最小 FPS<input name="b.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                <label>Batched push timeout<input name="b.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                <label>批量推送等待 us<input name="b.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
               </fieldset>
               <div id="runtime-topology-assignments" class="runtime-topology-assignments"></div>
             </form>
@@ -476,7 +476,7 @@
             <div class="pane-title">
               <div>
                 <h2>摄像头性能</h2>
-                <p>通过 API 聚合 Savant metrics，不直接暴露 18080。</p>
+                <p>展示每路摄像头最近帧、有效 FPS 和模型输出数量。</p>
               </div>
             </div>
             <div id="runtime-source-table" class="runtime-table-wrap"></div>
@@ -486,7 +486,7 @@
             <div class="pane-title">
               <div>
                 <h2>分析限流</h2>
-                <p>通过 API 聚合 forwarder metrics，不直接暴露 18081。</p>
+                <p>查看采样后转发到推理服务的帧数、丢帧和发送失败。</p>
               </div>
             </div>
             <div id="runtime-forwarder-table" class="runtime-table-wrap"></div>
@@ -496,7 +496,7 @@
             <div class="pane-title">
               <div>
                 <h2>证据生成</h2>
-                <p>检测事件到 Replay/finalizer 的实时状态。</p>
+                <p>跟踪事件进入取证队列、Replay 和视频生成的状态。</p>
               </div>
             </div>
             <div id="runtime-evidence-table" class="runtime-table-wrap"></div>
@@ -754,7 +754,7 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=behavior-rules-20260628"></script>
+    <script src="/static/operator.js?v=runtime-cn-20260629"></script>
     <script src="/static/evidence.js?v=evidence-list-fast-20260615"></script>
     <script src="/static/maintenance.js?v=maintenance-execute-control-20260627"></script>
   </body>

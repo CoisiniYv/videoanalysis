@@ -37,13 +37,14 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert "推理性能" in html
     assert "保存并应用" in html
     assert "Savant 最大 FPS" in html
-    assert "Forwarder 队列上限" in html
-    assert "Forwarder 发送超时 ms" in html
-    assert "Forwarder 发送重试" in html
-    assert "Forwarder 发送 HWM" in html
+    assert "转发队列上限" in html
+    assert "发送超时 ms" in html
+    assert "发送重试次数" in html
+    assert "发送高水位" in html
     assert "Savant Redis 超时 ms" in html
     assert "Savant Redis 写入重试" in html
     assert "Frame annotation 写入超时 ms" in html
+    assert "集中查看推理链路、视频源、证据任务和管理服务状态" in html
     assert "摄像头性能" in html
     assert "证据生成" in html
 
@@ -73,7 +74,13 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "frames_dropped_total" in js
     assert "restart_rate_per_min" in js
     assert "restart_warning" in js
-    assert "restarts/min" in js
+    assert "runtimeIssueLabel" in js
+    assert "containerStateText" in js
+    assert "每分钟重启" in js
+    assert "固定源容器未运行" in js
+    assert "推理指标" in js
+    assert "运行判断" in js
+    assert "发送失败" in js
     assert '"runtime"' in viewer_main
     assert "18080" not in js
     assert "savant-security:8080" not in js
