@@ -145,7 +145,7 @@ def test_start_builds_docker_run(script_mod, sources_path):
     assert env_dict["SOURCE_ID"] == "primary_rtsp"
     assert env_dict["LOCATION"] == "rtsp://example.local/stream"
     assert env_dict["RTSP_URI"] == "rtsp://example.local/stream"
-    assert env_dict["RTSP_TRANSPORT"] == "tcp"
+    assert env_dict["RTSP_TRANSPORT"] == script_mod.DEFAULT_RTSP_TRANSPORT_PARAMS
     assert env_dict["ZMQ_ENDPOINT"] == "dealer+connect:tcp://savant-security:5555"
     assert env_dict["SYNC_OUTPUT"] == "false"
     assert env_dict["BUFFER_LEN"] == "2000"

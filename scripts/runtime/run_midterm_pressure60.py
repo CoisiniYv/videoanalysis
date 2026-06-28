@@ -30,6 +30,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import psycopg
+import yaml
 from psycopg.rows import dict_row
 from redis import Redis
 
@@ -43,6 +44,52 @@ DEFAULT_RTSP_URI = "rtsp://192.168.1.105:8554/live/1080movie"
 DEFAULT_ARTIFACT_ROOT = Path("/data/video-analytics/artifacts")
 DEFAULT_EVIDENCE_ROOT = Path("/data/video-analytics/media/evidence")
 DEFAULT_REPLAY_EPOCH_ROOT = Path("/data/video-analytics/media/replay-sink-output/midterm/epochs")
+DEFAULT_MODULE_CONFIG_PATH = Path("modules/savant_security/config/cameras.midterm.yml")
+SOURCE_CONTROLLER = Path("scripts/runtime/camera_source_controller.py")
+DUAL_SHARD_PROFILE = "dual-4090-two-source"
+DUAL_SHARD_SERVICES = [
+    "savant-a",
+    "savant-b",
+    "analysis-forwarder-a",
+    "analysis-forwarder-b",
+    "replay-a",
+    "replay-b",
+]
+DUAL_SHARD_SINGLE_SERVICES = ["source-adapter", "analysis-forwarder", "savant-security"]
+DUAL_SHARD_FORWARDER_METRICS = {
+    "replay-a": "http://127.0.0.1:18182/metrics",
+    "replay-b": "http://127.0.0.1:18183/metrics",
+}
+DUAL_SHARD_FORWARDER_HEALTH = {
+    "replay-a": "http://127.0.0.1:18182/healthz",
+    "replay-b": "http://127.0.0.1:18183/healthz",
+}
+DUAL_SHARD_SAVANT_METRICS = {
+    "replay-a": "http://127.0.0.1:18180/metrics",
+    "replay-b": "http://127.0.0.1:18181/metrics",
+}
+PROM_SAMPLE_RE = re.compile(
+    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+"
+    r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$"
+)
+PROM_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
+SAVANT_COUNTER_METRICS = {
+    "va_savant_frames_seen_total",
+    "va_savant_frame_annotations_exported_total",
+    "va_savant_pose_stage_frames_total",
+    "va_savant_pose_frames_with_person_total",
+    "va_savant_pose_objects_total",
+    "va_savant_face_stage_frames_total",
+    "va_savant_face_frames_with_face_total",
+    "va_savant_face_objects_total",
+    "va_savant_adaface_embeddings_total",
+    "va_savant_person_observations_exported_total",
+    "va_savant_face_observations_exported_total",
+}
+SAVANT_GAUGE_METRICS = {
+    "va_savant_effective_fps",
+    "va_savant_last_frame_age_seconds",
+}
 ACTIVE_MATERIALIZATION_STATES = {
     "manifest_ready",
     "materialization_pending",
@@ -107,6 +154,8 @@ class PressureConfig:
     max_exited_sources: int
     max_validate_seq_iq: int
     forwarder_null_sink: bool
+    dual_shard_same_gpu: bool
+    dual_shard_gpu: str
     cleanup: bool
 
 
@@ -211,13 +260,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "but count forwarded frames in a null sink instead of sending to Savant."
         ),
     )
+    parser.add_argument(
+        "--dual-shard-same-gpu",
+        action="store_true",
+        help=(
+            "Run pressure sources through replay-a/b, analysis-forwarder-a/b, "
+            "and savant-a/b, with both Savant branches pinned to one GPU."
+        ),
+    )
+    parser.add_argument(
+        "--dual-shard-gpu",
+        default="0",
+        help="Physical GPU id used by both Savant branches in --dual-shard-same-gpu mode.",
+    )
     parser.add_argument("--no-cleanup", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    run_id = args.run_id or _default_run_id(args.fps, forwarder_null_sink=args.forwarder_null_sink)
+    if args.dual_shard_same_gpu and args.forwarder_null_sink:
+        raise SystemExit("--dual-shard-same-gpu cannot be combined with --forwarder-null-sink")
+    if args.dual_shard_same_gpu and args.keep_evidence > 0:
+        raise SystemExit(
+            "--dual-shard-same-gpu currently requires --keep-evidence 0; "
+            "evidence replay shard routing is a separate validation path."
+        )
+    run_id = args.run_id or _default_run_id(
+        args.fps,
+        forwarder_null_sink=args.forwarder_null_sink,
+        dual_shard_same_gpu=args.dual_shard_same_gpu,
+    )
     artifact_dir = (args.artifact_root / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cfg = PressureConfig(
@@ -255,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
         max_exited_sources=args.max_exited_sources,
         max_validate_seq_iq=args.max_validate_seq_iq,
         forwarder_null_sink=args.forwarder_null_sink,
+        dual_shard_same_gpu=args.dual_shard_same_gpu,
+        dual_shard_gpu=str(args.dual_shard_gpu),
         cleanup=not args.no_cleanup,
     )
     report: dict[str, Any] = {
@@ -293,8 +368,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        set_compose_operating_point(cfg)
-        if cfg.forwarder_null_sink:
+        if cfg.dual_shard_same_gpu:
+            stop_single_inference_runtime_for_dual_pressure(cfg)
+        else:
+            set_compose_operating_point(cfg)
+        if cfg.dual_shard_same_gpu:
+            write_json(
+                cfg.artifact_dir / "performance_apply_pressure.json",
+                {
+                    "skipped": True,
+                    "reason": "dual_shard_same_gpu_uses_compose_env",
+                    "analysis_fps": cfg.fps,
+                    "analysis_min_fps": cfg.min_fps,
+                    "gpu": cfg.dual_shard_gpu,
+                },
+            )
+        elif cfg.forwarder_null_sink:
             write_json(
                 cfg.artifact_dir / "performance_apply_pressure.json",
                 {
@@ -309,7 +398,24 @@ def main(argv: list[str] | None = None) -> int:
             save_performance_config(cfg, original_perf)
         rtsp_republishers = start_rtsp_republishers(cfg)
         insert_pressure_cameras(conn, cfg)
-        if cfg.forwarder_null_sink:
+        if cfg.dual_shard_same_gpu:
+            module_config = sync_module_config_snapshot(cfg)
+            shard_plan = write_dual_shard_pressure_sources(conn, cfg)
+            start_dual_shard_runtime(cfg)
+            start_pressure_sources_from_manifest(
+                cfg,
+                sources_path=Path(str(shard_plan["sources_path"])),
+            )
+            report["steps"].append(
+                {
+                    "name": "dual_shard_same_gpu_started",
+                    "module_config_path": module_config["module_config_path"],
+                    "sources_path": shard_plan["sources_path"],
+                    "gpu": cfg.dual_shard_gpu,
+                    "shards": shard_plan["shards"],
+                }
+            )
+        elif cfg.forwarder_null_sink:
             restart = apply_sources_only(cfg, "runtime_sources_apply_pressure.json")
             write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
             report["steps"].append({"name": "forwarder_null_sources_started"})
@@ -384,6 +490,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PRESSURE_RUN_INTERRUPTED artifact_dir={cfg.artifact_dir}", file=sys.stderr)
         try:
             stop_rtsp_republishers(rtsp_republishers, cfg)
+            cleanup_after_aborted_run(
+                conn,
+                redis_client,
+                cfg,
+                report,
+                runtime_epoch_root=runtime_epoch_root,
+            )
             if original_cameras:
                 restore_cameras(conn, original_cameras)
             if original_perf:
@@ -397,6 +510,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"PRESSURE_RUN_FAILED error={exc!r} artifact_dir={cfg.artifact_dir}", file=sys.stderr)
         try:
             stop_rtsp_republishers(rtsp_republishers, cfg)
+            cleanup_after_aborted_run(
+                conn,
+                redis_client,
+                cfg,
+                report,
+                runtime_epoch_root=runtime_epoch_root,
+            )
             if original_cameras:
                 restore_cameras(conn, original_cameras)
             if original_perf:
@@ -407,9 +527,19 @@ def main(argv: list[str] | None = None) -> int:
         conn.close()
 
 
-def _default_run_id(fps: str, *, forwarder_null_sink: bool = False) -> str:
+def _default_run_id(
+    fps: str,
+    *,
+    forwarder_null_sink: bool = False,
+    dual_shard_same_gpu: bool = False,
+) -> str:
     fps_label = fps.replace("/", "p").replace(".", "_")
-    prefix = "forwarder60_null" if forwarder_null_sink else "pressure60"
+    if dual_shard_same_gpu:
+        prefix = "pressure60_dual1gpu"
+    elif forwarder_null_sink:
+        prefix = "forwarder60_null"
+    else:
+        prefix = "pressure60"
     return f"{prefix}_{fps_label}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
 
@@ -624,6 +754,181 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
     )
 
 
+def stop_single_inference_runtime_for_dual_pressure(cfg: PressureConfig) -> None:
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            "stop",
+            *DUAL_SHARD_SINGLE_SERVICES,
+        ],
+        cfg.artifact_dir / "compose_stop_single_for_dual_pressure.log",
+        check=False,
+    )
+
+
+def start_dual_shard_runtime(cfg: PressureConfig) -> None:
+    override_path = write_dual_shard_same_gpu_compose_override(cfg)
+    env = os.environ.copy()
+    env.update(
+        {
+            "BATCH_SIZE": str(cfg.batch_size),
+            "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+            "ANALYSIS_FPS": cfg.fps,
+            "ANALYSIS_MIN_FPS": cfg.min_fps,
+            "MAX_FPS": cfg.fps,
+            "MIN_FPS": cfg.min_fps,
+            "SAVANT_A_NVIDIA_VISIBLE_DEVICES": cfg.dual_shard_gpu,
+            "SAVANT_B_NVIDIA_VISIBLE_DEVICES": cfg.dual_shard_gpu,
+            "SAVANT_B_CUDA_VISIBLE_DEVICES": "0",
+            "SAVANT_B_MODEL_ROOT": "/data/video-analytics/models",
+        }
+    )
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            "-f",
+            str(override_path),
+            "--profile",
+            DUAL_SHARD_PROFILE,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            *DUAL_SHARD_SERVICES,
+        ],
+        cfg.artifact_dir / "compose_recreate_dual_shard_same_gpu.log",
+        env=env,
+    )
+    wait_for_dual_shard_metrics(cfg)
+
+
+def stop_dual_shard_runtime(cfg: PressureConfig) -> None:
+    override_path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
+    compose = [
+        "docker",
+        "compose",
+        "--env-file",
+        cfg.env_file,
+        "-f",
+        cfg.compose_file,
+    ]
+    if override_path.exists():
+        compose.extend(["-f", str(override_path)])
+    compose.extend(["--profile", DUAL_SHARD_PROFILE, "stop", *DUAL_SHARD_SERVICES])
+    run(
+        compose,
+        cfg.artifact_dir / "compose_stop_dual_shard_same_gpu.log",
+        check=False,
+    )
+
+
+def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
+    path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
+    device = str(cfg.dual_shard_gpu)
+    doc = {
+        "services": {
+            "savant-a": {
+                "environment": {
+                    "NVIDIA_VISIBLE_DEVICES": device,
+                },
+                "deploy": {
+                    "resources": {
+                        "reservations": {
+                            "devices": [
+                                {
+                                    "driver": "nvidia",
+                                    "device_ids": [device],
+                                    "capabilities": ["gpu"],
+                                }
+                            ]
+                        }
+                    }
+                },
+            },
+            "savant-b": {
+                "environment": {
+                    "NVIDIA_VISIBLE_DEVICES": device,
+                    "CUDA_VISIBLE_DEVICES": "0",
+                },
+                "deploy": {
+                    "resources": {
+                        "reservations": {
+                            "devices": [
+                                {
+                                    "driver": "nvidia",
+                                    "device_ids": [device],
+                                    "capabilities": ["gpu"],
+                                }
+                            ]
+                        }
+                    }
+                },
+            },
+        }
+    }
+    write_text(path, yaml.safe_dump(doc, sort_keys=False))
+    return path
+
+
+def wait_for_dual_shard_metrics(cfg: PressureConfig) -> None:
+    urls = {
+        **{
+            f"{shard_id}-forwarder-health": url
+            for shard_id, url in DUAL_SHARD_FORWARDER_HEALTH.items()
+        },
+        **{
+            f"{shard_id}-savant-metrics": url
+            for shard_id, url in DUAL_SHARD_SAVANT_METRICS.items()
+        },
+    }
+    deadline = time.time() + 300
+    pending = dict(urls)
+    observations: list[dict[str, Any]] = []
+    while pending and time.time() < deadline:
+        for name, url in list(pending.items()):
+            try:
+                body = fetch_text_url(url, timeout_s=3)
+            except Exception as exc:
+                observations.append(
+                    {
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                        "name": name,
+                        "url": url,
+                        "ready": False,
+                        "error": repr(exc),
+                    }
+                )
+                continue
+            if body:
+                observations.append(
+                    {
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                        "name": name,
+                        "url": url,
+                        "ready": True,
+                    }
+                )
+                pending.pop(name, None)
+        if pending:
+            time.sleep(2)
+    write_json(
+        cfg.artifact_dir / "dual_shard_metrics_ready.json",
+        {"pending": pending, "observations": observations[-100:]},
+    )
+    if pending:
+        raise RuntimeError(f"dual shard metrics endpoints not ready: {pending}")
+
+
 def save_performance_config(cfg: PressureConfig, original: dict[str, Any]) -> None:
     payload = dict(original)
     payload.update(
@@ -746,6 +1051,88 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                     json.dumps(evidence_policy),
                 ),
             )
+
+
+def sync_module_config_snapshot(cfg: PressureConfig) -> dict[str, Any]:
+    body = api_text(cfg.api_base, "/cameras/config/export?include_disabled=true", timeout_s=60)
+    artifact_path = cfg.artifact_dir / "cameras.midterm.pressure.yml"
+    write_text(artifact_path, body)
+    module_path = DEFAULT_MODULE_CONFIG_PATH
+    _atomic_write_text(module_path, body)
+    return {
+        "module_config_path": str(module_path),
+        "artifact_config_path": str(artifact_path),
+    }
+
+
+def write_dual_shard_pressure_sources(conn, cfg: PressureConfig) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT id, name, source_id, rtsp_url, enabled
+        FROM cameras
+        WHERE source_id LIKE %s
+        ORDER BY source_id
+        """,
+        (f"{cfg.run_id}_%",),
+    ).fetchall()
+    if len(rows) != cfg.stream_count:
+        raise RuntimeError(
+            f"expected {cfg.stream_count} pressure cameras, found {len(rows)}"
+        )
+    split_at = max(1, cfg.stream_count // 2)
+    source_ids_by_shard = {"replay-a": [], "replay-b": []}
+    sources: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        camera = _row_json(row)
+        source_id = str(camera["source_id"])
+        shard_id = "replay-a" if index < split_at else "replay-b"
+        source_ids_by_shard[shard_id].append(source_id)
+        sources[str(camera["id"])] = {
+            "camera_id": str(camera["id"]),
+            "source_id": source_id,
+            "uri": str(camera["rtsp_url"]),
+            "enabled": bool(camera.get("enabled", True)),
+            "adapter_type": "gstreamer",
+            "zmq_endpoint": f"dealer+connect:tcp://{shard_id}:5555",
+            "replay_shard_id": shard_id,
+            "camera_name": str(camera.get("name") or ""),
+        }
+    sources_path = cfg.artifact_dir / "sources.dual-shard.generated.yml"
+    write_text(
+        sources_path,
+        yaml.safe_dump({"sources": sources}, sort_keys=False, allow_unicode=True),
+    )
+    shard_plan = {
+        "default_shard_id": "replay-a",
+        "shards": [
+            {
+                "shard_id": "replay-a",
+                "replay_api_url": "http://replay-a:8080",
+                "in_stream_endpoint": "dealer+connect:tcp://replay-a:5555",
+                "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-a:6666",
+                "source_ids": source_ids_by_shard["replay-a"],
+            },
+            {
+                "shard_id": "replay-b",
+                "replay_api_url": "http://replay-b:8080",
+                "in_stream_endpoint": "dealer+connect:tcp://replay-b:5555",
+                "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-b:6666",
+                "source_ids": source_ids_by_shard["replay-b"],
+            },
+        ],
+    }
+    shard_plan_path = cfg.artifact_dir / "replay_shards.dual-shard.pressure.json"
+    write_json(shard_plan_path, shard_plan)
+    result = {
+        "sources_path": str(sources_path),
+        "shard_plan_path": str(shard_plan_path),
+        "shards": {
+            "replay-a": len(source_ids_by_shard["replay-a"]),
+            "replay-b": len(source_ids_by_shard["replay-b"]),
+        },
+    }
+    write_json(cfg.artifact_dir / "dual_shard_source_plan.json", result)
+    return result
 
 
 def pressure_rtsp_uri(cfg: PressureConfig, *, index: int, source_id: str) -> str:
@@ -914,7 +1301,10 @@ def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
     index = 0
     while True:
         now = time.time()
-        overview = api_json(cfg.api_base, "GET", "/runtime/overview", timeout_s=10)["data"]
+        if cfg.dual_shard_same_gpu:
+            overview = dual_shard_runtime_overview(cfg)
+        else:
+            overview = api_json(cfg.api_base, "GET", "/runtime/overview", timeout_s=10)["data"]
         if isinstance(overview, dict):
             overview["_pressure_sample_observed_at"] = datetime.now(timezone.utc).isoformat()
         write_json(samples_dir / f"runtime_{index:03d}.json", overview)
@@ -926,10 +1316,65 @@ def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
         index += 1
         time.sleep(max(1, min(cfg.sample_interval_s, end_at - now)))
     since = started_at.isoformat().replace("+00:00", "Z")
-    run(["docker", "logs", "--since", since, "video-analytics-midterm-savant"], cfg.artifact_dir / "savant_logs_since_start.txt", check=False)
-    run(["docker", "logs", "--since", since, "video-analytics-midterm-analysis-forwarder"], cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt", check=False)
+    if cfg.dual_shard_same_gpu:
+        write_combined_docker_logs(
+            ["video-analytics-midterm-savant-a", "video-analytics-midterm-savant-b"],
+            cfg.artifact_dir / "savant_logs_since_start.txt",
+            since=since,
+        )
+        write_combined_docker_logs(
+            [
+                "video-analytics-midterm-analysis-forwarder-a",
+                "video-analytics-midterm-analysis-forwarder-b",
+            ],
+            cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt",
+            since=since,
+        )
+    else:
+        run(["docker", "logs", "--since", since, "video-analytics-midterm-savant"], cfg.artifact_dir / "savant_logs_since_start.txt", check=False)
+        run(["docker", "logs", "--since", since, "video-analytics-midterm-analysis-forwarder"], cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt", check=False)
     run(["docker", "logs", "--since", since, "video-analytics-midterm-media-worker"], cfg.artifact_dir / "media_worker_logs_since_start.txt", check=False)
     run(["docker", "logs", "--since", since, "video-analytics-midterm-clip-worker"], cfg.artifact_dir / "clip_worker_logs_since_start.txt", check=False)
+
+
+def start_pressure_sources_from_manifest(cfg: PressureConfig, *, sources_path: Path) -> None:
+    remove_pressure_source_containers(cfg.run_id)
+    log_path = cfg.artifact_dir / "source_controller_start_dual_shard.log"
+    entries: list[dict[str, Any]] = []
+    with log_path.open("w", encoding="utf-8") as log_fh:
+        for index in range(cfg.stream_count):
+            source_id = f"{cfg.run_id}_{index:02d}"
+            cmd = [
+                sys.executable,
+                str(SOURCE_CONTROLLER),
+                "start",
+                "--sources",
+                str(sources_path),
+                "--source-id",
+                source_id,
+            ]
+            completed = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            log_fh.write(f"$ {' '.join(cmd)}\n")
+            log_fh.write(completed.stdout)
+            if completed.stdout and not completed.stdout.endswith("\n"):
+                log_fh.write("\n")
+            entries.append(
+                {
+                    "source_id": source_id,
+                    "returncode": completed.returncode,
+                    "output_tail": completed.stdout[-1000:],
+                }
+            )
+            if completed.returncode != 0:
+                write_json(cfg.artifact_dir / "source_controller_start_dual_shard.json", entries)
+                raise RuntimeError(f"failed to start pressure source {source_id}")
+    write_json(cfg.artifact_dir / "source_controller_start_dual_shard.json", entries)
 
 
 def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
@@ -938,6 +1383,13 @@ def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
             "UPDATE cameras SET enabled=false, updated_at=now() WHERE source_id LIKE %s",
             (f"{cfg.run_id}_%",),
         )
+    if cfg.dual_shard_same_gpu:
+        removed = remove_pressure_source_containers(cfg.run_id)
+        write_json(
+            cfg.artifact_dir / "runtime_sources_apply_stop_pressure.json",
+            {"dual_shard_same_gpu": True, "removed_source_containers": removed},
+        )
+        return
     apply_sources_only(cfg, "runtime_sources_apply_stop_pressure.json")
 
 
@@ -1031,8 +1483,24 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         final_forwarder_seen = forwarder_seen
         final_forwarder_forwarded = forwarder_forwarded
         final_forwarder_dropped = forwarder_dropped
-        forwarder_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-analysis-forwarder")
-        savant_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-savant")
+        if cfg.dual_shard_same_gpu:
+            forwarder_cpu = _stats_cpu_percent_sum(
+                stats,
+                [
+                    "video-analytics-midterm-analysis-forwarder-a",
+                    "video-analytics-midterm-analysis-forwarder-b",
+                ],
+            )
+            savant_cpu = _stats_cpu_percent_sum(
+                stats,
+                [
+                    "video-analytics-midterm-savant-a",
+                    "video-analytics-midterm-savant-b",
+                ],
+            )
+        else:
+            forwarder_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-analysis-forwarder")
+            savant_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-savant")
         source_cpu = max(
             (
                 _parse_percent(str(item.get("CPUPerc") or "0"))
@@ -1523,6 +1991,29 @@ def cleanup_pressure_data(
     return cleanup
 
 
+def cleanup_after_aborted_run(
+    conn,
+    redis_client: Redis,
+    cfg: PressureConfig,
+    report: dict[str, Any],
+    *,
+    runtime_epoch_root: str | None,
+) -> None:
+    if not cfg.cleanup:
+        return
+    try:
+        report["cleanup_after_abort"] = cleanup_pressure_data(
+            conn,
+            redis_client,
+            cfg,
+            keep_event_ids=set(),
+            runtime_epoch_root=runtime_epoch_root,
+        )
+    except Exception as exc:
+        report["cleanup_after_abort_error"] = repr(exc)
+    write_json(cfg.artifact_dir / "report.json", report)
+
+
 def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
     with conn.transaction():
         for camera in cameras:
@@ -1533,6 +2024,8 @@ def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
 
 
 def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
+    if cfg.dual_shard_same_gpu:
+        stop_dual_shard_runtime(cfg)
     env = os.environ.copy()
     env.update(
         {
@@ -1688,6 +2181,233 @@ def api_json(
         raise RuntimeError(f"api request failed {method} {path}: {exc}") from exc
 
 
+def api_text(api_base: str, path: str, *, timeout_s: float = 60) -> str:
+    return fetch_text_url(api_base + path, timeout_s=timeout_s)
+
+
+def fetch_text_url(url: str, *, timeout_s: float = 10) -> str:
+    with urlopen(url, timeout=timeout_s) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
+    forwarder_shards: list[dict[str, Any]] = []
+    forwarder_sources: list[dict[str, Any]] = []
+    forwarder_queue_depth = 0.0
+    forwarder_running = 0.0
+    for shard_id, url in DUAL_SHARD_FORWARDER_METRICS.items():
+        try:
+            parsed = parse_forwarder_metrics_text(fetch_text_url(url, timeout_s=5))
+        except Exception as exc:
+            parsed = {
+                "available": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "global": {},
+                "sources": [],
+            }
+        for source in parsed.get("sources") or []:
+            source["replay_shard_id"] = shard_id
+        forwarder_sources.extend(parsed.get("sources") or [])
+        shard_global = parsed.get("global") or {}
+        forwarder_queue_depth += float(shard_global.get("queue_depth") or 0.0)
+        forwarder_running += float(shard_global.get("running") or 0.0)
+        forwarder_shards.append({"shard_id": shard_id, "url": url, **parsed})
+
+    savant_shards: list[dict[str, Any]] = []
+    savant_sources: list[dict[str, Any]] = []
+    savant_sources_active = 0.0
+    for shard_id, url in DUAL_SHARD_SAVANT_METRICS.items():
+        try:
+            parsed = parse_savant_metrics_text(fetch_text_url(url, timeout_s=5))
+        except Exception as exc:
+            parsed = {
+                "available": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "global": {},
+                "sources": [],
+            }
+        for source in parsed.get("sources") or []:
+            source["replay_shard_id"] = shard_id
+        savant_sources.extend(parsed.get("sources") or [])
+        savant_sources_active += float(parsed.get("sources_active") or 0.0)
+        savant_shards.append({"shard_id": shard_id, "url": url, **parsed})
+
+    return {
+        "dual_shard_same_gpu": True,
+        "dual_shard_gpu": cfg.dual_shard_gpu,
+        "metrics_url": "dual-shard://savant-a,savant-b",
+        "forwarder_metrics_url": "dual-shard://analysis-forwarder-a,analysis-forwarder-b",
+        "metrics": {
+            "available": any(bool(item.get("available")) for item in savant_shards),
+            "sources_active": savant_sources_active,
+            "global": {"va_savant_sources_active": savant_sources_active},
+            "sources": savant_sources,
+            "shards": savant_shards,
+        },
+        "forwarder": {
+            "available": any(bool(item.get("available")) for item in forwarder_shards),
+            "global": {
+                "queue_depth": forwarder_queue_depth,
+                "running": forwarder_running,
+            },
+            "sources": forwarder_sources,
+            "shards": forwarder_shards,
+        },
+    }
+
+
+def parse_forwarder_metrics_text(text: str) -> dict[str, Any]:
+    samples = _parse_prometheus_samples(text, prefix="va_forwarder_")
+    by_source: dict[str, dict[str, float]] = {}
+    global_metrics: dict[str, float] = {}
+    for sample in samples:
+        name = str(sample["name"])
+        value = float(sample["value"])
+        source_id = str(sample["labels"].get("source_id") or "")
+        if source_id:
+            by_source.setdefault(source_id, {})[name] = value
+        else:
+            global_metrics[name] = value
+    sources = [
+        {
+            "source_id": source_id,
+            "frames_seen_total": values.get("va_forwarder_frames_seen_total"),
+            "frames_forwarded_total": values.get("va_forwarder_frames_forwarded_total"),
+            "frames_dropped_total": values.get("va_forwarder_frames_dropped_total"),
+            "savant_send_failures_total": values.get(
+                "va_forwarder_savant_send_failures_total"
+            ),
+        }
+        for source_id, values in sorted(by_source.items())
+    ]
+    return {
+        "available": bool(samples),
+        "sample_count": len(samples),
+        "global": {
+            "queue_depth": global_metrics.get("va_forwarder_queue_depth"),
+            "running": global_metrics.get("va_forwarder_running"),
+        },
+        "sources": sources,
+    }
+
+
+def parse_savant_metrics_text(text: str) -> dict[str, Any]:
+    samples = _parse_prometheus_samples(text, prefix="va_savant_")
+    by_source: dict[str, dict[str, Any]] = {}
+    global_metrics: dict[str, float] = {}
+    required_seen: set[str] = set()
+    for sample in samples:
+        name = str(sample["name"])
+        value = float(sample["value"])
+        labels = sample["labels"]
+        source_id = str(labels.get("source_id") or "")
+        if source_id:
+            row = by_source.setdefault(
+                source_id,
+                {
+                    "source_id": source_id,
+                    "counters": {},
+                    "gauges": {},
+                    "windows": {},
+                },
+            )
+            window = str(labels.get("window") or "")
+            if window:
+                row["windows"].setdefault(window, {})[name] = value
+            elif name in SAVANT_GAUGE_METRICS:
+                row["gauges"][name] = value
+            else:
+                row["counters"][name] = value
+            if name in SAVANT_COUNTER_METRICS or name in SAVANT_GAUGE_METRICS:
+                required_seen.add(name)
+        else:
+            global_metrics[name] = value
+            if name == "va_savant_sources_active":
+                required_seen.add(name)
+    sources = []
+    for source_id, row in sorted(by_source.items()):
+        gauges = row["gauges"]
+        counters = row["counters"]
+        sources.append(
+            {
+                "source_id": source_id,
+                "effective_fps": gauges.get("va_savant_effective_fps"),
+                "last_frame_age_seconds": gauges.get("va_savant_last_frame_age_seconds"),
+                "frames_seen_total": counters.get("va_savant_frames_seen_total"),
+                "frame_annotations_exported_total": counters.get(
+                    "va_savant_frame_annotations_exported_total"
+                ),
+                "pose_objects_total": counters.get("va_savant_pose_objects_total"),
+                "face_objects_total": counters.get("va_savant_face_objects_total"),
+                "adaface_embeddings_total": counters.get("va_savant_adaface_embeddings_total"),
+                "person_observations_exported_total": counters.get(
+                    "va_savant_person_observations_exported_total"
+                ),
+                "face_observations_exported_total": counters.get(
+                    "va_savant_face_observations_exported_total"
+                ),
+                "counters": counters,
+                "gauges": gauges,
+                "windows": row["windows"],
+            }
+        )
+    return {
+        "available": bool(samples),
+        "sample_count": len(samples),
+        "required_metric_names_seen": sorted(required_seen),
+        "sources_active": global_metrics.get("va_savant_sources_active"),
+        "global": global_metrics,
+        "sources": sources,
+    }
+
+
+def _parse_prometheus_samples(text: str, *, prefix: str) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PROM_SAMPLE_RE.match(line)
+        if not match:
+            continue
+        name = match.group("name")
+        if not name.startswith(prefix):
+            continue
+        try:
+            value = float(match.group("value"))
+        except ValueError:
+            continue
+        samples.append(
+            {
+                "name": name,
+                "labels": _parse_prom_labels(match.group("labels") or ""),
+                "value": value,
+            }
+        )
+    return samples
+
+
+def _parse_prom_labels(raw: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for key, value in PROM_LABEL_RE.findall(raw or ""):
+        labels[key] = value.replace(r"\"", '"').replace(r"\\", "\\")
+    return labels
+
+
+def write_combined_docker_logs(containers: list[str], path: Path, *, since: str) -> None:
+    chunks: list[str] = []
+    for name in containers:
+        completed = subprocess.run(
+            ["docker", "logs", "--since", since, name],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        chunks.append(f"===== {name} rc={completed.returncode} =====\n{completed.stdout}\n")
+    write_text(path, "".join(chunks))
+
+
 def nvidia_smi_csv() -> str:
     query = "timestamp,index,name,utilization.gpu,utilization.decoder,memory.used,memory.total"
     try:
@@ -1703,11 +2423,20 @@ def nvidia_smi_csv() -> str:
 
 
 def docker_stats_json(cfg: PressureConfig) -> dict[str, Any]:
-    desired = [
-        "video-analytics-midterm-analysis-forwarder",
-        "video-analytics-midterm-savant",
-        *pressure_source_container_names(cfg.run_id),
-    ]
+    if cfg.dual_shard_same_gpu:
+        desired = [
+            "video-analytics-midterm-analysis-forwarder-a",
+            "video-analytics-midterm-analysis-forwarder-b",
+            "video-analytics-midterm-savant-a",
+            "video-analytics-midterm-savant-b",
+            *pressure_source_container_names(cfg.run_id),
+        ]
+    else:
+        desired = [
+            "video-analytics-midterm-analysis-forwarder",
+            "video-analytics-midterm-savant",
+            *pressure_source_container_names(cfg.run_id),
+        ]
     if not desired:
         return {"_meta": {"error": "no_containers"}}
     completed = subprocess.run(
@@ -1769,6 +2498,10 @@ def _stats_cpu_percent(stats: dict[str, dict[str, Any]], name: str) -> float:
     return _parse_percent(str((stats.get(name) or {}).get("CPUPerc") or "0"))
 
 
+def _stats_cpu_percent_sum(stats: dict[str, dict[str, Any]], names: list[str]) -> float:
+    return sum(_stats_cpu_percent(stats, name) for name in names)
+
+
 def _parse_percent(value: str) -> float:
     try:
         return float(str(value).strip().rstrip("%"))
@@ -1814,6 +2547,13 @@ def write_json(path: Path, data: Any) -> None:
 def write_text(path: Path, data: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(data, encoding="utf-8")
+
+
+def _atomic_write_text(path: Path, data: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _row_json(row: dict[str, Any] | None) -> dict[str, Any]:

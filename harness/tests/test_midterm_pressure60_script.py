@@ -55,6 +55,8 @@ def _config(module, **overrides):
         "max_exited_sources": 0,
         "max_validate_seq_iq": 0,
         "forwarder_null_sink": False,
+        "dual_shard_same_gpu": False,
+        "dual_shard_gpu": "0",
         "cleanup": True,
     }
     values.update(overrides)
@@ -233,6 +235,115 @@ def test_forwarder_null_sink_fails_when_queue_is_sampled_full() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "forwarder_queue_full" in reasons
+
+
+def test_dual_shard_same_gpu_run_id_prefix() -> None:
+    module = _load_module()
+
+    run_id = module._default_run_id("8/1", dual_shard_same_gpu=True)
+
+    assert run_id.startswith("pressure60_dual1gpu_8p1_")
+
+
+def test_dual_shard_same_gpu_override_pins_both_savants(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, dual_shard_same_gpu=True, dual_shard_gpu="0")
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+    text = override_path.read_text(encoding="utf-8")
+
+    assert "savant-a:" in text
+    assert "savant-b:" in text
+    assert "NVIDIA_VISIBLE_DEVICES: '0'" in text
+    assert "CUDA_VISIBLE_DEVICES: '0'" in text
+    assert "device_ids:" in text
+
+
+def test_write_dual_shard_pressure_sources_splits_sources_30_30(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, stream_count=60)
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "id": f"00000000-0000-4000-8000-{index:012d}",
+                    "name": f"pressure {index:02d}",
+                    "source_id": f"pressure60_test_{index:02d}",
+                    "rtsp_url": "rtsp://camera/live",
+                    "enabled": True,
+                }
+                for index in range(60)
+            ]
+
+    class _Conn:
+        def execute(self, *_args, **_kwargs):
+            return _Rows()
+
+    plan = module.write_dual_shard_pressure_sources(_Conn(), cfg)
+
+    assert plan["shards"] == {"replay-a": 30, "replay-b": 30}
+    shard_plan = json.loads(Path(plan["shard_plan_path"]).read_text(encoding="utf-8"))
+    assert len(shard_plan["shards"][0]["source_ids"]) == 30
+    assert len(shard_plan["shards"][1]["source_ids"]) == 30
+    sources_text = Path(plan["sources_path"]).read_text(encoding="utf-8")
+    assert "dealer+connect:tcp://replay-a:5555" in sources_text
+    assert "dealer+connect:tcp://replay-b:5555" in sources_text
+
+
+def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) -> None:
+    module = _load_module()
+    cfg = _config(module, dual_shard_same_gpu=True)
+
+    def fake_fetch(url: str, *, timeout_s: float):
+        if "18182" in url:
+            return "\n".join(
+                [
+                    "va_forwarder_queue_depth 0",
+                    "va_forwarder_running 1",
+                    'va_forwarder_frames_seen_total{source_id="pressure60_test_00"} 10',
+                    'va_forwarder_frames_forwarded_total{source_id="pressure60_test_00"} 4',
+                    'va_forwarder_frames_dropped_total{source_id="pressure60_test_00"} 6',
+                    'va_forwarder_savant_send_failures_total{source_id="pressure60_test_00"} 0',
+                ]
+            )
+        if "18183" in url:
+            return "\n".join(
+                [
+                    "va_forwarder_queue_depth 7",
+                    "va_forwarder_running 1",
+                    'va_forwarder_frames_seen_total{source_id="pressure60_test_01"} 20',
+                    'va_forwarder_frames_forwarded_total{source_id="pressure60_test_01"} 8',
+                    'va_forwarder_frames_dropped_total{source_id="pressure60_test_01"} 12',
+                    'va_forwarder_savant_send_failures_total{source_id="pressure60_test_01"} 0',
+                ]
+            )
+        if "18180" in url:
+            return "\n".join(
+                [
+                    'va_savant_sources_active{service="savant-a"} 1',
+                    'va_savant_frames_seen_total{source_id="pressure60_test_00"} 4',
+                    'va_savant_effective_fps{source_id="pressure60_test_00",window="10s"} 4.0',
+                ]
+            )
+        if "18181" in url:
+            return "\n".join(
+                [
+                    'va_savant_sources_active{service="savant-b"} 1',
+                    'va_savant_frames_seen_total{source_id="pressure60_test_01"} 8',
+                    'va_savant_effective_fps{source_id="pressure60_test_01",window="10s"} 8.0',
+                ]
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(module, "fetch_text_url", fake_fetch)
+
+    overview = module.dual_shard_runtime_overview(cfg)
+
+    assert overview["forwarder"]["global"]["queue_depth"] == 7
+    assert len(overview["forwarder"]["sources"]) == 2
+    assert overview["metrics"]["sources_active"] == 2
+    assert len(overview["metrics"]["sources"]) == 2
 
 
 def test_evidence_policy_groups_parse_pre_post_pairs() -> None:

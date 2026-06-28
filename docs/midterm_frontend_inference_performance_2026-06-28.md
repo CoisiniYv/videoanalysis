@@ -130,3 +130,39 @@
 2. 重新做端到端生产验收：
    - 60 路 * 4fps，证据 50/50 playable 且 annotation complete；
    - 60 路 * 8fps，先作为 4090 优化目标，不直接承诺生产弱卡。
+
+## 7. 单卡双分支 30+30 压测
+
+本次新增 `--dual-shard-same-gpu` 压测模式：60 路临时 camera 仍由
+PostgreSQL/8090 export 生成 Savant 规则配置，但 source manifest 由压测脚本写入
+artifact 目录，前 30 路连接 `replay-a -> analysis-forwarder-a -> savant-a`，后 30 路
+连接 `replay-b -> analysis-forwarder-b -> savant-b`。两个 Savant 实例都通过临时
+compose override pin 到同一张 GPU 0，`savant-b` 也复用
+`/data/video-analytics/models`，不再要求单独的 `models-savant-b`。
+
+第一次 4fps 同卡双分支尝试
+`pressure60_dual1gpu_4p1_20260628T134436Z` 失败，原因不是 Savant 分片本身，而是
+压测脚本绕过 8090 直接调用 `camera_source_controller.py` 时，controller 仍使用旧的
+`RTSP_TRANSPORT=tcp`。这与 8090 runtime apply 的
+`tcp,use_wallclock_as_timestamps=1,fflags=+genpts` 不一致，导致 48 次 source adapter
+重启和 48 次 negative PTS。已将 controller 默认 RTSP 参数对齐 8090 runtime apply。
+
+修复后结果：
+
+| 档位 | BATCH_SIZE | Artifact | 状态 | max queue | queue full samples | send failures | forwarded/target | avg effective FPS | max GPU | max decoder | source restart / negative PTS |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 60 路 * 4fps | 4 | `pressure60_dual1gpu_4p1_20260628T135936Z` | passed | 0 | 0 | 0 | 1.09 | 3.91 | 70% | 50% | 0 / 0 |
+| 60 路 * 8fps | 4 | `pressure60_dual1gpu_8p1_20260628T140351Z` | passed | 771 | 0 | 0 | 1.00 | 7.41 | 98% | 100% | 0 / 0 |
+
+结论：
+
+- 同一张 4090 上拆成两个 Savant 分支，能明显改善单实例 60 路 8fps 的入口背压。
+  单实例 `BATCH_SIZE=4/8/16` 8fps 会 queue full；同卡双分支 `BATCH_SIZE=4`
+  没有 queue full、没有 send failure。
+- 8fps 通过时 decoder 已到 100%，GPU 也到 98%，因此这不是宽裕配置。生产上可以把
+  单卡双分支 8fps 作为 4090 优化档，而不是弱卡默认承诺。
+- 4fps 仍是更稳的生产必保档；8fps 需要保留 runtime metrics 观察，尤其是 decoder
+  利用率和 forwarder queue 是否持续非零。
+- 本轮仍是 `keep-evidence=0` 的前端推理入口压测，不代表证据链路也在同样拓扑下完成
+  replay shard 取证。若后续要把双分支拓扑用于证据物化，需要同时让 clip-worker 使用
+  对应 replay shard plan。

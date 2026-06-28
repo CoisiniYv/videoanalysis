@@ -42,6 +42,7 @@ DEFAULT_SOURCES_PATH = "infra/generated/sources.generated.yml"
 DEFAULT_NETWORK = "video-analytics-midterm_default"
 DEFAULT_ADAPTER_IMAGE = "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
 CONTAINER_NAME_TEMPLATE = "video-analytics-source-{source_id}"
+DEFAULT_RTSP_TRANSPORT_PARAMS = "tcp,use_wallclock_as_timestamps=1,fflags=+genpts"
 
 ALLOWED_ADAPTER_TYPES = ("gstreamer",)
 
@@ -178,6 +179,7 @@ def docker_run_command(
     *,
     network: str,
     image: str,
+    rtsp_transport_params: str = DEFAULT_RTSP_TRANSPORT_PARAMS,
     extra_volumes: Optional[List[str]] = None,
 ) -> List[str]:
     """Construct ``docker run -d ...`` for *spec*."""
@@ -205,7 +207,7 @@ def docker_run_command(
     if scheme in ("rtsp", "rtsps"):
         cmd[cmd.index("--entrypoint"):cmd.index("--entrypoint")] = [
             "-e", f"RTSP_URI={location}",
-            "-e", "RTSP_TRANSPORT=tcp",
+            "-e", f"RTSP_TRANSPORT={rtsp_transport_params or DEFAULT_RTSP_TRANSPORT_PARAMS}",
         ]
     for vol in extra_volumes or []:
         cmd.extend(["-v", vol])
@@ -271,6 +273,7 @@ def cmd_start(
         spec,
         network=args.network,
         image=args.adapter_image,
+        rtsp_transport_params=args.rtsp_transport_params,
         extra_volumes=extra_volumes,
     )
     log(f"START source_id={spec.source_id} container={spec.container_name}")
@@ -366,6 +369,14 @@ def main(
     common.add_argument(
         "--adapter-image", default=DEFAULT_ADAPTER_IMAGE,
         help="GStreamer adapter image",
+    )
+    common.add_argument(
+        "--rtsp-transport-params",
+        default=os.environ.get("CAMERA_RUNTIME_RTSP_TRANSPORT_PARAMS", DEFAULT_RTSP_TRANSPORT_PARAMS),
+        help=(
+            "RTSP_TRANSPORT env passed to RTSP adapters "
+            f"(default: {DEFAULT_RTSP_TRANSPORT_PARAMS})"
+        ),
     )
     common.add_argument(
         "--testvideo-mount",
