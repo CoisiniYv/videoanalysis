@@ -639,6 +639,9 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert elements["yolov8_face"]["properties"]["interval"] == (
         "${parameters.face_infer_interval}"
     )
+    assert elements["yolov8_face"]["model"]["model_file"] == (
+        "/models/yolov8_face/yolov8n-face.onnx"
+    )
     assert elements["adaface"]["model"]["interval"] == (
         "${parameters.face_embedding_infer_interval}"
     )

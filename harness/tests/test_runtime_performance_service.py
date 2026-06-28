@@ -197,6 +197,11 @@ def test_performance_config_uses_runtime_env_without_saved_file(tmp_path: Path) 
     assert result["saved_config"]["forwarder_send_retries"] == 3
     assert result["saved_config"]["forwarder_send_hwm"] == 1000
     assert result["saved_config"]["savant_max_fps"] == "8/1"
+    assert result["saved_config"]["savant_batch_size"] == 1
+    assert result["saved_config"]["pose_batch_size"] == 1
+    assert result["saved_config"]["face_detector_batch_size"] == 1
+    assert result["saved_config"]["face_embedding_batch_size"] == 16
+    assert result["saved_config"]["max_parallel_streams"] == 4
     assert result["saved_config"]["frame_annotation_write_timeout_ms"] == 500
     assert result["saved_config"]["frame_annotation_redis_queue_maxsize"] == 8192
     assert result["saved_config"]["savant_redis_write_retries"] == 10
@@ -276,6 +281,11 @@ def test_apply_performance_config_recreates_only_forwarder_and_savant(
             "forwarder_queue_max_size": 4096,
             "forwarder_send_timeout_ms": 1500,
             "savant_max_fps": "5/1",
+            "savant_batch_size": 4,
+            "pose_batch_size": 4,
+            "face_detector_batch_size": 4,
+            "face_embedding_batch_size": 16,
+            "max_parallel_streams": 16,
             "face_embedding_infer_interval": 4,
             "frame_annotation_write_timeout_ms": 750,
         },
@@ -315,6 +325,11 @@ def test_apply_performance_config_recreates_only_forwarder_and_savant(
     assert "FORWARDER_SEND_RETRIES=3" in forwarder_env
     assert "FORWARDER_SEND_HWM=1000" in forwarder_env
     assert "MAX_FPS=5/1" in savant_env
+    assert "BATCH_SIZE=4" in savant_env
+    assert "POSE_BATCH_SIZE=4" in savant_env
+    assert "FACE_DETECTOR_BATCH_SIZE=4" in savant_env
+    assert "FACE_EMBEDDING_BATCH_SIZE=16" in savant_env
+    assert "MAX_PARALLEL_STREAMS=16" in savant_env
     assert "FACE_EMBEDDING_INFER_INTERVAL=4" in savant_env
     assert "SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS=500" in savant_env
     assert "SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE=8192" in savant_env

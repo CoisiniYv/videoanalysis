@@ -29,7 +29,11 @@ def _config(module, **overrides):
         "fps": "2/1",
         "min_fps": "1/1",
         "batch_size": 4,
+        "pose_batch_size": 4,
+        "face_detector_batch_size": 4,
+        "face_embedding_batch_size": 16,
         "max_parallel_streams": 64,
+        "batched_push_timeout": 40000,
         "duration_s": 1,
         "sample_interval_s": 1,
         "drain_s": 1,
@@ -256,6 +260,11 @@ def test_dual_shard_same_gpu_override_pins_both_savants(tmp_path: Path) -> None:
     assert "savant-b:" in text
     assert "NVIDIA_VISIBLE_DEVICES: '0'" in text
     assert "CUDA_VISIBLE_DEVICES: '0'" in text
+    assert "POSE_BATCH_SIZE: '4'" in text
+    assert "FACE_DETECTOR_BATCH_SIZE: '4'" in text
+    assert "FACE_EMBEDDING_BATCH_SIZE: '16'" in text
+    assert "MAX_PARALLEL_STREAMS: '64'" in text
+    assert "BATCHED_PUSH_TIMEOUT: '40000'" in text
     assert "device_ids:" in text
 
 

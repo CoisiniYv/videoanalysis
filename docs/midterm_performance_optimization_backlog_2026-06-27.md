@@ -112,6 +112,21 @@ retention。长期仍应再做成 8090 可配置项。
 `missing_frame_metadata`。这已不是之前“全部 missing”的失败模式，但 annotation
 完整率仍是 Phase E 后续优化项。
 
+2026-06-28 另有一次只读静态 review 固化了推理后链路的下一组待验证瓶颈：
+
+- face-worker 仍是单 consumer 同步链路：单条 Postgres insert 后同步做
+  watchlist / pgvector gallery search，且 face/gallery embedding 目前未建 ANN
+  vector index；
+- event-worker 的 `RecordRequestPublisher.has_request()` 仍对
+  `security.record_requests` 做全量 `XRANGE - +` 去重，事件量上来后是 O(N)
+  Redis/CPU 热点；
+- media-worker 的 `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` 是本进程内 guard，
+  当前不是 finalizer 线程池或进程池，ffprobe/ffmpeg/decode 校验仍主要受单进程
+  轮询链路约束。
+
+该 review 只固化静态发现，不替代 60 路压测结论。完整记录见
+`docs/midterm_post_inference_bottleneck_static_review_2026-06-28.md`。
+
 ## 2. 当前结论
 
 ### 2.1 单 T4 60 路不能按当前 8 FPS 直接扩展

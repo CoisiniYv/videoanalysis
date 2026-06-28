@@ -141,7 +141,7 @@ pipeline:
 
     # ------------------------------------------------------------------
     # YOLOv8-Face — full-frame face detector with 5-point landmarks.
-    # Static batch = 1 (model constraint).
+    # Batch is runtime-tunable through FACE_DETECTOR_BATCH_SIZE.
     # Official converter: savant.converter.yolo_v8face.
     # ------------------------------------------------------------------
     - element: nvinfer@complex_model
@@ -150,7 +150,7 @@ pipeline:
         interval: ${parameters.face_infer_interval}
       model:
         format: onnx
-        model_file: /models/yolov8_face.onnx
+        model_file: /models/yolov8_face/yolov8n-face.onnx
         batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
         precision: fp16
         input:

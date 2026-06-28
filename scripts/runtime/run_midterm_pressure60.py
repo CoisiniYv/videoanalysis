@@ -128,7 +128,11 @@ class PressureConfig:
     fps: str
     min_fps: str
     batch_size: int
+    pose_batch_size: int
+    face_detector_batch_size: int
+    face_embedding_batch_size: int
     max_parallel_streams: int
+    batched_push_timeout: int
     duration_s: int
     sample_interval_s: int
     drain_s: int
@@ -191,7 +195,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--pose-batch-size",
+        type=int,
+        default=None,
+        help="YOLO26-pose nvinfer batch size. Defaults to --batch-size.",
+    )
+    parser.add_argument(
+        "--face-detector-batch-size",
+        type=int,
+        default=None,
+        help="YOLOv8-face detector batch size. Defaults to --batch-size.",
+    )
+    parser.add_argument(
+        "--face-embedding-batch-size",
+        type=int,
+        default=16,
+        help="AdaFace embedding batch size.",
+    )
     parser.add_argument("--max-parallel-streams", type=int, default=64)
+    parser.add_argument("--batched-push-timeout", type=int, default=40000)
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
     parser.add_argument("--run-id")
     parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
@@ -300,7 +323,11 @@ def main(argv: list[str] | None = None) -> int:
         fps=args.fps,
         min_fps=args.min_fps,
         batch_size=args.batch_size,
+        pose_batch_size=args.pose_batch_size or args.batch_size,
+        face_detector_batch_size=args.face_detector_batch_size or args.batch_size,
+        face_embedding_batch_size=args.face_embedding_batch_size,
         max_parallel_streams=args.max_parallel_streams,
+        batched_push_timeout=args.batched_push_timeout,
         duration_s=args.duration_s,
         sample_interval_s=args.sample_interval_s,
         drain_s=args.drain_s,
@@ -380,6 +407,12 @@ def main(argv: list[str] | None = None) -> int:
                     "reason": "dual_shard_same_gpu_uses_compose_env",
                     "analysis_fps": cfg.fps,
                     "analysis_min_fps": cfg.min_fps,
+                    "batch_size": cfg.batch_size,
+                    "pose_batch_size": cfg.pose_batch_size,
+                    "face_detector_batch_size": cfg.face_detector_batch_size,
+                    "face_embedding_batch_size": cfg.face_embedding_batch_size,
+                    "max_parallel_streams": cfg.max_parallel_streams,
+                    "batched_push_timeout": cfg.batched_push_timeout,
                     "gpu": cfg.dual_shard_gpu,
                 },
             )
@@ -724,7 +757,11 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
     env = os.environ.copy()
     updates = {
         "BATCH_SIZE": str(cfg.batch_size),
+        "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
+        "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
+        "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
         "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+        "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
         "ANALYSIS_FPS": cfg.fps,
         "ANALYSIS_MIN_FPS": cfg.min_fps,
         "MAX_FPS": cfg.fps,
@@ -777,7 +814,11 @@ def start_dual_shard_runtime(cfg: PressureConfig) -> None:
     env.update(
         {
             "BATCH_SIZE": str(cfg.batch_size),
+            "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
+            "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
+            "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
             "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+            "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
             "ANALYSIS_FPS": cfg.fps,
             "ANALYSIS_MIN_FPS": cfg.min_fps,
             "MAX_FPS": cfg.fps,
@@ -840,6 +881,12 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             "savant-a": {
                 "environment": {
                     "NVIDIA_VISIBLE_DEVICES": device,
+                    "BATCH_SIZE": str(cfg.batch_size),
+                    "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
+                    "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
+                    "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+                    "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+                    "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
                 },
                 "deploy": {
                     "resources": {
@@ -859,6 +906,12 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 "environment": {
                     "NVIDIA_VISIBLE_DEVICES": device,
                     "CUDA_VISIBLE_DEVICES": "0",
+                    "BATCH_SIZE": str(cfg.batch_size),
+                    "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
+                    "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
+                    "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+                    "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+                    "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
                 },
                 "deploy": {
                     "resources": {
@@ -939,6 +992,12 @@ def save_performance_config(cfg: PressureConfig, original: dict[str, Any]) -> No
             "ingress_fps_gate_enabled": True,
             "savant_max_fps": cfg.fps,
             "savant_min_fps": cfg.min_fps,
+            "savant_batch_size": cfg.batch_size,
+            "pose_batch_size": cfg.pose_batch_size,
+            "face_detector_batch_size": cfg.face_detector_batch_size,
+            "face_embedding_batch_size": cfg.face_embedding_batch_size,
+            "max_parallel_streams": cfg.max_parallel_streams,
+            "batched_push_timeout": cfg.batched_push_timeout,
         }
     )
     write_json(cfg.artifact_dir / "performance_pressure_payload.json", payload)
@@ -2029,8 +2088,12 @@ def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
     env = os.environ.copy()
     env.update(
         {
-            "BATCH_SIZE": "1",
-            "MAX_PARALLEL_STREAMS": "4",
+            "BATCH_SIZE": str(original_perf.get("savant_batch_size", 1)),
+            "POSE_BATCH_SIZE": str(original_perf.get("pose_batch_size", 1)),
+            "FACE_DETECTOR_BATCH_SIZE": str(original_perf.get("face_detector_batch_size", 1)),
+            "FACE_EMBEDDING_BATCH_SIZE": str(original_perf.get("face_embedding_batch_size", 16)),
+            "MAX_PARALLEL_STREAMS": str(original_perf.get("max_parallel_streams", 4)),
+            "BATCHED_PUSH_TIMEOUT": str(original_perf.get("batched_push_timeout", 40000)),
             "ANALYSIS_FPS": str(original_perf.get("analysis_fps", "8/1")),
             "ANALYSIS_MIN_FPS": str(original_perf.get("analysis_min_fps", "2/1")),
             "FORWARDER_OUT_ENDPOINT": "dealer+connect:tcp://savant-security:5557",
