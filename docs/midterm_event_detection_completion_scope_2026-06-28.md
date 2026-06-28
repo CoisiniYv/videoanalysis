@@ -46,6 +46,40 @@ YOLOv8-Face -> face/person association -> AdaFace -> ReID gate -> face_observati
 
 因此下一阶段主要不是“再接模型”，而是补齐业务规则、事件语义、证据链路、8090 gate 和验收样本。
 
+## 2026-06-28 当前进度快照
+
+本阶段已落地两笔离线代码提交：
+
+| 提交 | 内容 | 运行态影响 |
+| --- | --- | --- |
+| `e0c8dc5 Add lightweight loitering and running rules` | 新增 `behavior.loitering` / `behavior.running` 轻量规则实现，并更新规则注册、support matrix 和单元测试 | 仅代码提交；未重启 live Savant，未执行 runtime apply/restart |
+| `50bc318 Adapt 8090 operator controls for event rules` | 8090 前端常规算法卡片和高级规则模板加入 `loitering`、`running`、`crowd_gathering`、`fall`、`chasing`；新增参数编辑/保存到 rule `config` 的通用逻辑 | 仅静态前端和文档提交；未刷新/重启正在运行的 8090 |
+
+当前代码层结论：
+
+- `behavior.loitering` 和 `behavior.running` 已从“待补规则”推进到
+  `event_only` 代码路径；
+- `behavior.crowd_gathering`、`behavior.fall`、`behavior.chasing` 已在 8090
+  常规入口可配置，仍保持 `event_only` 语义；
+- 8090 前端会按 support matrix 显示这些算法的支持状态，不把
+  `event_only` 伪装成 `production_ready`；
+- `behavior.wall_climb_suspicious` 仍保持 `unsupported`，且未进入 8090
+  常规模板入口；
+- 这次没有改 runtime performance config、compose 拓扑、模型链、压测脚本逻辑，
+  也没有对共享 live stack 执行 apply/restart。
+
+本阶段离线验证已通过：
+
+```text
+pytest -q harness/tests/test_loitering_rule.py harness/tests/test_running_rule.py harness/tests/test_algorithm_support_matrix.py
+node --check services/evidence-viewer/app/static/operator.js
+pytest -q harness/tests/test_operator_face_registration_static.py
+git diff --check
+```
+
+注意：当前运行中的 8090 是否已经显示这些入口，取决于运行服务是否加载到
+`50bc318` 以及浏览器静态资源缓存。本阶段没有为了验证页面显示而重启或刷新运行态。
+
 ## 补全阶段建议
 
 ### Phase E1: 先把已注册规则做稳

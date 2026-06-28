@@ -1,8 +1,9 @@
 # Midterm 8090 算法控制与运行时应用现状
 
-更新时间：2026-06-25
+更新时间：2026-06-28
 
-状态：P0-P1 已完成，`face.watchlist` 已补齐 per-camera 目标名单配置。
+状态：P0-P1 已完成，`face.watchlist` 已补齐 per-camera 目标名单配置；
+2026-06-28 已完成 rule-based 行为算法的 8090 离线前端适配。
 本记录用于固化 8090 操作台算法配置能力的当前边界，避免把“已保存到数据库”
 误认为“运行时已经生效”。
 
@@ -23,6 +24,41 @@
 - `face-worker` 会优先读取该摄像头启用的 `camera_rules.face.watchlist`；
 - 只有摄像头没有 per-camera watchlist 规则时，才回退到 env 配置；
 - `behavior.intrusion` 仍是当前生产可用的行为告警和证据基线。
+- 8090 前端代码已经开放 `behavior.loitering`、`behavior.running`、
+  `behavior.crowd_gathering`、`behavior.fall`、`behavior.chasing` 的常规配置入口，
+  但它们仍按 support matrix 标注为 `event_only`。
+
+## 2026-06-28 事件规则与 8090 前端适配进度
+
+本阶段已完成两笔离线代码提交：
+
+| 提交 | 进度 | 验证 |
+| --- | --- | --- |
+| `e0c8dc5 Add lightweight loitering and running rules` | 补齐 `behavior.loitering` / `behavior.running` 轻量规则，实现并注册到规则集合，support matrix 标为 `event_only` | `pytest -q harness/tests/test_loitering_rule.py harness/tests/test_running_rule.py harness/tests/test_algorithm_support_matrix.py` |
+| `50bc318 Adapt 8090 operator controls for event rules` | 8090 常规算法卡片和高级规则模板加入 `loitering`、`running`、`crowd_gathering`、`fall`、`chasing`，并支持把这些算法的阈值参数保存到 rule `config` | `node --check services/evidence-viewer/app/static/operator.js`；`pytest -q harness/tests/test_operator_face_registration_static.py`；`git diff --check` |
+
+当前 8090 前端代码层适配状态：
+
+| 算法 | 8090 常规卡片 | 高级规则模板 | 参数保存 | 当前语义 |
+| --- | --- | --- | --- | --- |
+| `behavior.intrusion` | 已支持 | 已支持 | 已支持 | `production_ready` |
+| `behavior.loitering` | 已支持 | 已支持 | 已支持 | `event_only` |
+| `behavior.running` | 已支持 | 已支持 | 已支持 | `event_only` |
+| `behavior.crowd_gathering` | 已支持 | 已支持 | 已支持 | `event_only` |
+| `behavior.fall` | 已支持 | 已支持 | 已支持 | `event_only` |
+| `behavior.chasing` | 已支持 | 已支持 | 已支持 | `event_only` |
+| `face.watchlist` | 已支持 | 已支持 | 已支持 | `production_ready` |
+| `behavior.wall_climb_suspicious` | 未开放 | 未开放 | 未开放 | `unsupported` |
+
+这次只做离线代码和静态契约更新，没有执行以下操作：
+
+- 没有重启 `evidence-viewer`、`api`、`savant-security` 或任何 worker；
+- 没有调用 `/api/v1/cameras/runtime/apply` 或 `/api/v1/cameras/runtime/restart`；
+- 没有修改 live camera rules 来启用这些新算法；
+- 没有改运行中的性能测试配置、compose 拓扑、模型路径、FPS、batch 或 interval。
+
+因此，正在运行的 8090 页面是否已经看到这些入口，取决于运行服务是否已经加载到
+`50bc318` 以及浏览器静态资源缓存；本文只确认代码层适配已完成。
 
 ## 2026-06-25 规则区域兼容修复
 
