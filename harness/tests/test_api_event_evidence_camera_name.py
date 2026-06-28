@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -86,3 +87,24 @@ def test_event_response_uses_joined_camera_name_when_payload_has_no_name() -> No
     assert event.camera_name == "Front Gate"
     assert evidence["camera_name"] == "Front Gate"
     assert evidence["event"]["camera_name"] == "Front Gate"
+
+
+def test_evidence_detail_does_not_inject_legacy_test_limitation_by_default() -> None:
+    detail = resolve_event_evidence_detail(_event())
+
+    assert "not_broad_accuracy_test" not in detail["limitations"]
+
+
+def test_evidence_detail_preserves_existing_legacy_limitations(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "summary.json").write_text(
+        json.dumps({"limitations": ["not_broad_accuracy_test"]}) + "\n",
+        encoding="utf-8",
+    )
+    event = _event()
+    event.payload["evidence"] = {"bundle_path": str(bundle)}
+
+    detail = resolve_event_evidence_detail(event)
+
+    assert detail["limitations"] == ["not_broad_accuracy_test"]

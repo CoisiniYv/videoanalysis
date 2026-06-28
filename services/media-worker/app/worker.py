@@ -81,6 +81,7 @@ SNAPSHOT_INELIGIBLE_CLIP_STATUSES = (
 )
 DB_BACKED_EVIDENCE_SIDECARS_TO_PRUNE = (
     "annotations.frame_cache.identity.jsonl",
+    "annotations.frame_cache.identity.dropped.debug.jsonl",
     "sink_metadata.json",
     "summary.json",
     "summary.frame_cache.identity.json",

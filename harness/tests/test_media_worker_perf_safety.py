@@ -129,6 +129,41 @@ def test_metadata_scan_limit_prefers_newest_candidates(tmp_path: Path) -> None:
     assert stats["metadata_files_visited"] == 1
 
 
+def test_frame_cache_dropped_debug_sidecar_is_opt_in() -> None:
+    policy = _activate("media-worker", "app.production_sidecar_policy")
+
+    assert policy.load_frame_cache_sidecar_config({})["write_dropped_debug_sidecar"] is False
+    assert (
+        policy.load_frame_cache_sidecar_config(
+            {"FRAME_CACHE_WRITE_DROPPED_DEBUG_SIDECAR": "true"}
+        )["write_dropped_debug_sidecar"]
+        is True
+    )
+
+
+def test_success_prune_removes_frame_cache_dropped_debug_sidecar(tmp_path: Path) -> None:
+    worker = _activate("media-worker", "app.worker")
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    raw_clip = bundle_dir / "raw_clip.mov"
+    raw_clip.write_bytes(b"video")
+    debug_sidecar = bundle_dir / "annotations.frame_cache.identity.dropped.debug.jsonl"
+    debug_sidecar.write_text("{}\n", encoding="utf-8")
+    production_sidecar = bundle_dir / "annotations.frame_cache.identity.jsonl"
+    production_sidecar.write_text("{}\n", encoding="utf-8")
+
+    result = worker._prune_success_evidence_sidecars(bundle_dir)
+
+    assert raw_clip.is_file()
+    assert not debug_sidecar.exists()
+    assert not production_sidecar.exists()
+    assert sorted(result["deleted"]) == [
+        "annotations.frame_cache.identity.dropped.debug.jsonl",
+        "annotations.frame_cache.identity.jsonl",
+    ]
+    assert result["errors"] == 0
+
+
 def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> None:
     writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
 

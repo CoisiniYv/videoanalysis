@@ -247,8 +247,6 @@ def _limitations(
         values.append("stable_sink_workaround")
     if event_style_replay_job_passed is False and "event_style_replay_not_passed" not in values:
         values.append("event_style_replay_not_passed")
-    if "not_broad_accuracy_test" not in values:
-        values.append("not_broad_accuracy_test")
     return values
 
 

@@ -35,6 +35,7 @@ from app.production_sidecar_policy import should_attempt_sidecar
 SCHEMA_VERSION = "1.0"
 TIMELINE_DOMAIN_FINAL_CANONICAL_CLIP = "final_canonical_clip"
 SIDECAR_TYPE_PRODUCTION = "production"
+DROPPED_DEBUG_ANNOTATIONS_FILE = "annotations.frame_cache.identity.dropped.debug.jsonl"
 FORBIDDEN_VECTOR_FIELDS = {
     "embedding",
     "embedding_vector",
@@ -261,7 +262,7 @@ def write_frame_cache_identity_sidecar(
             "error": None,
         }
         _write_jsonl(annotations_path, identity_annotations)
-        if dropped_annotations:
+        if dropped_annotations and bool(config.get("write_dropped_debug_sidecar")):
             _write_jsonl(_dropped_debug_path(annotations_path), dropped_annotations)
         _write_summary(summary_path, summary)
         if state is not None:
@@ -2492,7 +2493,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _dropped_debug_path(annotations_path: Path) -> Path:
-    return annotations_path.with_name("annotations.frame_cache.identity.dropped.debug.jsonl")
+    return annotations_path.with_name(DROPPED_DEBUG_ANNOTATIONS_FILE)
 
 
 def _write_summary(path: Path, summary: dict[str, Any]) -> None:

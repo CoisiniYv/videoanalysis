@@ -34,6 +34,7 @@ DEFAULT_SIDECAR_CONFIG = {
     "canonical_event_center_tolerance_seconds": 0.75,
     "max_row_age_before_event_seconds": None,
     "max_row_age_after_event_seconds": None,
+    "write_dropped_debug_sidecar": False,
 }
 
 
@@ -164,6 +165,10 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
             "max_row_age_after_event_seconds": _optional_positive_float(
                 source.get("FRAME_CACHE_MAX_ROW_AGE_AFTER_EVENT_SECONDS"),
                 config["max_row_age_after_event_seconds"],
+            ),
+            "write_dropped_debug_sidecar": _boolish(
+                source.get("FRAME_CACHE_WRITE_DROPPED_DEBUG_SIDECAR"),
+                False,
             ),
         }
     )
