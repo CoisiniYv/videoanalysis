@@ -743,6 +743,17 @@ def test_midterm_replay_duration_extra_slack_default_is_bounded() -> None:
     assert _compose_env_default_int(slack, "REPLAY_DURATION_EXTRA_SLACK_S") <= 5
 
 
+def test_midterm_replay_uses_constant_cadence_by_default() -> None:
+    compose = _compose()
+    env_file = _env()
+    clip_env = compose["services"]["clip-worker"]["environment"]
+
+    assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == (
+        "${REPLAY_FORCE_CONSTANT_CADENCE:-true}"
+    )
+    assert env_file["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
+
+
 def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
     compose = _compose()
     env_file = _env()

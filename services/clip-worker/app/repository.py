@@ -133,7 +133,13 @@ def expire_materialization_deadlines(pg_conn: psycopg.Connection) -> int:
                     WHERE materialization_status IN (
                         'manifest_ready',
                         'materialization_pending',
-                        'materialization_deferred'
+                        'materialization_deferred',
+                        'waiting_proof',
+                        'queued',
+                        'replay_job_created',
+                        'replaying',
+                        'materializing',
+                        'finalizing'
                     )
                       AND materialization_deadline_at IS NOT NULL
                       AND materialization_deadline_at <= now()

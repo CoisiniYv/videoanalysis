@@ -674,6 +674,36 @@ def test_runtime_sources_apply_route_is_under_cameras_prefix(client, monkeypatch
     assert captured["cameras"][0]["id"] == "cam_001"
 
 
+def test_runtime_config_sync_route_only_syncs_module_config(client, monkeypatch):
+    _create_camera(client)
+    captured: dict[str, Any] = {}
+
+    def fake_sync(*, export_doc):
+        captured["export_doc"] = export_doc
+        return {
+            "runtime_action": "module_config_sync",
+            "module_config_synced": True,
+            "containers_restarted": [],
+            "source_containers_touched": [],
+        }
+
+    def fail_source_sync(*args, **kwargs):
+        raise AssertionError("config sync must not converge source containers")
+
+    monkeypatch.setattr(cameras_router_module, "sync_camera_runtime_module_config", fake_sync)
+    monkeypatch.setattr(cameras_router_module, "sync_camera_runtime_config_and_sources", fail_source_sync)
+
+    resp = client.post("/api/v1/cameras/runtime/config/sync")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["error"] is None
+    assert body["data"]["runtime_action"] == "module_config_sync"
+    assert body["data"]["containers_restarted"] == []
+    assert body["data"]["source_containers_touched"] == []
+    assert "cameras" in captured["export_doc"]
+
+
 def test_runtime_restart_returns_409_when_evidence_guard_blocks(client, monkeypatch):
     _create_camera(client)
 

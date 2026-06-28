@@ -118,6 +118,9 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
     assert "quickRuleBodyFromCard" in js
     assert "switchCameraTab(\"rules\")" in js
     assert "配置并启用算法规则" in js
+    assert "cameras/runtime/config/sync" in js
+    assert "syncRuntimeConfig" in js
+    assert "运行配置已同步" in js
     assert "cameras/runtime/apply" in js
     assert "运行时已应用" in js
     assert "restart-runtime" in html

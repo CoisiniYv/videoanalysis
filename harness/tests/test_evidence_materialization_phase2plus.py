@@ -394,6 +394,8 @@ def test_expire_materialization_deadlines_marks_expired_state() -> None:
 
     assert expire_materialization_deadlines(conn) == 3
     assert "materialization_expired" in conn.cursor_obj.sql
+    assert "'materializing'" in conn.cursor_obj.sql
+    assert "'replay_job_created'" in conn.cursor_obj.sql
     assert "materialization_deadline_at <= now()" in conn.cursor_obj.sql
 
 

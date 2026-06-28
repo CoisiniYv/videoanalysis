@@ -43,6 +43,7 @@ from app.services.runtime_apply import (
     RuntimeApplyError,
     apply_camera_runtime,
     restart_camera_runtime,
+    sync_camera_runtime_module_config,
     sync_camera_runtime_config_and_sources,
 )
 from app.services.camera_preview import CameraPreviewError, capture_camera_preview_jpeg
@@ -282,6 +283,24 @@ def cameras_runtime_sources_apply(
         return _err_response(503, str(exc), request_id)
     except OSError as exc:
         return _err_response(503, f"runtime source apply filesystem error: {exc}", request_id)
+    return _ok(result, request_id)
+
+
+@router.post("/runtime/config/sync")
+def cameras_runtime_config_sync(
+    include_disabled: bool = Query(
+        True, description="Include disabled cameras in the generated rule snapshot."
+    ),
+    repo: CameraRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+):
+    _cameras, export_doc = _runtime_config_docs(repo, include_disabled=include_disabled)
+    try:
+        result = sync_camera_runtime_module_config(export_doc=export_doc)
+    except RuntimeApplyError as exc:
+        return _err_response(503, str(exc), request_id)
+    except OSError as exc:
+        return _err_response(503, f"runtime config sync filesystem error: {exc}", request_id)
     return _ok(result, request_id)
 
 

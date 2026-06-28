@@ -814,6 +814,50 @@ def test_source_only_sync_writes_module_config_and_preserves_epoch(
     assert module_doc["cameras"]["primary"]["enabled"] is False
 
 
+def test_module_config_sync_preserves_epoch_without_docker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module_path = tmp_path / "cameras.midterm.yml"
+    module_path.write_text(
+        "runtime_epoch_id: midterm-existing\n"
+        "cameras:\n"
+        "  lab:\n"
+        "    enabled: true\n"
+        "    source_id: lab\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CAMERA_RUNTIME_APPLY_ENABLED", "true")
+    monkeypatch.setenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", str(module_path))
+
+    export_doc = {
+        "cameras": {
+            "lab": {
+                "enabled": True,
+                "source_id": "lab",
+                "rules": {
+                    "rule_intrusion": {
+                        "enabled": True,
+                        "config": {"zone_id": "door"},
+                    }
+                },
+            }
+        }
+    }
+
+    result = runtime_apply.sync_camera_runtime_module_config(export_doc=export_doc)
+
+    module_doc = yaml.safe_load(module_path.read_text(encoding="utf-8"))
+    assert result["runtime_action"] == "module_config_sync"
+    assert result["module_config_synced"] is True
+    assert result["runtime_epoch_id_preserved"] == "midterm-existing"
+    assert result["containers_restarted"] == []
+    assert result["source_containers_touched"] == []
+    assert module_doc["runtime_epoch_id"] == "midterm-existing"
+    assert module_doc["cameras"]["lab"]["runtime_epoch_id"] == "midterm-existing"
+    assert module_doc["cameras"]["lab"]["rules"]["rule_intrusion"]["config"]["zone_id"] == "door"
+
+
 def test_source_only_converge_starts_enabled_compose_source(
     monkeypatch,
     tmp_path: Path,

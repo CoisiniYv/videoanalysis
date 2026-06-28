@@ -565,6 +565,7 @@ function isAlgorithmBlocked(algorithmId) {
 }
 
 function latestApplyRows() {
+  if (isRuntimeConfigSyncResult(lastRuntimeApplyResult)) return [];
   if (!lastRuntimeApplyResult) return [];
   return [
     ...(lastRuntimeApplyResult.applied_rules || []),
@@ -573,8 +574,12 @@ function latestApplyRows() {
   ];
 }
 
+function isRuntimeConfigSyncResult(result) {
+  return result?.runtime_action === "module_config_sync";
+}
+
 function latestApplyStateForAlgorithm(algorithmId, rule) {
-  if (!lastRuntimeApplyResult) {
+  if (!lastRuntimeApplyResult || isRuntimeConfigSyncResult(lastRuntimeApplyResult)) {
     if (rule?.enabled === false) {
       return { state: "disabled", label: applyStateLabel("disabled"), reason: "" };
     }
@@ -2315,6 +2320,17 @@ function renderRuntimeApplyResult() {
     runtimeApplyResultEl.innerHTML = `<div class="muted">尚未应用运行时。</div>`;
     return;
   }
+  if (isRuntimeConfigSyncResult(lastRuntimeApplyResult)) {
+    runtimeApplyResultEl.innerHTML =
+      `<div class="runtime-kv-grid">` +
+        `<div><span>配置同步</span><strong>已保存</strong></div>` +
+        `<div><span>runtime epoch</span><strong>${escapeHtml(lastRuntimeApplyResult.runtime_epoch_id_preserved || "--")}</strong></div>` +
+        `<div><span>容器重启</span><strong>0</strong></div>` +
+        `<div><span>视频源变更</span><strong>0</strong></div>` +
+      `</div>` +
+      `<div class="runtime-note">算法/区域配置已写入运行配置快照；未自动重启推理链路。需要立即加载到 Savant 时，请手动执行受控重启。</div>`;
+    return;
+  }
   const selectedRows = latestApplyRows().filter((row) => (
     !selectedCameraId || String(row.camera_id || "") === String(selectedCameraId)
   ));
@@ -3013,6 +3029,24 @@ async function applyRuntime({ context = "" } = {}) {
   return data;
 }
 
+function runtimeConfigSyncMessage(data) {
+  const epoch = data?.runtime_epoch_id_preserved || "--";
+  return `运行配置已同步：保留 epoch ${epoch}，未重启容器`;
+}
+
+async function syncRuntimeConfig({ context = "" } = {}) {
+  const data = await request(`${API}/cameras/runtime/config/sync`, { method: "POST" });
+  lastRuntimeApplyResult = data;
+  renderRuntimeApplyResult();
+  renderQuickAlgorithmControls();
+  if (selectedCameraId) {
+    await loadSelectedRuntimeConfig(selectedCameraId);
+  }
+  const message = runtimeConfigSyncMessage(data);
+  showSuccess(context ? `${context}；${message}` : message);
+  return data;
+}
+
 function runtimeRestartMessage(data) {
   const composeStarted = data.compose_sources_started || [];
   const started = data.dynamic_sources_started || [];
@@ -3040,9 +3074,9 @@ async function restartRuntime() {
 
 async function applyRuntimeAfterChange(context) {
   try {
-    await applyRuntime({ context });
+    await syncRuntimeConfig({ context });
   } catch (e) {
-    showError(`${context}，但运行时应用失败：${apiErrorMessage(e)}`);
+    showError(`${context}，但运行配置同步失败：${apiErrorMessage(e)}`);
   }
 }
 
@@ -3303,7 +3337,7 @@ async function saveQuickAlgorithmCard(card) {
     renderRuntimeApplyResult();
     return;
   }
-  await applyRuntime({
+  await syncRuntimeConfig({
     context: `${algorithmLabel(result.body.algorithm_id)} 配置已保存`,
   });
   if (selectedCameraId === cameraId) {
@@ -3338,7 +3372,7 @@ async function saveQuickAlgorithmControls() {
     renderRuntimeApplyResult();
     return;
   }
-  await applyRuntime({
+  await syncRuntimeConfig({
     context: `${savedCount} 个算法配置已保存${skippedBlocked ? `，跳过 ${skippedBlocked} 个未支持或已延期算法` : ""}`,
   });
   if (selectedCameraId === cameraId) {

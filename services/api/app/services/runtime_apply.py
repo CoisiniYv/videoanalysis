@@ -191,6 +191,36 @@ def sync_camera_runtime_config_and_sources(
     return result
 
 
+def sync_camera_runtime_module_config(
+    *,
+    export_doc: dict[str, Any],
+) -> dict[str, Any]:
+    """Sync the Savant camera/rule snapshot without touching containers.
+
+    This path is for operator edits that only change ROI/rule parameters. It
+    intentionally avoids source convergence, runtime epoch creation, and
+    service restarts so evidence generation and source adapters keep running.
+    """
+    if not _env_bool("CAMERA_RUNTIME_APPLY_ENABLED", default=False):
+        raise RuntimeApplyError("camera runtime control is disabled")
+
+    module_config_path = Path(
+        os.getenv("CAMERA_RUNTIME_MODULE_CONFIG_PATH", DEFAULT_MODULE_CONFIG_PATH)
+    )
+    runtime_epoch_id = _runtime_epoch_id_for_source_only_sync(module_config_path)
+    if runtime_epoch_id:
+        export_doc = _with_runtime_epoch(export_doc, runtime_epoch_id)
+    _write_yaml(module_config_path, export_doc)
+    return {
+        "runtime_action": "module_config_sync",
+        "module_config_path": str(module_config_path),
+        "module_config_synced": True,
+        "runtime_epoch_id_preserved": runtime_epoch_id,
+        "containers_restarted": [],
+        "source_containers_touched": [],
+    }
+
+
 def converge_camera_sources(
     *,
     cameras: list[dict[str, Any]],
