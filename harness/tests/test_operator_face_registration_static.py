@@ -126,20 +126,29 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
     assert "运行时已受控重启" in js
 
 
-def test_operator_primary_algorithm_controls_are_limited_to_live_alarm_paths() -> None:
+def test_operator_primary_algorithm_controls_include_rule_based_event_paths() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "operator.js")
     css = _text(STATIC_ROOT / "style.css")
 
     assert 'data-template="behavior.intrusion"' in html
+    assert 'data-template="behavior.loitering"' in html
+    assert 'data-template="behavior.running"' in html
+    assert 'data-template="behavior.crowd_gathering"' in html
+    assert 'data-template="behavior.fall"' in html
+    assert 'data-template="behavior.chasing"' in html
     assert 'data-template="face.watchlist"' in html
-    assert 'data-template="behavior.loitering"' not in html
-    assert 'data-template="behavior.running"' not in html
-    assert 'data-template="behavior.fall"' not in html
-    assert 'data-template="behavior.crowd_gathering"' not in html
+    assert 'data-template="behavior.wall_climb_suspicious"' not in html
     assert 'data-template="face.live_search"' not in html
-    assert 'const quickAlgorithmIds = [\n  "behavior.intrusion",\n  "face.watchlist",\n];' in js
+    assert 'const quickAlgorithmIds = [\n  "behavior.intrusion",\n  "behavior.loitering",\n  "behavior.running",\n  "behavior.crowd_gathering",\n  "behavior.fall",\n  "behavior.chasing",\n  "face.watchlist",\n];' in js
     assert "operatorAlgorithmMeta" in js
+    assert "renderBehaviorAlgorithmControls" in js
+    assert "data-config-field" in js
+    assert "min_duration_s" in js
+    assert "min_speed_px_s" in js
+    assert "min_down_ms" in js
+    assert "min_person_count" in js
+    assert "min_pair_duration_s" in js
     assert "按摄像头名单" in js
     assert "target_person_ids" in js
     assert "target_external_person_ids" in js
@@ -151,7 +160,7 @@ def test_operator_primary_algorithm_controls_are_limited_to_live_alarm_paths() -
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=roi-zone-stack-20260627" in html
+    assert "operator.js?v=behavior-rules-20260628" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js

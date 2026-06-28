@@ -138,6 +138,12 @@ GET /api/v1/algorithms/support-matrix
 - 跳过或未支持原因；
 - 选中摄像头的生成运行时配置预览。
 
+2026-06-28 离线代码更新后，8090 常规算法卡片和高级规则模板包含：
+`behavior.intrusion`、`behavior.loitering`、`behavior.running`、
+`behavior.crowd_gathering`、`behavior.fall`、`behavior.chasing` 和
+`face.watchlist`。`behavior.wall_climb_suspicious` 仍不进入常规入口，
+需要等 line/墙体配置和规则实现补齐后再开放。
+
 默认情况下，`unsupported` 和 `deferred` 算法不能保存或应用。需要显式调试时，
 可以通过：
 

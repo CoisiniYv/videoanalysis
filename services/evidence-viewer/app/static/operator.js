@@ -144,15 +144,114 @@ const templates = {
       post_seconds: 5,
     },
   },
+  "behavior.loitering": {
+    rule_id: "rule_loitering",
+    algorithm_id: "behavior.loitering",
+    enabled: true,
+    config: {
+      zone_id: "perimeter",
+      min_duration_s: 60,
+      max_avg_speed_px_s: 20,
+      cooldown_s: 60,
+    },
+    evidence_policy: {
+      snapshot_required: true,
+      clip_required: true,
+      pre_seconds: 5,
+      post_seconds: 5,
+    },
+  },
+  "behavior.running": {
+    rule_id: "rule_running",
+    algorithm_id: "behavior.running",
+    enabled: true,
+    config: {
+      zone_id: "perimeter",
+      min_speed_px_s: 250,
+      min_duration_ms: 500,
+      cooldown_s: 20,
+    },
+    evidence_policy: {
+      snapshot_required: true,
+      clip_required: true,
+      pre_seconds: 5,
+      post_seconds: 5,
+    },
+  },
+  "behavior.crowd_gathering": {
+    rule_id: "rule_crowd_gathering",
+    algorithm_id: "behavior.crowd_gathering",
+    enabled: true,
+    config: {
+      zone_id: "perimeter",
+      min_person_count: 5,
+      exit_person_count: 3,
+      min_duration_s: 2,
+      eps_px: 180,
+      require_in_zone: true,
+      cooldown_s: 60,
+    },
+    evidence_policy: {
+      snapshot_required: true,
+      clip_required: true,
+      pre_seconds: 5,
+      post_seconds: 5,
+    },
+  },
+  "behavior.fall": {
+    rule_id: "rule_fall",
+    algorithm_id: "behavior.fall",
+    enabled: true,
+    config: {
+      zone_id: "perimeter",
+      min_down_ms: 1500,
+      cooldown_s: 60,
+      require_transition: true,
+    },
+    evidence_policy: {
+      snapshot_required: true,
+      clip_required: true,
+      pre_seconds: 5,
+      post_seconds: 5,
+    },
+  },
+  "behavior.chasing": {
+    rule_id: "rule_chasing",
+    algorithm_id: "behavior.chasing",
+    enabled: true,
+    config: {
+      zone_id: "perimeter",
+      min_speed_px_s: 120,
+      max_distance_px: 220,
+      min_pair_duration_s: 1.5,
+      cooldown_s: 30,
+    },
+    evidence_policy: {
+      snapshot_required: true,
+      clip_required: true,
+      pre_seconds: 5,
+      post_seconds: 5,
+    },
+  },
 };
 
 const quickAlgorithmIds = [
   "behavior.intrusion",
+  "behavior.loitering",
+  "behavior.running",
+  "behavior.crowd_gathering",
+  "behavior.fall",
+  "behavior.chasing",
   "face.watchlist",
 ];
 
 const quickAlgorithmLabels = {
   "behavior.intrusion": "入侵检测",
+  "behavior.loitering": "徘徊",
+  "behavior.running": "奔跑",
+  "behavior.crowd_gathering": "聚集",
+  "behavior.fall": "摔倒",
+  "behavior.chasing": "追逐",
   "face.watchlist": "名单命中",
 };
 
@@ -160,14 +259,30 @@ const operatorAlgorithmMeta = {
   "behavior.intrusion": {
     title: "入侵检测",
     subtitle: "区域入侵事件与证据",
-    statusLabel: "运行时生效",
-    statusClass: "support-production_ready",
+  },
+  "behavior.loitering": {
+    title: "徘徊",
+    subtitle: "低速停留事件",
+  },
+  "behavior.running": {
+    title: "奔跑",
+    subtitle: "轨迹速度事件",
+  },
+  "behavior.crowd_gathering": {
+    title: "聚集",
+    subtitle: "多人密集事件",
+  },
+  "behavior.fall": {
+    title: "摔倒",
+    subtitle: "姿态跌倒事件",
+  },
+  "behavior.chasing": {
+    title: "追逐",
+    subtitle: "多轨迹追逐事件",
   },
   "face.watchlist": {
     title: "名单命中",
     subtitle: "按摄像头名单",
-    statusLabel: "运行时生效",
-    statusClass: "support-production_ready",
   },
 };
 
@@ -1437,6 +1552,64 @@ function renderZoneSelectors() {
   renderQuickAlgorithmControls();
 }
 
+function algorithmNumberField(label, field, value, disabledAttr, options = {}) {
+  const min = options.min ?? 0;
+  const step = options.step ?? 1;
+  const kind = options.kind || (String(step).includes(".") ? "float" : "int");
+  const fallback = options.defaultValue ?? 0;
+  const numberValue = Number(value ?? fallback);
+  return `<label class="algorithm-field">${escapeHtml(label)}` +
+    `<input data-config-field="${escapeHtml(field)}" data-config-kind="${escapeHtml(kind)}" ` +
+    `type="number" min="${escapeHtml(min)}" step="${escapeHtml(step)}" ` +
+    `value="${Number.isFinite(numberValue) ? numberValue : Number(fallback) || 0}"${disabledAttr} />` +
+    `</label>`;
+}
+
+function algorithmCheckboxField(label, field, value, disabledAttr) {
+  return `<label class="algorithm-field inline algorithm-check-field">` +
+    `<input data-config-field="${escapeHtml(field)}" data-config-kind="bool" type="checkbox" ` +
+    `${value !== false ? "checked" : ""}${disabledAttr} />` +
+    `<span>${escapeHtml(label)}</span>` +
+    `</label>`;
+}
+
+function renderBehaviorAlgorithmControls(algorithmId, config, disabledAttr) {
+  if (algorithmId === "behavior.intrusion") {
+    return algorithmNumberField("停留毫秒", "min_inside_ms", config.min_inside_ms ?? 1000, disabledAttr, { min: 1 }) +
+      algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 30, disabledAttr, { min: 0 });
+  }
+  if (algorithmId === "behavior.loitering") {
+    return algorithmNumberField("停留秒数", "min_duration_s", config.min_duration_s ?? 60, disabledAttr, { min: 1 }) +
+      algorithmNumberField("最高均速", "max_avg_speed_px_s", config.max_avg_speed_px_s ?? 20, disabledAttr, { min: 0, step: 1 }) +
+      algorithmNumberField("最大位移", "max_displacement_px", config.max_displacement_px ?? 0, disabledAttr, { min: 0, step: 1 }) +
+      algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 60, disabledAttr, { min: 0 });
+  }
+  if (algorithmId === "behavior.running") {
+    return algorithmNumberField("最低速度", "min_speed_px_s", config.min_speed_px_s ?? 250, disabledAttr, { min: 0, step: 1 }) +
+      algorithmNumberField("持续毫秒", "min_duration_ms", config.min_duration_ms ?? 500, disabledAttr, { min: 1 }) +
+      algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 20, disabledAttr, { min: 0 });
+  }
+  if (algorithmId === "behavior.crowd_gathering") {
+    return algorithmNumberField("触发人数", "min_person_count", config.min_person_count ?? 5, disabledAttr, { min: 1 }) +
+      algorithmNumberField("退出人数", "exit_person_count", config.exit_person_count ?? 3, disabledAttr, { min: 0 }) +
+      algorithmNumberField("持续秒数", "min_duration_s", config.min_duration_s ?? 2, disabledAttr, { min: 0, step: 0.5, kind: "float" }) +
+      algorithmNumberField("聚集半径", "eps_px", config.eps_px ?? 180, disabledAttr, { min: 1, step: 1 }) +
+      algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 60, disabledAttr, { min: 0 });
+  }
+  if (algorithmId === "behavior.fall") {
+    return algorithmNumberField("倒地毫秒", "min_down_ms", config.min_down_ms ?? 1500, disabledAttr, { min: 1 }) +
+      algorithmCheckboxField("要求姿态变化", "require_transition", config.require_transition ?? true, disabledAttr) +
+      algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 60, disabledAttr, { min: 0 });
+  }
+  if (algorithmId === "behavior.chasing") {
+    return algorithmNumberField("最低速度", "min_speed_px_s", config.min_speed_px_s ?? 120, disabledAttr, { min: 0, step: 1 }) +
+      algorithmNumberField("最大距离", "max_distance_px", config.max_distance_px ?? 220, disabledAttr, { min: 1, step: 1 }) +
+      algorithmNumberField("持续秒数", "min_pair_duration_s", config.min_pair_duration_s ?? 1.5, disabledAttr, { min: 0, step: 0.5, kind: "float" }) +
+      algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 30, disabledAttr, { min: 0 });
+  }
+  return "";
+}
+
 function zoneOptionId(zone) {
   return zone.zone_id || zone.zone_name || "";
 }
@@ -1465,16 +1638,14 @@ function renderQuickAlgorithmControls() {
   const polygonZones = currentZones.filter((z) => z.zone_type === "polygon");
   algorithmControlsEl.innerHTML = "";
   for (const algorithmId of quickAlgorithmIds) {
+    const support = supportForAlgorithm(algorithmId);
+    const supportStatus = support?.status || "config_only";
     const meta = operatorAlgorithmMeta[algorithmId] || {
       title: algorithmLabel(algorithmId),
       subtitle: algorithmId,
-      statusLabel: supportStatusLabel(supportForAlgorithm(algorithmId)?.status),
-      statusClass: `support-${supportForAlgorithm(algorithmId)?.status || "config_only"}`,
     };
     const rule = ruleForAlgorithm(algorithmId);
     const policy = evidencePolicyFor(rule, algorithmId);
-    const support = supportForAlgorithm(algorithmId);
-    const supportStatus = support?.status || "config_only";
     const blocked = isAlgorithmBlockedSupport(support) && !algorithmDebugModeEnabled();
     const applyState = latestApplyStateForAlgorithm(algorithmId, rule);
     const applyBadge = operatorApplyBadge(algorithmId, rule, applyState);
@@ -1497,10 +1668,7 @@ function renderQuickAlgorithmControls() {
           }).join("") +
         `</select></label>`
       : "";
-    const intrusionControls = algorithmId === "behavior.intrusion"
-      ? `<label class="algorithm-field">停留毫秒<input data-control="min_inside_ms" type="number" min="1" value="${Number(config.min_inside_ms ?? 1000)}"${disabledAttr} /></label>` +
-        `<label class="algorithm-field">冷却秒数<input data-control="cooldown_s" type="number" min="0" value="${Number(config.cooldown_s ?? 30)}"${disabledAttr} /></label>`
-      : "";
+    const behaviorControls = renderBehaviorAlgorithmControls(algorithmId, config, disabledAttr);
     const watchlistControls = algorithmId === "face.watchlist"
       ? `<label class="algorithm-field">匹配阈值<input data-control="threshold" type="number" min="0" max="1" step="0.01" value="${Number(config.threshold ?? 0.75)}"${disabledAttr} /></label>` +
         `<label class="algorithm-field">冷却秒数<input data-control="cooldown_s" type="number" min="0" value="${Number(config.cooldown_s ?? 60)}"${disabledAttr} /></label>`
@@ -1518,7 +1686,7 @@ function renderQuickAlgorithmControls() {
           `<span class="muted">${escapeHtml(meta.subtitle)}</span>` +
         `</div>` +
         `<div class="algorithm-status-stack">` +
-          `<span class="support-badge ${escapeHtml(meta.statusClass)}">${escapeHtml(meta.statusLabel)}</span>` +
+          `<span class="support-badge support-${escapeHtml(supportStatus)}">${escapeHtml(supportStatusLabel(supportStatus))}</span>` +
           `<span class="apply-badge ${escapeHtml(applyBadge.className)}">${escapeHtml(applyBadge.label)}</span>` +
           `<button class="sm primary" data-action="save-quick-rule" type="button"${disabledAttr}>保存并应用</button>` +
           `<button class="sm" data-action="edit-quick-rule" type="button"${disabledAttr}>高级</button>` +
@@ -1526,7 +1694,7 @@ function renderQuickAlgorithmControls() {
       `</div>` +
       `<div class="algorithm-control-fields">` +
         zoneControl +
-        intrusionControls +
+        behaviorControls +
         watchlistControls +
         `<label class="algorithm-field">前录秒数<input data-control="pre_seconds" type="number" min="0" max="300" value="${Number(policy.pre_seconds ?? 5)}"${disabledAttr} /></label>` +
         `<label class="algorithm-field">后录秒数<input data-control="post_seconds" type="number" min="0" max="300" value="${Number(policy.post_seconds ?? 5)}"${disabledAttr} /></label>` +
@@ -2661,6 +2829,21 @@ function quickRuleBodyFromCard(card) {
   const postSeconds = asInt(card.querySelector('[data-control="post_seconds"]')?.value, 5);
   const base = defaultRuleForAlgorithm(algorithmId);
   const config = { ...(base.config || {}), ...(existing?.config || {}) };
+  for (const control of card.querySelectorAll("[data-config-field]")) {
+    const field = String(control.dataset.configField || "").trim();
+    if (!field) continue;
+    const kind = control.dataset.configKind || "string";
+    const fallback = config[field];
+    if (kind === "bool") {
+      config[field] = control.checked === true;
+    } else if (kind === "int") {
+      config[field] = asInt(control.value, asInt(fallback, 0));
+    } else if (kind === "float") {
+      config[field] = asFloat(control.value, asFloat(fallback, 0));
+    } else {
+      config[field] = String(control.value || "").trim();
+    }
+  }
   const cooldownControl = card.querySelector('[data-control="cooldown_s"]');
   if (cooldownControl) {
     config.cooldown_s = asInt(cooldownControl.value, asInt(config.cooldown_s, 30));
