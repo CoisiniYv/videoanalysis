@@ -34,6 +34,8 @@ def _config(module, **overrides):
         "drain_s": 1,
         "guard_wait_s": 1,
         "keep_evidence": 1,
+        "evidence_group_size": 10,
+        "evidence_policy_groups": ((2, 2), (3, 3), (5, 5), (8, 8), (10, 10), (15, 15)),
         "artifact_dir": Path("/tmp/pressure60-test"),
         "db_url": "postgresql://video:video@127.0.0.1:5432/video_analytics",
         "redis_url": "redis://127.0.0.1:6396/0",
@@ -150,3 +152,57 @@ def test_validate_seq_iq_still_fails_when_ingress_is_unhealthy() -> None:
     assert "savant_send_failures" in reasons
     assert "validate_seq_iq_exceeded" in reasons
     assert module.pressure_warnings(cfg, diagnostics, reasons) == []
+
+
+def test_frame_annotation_redis_errors_are_explicit_failure() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=0)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_total": 0,
+            "max_queue_depth": 0,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {
+            "savant": {
+                "validate_seq_iq": 0,
+                "frame_annotation_redis_write_error": 12,
+            }
+        },
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "frame_annotation_redis_write_errors" in reasons
+
+
+def test_evidence_policy_groups_parse_pre_post_pairs() -> None:
+    module = _load_module()
+
+    assert module.parse_evidence_policy_groups("2:3,5/6,8") == (
+        (2, 3),
+        (5, 6),
+        (8, 8),
+    )
+
+
+def test_evidence_policy_groups_assign_ten_cameras_per_group() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        evidence_group_size=10,
+        evidence_policy_groups=((2, 2), (3, 3), (5, 5), (8, 8), (10, 10), (15, 15)),
+    )
+
+    assert module.evidence_policy_for_index(cfg, 0)["pressure_group_index"] == 0
+    assert module.evidence_policy_for_index(cfg, 9)["pre_seconds"] == 2
+    assert module.evidence_policy_for_index(cfg, 10)["pressure_group_index"] == 1
+    assert module.evidence_policy_for_index(cfg, 10)["post_seconds"] == 3
+    assert module.evidence_policy_for_index(cfg, 59)["pressure_group_index"] == 5
+    assert module.evidence_policy_for_index(cfg, 59)["pressure_total_seconds"] == 30

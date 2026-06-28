@@ -57,7 +57,8 @@ RUNTIME_EPOCH_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SOURCE_ID_MAX_LENGTH = 96
 DEFAULT_SOURCE_RESTART_POLICY = "no"
-DEFAULT_SOURCE_EOS_ON_START = True
+DEFAULT_SOURCE_EOS_ON_START = False
+DEFAULT_RTSP_TRANSPORT_PARAMS = "tcp,use_wallclock_as_timestamps=1,fflags=+genpts"
 SAVANT_READY_PATTERNS = (
     re.compile(r"\bPLAYING\b", re.IGNORECASE),
     re.compile(r"\bmodule\b.*\bstarted\b", re.IGNORECASE),
@@ -1381,6 +1382,9 @@ def _source_lifecycle_base(
             _source_restart_policy_name() if uri.startswith(("rtsp://", "rtsps://")) else ""
         ),
         "eos_on_start": _source_eos_on_start(),
+        "rtsp_transport_params": (
+            _source_rtsp_transport_params() if uri.startswith(("rtsp://", "rtsps://")) else ""
+        ),
     }
     camera_name = str(source.get("camera_name") or "")
     if camera_name:
@@ -1464,6 +1468,7 @@ def _recreate_rtsp_adapter(
     )
     restart_policy_name = _source_restart_policy_name()
     eos_on_start = _source_eos_on_start()
+    rtsp_transport_params = _source_rtsp_transport_params()
     body = {
         "Image": adapter_image,
         "Entrypoint": ["/opt/savant/adapters/gst/sources/rtsp.sh"],
@@ -1471,7 +1476,7 @@ def _recreate_rtsp_adapter(
             f"SOURCE_ID={source_id}",
             f"LOCATION={uri}",
             f"RTSP_URI={uri}",
-            "RTSP_TRANSPORT=tcp",
+            f"RTSP_TRANSPORT={rtsp_transport_params}",
             f"ZMQ_ENDPOINT={zmq_endpoint}",
             "SYNC_OUTPUT=false",
             "BUFFER_LEN=2000",
@@ -1520,6 +1525,12 @@ def _source_restart_policy_name() -> str:
 
 def _source_eos_on_start() -> bool:
     return _env_bool("CAMERA_RUNTIME_SOURCE_EOS_ON_START", default=DEFAULT_SOURCE_EOS_ON_START)
+
+
+def _source_rtsp_transport_params() -> str:
+    value = os.getenv("CAMERA_RUNTIME_RTSP_TRANSPORT_PARAMS", DEFAULT_RTSP_TRANSPORT_PARAMS)
+    value = str(value or "").strip()
+    return value or DEFAULT_RTSP_TRANSPORT_PARAMS
 
 
 def _source_only_convergence_plan(
@@ -1673,6 +1684,7 @@ def _rtsp_adapter_container_matches(inspect_doc: dict[str, Any], source: dict[st
         env.get("SOURCE_ID") == str(source.get("source_id") or "")
         and env.get("ZMQ_ENDPOINT") == str(source.get("zmq_endpoint") or "")
         and env.get("RTSP_URI", env.get("LOCATION", "")) == uri
+        and env.get("RTSP_TRANSPORT") == _source_rtsp_transport_params()
         and env.get("EOS_ON_START") == str(_source_eos_on_start()).lower()
         and env.get("FFMPEG_TIMEOUT_MS") == "20000"
         and restart_policy.get("Name") == _source_restart_policy_name()

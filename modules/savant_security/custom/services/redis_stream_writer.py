@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 from typing import Any
 
 
-DEFAULT_SOCKET_TIMEOUT_MS = 50
-DEFAULT_CONNECT_TIMEOUT_MS = 50
-DEFAULT_QUEUE_MAXSIZE = 1024
+DEFAULT_SOCKET_TIMEOUT_MS = 500
+DEFAULT_CONNECT_TIMEOUT_MS = 500
+DEFAULT_QUEUE_MAXSIZE = 8192
+DEFAULT_WRITE_RETRIES = 10
+DEFAULT_RETRY_SLEEP_MS = 20
 _STOP = object()
 
 
@@ -39,6 +42,8 @@ class AsyncRedisStreamWriter:
         socket_timeout_ms: int = DEFAULT_SOCKET_TIMEOUT_MS,
         connect_timeout_ms: int = DEFAULT_CONNECT_TIMEOUT_MS,
         queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
+        write_retries: int | None = None,
+        retry_sleep_ms: int | None = None,
         redis_module: Any | None = None,
         start_worker: bool = True,
     ) -> None:
@@ -52,6 +57,22 @@ class AsyncRedisStreamWriter:
         self.socket_timeout_ms = max(int(socket_timeout_ms), 1)
         self.connect_timeout_ms = max(int(connect_timeout_ms), 1)
         self.queue_maxsize = max(int(queue_maxsize), 1)
+        self.write_retries = max(
+            int(
+                env_int("SAVANT_REDIS_EXPORTER_WRITE_RETRIES", DEFAULT_WRITE_RETRIES)
+                if write_retries is None
+                else write_retries
+            ),
+            0,
+        )
+        self.retry_sleep_ms = max(
+            int(
+                env_int("SAVANT_REDIS_EXPORTER_RETRY_SLEEP_MS", DEFAULT_RETRY_SLEEP_MS)
+                if retry_sleep_ms is None
+                else retry_sleep_ms
+            ),
+            0,
+        )
         self.enqueued_count = 0
         self.dropped_count = 0
         self.write_error_count = 0
@@ -59,11 +80,7 @@ class AsyncRedisStreamWriter:
         self._queue: queue.Queue[dict[str, Any] | object] = queue.Queue(
             maxsize=self.queue_maxsize
         )
-        self._client = redis_module.Redis.from_url(
-            self.redis_url,
-            socket_timeout=self.socket_timeout_ms / 1000.0,
-            socket_connect_timeout=self.connect_timeout_ms / 1000.0,
-        )
+        self._client = self._create_client(redis_module)
         self._thread: threading.Thread | None = None
         if start_worker:
             self._thread = threading.Thread(
@@ -79,6 +96,8 @@ class AsyncRedisStreamWriter:
             queue_maxsize=self.queue_maxsize,
             socket_timeout_ms=self.socket_timeout_ms,
             connect_timeout_ms=self.connect_timeout_ms,
+            write_retries=self.write_retries,
+            retry_sleep_ms=self.retry_sleep_ms,
         )
 
     def enqueue(self, fields: dict[str, Any]) -> bool:
@@ -114,13 +133,16 @@ class AsyncRedisStreamWriter:
 
     def close(self, timeout_s: float = 0.2) -> None:
         self._closed = True
-        if self._thread is None:
-            return
-        try:
-            self._queue.put_nowait(_STOP)
-        except queue.Full:
-            return
-        self._thread.join(timeout=max(float(timeout_s), 0.0))
+        if self._thread is not None:
+            try:
+                self._queue.put_nowait(_STOP)
+            except queue.Full:
+                pass
+            else:
+                self._thread.join(timeout=max(float(timeout_s), 0.0))
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()
 
     def _run(self) -> None:
         while True:
@@ -128,12 +150,7 @@ class AsyncRedisStreamWriter:
             try:
                 if fields is _STOP:
                     return
-                self._client.xadd(
-                    self.stream,
-                    fields,
-                    maxlen=self.maxlen,
-                    approximate=True,
-                )
+                self._xadd_with_retries(fields)
             except Exception as exc:
                 self.write_error_count += 1
                 self._log(
@@ -143,6 +160,43 @@ class AsyncRedisStreamWriter:
                 )
             finally:
                 self._queue.task_done()
+
+    def _xadd_with_retries(self, fields: dict[str, Any]) -> None:
+        attempts = self.write_retries + 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                self._client.xadd(
+                    self.stream,
+                    fields,
+                    maxlen=self.maxlen,
+                    approximate=True,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= attempts - 1:
+                    break
+                if self.retry_sleep_ms > 0:
+                    time.sleep(self.retry_sleep_ms / 1000.0)
+        if last_exc is not None:
+            raise last_exc
+
+    def _create_client(self, redis_module: Any) -> Any:
+        kwargs: dict[str, Any] = {
+            "socket_timeout": self.socket_timeout_ms / 1000.0,
+            "socket_connect_timeout": self.connect_timeout_ms / 1000.0,
+            "socket_keepalive": True,
+            "single_connection_client": True,
+        }
+        try:
+            return redis_module.Redis.from_url(self.redis_url, **kwargs)
+        except TypeError:
+            return redis_module.Redis.from_url(
+                self.redis_url,
+                socket_timeout=kwargs["socket_timeout"],
+                socket_connect_timeout=kwargs["socket_connect_timeout"],
+            )
 
     def _log(self, action: str, **fields: Any) -> None:
         parts = [

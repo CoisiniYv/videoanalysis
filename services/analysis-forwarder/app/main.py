@@ -46,12 +46,12 @@ class ForwarderConfig:
             analysis_fps=os.getenv("ANALYSIS_FPS", os.getenv("MAX_FPS", "8/1")),
             min_fps=os.getenv("ANALYSIS_MIN_FPS", os.getenv("MIN_FPS", "2/1")),
             sampler_enabled=_bool_env("FORWARDER_SAMPLER_ENABLED", True),
-            queue_max_size=_int_env("FORWARDER_QUEUE_MAX_SIZE", 256),
+            queue_max_size=_int_env("FORWARDER_QUEUE_MAX_SIZE", 2048),
             receive_timeout_ms=_int_env("FORWARDER_RECEIVE_TIMEOUT_MS", 1000),
             receive_hwm=_int_env("FORWARDER_RECEIVE_HWM", 1000),
-            send_timeout_ms=_int_env("FORWARDER_SEND_TIMEOUT_MS", 100),
-            send_retries=_int_env("FORWARDER_SEND_RETRIES", 0),
-            send_hwm=_int_env("FORWARDER_SEND_HWM", 50),
+            send_timeout_ms=_int_env("FORWARDER_SEND_TIMEOUT_MS", 2000),
+            send_retries=_int_env("FORWARDER_SEND_RETRIES", 3),
+            send_hwm=_int_env("FORWARDER_SEND_HWM", 1000),
             metrics_port=_int_env("FORWARDER_METRICS_PORT", 8081),
         )
 

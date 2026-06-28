@@ -339,8 +339,17 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["analysis-forwarder"]["environment"]["FORWARDER_OUT_ENDPOINT"] == (
         "dealer+connect:tcp://savant-security:5557"
     )
+    assert services["analysis-forwarder"]["environment"]["FORWARDER_QUEUE_MAX_SIZE"] == (
+        "${FORWARDER_QUEUE_MAX_SIZE:-2048}"
+    )
     assert services["analysis-forwarder"]["environment"]["FORWARDER_SEND_TIMEOUT_MS"] == (
-        "${FORWARDER_SEND_TIMEOUT_MS:-100}"
+        "${FORWARDER_SEND_TIMEOUT_MS:-2000}"
+    )
+    assert services["analysis-forwarder"]["environment"]["FORWARDER_SEND_RETRIES"] == (
+        "${FORWARDER_SEND_RETRIES:-3}"
+    )
+    assert services["analysis-forwarder"]["environment"]["FORWARDER_SEND_HWM"] == (
+        "${FORWARDER_SEND_HWM:-1000}"
     )
     assert services["savant-security"]["environment"]["ZMQ_SRC_ENDPOINT"] == (
         "router+bind:tcp://0.0.0.0:5557"
@@ -642,17 +651,33 @@ def test_midterm_savant_redis_exporters_are_async_and_bounded() -> None:
     savant_env = compose["services"]["savant-security"]["environment"]
     writer = _text(SAVANT_CUSTOM_SERVICES / "redis_stream_writer.py")
 
-    assert env_file["SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS"] == "50"
-    assert env_file["SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS"] == "50"
-    assert env_file["SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE"] == "1024"
+    assert env_file["SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS"] == "500"
+    assert env_file["SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS"] == "500"
+    assert env_file["SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE"] == "8192"
+    assert env_file["SAVANT_REDIS_EXPORTER_WRITE_RETRIES"] == "10"
+    assert env_file["SAVANT_REDIS_EXPORTER_RETRY_SLEEP_MS"] == "20"
+    assert env_file["FRAME_ANNOTATION_WRITE_TIMEOUT_MS"] == "500"
+    assert env_file["FRAME_ANNOTATION_REDIS_QUEUE_MAXSIZE"] == "8192"
     assert savant_env["SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS"] == (
-        "${SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS:-50}"
+        "${SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS:-500}"
     )
     assert savant_env["SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS"] == (
-        "${SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS:-50}"
+        "${SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS:-500}"
     )
     assert savant_env["SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE"] == (
-        "${SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE:-1024}"
+        "${SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE:-8192}"
+    )
+    assert savant_env["SAVANT_REDIS_EXPORTER_WRITE_RETRIES"] == (
+        "${SAVANT_REDIS_EXPORTER_WRITE_RETRIES:-10}"
+    )
+    assert savant_env["SAVANT_REDIS_EXPORTER_RETRY_SLEEP_MS"] == (
+        "${SAVANT_REDIS_EXPORTER_RETRY_SLEEP_MS:-20}"
+    )
+    assert savant_env["FRAME_ANNOTATION_WRITE_TIMEOUT_MS"] == (
+        "${FRAME_ANNOTATION_WRITE_TIMEOUT_MS:-500}"
+    )
+    assert savant_env["FRAME_ANNOTATION_REDIS_QUEUE_MAXSIZE"] == (
+        "${FRAME_ANNOTATION_REDIS_QUEUE_MAXSIZE:-8192}"
     )
     assert "queue.Queue" in writer
     assert "put_nowait" in writer

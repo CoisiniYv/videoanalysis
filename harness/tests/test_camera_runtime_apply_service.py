@@ -256,8 +256,9 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     env = set(source_create["Env"])
     assert "SOURCE_ID=source_lab" in env
     assert "RTSP_URI=rtsp://lab/stream" in env
+    assert f"RTSP_TRANSPORT={runtime_apply.DEFAULT_RTSP_TRANSPORT_PARAMS}" in env
     assert "SYNC_OUTPUT=false" in env
-    assert "EOS_ON_START=true" in env
+    assert "EOS_ON_START=false" in env
     assert "MAX_FPS=8/1" not in env
     assert "MIN_FPS=2/1" not in env
     assert not any(item.startswith("USE_ABSOLUTE_TIMESTAMPS=") for item in env)
@@ -274,7 +275,8 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
             "dynamic_source": False,
             "ffmpeg_timeout_ms": 20000,
             "restart_policy": "no",
-            "eos_on_start": True,
+            "eos_on_start": False,
+            "rtsp_transport_params": runtime_apply.DEFAULT_RTSP_TRANSPORT_PARAMS,
             "action": "started",
             "container_name": "video-analytics-midterm-source-adapter",
             "start_status": 204,
@@ -289,7 +291,8 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
             "dynamic_source": True,
             "ffmpeg_timeout_ms": 20000,
             "restart_policy": "no",
-            "eos_on_start": True,
+            "eos_on_start": False,
+            "rtsp_transport_params": runtime_apply.DEFAULT_RTSP_TRANSPORT_PARAMS,
             "container_name": "video-analytics-source-source_lab",
             "delete_status": 204,
             "create_status": 201,
@@ -657,11 +660,47 @@ def test_source_only_converge_recreates_changed_dynamic_and_removes_disabled(
     env = set(create_calls[0]["Env"])
     assert "SOURCE_ID=source_lab" in env
     assert "RTSP_URI=rtsp://new-lab/stream" in env
-    assert "EOS_ON_START=true" in env
+    assert f"RTSP_TRANSPORT={runtime_apply.DEFAULT_RTSP_TRANSPORT_PARAMS}" in env
+    assert "EOS_ON_START=false" in env
     assert "MAX_FPS=8/1" not in env
     assert create_calls[0]["HostConfig"]["RestartPolicy"] == {"Name": "no"}
     sources_doc = yaml.safe_load((tmp_path / "sources.generated.yml").read_text())
     assert sources_doc["sources"]["lab"]["camera_name"] == "lab"
+
+
+def test_rtsp_adapter_match_requires_timestamp_normalization_and_eos_default(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("CAMERA_RUNTIME_SOURCE_EOS_ON_START", raising=False)
+    monkeypatch.delenv("CAMERA_RUNTIME_RTSP_TRANSPORT_PARAMS", raising=False)
+    source = {
+        "source_id": "source_lab",
+        "uri": "rtsp://lab/stream",
+        "zmq_endpoint": "dealer+connect:tcp://replay-service:5555",
+    }
+    inspect_doc = {
+        "Config": {
+            "Env": [
+                "SOURCE_ID=source_lab",
+                "RTSP_URI=rtsp://lab/stream",
+                "ZMQ_ENDPOINT=dealer+connect:tcp://replay-service:5555",
+                f"RTSP_TRANSPORT={runtime_apply.DEFAULT_RTSP_TRANSPORT_PARAMS}",
+                "EOS_ON_START=false",
+                "FFMPEG_TIMEOUT_MS=20000",
+            ]
+        },
+        "HostConfig": {"RestartPolicy": {"Name": "no"}},
+    }
+
+    assert runtime_apply._rtsp_adapter_container_matches(inspect_doc, source) is True
+
+    old_transport = json.loads(json.dumps(inspect_doc))
+    old_transport["Config"]["Env"][3] = "RTSP_TRANSPORT=tcp"
+    assert runtime_apply._rtsp_adapter_container_matches(old_transport, source) is False
+
+    old_eos = json.loads(json.dumps(inspect_doc))
+    old_eos["Config"]["Env"][4] = "EOS_ON_START=true"
+    assert runtime_apply._rtsp_adapter_container_matches(old_eos, source) is False
 
 
 def test_source_only_converge_stops_disabled_compose_source(
@@ -705,7 +744,8 @@ def test_source_only_converge_stops_disabled_compose_source(
             "dynamic_source": False,
             "ffmpeg_timeout_ms": 20000,
             "restart_policy": "no",
-            "eos_on_start": True,
+            "eos_on_start": False,
+            "rtsp_transport_params": runtime_apply.DEFAULT_RTSP_TRANSPORT_PARAMS,
             "camera_name": "Primary",
             "container_name": "video-analytics-midterm-source-adapter",
             "actual_state": "running",

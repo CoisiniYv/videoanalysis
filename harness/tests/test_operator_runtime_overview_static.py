@@ -37,6 +37,13 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert "推理性能" in html
     assert "保存并应用" in html
     assert "Savant 最大 FPS" in html
+    assert "Forwarder 队列上限" in html
+    assert "Forwarder 发送超时 ms" in html
+    assert "Forwarder 发送重试" in html
+    assert "Forwarder 发送 HWM" in html
+    assert "Savant Redis 超时 ms" in html
+    assert "Savant Redis 写入重试" in html
+    assert "Frame annotation 写入超时 ms" in html
     assert "摄像头性能" in html
     assert "证据生成" in html
 

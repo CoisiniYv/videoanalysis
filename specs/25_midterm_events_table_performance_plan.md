@@ -2,6 +2,55 @@
 
 Date: 2026-06-28
 
+## 0. Implementation Result - 2026-06-28
+
+Implemented and locally applied:
+
+- `db/migrations/018_events_table_performance_indexes.sql` for the P0 `events`
+  query shapes in this plan;
+- `db/migrations/019_media_worker_events_queue_indexes.sql` for the
+  media-worker evidence queue scans discovered during post-P0 sampling.
+
+Read-only validation after applying 018 showed the four P0 query shapes changed
+from `Seq Scan` / `Parallel Seq Scan` to `Index Scan` / `Index Only Scan`.
+The real 8090 `events` API queries kept the same response shape; the remaining
+camera-name `OR` join no longer forced an `events` table scan.
+
+The first 5-minute `pg_stat_user_tables.events` sample still showed background
+scan growth:
+
+```text
+seq_scan_delta: 159
+seq_tup_read_delta: 10,567,458
+```
+
+Follow-up EXPLAIN checks traced that residual scan load to media-worker periodic
+queue queries over `events`. Migration 019 adds narrower partial indexes for
+those queue predicates. After applying 019, a second 5-minute sample showed:
+
+```text
+seq_scan_delta: 0
+seq_tup_read_delta: 0
+idx_scan_delta: 174
+idx_tup_fetch_delta: 223,996
+```
+
+Validation commands run:
+
+```text
+pytest -q harness/tests/test_events_table_performance_indexes_static.py \
+  harness/tests/test_midterm_worker_indexes_static.py \
+  harness/tests/test_event_repository.py \
+  harness/tests/test_alert_policy_scoped_cooldown.py \
+  harness/tests/test_evidence_viewer_database_index.py
+PYTHONPYCACHEPREFIX=/tmp/video-analytics-pycache python -m py_compile \
+  services/api/app/repositories/events.py \
+  services/event-worker/app/repository.py \
+  services/api/app/services/runtime_overview.py \
+  services/media-worker/app/worker.py
+git diff --check
+```
+
 ## 1. Purpose
 
 This plan fixes the confirmed `events` table performance bottleneck without

@@ -86,6 +86,8 @@ class PressureConfig:
     drain_s: int
     guard_wait_s: int
     keep_evidence: int
+    evidence_group_size: int
+    evidence_policy_groups: tuple[tuple[int, int], ...]
     artifact_dir: Path
     db_url: str
     redis_url: str
@@ -123,6 +125,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Seconds to wait for existing evidence tasks after quiescing current sources.",
     )
     parser.add_argument("--keep-evidence", type=int, default=50)
+    parser.add_argument(
+        "--evidence-group-size",
+        type=int,
+        default=10,
+        help="Number of pressure cameras per evidence length group.",
+    )
+    parser.add_argument(
+        "--evidence-policy-groups",
+        default="2:2,3:3,5:5,8:8,10:10,15:15",
+        help=(
+            "Comma-separated pre:post seconds for pressure evidence groups. "
+            "With --streams=60 and --evidence-group-size=10 this creates 6 groups."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-parallel-streams", type=int, default=64)
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -207,6 +223,10 @@ def main(argv: list[str] | None = None) -> int:
         drain_s=args.drain_s,
         guard_wait_s=args.guard_wait_s,
         keep_evidence=args.keep_evidence,
+        evidence_group_size=args.evidence_group_size,
+        evidence_policy_groups=parse_evidence_policy_groups(
+            args.evidence_policy_groups
+        ),
         artifact_dir=artifact_dir,
         db_url=args.db_url,
         redis_url=args.redis_url,
@@ -355,6 +375,46 @@ def _jsonable_config(cfg: PressureConfig) -> dict[str, Any]:
         if isinstance(value, Path):
             data[key] = str(value)
     return data
+
+
+def parse_evidence_policy_groups(value: str) -> tuple[tuple[int, int], ...]:
+    groups: list[tuple[int, int]] = []
+    for raw_item in str(value or "").split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            pre_raw, post_raw = item.split(":", 1)
+        elif "/" in item:
+            pre_raw, post_raw = item.split("/", 1)
+        else:
+            pre_raw = post_raw = item
+        try:
+            pre_seconds = int(pre_raw)
+            post_seconds = int(post_raw)
+        except ValueError as exc:
+            raise ValueError(f"invalid evidence policy group: {item!r}") from exc
+        if pre_seconds < 0 or post_seconds < 0:
+            raise ValueError(f"evidence policy group must be non-negative: {item!r}")
+        groups.append((pre_seconds, post_seconds))
+    if not groups:
+        raise ValueError("at least one evidence policy group is required")
+    return tuple(groups)
+
+
+def evidence_policy_for_index(cfg: PressureConfig, index: int) -> dict[str, Any]:
+    group_size = max(1, int(cfg.evidence_group_size))
+    group_index = min(int(index) // group_size, len(cfg.evidence_policy_groups) - 1)
+    pre_seconds, post_seconds = cfg.evidence_policy_groups[group_index]
+    return {
+        "pre_seconds": pre_seconds,
+        "post_seconds": post_seconds,
+        "clip_required": True,
+        "snapshot_required": False,
+        "pressure_group_index": group_index,
+        "pressure_group_size": group_size,
+        "pressure_total_seconds": pre_seconds + post_seconds,
+    }
 
 
 def active_evidence_tasks(conn) -> dict[str, Any]:
@@ -554,9 +614,17 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
             zone_id = f"{source_id}_full_frame"
             camera_name = f"pressure {index:02d}"
             rtsp_uri = pressure_rtsp_uri(cfg, index=index, source_id=source_id)
+            evidence_policy = evidence_policy_for_index(cfg, index)
             metadata = {
                 "pressure_run_id": cfg.run_id,
                 "pressure_index": index,
+                "pressure_group_index": evidence_policy["pressure_group_index"],
+                "pressure_group_size": evidence_policy["pressure_group_size"],
+                "pressure_evidence_pre_seconds": evidence_policy["pre_seconds"],
+                "pressure_evidence_post_seconds": evidence_policy["post_seconds"],
+                "pressure_evidence_total_seconds": evidence_policy[
+                    "pressure_total_seconds"
+                ],
                 "created_by": "run_midterm_pressure60.py",
                 "rtsp_republished": bool(cfg.rtsp_republish_output_base),
             }
@@ -583,12 +651,6 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                 """,
                 (camera_id, "full frame", json.dumps(points), zone_id, "full frame", json.dumps(points)),
             )
-            evidence_policy = {
-                "pre_seconds": 5,
-                "post_seconds": 5,
-                "clip_required": True,
-                "snapshot_required": False,
-            }
             intrusion_config = {
                 "zone": zone_id,
                 "zone_id": zone_id,
@@ -1095,6 +1157,10 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "line_count": len(text.splitlines()),
             "validate_seq_iq": text.count("validate_seq_iq"),
             "writer_send_timeout": text.count("WriterResultSendTimeout"),
+            "frame_annotation_redis_write_error": text.count(
+                "frame_annotation_redis_writer action=write_error"
+            ),
+            "frame_annotation_redis_timeout": text.count("TimeoutError:timed out"),
             "negative_pts_overflow": len(re.findall(r"OverflowError: -\\d+", text)),
             "ffprobe_missing": text.count("ffprobe not found"),
             "imageio_ffmpeg_fallback": text.count("imageio_ffmpeg"),
@@ -1128,6 +1194,8 @@ def pressure_failure_reasons(
             reasons.append("rtsp_republishers_connection_errors")
     if int(sample_summary.get("max_savant_send_failures_total") or 0) > cfg.max_send_failures:
         reasons.append("savant_send_failures")
+    if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
+        reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:
         reasons.append("forwarder_did_not_see_all_sources")
     if int(sample_summary.get("max_savant_sources") or 0) < cfg.stream_count:
@@ -1170,7 +1238,14 @@ def _validate_seq_iq_is_failure(
     ingress_unhealthy = (
         int(sample_summary.get("max_savant_send_failures_total") or 0)
         > cfg.max_send_failures
-        or int(sample_summary.get("max_forwarder_queue_depth") or 0) > 0
+        or int(
+            sample_summary.get(
+                "max_forwarder_queue_depth",
+                sample_summary.get("max_queue_depth", 0),
+            )
+            or 0
+        )
+        > 0
         or int(source_summary.get("exited") or 0) > cfg.max_exited_sources
         or int(source_summary.get("restart_count_total") or 0) > 0
         or int(source_summary.get("negative_pts_error_total") or 0) > 0
@@ -1190,9 +1265,30 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
         SELECT eb.event_id, eb.source_id, eb.camera_id, eb.camera_name, eb.event_type,
                eb.evidence_state, eb.media_status, eb.raw_clip_uri, eb.raw_clip_size_bytes,
                eb.raw_clip_duration_seconds, eb.created_at, e.created_at AS event_created_at,
-               e.payload
+               e.payload, c.metadata AS camera_metadata,
+               rule_policy.evidence_policy AS rule_evidence_policy
         FROM evidence_bundles eb
         JOIN events e ON e.id = eb.event_id
+        LEFT JOIN cameras c ON c.id::text = eb.camera_id
+        LEFT JOIN LATERAL (
+            SELECT cr.evidence_policy
+            FROM camera_rules cr
+            WHERE cr.camera_id::text = eb.camera_id
+              AND (
+                  cr.rule_type = eb.event_type
+                  OR cr.algorithm_id = eb.event_type
+                  OR (
+                      eb.event_type = 'watchlist_hit'
+                      AND cr.algorithm_id = 'face.watchlist'
+                  )
+                  OR (
+                      eb.event_type = 'intrusion'
+                      AND cr.algorithm_id = 'behavior.intrusion'
+                  )
+              )
+            ORDER BY cr.updated_at DESC NULLS LAST, cr.created_at DESC NULLS LAST
+            LIMIT 1
+        ) rule_policy ON true
         WHERE eb.source_id LIKE %s
           AND eb.raw_clip_uri IS NOT NULL
           AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
@@ -1207,6 +1303,22 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
         raw_clip_path = raw_clip_uri_to_path(cfg.evidence_root, str(item.get("raw_clip_uri") or ""))
         item["raw_clip_path"] = str(raw_clip_path) if raw_clip_path else ""
         item["raw_clip_exists"] = bool(raw_clip_path and raw_clip_path.is_file())
+        camera_metadata = item.get("camera_metadata")
+        if isinstance(camera_metadata, dict):
+            item["pressure_group_index"] = camera_metadata.get("pressure_group_index")
+            item["expected_pre_seconds"] = camera_metadata.get(
+                "pressure_evidence_pre_seconds"
+            )
+            item["expected_post_seconds"] = camera_metadata.get(
+                "pressure_evidence_post_seconds"
+            )
+            item["expected_total_seconds"] = camera_metadata.get(
+                "pressure_evidence_total_seconds"
+            )
+        rule_policy = item.get("rule_evidence_policy")
+        if isinstance(rule_policy, dict):
+            item["rule_pre_seconds"] = rule_policy.get("pre_seconds")
+            item["rule_post_seconds"] = rule_policy.get("post_seconds")
         kept.append(item)
     kept = [row for row in kept if row["raw_clip_exists"]]
     return kept[: cfg.keep_evidence]
@@ -1222,6 +1334,12 @@ def write_kept_csv(cfg: PressureConfig, kept: list[dict[str, Any]]) -> None:
         "event_type",
         "evidence_state",
         "media_status",
+        "pressure_group_index",
+        "expected_pre_seconds",
+        "expected_post_seconds",
+        "expected_total_seconds",
+        "rule_pre_seconds",
+        "rule_post_seconds",
         "raw_clip_uri",
         "raw_clip_path",
         "raw_clip_size_bytes",

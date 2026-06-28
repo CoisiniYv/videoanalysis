@@ -278,7 +278,7 @@ pipeline:
         include_landmarks: ${oc.env:FRAME_ANNOTATION_INCLUDE_LANDMARKS, compact}
         include_embedding: ${oc.decode:${oc.env:FRAME_ANNOTATION_INCLUDE_EMBEDDING, false}}
         redis_maxlen: ${oc.decode:${oc.env:FRAME_ANNOTATION_REDIS_MAXLEN, 10000}}
-        write_timeout_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_WRITE_TIMEOUT_MS, 50}}
+        write_timeout_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_WRITE_TIMEOUT_MS, 500}}
         min_interval_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_EXPORT_MIN_INTERVAL_MS, 0}}
 
     # ------------------------------------------------------------------

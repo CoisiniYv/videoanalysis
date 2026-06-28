@@ -380,6 +380,10 @@
               </label>
               <label>Forwarder 最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
               <label>Forwarder 最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+              <label>Forwarder 队列上限<input name="forwarder_queue_max_size" type="number" min="1" max="20000" step="1" /></label>
+              <label>Forwarder 发送超时 ms<input name="forwarder_send_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+              <label>Forwarder 发送重试<input name="forwarder_send_retries" type="number" min="0" max="20" step="1" /></label>
+              <label>Forwarder 发送 HWM<input name="forwarder_send_hwm" type="number" min="1" max="20000" step="1" /></label>
               <label class="toggle-field">
                 <input name="ingress_fps_gate_enabled" type="checkbox" />
                 <span>Savant 入流限速</span>
@@ -389,6 +393,13 @@
               <label>姿态 interval<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
               <label>人脸 interval<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
               <label>AdaFace interval<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
+              <label>Savant Redis 超时 ms<input name="savant_redis_socket_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+              <label>Savant Redis 连接超时 ms<input name="savant_redis_connect_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+              <label>Savant Redis 队列上限<input name="savant_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
+              <label>Savant Redis 写入重试<input name="savant_redis_write_retries" type="number" min="0" max="100" step="1" /></label>
+              <label>Savant Redis 重试间隔 ms<input name="savant_redis_retry_sleep_ms" type="number" min="0" max="5000" step="10" /></label>
+              <label>Frame annotation 写入超时 ms<input name="frame_annotation_write_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+              <label>Frame annotation Redis 队列上限<input name="frame_annotation_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
               <label>Batched push timeout<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
             </form>
             <div id="runtime-performance-diff" class="runtime-table-wrap"></div>

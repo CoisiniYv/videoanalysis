@@ -32,7 +32,7 @@ from custom.services.time_utils import normalize_pts_to_ms
 
 DEFAULT_STREAM = "security.frame_annotations"
 DEFAULT_REDIS_MAXLEN = 10000
-DEFAULT_WRITE_TIMEOUT_MS = 50
+DEFAULT_WRITE_TIMEOUT_MS = 500
 DEFAULT_LOG_EVERY_N = 300
 DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
     "/data/video-analytics/media/replay-sink-output/midterm/.current_epoch.json"
