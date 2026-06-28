@@ -268,32 +268,32 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         algorithm_id="behavior.loitering",
         display_name="Loitering",
         category="behavior",
-        configurable=False,
-        per_camera_gate=False,
-        runtime_detecting=False,
-        event_enabled=False,
+        configurable=True,
+        per_camera_gate=True,
+        runtime_detecting=True,
+        event_enabled=True,
         evidence_enabled=False,
         production_ready=False,
-        status="unsupported",
+        status="event_only",
         status_reason=(
-            "rule module is not registered in custom.rules; runtime would skip "
-            "this camera_rules entry"
+            "Savant rule is registered and can emit events, but non-intrusion "
+            "behavior evidence still starts as not_implemented"
         ),
     ),
     "behavior.running": _support(
         algorithm_id="behavior.running",
         display_name="Running",
         category="behavior",
-        configurable=False,
-        per_camera_gate=False,
-        runtime_detecting=False,
-        event_enabled=False,
+        configurable=True,
+        per_camera_gate=True,
+        runtime_detecting=True,
+        event_enabled=True,
         evidence_enabled=False,
         production_ready=False,
-        status="unsupported",
+        status="event_only",
         status_reason=(
-            "rule module is not registered in custom.rules; runtime would skip "
-            "this camera_rules entry"
+            "Savant rule is registered and can emit events, but non-intrusion "
+            "behavior evidence still starts as not_implemented"
         ),
     ),
     "behavior.wall_climb_suspicious": _support(

@@ -155,8 +155,8 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
                         "rule_type": "face.watchlist",
                         "enabled": True,
                     },
-                    "running_unsupported": {
-                        "rule_id": "running_unsupported",
+                    "running_lobby": {
+                        "rule_id": "running_lobby",
                         "algorithm_id": "behavior.running",
                         "rule_type": "running",
                         "enabled": True,
@@ -190,26 +190,26 @@ def test_runtime_apply_writes_configs_and_recreates_dynamic_rtsp(monkeypatch, tm
     assert [rule["rule_id"] for rule in result["applied_rules"]] == [
         "intrusion_full_frame",
         "watchlist_config",
+        "running_lobby",
     ]
     assert {
         rule["rule_id"]: rule["runtime_skip_reason"]
         for rule in result["skipped_rules"]
     } == {}
-    assert [
-        rule["rule_id"] for rule in result["unsupported_rules"]
-    ] == ["running_unsupported"]
+    assert [rule["rule_id"] for rule in result["unsupported_rules"]] == []
     assert {
         rule["rule_id"] for rule in result["enabled_rules"]
-    } == {"intrusion_full_frame", "watchlist_config", "running_unsupported"}
+    } == {"intrusion_full_frame", "watchlist_config", "running_lobby"}
     primary_apply = next(
         camera for camera in result["applied_cameras"] if camera["camera_id"] == "primary"
     )
     assert primary_apply["applied_rule_ids"] == [
         "intrusion_full_frame",
         "watchlist_config",
+        "running_lobby",
     ]
     assert primary_apply["skipped_rule_ids"] == []
-    assert primary_apply["unsupported_rule_ids"] == ["running_unsupported"]
+    assert primary_apply["unsupported_rule_ids"] == []
     assert result["dynamic_sources_started"] == ["source_lab"]
     assert result["compose_sources_started"] == ["primary_rtsp"]
     assert result["sources_skipped"] == []

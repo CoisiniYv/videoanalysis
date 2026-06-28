@@ -62,8 +62,13 @@ def test_support_matrix_marks_runtime_semantics_explicitly() -> None:
     assert matrix["behavior.fall"]["event_enabled"] is True
     assert matrix["behavior.fall"]["evidence_enabled"] is False
 
-    assert matrix["behavior.running"]["status"] == "unsupported"
-    assert matrix["behavior.running"]["configurable"] is False
+    assert matrix["behavior.loitering"]["status"] == "event_only"
+    assert matrix["behavior.loitering"]["configurable"] is True
+    assert matrix["behavior.loitering"]["event_enabled"] is True
+
+    assert matrix["behavior.running"]["status"] == "event_only"
+    assert matrix["behavior.running"]["configurable"] is True
+    assert matrix["behavior.running"]["event_enabled"] is True
 
     assert matrix["face.watchlist"]["status"] == "production_ready"
     assert matrix["face.watchlist"]["per_camera_gate"] is True
@@ -84,8 +89,12 @@ def test_runtime_apply_state_uses_support_matrix() -> None:
     assert watchlist["runtime_consumed"] is True
 
     running = runtime_apply_state_for_algorithm("behavior.running")
-    assert running["runtime_apply_state"] == "unsupported"
-    assert running["runtime_skip_reason"] == "unsupported_algorithm"
+    assert running["runtime_apply_state"] == "applied"
+    assert running["runtime_consumed"] is True
+
+    wall_climb = runtime_apply_state_for_algorithm("behavior.wall_climb_suspicious")
+    assert wall_climb["runtime_apply_state"] == "unsupported"
+    assert wall_climb["runtime_skip_reason"] == "unsupported_algorithm"
 
     disabled = runtime_apply_state_for_algorithm(
         "behavior.intrusion",

@@ -62,6 +62,8 @@ def rules_pkg():
 def test_registry_exposes_intrusion(rules_pkg):
     assert rules_pkg.REGISTRY.has("intrusion")
     assert "intrusion" in rules_pkg.REGISTRY.known_rule_types()
+    assert rules_pkg.REGISTRY.has("loitering")
+    assert rules_pkg.REGISTRY.has("running")
 
 
 def test_register_rule_rejects_duplicate(rules_pkg):
@@ -76,7 +78,7 @@ def test_register_rule_rejects_empty_type(rules_pkg):
 
 def test_get_factory_unknown_raises(rules_pkg):
     with pytest.raises(KeyError):
-        rules_pkg.REGISTRY.get_factory("loitering")
+        rules_pkg.REGISTRY.get_factory("wall_climb")
 
 
 # ---------------------------------------------------------------------------
@@ -138,20 +140,20 @@ def test_build_rules_skips_unknown_rule_type(rules_pkg, capsys):
         zones={"perimeter": _zone()},
         rules={
             "intrusion_perimeter": _intrusion_cfg(),
-            "loiter_perimeter": RuleConfig(
-                name="loiter_perimeter",
-                rule_type="loitering",   # not registered yet (B2.1)
+            "wall_climb_perimeter": RuleConfig(
+                name="wall_climb_perimeter",
+                rule_type="wall_climb",
                 zone="perimeter",
                 enabled=True,
             ),
         },
     )
     rules = rules_pkg.build_rules(cfg, CooldownTracker())
-    # Only intrusion is registered today.
+    # Wall-climb is still deferred because it needs line/墙体 configuration.
     assert [r.rule_type for r in rules] == ["intrusion"]
     captured = capsys.readouterr().out
     assert "stage=savant_security_rule_registry_unknown" in captured
-    assert "rule_type=loitering" in captured
+    assert "rule_type=wall_climb" in captured
 
 
 # ---------------------------------------------------------------------------

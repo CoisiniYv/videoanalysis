@@ -121,8 +121,8 @@ GET /api/v1/algorithms/support-matrix
 | `behavior.crowd_gathering` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
 | `behavior.fall` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
 | `behavior.chasing` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
-| `behavior.loitering` | `unsupported` | rule module 未注册，运行时会跳过 |
-| `behavior.running` | `unsupported` | rule module 未注册，运行时会跳过 |
+| `behavior.loitering` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
+| `behavior.running` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
 | `behavior.wall_climb_suspicious` | `unsupported` | rule module 未注册，运行时会跳过 |
 | `face.observation` | `config_only` | 人脸观察由 pipeline/env 控制，未使用 per-camera rule gate |
 | `face.watchlist` | `production_ready` | watchlist 由 per-camera camera_rules 控制目标名单和阈值，face-worker 运行时消费 |

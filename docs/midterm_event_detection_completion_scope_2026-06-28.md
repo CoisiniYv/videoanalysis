@@ -32,8 +32,8 @@ GET /api/v1/algorithms/support-matrix
 | `behavior.fall` | `event_only` | `custom.rules.fall` 已注册，可基于姿态/框形态出事件 | 需要标准样本、误报控制和证据闭环 |
 | `behavior.chasing` | `event_only` | `custom.rules.chasing` 已注册，可基于多轨迹运动关系出事件 | 需要真实样本、阈值校准和证据闭环 |
 | `face.observation` | `config_only` | 底层 YOLOv8-Face、AdaFace、ReID gate/exporter 已存在 | 不是 per-camera rule gate；由 pipeline/env 控制 |
-| `behavior.loitering` | `unsupported` | 有算法 ID/配置契约 | 缺 `custom.rules.loitering` 规则实现和注册 |
-| `behavior.running` | `unsupported` | 有算法 ID/配置契约 | 缺 `custom.rules.running` 规则实现和注册 |
+| `behavior.loitering` | `event_only` | `custom.rules.loitering` 已注册，可基于 ROI 停留和低速出事件 | 非 intrusion 行为证据 materialization 仍未生产闭环 |
+| `behavior.running` | `event_only` | `custom.rules.running` 已注册，可基于轨迹速度和持续时间出事件 | 非 intrusion 行为证据 materialization 仍未生产闭环 |
 | `behavior.wall_climb_suspicious` | `unsupported` | 有算法 ID/配置契约，配置层要求 line zone | 缺 `custom.rules.wall_climb` 规则实现和注册 |
 | `face.live_search` | `deferred` | 有产品/事件契约 | 缺 runtime 查询、目标选择、事件和证据链路 |
 
@@ -75,13 +75,11 @@ YOLOv8-Face -> face/person association -> AdaFace -> ReID gate -> face_observati
 
 范围：
 
-- `behavior.loitering`
-- `behavior.running`
 - `behavior.wall_climb_suspicious`
 
 目标：
 
-- 新增 `modules/savant_security/custom/rules/<rule>.py`；
+- 新增 `modules/savant_security/custom/rules/wall_climb.py`；
 - 在 `modules/savant_security/custom/rules/__init__.py` 注册；
 - 补 unit tests 和 runtime config export 校验；
 - support matrix 从 `unsupported` 升到 `event_only`，除非证据链路也同时闭环。
@@ -189,10 +187,9 @@ enabled camera_rules after
 
 建议从以下最小安全切入点开始：
 
-1. `behavior.loitering` unit-only 实现；
-2. `behavior.running` unit-only 实现；
-3. `behavior.wall_climb_suspicious` line-zone unit-only 实现；
-4. 为 `crowd_gathering`、`fall`、`chasing` 补 sample/fixture regression；
-5. 更新 support matrix 只在规则注册和 runtime evidence 状态真实变化后进行。
+1. 为 `behavior.loitering` / `behavior.running` 补真实或半真实 fixture regression；
+2. 为 `crowd_gathering`、`fall`、`chasing` 补 sample/fixture regression；
+3. 暂缓 `behavior.wall_climb_suspicious`，直到 8090 line/墙体配置和 runtime zone 表达保真；
+4. 更新 support matrix 只在规则注册和 runtime evidence 状态真实变化后进行。
 
 这条路径不会要求重启 live runtime，也不会改变性能测试正在验证的模型链和运行参数。

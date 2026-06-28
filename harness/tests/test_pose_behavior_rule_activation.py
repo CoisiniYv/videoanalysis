@@ -58,6 +58,18 @@ def _write_yaml(tmp_path: Path, body: str) -> str:
             "chasing",
             {"min_pair_duration_s": 1.5, "max_distance_px": 220.0},
         ),
+        (
+            "behavior.loitering",
+            "loiter_lobby",
+            "loitering",
+            {"min_duration_ms": 1000, "max_avg_speed_px_s": 20.0},
+        ),
+        (
+            "behavior.running",
+            "running_lobby",
+            "running",
+            {"min_speed_px_s": 250.0, "min_duration_ms": 500},
+        ),
     ],
 )
 def test_behavior_algorithm_activates_expected_rule(
@@ -133,13 +145,12 @@ def test_unknown_enabled_behavior_rule_is_skipped_with_log(
                 type: polygon
                 points: [[0,0],[1000,0],[1000,1000],[0,1000]]
             rules:
-              loiter_lobby:
-                rule_id: loiter_lobby
-                algorithm_id: behavior.loitering
+              wall_climb_lobby:
+                rule_id: wall_climb_lobby
+                algorithm_id: behavior.wall_climb_suspicious
                 enabled: true
                 config:
-                  zone_id: lobby
-                  min_duration_s: 60
+                  line_id: wall_line
         """,
     )
     bundle = modules["loader"].load_camera_config(cfg_path)

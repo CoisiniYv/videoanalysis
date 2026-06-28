@@ -52,8 +52,8 @@ DeepStream tracker 文档也给出明确取舍：
 | 算法 | 推荐实现 | 集成复杂度 | 性能成本 | 准确度预期 | 当前建议 |
 | --- | --- | --- | --- | --- | --- |
 | `behavior.intrusion` | foot point in polygon + dwell time | 已完成 | 低 | 中高，依赖 person track | 保持生产基线 |
-| `behavior.loitering` | ROI 内停留时间 + 低速/低位移 | 低 | 低 | 中 | 立即补 |
-| `behavior.running` | track speed + 持续时间 + bbox-height 归一化可选 | 低 | 低 | 中 | 立即补 |
+| `behavior.loitering` | ROI 内停留时间 + 低速/低位移 | 已有基础 | 低 | 中 | 稳定现有实现 |
+| `behavior.running` | track speed + 持续时间 + bbox-height 归一化可选 | 已有基础 | 低 | 中 | 稳定现有实现 |
 | `behavior.wall_climb_suspicious` | line crossing + line-near dwell + pose/vertical motion cues | 中 | 低到中 | 中 | 第二批补 |
 | `behavior.crowd_gathering` | ROI 内人数 + 近邻聚类/DBSCAN-like + 持续时间 | 已有基础 | 中 | 中 | 稳定现有实现 |
 | `behavior.fall` | 姿态 keypoints + bbox aspect + upright-to-lying transition | 已有基础 | 低到中 | 中 | 稳定现有实现 |
@@ -388,10 +388,10 @@ job 过期自动停止
 
 ### P0: 低风险快速补全
 
-1. `behavior.loitering`
-2. `behavior.running`
+1. `behavior.loitering` fixture / live-smoke 回归
+2. `behavior.running` fixture / live-smoke 回归
 
-理由：都是单目标规则，复用现有 polygon ROI、TrackState、cooldown，性能最低，集成最小。
+理由：两个规则已落到单目标 rules 路线，后续重点是样本、阈值和证据链路，不是新增模型。
 
 ### P1: 需要 runtime zone 结构补齐
 
