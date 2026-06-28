@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -21,6 +22,82 @@ def _load_module(name: str):
 
 sampler_mod = _load_module("sampler")
 queueing_mod = _load_module("queueing")
+
+
+def _load_main_module():
+    _install_fake_savant_rs()
+    package_name = "analysis_forwarder_test_app"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(APP_DIR)]  # type: ignore[attr-defined]
+    sys.modules[package_name] = package
+    spec = importlib.util.spec_from_file_location(
+        f"{package_name}.main", APP_DIR / "main.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[f"{package_name}.main"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _install_fake_savant_rs() -> None:
+    savant_rs = types.ModuleType("savant_rs")
+    py_mod = types.ModuleType("savant_rs.py")
+    utils_mod = types.ModuleType("savant_rs.py.utils")
+    zeromq_mod = types.ModuleType("savant_rs.py.utils.zeromq")
+    zmq_mod = types.ModuleType("savant_rs.zmq")
+
+    class FakeZeroMQSource:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def next_message(self):
+            return None
+
+        def shutdown(self) -> None:
+            pass
+
+    class FakeWriterConfigBuilder:
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+        def with_send_timeout(self, _value: int) -> None:
+            pass
+
+        def with_send_retries(self, _value: int) -> None:
+            pass
+
+        def with_send_hwm(self, _value: int) -> None:
+            pass
+
+        def build(self) -> dict[str, str]:
+            return {"endpoint": self.endpoint}
+
+    class FakeBlockingWriter:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def start(self) -> None:
+            pass
+
+        def shutdown(self) -> None:
+            pass
+
+    zeromq_mod.ZeroMQSource = FakeZeroMQSource
+    zmq_mod.BlockingWriter = FakeBlockingWriter
+    zmq_mod.WriterConfigBuilder = FakeWriterConfigBuilder
+    sys.modules.update(
+        {
+            "savant_rs": savant_rs,
+            "savant_rs.py": py_mod,
+            "savant_rs.py.utils": utils_mod,
+            "savant_rs.py.utils.zeromq": zeromq_mod,
+            "savant_rs.zmq": zmq_mod,
+        }
+    )
 
 
 @dataclass
@@ -85,6 +162,33 @@ def test_bounded_queue_drops_non_keyframes_and_preserves_keyframes() -> None:
 
     assert queue.pop(timeout_s=0) == old_key
     assert queue.pop(timeout_s=0) == new_key
+
+
+def test_null_sink_counts_forwarded_without_savant_writer() -> None:
+    main_mod = _load_main_module()
+    config = main_mod.ForwarderConfig(
+        in_endpoint="router+bind:tcp://0.0.0.0:5557",
+        out_endpoint="null://diagnostic",
+        analysis_fps="8/1",
+        min_fps="2/1",
+        sampler_enabled=True,
+        queue_max_size=8,
+        receive_timeout_ms=100,
+        receive_hwm=10,
+        send_timeout_ms=100,
+        send_retries=0,
+        send_hwm=10,
+        metrics_port=8081,
+    )
+
+    forwarder = main_mod.AnalysisForwarder(config)
+
+    assert isinstance(forwarder.writer, main_mod.NullWriter)
+    assert forwarder.metrics.null_sink_enabled == 1
+    assert type(forwarder.writer.send_message("cam", object(), b"")).__name__ == (
+        "WriterResultSuccess"
+    )
+    assert "va_forwarder_null_sink_enabled 1" in forwarder.metrics.render_prometheus()
 
 
 def test_phase05_passthrough_probe_is_available() -> None:

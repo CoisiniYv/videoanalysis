@@ -23,6 +23,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -105,6 +106,7 @@ class PressureConfig:
     max_send_failures: int
     max_exited_sources: int
     max_validate_seq_iq: int
+    forwarder_null_sink: bool
     cleanup: bool
 
 
@@ -201,13 +203,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=0,
         help="Maximum allowed validate_seq_iq log lines in Savant logs.",
     )
+    parser.add_argument(
+        "--forwarder-null-sink",
+        action="store_true",
+        help=(
+            "Run the pressure sources through Replay and analysis-forwarder, "
+            "but count forwarded frames in a null sink instead of sending to Savant."
+        ),
+    )
     parser.add_argument("--no-cleanup", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    run_id = args.run_id or _default_run_id(args.fps)
+    run_id = args.run_id or _default_run_id(args.fps, forwarder_null_sink=args.forwarder_null_sink)
     artifact_dir = (args.artifact_root / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cfg = PressureConfig(
@@ -244,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         max_send_failures=args.max_send_failures,
         max_exited_sources=args.max_exited_sources,
         max_validate_seq_iq=args.max_validate_seq_iq,
+        forwarder_null_sink=args.forwarder_null_sink,
         cleanup=not args.no_cleanup,
     )
     report: dict[str, Any] = {
@@ -283,13 +294,30 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         set_compose_operating_point(cfg)
-        save_performance_config(cfg, original_perf)
+        if cfg.forwarder_null_sink:
+            write_json(
+                cfg.artifact_dir / "performance_apply_pressure.json",
+                {
+                    "skipped": True,
+                    "reason": "forwarder_null_sink_only",
+                    "analysis_fps": cfg.fps,
+                    "analysis_min_fps": cfg.min_fps,
+                    "forwarder_out_endpoint": "null://pressure",
+                },
+            )
+        else:
+            save_performance_config(cfg, original_perf)
         rtsp_republishers = start_rtsp_republishers(cfg)
         insert_pressure_cameras(conn, cfg)
-        restart = restart_camera_runtime(cfg)
-        runtime_epoch_root = restart.get("runtime_epoch_root")
-        write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
-        report["steps"].append({"name": "runtime_started", "runtime_epoch_root": runtime_epoch_root})
+        if cfg.forwarder_null_sink:
+            restart = apply_sources_only(cfg, "runtime_sources_apply_pressure.json")
+            write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
+            report["steps"].append({"name": "forwarder_null_sources_started"})
+        else:
+            restart = restart_camera_runtime(cfg)
+            runtime_epoch_root = restart.get("runtime_epoch_root")
+            write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
+            report["steps"].append({"name": "runtime_started", "runtime_epoch_root": runtime_epoch_root})
 
         sample_runtime(cfg, started_at)
         diagnostics = collect_pressure_diagnostics(cfg)
@@ -297,11 +325,17 @@ def main(argv: list[str] | None = None) -> int:
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
-        wait_for_drain(cfg)
-        kept = select_kept_evidence(conn, cfg)
-        write_kept_csv(cfg, kept)
-        report["kept_evidence_count"] = len(kept)
-        report["kept_evidence"] = kept[: cfg.keep_evidence]
+        kept: list[dict[str, Any]] = []
+        if cfg.forwarder_null_sink:
+            report["kept_evidence_count"] = 0
+            report["kept_evidence"] = []
+            report["steps"].append({"name": "evidence_drain_skipped", "reason": "forwarder_null_sink"})
+        else:
+            wait_for_drain(cfg)
+            kept = select_kept_evidence(conn, cfg)
+            write_kept_csv(cfg, kept)
+            report["kept_evidence_count"] = len(kept)
+            report["kept_evidence"] = kept[: cfg.keep_evidence]
         report["db_summary_before_cleanup"] = db_summary(conn, cfg.run_id)
         write_json(cfg.artifact_dir / "db_summary_before_cleanup.json", report["db_summary_before_cleanup"])
         report["failure_reasons"] = pressure_failure_reasons(cfg, kept, diagnostics)
@@ -311,17 +345,26 @@ def main(argv: list[str] | None = None) -> int:
             report["failure_reasons"],
         )
 
+        keep_event_ids = {str(row["event_id"]) for row in kept}
         if cfg.cleanup:
             cleanup = cleanup_pressure_data(
                 conn,
                 redis_client,
                 cfg,
-                keep_event_ids={str(row["event_id"]) for row in kept},
+                keep_event_ids=keep_event_ids,
                 runtime_epoch_root=runtime_epoch_root,
             )
             report["cleanup"] = cleanup
         restore_cameras(conn, original_cameras)
         restore_runtime(cfg, original_perf)
+        if cfg.cleanup:
+            report["cleanup_after_restore"] = cleanup_pressure_data(
+                conn,
+                redis_client,
+                cfg,
+                keep_event_ids=keep_event_ids,
+                runtime_epoch_root=runtime_epoch_root,
+            )
         report["db_summary_after_cleanup"] = db_summary(conn, cfg.run_id)
         report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
         report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
@@ -364,9 +407,10 @@ def main(argv: list[str] | None = None) -> int:
         conn.close()
 
 
-def _default_run_id(fps: str) -> str:
+def _default_run_id(fps: str, *, forwarder_null_sink: bool = False) -> str:
     fps_label = fps.replace("/", "p").replace(".", "_")
-    return f"pressure60_{fps_label}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    prefix = "forwarder60_null" if forwarder_null_sink else "pressure60"
+    return f"{prefix}_{fps_label}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
 
 def _jsonable_config(cfg: PressureConfig) -> dict[str, Any]:
@@ -548,16 +592,19 @@ def fetch_cameras(conn) -> list[dict[str, Any]]:
 
 def set_compose_operating_point(cfg: PressureConfig) -> None:
     env = os.environ.copy()
-    env.update(
-        {
-            "BATCH_SIZE": str(cfg.batch_size),
-            "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
-            "ANALYSIS_FPS": cfg.fps,
-            "ANALYSIS_MIN_FPS": cfg.min_fps,
-            "MAX_FPS": cfg.fps,
-            "MIN_FPS": cfg.min_fps,
-        }
-    )
+    updates = {
+        "BATCH_SIZE": str(cfg.batch_size),
+        "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+        "ANALYSIS_FPS": cfg.fps,
+        "ANALYSIS_MIN_FPS": cfg.min_fps,
+        "MAX_FPS": cfg.fps,
+        "MIN_FPS": cfg.min_fps,
+    }
+    services = ["analysis-forwarder", "savant-security"]
+    if cfg.forwarder_null_sink:
+        updates["FORWARDER_OUT_ENDPOINT"] = "null://pressure"
+        services = ["analysis-forwarder"]
+    env.update(updates)
     run(
         [
             "docker",
@@ -570,8 +617,7 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
             "-d",
             "--no-deps",
             "--force-recreate",
-            "analysis-forwarder",
-            "savant-security",
+            *services,
         ],
         cfg.artifact_dir / "compose_recreate_pressure.log",
         env=env,
@@ -873,6 +919,7 @@ def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
             overview["_pressure_sample_observed_at"] = datetime.now(timezone.utc).isoformat()
         write_json(samples_dir / f"runtime_{index:03d}.json", overview)
         write_text(samples_dir / f"gpu_{index:03d}.csv", nvidia_smi_csv())
+        write_json(samples_dir / f"docker_stats_{index:03d}.json", docker_stats_json(cfg))
         write_json(samples_dir / f"db_{index:03d}.json", db_summary_connect(cfg))
         if now >= end_at:
             break
@@ -939,6 +986,13 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     max_send_failures = 0.0
     max_forwarder_sources = 0
     max_savant_sources = 0
+    max_forwarder_cpu_percent = 0.0
+    max_savant_cpu_percent = 0.0
+    max_source_adapter_cpu_percent = 0.0
+    queue_full_samples = 0
+    final_forwarder_seen = 0.0
+    final_forwarder_forwarded = 0.0
+    final_forwarder_dropped = 0.0
     stable_samples = 0
     for path in sorted(samples_dir.glob("runtime_*.json")):
         try:
@@ -950,6 +1004,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         forwarder = payload.get("forwarder") or {}
         savant_sources = metrics.get("sources") or []
         forwarder_sources = forwarder.get("sources") or []
+        sample_index = path.stem.rsplit("_", 1)[-1]
+        stats = _read_docker_stats_sample(samples_dir / f"docker_stats_{sample_index}.json")
         effective_fps = []
         for source in savant_sources:
             window = ((source.get("windows") or {}).get("10s") or {})
@@ -962,9 +1018,32 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             for source in forwarder_sources
         )
         max_queue_depth = max(max_queue_depth, queue_depth)
+        if queue_depth >= 2048:
+            queue_full_samples += 1
         max_send_failures = max(max_send_failures, send_failures)
         max_forwarder_sources = max(max_forwarder_sources, len(forwarder_sources))
         max_savant_sources = max(max_savant_sources, len(savant_sources))
+        forwarder_seen = sum(float(source.get("frames_seen_total") or 0.0) for source in forwarder_sources)
+        forwarder_forwarded = sum(
+            float(source.get("frames_forwarded_total") or 0.0) for source in forwarder_sources
+        )
+        forwarder_dropped = sum(float(source.get("frames_dropped_total") or 0.0) for source in forwarder_sources)
+        final_forwarder_seen = forwarder_seen
+        final_forwarder_forwarded = forwarder_forwarded
+        final_forwarder_dropped = forwarder_dropped
+        forwarder_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-analysis-forwarder")
+        savant_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-savant")
+        source_cpu = max(
+            (
+                _parse_percent(str(item.get("CPUPerc") or "0"))
+                for name, item in stats.items()
+                if name.startswith(f"video-analytics-source-{cfg.run_id}_")
+            ),
+            default=0.0,
+        )
+        max_forwarder_cpu_percent = max(max_forwarder_cpu_percent, forwarder_cpu)
+        max_savant_cpu_percent = max(max_savant_cpu_percent, savant_cpu)
+        max_source_adapter_cpu_percent = max(max_source_adapter_cpu_percent, source_cpu)
         if len(forwarder_sources) >= cfg.stream_count and queue_depth <= 0 and send_failures <= cfg.max_send_failures:
             stable_samples += 1
         rows.append(
@@ -975,6 +1054,17 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "forwarder_sources": len(forwarder_sources),
                 "queue_depth": queue_depth,
                 "savant_send_failures_total": send_failures,
+                "forwarder_frames_seen_total": int(forwarder_seen),
+                "forwarder_frames_forwarded_total": int(forwarder_forwarded),
+                "forwarder_frames_dropped_total": int(forwarder_dropped),
+                "forwarder_forwarded_seen_ratio": (
+                    round(forwarder_forwarded / forwarder_seen, 4)
+                    if forwarder_seen > 0
+                    else None
+                ),
+                "forwarder_cpu_percent": forwarder_cpu,
+                "savant_cpu_percent": savant_cpu,
+                "max_source_adapter_cpu_percent": source_cpu,
                 "avg_effective_fps_10s": (
                     round(sum(effective_fps) / len(effective_fps), 3)
                     if effective_fps
@@ -987,9 +1077,34 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     summary = {
         "sample_count": len(rows),
         "max_queue_depth": max_queue_depth,
+        "max_forwarder_queue_depth": max_queue_depth,
+        "queue_full_samples": queue_full_samples,
         "max_savant_send_failures_total": int(max_send_failures),
         "max_forwarder_sources": max_forwarder_sources,
         "max_savant_sources": max_savant_sources,
+        "final_forwarder_frames_seen_total": int(final_forwarder_seen),
+        "final_forwarder_frames_forwarded_total": int(final_forwarder_forwarded),
+        "final_forwarder_frames_dropped_total": int(final_forwarder_dropped),
+        "final_forwarder_forwarded_seen_ratio": (
+            round(final_forwarder_forwarded / final_forwarder_seen, 4)
+            if final_forwarder_seen > 0
+            else None
+        ),
+        "target_forwarded_frames": int(
+            round(cfg.stream_count * _fps_to_float(cfg.fps) * max(cfg.duration_s, 0))
+        ),
+        "final_forwarded_target_ratio": (
+            round(
+                final_forwarder_forwarded
+                / max(cfg.stream_count * _fps_to_float(cfg.fps) * max(cfg.duration_s, 1), 1),
+                4,
+            )
+            if final_forwarder_forwarded
+            else 0.0
+        ),
+        "max_forwarder_cpu_percent": round(max_forwarder_cpu_percent, 3),
+        "max_savant_cpu_percent": round(max_savant_cpu_percent, 3),
+        "max_source_adapter_cpu_percent": round(max_source_adapter_cpu_percent, 3),
         "stable_samples": stable_samples,
         "samples": rows,
     }
@@ -1179,7 +1294,7 @@ def pressure_failure_reasons(
     republish_summary = diagnostics.get("rtsp_republishers") or {}
     log_summary = diagnostics.get("log_summary") or {}
     savant_logs = log_summary.get("savant") or {}
-    if len(kept) < cfg.keep_evidence:
+    if not cfg.forwarder_null_sink and len(kept) < cfg.keep_evidence:
         reasons.append("insufficient_playable_evidence")
     if int(source_summary.get("exited") or 0) > cfg.max_exited_sources:
         reasons.append("source_containers_exited")
@@ -1198,9 +1313,11 @@ def pressure_failure_reasons(
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:
         reasons.append("forwarder_did_not_see_all_sources")
-    if int(sample_summary.get("max_savant_sources") or 0) < cfg.stream_count:
+    if int(sample_summary.get("queue_full_samples") or 0) > 0:
+        reasons.append("forwarder_queue_full")
+    if not cfg.forwarder_null_sink and int(sample_summary.get("max_savant_sources") or 0) < cfg.stream_count:
         reasons.append("savant_did_not_see_all_sources")
-    if _validate_seq_iq_is_failure(cfg, diagnostics, reasons):
+    if not cfg.forwarder_null_sink and _validate_seq_iq_is_failure(cfg, diagnostics, reasons):
         reasons.append("validate_seq_iq_exceeded")
     return reasons
 
@@ -1215,6 +1332,8 @@ def pressure_warnings(
     savant_logs = log_summary.get("savant") or {}
     validate_count = int(savant_logs.get("validate_seq_iq") or 0)
     if (
+        not cfg.forwarder_null_sink
+        and
         validate_count > cfg.max_validate_seq_iq
         and "validate_seq_iq_exceeded" not in failure_reasons
     ):
@@ -1421,6 +1540,7 @@ def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
             "MAX_PARALLEL_STREAMS": "4",
             "ANALYSIS_FPS": str(original_perf.get("analysis_fps", "8/1")),
             "ANALYSIS_MIN_FPS": str(original_perf.get("analysis_min_fps", "2/1")),
+            "FORWARDER_OUT_ENDPOINT": "dealer+connect:tcp://savant-security:5557",
             "MAX_FPS": str(original_perf.get("savant_max_fps", "8/1")),
             "MIN_FPS": str(original_perf.get("savant_min_fps", "2/1")),
         }
@@ -1580,6 +1700,90 @@ def nvidia_smi_csv() -> str:
         ).stdout
     except Exception as exc:
         return f"nvidia-smi failed: {exc}\n"
+
+
+def docker_stats_json(cfg: PressureConfig) -> dict[str, Any]:
+    desired = [
+        "video-analytics-midterm-analysis-forwarder",
+        "video-analytics-midterm-savant",
+        *pressure_source_container_names(cfg.run_id),
+    ]
+    if not desired:
+        return {"_meta": {"error": "no_containers"}}
+    completed = subprocess.run(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}", *desired],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    rows: dict[str, Any] = {}
+    errors: list[str] = []
+    for line in completed.stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            if line.strip():
+                errors.append(line.strip())
+            continue
+        name = str(item.get("Name") or item.get("Container") or item.get("ID") or "")
+        if name:
+            rows[name] = item
+    rows["_meta"] = {"returncode": completed.returncode, "errors": errors[:20]}
+    return rows
+
+
+def pressure_source_container_names(run_id: str) -> list[str]:
+    completed = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    prefix = f"video-analytics-source-{run_id}_"
+    return sorted(
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if line.strip().startswith(prefix)
+    )
+
+
+def _read_docker_stats_sample(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if not str(key).startswith("_") and isinstance(value, dict)
+    }
+
+
+def _stats_cpu_percent(stats: dict[str, dict[str, Any]], name: str) -> float:
+    return _parse_percent(str((stats.get(name) or {}).get("CPUPerc") or "0"))
+
+
+def _parse_percent(value: str) -> float:
+    try:
+        return float(str(value).strip().rstrip("%"))
+    except Exception:
+        return 0.0
+
+
+def _fps_to_float(value: str) -> float:
+    try:
+        return float(Fraction(str(value).strip()))
+    except Exception:
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
 
 
 def run(

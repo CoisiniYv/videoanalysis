@@ -62,6 +62,7 @@ class ForwarderMetrics:
         self._by_source: dict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.queue_depth = 0
         self.running = 1
+        self.null_sink_enabled = 0
 
     def inc(self, source_id: str, name: str, amount: int = 1) -> None:
         with self._lock:
@@ -80,6 +81,9 @@ class ForwarderMetrics:
                 "# HELP va_forwarder_running Whether the analysis-forwarder main process is running.",
                 "# TYPE va_forwarder_running gauge",
                 f"va_forwarder_running {self.running}",
+                "# HELP va_forwarder_null_sink_enabled Whether forwarded frames are counted without sending to Savant.",
+                "# TYPE va_forwarder_null_sink_enabled gauge",
+                f"va_forwarder_null_sink_enabled {self.null_sink_enabled}",
             ]
             metric_names = {
                 "seen": "va_forwarder_frames_seen_total",
@@ -138,14 +142,24 @@ class AnalysisForwarder:
             receive_timeout=config.receive_timeout_ms,
             receive_hwm=config.receive_hwm,
         )
-        writer_config = WriterConfigBuilder(config.out_endpoint)
-        writer_config.with_send_timeout(config.send_timeout_ms)
-        writer_config.with_send_retries(config.send_retries)
-        writer_config.with_send_hwm(config.send_hwm)
-        self.writer = BlockingWriter(writer_config.build())
+        if _is_null_endpoint(config.out_endpoint):
+            self.writer = NullWriter()
+            self.metrics.null_sink_enabled = 1
+        else:
+            writer_config = WriterConfigBuilder(config.out_endpoint)
+            writer_config.with_send_timeout(config.send_timeout_ms)
+            writer_config.with_send_retries(config.send_retries)
+            writer_config.with_send_hwm(config.send_hwm)
+            self.writer = BlockingWriter(writer_config.build())
 
     def run(self) -> None:
-        LOGGER.info("starting forwarder in=%s out=%s", self.config.in_endpoint, self.config.out_endpoint)
+        sink_mode = "null" if self.metrics.null_sink_enabled else "savant"
+        LOGGER.info(
+            "starting forwarder in=%s out=%s sink_mode=%s",
+            self.config.in_endpoint,
+            self.config.out_endpoint,
+            sink_mode,
+        )
         self.reader.start()
         self.writer.start()
         writer_thread = threading.Thread(target=self._write_loop, name="forwarder-writer", daemon=True)
@@ -253,6 +267,23 @@ def run_metrics_server(metrics: ForwarderMetrics, port: int) -> ThreadingHTTPSer
     return server
 
 
+class WriterResultSuccess:
+    pass
+
+
+class NullWriter:
+    """Fast diagnostic sink that exercises forwarder read/sample/queue without Savant."""
+
+    def start(self) -> None:
+        return None
+
+    def send_message(self, _topic: str, _message: Any, _content: bytes) -> WriterResultSuccess:
+        return WriterResultSuccess()
+
+    def shutdown(self) -> None:
+        return None
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOGLEVEL", "INFO").upper(),
@@ -285,6 +316,11 @@ def _bool_env(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_null_endpoint(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in {"null", "none", "null://"} or normalized.startswith("null://")
 
 
 def _escape_label(value: str) -> str:

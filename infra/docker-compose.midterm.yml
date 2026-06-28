@@ -178,7 +178,7 @@ services:
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
-      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-security:5557
+      FORWARDER_OUT_ENDPOINT: "${FORWARDER_OUT_ENDPOINT:-dealer+connect:tcp://savant-security:5557}"
       ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
       ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
       FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"

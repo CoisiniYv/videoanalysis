@@ -54,6 +54,7 @@ def _config(module, **overrides):
         "max_send_failures": 0,
         "max_exited_sources": 0,
         "max_validate_seq_iq": 0,
+        "forwarder_null_sink": False,
         "cleanup": True,
     }
     values.update(overrides)
@@ -181,6 +182,57 @@ def test_frame_annotation_redis_errors_are_explicit_failure() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "frame_annotation_redis_write_errors" in reasons
+
+
+def test_forwarder_null_sink_skips_savant_and_evidence_gates() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=50, forwarder_null_sink=True)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 0,
+            "max_savant_send_failures_total": 0,
+            "max_queue_depth": 0,
+            "queue_full_samples": 0,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 25}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "insufficient_playable_evidence" not in reasons
+    assert "savant_did_not_see_all_sources" not in reasons
+    assert "validate_seq_iq_exceeded" not in reasons
+    assert module.pressure_warnings(cfg, diagnostics, reasons) == []
+
+
+def test_forwarder_null_sink_fails_when_queue_is_sampled_full() -> None:
+    module = _load_module()
+    cfg = _config(module, forwarder_null_sink=True)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 0,
+            "max_savant_send_failures_total": 0,
+            "max_queue_depth": 2048,
+            "queue_full_samples": 1,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "forwarder_queue_full" in reasons
 
 
 def test_evidence_policy_groups_parse_pre_post_pairs() -> None:

@@ -337,7 +337,7 @@ def test_replay_first_topology_is_preserved() -> None:
         "router+bind:tcp://0.0.0.0:5557"
     )
     assert services["analysis-forwarder"]["environment"]["FORWARDER_OUT_ENDPOINT"] == (
-        "dealer+connect:tcp://savant-security:5557"
+        "${FORWARDER_OUT_ENDPOINT:-dealer+connect:tcp://savant-security:5557}"
     )
     assert services["analysis-forwarder"]["environment"]["FORWARDER_QUEUE_MAX_SIZE"] == (
         "${FORWARDER_QUEUE_MAX_SIZE:-2048}"
