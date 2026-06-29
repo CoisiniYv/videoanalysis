@@ -5,11 +5,12 @@
 本报告基于当前 checkout 的代码、配置和 2026-06-28 已沉淀的压测文档进行静态技术分析。
 未在本次报告编写过程中重启服务、读取 live runtime 指标或重新运行压测。
 
-2026-06-29 同步状态：后续提交已经落地 8090 运行控制、性能配置、拓扑配置和
-算法/ROI 配置同步相关改动。当前未提交差异只应被视为运行时生成快照或操作者配置时，
-不能再把本报告最初列出的 runtime/frontend 文件当作待提交代码风险。当前已知仍可能出现
-tracked diff 的文件是 `modules/savant_security/config/cameras.midterm.yml`，它来自
-PostgreSQL 摄像头/规则状态导出的 Savant 配置快照。
+2026-06-29 同步状态：后续提交已经落地 8090 运行控制、性能配置、拓扑配置、
+算法/ROI 配置同步、离线迁移打包，以及 media-worker finalizer 平滑调度相关改动。
+当前未提交差异只应被视为运行时生成快照或操作者配置时，不能再把本报告最初列出的
+runtime/frontend 文件当作待提交代码风险。当前已知仍可能出现 tracked diff 的文件是
+`modules/savant_security/config/cameras.midterm.yml`，它来自 PostgreSQL 摄像头/规则状态导出的
+Savant 配置快照。
 
 本文不分析归档阶段文件作为当前部署入口。当前部署入口以 midterm 栈为准：
 
@@ -18,6 +19,8 @@ PostgreSQL 摄像头/规则状态导出的 Savant 配置快照。
 - Env：`infra/env/midterm.env`
 - Savant module：`modules/savant_security/module.yml`
 - 8090 操作台：`http://127.0.0.1:8090/operator`
+- 干净迁移打包：`scripts/midterm_package_clean.sh`
+- 干净迁移部署：`scripts/midterm_deploy_clean.sh`
 
 ## 2. 执行摘要
 
@@ -41,21 +44,24 @@ RTSP source
 存储维护、运行时状态、性能配置和拓扑配置。后端 API 通过 evidence-viewer 代理暴露到 8090，
 内部 API 服务继续只在 compose 网络内监听。
 
-当前最强的运行证据来自 2026-06-28 的压测文档：
+当前最强的运行证据来自 2026-06-28 到 2026-06-29 的压测文档：
 
 - 60 路 3 FPS 下游证据链压测通过，保留 50 条 evidence，50/50 playable，8090 API 可查询。
 - 60 路 16/1 配置压测证明高入口压力下证据链能保住样本，但没有证明 16 FPS 推理吞吐。
-- 单 4090 双分支 30+30 前端推理入口压测在 4 FPS 和 8 FPS 档位通过，但 `keep-evidence=0`，
-  不能替代双分支证据链验收。
+- 单 4090 同卡双分支 30+30 在 4 FPS 和 8 FPS 档位完成 retained-evidence 证据链验收。
+- `pressure60_media_fullobs_8fps_20260629T092901Z` 证明第一阶段 media finalizer 平滑调度可在
+  60 路同卡双分支 8 FPS profile 下保留 50/50 playable evidence，并把 media-worker CPU 峰值控制到
+  约 98%。
 
 当前主要技术风险不再是“是否能跑通一个告警证据”，而是扩展性和验收边界：
 
 - face-worker 仍在单消费 loop 中同步做 DB insert 和 watchlist/gallery pgvector 匹配。
 - gallery 和 face observation 向量查询目前没有 ANN 索引。
-- media-worker 仍是单进程轮询 finalizer，`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` 是本进程 guard，
-  不是完整 worker pool。
-- 8090 runtime topology 已能写双分支计划，但 replay shard 输出路径和 clip-worker 读取路径需要在部署和压测中证明一致。
-- 双分支 8 FPS 目前是前端推理入口证据，不是完整 Replay/clip/media/evidence 闭环证据。
+- media-worker 仍是单进程轮询 finalizer，第一阶段 deadline-aware pacer 已通过 pressure profile
+  验证；如果生产目标变成“所有事件全量物化”，仍需要重新评估 worker pool / 多容器 claim / 独立
+  finalizer service。
+- 8090 runtime topology 已能写双分支计划，pressure harness 已证明 replay shard 输出和 clip-worker
+  读取路径一致；仍缺真实 RTSP 混合输入和长时间 soak。
 
 2026-06-29 后续已修复并应从开放风险降级为回归验证的点：
 
@@ -71,6 +77,11 @@ RTSP source
   旧任务不应无限停留在 8090 的“生成中”状态。
 - `REPLAY_FORCE_CONSTANT_CADENCE=true` 已作为 midterm 默认行为，Replay 400 后 fallback
   不应再作为常态取证路径；后续继续观察 evidence lifecycle p95/p99，而不是重复排查同一 fallback。
+- media-worker 已加入 deadline-aware pacer、CPU/native thread limit、ffmpeg output-side thread limit
+  和 pressure 报告 drain 后日志刷新；`imageio_ffmpeg_fallback_count` 已按数值解析，避免把
+  `imageio_ffmpeg_fallback_count=0` 误报为 fallback。
+- clean-machine 迁移脚本支持 `--include-images` 离线打包 Docker 镜像，部署脚本可自动加载
+  `images.tar` 并以 `--no-build` 启动，UOS 迁移步骤已固化。
 
 ## 3. 当前部署边界
 
@@ -131,6 +142,10 @@ API 服务的 8000 端口只在 compose 网络内暴露，8090 通过 `/api/v1/*
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD` | `4` | 单 Replay shard 并发预算 |
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE` | `1` | 单 source 并发预算 |
 | `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` | `4` | media-worker 本进程 materialization guard |
+| `MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S` | `0.5` | media-worker 每条 evidence 完成后的平滑停顿 |
+| `MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S` | `90` | deadline 剩余时间低于该值时跳过停顿 |
+| `MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT` | `4` | media-worker native/ffmpeg 线程上限 |
+| `MEDIA_WORKER_FFMPEG_X264_PRESET` | `ultrafast` | post-Savant fallback 转码预设 |
 | `REPLAY_FORCE_CONSTANT_CADENCE` | `true` | clip-worker 默认使用 Replay constant-cadence 请求，避免旧 Replay payload 兼容 fallback 成为常态路径 |
 
 注意：`STORAGE_MAINTENANCE_EXECUTE_ENABLED=true` 写在 env 中；compose API 服务有 false 默认值，
@@ -420,15 +435,26 @@ forwarder null sink 结果：
 - 4 FPS、`BATCH_SIZE=4`：passed，queue 0，send failures 0；
 - 8 FPS、`BATCH_SIZE=4`：passed，max queue 771，send failures 0，avg effective FPS 7.41。
 
-这说明单 4090 双分支显著改善 8 FPS 前端入口背压，但该压测 `keep-evidence=0`，
-不是完整证据链验收。
+后续同卡双分支 retained-evidence 证据链也已完成：
+
+- 4 FPS：`pressure60_8090topology_dual1gpu_evidence4fps_20260629T064345Z`，50/50 playable，
+  annotation complete 50/50；
+- 8 FPS：`pressure60_8090topology_dual1gpu_evidence8fps_batch4_verify_20260629T070656Z`，
+  50/50 playable；
+- media finalizer 平滑调度复测：`pressure60_media_fullobs_8fps_20260629T092901Z`，50/50
+  retained playable，media-worker CPU 峰值约 98%，queue wait p95 约 189.9 秒，lifecycle
+  p95 约 192.3 秒。
+
+这说明单 4090 同卡双分支 8 FPS 已经不只是前端入口证明，而是有 pressure source 下的
+Replay/clip/media/evidence 闭环证明。但它仍不是长时间 soak、真实 RTSP 混合输入或生产硬件承诺。
 
 ### 8.4 当前建议 operating point
 
 基于现有证据：
 
-- 稳妥生产基线：60 路 4 FPS，仍需按目标部署形态复跑端到端证据验收。
-- 4090 优化档：60 路 8 FPS，优先使用双分支继续验证；单实例 `BATCH_SIZE=32` 不足以作为稳定承诺。
+- 稳妥生产基线：60 路 4 FPS，当前已有同卡双分支证据链通过证据，仍需真实 RTSP / 长时间 soak。
+- 4090 优化档：60 路 8 FPS，优先使用同卡双分支；pressure source 下 retained-evidence 已通过，
+  但真实 RTSP、长时间 soak 和现场生产硬件仍需单独验收。
 - 16 FPS：只能作为极限观察，不应作为默认生产目标。
 - T4/弱卡生产结论：当前证据不足，必须按 T4 / 30-per-shard 计划单独验收。
 
@@ -513,12 +539,13 @@ retained-evidence 复测中把采样到的 media-worker CPU 峰值从约 1151% �
 
 ### 9.4 双拓扑和 replay shard 接线风险
 
-当前代码已经支持 topology plan 和 replay shard routing，但默认 compose 中 clip-worker 的
-`REPLAY_SHARDS_CONFIG_PATH` 为空。8090 topology apply 写出的 shard 文件不会自动证明 clip-worker
-读取了同一个文件。
+当前代码已经支持 topology plan 和 replay shard routing。默认 compose 中 clip-worker 的
+`REPLAY_SHARDS_CONFIG_PATH` 可以为空，但 pressure harness 已通过 `REPLAY_SHARDS_JSON`
+把 8090 topology apply 写出的 shard plan 注入 clip-worker，并校验 observed SHA256 和 topology
+文件 SHA256 一致。
 
-如果目标部署采用同卡双分支或双卡双分支，必须补一个带 evidence retention 的端到端压力 run，
-并在 artifact 中记录：
+如果目标部署采用同卡双分支或双卡双分支，后续必须在真实 RTSP / 长时间 soak / 生产硬件 profile 中
+继续记录：
 
 - topology config；
 - runtime epoch；
@@ -545,7 +572,7 @@ Redis pending 和 8090 查询证明。本次新增：
 
 仍缺或仍是 `not_enough_data`：
 
-- face-worker gallery query p95；
+- face-worker 代表性图库规模下的 gallery query p95 / EXPLAIN；
 - event-worker record-request dedupe latency；
 - PostgreSQL hot query plan/stat deltas；
 - media-worker queue wait / lifecycle / throttle 指标已在
@@ -570,6 +597,16 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 干净迁移应携带代码和模型，通常不应把 live Redis/PostgreSQL/Replay/evidence/person 状态直接带到新机器，
 除非迁移目标明确需要保留业务数据并配套校验。
 
+当前 clean-machine 迁移脚本支持两种包：
+
+- 在线/半在线包：`repo.tgz` + `models.tgz`，目标机按 compose build/pull；
+- 离线包：增加 `--include-images` 后生成 `images.tar` 和 `image_list.txt`，部署脚本自动
+  `docker load`，并在启动时使用 `--no-build`。
+
+UOS 目标机仍必须先具备 Docker Engine、Docker Compose v2、NVIDIA driver 和 NVIDIA Container
+Toolkit。应用包不迁移旧 PostgreSQL、Redis、Replay RocksDB、证据媒体、人脸库或历史 artifact；
+新机器需要在 8090 重新注册人员/人脸，除非另做业务数据迁移方案。
+
 ### 10.3 8090 强操作
 
 8090 当前不仅是浏览器 UI，也是运行控制面：
@@ -591,7 +628,8 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 
 ### P0 - 固化验收边界
 
-- 将“60 路 3 FPS 下游证据链通过”“60 路 16/1 不是 16 FPS 推理证明”“双分支 8 FPS 是前端入口证明”
+- 将“60 路 3 FPS 下游证据链通过”“60 路 16/1 不是 16 FPS 推理证明”“同卡双分支 8 FPS
+  pressure source 证据链通过但不是生产 soak 证明”
   作为文档和验收口径固定下来。
 - 对所有 runtime/topology 压测 artifact 记录 dirty diff、runtime epoch、source count、规则集、FPS/batch、
   forwarder/Savant/worker/DB 指标。
@@ -610,19 +648,20 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 - 已选择第一阶段扩展模型：单进程 deadline-aware pacer + CPU/ffmpeg thread limit。
 - 已用 60 路同卡双分支 8 FPS retained-evidence 压测证明第一阶段模型：
   media-worker CPU 峰值约 98%，50/50 retained playable。
-- 继续拆分 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段。
-- 添加重复 finalizer、终态收敛和 cleanup 竞态测试。
-- 用 pressure rerun 验证 queue wait 和 lifecycle p95/p99。
-- 补 harness：media-worker stale active task 收敛、重复 finalizer 终态幂等、ffprobe/ffmpeg
-  成功路径和缺失 metadata degraded 路径测试。
+- 当前保留单进程模型，不立即上内部 worker pool 或多容器 DB claim。
+- 后续只有在真实 RTSP / 长时间 soak 中 queue/lifecycle p95 超出 300 秒 deadline，或生产要求全量事件
+  物化时，再升级为内部 worker pool、多 media-worker 容器 DB claim 或独立 finalizer service。
+- 仍需补充更细的 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段指标和终态幂等
+  回归测试。
 
 ### P3 - 双分支证据链闭环
 
-- 让 8090 topology 写出的 replay shard plan 和 clip-worker 读取路径在部署层明确接通。
-- 对同卡双分支跑一轮带 evidence retention 的端到端压力测试。
-- 保留两个分支的 retained evidence，并通过 8090 list/detail 验证。
-- 补 harness：replay shard parser/routing 测试、topology apply dry-run 测试、clip-worker
-  retained evidence shard diagnostics 验证。
+- 已完成同卡双分支 retained-evidence 端到端压力测试，并通过 8090 list/detail 证明保留样本可查询。
+- pressure harness 已校验 topology replay shard JSON 和 clip-worker `REPLAY_SHARDS_JSON` SHA256 一致。
+- 下一步不是重复证明同一 pressure source profile，而是做真实 RTSP 混合输入、长时间 soak 和双 GPU /
+  T4 profile 验收。
+- 仍需保留 replay shard parser/routing、topology apply dry-run、clip-worker retained evidence shard
+  diagnostics 作为回归测试。
 
 ### P4 - Savant 阶段级指标
 
@@ -644,13 +683,15 @@ DB-backed evidence 语义已经替代单纯 sidecar 读取。
 但当前还不能把“压测通过”扩大解释为所有生产目标完成。准确边界是：
 
 - 60 路 3 FPS 下游证据链已经有通过证据；
-- 60 路 4 FPS 前端推理入口在单 4090 上可作为稳妥目标继续端到端验收；
-- 60 路 8 FPS 在同卡双分支上显示出可行性，但还缺同拓扑证据链闭环；
+- 60 路 4 FPS 同卡双分支已完成 pressure source 证据链验收，可作为当前保守生产目标继续做真实 RTSP /
+  长时间 soak；
+- 60 路 8 FPS 同卡双分支已完成 pressure source retained-evidence 验收；media-worker 平滑调度将
+  evidence lifecycle p95 明确控制在约 192 秒；
 - 16 FPS 不应作为当前默认生产承诺；
 - T4/弱卡 60 路仍需要按单独计划验收。
 
-下一阶段应避免继续扩大配置面，而应优先关闭 record request 幂等、face-worker 向量检索、
-media finalizer 并发模型、双拓扑 replay shard 接线和观测指标缺口。只有这些闭环后，
+下一阶段应避免继续扩大配置面，而应优先做真实 RTSP 混合输入、长时间 soak、生产硬件 profile、
+face-worker 代表性图库规模 EXPLAIN/压力验证，以及 Savant 阶段级 latency 指标。只有这些闭环后，
 `PASS_POST_INFERENCE_60_STREAM_CLOSURE` 或更高层的生产 readiness 才有足够证据支撑。
 
 ## 13. 参考依据
@@ -671,8 +712,13 @@ media finalizer 并发模型、双拓扑 replay shard 接线和观测指标缺�
 - `services/face-worker/app/vector_store.py`
 - `services/clip-worker/app/replay_shards.py`
 - `services/media-worker/app/worker.py`
+- `scripts/midterm_package_clean.sh`
+- `scripts/midterm_deploy_clean.sh`
 - `db/migrations/*.sql`
 - `docs/midterm_downstream_evidence_performance_2026-06-28.md`
 - `docs/midterm_frontend_inference_performance_2026-06-28.md`
+- `docs/midterm_dual1gpu_evidence_chain_4fps_8fps_report_2026-06-29.md`
+- `docs/midterm_media_finalizer_pacer_8fps_report_2026-06-29.md`
+- `docs/midterm_uos_clean_machine_migration_steps_2026-06-29.md`
 - `docs/midterm_post_inference_bottleneck_static_review_2026-06-28.md`
 - `specs/26_midterm_post_inference_bottleneck_closure_plan.md`
