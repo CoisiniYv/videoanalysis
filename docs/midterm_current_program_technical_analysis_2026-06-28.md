@@ -5,15 +5,11 @@
 本报告基于当前 checkout 的代码、配置和 2026-06-28 已沉淀的压测文档进行静态技术分析。
 未在本次报告编写过程中重启服务、读取 live runtime 指标或重新运行压测。
 
-当前工作区包含未提交改动，因此本文描述的是“当前工作树状态”，不是某个干净 git commit：
-
-- `scripts/runtime/run_midterm_pressure60.py`
-- `services/api/app/routers/runtime.py`
-- `services/api/app/services/runtime_topology.py`
-- `services/evidence-viewer/app/static/index.html`
-- `services/evidence-viewer/app/static/operator.js`
-- `services/evidence-viewer/app/static/style.css`
-- `specs/26_midterm_post_inference_bottleneck_closure_plan.md`
+2026-06-29 同步状态：后续提交已经落地 8090 运行控制、性能配置、拓扑配置和
+算法/ROI 配置同步相关改动。当前未提交差异只应被视为运行时生成快照或操作者配置时，
+不能再把本报告最初列出的 runtime/frontend 文件当作待提交代码风险。当前已知仍可能出现
+tracked diff 的文件是 `modules/savant_security/config/cameras.midterm.yml`，它来自
+PostgreSQL 摄像头/规则状态导出的 Savant 配置快照。
 
 本文不分析归档阶段文件作为当前部署入口。当前部署入口以 midterm 栈为准：
 
@@ -54,13 +50,27 @@ RTSP source
 
 当前主要技术风险不再是“是否能跑通一个告警证据”，而是扩展性和验收边界：
 
-- event-worker record request 去重仍是 `XRANGE security.record_requests - +` 全流扫描。
 - face-worker 仍在单消费 loop 中同步做 DB insert 和 watchlist/gallery pgvector 匹配。
 - gallery 和 face observation 向量查询目前没有 ANN 索引。
 - media-worker 仍是单进程轮询 finalizer，`MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` 是本进程 guard，
   不是完整 worker pool。
 - 8090 runtime topology 已能写双分支计划，但 replay shard 输出路径和 clip-worker 读取路径需要在部署和压测中证明一致。
 - 双分支 8 FPS 目前是前端推理入口证据，不是完整 Replay/clip/media/evidence 闭环证据。
+
+2026-06-29 后续已修复并应从开放风险降级为回归验证的点：
+
+- event-worker record request 去重已从 `XRANGE security.record_requests - +` 全流扫描改为
+  Redis `SET NX EX` 幂等键；重复 record request 会终态跳过新建 retry task。
+- pressure60 脚本已新增 `downstream_observability_summary.json`，固定 Redis、PostgreSQL、
+  event-worker、face-worker、media-worker 和 8090 retained evidence proof 的报告结构。
+- 8090 摄像头算法/ROI 保存不再通过 full runtime apply 重启推理链路；前端保存规则后调用
+  `/api/v1/cameras/runtime/config/sync`，只同步 Savant/adapter 配置快照。
+- `clip-worker` 对 stale/缺失 DB 事件的 pending record request 会执行终态清理和 `XACK`，
+  不应继续长期 reclaim 空转。
+- materializing/replay_job_created/finalizing 等 active evidence 状态已纳入 stale 终态收敛检查，
+  旧任务不应无限停留在 8090 的“生成中”状态。
+- `REPLAY_FORCE_CONSTANT_CADENCE=true` 已作为 midterm 默认行为，Replay 400 后 fallback
+  不应再作为常态取证路径；后续继续观察 evidence lifecycle p95/p99，而不是重复排查同一 fallback。
 
 ## 3. 当前部署边界
 
@@ -121,6 +131,7 @@ API 服务的 8000 端口只在 compose 网络内暴露，8090 通过 `/api/v1/*
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD` | `4` | 单 Replay shard 并发预算 |
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE` | `1` | 单 source 并发预算 |
 | `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` | `4` | media-worker 本进程 materialization guard |
+| `REPLAY_FORCE_CONSTANT_CADENCE` | `true` | clip-worker 默认使用 Replay constant-cadence 请求，避免旧 Replay payload 兼容 fallback 成为常态路径 |
 
 注意：`STORAGE_MAINTENANCE_EXECUTE_ENABLED=true` 写在 env 中；compose API 服务有 false 默认值，
 但 env 渲染时会覆盖。8090 存储删除能力因此是强能力，需要执行控制、确认 token 和审计配合。
@@ -255,9 +266,15 @@ media mount。这个设计让用户入口集中在 8090，而不是直接暴露 
 - `/api/v1/runtime/topology-config` GET/PUT/apply
 - `/api/v1/runtime/control/single/start|stop|restart`
 - `/api/v1/runtime/control/dual/stop`
+- `/api/v1/cameras/runtime/config/sync`
 
 `runtime_performance.py` 可以保存并应用 forwarder/Savant 性能参数，应用时重建相关容器并等待
 Savant ready。
+
+摄像头算法、ROI、规则保存与 runtime apply 是不同语义。算法/ROI 只是更新 DB-backed camera
+rule，再导出 Savant/adapter 配置快照；它不应重启 Savant、Replay、source adapter、clip-worker
+或 media-worker。需要启停摄像头、改变 RTSP 源、切换性能参数或切换拓扑时，才进入受控 runtime
+apply/restart 路径，并应继续受 evidence guard 保护。
 
 `runtime_topology.py` 是当前工作树新增能力，支持：
 
@@ -417,7 +434,7 @@ forwarder null sink 结果：
 
 ## 9. 主要代码级风险
 
-### 9.1 Record request 去重是 O(N)
+### 9.1 Record request 去重已移除 O(N) 扫描
 
 `event-worker` 在发布 record request 前调用：
 
@@ -425,14 +442,23 @@ forwarder null sink 结果：
 record_publisher.has_request(source_event_id, "savant_replay")
 ```
 
-`RecordRequestPublisher.has_request()` 仍对 `security.record_requests` 做：
+旧实现中 `RecordRequestPublisher.has_request()` 会对 `security.record_requests` 做：
 
 ```text
 XRANGE security.record_requests - +
 ```
 
-每个可录像事件都会按 stream 长度线性扫描并解析 JSON。随着事件数增加，这会变成 Redis/CPU
-热点。应替换为 Redis set/key、PostgreSQL 唯一键或其他 O(1)/indexed idempotency 机制。
+本次已改为 Redis `SET NX EX` 幂等键：
+
+- key 由 `(stream, source_event_id, strategy)` 计算 SHA-256；
+- `publish()` 在 `XADD` 前占用 key，`XADD` 失败会释放 key，允许后续重试；
+- `has_request()` 只做 Redis `EXISTS`，不再扫描 stream；
+- `RECORD_REQUEST_DEDUPE_TTL_SECONDS` 默认 86400 秒；
+- duplicate retry task 会标记为
+  `recording_policy_skipped:duplicate_record_request`，避免留下 pending 任务。
+
+后续风险已经从代码热点降级为压测回归项：需要在下一次 60 路压力 artifact 中确认 event-worker
+CPU 和 duplicate count 没有异常。
 
 ### 9.2 face-worker 同步匹配路径
 
@@ -476,20 +502,31 @@ XRANGE security.record_requests - +
 - retained evidence 的 branch/shard 分布；
 - 8090 list/detail 查询证明。
 
-### 9.5 观测指标缺口
+### 9.5 观测指标状态
 
 当前 pressure 报告已经覆盖 forwarder、Savant、source 状态、保留 evidence、playable 数、
-Redis pending 和 8090 查询证明。但仍缺：
+Redis pending 和 8090 查询证明。本次新增：
+
+- `downstream_observability_summary.json`；
+- Redis `XLEN` / `XINFO GROUPS`；
+- PostgreSQL run summary、`pg_stat_user_tables` 和 evidence task lifecycle 聚合；
+- event-worker record request dedupe counters；
+- face-worker watchlist emitted/failed slots；
+- media-worker finalization、ffprobe、ffmpeg duration distribution；
+- worker docker CPU summary；
+- retained evidence 的 8090 `/api/v1/evidence/bundles/{event_id}` 查询 proof。
+
+仍缺或仍是 `not_enough_data`：
 
 - face-worker gallery query p95；
 - event-worker record-request dedupe latency；
 - PostgreSQL hot query plan/stat deltas；
 - media-worker queue wait p95/p99；
-- ffmpeg elapsed/CPU；
-- evidence lifecycle p95/p99；
+- ffmpeg CPU；
 - Savant 模型阶段级 latency，例如 pose、face、AdaFace、pyfunc 后处理耗时。
 
-没有这些指标，后续优化顺序容易从“测得瓶颈”退化成“静态猜测”。
+这些缺口需要后续在对应 worker 内加 timer 或 EXPLAIN harness；当前报告结构已经固定，缺数据会显式
+显示为 `not_enough_data`，不再静默遗漏。
 
 ## 10. 运维和迁移风险
 
@@ -532,9 +569,12 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 
 ### P1 - 去除 O(N) 热点
 
-- 替换 `RecordRequestPublisher.has_request()` 全 stream 扫描。
+- 已完成：替换 `RecordRequestPublisher.has_request()` 全 stream 扫描。
+- 已完成：pressure60 downstream observability schema 和静态测试。
 - 为 face gallery/observation 查询补 `EXPLAIN ANALYZE` 基线。
 - 根据基线添加 pgvector ANN index，并决定是否需要 exact rerank。
+- 已补 harness：`RecordRequestPublisher` 幂等单测、event-worker duplicate/reclaim 测试、
+  合成 Redis stream 验证不再调用 `XRANGE - +`。
 
 ### P2 - 证明 media finalizer 扩展模型
 
@@ -542,17 +582,27 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 - 拆分 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段。
 - 添加重复 finalizer、终态收敛和 cleanup 竞态测试。
 - 用 pressure rerun 验证 queue wait 和 lifecycle p95/p99。
+- 补 harness：media-worker stale active task 收敛、重复 finalizer 终态幂等、ffprobe/ffmpeg
+  成功路径和缺失 metadata degraded 路径测试。
 
 ### P3 - 双分支证据链闭环
 
 - 让 8090 topology 写出的 replay shard plan 和 clip-worker 读取路径在部署层明确接通。
 - 对同卡双分支跑一轮带 evidence retention 的端到端压力测试。
 - 保留两个分支的 retained evidence，并通过 8090 list/detail 验证。
+- 补 harness：replay shard parser/routing 测试、topology apply dry-run 测试、clip-worker
+  retained evidence shard diagnostics 验证。
 
 ### P4 - Savant 阶段级指标
 
 - 补 pose、face detector、AdaFace、pyfunc 后处理、DeepStream queue/batch wait 的低频指标。
 - 在 8 FPS 优化中用阶段指标判断是调 interval、减少 annotation 输出、提高 batch，还是继续拆 shard。
+
+### P5 - 8090 和受控重启回归
+
+- 把算法/ROI 保存和 runtime apply 的区别写入 operator 验收项。
+- 每次修改 camera rule/zone 后，验收 `containers_restarted=[]` 和 `source_containers_touched=[]`。
+- 每次修改性能参数或拓扑参数后，验收 evidence guard、审计日志、受影响容器列表和 8090 状态提示。
 
 ## 12. 结论
 

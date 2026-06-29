@@ -76,9 +76,12 @@ class _Consumer:
 class _Publisher:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
+        self.existing_requests: set[tuple[str, str]] = set()
+        self.has_request_calls: list[tuple[str, str]] = []
 
     def has_request(self, source_event_id: str, recording_strategy: str) -> bool:
-        return False
+        self.has_request_calls.append((source_event_id, recording_strategy))
+        return (source_event_id, recording_strategy) in self.existing_requests
 
     def publish(self, event: dict[str, Any], event_id: str) -> str:
         record = build_record_request(
@@ -90,6 +93,9 @@ class _Publisher:
         )
         assert record is not None
         self.records.append(record)
+        self.existing_requests.add(
+            (str(record["source_event_id"]), str(record["strategy"]))
+        )
         return "1-0"
 
 
@@ -177,6 +183,59 @@ def test_blank_recording_source_id_allows_8090_added_camera_source() -> None:
     assert publisher.records[0]["source_id"] == "source_lab"
     assert publisher.records[0]["pre_seconds"] == 4
     assert publisher.records[0]["post_seconds"] == 9
+
+
+def test_duplicate_record_request_marks_new_retry_task_skipped_without_publish() -> None:
+    event = {
+        "event_type": "intrusion",
+        "source_event_id": "lab:intrusion:duplicate",
+        "camera_id": "cam_lab",
+        "source_id": "source_lab",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "source_lab",
+            }
+        },
+    }
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+    publisher.existing_requests.add(("lab:intrusion:duplicate", "savant_replay"))
+
+    inserted, event_id = _handle_event(
+        event,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=RecordingPolicyState(),
+        recording_event_types=("intrusion",),
+        recording_source_id="",
+        recording_cooldown_seconds=0,
+    )
+
+    assert inserted is True
+    assert event_id == "event-1"
+    assert publisher.has_request_calls == [
+        ("lab:intrusion:duplicate", "savant_replay")
+    ]
+    assert publisher.records == []
+    assert repo.skipped_materializations == [
+        {
+            "event_id": "event-1",
+            "reason": "recording_policy_skipped:duplicate_record_request",
+        }
+    ]
 
 
 def test_current_runtime_epoch_overrides_stale_event_epoch() -> None:

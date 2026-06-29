@@ -118,6 +118,21 @@ SECURITY_STREAMS = [
     "security.record_requests",
     "security.alerts",
 ]
+DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 1
+DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
+    "redis",
+    "postgresql",
+    "event_worker",
+    "face_worker",
+    "media_worker",
+    "evidence_8090",
+)
+WORKER_CONTAINER_NAMES = {
+    "event_worker": "video-analytics-midterm-event-worker",
+    "face_worker": "video-analytics-midterm-face-worker",
+    "media_worker": "video-analytics-midterm-media-worker",
+    "clip_worker": "video-analytics-midterm-clip-worker",
+}
 
 
 @dataclass(frozen=True)
@@ -510,6 +525,13 @@ def main(argv: list[str] | None = None) -> int:
             report["kept_evidence"] = kept[: cfg.keep_evidence]
         report["db_summary_before_cleanup"] = db_summary(conn, cfg.run_id)
         write_json(cfg.artifact_dir / "db_summary_before_cleanup.json", report["db_summary_before_cleanup"])
+        report["downstream_observability"] = collect_downstream_observability(
+            cfg,
+            conn,
+            redis_client,
+            kept=kept,
+            diagnostics=diagnostics,
+        )
         report["failure_reasons"] = pressure_failure_reasons(cfg, kept, diagnostics)
         report["warnings"] = pressure_warnings(
             cfg,
@@ -1480,6 +1502,8 @@ def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
         run(["docker", "logs", "--since", since, "video-analytics-midterm-analysis-forwarder"], cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt", check=False)
     run(["docker", "logs", "--since", since, "video-analytics-midterm-media-worker"], cfg.artifact_dir / "media_worker_logs_since_start.txt", check=False)
     run(["docker", "logs", "--since", since, "video-analytics-midterm-clip-worker"], cfg.artifact_dir / "clip_worker_logs_since_start.txt", check=False)
+    run(["docker", "logs", "--since", since, "video-analytics-midterm-event-worker"], cfg.artifact_dir / "event_worker_logs_since_start.txt", check=False)
+    run(["docker", "logs", "--since", since, "video-analytics-midterm-face-worker"], cfg.artifact_dir / "face_worker_logs_since_start.txt", check=False)
 
 
 def start_pressure_sources_from_manifest(cfg: PressureConfig, *, sources_path: Path) -> None:
@@ -1586,6 +1610,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     max_forwarder_cpu_percent = 0.0
     max_savant_cpu_percent = 0.0
     max_source_adapter_cpu_percent = 0.0
+    max_worker_cpu_percent: dict[str, float] = {
+        key: 0.0 for key in WORKER_CONTAINER_NAMES
+    }
     queue_full_samples = 0
     final_forwarder_seen = 0.0
     final_forwarder_forwarded = 0.0
@@ -1657,6 +1684,12 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         max_forwarder_cpu_percent = max(max_forwarder_cpu_percent, forwarder_cpu)
         max_savant_cpu_percent = max(max_savant_cpu_percent, savant_cpu)
         max_source_adapter_cpu_percent = max(max_source_adapter_cpu_percent, source_cpu)
+        worker_cpu = {
+            key: _stats_cpu_percent(stats, container)
+            for key, container in WORKER_CONTAINER_NAMES.items()
+        }
+        for key, value in worker_cpu.items():
+            max_worker_cpu_percent[key] = max(max_worker_cpu_percent[key], value)
         if len(forwarder_sources) >= cfg.stream_count and queue_depth <= 0 and send_failures <= cfg.max_send_failures:
             stable_samples += 1
         rows.append(
@@ -1677,6 +1710,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 ),
                 "forwarder_cpu_percent": forwarder_cpu,
                 "savant_cpu_percent": savant_cpu,
+                "worker_cpu_percent": worker_cpu,
                 "max_source_adapter_cpu_percent": source_cpu,
                 "avg_effective_fps_10s": (
                     round(sum(effective_fps) / len(effective_fps), 3)
@@ -1718,6 +1752,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "max_forwarder_cpu_percent": round(max_forwarder_cpu_percent, 3),
         "max_savant_cpu_percent": round(max_savant_cpu_percent, 3),
         "max_source_adapter_cpu_percent": round(max_source_adapter_cpu_percent, 3),
+        "max_worker_cpu_percent": {
+            key: round(value, 3) for key, value in max_worker_cpu_percent.items()
+        },
         "stable_samples": stable_samples,
         "samples": rows,
     }
@@ -1871,16 +1908,53 @@ def count_docker_log_pattern(name: str, pattern: str) -> int:
     return completed.stdout.count(pattern)
 
 
+def _extract_metric_ints(text: str, name: str) -> list[int]:
+    pattern = re.compile(rf"\b{re.escape(name)}=(\d+)")
+    return [int(match.group(1)) for match in pattern.finditer(text or "")]
+
+
+def _numeric_distribution(values: list[float] | list[int]) -> dict[str, Any]:
+    if not values:
+        return {"status": "not_enough_data", "count": 0}
+    sorted_values = sorted(float(value) for value in values)
+    return {
+        "status": "measured",
+        "count": len(sorted_values),
+        "min": round(sorted_values[0], 3),
+        "p50": round(_percentile(sorted_values, 0.50), 3),
+        "p95": round(_percentile(sorted_values, 0.95), 3),
+        "p99": round(_percentile(sorted_values, 0.99), 3),
+        "max": round(sorted_values[-1], 3),
+    }
+
+
+def _percentile(sorted_values: list[float], quantile: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    weight = position - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
 def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
     paths = {
         "savant": cfg.artifact_dir / "savant_logs_since_start.txt",
         "analysis_forwarder": cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt",
         "media_worker": cfg.artifact_dir / "media_worker_logs_since_start.txt",
         "clip_worker": cfg.artifact_dir / "clip_worker_logs_since_start.txt",
+        "event_worker": cfg.artifact_dir / "event_worker_logs_since_start.txt",
+        "face_worker": cfg.artifact_dir / "face_worker_logs_since_start.txt",
     }
     summary: dict[str, Any] = {}
     for key, path in paths.items():
         text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        media_finalization_ms = _extract_metric_ints(text, "finalization_duration_ms")
+        media_ffprobe_ms = _extract_metric_ints(text, "ffprobe_duration_ms")
+        media_ffmpeg_ms = _extract_metric_ints(text, "ffmpeg_duration_ms")
         summary[key] = {
             "line_count": len(text.splitlines()),
             "validate_seq_iq": text.count("validate_seq_iq"),
@@ -1892,6 +1966,29 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "negative_pts_overflow": len(re.findall(r"OverflowError: -\\d+", text)),
             "ffprobe_missing": text.count("ffprobe not found"),
             "imageio_ffmpeg_fallback": text.count("imageio_ffmpeg"),
+            "record_request_dedupe_reserved": text.count(
+                "record_request_dedupe_reserved"
+            ),
+            "record_request_dedupe_duplicate": text.count(
+                "record_request_dedupe_duplicate"
+            ),
+            "record_request_dedupe_reserve_failed": text.count(
+                "record_request_dedupe_reserve_failed"
+            ),
+            "watchlist_hit_emitted": text.count("watchlist_hit_emitted"),
+            "watchlist_emit_failed": text.count("watchlist emit failed"),
+            "media_event_finalized": text.count("media_event_finalized"),
+            "media_materialization_deferred": text.count(
+                "media_materialization_deferred"
+            ),
+            "post_savant_finalizer_failed": text.count(
+                "post_savant_finalizer_failed"
+            ),
+            "media_finalization_duration_ms": _numeric_distribution(
+                media_finalization_ms
+            ),
+            "media_ffprobe_duration_ms": _numeric_distribution(media_ffprobe_ms),
+            "media_ffmpeg_duration_ms": _numeric_distribution(media_ffmpeg_ms),
         }
     return summary
 
@@ -2256,6 +2353,271 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
     return data
 
 
+def collect_downstream_observability(
+    cfg: PressureConfig,
+    conn,
+    redis_client: Redis,
+    *,
+    kept: list[dict[str, Any]],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    summary = {
+        "schema_version": DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "redis": redis_observability_summary(redis_client),
+        "postgresql": postgres_observability_summary(conn, cfg.run_id),
+        "event_worker": event_worker_observability_summary(diagnostics),
+        "face_worker": face_worker_observability_summary(diagnostics),
+        "media_worker": media_worker_observability_summary(diagnostics),
+        "evidence_8090": evidence_8090_observability_summary(cfg, kept),
+    }
+    validate_downstream_observability_schema(summary)
+    write_json(cfg.artifact_dir / "downstream_observability_summary.json", summary)
+    return summary
+
+
+def redis_observability_summary(redis_client: Redis) -> dict[str, Any]:
+    streams: dict[str, Any] = {}
+    for stream in SECURITY_STREAMS:
+        item: dict[str, Any] = {}
+        try:
+            item["length"] = int(redis_client.xlen(stream))
+        except Exception as exc:
+            item["length"] = _not_enough_data(f"xlen_failed:{type(exc).__name__}")
+        try:
+            groups = redis_client.xinfo_groups(stream)
+            item["consumer_groups"] = [
+                _decode_redis_mapping(group) for group in groups
+            ]
+        except Exception as exc:
+            item["consumer_groups"] = []
+            item["consumer_groups_status"] = _not_enough_data(
+                f"xinfo_groups_failed:{type(exc).__name__}"
+            )
+        streams[stream] = item
+    return {"streams": streams}
+
+
+def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {"run_summary": db_summary(conn, run_id)}
+    tables = [
+        "events",
+        "evidence_tasks",
+        "evidence_bundles",
+        "face_observations",
+        "person_bbox_observations",
+    ]
+    try:
+        rows = conn.execute(
+            """
+            SELECT relname, n_live_tup, n_dead_tup, seq_scan, seq_tup_read,
+                   idx_scan, idx_tup_fetch
+            FROM pg_stat_user_tables
+            WHERE relname = ANY(%s)
+            ORDER BY relname
+            """,
+            (tables,),
+        ).fetchall()
+        summary["table_stats"] = [_row_json(row) for row in rows]
+    except Exception as exc:
+        summary["table_stats"] = _not_enough_data(
+            f"pg_stat_user_tables_failed:{type(exc).__name__}"
+        )
+    try:
+        row = conn.execute(
+            """
+            SELECT count(*) AS count,
+                   percentile_cont(0.50) WITHIN GROUP (
+                     ORDER BY EXTRACT(EPOCH FROM (COALESCE(last_materialization_at, updated_at) - created_at))
+                   ) AS p50_seconds,
+                   percentile_cont(0.95) WITHIN GROUP (
+                     ORDER BY EXTRACT(EPOCH FROM (COALESCE(last_materialization_at, updated_at) - created_at))
+                   ) AS p95_seconds,
+                   percentile_cont(0.99) WITHIN GROUP (
+                     ORDER BY EXTRACT(EPOCH FROM (COALESCE(last_materialization_at, updated_at) - created_at))
+                   ) AS p99_seconds
+            FROM evidence_tasks
+            WHERE source_id LIKE %s
+              AND created_at IS NOT NULL
+              AND COALESCE(last_materialization_at, updated_at) IS NOT NULL
+            """,
+            (f"{run_id}_%",),
+        ).fetchone()
+        lifecycle = _row_json(row)
+        lifecycle["status"] = (
+            "measured" if int(lifecycle.get("count") or 0) > 0 else "not_enough_data"
+        )
+        summary["evidence_task_lifecycle_seconds"] = lifecycle
+    except Exception as exc:
+        summary["evidence_task_lifecycle_seconds"] = _not_enough_data(
+            f"evidence_lifecycle_query_failed:{type(exc).__name__}"
+        )
+    return summary
+
+
+def event_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = ((diagnostics.get("log_summary") or {}).get("event_worker") or {})
+    return {
+        "record_request_dedupe": {
+            "reserved_count": int(logs.get("record_request_dedupe_reserved") or 0),
+            "duplicate_count": int(logs.get("record_request_dedupe_duplicate") or 0),
+            "reserve_failed_count": int(
+                logs.get("record_request_dedupe_reserve_failed") or 0
+            ),
+            "latency_ms": _not_enough_data("dedupe path is O(1); latency timer not instrumented yet"),
+        },
+        "cpu_percent": (
+            (diagnostics.get("sample_summary") or {})
+            .get("max_worker_cpu_percent", {})
+            .get("event_worker")
+        ),
+    }
+
+
+def face_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = ((diagnostics.get("log_summary") or {}).get("face_worker") or {})
+    return {
+        "watchlist_hit_emitted_count": int(logs.get("watchlist_hit_emitted") or 0),
+        "watchlist_emit_failed_count": int(logs.get("watchlist_emit_failed") or 0),
+        "gallery_query_latency_ms": _not_enough_data(
+            "face-worker gallery query timer is not instrumented yet"
+        ),
+        "cpu_percent": (
+            (diagnostics.get("sample_summary") or {})
+            .get("max_worker_cpu_percent", {})
+            .get("face_worker")
+        ),
+    }
+
+
+def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = ((diagnostics.get("log_summary") or {}).get("media_worker") or {})
+    return {
+        "finalized_count": int(logs.get("media_event_finalized") or 0),
+        "deferred_count": int(logs.get("media_materialization_deferred") or 0),
+        "finalizer_failed_count": int(logs.get("post_savant_finalizer_failed") or 0),
+        "imageio_ffmpeg_fallback_count": int(logs.get("imageio_ffmpeg_fallback") or 0),
+        "finalization_duration_ms": logs.get("media_finalization_duration_ms")
+        or _not_enough_data("media finalization logs unavailable"),
+        "ffprobe_duration_ms": logs.get("media_ffprobe_duration_ms")
+        or _not_enough_data("ffprobe logs unavailable"),
+        "ffmpeg_duration_ms": logs.get("media_ffmpeg_duration_ms")
+        or _not_enough_data("ffmpeg logs unavailable"),
+        "cpu_percent": (
+            (diagnostics.get("sample_summary") or {})
+            .get("max_worker_cpu_percent", {})
+            .get("media_worker")
+        ),
+    }
+
+
+def evidence_8090_observability_summary(
+    cfg: PressureConfig,
+    kept: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "retained_count": len(kept),
+        "checked_count": 0,
+        "ok_count": 0,
+        "failed": [],
+    }
+    try:
+        result["health"] = api_json(cfg.api_base, "GET", "/evidence/health", timeout_s=10)
+    except Exception as exc:
+        result["health"] = _not_enough_data(f"health_request_failed:{type(exc).__name__}")
+    for row in kept[: max(0, cfg.keep_evidence)]:
+        event_id = str(row.get("event_id") or "")
+        if not event_id:
+            continue
+        result["checked_count"] += 1
+        try:
+            response = api_json(
+                cfg.api_base,
+                "GET",
+                f"/evidence/bundles/{event_id}",
+                timeout_s=10,
+            )
+        except Exception as exc:
+            result["failed"].append(
+                {"event_id": event_id, "error": f"{type(exc).__name__}: {exc}"}
+            )
+            continue
+        if response.get("error"):
+            result["failed"].append({"event_id": event_id, "error": response["error"]})
+            continue
+        data = response.get("data") or {}
+        if str(data.get("event_id") or "") == event_id:
+            result["ok_count"] += 1
+        else:
+            result["failed"].append(
+                {
+                    "event_id": event_id,
+                    "error": "event_id_mismatch",
+                    "observed_event_id": data.get("event_id"),
+                }
+            )
+    result["status"] = (
+        "measured" if result["checked_count"] else "not_enough_data"
+    )
+    return result
+
+
+def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
+    missing = [
+        section
+        for section in DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS
+        if section not in summary
+    ]
+    if summary.get("schema_version") != DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION:
+        missing.append("schema_version")
+    nested_requirements = {
+        "redis": ("streams",),
+        "postgresql": ("run_summary", "table_stats", "evidence_task_lifecycle_seconds"),
+        "event_worker": ("record_request_dedupe",),
+        "face_worker": ("gallery_query_latency_ms",),
+        "media_worker": ("finalization_duration_ms", "ffprobe_duration_ms"),
+        "evidence_8090": ("retained_count", "checked_count", "ok_count"),
+    }
+    for section, keys in nested_requirements.items():
+        value = summary.get(section)
+        if not isinstance(value, dict):
+            continue
+        for key in keys:
+            if key not in value:
+                missing.append(f"{section}.{key}")
+    if missing:
+        raise ValueError(
+            "downstream observability summary missing required fields: "
+            + ", ".join(sorted(missing))
+        )
+    return True
+
+
+def _not_enough_data(reason: str) -> dict[str, Any]:
+    return {"status": "not_enough_data", "reason": reason}
+
+
+def _decode_redis_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"value": _decode_redis_value(value)}
+    return {
+        str(_decode_redis_value(key)): _decode_redis_value(item)
+        for key, item in value.items()
+    }
+
+
+def _decode_redis_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, list):
+        return [_decode_redis_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_decode_redis_value(item) for item in value]
+    if isinstance(value, dict):
+        return _decode_redis_mapping(value)
+    return value
+
+
 def cleanup_redis_streams(redis_client: Redis, run_id: str) -> dict[str, int]:
     deleted: dict[str, int] = {}
     token = run_id.encode("utf-8")
@@ -2585,12 +2947,14 @@ def docker_stats_json(cfg: PressureConfig) -> dict[str, Any]:
             "video-analytics-midterm-analysis-forwarder-b",
             "video-analytics-midterm-savant-a",
             "video-analytics-midterm-savant-b",
+            *WORKER_CONTAINER_NAMES.values(),
             *pressure_source_container_names(cfg.run_id),
         ]
     else:
         desired = [
             "video-analytics-midterm-analysis-forwarder",
             "video-analytics-midterm-savant",
+            *WORKER_CONTAINER_NAMES.values(),
             *pressure_source_container_names(cfg.run_id),
         ]
     if not desired:

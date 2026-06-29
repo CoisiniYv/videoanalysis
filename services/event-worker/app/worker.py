@@ -41,6 +41,7 @@ RECORDING_POLICY_TERMINAL_SKIP_REASONS = {
     "event_type_mismatch",
     "max_requests_reached",
     "source_id_mismatch",
+    "duplicate_record_request",
 }
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
@@ -746,6 +747,7 @@ def run_worker(
             default_replay_source_id=cfg.default_replay_source_id,
             default_pre_seconds=cfg.recording_pre_seconds,
             default_post_seconds=cfg.recording_post_seconds,
+            dedupe_ttl_seconds=cfg.record_request_dedupe_ttl_seconds,
         )
         if cfg.recording_enabled
         else None
@@ -758,7 +760,8 @@ def run_worker(
         "recording_source_id=%s recording_max_requests_per_run=%s "
         "recording_cooldown_seconds=%s recording_cooldown_grace_ms=%s "
         "recording_pre_seconds=%s "
-        "recording_post_seconds=%s person_observation_enabled=%s "
+        "recording_post_seconds=%s record_request_dedupe_ttl_seconds=%s "
+        "person_observation_enabled=%s "
         "person_observation_stream=%s person_observation_group=%s "
         "person_observation_start_id=%s person_observation_batch_size=%s",
         cfg.event_stream,
@@ -774,6 +777,7 @@ def run_worker(
         cfg.recording_cooldown_grace_ms,
         cfg.recording_pre_seconds,
         cfg.recording_post_seconds,
+        cfg.record_request_dedupe_ttl_seconds,
         cfg.person_observation_enabled,
         cfg.person_observation_stream,
         cfg.person_observation_consumer_group,

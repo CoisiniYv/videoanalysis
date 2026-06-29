@@ -26,6 +26,7 @@ class Config:
     recording_cooldown_grace_ms: int
     recording_pre_seconds: int
     recording_post_seconds: int
+    record_request_dedupe_ttl_seconds: int
     person_observation_stream: str
     person_observation_consumer_group: str
     person_observation_consumer_name: str
@@ -75,6 +76,9 @@ def load_config() -> Config:
         ),
         recording_post_seconds=int(
             os.getenv("RECORDING_POST_SECONDS", os.getenv("DEFAULT_POST_SECONDS", "5"))
+        ),
+        record_request_dedupe_ttl_seconds=max(
+            1, int(os.getenv("RECORD_REQUEST_DEDUPE_TTL_SECONDS", "86400"))
         ),
         person_observation_stream=os.getenv(
             "PERSON_OBSERVATION_STREAM", "security.person_observations"

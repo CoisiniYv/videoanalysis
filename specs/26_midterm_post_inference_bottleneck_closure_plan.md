@@ -58,6 +58,17 @@ Already mitigated:
 - `clip-worker` already has replay shard routing support through
   `REPLAY_SHARDS_CONFIG_PATH` / `REPLAY_SHARDS_JSON`; this spec must not treat
   replay shard routing as absent code.
+- 8090 camera algorithm/ROI saves now use
+  `/api/v1/cameras/runtime/config/sync`; this is a config snapshot sync and is
+  not supposed to restart Savant, Replay, source adapters, clip-worker, or
+  media-worker.
+- `clip-worker` now acks stale record requests whose DB event/task has already
+  disappeared, so old Redis pending messages should not cause long-running
+  proof/replay polling.
+- Active evidence states such as `materializing`, `replay_job_created`, and
+  `finalizing` are included in stale materialization convergence checks.
+- `REPLAY_FORCE_CONSTANT_CADENCE=true` is now the midterm default, so Replay
+  payload fallback should no longer be the normal evidence path.
 
 Still open:
 
@@ -65,8 +76,6 @@ Still open:
   watchlist/gallery matching;
 - gallery and face observation vector searches do not yet have ANN vector
   indexes;
-- event-worker record request dedupe scans `security.record_requests` with
-  `XRANGE - +`;
 - media-worker materialization is still organized around one polling process and
   ffprobe/ffmpeg/decode finalization.
 - dual-branch topology has front-end inference evidence, but the same topology
@@ -74,9 +83,12 @@ Still open:
 - topology apply writes a replay shard file, while clip-worker reads
   `REPLAY_SHARDS_JSON` or `REPLAY_SHARDS_CONFIG_PATH`; deployment must prove
   those paths are wired to the same shard plan before dual evidence closure.
-- downstream observability still does not fully expose gallery query p95,
-  record-request dedupe latency, PostgreSQL hot query-plan deltas, and media
-  lifecycle p95/p99 in one report schema.
+- downstream observability now emits a fixed Redis/PostgreSQL/worker/media/8090
+  schema, but face-worker gallery query p95 and event-worker dedupe latency are
+  still explicit `not_enough_data` fields until code-level timers are added.
+- 8090 config-sync versus runtime-apply behavior needs to remain covered by
+  regression harnesses so camera rule edits do not reintroduce unnecessary
+  runtime restarts.
 
 Important boundary:
 
@@ -128,6 +140,10 @@ Current status:
 - This is not the final closure token. The current checkout still has open code
   work in Spec 1, Spec 2, Spec 3, Spec 5, and dual-topology evidence-chain
   verification in Spec 6.
+- 2026-06-29 follow-up fixes moved camera rule/ROI saves to config-sync,
+  enabled Replay constant-cadence by default, and tightened stale evidence/task
+  convergence. Those items are no longer primary implementation targets for
+  this spec, but they must stay in the regression set.
 
 Runtime topology note:
 
@@ -146,11 +162,12 @@ Runtime topology note:
 | Area | Problem | Why it matters |
 | --- | --- | --- |
 | face-worker | Single consumer does Postgres insert and synchronous watchlist/gallery pgvector search per face observation | Face observation rate and gallery size can linearly amplify latency after Redis |
-| event-worker | `RecordRequestPublisher.has_request()` scans the full `security.record_requests` stream | Every recordable event pays O(N) Redis/JSON cost as stream length grows |
+| event-worker | Record request dedupe is now Redis `SET NX EX`, but runtime pressure artifacts still need to show duplicate suppression and low CPU under event storms | A regression to full-stream scan would make every recordable event pay O(N) Redis/JSON cost |
 | media-worker | Materialization active count is a guard, not a finalizer worker pool | ffprobe/ffmpeg/decode work can dominate evidence lifecycle even if inference is healthy |
 | topology/replay shards | 8090 can apply dual-branch plans and clip-worker can route by replay shard, but the dual evidence-chain profile is not yet proven end-to-end | Front-end 8 FPS success can be misread as proof that evidence materialization is also production-ready |
 | annotation/evidence windows | Retention and admission are now partially sized, but still need lifecycle and memory-margin proof | Evidence can become playable but annotation-missing, or expire before materialization |
 | observability | Pressure reports need more downstream split metrics to rank bottlenecks | Without split metrics, fixes may only move backlog between queues |
+| 8090 config sync | Camera rule/ROI saves must not call disruptive runtime apply | A simple ROI edit should not restart unrelated inference/evidence services or interrupt evidence generation |
 
 ## 5. Execution Flow
 
@@ -194,36 +211,42 @@ Current checkout status:
   show that single 4090 dual branch 30+30 can pass 4 FPS and 8 FPS entry
   pressure with `keep-evidence=0`; these runs do not replace downstream
   evidence-chain closure.
-- Missing from the current report schema: face-worker gallery query p95,
-  event-worker record-request dedupe latency, and PostgreSQL hot query-plan
-  deltas.
+- The pressure report schema now includes `downstream_observability_summary.json`
+  with Redis stream/group status, PostgreSQL run/table/lifecycle summaries,
+  event-worker dedupe counters, face-worker watchlist slots, media-worker
+  finalization metrics, and retained-evidence 8090 proof.
+- Remaining gaps are deliberately explicit `not_enough_data` fields where the
+  worker code still lacks timers: face-worker gallery query p95/p99 and
+  event-worker dedupe latency.
 
 ### Spec 1 - Record Request Idempotency
 
 Problem:
 
-`event-worker` checks whether a record request already exists by scanning the
-whole `security.record_requests` Redis stream. This is O(N) in stream length and
-is paid by each recordable event.
+`event-worker` previously checked whether a record request already existed by
+scanning the whole `security.record_requests` Redis stream. That was O(N) in
+stream length and was paid by each recordable event.
 
 Current code verification:
 
 - `services/event-worker/app/worker.py` still calls
   `record_publisher.has_request(source_event_id, "savant_replay")` before
   publishing a record request.
-- `services/event-worker/app/record_request.py` still implements
-  `has_request()` with `xrange(self._stream, "-", "+")`.
+- `services/event-worker/app/record_request.py` now implements `has_request()`
+  with a Redis idempotency key lookup and `publish()` with atomic `SET NX EX`.
+- Duplicate record requests now terminally skip the new task as
+  `recording_policy_skipped:duplicate_record_request` instead of leaving a
+  retry-created evidence task pending.
 
 Modification direction:
 
-- Replace full-stream scan dedupe with an explicit idempotency key:
-  `(source_event_id, strategy)`.
-- Prefer one of:
-  - a Redis key/set with TTL aligned to record request retention;
-  - a PostgreSQL unique/idempotency table;
-  - a unique constraint on the durable request representation if one exists.
-- Keep duplicate replay/event behavior deterministic.
-- Add unit tests for duplicate events, retry/reclaim, and cleanup/TTL behavior.
+- Implemented Redis key/set idempotency keyed by `(stream, source_event_id,
+  strategy)`, stored as a SHA-256 Redis key with configurable
+  `RECORD_REQUEST_DEDUPE_TTL_SECONDS`.
+- `publish()` reserves the key before `XADD` and releases the key if `XADD`
+  fails, so a transient publish failure can be retried.
+- Unit tests cover first publish, duplicate publish, publish-failure retry,
+  `has_request()` without `XRANGE`, and event-worker duplicate policy.
 
 Target effect:
 
@@ -242,10 +265,18 @@ PASS_POST_INFERENCE_SPEC1_RECORD_REQUEST_IDEMPOTENCY
 Required verification:
 
 - targeted tests for `RecordRequestPublisher` and event-worker policy;
-- pressure or synthetic replay showing `has_request()` no longer performs
-  `XRANGE - +`;
+- synthetic replay showing `has_request()` no longer performs `XRANGE - +`;
 - no duplicate record request for the same `(source_event_id, strategy)`;
 - retained pressure evidence remains queryable in 8090.
+
+Harness plan:
+
+- Added `harness/tests/test_record_request_idempotency.py` for duplicate,
+  retry/release, TTL, and no-`XRANGE` contracts.
+- Extended `harness/tests/test_event_worker_recording_policy.py` for
+  duplicate retry task terminal skip behavior.
+- No PostgreSQL migration is required because Redis stream remains the durable
+  queue and the new idempotency key is a bounded TTL index.
 
 ### Spec 2 - Face Worker Vector Search And Matching Scale
 
@@ -302,6 +333,18 @@ Required verification:
 - unit/integration tests for watchlist threshold and target-person filtering;
 - pressure evidence showing face-worker lag and gallery query p95 are bounded.
 
+Harness plan:
+
+- Add a query-plan harness that can seed representative gallery rows and capture
+  `EXPLAIN ANALYZE` for gallery lookup and face-observation lookup.
+- Add a correctness test that compares ANN candidate results plus optional exact
+  rerank against the current exact pgvector ordering for a small deterministic
+  dataset.
+- Add watchlist threshold tests that prove target-person filtering and duplicate
+  suppression do not change when the index/search path changes.
+- Extend the pressure report schema with face-worker consumed count, pending
+  count, gallery query p95/p99, and emitted watchlist hit count.
+
 ### Spec 3 - Media Worker Finalizer Throughput
 
 Problem:
@@ -356,6 +399,18 @@ Required verification:
 - measured queue wait, ffmpeg elapsed/CPU, playable p95, and lifecycle p95/p99;
 - staged pressure rerun showing at least the same retained playable count as the
   baseline and improved latency.
+
+Harness plan:
+
+- Add media-worker tests for stale active task convergence from
+  `materializing`, `replay_job_created`, and `finalizing` to a terminal state.
+- Add duplicate finalizer tests where two claims see the same sink output and
+  only one terminal bundle/update wins.
+- Add degraded evidence tests for playable raw clip with missing frame metadata,
+  so annotation loss remains visible without failing the video evidence.
+- Add a report collector for `queue_wait_s`, `proof_wait_s`,
+  `replay_job_elapsed_s`, `ffprobe_elapsed_s`, `finalizer_elapsed_s`, and
+  total evidence lifecycle p95/p99.
 
 ### Spec 4 - Annotation And Evidence Window Sizing
 
@@ -433,12 +488,16 @@ Modification direction:
 
 Current checkout status:
 
-- The pressure report already captures retained evidence, playable count,
-  cleanup behavior, source/forwarder/Savant health, Redis pending status, and
-  8090 evidence query proof.
-- Remaining observability gaps are face-worker gallery query p95, event-worker
-  dedupe count/latency, PostgreSQL hot query-plan/stat deltas, and explicit
-  media queue wait/lifecycle p95/p99.
+- The pressure report now writes `downstream_observability_summary.json` and
+  embeds the same object in `report.json`.
+- The summary has fixed sections for Redis, PostgreSQL, event-worker,
+  face-worker, media-worker, and 8090 retained-evidence proof.
+- Redis uses `XLEN` and `XINFO GROUPS`; PostgreSQL uses run summary,
+  `pg_stat_user_tables`, and evidence task lifecycle aggregates; worker CPU and
+  downstream logs are sampled from docker stats/logs.
+- Remaining observability gaps are now explicit `not_enough_data` values rather
+  than omitted fields: face-worker gallery query p95/p99 and event-worker
+  dedupe latency need code-level timers in a later stage.
 
 Target effect:
 
@@ -451,6 +510,15 @@ Acceptance:
 ```text
 PASS_POST_INFERENCE_SPEC5_DOWNSTREAM_OBSERVABILITY
 ```
+
+Harness plan:
+
+- `scripts/runtime/run_midterm_pressure60.py` emits one JSON summary with Redis,
+  PostgreSQL, worker, media, and 8090 proof sections.
+- `harness/tests/test_midterm_pressure60_script.py` validates that required
+  sections cannot be omitted and that explicit `not_enough_data` is accepted.
+- Media finalization/ffprobe/ffmpeg distributions are parsed from logs when
+  present; absent metrics stay explicit rather than being treated as pass.
 
 ### Spec 6 - Dual Topology Evidence-Chain Closure
 
@@ -526,7 +594,173 @@ Required verification:
 - no replay shard routing failures, duplicate terminal bundles, or branch-only
   evidence gaps.
 
-## 6. Final Acceptance
+Harness plan:
+
+- Add replay shard parser tests for duplicate source assignments, missing
+  source assignments, invalid shard URLs, and default shard fallback.
+- Add a topology dry-run/apply smoke that records the written replay shard plan
+  path, file hash, runtime epoch, and branch container names.
+- Add a clip-worker routing test that proves retained evidence tasks include
+  shard diagnostics matching the selected source-to-shard plan.
+- Add a dual-topology pressure profile with evidence retention enabled and
+  retained samples from both branches.
+
+### Spec 7 - 8090 Config Sync Regression
+
+Problem:
+
+Camera algorithm, ROI, threshold, cooldown, and rule edits are lightweight
+configuration changes. They must export the DB-backed camera/rule state to
+runtime config snapshots without invoking disruptive runtime apply.
+
+Modification direction:
+
+- Keep 8090 camera rule/ROI save paths on
+  `/api/v1/cameras/runtime/config/sync`.
+- Keep runtime performance and topology changes on their explicit apply
+  endpoints.
+- Record the list of restarted/touched containers in every operator-facing
+  response where an action can affect runtime.
+
+Target effect:
+
+- A camera rule edit does not restart unrelated services.
+- Evidence generation is not interrupted by ROI/threshold/cooldown edits.
+- Operators can distinguish "configuration synced" from "runtime restarted".
+
+Acceptance:
+
+```text
+PASS_POST_INFERENCE_SPEC7_8090_CONFIG_SYNC_REGRESSION
+```
+
+Required verification:
+
+- targeted API test for `/api/v1/cameras/runtime/config/sync` returning
+  `containers_restarted=[]` and `source_containers_touched=[]`;
+- frontend or contract test proving rule/ROI save calls config-sync, not
+  `/api/v1/cameras/runtime/apply`;
+- live smoke after one rule edit showing Savant/Replay/source adapter,
+  clip-worker, and media-worker container IDs are unchanged;
+- one evidence-generation smoke showing no new stale `materializing` task is
+  introduced by a rule edit.
+
+## 6. Next Implementation Plan
+
+The next repair pass should be staged so each change has a narrow harness and a
+clear stop condition.
+
+### Stage 1 - Record request idempotency
+
+Change:
+
+- Done: `RecordRequestPublisher.has_request()` no longer scans the Redis
+  stream. `publish()` uses Redis `SET NX EX` keyed by `(stream,
+  source_event_id, strategy)` and releases the key if `XADD` fails.
+
+Harness:
+
+- Done: unit tests cover first publish, duplicate publish, retry after failed
+  publish, TTL wiring, and a fake Redis guard that fails on `XRANGE`.
+- Done: event-worker duplicate policy terminally marks duplicate retry tasks as
+  `materialization_skipped`.
+
+Acceptance:
+
+- `PASS_POST_INFERENCE_SPEC1_RECORD_REQUEST_IDEMPOTENCY`;
+- no duplicate record request for one `(source_event_id, strategy)`;
+- Redis stream length no longer affects per-event dedupe latency.
+
+### Stage 2 - Downstream observability schema
+
+Change:
+
+- Done: pressure collection now emits `downstream_observability_summary.json`
+  before cleanup and embeds the same object in `report.json`.
+- Done: the schema contains Redis stream/group status, PostgreSQL run/table and
+  lifecycle summaries, event-worker dedupe counters, face-worker watchlist slots,
+  media-worker finalization/ffprobe/ffmpeg distributions, worker CPU, and 8090
+  retained-evidence proof.
+- Remaining timer gaps are explicit `not_enough_data` fields.
+
+Harness:
+
+- Done: JSON schema/static tests reject missing sections and accept explicit
+  `not_enough_data`.
+- Done: synthetic log test proves downstream worker metrics are extracted.
+
+Acceptance:
+
+- `PASS_POST_INFERENCE_SPEC5_DOWNSTREAM_OBSERVABILITY`;
+- every later optimization report can prove the target metric changed.
+
+### Stage 3 - Face-worker vector search scale
+
+Change:
+
+- Measure exact pgvector query plans first.
+- Add ANN indexes only after the representative plan shows exact scan cost is a
+  real bottleneck.
+- Preserve exact threshold semantics by exact rerank if ANN recall is used.
+
+Harness:
+
+- Seeded gallery/observation plan harness.
+- Exact-versus-ANN correctness comparison.
+- Watchlist threshold and target-person filtering tests.
+
+Acceptance:
+
+- `PASS_POST_INFERENCE_SPEC2_FACE_WORKER_SCALE`;
+- bounded face-worker pending and gallery query p95 under the selected gallery
+  size.
+
+### Stage 4 - Media finalizer throughput
+
+Change:
+
+- Do not raise concurrency blindly.
+- First split media lifecycle metrics and harden idempotent terminal updates.
+- Then choose internal worker pool, multi-container DB claim, or separate
+  finalizer service based on measured queue wait and CPU/IO behavior.
+
+Harness:
+
+- Stale active task convergence tests.
+- Duplicate finalizer claim tests.
+- Playable-but-missing-annotation degraded evidence tests.
+- Pressure rerun comparing lifecycle p95/p99 against the 60-stream 3 FPS
+  baseline.
+
+Acceptance:
+
+- `PASS_POST_INFERENCE_SPEC3_MEDIA_FINALIZER_THROUGHPUT`;
+- retained playable evidence does not regress and lifecycle p95/p99 improves or
+  is explicitly bounded.
+
+### Stage 5 - Dual topology evidence-chain closure
+
+Change:
+
+- Wire and prove topology replay shard output path equals clip-worker replay
+  shard input path.
+- Run same-GPU dual branch with evidence retention enabled before calling 8 FPS
+  dual topology production-ready.
+
+Harness:
+
+- Replay shard parser/routing tests.
+- Topology apply dry-run smoke.
+- Clip-worker shard diagnostics test.
+- Dual pressure profile retaining evidence from both branches.
+
+Acceptance:
+
+- `PASS_POST_INFERENCE_SPEC6_DUAL_TOPOLOGY_EVIDENCE_CHAIN`;
+- retained evidence samples cover both branches and are queryable through 8090
+  list/detail APIs.
+
+## 7. Final Acceptance
 
 The post-inference closure is complete only when all of the following are true
 for the selected pressure profile:
@@ -558,16 +792,17 @@ Current checkout status:
 
 - Do not issue `PASS_POST_INFERENCE_60_STREAM_CLOSURE` yet.
 - The downstream evidence-chain pressure result is good enough to start scoped
-  code work, but final closure still requires removing the record-request
-  full-stream scan, bounding face-worker gallery/watchlist p95 for the selected
-  gallery size, choosing and proving the media-finalizer concurrency model, and
-  extending pressure observability.
+  code work. Stage 1-2 removed the record-request full-stream scan and added the
+  downstream observability contract; final closure still requires bounding
+  face-worker gallery/watchlist p95 for the selected gallery size, choosing and
+  proving the media-finalizer concurrency model, and running a fresh pressure
+  report with the new schema.
 - If the target deployment uses same-GPU or dual-GPU topology, final closure
   also requires Spec 6 evidence-chain proof on that topology. The current
   same-GPU dual-branch 8 FPS result is a front-end inference-entry proof, not a
   downstream evidence-chain closure token.
 
-## 7. Non-Goals
+## 8. Non-Goals
 
 This spec does not:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 import uuid
 from typing import Any, Dict
 
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PRE_SECONDS = 5
 DEFAULT_POST_SECONDS = 5
+DEFAULT_DEDUPE_TTL_SECONDS = 24 * 60 * 60
 POST_SAVANT_EVIDENCE_TOPOLOGIES = {"post_savant", "post_savant_replay"}
 POST_SAVANT_REPLAY_STOP_STRATEGY = "event_anchor_pre_seconds_rewind"
 PTS_TIME_BASE = 1_000_000_000
@@ -261,12 +263,84 @@ class RecordRequestPublisher:
         default_replay_source_id: str = "",
         default_pre_seconds: int = DEFAULT_PRE_SECONDS,
         default_post_seconds: int = DEFAULT_POST_SECONDS,
+        dedupe_ttl_seconds: int = DEFAULT_DEDUPE_TTL_SECONDS,
     ) -> None:
         self._client = client
         self._stream = stream
         self._default_replay_source_id = default_replay_source_id
         self._default_pre_seconds = int(default_pre_seconds)
         self._default_post_seconds = int(default_post_seconds)
+        self._dedupe_ttl_seconds = max(1, int(dedupe_ttl_seconds))
+
+    def _dedupe_key(self, source_event_id: str, recording_strategy: str) -> str:
+        token = json.dumps(
+            {
+                "stream": self._stream,
+                "source_event_id": str(source_event_id or ""),
+                "strategy": str(recording_strategy or ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return f"security:record_request:dedupe:{digest}"
+
+    def _reserve_request(
+        self,
+        source_event_id: str,
+        recording_strategy: str,
+        request_id: str,
+    ) -> bool:
+        key = self._dedupe_key(source_event_id, recording_strategy)
+        try:
+            reserved = self._client.set(
+                key,
+                request_id,
+                ex=self._dedupe_ttl_seconds,
+                nx=True,
+            )
+        except Exception:
+            logger.exception(
+                "record_request_dedupe_reserve_failed source_event_id=%s strategy=%s",
+                source_event_id,
+                recording_strategy,
+            )
+            return False
+        if not reserved:
+            logger.info(
+                "record_request_dedupe_duplicate source_event_id=%s strategy=%s",
+                source_event_id,
+                recording_strategy,
+            )
+            return False
+        logger.debug(
+            "record_request_dedupe_reserved source_event_id=%s strategy=%s ttl_s=%s",
+            source_event_id,
+            recording_strategy,
+            self._dedupe_ttl_seconds,
+        )
+        return True
+
+    def _release_request(
+        self,
+        source_event_id: str,
+        recording_strategy: str,
+        request_id: str,
+    ) -> None:
+        key = self._dedupe_key(source_event_id, recording_strategy)
+        try:
+            value = self._client.get(key)
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            if value == request_id:
+                self._client.delete(key)
+        except Exception:
+            logger.exception(
+                "record_request_dedupe_release_failed source_event_id=%s strategy=%s",
+                source_event_id,
+                recording_strategy,
+            )
 
     def publish(self, event: Dict[str, Any], event_id: str) -> str | None:
         """Publish a record_request for *event*.
@@ -290,6 +364,10 @@ class RecordRequestPublisher:
             return None
         request_id = str(record["request_id"])
         source_id = str(record["source_id"])
+        strategy = str(record.get("strategy") or "savant_replay")
+
+        if not self._reserve_request(source_event_id, strategy, request_id):
+            return None
 
         fields = {
             "request_id": request_id,
@@ -314,6 +392,7 @@ class RecordRequestPublisher:
             )
             return msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
         except Exception:
+            self._release_request(source_event_id, strategy, request_id)
             logger.exception(
                 "record_request publish failed for source_event_id=%s",
                 source_event_id,
@@ -322,24 +401,11 @@ class RecordRequestPublisher:
 
     def has_request(self, source_event_id: str, recording_strategy: str) -> bool:
         """Return True when a record_request already exists for this event."""
+        key = self._dedupe_key(source_event_id, recording_strategy)
         try:
-            stream = self._client.xrange(self._stream, "-", "+")
+            return bool(self._client.exists(key))
         except Exception:
             logger.exception(
                 "record_request lookup failed for source_event_id=%s", source_event_id
             )
             return False
-        for _msg_id, fields in stream:
-            data_raw = fields.get(b"data")
-            if not data_raw:
-                continue
-            try:
-                data = json.loads(data_raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if (
-                data.get("source_event_id") == source_event_id
-                and data.get("strategy") == recording_strategy
-            ):
-                return True
-        return False

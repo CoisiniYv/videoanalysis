@@ -464,3 +464,105 @@ def test_wait_for_drain_waits_for_playable_evidence(monkeypatch, tmp_path: Path)
     assert [item["playable_bundles"] for item in observed] == [42, 50]
     snapshots = json.loads((tmp_path / "drain_snapshots.json").read_text())
     assert len(snapshots) == 2
+
+
+def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> None:
+    module = _load_module()
+    summary = {
+        "schema_version": module.DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION,
+        "redis": {"streams": {}},
+        "postgresql": {
+            "run_summary": {},
+            "table_stats": module._not_enough_data("synthetic"),
+            "evidence_task_lifecycle_seconds": module._not_enough_data("synthetic"),
+        },
+        "event_worker": {
+            "record_request_dedupe": {
+                "reserved_count": 0,
+                "duplicate_count": 0,
+                "reserve_failed_count": 0,
+                "latency_ms": module._not_enough_data("synthetic"),
+            }
+        },
+        "face_worker": {
+            "gallery_query_latency_ms": module._not_enough_data("synthetic")
+        },
+        "media_worker": {
+            "finalization_duration_ms": module._not_enough_data("synthetic"),
+            "ffprobe_duration_ms": module._not_enough_data("synthetic"),
+        },
+        "evidence_8090": {
+            "retained_count": 0,
+            "checked_count": 0,
+            "ok_count": 0,
+        },
+    }
+
+    assert module.validate_downstream_observability_schema(summary) is True
+
+
+def test_downstream_observability_schema_rejects_missing_required_field() -> None:
+    module = _load_module()
+    summary = {
+        "schema_version": module.DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION,
+        "redis": {"streams": {}},
+        "postgresql": {
+            "run_summary": {},
+            "table_stats": {},
+            "evidence_task_lifecycle_seconds": {},
+        },
+        "event_worker": {"record_request_dedupe": {}},
+        "face_worker": {"gallery_query_latency_ms": {}},
+        "media_worker": {"finalization_duration_ms": {}},
+        "evidence_8090": {"retained_count": 0, "checked_count": 0, "ok_count": 0},
+    }
+
+    try:
+        module.validate_downstream_observability_schema(summary)
+    except ValueError as exc:
+        assert "media_worker.ffprobe_duration_ms" in str(exc)
+    else:
+        raise AssertionError("schema validation should reject missing ffprobe metric")
+
+
+def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    (tmp_path / "event_worker_logs_since_start.txt").write_text(
+        "\n".join(
+            [
+                "record_request_dedupe_reserved source_event_id=a strategy=savant_replay",
+                "record_request_dedupe_duplicate source_event_id=a strategy=savant_replay",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "face_worker_logs_since_start.txt").write_text(
+        "watchlist_hit_emitted source_observation_id=obs-1 camera_id=cam\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "media_worker_logs_since_start.txt").write_text(
+        "\n".join(
+            [
+                "media_event_finalized event_id=e1 finalization_duration_ms=100 "
+                "scan_duration_ms=1 metadata_files_visited=1 ffprobe_invocations=1 "
+                "ffprobe_duration_ms=20 ffmpeg_invocations=1 ffmpeg_duration_ms=80 "
+                "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
+                "media_event_finalized event_id=e2 finalization_duration_ms=300 "
+                "scan_duration_ms=1 metadata_files_visited=1 ffprobe_invocations=1 "
+                "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
+                "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = module.summarize_logs(cfg)
+
+    assert summary["event_worker"]["record_request_dedupe_reserved"] == 1
+    assert summary["event_worker"]["record_request_dedupe_duplicate"] == 1
+    assert summary["face_worker"]["watchlist_hit_emitted"] == 1
+    assert summary["media_worker"]["media_event_finalized"] == 2
+    assert summary["media_worker"]["media_finalization_duration_ms"]["count"] == 2
+    assert summary["media_worker"]["media_finalization_duration_ms"]["p50"] == 200.0
+    assert summary["media_worker"]["media_ffprobe_duration_ms"]["max"] == 40.0
