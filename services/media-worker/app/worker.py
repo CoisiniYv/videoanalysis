@@ -59,6 +59,10 @@ DEFAULT_MEDIA_DECODE_TIMEOUT_S = 120.0
 DEFAULT_MATERIALIZATION_MAX_ACTIVE = 1
 DEFAULT_MATERIALIZATION_TIMEOUT_S = 0.0
 DEFAULT_MATERIALIZATION_MAX_BACKLOG = 0
+DEFAULT_MATERIALIZATION_MAX_PER_POLL = 0
+DEFAULT_MATERIALIZATION_THROTTLE_SLEEP_S = 0.0
+DEFAULT_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S = 0.0
+DEFAULT_MATERIALIZATION_CPU_THREAD_LIMIT = 0
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
 INVALID_SINK_OUTPUT_MARKER = ".media-worker.invalid.json"
@@ -672,6 +676,178 @@ class _MaterializationGuard:
         }
 
 
+class _MaterializationPacer:
+    def __init__(
+        self,
+        *,
+        max_per_poll: int = 0,
+        throttle_sleep_s: float = 0.0,
+        deadline_guard_s: float = 0.0,
+        sleeper: object = time.sleep,
+    ) -> None:
+        self.max_per_poll = max(0, int(max_per_poll or 0))
+        self.throttle_sleep_s = max(0.0, float(throttle_sleep_s or 0.0))
+        self.deadline_guard_s = max(0.0, float(deadline_guard_s or 0.0))
+        self._sleeper = sleeper
+        self.processed_this_poll = 0
+        self.throttled_this_poll = 0
+        self.skipped_sleep_this_poll = 0
+
+    def reset_poll(self) -> None:
+        self.processed_this_poll = 0
+        self.throttled_this_poll = 0
+        self.skipped_sleep_this_poll = 0
+
+    def can_start(
+        self,
+        *,
+        deadline_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        if self.max_per_poll <= 0 or self.processed_this_poll < self.max_per_poll:
+            return True
+        if deadline_at is None or self.deadline_guard_s <= 0:
+            return False
+        current = now or datetime.now(timezone.utc)
+        if deadline_at.tzinfo is None:
+            deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+        slack_s = (
+            deadline_at.astimezone(timezone.utc) - current.astimezone(timezone.utc)
+        ).total_seconds()
+        return slack_s <= self.deadline_guard_s
+
+    def record_start(self) -> None:
+        self.processed_this_poll += 1
+
+    def decision_after_finalize(
+        self,
+        *,
+        deadline_at: datetime | None,
+        now: datetime | None = None,
+    ) -> dict:
+        return _materialization_throttle_decision(
+            throttle_sleep_s=self.throttle_sleep_s,
+            deadline_guard_s=self.deadline_guard_s,
+            deadline_at=deadline_at,
+            now=now,
+        )
+
+    def apply_decision(self, decision: dict) -> None:
+        if decision["sleep_s"] > 0:
+            self.throttled_this_poll += 1
+            self._sleeper(decision["sleep_s"])
+        else:
+            self.skipped_sleep_this_poll += 1
+
+    def snapshot(self) -> dict[str, int | float]:
+        return {
+            "max_per_poll": self.max_per_poll,
+            "processed_this_poll": self.processed_this_poll,
+            "throttled_this_poll": self.throttled_this_poll,
+            "skipped_sleep_this_poll": self.skipped_sleep_this_poll,
+            "throttle_sleep_s": self.throttle_sleep_s,
+            "deadline_guard_s": self.deadline_guard_s,
+        }
+
+
+def _materialization_throttle_decision(
+    *,
+    throttle_sleep_s: float,
+    deadline_guard_s: float,
+    deadline_at: datetime | None,
+    now: datetime | None = None,
+) -> dict:
+    sleep_s = max(0.0, float(throttle_sleep_s or 0.0))
+    guard_s = max(0.0, float(deadline_guard_s or 0.0))
+    if sleep_s <= 0:
+        return {
+            "enabled": False,
+            "sleep_s": 0.0,
+            "reason": "disabled",
+            "deadline_slack_s": None,
+            "deadline_guard_s": guard_s,
+        }
+    slack_s: float | None = None
+    if deadline_at is not None:
+        current = now or datetime.now(timezone.utc)
+        if deadline_at.tzinfo is None:
+            deadline_at = deadline_at.replace(tzinfo=timezone.utc)
+        slack_s = (deadline_at.astimezone(timezone.utc) - current.astimezone(timezone.utc)).total_seconds()
+        if slack_s <= guard_s:
+            return {
+                "enabled": True,
+                "sleep_s": 0.0,
+                "reason": "deadline_guard",
+                "deadline_slack_s": round(slack_s, 3),
+                "deadline_guard_s": guard_s,
+            }
+    return {
+        "enabled": True,
+        "sleep_s": sleep_s,
+        "reason": "paced",
+        "deadline_slack_s": round(slack_s, 3) if slack_s is not None else None,
+        "deadline_guard_s": guard_s,
+    }
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _apply_materialization_cpu_thread_limit(limit: int) -> dict[str, object]:
+    thread_limit = max(0, int(limit or 0))
+    applied_env: dict[str, str] = {}
+    cv2_threads_set = False
+    cv2_error = ""
+    if thread_limit <= 0:
+        return {
+            "enabled": False,
+            "thread_limit": 0,
+            "applied_env": applied_env,
+            "cv2_threads_set": cv2_threads_set,
+            "cv2_error": cv2_error,
+        }
+
+    value = str(thread_limit)
+    for name in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        if not os.getenv(name):
+            os.environ[name] = value
+            applied_env[name] = value
+
+    try:
+        import cv2  # type: ignore[import-not-found]
+
+        cv2.setNumThreads(thread_limit)
+        cv2_threads_set = True
+    except Exception as exc:
+        cv2_error = f"{type(exc).__name__}:{exc}"
+
+    return {
+        "enabled": True,
+        "thread_limit": thread_limit,
+        "applied_env": applied_env,
+        "cv2_threads_set": cv2_threads_set,
+        "cv2_error": cv2_error,
+    }
+
+
 def _materialization_backlog_depth(pg_conn: psycopg.Connection) -> int:
     try:
         with pg_conn.cursor() as cur:
@@ -692,6 +868,67 @@ def _materialization_backlog_depth(pg_conn: psycopg.Connection) -> int:
     except Exception:
         logger.exception("failed to query materialization backlog depth")
         return 0
+
+
+def _high_priority_event_types() -> set[str]:
+    raw = os.getenv("EVIDENCE_HIGH_PRIORITY_EVENT_TYPES", "watchlist_hit,live_search_hit")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _materialization_schedule_rows(
+    pg_conn: psycopg.Connection,
+    event_ids: list[str],
+) -> dict[str, dict]:
+    if not event_ids:
+        return {}
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.id::text, e.event_type, et.materialization_deadline_at
+                FROM events e
+                LEFT JOIN evidence_tasks et ON et.event_id = e.id
+                WHERE e.id = ANY(%(event_ids)s::uuid[])
+                """,
+                {"event_ids": event_ids},
+            )
+            rows = cur.fetchall() or []
+    except Exception:
+        logger.exception("failed to query materialization schedule rows")
+        return {}
+    result: dict[str, dict] = {}
+    priority_types = _high_priority_event_types()
+    for event_id, event_type, deadline_at in rows:
+        parsed_deadline = _parse_datetime(deadline_at)
+        result[str(event_id)] = {
+            "event_type": event_type or "",
+            "materialization_deadline_at": parsed_deadline,
+            "priority_rank": 0 if (event_type or "") in priority_types else 1,
+        }
+    return result
+
+
+def _sort_metadata_for_materialization(
+    metadata_files: list[dict],
+    schedule_rows: dict[str, dict],
+) -> list[dict]:
+    max_deadline = datetime.max.replace(tzinfo=timezone.utc)
+
+    def key(meta: dict) -> tuple[int, datetime, str]:
+        event_id = _extract_event_id(meta)
+        schedule = schedule_rows.get(event_id or "", {})
+        deadline = schedule.get("materialization_deadline_at")
+        if not isinstance(deadline, datetime):
+            deadline = max_deadline
+        elif deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return (
+            int(schedule.get("priority_rank", 1)),
+            deadline.astimezone(timezone.utc),
+            str(meta.get("_meta_dir", "")),
+        )
+
+    return sorted(metadata_files, key=key)
 
 
 def _materialization_backlog_limit_exceeded(
@@ -772,6 +1009,7 @@ def _storage_quota_decision(
 def _materialization_guardrails(
     *,
     guard: _MaterializationGuard | None,
+    pacer: _MaterializationPacer | None = None,
     timeout_s: float,
     max_backlog: int,
     backlog_depth: int | None,
@@ -779,6 +1017,7 @@ def _materialization_guardrails(
     reason: str = "",
 ) -> dict:
     snapshot = guard.snapshot() if guard is not None else {}
+    pacer_snapshot = pacer.snapshot() if pacer is not None else {}
     return {
         "schema_version": "phase1a-materialization-guardrails-v1",
         "mode": "bounded_crop",
@@ -789,6 +1028,10 @@ def _materialization_guardrails(
         "timeout_s": float(timeout_s or 0.0),
         "max_backlog": int(max_backlog or 0),
         "backlog_depth_at_decision": backlog_depth,
+        "max_per_poll": pacer_snapshot.get("max_per_poll"),
+        "processed_this_poll": pacer_snapshot.get("processed_this_poll"),
+        "throttle_sleep_s": pacer_snapshot.get("throttle_sleep_s"),
+        "deadline_guard_s": pacer_snapshot.get("deadline_guard_s"),
     }
 
 
@@ -3007,6 +3250,7 @@ def _process_sink_output(
     processed_state_path: str | Path | None = None,
     sink_scan_max_metadata_files: int | None = None,
     materialization_guard: _MaterializationGuard | None = None,
+    materialization_pacer: _MaterializationPacer | None = None,
     materialization_timeout_s: float = 0.0,
     materialization_max_backlog: int = 0,
     evidence_final_root_max_bytes: int = 0,
@@ -3028,6 +3272,18 @@ def _process_sink_output(
         processed_dirs=processed_dirs,
         max_metadata_files=sink_scan_max_metadata_files,
     )
+    post_savant_finalizer_enabled = _post_savant_finalizer_enabled()
+    if materialization_pacer is not None:
+        materialization_pacer.reset_poll()
+    schedule_rows: dict[str, dict] = {}
+    if post_savant_finalizer_enabled:
+        event_ids = [
+            event_id
+            for event_id in (_extract_event_id(meta) for meta in metadata_files)
+            if event_id
+        ]
+        schedule_rows = _materialization_schedule_rows(pg_conn, event_ids)
+        metadata_files = _sort_metadata_for_materialization(metadata_files, schedule_rows)
     for meta in metadata_files:
         meta_dir = meta.get("_meta_dir", "")
 
@@ -3057,7 +3313,6 @@ def _process_sink_output(
             logger.debug("media_skip: event already ready event_id=%s", event_id)
             continue
 
-        post_savant_finalizer_enabled = _post_savant_finalizer_enabled()
         finalizer_enabled = post_savant_finalizer_enabled
 
         video_file = _find_video_file(meta_dir)
@@ -3139,6 +3394,27 @@ def _process_sink_output(
                 )
                 continue
 
+        if (
+            post_savant_finalizer_enabled
+            and materialization_pacer is not None
+            and not materialization_pacer.can_start(
+                deadline_at=(
+                    schedule_rows.get(event_id, {}).get("materialization_deadline_at")
+                    if schedule_rows
+                    else None
+                )
+            )
+        ):
+            logger.info(
+                "media_materialization_paced event_id=%s meta_dir=%s "
+                "reason=max_per_poll_reached max_per_poll=%s processed_this_poll=%s",
+                event_id,
+                meta_dir,
+                materialization_pacer.max_per_poll,
+                materialization_pacer.processed_this_poll,
+            )
+            break
+
         bundle = None
         finalize_started = time.monotonic()
         probe_before = _probe_metrics_snapshot()
@@ -3161,6 +3437,7 @@ def _process_sink_output(
             reason = "storage_hard_limit_exceeded"
             guardrails = _materialization_guardrails(
                 guard=materialization_guard,
+                pacer=materialization_pacer,
                 timeout_s=materialization_timeout_s,
                 max_backlog=materialization_max_backlog,
                 backlog_depth=None,
@@ -3200,6 +3477,7 @@ def _process_sink_output(
             )
             guardrails = _materialization_guardrails(
                 guard=materialization_guard,
+                pacer=materialization_pacer,
                 timeout_s=materialization_timeout_s,
                 max_backlog=materialization_max_backlog,
                 backlog_depth=backlog_depth,
@@ -3227,6 +3505,7 @@ def _process_sink_output(
                 reason = "materialization_concurrency_limit_exceeded"
                 guardrails = _materialization_guardrails(
                     guard=materialization_guard,
+                    pacer=materialization_pacer,
                     timeout_s=materialization_timeout_s,
                     max_backlog=materialization_max_backlog,
                     backlog_depth=backlog_depth,
@@ -3249,11 +3528,14 @@ def _process_sink_output(
                 continue
         guardrails = _materialization_guardrails(
             guard=materialization_guard,
+            pacer=materialization_pacer,
             timeout_s=materialization_timeout_s,
             max_backlog=materialization_max_backlog,
             backlog_depth=backlog_depth,
             admission_status="admitted",
         )
+        if post_savant_finalizer_enabled and materialization_pacer is not None:
+            materialization_pacer.record_start()
         _set_event_evidence_state(pg_conn, event_id, state="materializing")
         try:
             if post_savant_finalizer_enabled:
@@ -3313,6 +3595,14 @@ def _process_sink_output(
             ):
                 materialization_guard.release()
         finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
+        throttle_decision: dict | None = None
+        if post_savant_finalizer_enabled and materialization_pacer is not None:
+            deadline_at = (schedule_rows.get(event_id) or {}).get(
+                "materialization_deadline_at"
+            )
+            throttle_decision = materialization_pacer.decision_after_finalize(
+                deadline_at=deadline_at if isinstance(deadline_at, datetime) else None,
+            )
         probe_delta = _probe_metrics_delta(probe_before)
         materialization_metrics = (
             bundle.get("materialization_metrics")
@@ -3326,6 +3616,7 @@ def _process_sink_output(
             "finalization_duration_ms=%s scan_duration_ms=%s "
             "queue_wait_ms=%s lifecycle_elapsed_ms=%s "
             "post_savant_finalization_elapsed_ms=%s "
+            "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
             "metadata_files_visited=%s ffprobe_invocations=%s "
             "ffprobe_duration_ms=%s ffmpeg_invocations=%s ffmpeg_duration_ms=%s "
             "imageio_ffmpeg_fallback_count=%s imageio_ffmpeg_fallback_duration_ms=%s",
@@ -3336,6 +3627,9 @@ def _process_sink_output(
             materialization_metrics.get("queue_wait_ms"),
             materialization_metrics.get("lifecycle_elapsed_ms"),
             materialization_metrics.get("finalization_elapsed_ms"),
+            (throttle_decision or {}).get("sleep_s"),
+            (throttle_decision or {}).get("reason"),
+            (throttle_decision or {}).get("deadline_slack_s"),
             scan_stats.get("metadata_files_visited"),
             probe_delta["ffprobe_invocation_count"],
             probe_delta["ffprobe_duration_ms"],
@@ -3728,6 +4022,12 @@ def _process_sink_output(
                     updated += 1
                 if meta_dir:
                     processed_dirs.add(meta_dir)
+                if (
+                    post_savant_finalizer_enabled
+                    and materialization_pacer is not None
+                    and throttle_decision is not None
+                ):
+                    materialization_pacer.apply_decision(throttle_decision)
         except Exception:
             logger.exception("failed to update event_id=%s", event_id)
 
@@ -4279,6 +4579,9 @@ def connect_postgres(cfg: Config) -> psycopg.Connection:
 
 
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
+    cpu_thread_limit = _apply_materialization_cpu_thread_limit(
+        cfg.materialization_cpu_thread_limit
+    )
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
         "sink_stability_checks=%d poll_interval=%ds "
@@ -4286,7 +4589,10 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "state_path=%s sink_scan_max_metadata_files=%d "
         "media_probe_timeout_s=%.1f media_decode_timeout_s=%.1f "
         "materialization_max_active=%d materialization_timeout_s=%.1f "
-        "materialization_max_backlog=%d "
+        "materialization_max_backlog=%d materialization_max_per_poll=%d "
+        "materialization_throttle_sleep_s=%.1f "
+        "materialization_throttle_deadline_guard_s=%.1f "
+        "materialization_cpu_thread_limit=%d cpu_thread_limit_result=%s "
         "cleanup_replay_sink_output=%s cleanup_statuses=%s",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
@@ -4303,6 +4609,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.materialization_max_active,
         cfg.materialization_timeout_s,
         cfg.materialization_max_backlog,
+        cfg.materialization_max_per_poll,
+        cfg.materialization_throttle_sleep_s,
+        cfg.materialization_throttle_deadline_guard_s,
+        cfg.materialization_cpu_thread_limit,
+        cpu_thread_limit,
         cfg.cleanup_replay_sink_output_enabled,
         ",".join(cfg.cleanup_replay_sink_output_statuses),
     )
@@ -4315,6 +4626,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     candidate_dirs: dict[str, tuple[int, int]] = {}
     invalid_output_failures: dict[str, int] = {}
     materialization_guard = _MaterializationGuard(cfg.materialization_max_active)
+    materialization_pacer = _MaterializationPacer(
+        max_per_poll=cfg.materialization_max_per_poll,
+        throttle_sleep_s=cfg.materialization_throttle_sleep_s,
+        deadline_guard_s=cfg.materialization_throttle_deadline_guard_s,
+    )
 
     while not shutdown_requested:
         try:
@@ -4330,6 +4646,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 processed_state_path=processed_state_path,
                 sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
                 materialization_guard=materialization_guard,
+                materialization_pacer=materialization_pacer,
                 materialization_timeout_s=cfg.materialization_timeout_s,
                 materialization_max_backlog=cfg.materialization_max_backlog,
                 evidence_final_root_max_bytes=cfg.evidence_final_root_max_bytes,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections import Counter
@@ -321,6 +322,7 @@ def _ffmpeg_decode(video_path: Path, decode_log_path: Path | None) -> dict[str, 
         "ffmpeg",
         "-hide_banner",
         "-nostdin",
+        *_ffmpeg_thread_args(),
         "-v",
         "warning",
         "-i",
@@ -348,6 +350,16 @@ def _ffmpeg_decode(video_path: Path, decode_log_path: Path | None) -> dict[str, 
         "decode_error_sample": lines[:20],
         "decode_signal_counts": _categorize_decode_log(lines),
     }
+
+
+def _ffmpeg_thread_args() -> list[str]:
+    try:
+        thread_limit = int(os.getenv("MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT", "0"))
+    except ValueError:
+        thread_limit = 0
+    if thread_limit <= 0:
+        return []
+    return ["-threads", str(thread_limit)]
 
 
 def _categorize_decode_log(lines: list[str]) -> dict[str, int]:

@@ -24,6 +24,10 @@ class Config:
     materialization_max_active: int
     materialization_timeout_s: float
     materialization_max_backlog: int
+    materialization_max_per_poll: int
+    materialization_throttle_sleep_s: float
+    materialization_throttle_deadline_guard_s: float
+    materialization_cpu_thread_limit: int
     evidence_final_root_max_bytes: int
     evidence_incoming_root_max_bytes: int
     replay_sink_output_max_bytes: int
@@ -78,6 +82,27 @@ def load_config() -> Config:
         materialization_max_backlog=max(
             0,
             int(os.getenv("MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG", "0")),
+        ),
+        materialization_max_per_poll=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL", "0")),
+        ),
+        materialization_throttle_sleep_s=max(
+            0.0,
+            float(os.getenv("MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S", "0")),
+        ),
+        materialization_throttle_deadline_guard_s=max(
+            0.0,
+            float(
+                os.getenv(
+                    "MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S",
+                    "0",
+                )
+            ),
+        ),
+        materialization_cpu_thread_limit=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT", "0")),
         ),
         evidence_final_root_max_bytes=max(
             0,

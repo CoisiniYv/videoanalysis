@@ -108,6 +108,47 @@ def test_time_domain_crop_timeout_fails_closed(monkeypatch, tmp_path: Path) -> N
     )
 
 
+def test_time_domain_crop_passes_configured_ffmpeg_thread_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_video = tmp_path / "source.mov"
+    source_video.write_bytes(b"source video")
+    output_video = tmp_path / "raw_clip.mov"
+    observed: dict[str, list[str]] = {}
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed["command"] = command
+        output_video.write_bytes(b"valid clip")
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT", "4")
+    monkeypatch.setattr(bundle, "_ffmpeg_executable", lambda: "ffmpeg")
+    monkeypatch.setattr(bundle.subprocess, "run", fake_run)
+    monkeypatch.setattr(bundle, "read_decoded_video_frame_count", lambda _path: 12)
+
+    bundle._copy_or_crop_video(
+        source_video_path=source_video,
+        output_video_path=output_video,
+        source_frames=[{"pts": 1_000_000_000}],
+        time_window={
+            "requested_start_pts": 1_000_000_000,
+            "requested_end_pts": 11_000_000_000,
+            "time_domain_crop_applied": True,
+        },
+        copy_video=True,
+        crop_video_to_time_window=True,
+    )
+
+    assert "-threads" in observed["command"]
+    assert observed["command"][observed["command"].index("-threads") + 1] == "4"
+    assert "-preset" in observed["command"]
+    assert observed["command"][observed["command"].index("-preset") + 1] == "ultrafast"
+    codec_index = observed["command"].index("-c:v")
+    output_threads_index = observed["command"].index("-threads", codec_index)
+    assert observed["command"][output_threads_index + 1] == "4"
+
+
 def test_time_domain_selection_uses_latest_contiguous_pts_segment() -> None:
     frames = (
         _frames(0, [80, 81], "stale-head")

@@ -394,6 +394,7 @@ def _copy_or_crop_video(
         ffmpeg_exe,
         "-hide_banner",
         "-nostdin",
+        *_ffmpeg_thread_args(),
         "-y",
         "-i",
         str(source_video_path),
@@ -404,6 +405,7 @@ def _copy_or_crop_video(
         "-an",
         "-c:v",
         "libx264",
+        *_ffmpeg_x264_tuning_args(),
         "-pix_fmt",
         "yuv420p",
         str(output_video_path),
@@ -529,6 +531,25 @@ def _ffmpeg_executable() -> str:
         return str(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as exc:
         raise FileNotFoundError("imageio_ffmpeg executable unavailable") from exc
+
+
+def _ffmpeg_thread_args() -> list[str]:
+    try:
+        thread_limit = int(os.getenv("MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT", "0"))
+    except ValueError:
+        thread_limit = 0
+    if thread_limit <= 0:
+        return []
+    return ["-threads", str(thread_limit)]
+
+
+def _ffmpeg_x264_tuning_args() -> list[str]:
+    args: list[str] = []
+    preset = os.getenv("MEDIA_WORKER_FFMPEG_X264_PRESET", "ultrafast").strip()
+    if preset:
+        args.extend(["-preset", preset])
+    args.extend(_ffmpeg_thread_args())
+    return args
 
 
 def _requested_duration_s(time_window: dict[str, Any]) -> float | None:
@@ -750,6 +771,7 @@ def _read_frame_count_ffmpeg_decode(video_path: Path) -> int | None:
                 ffmpeg_exe,
                 "-hide_banner",
                 "-nostdin",
+                *_ffmpeg_thread_args(),
                 "-i",
                 str(video_path),
                 "-map",

@@ -772,6 +772,37 @@ Harness:
   post-Savant finalization, ffprobe, and ffmpeg distributions. The next
   pressure run can rank whether the remaining bottleneck is queue admission,
   finalizer CPU/ffmpeg, or end-to-end lifecycle.
+- Implemented: the first media finalizer extension model is a single-process,
+  deadline-aware pacer rather than a blind concurrency increase. It orders
+  sink outputs by high-priority event type and materialization deadline, limits
+  starts per poll, sleeps between finalized bundles while deadline slack remains
+  above the guard window, and skips sleep for near-deadline evidence.
+- Implemented: `MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT` constrains
+  process-level native thread envs, OpenCV threads when available, and ffmpeg
+  `-threads` for post-Savant crop/decode fallbacks. The default midterm
+  profile is `MAX_PER_POLL=0`, `THROTTLE_SLEEP_S=0.5`,
+  `THROTTLE_DEADLINE_GUARD_S=90`, and `CPU_THREAD_LIMIT=4`.
+- Rejected: the first tested `MAX_PER_POLL=1` / `THROTTLE_SLEEP_S=2` profile
+  reduced sampled media-worker CPU peak from about 1151% to about 992%, but it
+  admitted too slowly for the 8 FPS / 60-source retained-evidence target:
+  only 32 tasks had materialized before the run was interrupted, with many
+  tasks already near or past the 300s materialization deadline. The default was
+  widened so deadline sorting and thread limiting remain active without
+  sacrificing the 50 retained evidence target.
+- Implemented: pressure reports now parse `media_materialization_paced`,
+  throttle reason counts, `throttle_sleep_s`, and `deadline_slack_s`, so the
+  next run can prove whether CPU peak reduction came from pacing or from other
+  runtime changes.
+- Implemented: pressure reports now refresh worker logs after evidence drain
+  before building downstream observability, so media finalization p95/p99 covers
+  retained evidence completion rather than only the initial pressure window.
+- Implemented: `imageio_ffmpeg_fallback_count` is parsed from numeric log
+  fields instead of string occurrence counts.
+- Verified: `pressure60_media_fullobs_8fps_20260629T092901Z` passed the selected
+  60-source same-GPU dual-branch 8 FPS retained-evidence profile. Results:
+  50/50 retained playable, media-worker CPU peak 98.08%, queue wait p95
+  189.913s / p99 193.068s, lifecycle p95 192.325s / p99 195.688s, min
+  deadline slack 103.073s, finalizer failures 0, imageio fallback 0.
 
 Acceptance:
 
@@ -838,10 +869,10 @@ Current checkout status:
   downstream observability contract. The 2026-06-29 P1 follow-up added
   face-worker gallery latency logs, media-worker queue/lifecycle split metrics,
   8090 config-sync no-restart regression coverage, and topology replay shard
-  source-map regression coverage. Final closure still requires a fresh pressure
-  report with these metrics populated, bounding face-worker gallery/watchlist
-  p95 for the selected gallery size, and choosing/proving the media-finalizer
-  concurrency model if queue/lifecycle p95 remains high.
+  source-map regression coverage. The 2026-06-29 media follow-up proved the
+  first-stage media-finalizer model on the selected pressure profile. Final
+  closure still requires real RTSP mixed-input repeat runs, longer 8 FPS soak,
+  and production-hardware profiles before treating it as a reliability guarantee.
 - If the target deployment uses same-GPU or dual-GPU topology, final closure
   also requires repeated Spec 6 evidence-chain proof on that topology. The
   current same-GPU dual-branch 8 FPS batch=4 run is a valid single-run

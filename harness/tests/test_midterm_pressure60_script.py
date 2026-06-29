@@ -626,6 +626,17 @@ def test_wait_for_drain_waits_for_playable_evidence(monkeypatch, tmp_path: Path)
     assert len(snapshots) == 2
 
 
+def test_pressure_runner_refreshes_worker_logs_after_drain_before_observability() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    wait_index = source.index("wait_for_drain(cfg)")
+    refresh_index = source.index("capture_runtime_logs_since_start(cfg, started_at)", wait_index)
+    summary_index = source.index('diagnostics["log_summary"] = summarize_logs(cfg)', refresh_index)
+    observability_index = source.index("collect_downstream_observability(", summary_index)
+
+    assert wait_index < refresh_index < summary_index < observability_index
+
+
 def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> None:
     module = _load_module()
     summary = {
@@ -650,6 +661,8 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
         "media_worker": {
             "finalization_duration_ms": module._not_enough_data("synthetic"),
             "ffprobe_duration_ms": module._not_enough_data("synthetic"),
+            "throttle_sleep_s": module._not_enough_data("synthetic"),
+            "deadline_slack_s": module._not_enough_data("synthetic"),
         },
         "evidence_8090": {
             "retained_count": 0,
@@ -719,15 +732,18 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "media_event_finalized event_id=e1 finalization_duration_ms=100 "
                 "scan_duration_ms=1 queue_wait_ms=10 lifecycle_elapsed_ms=110 "
                 "post_savant_finalization_elapsed_ms=90 "
+                "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=20 ffmpeg_invocations=1 ffmpeg_duration_ms=80 "
                 "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
                 "media_event_finalized event_id=e2 finalization_duration_ms=300 "
                 "scan_duration_ms=1 queue_wait_ms=30 lifecycle_elapsed_ms=330 "
                 "post_savant_finalization_elapsed_ms=250 "
+                "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
-                "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
+                "imageio_ffmpeg_fallback_count=2 imageio_ffmpeg_fallback_duration_ms=0",
+                "media_materialization_paced event_id=e3 reason=max_per_poll_reached",
             ]
         ),
         encoding="utf-8",
@@ -742,9 +758,19 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["face_worker"]["face_gallery_query_latency_ms"]["count"] == 2
     assert summary["face_worker"]["face_gallery_query_latency_ms"]["max"] == 34.0
     assert summary["media_worker"]["media_event_finalized"] == 2
+    assert summary["media_worker"]["media_materialization_paced"] == 1
+    assert summary["media_worker"]["media_materialization_throttle_paced"] == 1
+    assert summary["media_worker"]["media_materialization_throttle_deadline_guard"] == 1
     assert summary["media_worker"]["media_finalization_duration_ms"]["count"] == 2
     assert summary["media_worker"]["media_finalization_duration_ms"]["p50"] == 200.0
     assert summary["media_worker"]["media_queue_wait_ms"]["p95"] == 29.0
     assert summary["media_worker"]["media_lifecycle_elapsed_ms"]["max"] == 330.0
     assert summary["media_worker"]["media_post_savant_finalization_elapsed_ms"]["max"] == 250.0
     assert summary["media_worker"]["media_ffprobe_duration_ms"]["max"] == 40.0
+    assert summary["media_worker"]["imageio_ffmpeg_fallback"] == 2
+    assert (
+        summary["media_worker"]["imageio_ffmpeg_fallback_count_distribution"]["max"]
+        == 2.0
+    )
+    assert summary["media_worker"]["media_throttle_sleep_s"]["max"] == 2.0
+    assert summary["media_worker"]["media_deadline_slack_s"]["min"] == 45.0

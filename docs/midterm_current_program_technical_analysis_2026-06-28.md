@@ -472,13 +472,38 @@ CPU 和 duplicate count 没有异常。
 `vector_store.py` 的 gallery/observation 查询使用 exact pgvector ordering。图库规模、每人 embedding
 数量、face observation 速率增加后，单 consumer loop 会被 DB insert 和向量检索共同拖慢。
 
-### 9.3 media-worker 并发模型不清晰
+### 9.3 media-worker finalizer 扩展模型
 
 `media-worker` 有 `_MaterializationGuard(max_active)`，但主流程仍是一个进程内的轮询 loop，
 调用 `_process_sink_output(...)`。该 guard 能限制本进程进入物化的活跃数，但不等于真正的
 多 worker finalizer pool。
 
-如果后续提升证据吞吐，必须先明确并发模型：
+2026-06-29 后续状态：当前选择的第一阶段扩展模型不是直接提高并发，而是单进程
+deadline-aware pacer：
+
+- 高优先级事件类型优先，默认 `watchlist_hit,live_search_hit`；
+- 同优先级按 `evidence_tasks.materialization_deadline_at` 更早者优先；
+- 每轮最多启动 `MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL` 个 finalization，默认 0 表示不按轮硬限量；
+- 每条完成并完成 DB/index/cleanup 更新后，按
+  `MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S` 短暂停顿，默认 0.5 秒；
+- deadline 剩余时间小于 `MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S`
+  时跳过 sleep，并允许越过 per-poll 限制，默认 90 秒；
+- `MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT` 默认 4，用于限制 native math env、
+  OpenCV 线程和 post-Savant ffmpeg `-threads`。
+
+这个模型利用 300 秒 Replay/evidence deadline 余量平滑 CPU 峰值，不改变 evidence 存储方式，
+也不引入多 media-worker 容器的 DB claim 竞态。2026-06-29 的
+`pressure60_media_fullobs_8fps_20260629T092901Z` 已经完成第一阶段吞吐证明：
+50/50 retained playable，media-worker CPU 峰值约 98%，queue wait p95 约 189.9 秒，
+lifecycle p95 约 192.3 秒，最小 deadline slack 约 103.1 秒。该结论固化在
+`docs/midterm_media_finalizer_pacer_8fps_report_2026-06-29.md`。
+
+已拒绝的调参结果：`MAX_PER_POLL=1` / `THROTTLE_SLEEP_S=2` 在 8 FPS / 60 路
+retained-evidence 复测中把采样到的 media-worker CPU 峰值从约 1151% 降到约 992%，
+但处理过慢，运行中只 materialize 32 条，且出现多条 `materialization_expired`。因此默认改为
+保守 sleep + 线程限制，不再用每轮 1 条作为生产默认。
+
+如果后续仍需提升证据吞吐，才继续评估更强并发模型：
 
 - 多 media-worker 容器 + DB-backed claim；
 - 单进程内部 worker pool；
@@ -513,6 +538,8 @@ Redis pending 和 8090 查询证明。本次新增：
 - event-worker record request dedupe counters；
 - face-worker watchlist emitted/failed slots；
 - media-worker finalization、ffprobe、ffmpeg duration distribution；
+- media-worker deadline-aware pacing count、throttle reason、throttle sleep 和
+  deadline slack distribution；
 - worker docker CPU summary；
 - retained evidence 的 8090 `/api/v1/evidence/bundles/{event_id}` 查询 proof。
 
@@ -521,8 +548,10 @@ Redis pending 和 8090 查询证明。本次新增：
 - face-worker gallery query p95；
 - event-worker record-request dedupe latency；
 - PostgreSQL hot query plan/stat deltas；
-- media-worker queue wait p95/p99；
-- ffmpeg CPU；
+- media-worker queue wait / lifecycle / throttle 指标已在
+  `pressure60_media_fullobs_8fps_20260629T092901Z` 中完成 pressure profile 级证明；
+- ffmpeg CPU 已通过 thread limit 后的压力结果验证峰值改善；本轮 retained evidence
+  没有触发常规 ffmpeg 转码，`imageio_ffmpeg_fallback_count=0`；
 - Savant 模型阶段级 latency，例如 pose、face、AdaFace、pyfunc 后处理耗时。
 
 这些缺口需要后续在对应 worker 内加 timer 或 EXPLAIN harness；当前报告结构已经固定，缺数据会显式
@@ -578,8 +607,10 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 
 ### P2 - 证明 media finalizer 扩展模型
 
-- 明确 media-worker 并发架构。
-- 拆分 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段。
+- 已选择第一阶段扩展模型：单进程 deadline-aware pacer + CPU/ffmpeg thread limit。
+- 已用 60 路同卡双分支 8 FPS retained-evidence 压测证明第一阶段模型：
+  media-worker CPU 峰值约 98%，50/50 retained playable。
+- 继续拆分 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段。
 - 添加重复 finalizer、终态收敛和 cleanup 竞态测试。
 - 用 pressure rerun 验证 queue wait 和 lifecycle p95/p99。
 - 补 harness：media-worker stale active task 收敛、重复 finalizer 终态幂等、ffprobe/ffmpeg

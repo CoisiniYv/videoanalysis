@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -327,6 +327,126 @@ def test_media_worker_phase1a_backlog_limit_is_disabled_by_zero() -> None:
         backlog_depth=10,
         max_backlog=10,
     ) is True
+
+
+def test_media_worker_deadline_aware_throttle_decision_skips_near_deadline() -> None:
+    worker = _activate_media_worker()
+    now = datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+
+    paced = worker._materialization_throttle_decision(
+        throttle_sleep_s=2.0,
+        deadline_guard_s=60.0,
+        deadline_at=now + timedelta(seconds=180),
+        now=now,
+    )
+    guarded = worker._materialization_throttle_decision(
+        throttle_sleep_s=2.0,
+        deadline_guard_s=60.0,
+        deadline_at=now + timedelta(seconds=30),
+        now=now,
+    )
+
+    assert paced["sleep_s"] == 2.0
+    assert paced["reason"] == "paced"
+    assert paced["deadline_slack_s"] == 180.0
+    assert guarded["sleep_s"] == 0.0
+    assert guarded["reason"] == "deadline_guard"
+    assert guarded["deadline_slack_s"] == 30.0
+
+
+def test_media_worker_materialization_pacer_limits_per_poll_and_records_sleep() -> None:
+    worker = _activate_media_worker()
+    sleeps: list[float] = []
+    pacer = worker._MaterializationPacer(
+        max_per_poll=1,
+        throttle_sleep_s=2,
+        deadline_guard_s=60,
+        sleeper=sleeps.append,
+    )
+
+    assert pacer.can_start() is True
+    pacer.record_start()
+    assert pacer.can_start() is False
+    assert pacer.can_start(
+        deadline_at=datetime(2026, 6, 29, 12, 0, 30, tzinfo=timezone.utc),
+        now=datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc),
+    ) is True
+    decision = pacer.decision_after_finalize(deadline_at=None)
+    assert decision["reason"] == "paced"
+    pacer.apply_decision(decision)
+    assert sleeps == [2.0]
+
+    snapshot = worker._materialization_guardrails(
+        guard=worker._MaterializationGuard(max_active=4),
+        pacer=pacer,
+        timeout_s=180,
+        max_backlog=200,
+        backlog_depth=12,
+        admission_status="admitted",
+    )
+    assert snapshot["max_per_poll"] == 1
+    assert snapshot["processed_this_poll"] == 1
+    assert snapshot["throttle_sleep_s"] == 2.0
+    assert snapshot["deadline_guard_s"] == 60.0
+
+
+def test_media_worker_materialization_sort_prioritizes_watchlist_and_deadline(
+    monkeypatch,
+) -> None:
+    worker = _activate_media_worker()
+    monkeypatch.setenv("EVIDENCE_HIGH_PRIORITY_EVENT_TYPES", "watchlist_hit")
+    watchlist_event = "11111111-1111-4111-8111-111111111111"
+    early_intrusion = "22222222-2222-4222-8222-222222222222"
+    late_intrusion = "33333333-3333-4333-8333-333333333333"
+    base = datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+    metadata_files = [
+        {"labels": {"event_id": late_intrusion}, "_meta_dir": "z-late"},
+        {"labels": {"event_id": watchlist_event}, "_meta_dir": "a-watch"},
+        {"labels": {"event_id": early_intrusion}, "_meta_dir": "m-early"},
+    ]
+    schedule_rows = {
+        watchlist_event: {
+            "event_type": "watchlist_hit",
+            "materialization_deadline_at": base + timedelta(seconds=200),
+            "priority_rank": 0,
+        },
+        early_intrusion: {
+            "event_type": "intrusion",
+            "materialization_deadline_at": base + timedelta(seconds=10),
+            "priority_rank": 1,
+        },
+        late_intrusion: {
+            "event_type": "intrusion",
+            "materialization_deadline_at": base + timedelta(seconds=100),
+            "priority_rank": 1,
+        },
+    }
+
+    sorted_meta = worker._sort_metadata_for_materialization(metadata_files, schedule_rows)
+
+    assert [item["_meta_dir"] for item in sorted_meta] == [
+        "a-watch",
+        "m-early",
+        "z-late",
+    ]
+
+
+def test_media_worker_cpu_thread_limit_sets_process_env(monkeypatch) -> None:
+    worker = _activate_media_worker()
+    for name in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    result = worker._apply_materialization_cpu_thread_limit(4)
+
+    assert result["enabled"] is True
+    assert result["thread_limit"] == 4
+    assert result["applied_env"]["OMP_NUM_THREADS"] == "4"
+    assert result["applied_env"]["OPENBLAS_NUM_THREADS"] == "4"
 
 
 def test_media_worker_phase1a_deferred_state_updates_event_and_task() -> None:

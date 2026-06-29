@@ -31,7 +31,7 @@ def _ffmpeg_duration(filepath: str) -> Optional[float]:
     ffmpeg = _get_ffmpeg()
     try:
         result = subprocess.run(
-            [ffmpeg, "-i", filepath],
+            [ffmpeg, *_ffmpeg_thread_args(), "-i", filepath],
             capture_output=True, text=True, timeout=30,
         )
         # ffmpeg writes info to stderr; look for "Duration: HH:MM:SS.ms"
@@ -52,6 +52,7 @@ def _ffmpeg_extract(filepath: str, offset_seconds: float, output_path: str) -> b
         result = subprocess.run(
             [
                 ffmpeg, "-y",
+                *_ffmpeg_thread_args(),
                 "-ss", str(offset_seconds),
                 "-i", filepath,
                 "-frames:v", "1",
@@ -72,6 +73,16 @@ def _ffmpeg_extract(filepath: str, offset_seconds: float, output_path: str) -> b
     except Exception:
         logger.exception("ffmpeg failed for %s offset=%.2f", filepath, offset_seconds)
         return False
+
+
+def _ffmpeg_thread_args() -> list[str]:
+    try:
+        thread_limit = int(os.getenv("MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT", "0"))
+    except ValueError:
+        thread_limit = 0
+    if thread_limit <= 0:
+        return []
+    return ["-threads", str(thread_limit)]
 
 
 def generate_snapshot(

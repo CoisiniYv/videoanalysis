@@ -532,6 +532,9 @@ def main(argv: list[str] | None = None) -> int:
             write_kept_csv(cfg, kept)
             report["kept_evidence_count"] = len(kept)
             report["kept_evidence"] = kept[: cfg.keep_evidence]
+        capture_runtime_logs_since_start(cfg, started_at)
+        diagnostics["log_summary"] = summarize_logs(cfg)
+        write_json(cfg.artifact_dir / "pressure_diagnostics.json", diagnostics)
         report["db_summary_before_cleanup"] = db_summary(conn, cfg.run_id)
         write_json(cfg.artifact_dir / "db_summary_before_cleanup.json", report["db_summary_before_cleanup"])
         report["downstream_observability"] = collect_downstream_observability(
@@ -1657,6 +1660,10 @@ def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
             break
         index += 1
         time.sleep(max(1, min(cfg.sample_interval_s, end_at - now)))
+    capture_runtime_logs_since_start(cfg, started_at)
+
+
+def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) -> None:
     since = started_at.isoformat().replace("+00:00", "Z")
     if cfg.dual_shard_same_gpu:
         write_combined_docker_logs(
@@ -2121,6 +2128,15 @@ def _extract_metric_ints(text: str, name: str) -> list[int]:
     return [int(match.group(1)) for match in pattern.finditer(text or "")]
 
 
+def _extract_metric_numbers(text: str, name: str) -> list[float]:
+    pattern = re.compile(rf"\b{re.escape(name)}=(-?\d+(?:\.\d+)?)")
+    return [float(match.group(1)) for match in pattern.finditer(text or "")]
+
+
+def _metric_sum(values: list[int]) -> int:
+    return int(sum(values))
+
+
 def _numeric_distribution(values: list[float] | list[int]) -> dict[str, Any]:
     if not values:
         return {"status": "not_enough_data", "count": 0}
@@ -2169,6 +2185,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         )
         media_ffprobe_ms = _extract_metric_ints(text, "ffprobe_duration_ms")
         media_ffmpeg_ms = _extract_metric_ints(text, "ffmpeg_duration_ms")
+        media_imageio_ffmpeg_fallback_counts = _extract_metric_ints(
+            text,
+            "imageio_ffmpeg_fallback_count",
+        )
+        media_throttle_sleep_s = _extract_metric_numbers(text, "throttle_sleep_s")
+        media_deadline_slack_s = _extract_metric_numbers(text, "deadline_slack_s")
         face_gallery_query_ms = _extract_metric_ints(text, "gallery_query_duration_ms")
         summary[key] = {
             "line_count": len(text.splitlines()),
@@ -2180,7 +2202,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "frame_annotation_redis_timeout": text.count("TimeoutError:timed out"),
             "negative_pts_overflow": len(re.findall(r"OverflowError: -\\d+", text)),
             "ffprobe_missing": text.count("ffprobe not found"),
-            "imageio_ffmpeg_fallback": text.count("imageio_ffmpeg"),
+            "imageio_ffmpeg_fallback": _metric_sum(
+                media_imageio_ffmpeg_fallback_counts
+            ),
+            "imageio_ffmpeg_fallback_count_distribution": _numeric_distribution(
+                media_imageio_ffmpeg_fallback_counts
+            ),
             "record_request_dedupe_reserved": text.count(
                 "record_request_dedupe_reserved"
             ),
@@ -2205,6 +2232,16 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "media_materialization_deferred": text.count(
                 "media_materialization_deferred"
             ),
+            "media_materialization_paced": text.count("media_materialization_paced"),
+            "media_materialization_throttle_paced": text.count(
+                "throttle_reason=paced"
+            ),
+            "media_materialization_throttle_deadline_guard": text.count(
+                "throttle_reason=deadline_guard"
+            ),
+            "media_materialization_throttle_disabled": text.count(
+                "throttle_reason=disabled"
+            ),
             "post_savant_finalizer_failed": text.count(
                 "post_savant_finalizer_failed"
             ),
@@ -2218,6 +2255,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "media_ffprobe_duration_ms": _numeric_distribution(media_ffprobe_ms),
             "media_ffmpeg_duration_ms": _numeric_distribution(media_ffmpeg_ms),
+            "media_throttle_sleep_s": _numeric_distribution(media_throttle_sleep_s),
+            "media_deadline_slack_s": _numeric_distribution(media_deadline_slack_s),
         }
     return summary
 
@@ -2740,8 +2779,22 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
     return {
         "finalized_count": int(logs.get("media_event_finalized") or 0),
         "deferred_count": int(logs.get("media_materialization_deferred") or 0),
+        "paced_count": int(logs.get("media_materialization_paced") or 0),
+        "throttle_paced_count": int(
+            logs.get("media_materialization_throttle_paced") or 0
+        ),
+        "throttle_deadline_guard_count": int(
+            logs.get("media_materialization_throttle_deadline_guard") or 0
+        ),
+        "throttle_disabled_count": int(
+            logs.get("media_materialization_throttle_disabled") or 0
+        ),
         "finalizer_failed_count": int(logs.get("post_savant_finalizer_failed") or 0),
         "imageio_ffmpeg_fallback_count": int(logs.get("imageio_ffmpeg_fallback") or 0),
+        "throttle_sleep_s": logs.get("media_throttle_sleep_s")
+        or _not_enough_data("media throttle logs unavailable"),
+        "deadline_slack_s": logs.get("media_deadline_slack_s")
+        or _not_enough_data("media deadline slack logs unavailable"),
         "finalization_duration_ms": logs.get("media_finalization_duration_ms")
         or _not_enough_data("media finalization logs unavailable"),
         "queue_wait_ms": logs.get("media_queue_wait_ms")
@@ -2828,7 +2881,12 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
         "postgresql": ("run_summary", "table_stats", "evidence_task_lifecycle_seconds"),
         "event_worker": ("record_request_dedupe",),
         "face_worker": ("gallery_query_latency_ms",),
-        "media_worker": ("finalization_duration_ms", "ffprobe_duration_ms"),
+        "media_worker": (
+            "finalization_duration_ms",
+            "ffprobe_duration_ms",
+            "throttle_sleep_s",
+            "deadline_slack_s",
+        ),
         "evidence_8090": ("retained_count", "checked_count", "ok_count"),
     }
     for section, keys in nested_requirements.items():

@@ -154,6 +154,11 @@ def test_midterm_clean_machine_migration_scripts_exclude_old_runtime_data() -> N
 
     assert "models.tgz" in package
     assert "repo.tgz" in package
+    assert "--include-images" in package
+    assert "images.tar" in package
+    assert "contains_docker_images=$INCLUDE_IMAGES" in package
+    assert "docker save -o" in package
+    assert "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0" in package
     assert "contains_postgres_dump=false" in package
     assert "contains_redis_state=false" in package
     assert "contains_media_evidence=false" in package
@@ -168,6 +173,9 @@ def test_midterm_clean_machine_migration_scripts_exclude_old_runtime_data() -> N
 
     assert "repo.tgz" in deploy
     assert "models.tgz" in deploy
+    assert "images.tar" in deploy
+    assert "docker load -i" in deploy
+    assert "--no-build" in deploy
     assert "media/face_uploads" in deploy
     assert "media/face_registration" in deploy
     assert "replay-midterm-a" in deploy
@@ -430,6 +438,21 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"
     ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-200}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S:-90}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT:-4}"
+    assert services["media-worker"]["environment"]["MEDIA_WORKER_FFMPEG_X264_PRESET"] == (
+        "${MEDIA_WORKER_FFMPEG_X264_PRESET:-ultrafast}"
+    )
     assert services["clip-worker"]["environment"][
         "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"
     ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-4}"
@@ -806,6 +829,11 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "4"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0.5"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
+    assert env_file["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
     assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == (
         "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
     )
@@ -814,6 +842,21 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == (
         "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-200}"
+    )
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
+    )
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
+    )
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S:-90}"
+    )
+    assert media_env["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == (
+        "${MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT:-4}"
+    )
+    assert media_env["MEDIA_WORKER_FFMPEG_X264_PRESET"] == (
+        "${MEDIA_WORKER_FFMPEG_X264_PRESET:-ultrafast}"
     )
 
 
@@ -859,6 +902,11 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "4"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0.5"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
+    assert env_file["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
     assert env_file["EVIDENCE_MATERIALIZATION_POLICY"] == "priority"
     assert env_file["EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY"] == "false"
     assert env_file["EVIDENCE_REPLAY_TTL_SECONDS"] == "300"
