@@ -403,6 +403,42 @@ class TestWatchlistCameraRules:
         assert first_event["payload"]["watchlist"]["match_source"] == "db_camera_rule"
         assert first_event["payload"]["watchlist"]["target_person_ids"] == [7]
 
+    def test_emitter_logs_gallery_query_latency(self, caplog):
+        conn = _FakeWatchlistConn(
+            rules_by_camera={
+                "cam-a": [
+                    {
+                        "rule_id": "rule_watchlist_a",
+                        "config": {
+                            "threshold": 0.81,
+                            "top_k": 3,
+                            "target_person_ids": [7],
+                        },
+                        "evidence_policy": {},
+                    }
+                ],
+            },
+            person_rows=[
+                {"id": 7, "name": "Person 7", "external_person_id": "p7", "is_active": True},
+            ],
+        )
+        store = _FakeGalleryStore()
+        redis = _FakeRedis()
+        emitter = _make_watchlist_emitter(
+            _make_watchlist_cfg(),
+            conn,
+            store,
+            redis,
+        )
+
+        with caplog.at_level("INFO"):
+            assert emitter.emit_for_observation(_make_obs_dict(camera_id="cam-a")) == 1
+
+        assert "watchlist_gallery_query_completed" in caplog.text
+        assert "gallery_query_duration_ms=" in caplog.text
+        assert "target_count=1" in caplog.text
+        assert "threshold=0.8100" in caplog.text
+
     def test_empty_camera_watchlist_targets_do_not_match_all_people(self):
         conn = _FakeWatchlistConn(
             rules_by_camera={

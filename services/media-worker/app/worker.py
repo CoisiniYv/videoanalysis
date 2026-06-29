@@ -1291,6 +1291,8 @@ def _post_savant_materialization_metrics(
     event_created_at = _datetime_or_none(event_context.get("created_at"))
     started_at = started_at.astimezone(timezone.utc)
     finished_at = finished_at.astimezone(timezone.utc)
+    queue_wait_ms = _elapsed_ms_between(event_created_at, started_at)
+    lifecycle_elapsed_ms = _elapsed_ms_between(event_created_at, finished_at)
     return {
         "measurement_schema_version": "phase0-materialization-v1",
         "materialization_mode": (
@@ -1306,7 +1308,8 @@ def _post_savant_materialization_metrics(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "finalization_elapsed_ms": int(finalization_duration_ms),
-        "queue_wait_ms": _elapsed_ms_between(event_created_at, started_at),
+        "queue_wait_ms": queue_wait_ms,
+        "lifecycle_elapsed_ms": lifecycle_elapsed_ms,
         "input_bytes": video_crop.get("input_bytes"),
         "input_duration_seconds": video_crop.get("input_duration_seconds"),
         "output_bytes": video_crop.get("output_bytes"),
@@ -3311,9 +3314,18 @@ def _process_sink_output(
                 materialization_guard.release()
         finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
         probe_delta = _probe_metrics_delta(probe_before)
+        materialization_metrics = (
+            bundle.get("materialization_metrics")
+            if isinstance(bundle, dict)
+            else {}
+        )
+        if not isinstance(materialization_metrics, dict):
+            materialization_metrics = {}
         logger.info(
             "media_event_finalized event_id=%s meta_dir=%s "
             "finalization_duration_ms=%s scan_duration_ms=%s "
+            "queue_wait_ms=%s lifecycle_elapsed_ms=%s "
+            "post_savant_finalization_elapsed_ms=%s "
             "metadata_files_visited=%s ffprobe_invocations=%s "
             "ffprobe_duration_ms=%s ffmpeg_invocations=%s ffmpeg_duration_ms=%s "
             "imageio_ffmpeg_fallback_count=%s imageio_ffmpeg_fallback_duration_ms=%s",
@@ -3321,6 +3333,9 @@ def _process_sink_output(
             meta_dir,
             finalize_duration_ms,
             scan_stats.get("scan_duration_ms"),
+            materialization_metrics.get("queue_wait_ms"),
+            materialization_metrics.get("lifecycle_elapsed_ms"),
+            materialization_metrics.get("finalization_elapsed_ms"),
             scan_stats.get("metadata_files_visited"),
             probe_delta["ffprobe_invocation_count"],
             probe_delta["ffprobe_duration_ms"],

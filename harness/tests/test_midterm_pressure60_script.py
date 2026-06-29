@@ -153,6 +153,108 @@ def test_topology_pressure_payload_uses_8090_dual_same_gpu_shape() -> None:
     assert payload["branches"]["a"]["analysis_fps"] == "8/1"
 
 
+def test_clip_worker_compose_accepts_inline_replay_shards_json() -> None:
+    compose_path = ROOT.parent / "infra" / "docker-compose.midterm.yml"
+    compose = compose_path.read_text(encoding="utf-8")
+    clip_start = compose.index("  clip-worker:")
+    clip_end = compose.index("  video-file-sink:", clip_start)
+    clip_worker = compose[clip_start:clip_end]
+
+    assert 'REPLAY_SHARDS_JSON: "${REPLAY_SHARDS_JSON:-}"' in clip_worker
+
+
+def test_configure_clip_worker_for_topology_shards_injects_json_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    shard_path = tmp_path / "replay_shards.topology.json"
+    shard_doc = {
+        "default_shard_id": "replay-a",
+        "shards": [
+            {
+                "shard_id": "replay-a",
+                "replay_api_url": "http://replay-a:8080",
+                "in_stream_endpoint": "dealer+connect:tcp://replay-a:5555",
+                "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-a:6666",
+                "source_ids": ["pressure60_test_00"],
+            },
+            {
+                "shard_id": "replay-b",
+                "replay_api_url": "http://replay-b:8080",
+                "in_stream_endpoint": "dealer+connect:tcp://replay-b:5555",
+                "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-b:6666",
+                "source_ids": ["pressure60_test_01"],
+            },
+        ],
+    }
+    shard_path.write_text(json.dumps(shard_doc), encoding="utf-8")
+    observed: dict[str, str] = {}
+
+    def fake_run(cmd, log_path, *, env=None, check=True):
+        observed["cmd"] = " ".join(cmd)
+        observed["log_path"] = str(log_path)
+        observed["REPLAY_SHARDS_JSON"] = (env or {}).get("REPLAY_SHARDS_JSON", "")
+        observed["REPLAY_SHARDS_CONFIG_PATH"] = (env or {}).get(
+            "REPLAY_SHARDS_CONFIG_PATH",
+            "",
+        )
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "clip_worker_replay_shard_env_snapshot",
+        lambda: {
+            "REPLAY_SHARDS_JSON": observed.get("REPLAY_SHARDS_JSON", ""),
+            "REPLAY_SHARDS_CONFIG_PATH": observed.get("REPLAY_SHARDS_CONFIG_PATH", ""),
+        },
+    )
+
+    summary = module.configure_clip_worker_for_topology_shards(
+        cfg,
+        {"replay_shards_path": str(shard_path)},
+    )
+
+    assert "up -d --no-deps --force-recreate clip-worker" in observed["cmd"]
+    assert observed["REPLAY_SHARDS_CONFIG_PATH"] == ""
+    assert json.loads(observed["REPLAY_SHARDS_JSON"]) == shard_doc
+    assert summary["shard_count"] == 2
+    assert summary["source_count"] == 2
+    assert summary["observed_replay_shards_json_sha256"] == summary[
+        "replay_shards_json_sha256"
+    ]
+    written = json.loads((tmp_path / "clip_worker_replay_shards_pressure.json").read_text())
+    assert written["topology_replay_shards_path"] == str(shard_path)
+
+
+def test_configure_clip_worker_replay_shards_fails_if_env_not_applied(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+
+    monkeypatch.setattr(module, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "clip_worker_replay_shard_env_snapshot",
+        lambda: {"REPLAY_SHARDS_JSON": "", "REPLAY_SHARDS_CONFIG_PATH": ""},
+    )
+
+    try:
+        module.configure_clip_worker_replay_shards(
+            cfg,
+            replay_shards_json='{"shards":[]}',
+            replay_shards_config_path="",
+            artifact_name="compose_recreate_clip_worker_replay_shards.log",
+        )
+    except RuntimeError as exc:
+        assert "REPLAY_SHARDS_JSON was not applied" in str(exc)
+    else:
+        raise AssertionError("expected unapplied replay shard env to fail")
+
+
 def test_validate_seq_iq_from_sampling_is_warning_without_ingress_failure() -> None:
     module = _load_module()
     cfg = _config(module, keep_evidence=0)
@@ -230,6 +332,64 @@ def test_frame_annotation_redis_errors_are_explicit_failure() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "frame_annotation_redis_write_errors" in reasons
+
+
+def test_retained_evidence_run_fails_when_savant_semantic_outputs_are_zero() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=50)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_total": 0,
+            "max_queue_depth": 0,
+            "queue_full_samples": 0,
+            "final_savant_pose_objects_total": 0,
+            "final_savant_person_observations_exported_total": 0,
+            "final_savant_face_observations_exported_total": 0,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "savant_pose_objects_zero" in reasons
+    assert "savant_person_observations_zero" in reasons
+    assert "savant_face_observations_zero" in reasons
+
+
+def test_ingress_only_run_does_not_require_savant_semantic_outputs() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=0)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_total": 0,
+            "max_queue_depth": 0,
+            "queue_full_samples": 0,
+            "final_savant_pose_objects_total": 0,
+            "final_savant_person_observations_exported_total": 0,
+            "final_savant_face_observations_exported_total": 0,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "savant_pose_objects_zero" not in reasons
+    assert "savant_person_observations_zero" not in reasons
+    assert "savant_face_observations_zero" not in reasons
 
 
 def test_forwarder_null_sink_skips_savant_and_evidence_gates() -> None:
@@ -538,18 +698,34 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         encoding="utf-8",
     )
     (tmp_path / "face_worker_logs_since_start.txt").write_text(
-        "watchlist_hit_emitted source_observation_id=obs-1 camera_id=cam\n",
+        "\n".join(
+            [
+                "watchlist_gallery_query_completed source_observation_id=obs-1 "
+                "camera_id=cam rule_id=rule match_source=db_camera_rule "
+                "target_count=2 top_k=5 threshold=0.6000 result_count=1 "
+                "gallery_query_duration_ms=12",
+                "watchlist_gallery_query_completed source_observation_id=obs-2 "
+                "camera_id=cam rule_id=rule match_source=db_camera_rule "
+                "target_count=2 top_k=5 threshold=0.6000 result_count=0 "
+                "gallery_query_duration_ms=34",
+                "watchlist_hit_emitted source_observation_id=obs-1 camera_id=cam",
+            ]
+        ),
         encoding="utf-8",
     )
     (tmp_path / "media_worker_logs_since_start.txt").write_text(
         "\n".join(
             [
                 "media_event_finalized event_id=e1 finalization_duration_ms=100 "
-                "scan_duration_ms=1 metadata_files_visited=1 ffprobe_invocations=1 "
+                "scan_duration_ms=1 queue_wait_ms=10 lifecycle_elapsed_ms=110 "
+                "post_savant_finalization_elapsed_ms=90 "
+                "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=20 ffmpeg_invocations=1 ffmpeg_duration_ms=80 "
                 "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
                 "media_event_finalized event_id=e2 finalization_duration_ms=300 "
-                "scan_duration_ms=1 metadata_files_visited=1 ffprobe_invocations=1 "
+                "scan_duration_ms=1 queue_wait_ms=30 lifecycle_elapsed_ms=330 "
+                "post_savant_finalization_elapsed_ms=250 "
+                "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
                 "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
             ]
@@ -562,7 +738,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["event_worker"]["record_request_dedupe_reserved"] == 1
     assert summary["event_worker"]["record_request_dedupe_duplicate"] == 1
     assert summary["face_worker"]["watchlist_hit_emitted"] == 1
+    assert summary["face_worker"]["watchlist_gallery_query_completed"] == 2
+    assert summary["face_worker"]["face_gallery_query_latency_ms"]["count"] == 2
+    assert summary["face_worker"]["face_gallery_query_latency_ms"]["max"] == 34.0
     assert summary["media_worker"]["media_event_finalized"] == 2
     assert summary["media_worker"]["media_finalization_duration_ms"]["count"] == 2
     assert summary["media_worker"]["media_finalization_duration_ms"]["p50"] == 200.0
+    assert summary["media_worker"]["media_queue_wait_ms"]["p95"] == 29.0
+    assert summary["media_worker"]["media_lifecycle_elapsed_ms"]["max"] == 330.0
+    assert summary["media_worker"]["media_post_savant_finalization_elapsed_ms"]["max"] == 250.0
     assert summary["media_worker"]["media_ffprobe_duration_ms"]["max"] == 40.0

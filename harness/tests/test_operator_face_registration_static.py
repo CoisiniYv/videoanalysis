@@ -129,6 +129,28 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
     assert "运行时已受控重启" in js
 
 
+def test_operator_rule_and_roi_saves_use_config_sync_not_runtime_restart() -> None:
+    js = _text(STATIC_ROOT / "operator.js")
+
+    sync_start = js.index("async function applyRuntimeAfterChange")
+    sync_end = js.index("async function saveCamera", sync_start)
+    sync_block = js[sync_start:sync_end]
+    assert "syncRuntimeConfig" in sync_block
+    assert "applyRuntime(" not in sync_block
+    assert "restartRuntime(" not in sync_block
+    assert "cameras/runtime/restart" not in sync_block
+    assert "cameras/runtime/apply" not in sync_block
+
+    for function_name in ("saveZone", "saveRule", "deleteRule", "setRuleEnabled"):
+        start = js.index(f"async function {function_name}")
+        next_function = js.find("\nasync function ", start + 1)
+        block = js[start: next_function if next_function != -1 else len(js)]
+        assert "applyRuntimeAfterChange" in block
+        assert "restartRuntime(" not in block
+        assert "cameras/runtime/restart" not in block
+        assert "cameras/runtime/apply" not in block
+
+
 def test_operator_primary_algorithm_controls_include_rule_based_event_paths() -> None:
     html = _text(STATIC_ROOT / "index.html")
     js = _text(STATIC_ROOT / "operator.js")
@@ -163,7 +185,7 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=behavior-rules-20260628" in html
+    assert "operator.js?v=runtime-config-sync-20260629" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js

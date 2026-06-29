@@ -53,6 +53,7 @@ services:
       CAMERA_RUNTIME_ZMQ_ENDPOINT: dealer+connect:tcp://replay-service:5555
       REPLAY_API_URL: http://replay-service:8080
       REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
+      REPLAY_SHARDS_JSON: "${REPLAY_SHARDS_JSON:-}"
       REPLAY_SHARDS_CONFIG_PATH: "${REPLAY_SHARDS_CONFIG_PATH:-}"
       CAMERA_RUNTIME_DOCKER_NETWORK: video-analytics-midterm_default
       CAMERA_RUNTIME_REPLAY_CONTAINER: video-analytics-midterm-replay-service
@@ -664,6 +665,7 @@ services:
       RECORD_REQUEST_STREAM: security.record_requests
       REPLAY_API_URL: http://replay-service:8080
       REPLAY_JOB_SINK_URL: dealer+connect:tcp://video-file-sink:6666
+      REPLAY_SHARDS_JSON: "${REPLAY_SHARDS_JSON:-}"
       REPLAY_SHARDS_CONFIG_PATH: "${REPLAY_SHARDS_CONFIG_PATH:-}"
       CONSUMER_GROUP: clip-workers-midterm
       CONSUMER_NAME: clip-worker-midterm-1

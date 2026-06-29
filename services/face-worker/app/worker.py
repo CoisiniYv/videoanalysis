@@ -198,11 +198,46 @@ class WatchlistMatchEmitter:
                     rule.rule_id,
                 )
                 continue
-            gallery_results = self._store.search_gallery(
-                embedding,
-                top_k=max(rule.top_k, 1),
-                min_similarity=rule.threshold,
-                person_ids=target_person_ids,
+            top_k = max(rule.top_k, 1)
+            query_started = time.perf_counter()
+            try:
+                gallery_results = self._store.search_gallery(
+                    embedding,
+                    top_k=top_k,
+                    min_similarity=rule.threshold,
+                    person_ids=target_person_ids,
+                )
+            except Exception:
+                elapsed_ms = int(round((time.perf_counter() - query_started) * 1000))
+                logger.exception(
+                    "watchlist_gallery_query_failed source_observation_id=%s "
+                    "camera_id=%s rule_id=%s match_source=%s target_count=%d "
+                    "top_k=%d threshold=%.4f gallery_query_duration_ms=%d",
+                    obs.get("source_observation_id"),
+                    obs.get("camera_id", ""),
+                    rule.rule_id,
+                    rule.source,
+                    len(target_person_ids),
+                    top_k,
+                    rule.threshold,
+                    elapsed_ms,
+                )
+                raise
+            elapsed_ms = int(round((time.perf_counter() - query_started) * 1000))
+            logger.info(
+                "watchlist_gallery_query_completed source_observation_id=%s "
+                "camera_id=%s rule_id=%s match_source=%s target_count=%d "
+                "top_k=%d threshold=%.4f result_count=%d "
+                "gallery_query_duration_ms=%d",
+                obs.get("source_observation_id"),
+                obs.get("camera_id", ""),
+                rule.rule_id,
+                rule.source,
+                len(target_person_ids),
+                top_k,
+                rule.threshold,
+                len(gallery_results),
+                elapsed_ms,
             )
             seen_person_ids: set[int] = set()
             for gallery_match in gallery_results:

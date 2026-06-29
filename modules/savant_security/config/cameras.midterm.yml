@@ -121,7 +121,7 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260628T161045Z-8aa9a0c6
+    runtime_epoch_id: midterm-20260629T071308Z-3a2dd819
   00000000-0000-4000-8000-781078565686:
     enabled: true
     source_id: source_00000000-0000-4000-8000-781078565686
@@ -231,7 +231,7 @@ cameras:
         enabled: true
         config:
           severity: medium
-          threshold: 0.66
+          threshold: 0.5
           cooldown_s: 17
           target_names:
           - zr
@@ -311,6 +311,7 @@ cameras:
           cooldown_s: 60
           min_duration_s: 30
           max_avg_speed_px_s: 25
+          max_displacement_px: 0
           max_motion_range_px: 120
         zone_id: lab_full_frame
         evidence_policy:
@@ -336,5 +337,5 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260628T161045Z-8aa9a0c6
-runtime_epoch_id: midterm-20260628T161045Z-8aa9a0c6
+    runtime_epoch_id: midterm-20260629T071308Z-3a2dd819
+runtime_epoch_id: midterm-20260629T071308Z-3a2dd819

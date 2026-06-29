@@ -284,6 +284,8 @@ def test_media_worker_phase0_materialization_metrics_flow_to_metadata(
     assert metrics["input_duration_seconds"] == 10.0
     assert metrics["output_bytes"] == 8
     assert metrics["queue_wait_ms"] is not None
+    assert metrics["lifecycle_elapsed_ms"] is not None
+    assert metrics["lifecycle_elapsed_ms"] >= metrics["queue_wait_ms"]
     assert metrics["finalization_process_cpu_seconds"] is not None
 
 

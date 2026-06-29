@@ -92,3 +92,57 @@ def test_manual_assignments_override_balanced_branching() -> None:
     branches = {branch["branch_id"]: branch for branch in plan["branches"]}
     assert branches["a"]["source_ids"] == ["camera_02"]
     assert branches["b"]["source_ids"] == ["camera_00", "camera_01", "camera_03"]
+
+
+def test_dual_topology_sources_and_replay_shards_share_same_source_map() -> None:
+    plan = build_topology_plan(
+        {
+            "topology_mode": "dual_same_gpu",
+            "streams_per_branch": 30,
+            "branches": {
+                "a": {"gpu_id": 0},
+                "b": {"gpu_id": 0},
+            },
+        },
+        _cameras(60),
+        available_gpus=["0"],
+    )
+
+    branches = {branch["branch_id"]: branch for branch in plan["branches"]}
+    shards = {
+        shard["shard_id"]: shard
+        for shard in (plan["replay_shards"] or {}).get("shards", [])
+    }
+    source_rows = list((plan["sources"] or {}).get("sources", {}).values())
+
+    assert set(shards) == {"replay-a", "replay-b"}
+    assert shards["replay-a"]["source_ids"] == branches["a"]["source_ids"]
+    assert shards["replay-b"]["source_ids"] == branches["b"]["source_ids"]
+    assert shards["replay-a"]["replay_job_sink_url"] == (
+        "dealer+connect:tcp://video-file-sink-a:6666"
+    )
+    assert shards["replay-b"]["replay_job_sink_url"] == (
+        "dealer+connect:tcp://video-file-sink-b:6666"
+    )
+    source_to_shard = {
+        row["source_id"]: row["replay_shard_id"]
+        for row in source_rows
+    }
+    assert {
+        source_to_shard[source_id]
+        for source_id in branches["a"]["source_ids"]
+    } == {"replay-a"}
+    assert {
+        source_to_shard[source_id]
+        for source_id in branches["b"]["source_ids"]
+    } == {"replay-b"}
+    assert {
+        row["zmq_endpoint"]
+        for row in source_rows
+        if row["replay_shard_id"] == "replay-a"
+    } == {"dealer+connect:tcp://replay-a:5555"}
+    assert {
+        row["zmq_endpoint"]
+        for row in source_rows
+        if row["replay_shard_id"] == "replay-b"
+    } == {"dealer+connect:tcp://replay-b:5555"}

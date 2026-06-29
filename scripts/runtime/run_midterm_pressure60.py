@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -327,10 +328,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dual-shard-same-gpu cannot be combined with --forwarder-null-sink")
     if args.dual_shard_api and not args.dual_shard_same_gpu:
         raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
-    if args.dual_shard_same_gpu and args.keep_evidence > 0:
+    if args.dual_shard_same_gpu and args.keep_evidence > 0 and not args.dual_shard_api:
         raise SystemExit(
-            "--dual-shard-same-gpu currently requires --keep-evidence 0; "
-            "evidence replay shard routing is a separate validation path."
+            "--dual-shard-same-gpu with evidence retention requires "
+            "--dual-shard-api so clip-worker can be wired to the topology "
+            "replay shard plan."
         )
     run_id = args.run_id or _default_run_id(
         args.fps,
@@ -396,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
     redis_client = Redis.from_url(cfg.redis_url, decode_responses=False)
     original_perf: dict[str, Any] | None = None
     original_topology: dict[str, Any] | None = None
+    original_clip_worker_replay_shards: dict[str, str] | None = None
     original_cameras: list[dict[str, Any]] = []
     runtime_epoch_root: str | None = None
     rtsp_republishers: list[subprocess.Popen] = []
@@ -407,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         original_topology = api_json(cfg.api_base, "GET", "/runtime/topology-config")["data"][
             "saved_config"
         ]
+        original_clip_worker_replay_shards = clip_worker_replay_shard_env_snapshot()
         original_cameras = fetch_cameras(conn)
         write_json(cfg.artifact_dir / "cameras_before.json", original_cameras)
         write_json(cfg.artifact_dir / "performance_before.json", original_perf)
@@ -469,6 +473,10 @@ def main(argv: list[str] | None = None) -> int:
         if cfg.dual_shard_same_gpu:
             if cfg.dual_shard_api:
                 topology = save_and_apply_topology_config(cfg)
+                clip_worker_shards = configure_clip_worker_for_topology_shards(
+                    cfg,
+                    topology,
+                )
                 write_json(cfg.artifact_dir / "runtime_restart_pressure.json", topology)
                 report["steps"].append(
                     {
@@ -477,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
                         "runtime_epoch_id": topology.get("runtime_epoch_id"),
                         "sources_config_path": topology.get("sources_config_path"),
                         "replay_shards_path": topology.get("replay_shards_path"),
+                        "clip_worker_replay_shards": clip_worker_shards,
                     }
                 )
             else:
@@ -551,6 +560,19 @@ def main(argv: list[str] | None = None) -> int:
             report["cleanup"] = cleanup
         restore_cameras(conn, original_cameras)
         restore_runtime(cfg, original_perf)
+        if original_clip_worker_replay_shards is not None:
+            report["clip_worker_replay_shards_restore"] = configure_clip_worker_replay_shards(
+                cfg,
+                replay_shards_json=original_clip_worker_replay_shards.get(
+                    "REPLAY_SHARDS_JSON",
+                    "",
+                ),
+                replay_shards_config_path=original_clip_worker_replay_shards.get(
+                    "REPLAY_SHARDS_CONFIG_PATH",
+                    "",
+                ),
+                artifact_name="compose_restore_clip_worker_replay_shards.log",
+            )
         if original_topology is not None:
             api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         if cfg.cleanup:
@@ -591,6 +613,19 @@ def main(argv: list[str] | None = None) -> int:
                 restore_cameras(conn, original_cameras)
             if original_perf:
                 restore_runtime(cfg, original_perf)
+            if original_clip_worker_replay_shards is not None:
+                configure_clip_worker_replay_shards(
+                    cfg,
+                    replay_shards_json=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_JSON",
+                        "",
+                    ),
+                    replay_shards_config_path=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_CONFIG_PATH",
+                        "",
+                    ),
+                    artifact_name="compose_restore_clip_worker_replay_shards_after_interrupt.log",
+                )
             if original_topology is not None:
                 api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         finally:
@@ -613,6 +648,19 @@ def main(argv: list[str] | None = None) -> int:
                 restore_cameras(conn, original_cameras)
             if original_perf:
                 restore_runtime(cfg, original_perf)
+            if original_clip_worker_replay_shards is not None:
+                configure_clip_worker_replay_shards(
+                    cfg,
+                    replay_shards_json=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_JSON",
+                        "",
+                    ),
+                    replay_shards_config_path=original_clip_worker_replay_shards.get(
+                        "REPLAY_SHARDS_CONFIG_PATH",
+                        "",
+                    ),
+                    artifact_name="compose_restore_clip_worker_replay_shards_after_failure.log",
+                )
             if original_topology is not None:
                 api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         finally:
@@ -1123,6 +1171,133 @@ def save_and_apply_topology_config(cfg: PressureConfig) -> dict[str, Any]:
     return response["data"]
 
 
+def docker_container_env(name: str) -> dict[str, str]:
+    completed = subprocess.run(
+        ["docker", "inspect", name, "--format", "{{json .Config.Env}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        return {}
+    try:
+        values = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {}
+    result: dict[str, str] = {}
+    for item in values or []:
+        key, sep, value = str(item).partition("=")
+        if sep:
+            result[key] = value
+    return result
+
+
+def clip_worker_replay_shard_env_snapshot() -> dict[str, str]:
+    env = docker_container_env("video-analytics-midterm-clip-worker")
+    return {
+        "REPLAY_SHARDS_JSON": env.get("REPLAY_SHARDS_JSON", ""),
+        "REPLAY_SHARDS_CONFIG_PATH": env.get("REPLAY_SHARDS_CONFIG_PATH", ""),
+    }
+
+
+def _compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def configure_clip_worker_replay_shards(
+    cfg: PressureConfig,
+    *,
+    replay_shards_json: str,
+    replay_shards_config_path: str,
+    artifact_name: str,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "REPLAY_SHARDS_JSON": replay_shards_json,
+            "REPLAY_SHARDS_CONFIG_PATH": replay_shards_config_path,
+        }
+    )
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "clip-worker",
+        ],
+        cfg.artifact_dir / artifact_name,
+        env=env,
+    )
+    digest = hashlib.sha256(replay_shards_json.encode("utf-8")).hexdigest() if replay_shards_json else ""
+    observed = clip_worker_replay_shard_env_snapshot()
+    observed_json = observed.get("REPLAY_SHARDS_JSON", "")
+    observed_config_path = observed.get("REPLAY_SHARDS_CONFIG_PATH", "")
+    summary = {
+        "container": "video-analytics-midterm-clip-worker",
+        "replay_shards_json_sha256": digest,
+        "replay_shards_config_path": replay_shards_config_path,
+        "replay_shards_json_bytes": len(replay_shards_json.encode("utf-8")),
+        "observed_replay_shards_json_sha256": (
+            hashlib.sha256(observed_json.encode("utf-8")).hexdigest()
+            if observed_json
+            else ""
+        ),
+        "observed_replay_shards_config_path": observed_config_path,
+        "observed_replay_shards_json_bytes": len(observed_json.encode("utf-8")),
+    }
+    write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    if observed_json != replay_shards_json:
+        raise RuntimeError(
+            "clip-worker REPLAY_SHARDS_JSON was not applied after compose recreate"
+        )
+    if observed_config_path != replay_shards_config_path:
+        raise RuntimeError(
+            "clip-worker REPLAY_SHARDS_CONFIG_PATH was not applied after compose recreate"
+        )
+    return summary
+
+
+def configure_clip_worker_for_topology_shards(
+    cfg: PressureConfig,
+    topology: dict[str, Any],
+) -> dict[str, Any]:
+    replay_shards_path = Path(str(topology.get("replay_shards_path") or ""))
+    if not replay_shards_path.exists():
+        raise RuntimeError(f"topology replay shard file not found: {replay_shards_path}")
+    replay_shards_doc = json.loads(replay_shards_path.read_text(encoding="utf-8"))
+    replay_shards_json = _compact_json(replay_shards_doc)
+    summary = configure_clip_worker_replay_shards(
+        cfg,
+        replay_shards_json=replay_shards_json,
+        replay_shards_config_path="",
+        artifact_name="compose_recreate_clip_worker_replay_shards.log",
+    )
+    summary.update(
+        {
+            "topology_replay_shards_path": str(replay_shards_path),
+            "topology_replay_shards_sha256": hashlib.sha256(
+                replay_shards_json.encode("utf-8")
+            ).hexdigest(),
+            "shard_count": len(replay_shards_doc.get("shards") or []),
+            "source_count": sum(
+                len(shard.get("source_ids") or [])
+                for shard in replay_shards_doc.get("shards") or []
+                if isinstance(shard, dict)
+            ),
+        }
+    )
+    write_json(cfg.artifact_dir / "clip_worker_replay_shards_pressure.json", summary)
+    return summary
+
+
 def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
     with conn.transaction():
         conn.execute("UPDATE cameras SET enabled=false, updated_at=now()")
@@ -1617,6 +1792,11 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     final_forwarder_seen = 0.0
     final_forwarder_forwarded = 0.0
     final_forwarder_dropped = 0.0
+    final_savant_pose_objects = 0.0
+    final_savant_face_objects = 0.0
+    final_savant_adaface_embeddings = 0.0
+    final_savant_person_observations = 0.0
+    final_savant_face_observations = 0.0
     stable_samples = 0
     for path in sorted(samples_dir.glob("runtime_*.json")):
         try:
@@ -1655,6 +1835,24 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         final_forwarder_seen = forwarder_seen
         final_forwarder_forwarded = forwarder_forwarded
         final_forwarder_dropped = forwarder_dropped
+        savant_pose_objects = sum(float(source.get("pose_objects_total") or 0.0) for source in savant_sources)
+        savant_face_objects = sum(float(source.get("face_objects_total") or 0.0) for source in savant_sources)
+        savant_adaface_embeddings = sum(
+            float(source.get("adaface_embeddings_total") or 0.0) for source in savant_sources
+        )
+        savant_person_observations = sum(
+            float(source.get("person_observations_exported_total") or 0.0)
+            for source in savant_sources
+        )
+        savant_face_observations = sum(
+            float(source.get("face_observations_exported_total") or 0.0)
+            for source in savant_sources
+        )
+        final_savant_pose_objects = savant_pose_objects
+        final_savant_face_objects = savant_face_objects
+        final_savant_adaface_embeddings = savant_adaface_embeddings
+        final_savant_person_observations = savant_person_observations
+        final_savant_face_observations = savant_face_observations
         if cfg.dual_shard_same_gpu:
             forwarder_cpu = _stats_cpu_percent_sum(
                 stats,
@@ -1703,6 +1901,11 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "forwarder_frames_seen_total": int(forwarder_seen),
                 "forwarder_frames_forwarded_total": int(forwarder_forwarded),
                 "forwarder_frames_dropped_total": int(forwarder_dropped),
+                "savant_pose_objects_total": int(savant_pose_objects),
+                "savant_face_objects_total": int(savant_face_objects),
+                "savant_adaface_embeddings_total": int(savant_adaface_embeddings),
+                "savant_person_observations_exported_total": int(savant_person_observations),
+                "savant_face_observations_exported_total": int(savant_face_observations),
                 "forwarder_forwarded_seen_ratio": (
                     round(forwarder_forwarded / forwarder_seen, 4)
                     if forwarder_seen > 0
@@ -1732,6 +1935,11 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "final_forwarder_frames_seen_total": int(final_forwarder_seen),
         "final_forwarder_frames_forwarded_total": int(final_forwarder_forwarded),
         "final_forwarder_frames_dropped_total": int(final_forwarder_dropped),
+        "final_savant_pose_objects_total": int(final_savant_pose_objects),
+        "final_savant_face_objects_total": int(final_savant_face_objects),
+        "final_savant_adaface_embeddings_total": int(final_savant_adaface_embeddings),
+        "final_savant_person_observations_exported_total": int(final_savant_person_observations),
+        "final_savant_face_observations_exported_total": int(final_savant_face_observations),
         "final_forwarder_forwarded_seen_ratio": (
             round(final_forwarder_forwarded / final_forwarder_seen, 4)
             if final_forwarder_seen > 0
@@ -1953,8 +2161,15 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
     for key, path in paths.items():
         text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
         media_finalization_ms = _extract_metric_ints(text, "finalization_duration_ms")
+        media_queue_wait_ms = _extract_metric_ints(text, "queue_wait_ms")
+        media_lifecycle_ms = _extract_metric_ints(text, "lifecycle_elapsed_ms")
+        media_post_savant_finalization_ms = _extract_metric_ints(
+            text,
+            "post_savant_finalization_elapsed_ms",
+        )
         media_ffprobe_ms = _extract_metric_ints(text, "ffprobe_duration_ms")
         media_ffmpeg_ms = _extract_metric_ints(text, "ffmpeg_duration_ms")
+        face_gallery_query_ms = _extract_metric_ints(text, "gallery_query_duration_ms")
         summary[key] = {
             "line_count": len(text.splitlines()),
             "validate_seq_iq": text.count("validate_seq_iq"),
@@ -1977,6 +2192,15 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "watchlist_hit_emitted": text.count("watchlist_hit_emitted"),
             "watchlist_emit_failed": text.count("watchlist emit failed"),
+            "watchlist_gallery_query_completed": text.count(
+                "watchlist_gallery_query_completed"
+            ),
+            "watchlist_gallery_query_failed": text.count(
+                "watchlist_gallery_query_failed"
+            ),
+            "face_gallery_query_latency_ms": _numeric_distribution(
+                face_gallery_query_ms
+            ),
             "media_event_finalized": text.count("media_event_finalized"),
             "media_materialization_deferred": text.count(
                 "media_materialization_deferred"
@@ -1986,6 +2210,11 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "media_finalization_duration_ms": _numeric_distribution(
                 media_finalization_ms
+            ),
+            "media_queue_wait_ms": _numeric_distribution(media_queue_wait_ms),
+            "media_lifecycle_elapsed_ms": _numeric_distribution(media_lifecycle_ms),
+            "media_post_savant_finalization_elapsed_ms": _numeric_distribution(
+                media_post_savant_finalization_ms
             ),
             "media_ffprobe_duration_ms": _numeric_distribution(media_ffprobe_ms),
             "media_ffmpeg_duration_ms": _numeric_distribution(media_ffmpeg_ms),
@@ -2019,6 +2248,17 @@ def pressure_failure_reasons(
             reasons.append("rtsp_republishers_connection_errors")
     if int(sample_summary.get("max_savant_send_failures_total") or 0) > cfg.max_send_failures:
         reasons.append("savant_send_failures")
+    if (
+        cfg.keep_evidence > 0
+        and not cfg.forwarder_null_sink
+        and int(sample_summary.get("max_savant_sources") or 0) >= cfg.stream_count
+    ):
+        if int(sample_summary.get("final_savant_pose_objects_total") or 0) <= 0:
+            reasons.append("savant_pose_objects_zero")
+        if int(sample_summary.get("final_savant_person_observations_exported_total") or 0) <= 0:
+            reasons.append("savant_person_observations_zero")
+        if int(sample_summary.get("final_savant_face_observations_exported_total") or 0) <= 0:
+            reasons.append("savant_face_observations_zero")
     if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:
@@ -2479,9 +2719,14 @@ def face_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str, 
     return {
         "watchlist_hit_emitted_count": int(logs.get("watchlist_hit_emitted") or 0),
         "watchlist_emit_failed_count": int(logs.get("watchlist_emit_failed") or 0),
-        "gallery_query_latency_ms": _not_enough_data(
-            "face-worker gallery query timer is not instrumented yet"
+        "gallery_query_completed_count": int(
+            logs.get("watchlist_gallery_query_completed") or 0
         ),
+        "gallery_query_failed_count": int(
+            logs.get("watchlist_gallery_query_failed") or 0
+        ),
+        "gallery_query_latency_ms": logs.get("face_gallery_query_latency_ms")
+        or _not_enough_data("face-worker gallery query logs unavailable"),
         "cpu_percent": (
             (diagnostics.get("sample_summary") or {})
             .get("max_worker_cpu_percent", {})
@@ -2499,6 +2744,14 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         "imageio_ffmpeg_fallback_count": int(logs.get("imageio_ffmpeg_fallback") or 0),
         "finalization_duration_ms": logs.get("media_finalization_duration_ms")
         or _not_enough_data("media finalization logs unavailable"),
+        "queue_wait_ms": logs.get("media_queue_wait_ms")
+        or _not_enough_data("media queue wait logs unavailable"),
+        "lifecycle_elapsed_ms": logs.get("media_lifecycle_elapsed_ms")
+        or _not_enough_data("media lifecycle logs unavailable"),
+        "post_savant_finalization_elapsed_ms": logs.get(
+            "media_post_savant_finalization_elapsed_ms"
+        )
+        or _not_enough_data("post-Savant finalization logs unavailable"),
         "ffprobe_duration_ms": logs.get("media_ffprobe_duration_ms")
         or _not_enough_data("ffprobe logs unavailable"),
         "ffmpeg_duration_ms": logs.get("media_ffmpeg_duration_ms")

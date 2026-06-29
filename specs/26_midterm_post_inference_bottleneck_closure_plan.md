@@ -72,22 +72,31 @@ Already mitigated:
 
 Still open:
 
-- face-worker writes each face observation and then synchronously runs
-  watchlist/gallery matching;
+- face-worker still writes each face observation and then synchronously runs
+  watchlist/gallery matching, but 2026-06-29 code now emits
+  `gallery_query_duration_ms` so pressure reports can bound p95/p99 instead of
+  reporting `not_enough_data`;
 - gallery and face observation vector searches do not yet have ANN vector
-  indexes;
+  indexes; current live gallery size was only 3 active embeddings / 5 total
+  embeddings, so ANN should not be added until representative gallery-size
+  EXPLAIN/pressure data proves exact scan cost is real;
 - media-worker materialization is still organized around one polling process and
-  ffprobe/ffmpeg/decode finalization.
-- dual-branch topology has front-end inference evidence, but the same topology
-  has not yet been proven as a full replay/clip/media evidence-chain profile.
-- topology apply writes a replay shard file, while clip-worker reads
-  `REPLAY_SHARDS_JSON` or `REPLAY_SHARDS_CONFIG_PATH`; deployment must prove
-  those paths are wired to the same shard plan before dual evidence closure.
+  ffprobe/ffmpeg/decode finalization, but 2026-06-29 code now exposes
+  `queue_wait_ms`, `lifecycle_elapsed_ms`, and post-Savant finalizer elapsed
+  logs for pressure report p95/p99 ranking;
+- dual-branch topology now has one same-GPU 8 FPS retained-evidence pass, but
+  it still needs longer 8 FPS soak and real RTSP mixed-input repeat runs before
+  being treated as a production guarantee.
+- topology apply replay shard output and clip-worker replay shard input have
+  been wired through `REPLAY_SHARDS_JSON` for the pressure harness; regression
+  coverage now asserts topology branch source maps, generated source
+  `replay_shard_id`, and replay shard `source_ids` stay consistent.
 - downstream observability now emits a fixed Redis/PostgreSQL/worker/media/8090
-  schema, but face-worker gallery query p95 and event-worker dedupe latency are
-  still explicit `not_enough_data` fields until code-level timers are added.
-- 8090 config-sync versus runtime-apply behavior needs to remain covered by
-  regression harnesses so camera rule edits do not reintroduce unnecessary
+  schema; face-worker gallery query latency and media-worker lifecycle splits
+  are now populated from logs when present. Event-worker dedupe latency remains
+  an explicit `not_enough_data` field until a code-level timer is added.
+- 8090 config-sync versus runtime-apply behavior is now covered by static
+  regression harnesses so camera rule/ROI edits do not reintroduce unnecessary
   runtime restarts.
 
 Important boundary:
@@ -96,11 +105,19 @@ Important boundary:
   evidence chain for that pressure profile.
 - The 60-stream 16/1 run proves high-input evidence-chain resilience, not
   16 FPS inference throughput.
-- The same-GPU dual-branch 30+30 run proves front-end inference entry pressure
-  at 4 FPS and 8 FPS with `keep-evidence=0`; it does not close this
-  post-inference spec until replay shard routing, clip-worker materialization,
-  media finalization, and 8090 evidence queries are verified on the same
-  topology.
+- The same-GPU dual-branch 30+30 topology has front-end inference entry proof
+  and one retained-evidence closure proof at 4 FPS and 8 FPS. It is a strong
+  single-run result, not yet a production soak guarantee.
+- 2026-06-29 retained-evidence follow-up:
+  `docs/midterm_dual1gpu_evidence_chain_4fps_8fps_report_2026-06-29.md`
+  proves the same-GPU dual-branch topology at 4 FPS with replay shard routing
+  and 50/50 playable, annotation-complete evidence bundles. A first 8 FPS
+  retained run exposed a false-positive risk where ingress passed but
+  pose/person/face observation output was 0. The follow-up 8 FPS batch=4 run
+  passed with 50 retained playable bundles, 8,189 pose/person observations, and
+  2,605 exported face observations. Future pressure reports must keep the
+  semantic observation gate so ingress-only success is not mistaken for
+  algorithm/evidence success.
 
 ## 3. Coordination Gate
 
@@ -708,6 +725,19 @@ Harness:
 - Seeded gallery/observation plan harness.
 - Exact-versus-ANN correctness comparison.
 - Watchlist threshold and target-person filtering tests.
+- Pressure-log parser test for `gallery_query_duration_ms` p95/p99.
+
+2026-06-29 status:
+
+- Implemented: `WatchlistMatchEmitter` logs
+  `watchlist_gallery_query_completed` / `watchlist_gallery_query_failed` with
+  `gallery_query_duration_ms`, target count, top_k, threshold, and result count.
+- Implemented: pressure report parses `face_worker.gallery_query_latency_ms`
+  from logs instead of leaving it permanently `not_enough_data`.
+- Current live DB check showed 3 active `person_gallery_embeddings` / 5 total
+  embeddings and no ANN vector indexes. With this gallery size, exact scan is
+  not the current bottleneck; defer ANN until representative gallery-size
+  EXPLAIN/pressure evidence exists.
 
 Acceptance:
 
@@ -732,6 +762,17 @@ Harness:
 - Pressure rerun comparing lifecycle p95/p99 against the 60-stream 3 FPS
   baseline.
 
+2026-06-29 status:
+
+- Implemented: post-Savant materialization metrics now include
+  `lifecycle_elapsed_ms` alongside `queue_wait_ms` and finalization elapsed.
+- Implemented: `media_event_finalized` logs expose `queue_wait_ms`,
+  `lifecycle_elapsed_ms`, and `post_savant_finalization_elapsed_ms`.
+- Implemented: pressure report parses media queue wait, lifecycle elapsed,
+  post-Savant finalization, ffprobe, and ffmpeg distributions. The next
+  pressure run can rank whether the remaining bottleneck is queue admission,
+  finalizer CPU/ffmpeg, or end-to-end lifecycle.
+
 Acceptance:
 
 - `PASS_POST_INFERENCE_SPEC3_MEDIA_FINALIZER_THROUGHPUT`;
@@ -744,8 +785,9 @@ Change:
 
 - Wire and prove topology replay shard output path equals clip-worker replay
   shard input path.
-- Run same-GPU dual branch with evidence retention enabled before calling 8 FPS
-  dual topology production-ready.
+- Keep same-GPU dual branch retained-evidence pressure in the acceptance suite
+  and repeat it as longer 8 FPS soak / real RTSP mixed-input tests before
+  calling the topology production-ready.
 
 Harness:
 
@@ -793,14 +835,18 @@ Current checkout status:
 - Do not issue `PASS_POST_INFERENCE_60_STREAM_CLOSURE` yet.
 - The downstream evidence-chain pressure result is good enough to start scoped
   code work. Stage 1-2 removed the record-request full-stream scan and added the
-  downstream observability contract; final closure still requires bounding
-  face-worker gallery/watchlist p95 for the selected gallery size, choosing and
-  proving the media-finalizer concurrency model, and running a fresh pressure
-  report with the new schema.
+  downstream observability contract. The 2026-06-29 P1 follow-up added
+  face-worker gallery latency logs, media-worker queue/lifecycle split metrics,
+  8090 config-sync no-restart regression coverage, and topology replay shard
+  source-map regression coverage. Final closure still requires a fresh pressure
+  report with these metrics populated, bounding face-worker gallery/watchlist
+  p95 for the selected gallery size, and choosing/proving the media-finalizer
+  concurrency model if queue/lifecycle p95 remains high.
 - If the target deployment uses same-GPU or dual-GPU topology, final closure
-  also requires Spec 6 evidence-chain proof on that topology. The current
-  same-GPU dual-branch 8 FPS result is a front-end inference-entry proof, not a
-  downstream evidence-chain closure token.
+  also requires repeated Spec 6 evidence-chain proof on that topology. The
+  current same-GPU dual-branch 8 FPS batch=4 run is a valid single-run
+  downstream evidence-chain closure token, but not a soak-test or production
+  reliability guarantee.
 
 ## 8. Non-Goals
 
