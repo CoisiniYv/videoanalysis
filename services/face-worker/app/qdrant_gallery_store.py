@@ -25,6 +25,7 @@ class QdrantGallerySettings:
     url: str
     api_key: str
     collection: str
+    prefer_grpc: bool
     timeout_seconds: float
     search_ef: int
     candidate_multiplier: int
@@ -66,6 +67,7 @@ class QdrantGallerySearchBackend:
                 url=cfg.qdrant_url,
                 api_key=cfg.qdrant_api_key,
                 collection=cfg.qdrant_collection,
+                prefer_grpc=cfg.qdrant_prefer_grpc,
                 timeout_seconds=cfg.qdrant_timeout_seconds,
                 search_ef=cfg.qdrant_search_ef,
                 candidate_multiplier=cfg.qdrant_candidate_multiplier,
@@ -322,6 +324,7 @@ def _make_qdrant_client(settings: QdrantGallerySettings) -> Any:
     return QdrantClient(
         url=settings.url,
         api_key=api_key,
+        prefer_grpc=settings.prefer_grpc,
         timeout=settings.timeout_seconds,
     )
 

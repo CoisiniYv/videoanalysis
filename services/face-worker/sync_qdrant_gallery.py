@@ -37,11 +37,17 @@ class SyncConfig:
     qdrant_api_key: str
     qdrant_base_collection: str
     qdrant_alias: str
+    prefer_grpc: bool
     timeout_seconds: float
     write_wait: bool
     batch_size: int
     max_attempts: int
     claimed_by: str
+    indexing_threshold_kb: int
+    full_scan_threshold_kb: int
+    default_segment_number: int
+    hnsw_m: int
+    hnsw_ef_construct: int
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -70,11 +76,17 @@ def main(argv: list[str] | None = None) -> int:
         qdrant_api_key=cfg0.qdrant_api_key,
         qdrant_base_collection=cfg0.qdrant_base_collection,
         qdrant_alias=cfg0.qdrant_collection,
+        prefer_grpc=cfg0.qdrant_prefer_grpc,
         timeout_seconds=cfg0.qdrant_timeout_seconds,
         write_wait=cfg0.qdrant_write_wait,
         batch_size=max(1, args.batch_size),
         max_attempts=max(1, args.max_attempts),
         claimed_by=f"{socket.gethostname()}:{os.getpid()}",
+        indexing_threshold_kb=max(1, cfg0.qdrant_indexing_threshold_kb),
+        full_scan_threshold_kb=max(1, cfg0.qdrant_full_scan_threshold_kb),
+        default_segment_number=max(0, cfg0.qdrant_default_segment_number),
+        hnsw_m=max(1, cfg0.qdrant_hnsw_m),
+        hnsw_ef_construct=max(1, cfg0.qdrant_hnsw_ef_construct),
     )
     client = make_client(cfg)
     with psycopg.connect(cfg.database_url, autocommit=True) as conn:
@@ -105,6 +117,7 @@ def make_client(cfg: SyncConfig) -> Any:
     return QdrantClient(
         url=cfg.qdrant_url,
         api_key=cfg.qdrant_api_key or None,
+        prefer_grpc=cfg.prefer_grpc,
         timeout=cfg.timeout_seconds,
     )
 
@@ -134,8 +147,13 @@ def ensure_collection(client: Any, cfg: SyncConfig) -> None:
                 size=VECTOR_SIZE,
                 distance=qmodels.Distance.COSINE,
             ),
+            hnsw_config=qdrant_hnsw_config(qmodels, cfg),
+            optimizers_config=qdrant_optimizer_config(qmodels, cfg),
+            on_disk_payload=True,
         )
         logger.info("qdrant_collection_created collection=%s", cfg.qdrant_base_collection)
+    else:
+        ensure_collection_tuning(client, cfg)
     ensure_alias(client, cfg)
     for field_name, schema in (
         ("person_id", qmodels.PayloadSchemaType.INTEGER),
@@ -188,6 +206,41 @@ def ensure_alias(client: Any, cfg: SyncConfig) -> None:
             cfg.qdrant_alias,
             cfg.qdrant_base_collection,
         )
+
+
+def ensure_collection_tuning(client: Any, cfg: SyncConfig) -> None:
+    qmodels = models()
+    client.update_collection(
+        collection_name=cfg.qdrant_base_collection,
+        hnsw_config=qdrant_hnsw_config(qmodels, cfg),
+        optimizers_config=qdrant_optimizer_config(qmodels, cfg),
+    )
+    logger.info(
+        "qdrant_collection_tuning_ready collection=%s indexing_threshold_kb=%d "
+        "full_scan_threshold_kb=%d default_segment_number=%d hnsw_m=%d "
+        "hnsw_ef_construct=%d",
+        cfg.qdrant_base_collection,
+        cfg.indexing_threshold_kb,
+        cfg.full_scan_threshold_kb,
+        cfg.default_segment_number,
+        cfg.hnsw_m,
+        cfg.hnsw_ef_construct,
+    )
+
+
+def qdrant_hnsw_config(qmodels: Any, cfg: SyncConfig) -> Any:
+    return qmodels.HnswConfigDiff(
+        m=cfg.hnsw_m,
+        ef_construct=cfg.hnsw_ef_construct,
+        full_scan_threshold=cfg.full_scan_threshold_kb,
+    )
+
+
+def qdrant_optimizer_config(qmodels: Any, cfg: SyncConfig) -> Any:
+    return qmodels.OptimizersConfigDiff(
+        default_segment_number=cfg.default_segment_number,
+        indexing_threshold=cfg.indexing_threshold_kb,
+    )
 
 
 def recreate_collection(client: Any, cfg: SyncConfig) -> None:

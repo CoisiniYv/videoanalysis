@@ -2366,13 +2366,7 @@ def _validate_seq_iq_is_failure(
     ingress_unhealthy = (
         int(sample_summary.get("max_savant_send_failures_total") or 0)
         > cfg.max_send_failures
-        or int(
-            sample_summary.get(
-                "max_forwarder_queue_depth",
-                sample_summary.get("max_queue_depth", 0),
-            )
-            or 0
-        )
+        or int(sample_summary.get("queue_full_samples") or 0)
         > 0
         or int(source_summary.get("exited") or 0) > cfg.max_exited_sources
         or int(source_summary.get("restart_count_total") or 0) > 0
@@ -2785,10 +2779,14 @@ def qdrant_observability_summary(conn, diagnostics: dict[str, Any]) -> dict[str,
                 """
                 SELECT
                     count(*) FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS active,
-                    EXTRACT(EPOCH FROM (now() - min(created_at)))
-                        FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS oldest_active_age_s,
-                    EXTRACT(EPOCH FROM (now() - max(processed_at)))
-                        FILTER (WHERE status = 'completed') AS newest_completed_age_s
+                    EXTRACT(EPOCH FROM (
+                        now() - min(created_at)
+                            FILTER (WHERE status IN ('pending', 'retry', 'processing'))
+                    )) AS oldest_active_age_s,
+                    EXTRACT(EPOCH FROM (
+                        now() - max(processed_at)
+                            FILTER (WHERE status = 'completed')
+                    )) AS newest_completed_age_s
                 FROM gallery_vector_sync_outbox
                 """
             ).fetchone()

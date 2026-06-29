@@ -8,6 +8,7 @@ import math
 import signal
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -158,6 +159,14 @@ def _int_config(value: Any, fallback: int) -> int:
     return parsed
 
 
+def _is_uuid_text(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
 class WatchlistMatchEmitter:
     """Emit watchlist_hit events for newly persisted face observations."""
 
@@ -172,6 +181,7 @@ class WatchlistMatchEmitter:
         self._redis = redis_client
         self._store = build_gallery_search_backend(cfg, conn)
         self._rule_cache: dict[str, tuple[float, list[WatchlistRuleConfig]]] = {}
+        self._camera_id_by_source_cache: dict[str, tuple[float, str | None]] = {}
         self._env_target_person_ids: list[int] | None = None
         self._last_env_target_refresh = 0.0
         logger.info(
@@ -185,6 +195,7 @@ class WatchlistMatchEmitter:
 
     def emit_for_observation(self, obs: dict) -> int:
         """Search configured watchlist targets and emit events above threshold."""
+        obs = self._normalize_observation_camera_id(obs)
         rules = self._current_rules_for_observation(obs)
         if not rules:
             logger.warning(
@@ -291,6 +302,56 @@ class WatchlistMatchEmitter:
                 )
         return emitted
 
+    def _normalize_observation_camera_id(self, obs: dict) -> dict:
+        camera_id = str(obs.get("camera_id") or "")
+        if not camera_id or _is_uuid_text(camera_id):
+            return obs
+        source_id = str(obs.get("source_id") or camera_id)
+        resolved_camera_id = self._camera_id_for_source(source_id)
+        if not resolved_camera_id or resolved_camera_id == camera_id:
+            return obs
+        normalized = dict(obs)
+        normalized["camera_id"] = resolved_camera_id
+        logger.info(
+            "watchlist camera_id resolved source_id=%s original_camera_id=%s camera_id=%s",
+            source_id,
+            camera_id,
+            resolved_camera_id,
+        )
+        return normalized
+
+    def _camera_id_for_source(self, source_id: str) -> str | None:
+        if not source_id:
+            return None
+        now = time.monotonic()
+        refresh_seconds = max(self._cfg.watchlist_target_refresh_seconds, 1)
+        cached = self._camera_id_by_source_cache.get(source_id)
+        if cached is not None and now - cached[0] < refresh_seconds:
+            return cached[1]
+        try:
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT id::text AS id
+                    FROM cameras
+                    WHERE source_id = %(source_id)s
+                    ORDER BY enabled DESC, updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    {"source_id": source_id},
+                )
+                row = cur.fetchone()
+        except Exception:
+            logger.exception(
+                "watchlist camera source lookup failed source_id=%s",
+                source_id,
+            )
+            self._camera_id_by_source_cache[source_id] = (now, None)
+            return None
+        resolved = str(row["id"]) if row and row.get("id") else None
+        self._camera_id_by_source_cache[source_id] = (now, resolved)
+        return resolved
+
     def _current_rules_for_observation(self, obs: dict) -> list[WatchlistRuleConfig]:
         camera_id = str(obs.get("camera_id") or "")
         if not camera_id:
@@ -307,25 +368,32 @@ class WatchlistMatchEmitter:
         if cached is not None and now - cached[0] < refresh_seconds:
             return cached[1]
 
-        with self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                SELECT r.rule_id, r.config, r.evidence_policy
-                FROM camera_rules r
-                JOIN cameras c ON c.id = r.camera_id
-                WHERE r.camera_id = %(camera_id)s
-                  AND c.enabled = true
-                  AND r.enabled = true
-                  AND (
-                    r.algorithm_id = 'face.watchlist'
-                    OR r.rule_type = 'face.watchlist'
-                  )
-                ORDER BY r.updated_at DESC NULLS LAST, r.id DESC
-                LIMIT 1
-                """,
-                {"camera_id": camera_id},
+        try:
+            with self._conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT r.rule_id, r.config, r.evidence_policy
+                    FROM camera_rules r
+                    JOIN cameras c ON c.id = r.camera_id
+                    WHERE r.camera_id = %(camera_id)s
+                      AND c.enabled = true
+                      AND r.enabled = true
+                      AND (
+                        r.algorithm_id = 'face.watchlist'
+                        OR r.rule_type = 'face.watchlist'
+                      )
+                    ORDER BY r.updated_at DESC NULLS LAST, r.id DESC
+                    LIMIT 1
+                    """,
+                    {"camera_id": camera_id},
+                )
+                rows = list(cur.fetchall())
+        except psycopg.errors.InvalidTextRepresentation:
+            logger.warning(
+                "watchlist camera rules skipped invalid camera_id=%s",
+                camera_id,
             )
-            rows = list(cur.fetchall())
+            rows = []
 
         rules = [
             self._rule_from_row(camera_id, row, source="db_camera_rule")

@@ -33,7 +33,7 @@ RTSP source
   -> Savant inference
   -> Redis streams
   -> event-worker / face-worker
-  -> PostgreSQL / pgvector
+  -> PostgreSQL / Qdrant / pgvector rollback
   -> clip-worker Replay job
   -> video-file-sink raw clip
   -> media-worker evidence indexing/finalization
@@ -55,8 +55,10 @@ RTSP source
 
 当前主要技术风险不再是“是否能跑通一个告警证据”，而是扩展性和验收边界：
 
-- face-worker 仍在单消费 loop 中同步做 DB insert 和 watchlist/gallery pgvector 匹配。
-- gallery 和 face observation 向量查询目前没有 ANN 索引。
+- face-worker 仍在单消费 loop 中同步做 DB insert、规则解析、Qdrant/pgvector 查询和 event publish；
+  Qdrant 已解决注册图库向量检索扩展性，但尚未把 persistence 和 matching 解耦。
+- 注册图库查询已有 Qdrant 派生索引；历史 `face_observations` 相似检索仍未迁移到 Qdrant，也不属于
+  本次 cutover 范围。
 - media-worker 仍是单进程轮询 finalizer，第一阶段 deadline-aware pacer 已通过 pressure profile
   验证；如果生产目标变成“所有事件全量物化”，仍需要重新评估 worker pool / 多容器 claim / 独立
   finalizer service。
@@ -82,6 +84,10 @@ RTSP source
   `imageio_ffmpeg_fallback_count=0` 误报为 fallback。
 - clean-machine 迁移脚本支持 `--include-images` 离线打包 Docker 镜像，部署脚本可自动加载
   `images.tar` 并以 `--no-build` 启动，UOS 迁移步骤已固化。
+- face-worker 在线注册人脸图库检索已完成 Qdrant authoritative 切换。PostgreSQL 仍是人员和
+  `person_gallery_embeddings` 事实源，Qdrant 是可重建派生索引；60 路 8 FPS Qdrant authoritative
+  压测通过，fallback count 为 0，20,000 向量 gRPC benchmark all-search p95/p99 为
+  4.037ms/6.427ms。
 
 ## 3. 当前部署边界
 
@@ -99,7 +105,7 @@ RTSP source
 | 推理 | `savant-security` | DeepStream/Savant 模型链、规则和 Redis exporter |
 | 源接入 | `source-adapter` 和动态 `video-analytics-source-*` | RTSP 到 Replay |
 | 事件处理 | `event-worker` | Redis event 入库、告警、录像请求发布 |
-| 人脸处理 | `face-worker` | face observation 入库、gallery/watchlist 匹配、watchlist hit 事件 |
+| 人脸处理 | `face-worker` | face observation 入库、Qdrant/pgvector gallery-watchlist 匹配、watchlist hit 事件 |
 | 取证调度 | `clip-worker` | 消费 record requests，调用 Replay，写 evidence task 状态 |
 | 原始视频 | `video-file-sink` | Replay job 输出 `raw_clip.mov` 相关 sink 文件 |
 | 证据最终化 | `media-worker` | 扫描 sink 输出、校验 raw clip、写 DB-backed evidence 索引 |
@@ -258,6 +264,10 @@ media mount。这个设计让用户入口集中在 8090，而不是直接暴露 
 - face-worker 通过 env 和图库做全局 watchlist/gallery matching。
 
 报告使用当前代码观察：face-worker 仍会对每条新插入 observation 同步调用 watchlist emitter。
+2026-06-29 后，在线图库检索已支持 `pgvector`、`shadow`、`qdrant`、`hybrid` 后端；当前
+Qdrant authoritative 运行态为 `FACE_VECTOR_BACKEND=qdrant`、
+`QDRANT_FALLBACK_TO_PGVECTOR=false`、`QDRANT_PREFER_GRPC=true`。这修复的是图库向量查询
+扩展性，不等价于已经拆分 face observation 入库和 matching 队列。
 
 ### 5.4 Evidence API
 
@@ -348,10 +358,10 @@ topology 写出的 shard 文件。
 - `match_results`
 - `person_bbox_observations`
 
-当前 btree/person-active 索引用于过滤和关联，但 `face_observations.embedding` 与
-`person_gallery_embeddings.embedding` 没有 ANN vector index。`vector_store.py` 使用
-`ORDER BY embedding <=> %(query_embedding)s` 做 exact pgvector 查询。图库规模增大后，
-watchlist/gallery latency 会随图库规模放大。
+当前 btree/person-active 索引用于过滤和关联。2026-06-29 后，
+`person_gallery_embeddings` 的在线注册图库查询已经有 Qdrant 派生索引和 pgvector rollback path；
+Qdrant 只服务注册图库，不改变 PostgreSQL 事实源。`face_observations.embedding` 历史相似检索仍
+未迁移到 Qdrant，后续如要做历史人脸搜索，需要单独设计 retention、相机/时间过滤和删除一致性。
 
 ### 6.4 Evidence
 
@@ -495,8 +505,11 @@ CPU 和 duplicate count 没有异常。
 3. 插入 PostgreSQL；
 4. 对新插入 observation 同步调用 `watchlist_emitter.emit_for_observation()`。
 
-`vector_store.py` 的 gallery/observation 查询使用 exact pgvector ordering。图库规模、每人 embedding
-数量、face observation 速率增加后，单 consumer loop 会被 DB insert 和向量检索共同拖慢。
+注册图库检索已经切到 Qdrant authoritative，并保留 pgvector rollback/exact rerank path。20,000
+向量 gRPC benchmark 显示 Qdrant 查询本身已不是“数千人员、每人几张脸”场景的主要瓶颈。剩余风险
+变成：单 consumer loop 仍把 DB insert、规则解析、Qdrant 查询、exact rerank、event publish 和 ACK
+串在一起；face observation 速率继续增加时，应该优先考虑拆分 persistence/matching 队列，而不是再
+优化 pgvector gallery scan。
 
 ### 9.3 media-worker finalizer 扩展模型
 
@@ -638,8 +651,10 @@ Toolkit。应用包不迁移旧 PostgreSQL、Redis、Replay RocksDB、证据媒�
 
 - 已完成：替换 `RecordRequestPublisher.has_request()` 全 stream 扫描。
 - 已完成：pressure60 downstream observability schema 和静态测试。
-- 为 face gallery/observation 查询补 `EXPLAIN ANALYZE` 基线。
-- 根据基线添加 pgvector ANN index，并决定是否需要 exact rerank。
+- 已完成：注册图库在线查询 Qdrant cutover，60 路 authoritative 压测 fallback=0，20,000 向量
+  gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。
+- 后续仅对历史 `face_observations` 相似检索补 `EXPLAIN ANALYZE` / Qdrant 方案；注册图库
+  pgvector ANN 已不是本阶段首要路线。
 - 已补 harness：`RecordRequestPublisher` 幂等单测、event-worker duplicate/reclaim 测试、
   合成 Redis stream 验证不再调用 `XRANGE - +`。
 
@@ -687,11 +702,13 @@ DB-backed evidence 语义已经替代单纯 sidecar 读取。
   长时间 soak；
 - 60 路 8 FPS 同卡双分支已完成 pressure source retained-evidence 验收；media-worker 平滑调度将
   evidence lifecycle p95 明确控制在约 192 秒；
+- 注册图库 Qdrant authoritative cutover 已完成当前 scale gate：60 路 8 FPS 压测 Qdrant p95/p99
+  为 3ms/4ms、fallback=0；20,000 向量 benchmark all-search p95/p99 为 4.037ms/6.427ms；
 - 16 FPS 不应作为当前默认生产承诺；
 - T4/弱卡 60 路仍需要按单独计划验收。
 
 下一阶段应避免继续扩大配置面，而应优先做真实 RTSP 混合输入、长时间 soak、生产硬件 profile、
-face-worker 代表性图库规模 EXPLAIN/压力验证，以及 Savant 阶段级 latency 指标。只有这些闭环后，
+face-worker persistence/matching 解耦可行性，以及 Savant 阶段级 latency 指标。只有这些闭环后，
 `PASS_POST_INFERENCE_60_STREAM_CLOSURE` 或更高层的生产 readiness 才有足够证据支撑。
 
 ## 13. 参考依据

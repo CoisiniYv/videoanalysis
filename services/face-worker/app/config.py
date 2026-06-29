@@ -29,6 +29,7 @@ class Config:
     qdrant_api_key: str
     qdrant_collection: str
     qdrant_base_collection: str
+    qdrant_prefer_grpc: bool
     qdrant_timeout_seconds: float
     qdrant_search_ef: int
     qdrant_candidate_multiplier: int
@@ -36,6 +37,11 @@ class Config:
     qdrant_exact_rerank_enabled: bool
     qdrant_fallback_to_pgvector: bool
     qdrant_write_wait: bool
+    qdrant_indexing_threshold_kb: int
+    qdrant_full_scan_threshold_kb: int
+    qdrant_default_segment_number: int
+    qdrant_hnsw_m: int
+    qdrant_hnsw_ef_construct: int
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -93,6 +99,7 @@ def load_config() -> Config:
             "QDRANT_BASE_COLLECTION",
             "face_gallery_adaface_512_v1",
         ),
+        qdrant_prefer_grpc=_bool_env("QDRANT_PREFER_GRPC", "true"),
         qdrant_timeout_seconds=float(os.getenv("QDRANT_TIMEOUT_SECONDS", "2.0")),
         qdrant_search_ef=int(os.getenv("QDRANT_SEARCH_EF", "128")),
         qdrant_candidate_multiplier=int(os.getenv("QDRANT_CANDIDATE_MULTIPLIER", "3")),
@@ -100,4 +107,15 @@ def load_config() -> Config:
         qdrant_exact_rerank_enabled=_bool_env("QDRANT_EXACT_RERANK_ENABLED", "true"),
         qdrant_fallback_to_pgvector=_bool_env("QDRANT_FALLBACK_TO_PGVECTOR", "true"),
         qdrant_write_wait=_bool_env("QDRANT_WRITE_WAIT", "true"),
+        qdrant_indexing_threshold_kb=int(
+            os.getenv("QDRANT_INDEXING_THRESHOLD_KB", "1000")
+        ),
+        qdrant_full_scan_threshold_kb=int(
+            os.getenv("QDRANT_FULL_SCAN_THRESHOLD_KB", "1000")
+        ),
+        qdrant_default_segment_number=int(
+            os.getenv("QDRANT_DEFAULT_SEGMENT_NUMBER", "2")
+        ),
+        qdrant_hnsw_m=int(os.getenv("QDRANT_HNSW_M", "16")),
+        qdrant_hnsw_ef_construct=int(os.getenv("QDRANT_HNSW_EF_CONSTRUCT", "100")),
     )

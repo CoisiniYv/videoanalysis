@@ -102,6 +102,7 @@ def _settings(**overrides):
         "url": "http://qdrant:6333",
         "api_key": "",
         "collection": "face_gallery_current",
+        "prefer_grpc": True,
         "timeout_seconds": 2.0,
         "search_ef": 0,
         "candidate_multiplier": 3,

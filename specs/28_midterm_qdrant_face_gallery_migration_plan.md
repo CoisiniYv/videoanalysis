@@ -615,11 +615,11 @@ Actions:
   and the pinned Qdrant image in offline image bundles.
 - Added static tests for default pgvector behavior, compose profile placement,
   Qdrant result-shape compatibility, and pressure-report schema fields.
-- Runtime Qdrant startup was not completed in this pass because Docker image
-  downloads through the available proxy were too slow. CLI proxy worked for
-  GitHub and `crane`, but Docker daemon image pulls/build base layers did not
-  complete within the interactive window. This is an external download channel
-  issue, not a code-path failure.
+- Runtime Qdrant startup was completed after proxy recovery:
+  `video-analytics-midterm-qdrant` runs `qdrant/qdrant:v1.18.2` on the compose
+  network without publishing host port `6333`.
+- Qdrant runtime search now defaults to gRPC through `QDRANT_PREFER_GRPC=true`
+  to avoid HTTP/JSON overhead for 512-d vector queries.
 
 Acceptance:
 
@@ -672,8 +672,12 @@ Actions:
   `bootstrap`, `drain-outbox`, `reconcile`, `rebuild`, and `status`.
 - Applied migration 021 successfully on the current live `phase0-postgres`
   database.
-- Runtime Qdrant bootstrap/reconcile remains pending until the Qdrant container
-  image and rebuilt face-worker image are available.
+- Runtime bootstrap/reconcile/drain have been executed. Current live status is
+  PostgreSQL active gallery count 3, Qdrant point count 3, outbox active 0.
+- Collection creation/update now enforces production-oriented query tuning:
+  payload indexes, `on_disk_payload=true`, HNSW `m=16`, `ef_construct=100`,
+  `full_scan_threshold=1000`, optimizer `indexing_threshold=1000`, and
+  `default_segment_number=2`.
 
 Acceptance:
 
@@ -745,7 +749,12 @@ Pass criteria:
 - Added exact rerank tests proving PostgreSQL candidate vectors, not raw Qdrant
   ordering, decide thresholded output when exact rerank is enabled.
 - Added fallback tests for Qdrant errors.
-- Live shadow parity remains pending until Qdrant is running.
+- Live shadow-only pressure was not retained as a separate acceptance artifact.
+  The cutover instead kept exact rerank enabled and verified Qdrant
+  authoritative pressure with fallback disabled, no watchlist emit failures, and
+  retained 8090 evidence. If approximate-only Qdrant decisions are later
+  desired, rerun Stage 3 with exact rerank disabled only after a dedicated
+  parity acceptance run.
 
 ### Stage 4 - Canary Cutover
 
@@ -781,6 +790,15 @@ Pass criteria:
 - Qdrant search p95 and p99 are in the pressure report.
 - Retained watchlist evidence remains queryable through 8090.
 - Rollback to `FACE_VECTOR_BACKEND=pgvector` works by service restart only.
+
+2026-06-29 cutover checkpoint:
+
+- Runtime was switched to `FACE_VECTOR_BACKEND=qdrant`,
+  `QDRANT_FALLBACK_TO_PGVECTOR=false`, `QDRANT_PREFER_GRPC=true`.
+- `face-worker` restarted cleanly without rebuilding Savant, Replay,
+  clip-worker, or media-worker.
+- A 60-route authoritative pressure run completed with fallback count 0 and
+  unchanged `watchlist_hit` evidence semantics.
 
 ### Stage 5 - Operational Hardening
 
@@ -823,6 +841,16 @@ Pass criteria:
 - The operator can tell whether the active backend is pgvector, shadow, or
   Qdrant.
 
+2026-06-29 operational checkpoint:
+
+- Pressure reports include Qdrant query p50/p95/p99, exact rerank p50/p95/p99,
+  fallback count, shadow mismatch count, and outbox active/age summary.
+- `sync_qdrant_gallery.py --mode status` reports collection status, PostgreSQL
+  active gallery count, Qdrant points, update queue, payload indexes, and outbox
+  counts.
+- Snapshot create/restore is still a later hardening task; PostgreSQL rebuild
+  remains the authoritative recovery path for this cutover.
+
 ### Stage 6 - Full Pressure Acceptance
 
 Goal:
@@ -853,6 +881,33 @@ Default SLA:
 - no duplicate `watchlist_hit` rows for the same
   `(source_observation_id, person_id, rule_id)`;
 - retained watchlist evidence is visible in 8090 list/detail.
+
+2026-06-29 pressure acceptance:
+
+- Report:
+  `/data/video-analytics/artifacts/pressure60_qdrant_authoritative_8fps_20260629T130224Z/report.json`
+- 60 routes, 8 FPS, single-GPU dual shard, batch size 4, 300s run plus 600s
+  drain.
+- Status `passed`; failure reasons `[]`; warning only
+  `validate_seq_iq_expected_sampling_gap`.
+- Qdrant query count 4367, p50 2ms, p95 3ms, p99 4ms, max 11ms.
+- Exact rerank count 4367, p50 1ms, p95 1ms, p99 2ms, max 26ms.
+- Fallback count 0; watchlist hits emitted 626; watchlist emit failed 0.
+- `security.face_observations` pending returned to 0.
+- 8090 retained evidence proof was 50/50 with database index source.
+- Cleanup retained 50 playable bundles: 39 `watchlist_hit`, 11 `intrusion`.
+
+2026-06-29 gallery-scale acceptance:
+
+- Report:
+  `/data/video-analytics/artifacts/qdrant_scale/qdrant_gallery_scale_5000x4_tuned_grpc_20260629T132453Z.json`
+- Synthetic gallery: 5000 persons x 4 images = 20,000 active vectors.
+- Temporary collection used gRPC, HNSW indexed all 20,000 vectors, and was
+  deleted after the benchmark.
+- All-search latency: p50 1.996ms, p95 4.037ms, p99 6.427ms, max 7.104ms.
+- Target-filtered latency remained under p95 2.025ms for target sizes 2, 20,
+  and 200.
+- Benchmark acceptance `max_p95_ms=75`, `max_p99_ms=150` passed.
 
 ## 8. Rollback Plan
 
@@ -939,6 +994,7 @@ services/face-worker/app/qdrant_gallery_store.py
 services/face-worker/app/gallery_sync_outbox.py
 services/face-worker/app/worker.py
 services/face-worker/sync_qdrant_gallery.py
+services/face-worker/benchmark_qdrant_gallery_scale.py
 scripts/runtime/run_midterm_pressure60.py
 libs/face_registration/gallery_repository.py
 libs/face_registration/image_face_registration.py
@@ -972,6 +1028,19 @@ Final token:
 ```text
 PASS_FACE_GALLERY_QDRANT_CUTOVER
 ```
+
+2026-06-29 status:
+
+- Qdrant authoritative runtime and 60-route pressure acceptance are complete.
+- PostgreSQL remains source of truth and Qdrant rebuild from PostgreSQL is
+  proven through bootstrap/reconcile/status.
+- Live rollback was tested by restarting only `face-worker` with
+  `FACE_VECTOR_BACKEND=pgvector`, observing `backend=pgvector`, then restarting
+  only `face-worker` back to `FACE_VECTOR_BACKEND=qdrant` with fallback
+  disabled and observing `backend=qdrant`. No rebuild, Savant, Replay,
+  clip-worker, or media-worker restart was needed.
+- Snapshot create/restore and 50k/100k gallery benchmarks remain later
+  hardening, not blockers for the current 5000-person cutover.
 
 ## 12. Recommended First Slice
 

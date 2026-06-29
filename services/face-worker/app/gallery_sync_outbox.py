@@ -192,14 +192,18 @@ def outbox_status_summary(conn: psycopg.Connection) -> dict[str, Any]:
         counts = {str(row["status"]): int(row["count"]) for row in cur.fetchall()}
         cur.execute(
             """
-            SELECT
-                count(*) FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS active,
-                EXTRACT(EPOCH FROM (now() - min(created_at)))
-                    FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS oldest_active_age_s,
-                EXTRACT(EPOCH FROM (now() - max(processed_at)))
-                    FILTER (WHERE status = 'completed') AS newest_completed_age_s
-            FROM gallery_vector_sync_outbox
-            """
+                SELECT
+                    count(*) FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS active,
+                    EXTRACT(EPOCH FROM (
+                        now() - min(created_at)
+                            FILTER (WHERE status IN ('pending', 'retry', 'processing'))
+                    )) AS oldest_active_age_s,
+                    EXTRACT(EPOCH FROM (
+                        now() - max(processed_at)
+                            FILTER (WHERE status = 'completed')
+                    )) AS newest_completed_age_s
+                FROM gallery_vector_sync_outbox
+                """
         )
         row = dict(cur.fetchone())
     row["status_counts"] = counts

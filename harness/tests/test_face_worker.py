@@ -53,6 +53,7 @@ class TestFaceWorkerConfig:
             qdrant_api_key="",
             qdrant_collection="face_gallery_current",
             qdrant_base_collection="face_gallery_adaface_512_v1",
+            qdrant_prefer_grpc=True,
             qdrant_timeout_seconds=2.0,
             qdrant_search_ef=128,
             qdrant_candidate_multiplier=3,
@@ -60,6 +61,11 @@ class TestFaceWorkerConfig:
             qdrant_exact_rerank_enabled=True,
             qdrant_fallback_to_pgvector=True,
             qdrant_write_wait=True,
+            qdrant_indexing_threshold_kb=1000,
+            qdrant_full_scan_threshold_kb=1000,
+            qdrant_default_segment_number=2,
+            qdrant_hnsw_m=16,
+            qdrant_hnsw_ef_construct=100,
         )
         assert cfg.face_observation_stream == "security.face_observations"
         assert cfg.consumer_group == "face-workers"
@@ -82,6 +88,9 @@ class TestFaceWorkerConfig:
         assert cfg.consumer_start_id == "0"
         assert cfg.face_vector_backend == "pgvector"
         assert cfg.qdrant_collection == "face_gallery_current"
+        assert cfg.qdrant_prefer_grpc is True
+        assert cfg.qdrant_indexing_threshold_kb == 1000
+        assert cfg.qdrant_full_scan_threshold_kb == 1000
 
     def test_load_config_env_override(self, monkeypatch):
         monkeypatch.setenv("FACE_OBSERVATION_STREAM", "custom.face.stream")
@@ -166,6 +175,7 @@ class _FakeWatchlistCursor:
     def __init__(self, conn):
         self.conn = conn
         self.rows = []
+        self.row = None
 
     def __enter__(self):
         return self
@@ -175,8 +185,14 @@ class _FakeWatchlistCursor:
 
     def execute(self, query, params=None):
         params = params or {}
+        self.row = None
         if "FROM camera_rules" in query:
             self.rows = self.conn.rules_by_camera.get(params.get("camera_id"), [])
+            return
+        if "FROM cameras" in query:
+            camera_id = self.conn.cameras_by_source.get(params.get("source_id"))
+            self.row = {"id": camera_id} if camera_id else None
+            self.rows = []
             return
         if "FROM persons" in query:
             person_ids = set(int(value) for value in params.get("person_ids", []))
@@ -198,11 +214,15 @@ class _FakeWatchlistCursor:
     def fetchall(self):
         return list(self.rows)
 
+    def fetchone(self):
+        return self.row
+
 
 class _FakeWatchlistConn:
-    def __init__(self, *, rules_by_camera, person_rows):
+    def __init__(self, *, rules_by_camera, person_rows, cameras_by_source=None):
         self.rules_by_camera = rules_by_camera
         self.person_rows = person_rows
+        self.cameras_by_source = cameras_by_source or {}
 
     def cursor(self, *_, **__):
         return _FakeWatchlistCursor(self)
@@ -266,6 +286,7 @@ def _make_watchlist_cfg(**overrides):
         "qdrant_api_key": "",
         "qdrant_collection": "face_gallery_current",
         "qdrant_base_collection": "face_gallery_adaface_512_v1",
+        "qdrant_prefer_grpc": True,
         "qdrant_timeout_seconds": 2.0,
         "qdrant_search_ef": 128,
         "qdrant_candidate_multiplier": 3,
@@ -273,6 +294,11 @@ def _make_watchlist_cfg(**overrides):
         "qdrant_exact_rerank_enabled": True,
         "qdrant_fallback_to_pgvector": True,
         "qdrant_write_wait": True,
+        "qdrant_indexing_threshold_kb": 1000,
+        "qdrant_full_scan_threshold_kb": 1000,
+        "qdrant_default_segment_number": 2,
+        "qdrant_hnsw_m": 16,
+        "qdrant_hnsw_ef_construct": 100,
     }
     defaults.update(overrides)
     return Config(**defaults)
@@ -285,6 +311,7 @@ def _make_watchlist_emitter(cfg, conn, store, redis):
     emitter._redis = redis
     emitter._store = store
     emitter._rule_cache = {}
+    emitter._camera_id_by_source_cache = {}
     emitter._env_target_person_ids = None
     emitter._last_env_target_refresh = 0.0
     return emitter
@@ -430,6 +457,46 @@ class TestWatchlistCameraRules:
         assert first_event["evidence_policy"]["pre_seconds"] == 2
         assert first_event["payload"]["watchlist"]["match_source"] == "db_camera_rule"
         assert first_event["payload"]["watchlist"]["target_person_ids"] == [7]
+
+    def test_emitter_resolves_source_id_camera_id_before_rule_lookup(self):
+        resolved_camera_id = "11111111-1111-4111-8111-111111111111"
+        source_id = "pressure60_test_24"
+        conn = _FakeWatchlistConn(
+            cameras_by_source={source_id: resolved_camera_id},
+            rules_by_camera={
+                resolved_camera_id: [
+                    {
+                        "rule_id": "rule_watchlist_a",
+                        "config": {
+                            "threshold": 0.81,
+                            "target_person_ids": [7],
+                        },
+                        "evidence_policy": {},
+                    }
+                ],
+            },
+            person_rows=[
+                {"id": 7, "name": "Person 7", "external_person_id": "p7", "is_active": True},
+            ],
+        )
+        store = _FakeGalleryStore()
+        redis = _FakeRedis()
+        emitter = _make_watchlist_emitter(
+            _make_watchlist_cfg(),
+            conn,
+            store,
+            redis,
+        )
+
+        assert emitter.emit_for_observation(
+            _make_obs_dict(camera_id=source_id, source_id=source_id)
+        ) == 1
+
+        first_event = json.loads(redis.events[0]["fields"]["data"])
+        assert first_event["camera_id"] == resolved_camera_id
+        assert first_event["source_id"] == source_id
+        assert first_event["payload"]["observation"]["camera_id"] == resolved_camera_id
+        assert store.calls[0]["person_ids"] == [7]
 
     def test_emitter_logs_gallery_query_latency(self, caplog):
         conn = _FakeWatchlistConn(

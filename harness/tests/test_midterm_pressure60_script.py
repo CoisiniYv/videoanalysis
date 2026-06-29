@@ -264,6 +264,34 @@ def test_validate_seq_iq_from_sampling_is_warning_without_ingress_failure() -> N
             "max_savant_sources": 2,
             "max_savant_send_failures_total": 0,
             "max_forwarder_queue_depth": 0,
+            "queue_full_samples": 0,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 25}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "validate_seq_iq_exceeded" not in reasons
+    assert module.pressure_warnings(cfg, diagnostics, reasons) == [
+        "validate_seq_iq_expected_sampling_gap"
+    ]
+
+
+def test_validate_seq_iq_with_transient_non_full_queue_remains_warning() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=0)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_total": 0,
+            "max_forwarder_queue_depth": 1,
+            "queue_full_samples": 0,
         },
         "source_containers": {
             "exited": 0,
@@ -678,6 +706,15 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
     }
 
     assert module.validate_downstream_observability_schema(summary) is True
+
+
+def test_qdrant_outbox_summary_uses_valid_aggregate_filters() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "count(*) FILTER (WHERE status IN ('pending', 'retry', 'processing'))" in source
+    assert "min(created_at)\n                            FILTER" in source
+    assert "max(processed_at)\n                            FILTER" in source
+    assert "EXTRACT(EPOCH FROM (now() - min(created_at)))\n                        FILTER" not in source
 
 
 def test_downstream_observability_schema_rejects_missing_required_field() -> None:

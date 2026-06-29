@@ -34,3 +34,19 @@ def test_sync_script_supports_required_modes_and_skip_locked_claim():
     assert "FOR UPDATE SKIP LOCKED" in helper
     assert "status IN ('pending', 'retry')" in helper
     assert "poisoned" in helper
+    assert "HnswConfigDiff" in text
+    assert "OptimizersConfigDiff" in text
+    assert "indexing_threshold" in text
+    assert "full_scan_threshold" in text
+    assert "update_collection" in text
+
+
+def test_outbox_status_summary_uses_valid_aggregate_filters():
+    helper = (ROOT / "services" / "face-worker" / "app" / "gallery_sync_outbox.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "count(*) FILTER (WHERE status IN ('pending', 'retry', 'processing'))" in helper
+    assert "min(created_at)\n                            FILTER" in helper
+    assert "max(processed_at)\n                            FILTER" in helper
+    assert "EXTRACT(EPOCH FROM (now() - min(created_at)))\n                    FILTER" not in helper

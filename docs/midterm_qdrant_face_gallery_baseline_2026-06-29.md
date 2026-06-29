@@ -98,12 +98,18 @@ FACE_VECTOR_SMALL_TARGET_THRESHOLD=5
 - `gallery_vector_sync_outbox`；
 - `sync_qdrant_gallery.py` 的 `bootstrap` / `drain-outbox` / `reconcile` / `rebuild` / `status`。
 
-## 后续验收
+## 后续验收同步
 
-Qdrant authoritative 前还需要：
+2026-06-29 后续已完成 Qdrant authoritative 切换，详见：
 
-1. Qdrant 镜像和 `qdrant-client` 依赖可用后，只重建/重启 `face-worker`。
-2. 执行 migration 021 后，运行：
+```text
+docs/midterm_qdrant_face_gallery_cutover_2026-06-29.md
+```
+
+已执行：
+
+1. Qdrant 镜像已启动，`face-worker` 镜像已加入 `qdrant-client`。
+2. migration 021 已执行，图库同步命令已运行：
 
 ```bash
 python sync_qdrant_gallery.py --mode bootstrap
@@ -111,17 +117,13 @@ python sync_qdrant_gallery.py --mode reconcile
 python sync_qdrant_gallery.py --mode drain-outbox
 ```
 
-3. 切 `FACE_VECTOR_BACKEND=shadow`，确认 top1/person/threshold parity。
-4. 再切 `FACE_VECTOR_BACKEND=qdrant`，跑 60 路压力测试。
-5. 最终报告必须包含：
-   - Qdrant query p95/p99；
-   - exact rerank p95/p99；
-   - outbox lag；
-   - fallback count；
-   - Redis pending；
-   - face-worker latency；
-   - retained evidence playable；
-   - 8090 list/detail proof。
+3. 最终运行态已切为 `FACE_VECTOR_BACKEND=qdrant`、
+   `QDRANT_FALLBACK_TO_PGVECTOR=false`、`QDRANT_PREFER_GRPC=true`。
+4. 60 路 8 FPS authoritative 压测已通过，Qdrant query p95/p99 为 3ms/4ms，
+   exact rerank p95/p99 为 1ms/2ms，fallback count 为 0，8090 retained evidence
+   proof 为 50/50。
+5. 5000 人 x 4 张图，即 20,000 向量合成 benchmark 已通过，all-search p95/p99
+   为 4.037ms/6.427ms。
 
 最终通过条件：
 
