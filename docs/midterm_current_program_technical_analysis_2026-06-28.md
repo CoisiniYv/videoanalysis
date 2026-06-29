@@ -52,6 +52,10 @@ RTSP source
 - `pressure60_media_fullobs_8fps_20260629T092901Z` 证明第一阶段 media finalizer 平滑调度可在
   60 路同卡双分支 8 FPS profile 下保留 50/50 playable evidence，并把 media-worker CPU 峰值控制到
   约 98%。
+- `pressure60_media_finalizer_pool_8fps_20260629T143548Z` 证明第二阶段内部 finalizer worker pool
+  可在同一 60 路 8 FPS profile 下保持 50/50 retained playable、8090 50/50 OK、duplicate
+  materialization 0、finalizer failed 0，并将 Qdrant-authoritative 基线的 queue wait p95 从约
+  302.6 秒降到约 175.5 秒。
 
 当前主要技术风险不再是“是否能跑通一个告警证据”，而是扩展性和验收边界：
 
@@ -59,9 +63,10 @@ RTSP source
   Qdrant 已解决注册图库向量检索扩展性，但尚未把 persistence 和 matching 解耦。
 - 注册图库查询已有 Qdrant 派生索引；历史 `face_observations` 相似检索仍未迁移到 Qdrant，也不属于
   本次 cutover 范围。
-- media-worker 仍是单进程轮询 finalizer，第一阶段 deadline-aware pacer 已通过 pressure profile
-  验证；如果生产目标变成“所有事件全量物化”，仍需要重新评估 worker pool / 多容器 claim / 独立
-  finalizer service。
+- media-worker 已从单进程轮询 finalizer 升级为可配置内部 finalizer worker pool，并保留
+  deadline-aware pacing、source fairness、DB-backed idempotent claim 和 CPU thread limit。当前 4
+  worker profile 已降低长尾，但还没有把 queue wait p95 压到 60-90 秒；下一步需要拆 proof/replay/sink
+  wait，判断是调高内部 worker 到 6/8，还是优化 clip-worker/replay 调度。
 - 8090 runtime topology 已能写双分支计划，pressure harness 已证明 replay shard 输出和 clip-worker
   读取路径一致；仍缺真实 RTSP 混合输入和长时间 soak。
 
@@ -148,6 +153,7 @@ API 服务的 8000 端口只在 compose 网络内暴露，8090 通过 `/api/v1/*
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD` | `4` | 单 Replay shard 并发预算 |
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE` | `1` | 单 source 并发预算 |
 | `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE` | `4` | media-worker 本进程 materialization guard |
+| `MEDIA_WORKER_FINALIZER_WORKERS` | `4` | media-worker 内部 finalizer worker pool 并发数 |
 | `MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S` | `0.5` | media-worker 每条 evidence 完成后的平滑停顿 |
 | `MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S` | `90` | deadline 剩余时间低于该值时跳过停顿 |
 | `MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT` | `4` | media-worker native/ffmpeg 线程上限 |
@@ -517,7 +523,7 @@ CPU 和 duplicate count 没有异常。
 调用 `_process_sink_output(...)`。该 guard 能限制本进程进入物化的活跃数，但不等于真正的
 多 worker finalizer pool。
 
-2026-06-29 后续状态：当前选择的第一阶段扩展模型不是直接提高并发，而是单进程
+2026-06-29 后续状态：media-worker 已经分两步扩展。第一阶段是单进程
 deadline-aware pacer：
 
 - 高优先级事件类型优先，默认 `watchlist_hit,live_search_hit`；
@@ -542,10 +548,29 @@ retained-evidence 复测中把采样到的 media-worker CPU 峰值从约 1151% �
 但处理过慢，运行中只 materialize 32 条，且出现多条 `materialization_expired`。因此默认改为
 保守 sleep + 线程限制，不再用每轮 1 条作为生产默认。
 
-如果后续仍需提升证据吞吐，才继续评估更强并发模型：
+第二阶段已经实现内部 finalizer worker pool：
+
+- `MEDIA_WORKER_FINALIZER_WORKERS` 控制 pool 并发，midterm 默认 4，代码 fallback 1；
+- 每轮按 high-priority、deadline 和 source round-robin 排序；
+- 同一 source 同一轮最多 finalizing 1 个 evidence，不同 source 可并行；
+- task claim 使用 `FOR UPDATE SKIP LOCKED`，claim 后进入 `finalizing`，终态/ready 重复处理不重复生成 bundle；
+- `media_event_finalized` 输出 `worker_id`、`source_id`、`replay_shard_id`、`claim_wait_ms`；
+- pressure report 输出 worker counts、按 source/shard 的 queue wait、claim wait 和 duplicate materialization。
+
+`pressure60_media_finalizer_pool_8fps_20260629T143548Z` 已经完成第二阶段吞吐证明：
+50/50 retained playable，8090 50/50 OK，duplicate materialization 0，finalizer failed 0，
+imageio fallback 0；queue wait p50/p95/p99 为 97.8/175.5/199.2 秒，lifecycle
+p50/p95/p99 为 99.6/181.3/205.5 秒，min deadline slack 78.6 秒。相比
+`pressure60_qdrant_authoritative_8fps_20260629T130224Z` 的 queue wait p95 约 302.6 秒，
+长尾已经明显下降，但仍未达到 60-90 秒目标。
+
+当前判断：`queue_wait_ms` 是 event 创建到 media finalization 开始的总等待，不是纯
+media-worker 内部队列。因此下一步要先拆 proof wait、replay job elapsed、sink-ready wait 和
+finalizer wait，再决定提高 `MEDIA_WORKER_FINALIZER_WORKERS=6/8`，还是优化 clip-worker/replay 调度。
+
+如果后续仍需继续提升证据吞吐，才评估更强部署模型：
 
 - 多 media-worker 容器 + DB-backed claim；
-- 单进程内部 worker pool；
 - 独立 finalizer service。
 
 否则会有重复终态、磁盘膨胀、Replay sink 堆积和 cleanup 竞态风险。
@@ -660,14 +685,17 @@ Toolkit。应用包不迁移旧 PostgreSQL、Redis、Replay RocksDB、证据媒�
 
 ### P2 - 证明 media finalizer 扩展模型
 
-- 已选择第一阶段扩展模型：单进程 deadline-aware pacer + CPU/ffmpeg thread limit。
-- 已用 60 路同卡双分支 8 FPS retained-evidence 压测证明第一阶段模型：
-  media-worker CPU 峰值约 98%，50/50 retained playable。
-- 当前保留单进程模型，不立即上内部 worker pool 或多容器 DB claim。
-- 后续只有在真实 RTSP / 长时间 soak 中 queue/lifecycle p95 超出 300 秒 deadline，或生产要求全量事件
-  物化时，再升级为内部 worker pool、多 media-worker 容器 DB claim 或独立 finalizer service。
-- 仍需补充更细的 claim、proof、ffprobe/ffmpeg、decode、DB terminal update 阶段指标和终态幂等
-  回归测试。
+- 已完成第一阶段：单进程 deadline-aware pacer + CPU/ffmpeg thread limit。
+- 已完成第二阶段：单进程内部 finalizer worker pool，midterm 默认 4 workers，source fair scheduling，
+  DB-backed SKIP LOCKED claim，终态幂等和 duplicate materialization 统计。
+- 已用 `pressure60_media_finalizer_pool_8fps_20260629T143548Z` 证明当前模型：
+  50/50 retained playable，8090 50/50 OK，duplicate materialization 0，finalizer failed 0，
+  imageio fallback 0，queue wait p95 约 175.5 秒，lifecycle p95 约 181.3 秒。
+- 已比 Qdrant authoritative 8 FPS 基线的 queue wait p95 约 302.6 秒明显下降，但尚未进入
+  60-90 秒目标区间。
+- 下一步不是立即换存储模型，而是拆分 proof wait、replay job elapsed、sink-ready wait 和
+  finalizer wait；如果 finalizer wait 仍是主因，再对比 `MEDIA_WORKER_FINALIZER_WORKERS=6/8`。
+- 只有内部 worker pool 无法覆盖生产目标时，才评估多 media-worker 容器 DB claim 或独立 finalizer service。
 
 ### P3 - 双分支证据链闭环
 
@@ -700,8 +728,9 @@ DB-backed evidence 语义已经替代单纯 sidecar 读取。
 - 60 路 3 FPS 下游证据链已经有通过证据；
 - 60 路 4 FPS 同卡双分支已完成 pressure source 证据链验收，可作为当前保守生产目标继续做真实 RTSP /
   长时间 soak；
-- 60 路 8 FPS 同卡双分支已完成 pressure source retained-evidence 验收；media-worker 平滑调度将
-  evidence lifecycle p95 明确控制在约 192 秒；
+- 60 路 8 FPS 同卡双分支已完成 pressure source retained-evidence 验收；media-worker 内部
+  finalizer pool 将 retained profile 的 evidence lifecycle p95 控制在约 181 秒，并保持 8090
+  50/50 OK、duplicate materialization 0、finalizer failed 0；
 - 注册图库 Qdrant authoritative cutover 已完成当前 scale gate：60 路 8 FPS 压测 Qdrant p95/p99
   为 3ms/4ms、fallback=0；20,000 向量 benchmark all-search p95/p99 为 4.037ms/6.427ms；
 - 16 FPS 不应作为当前默认生产承诺；
@@ -736,6 +765,7 @@ face-worker persistence/matching 解耦可行性，以及 Savant 阶段级 laten
 - `docs/midterm_frontend_inference_performance_2026-06-28.md`
 - `docs/midterm_dual1gpu_evidence_chain_4fps_8fps_report_2026-06-29.md`
 - `docs/midterm_media_finalizer_pacer_8fps_report_2026-06-29.md`
+- `docs/midterm_media_finalizer_pool_8fps_report_2026-06-29.md`
 - `docs/midterm_uos_clean_machine_migration_steps_2026-06-29.md`
 - `docs/midterm_post_inference_bottleneck_static_review_2026-06-28.md`
 - `specs/26_midterm_post_inference_bottleneck_closure_plan.md`

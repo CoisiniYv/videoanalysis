@@ -82,10 +82,10 @@ Still open:
   indexes; current live gallery size was only 3 active embeddings / 5 total
   embeddings, and the selected online gallery-search replacement direction is
   now Qdrant rather than pgvector ANN-first;
-- media-worker materialization is still organized around one polling process and
-  ffprobe/ffmpeg/decode finalization, but 2026-06-29 code now exposes
-  `queue_wait_ms`, `lifecycle_elapsed_ms`, and post-Savant finalizer elapsed
-  logs for pressure report p95/p99 ranking;
+- media-worker materialization is still one service process, but it now has an
+  internal source-fair finalizer worker pool plus `queue_wait_ms`,
+  `lifecycle_elapsed_ms`, post-Savant finalizer elapsed, claim wait, and
+  per-source/per-shard pressure report metrics;
 - dual-branch topology now has one same-GPU 8 FPS retained-evidence pass, but
   it still needs longer 8 FPS soak and real RTSP mixed-input repeat runs before
   being treated as a production guarantee.
@@ -182,8 +182,8 @@ Runtime topology note:
 | --- | --- | --- |
 | face-worker | Single consumer does Postgres insert, rule resolution, Qdrant lookup, exact rerank, and event publish per face observation | Face observation rate can still amplify ACK latency even though registered-gallery vector lookup is now within SLA |
 | event-worker | Record request dedupe is now Redis `SET NX EX`, but runtime pressure artifacts still need to show duplicate suppression and low CPU under event storms | A regression to full-stream scan would make every recordable event pay O(N) Redis/JSON cost |
-| media-worker | Materialization active count is a guard, not a finalizer worker pool | ffprobe/ffmpeg/decode work can dominate evidence lifecycle even if inference is healthy |
-| topology/replay shards | 8090 can apply dual-branch plans and clip-worker can route by replay shard, but the dual evidence-chain profile is not yet proven end-to-end | Front-end 8 FPS success can be misread as proof that evidence materialization is also production-ready |
+| media-worker | Internal finalizer pool is now implemented, but queue wait p95 still needs proof/replay/sink/finalizer phase split | Without phase split, raising finalizer workers may only trade queue wait for CPU spikes or move backlog to clip-worker/Replay |
+| topology/replay shards | Same-GPU dual-branch retained-evidence profile is proven for pressure sources, but still needs true RTSP / soak / production-hardware regression | Front-end 8 FPS success can still be misread as long-run production evidence-chain readiness |
 | annotation/evidence windows | Retention and admission are now partially sized, but still need lifecycle and memory-margin proof | Evidence can become playable but annotation-missing, or expire before materialization |
 | observability | Pressure reports need more downstream split metrics to rank bottlenecks | Without split metrics, fixes may only move backlog between queues |
 | 8090 config sync | Camera rule/ROI saves must not call disruptive runtime apply | A simple ROI edit should not restart unrelated inference/evidence services or interrupt evidence generation |
@@ -856,12 +856,50 @@ Harness:
   50/50 retained playable, media-worker CPU peak 98.08%, queue wait p95
   189.913s / p99 193.068s, lifecycle p95 192.325s / p99 195.688s, min
   deadline slack 103.073s, finalizer failures 0, imageio fallback 0.
+- Implemented: second-stage media finalizer extension is now an internal
+  single-process worker pool controlled by `MEDIA_WORKER_FINALIZER_WORKERS`.
+  The midterm default is 4 workers, while code fallback remains 1. The pool
+  schedules fairly by `source_id`, keeps each source serial by default, allows
+  different sources to finalize in parallel, and keeps the existing deadline
+  pacing, deadline guard, CPU thread limit, sink stability, DB indexing, and
+  cleanup semantics.
+- Implemented: media finalization claim now uses a DB-backed idempotent claim
+  path with `FOR UPDATE SKIP LOCKED`, updates claimed tasks to `finalizing`,
+  and records finalizer audit fields. Terminal or already-ready evidence is
+  treated as processed without creating duplicate bundles.
+- Implemented: pressure reports now parse finalizer worker counts, per-source
+  and per-shard queue wait distributions, claim wait distribution, claim
+  busy/terminal counts, and duplicate materialization count.
+- Verified: targeted harness coverage now includes source round-robin ordering,
+  SKIP LOCKED claim SQL, different-source parallel scheduling, same-source
+  serial scheduling, terminal idempotency propagation, pressure report schema,
+  and deployment config wiring.
+- Verified: `smoke_media_finalizer_pool_8src_4fps_20260629T1432Z` passed with
+  8/8 retained evidence queryable through 8090, queue wait p95 about 50.1s,
+  duplicate materialization 0, finalizer failures 0, and imageio fallback 0.
+- Verified: `pressure60_media_finalizer_pool_8fps_20260629T143548Z` passed the
+  60-source same-GPU dual-branch 8 FPS retained-evidence profile. Results:
+  50/50 retained playable, 8090 50/50 OK, source exits/restarts 0,
+  analysis-forwarder queue_full 0, Savant send failures 0, Qdrant query p95/p99
+  3ms/5ms, duplicate materialization 0, finalizer failures 0, imageio fallback
+  0, finalizer workers used 4, queue wait p50/p95/p99 97.768s/175.545s/199.193s,
+  lifecycle p50/p95/p99 99.628s/181.293s/205.493s, finalization p95 7.433s,
+  and min deadline slack 78.579s.
+- Not yet closed for the 60-90s target: queue wait p95 improved versus the
+  Qdrant-authoritative baseline of about 302.637s, but remained above the
+  desired 60-90s band. Because `queue_wait_ms` currently measures event-created
+  to media-finalization-start, the remaining long tail must be split into
+  proof wait, replay job elapsed, sink-ready wait, and finalizer wait before
+  choosing whether to raise `MEDIA_WORKER_FINALIZER_WORKERS` to 6/8 or optimize
+  clip-worker/replay scheduling.
 
 Acceptance:
 
 - `PASS_POST_INFERENCE_SPEC3_MEDIA_FINALIZER_THROUGHPUT`;
 - retained playable evidence does not regress and lifecycle p95/p99 improves or
-  is explicitly bounded.
+  is explicitly bounded. For the current pressure profile this is satisfied by
+  `pressure60_media_finalizer_pool_8fps_20260629T143548Z`, with the caveat that
+  the optional 60-90s queue-wait target remains a follow-up tuning item.
 
 ### Stage 5 - Dual topology evidence-chain closure
 

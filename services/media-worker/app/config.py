@@ -25,6 +25,7 @@ class Config:
     materialization_timeout_s: float
     materialization_max_backlog: int
     materialization_max_per_poll: int
+    materialization_finalizer_workers: int
     materialization_throttle_sleep_s: float
     materialization_throttle_deadline_guard_s: float
     materialization_cpu_thread_limit: int
@@ -86,6 +87,10 @@ def load_config() -> Config:
         materialization_max_per_poll=max(
             0,
             int(os.getenv("MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL", "0")),
+        ),
+        materialization_finalizer_workers=max(
+            1,
+            int(os.getenv("MEDIA_WORKER_FINALIZER_WORKERS", "1")),
         ),
         materialization_throttle_sleep_s=max(
             0.0,

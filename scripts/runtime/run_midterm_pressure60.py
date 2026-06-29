@@ -2165,6 +2165,58 @@ def _percentile(sorted_values: list[float], quantile: float) -> float:
     return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
 
 
+def _extract_log_field(line: str, field: str) -> str:
+    match = re.search(rf"\b{re.escape(field)}=([^\s]+)", line)
+    return match.group(1) if match else ""
+
+
+def _media_finalizer_line_metrics(text: str) -> dict[str, Any]:
+    by_worker: dict[str, int] = {}
+    by_source: dict[str, list[int]] = {}
+    by_shard: dict[str, list[int]] = {}
+    event_counts: dict[str, int] = {}
+    claim_wait_ms: list[int] = []
+    for line in text.splitlines():
+        if "media_event_finalized" not in line:
+            continue
+        event_id = _extract_log_field(line, "event_id")
+        if event_id:
+            event_counts[event_id] = event_counts.get(event_id, 0) + 1
+        worker_id = _extract_log_field(line, "worker_id") or "unknown"
+        by_worker[worker_id] = by_worker.get(worker_id, 0) + 1
+        source_id = _extract_log_field(line, "source_id") or "unknown"
+        shard_id = _extract_log_field(line, "replay_shard_id") or "unknown"
+        queue_wait = _extract_log_field(line, "queue_wait_ms")
+        try:
+            queue_wait_value = int(queue_wait)
+        except ValueError:
+            queue_wait_value = -1
+        if queue_wait_value >= 0:
+            by_source.setdefault(source_id, []).append(queue_wait_value)
+            by_shard.setdefault(shard_id, []).append(queue_wait_value)
+        claim_wait = _extract_log_field(line, "claim_wait_ms")
+        try:
+            claim_wait_ms.append(int(claim_wait))
+        except ValueError:
+            pass
+    return {
+        "worker_counts": by_worker,
+        "worker_count": len(by_worker),
+        "queue_wait_ms_by_source": {
+            key: _numeric_distribution(values)
+            for key, values in sorted(by_source.items())
+        },
+        "queue_wait_ms_by_shard": {
+            key: _numeric_distribution(values)
+            for key, values in sorted(by_shard.items())
+        },
+        "claim_wait_ms": _numeric_distribution(claim_wait_ms),
+        "duplicate_materialization_count": sum(
+            count - 1 for count in event_counts.values() if count > 1
+        ),
+    }
+
+
 def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
     paths = {
         "savant": cfg.artifact_dir / "savant_logs_since_start.txt",
@@ -2205,6 +2257,11 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         qdrant_shadow_mismatch = _extract_metric_ints(
             text,
             "qdrant_shadow_mismatch",
+        )
+        media_finalizer_metrics = (
+            _media_finalizer_line_metrics(text)
+            if key == "media_worker"
+            else {}
         )
         summary[key] = {
             "line_count": len(text.splitlines()),
@@ -2262,6 +2319,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "media_materialization_throttle_disabled": text.count(
                 "throttle_reason=disabled"
             ),
+            "media_finalization_claim_busy": text.count(
+                "media_finalization_claim_busy"
+            ),
+            "media_finalization_claim_terminal": text.count(
+                "media_finalization_claim_terminal"
+            ),
             "post_savant_finalizer_failed": text.count(
                 "post_savant_finalizer_failed"
             ),
@@ -2277,6 +2340,30 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "media_ffmpeg_duration_ms": _numeric_distribution(media_ffmpeg_ms),
             "media_throttle_sleep_s": _numeric_distribution(media_throttle_sleep_s),
             "media_deadline_slack_s": _numeric_distribution(media_deadline_slack_s),
+            "media_finalizer_worker_counts": media_finalizer_metrics.get(
+                "worker_counts",
+                {},
+            ),
+            "media_finalizer_worker_count": media_finalizer_metrics.get(
+                "worker_count",
+                0,
+            ),
+            "media_queue_wait_ms_by_source": media_finalizer_metrics.get(
+                "queue_wait_ms_by_source",
+                {},
+            ),
+            "media_queue_wait_ms_by_shard": media_finalizer_metrics.get(
+                "queue_wait_ms_by_shard",
+                {},
+            ),
+            "media_claim_wait_ms": media_finalizer_metrics.get(
+                "claim_wait_ms",
+                _not_enough_data("media claim wait logs unavailable"),
+            ),
+            "media_duplicate_materialization_count": media_finalizer_metrics.get(
+                "duplicate_materialization_count",
+                0,
+            ),
         }
     return summary
 
@@ -2860,7 +2947,22 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
             logs.get("media_materialization_throttle_disabled") or 0
         ),
         "finalizer_failed_count": int(logs.get("post_savant_finalizer_failed") or 0),
+        "claim_busy_count": int(logs.get("media_finalization_claim_busy") or 0),
+        "claim_terminal_count": int(
+            logs.get("media_finalization_claim_terminal") or 0
+        ),
+        "duplicate_materialization_count": int(
+            logs.get("media_duplicate_materialization_count") or 0
+        ),
+        "finalizer_worker_counts": logs.get("media_finalizer_worker_counts") or {},
+        "finalizer_worker_count": int(
+            logs.get("media_finalizer_worker_count") or 0
+        ),
         "imageio_ffmpeg_fallback_count": int(logs.get("imageio_ffmpeg_fallback") or 0),
+        "claim_wait_ms": logs.get("media_claim_wait_ms")
+        or _not_enough_data("media claim wait logs unavailable"),
+        "queue_wait_ms_by_source": logs.get("media_queue_wait_ms_by_source") or {},
+        "queue_wait_ms_by_shard": logs.get("media_queue_wait_ms_by_shard") or {},
         "throttle_sleep_s": logs.get("media_throttle_sleep_s")
         or _not_enough_data("media throttle logs unavailable"),
         "deadline_slack_s": logs.get("media_deadline_slack_s")
@@ -2957,6 +3059,10 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
             "ffprobe_duration_ms",
             "throttle_sleep_s",
             "deadline_slack_s",
+            "claim_wait_ms",
+            "queue_wait_ms_by_source",
+            "queue_wait_ms_by_shard",
+            "duplicate_materialization_count",
         ),
         "evidence_8090": ("retained_count", "checked_count", "ok_count"),
     }

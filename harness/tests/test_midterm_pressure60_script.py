@@ -697,6 +697,10 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "ffprobe_duration_ms": module._not_enough_data("synthetic"),
             "throttle_sleep_s": module._not_enough_data("synthetic"),
             "deadline_slack_s": module._not_enough_data("synthetic"),
+            "claim_wait_ms": module._not_enough_data("synthetic"),
+            "queue_wait_ms_by_source": {},
+            "queue_wait_ms_by_shard": {},
+            "duplicate_materialization_count": 0,
         },
         "evidence_8090": {
             "retained_count": 0,
@@ -773,6 +777,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         "\n".join(
             [
                 "media_event_finalized event_id=e1 finalization_duration_ms=100 "
+                "worker_id=finalizer-1 source_id=source-a replay_shard_id=replay-a "
+                "claim_status=claimed claim_wait_ms=3 "
                 "scan_duration_ms=1 queue_wait_ms=10 lifecycle_elapsed_ms=110 "
                 "post_savant_finalization_elapsed_ms=90 "
                 "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
@@ -780,6 +786,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "ffprobe_duration_ms=20 ffmpeg_invocations=1 ffmpeg_duration_ms=80 "
                 "imageio_ffmpeg_fallback_count=0 imageio_ffmpeg_fallback_duration_ms=0",
                 "media_event_finalized event_id=e2 finalization_duration_ms=300 "
+                "worker_id=finalizer-2 source_id=source-b replay_shard_id=replay-b "
+                "claim_status=claimed claim_wait_ms=7 "
                 "scan_duration_ms=1 queue_wait_ms=30 lifecycle_elapsed_ms=330 "
                 "post_savant_finalization_elapsed_ms=250 "
                 "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
@@ -787,6 +795,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
                 "imageio_ffmpeg_fallback_count=2 imageio_ffmpeg_fallback_duration_ms=0",
                 "media_materialization_paced event_id=e3 reason=max_per_poll_reached",
+                "media_finalization_claim_busy event_id=e4",
             ]
         ),
         encoding="utf-8",
@@ -801,12 +810,28 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["face_worker"]["face_gallery_query_latency_ms"]["count"] == 2
     assert summary["face_worker"]["face_gallery_query_latency_ms"]["max"] == 34.0
     assert summary["media_worker"]["media_event_finalized"] == 2
+    assert summary["media_worker"]["media_finalization_claim_busy"] == 1
+    assert summary["media_worker"]["media_finalizer_worker_count"] == 2
+    assert summary["media_worker"]["media_finalizer_worker_counts"] == {
+        "finalizer-1": 1,
+        "finalizer-2": 1,
+    }
     assert summary["media_worker"]["media_materialization_paced"] == 1
     assert summary["media_worker"]["media_materialization_throttle_paced"] == 1
     assert summary["media_worker"]["media_materialization_throttle_deadline_guard"] == 1
     assert summary["media_worker"]["media_finalization_duration_ms"]["count"] == 2
     assert summary["media_worker"]["media_finalization_duration_ms"]["p50"] == 200.0
     assert summary["media_worker"]["media_queue_wait_ms"]["p95"] == 29.0
+    assert (
+        summary["media_worker"]["media_queue_wait_ms_by_source"]["source-a"]["p50"]
+        == 10.0
+    )
+    assert (
+        summary["media_worker"]["media_queue_wait_ms_by_shard"]["replay-b"]["p50"]
+        == 30.0
+    )
+    assert summary["media_worker"]["media_claim_wait_ms"]["max"] == 7.0
+    assert summary["media_worker"]["media_duplicate_materialization_count"] == 0
     assert summary["media_worker"]["media_lifecycle_elapsed_ms"]["max"] == 330.0
     assert summary["media_worker"]["media_post_savant_finalization_elapsed_ms"]["max"] == 250.0
     assert summary["media_worker"]["media_ffprobe_duration_ms"]["max"] == 40.0

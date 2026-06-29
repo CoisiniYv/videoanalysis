@@ -441,6 +441,9 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"
     ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
+    assert services["media-worker"]["environment"]["MEDIA_WORKER_FINALIZER_WORKERS"] == (
+        "${MEDIA_WORKER_FINALIZER_WORKERS:-4}"
+    )
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"
     ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
@@ -830,6 +833,7 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
+    assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "4"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0.5"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
@@ -845,6 +849,9 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == (
         "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
+    )
+    assert media_env["MEDIA_WORKER_FINALIZER_WORKERS"] == (
+        "${MEDIA_WORKER_FINALIZER_WORKERS:-4}"
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == (
         "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
@@ -903,6 +910,7 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
+    assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "4"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0.5"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
