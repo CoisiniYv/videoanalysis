@@ -27,6 +27,7 @@ This is not a Savant model-chain tuning spec. It must be coordinated with:
 - `docs/midterm_post_inference_bottleneck_static_review_2026-06-28.md`
 - `docs/midterm_downstream_evidence_performance_2026-06-28.md`
 - `docs/midterm_frontend_inference_performance_2026-06-28.md`
+- `specs/27_midterm_face_worker_vector_matching_optimization_plan.md`
 
 ## 2. Current Finding And Checkout Status
 
@@ -302,6 +303,14 @@ Problem:
 `face-worker` handles each face observation by inserting it into PostgreSQL and
 then synchronously running watchlist/gallery matching. The gallery and
 observation vector tables currently lack ANN vector indexes.
+
+Dedicated plan:
+
+- `specs/27_midterm_face_worker_vector_matching_optimization_plan.md`
+  defines the staged optimization and acceptance plan for this area, including
+  baseline measurement, observability, query-plan/index closure,
+  persistence/matching decoupling, match-worker scaling, and the decision gate
+  before any C++/Rust rewrite.
 
 Current code verification:
 
