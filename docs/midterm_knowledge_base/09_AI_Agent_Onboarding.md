@@ -18,12 +18,25 @@ tags:
 5. [[05_Evidence_Chain|证据链]]
 6. [[06_Performance_Optimization_History|性能优化历史]]
 7. [[08_Open_Risks_And_Next_Actions|剩余风险与下一步]]
+8. [[11_Data_Contracts_And_Storage|数据契约与存储]]
+9. [[12_Service_Deep_Dive|服务深潜]]
+10. [[14_Performance_And_Acceptance_Playbook|性能与验收手册]]
 
 然后再读正式报告：
 
 - `docs/midterm_current_program_technical_analysis_2026-06-28.md`
 - `specs/26_midterm_post_inference_bottleneck_closure_plan.md`
 - `docs/midterm_media_finalizer_pacer_8fps_report_2026-06-29.md`
+
+如果是排障或压测失败，优先加读：
+
+- [[16_Troubleshooting_Playbook|排障手册]]
+- [[18_Artifact_And_Directory_Map|目录与 artifact 地图]]
+
+如果是准备改代码，优先加读：
+
+- [[15_Design_Invariants_And_Decisions|设计不变量与决策]]
+- [[17_Testing_And_Change_Guide|测试与变更指南]]
 
 ## 不要踩的坑
 

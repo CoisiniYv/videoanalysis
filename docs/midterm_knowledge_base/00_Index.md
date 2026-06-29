@@ -22,6 +22,14 @@ tags:
 - [[07_Deployment_Migration|部署与迁移]]
 - [[08_Open_Risks_And_Next_Actions|剩余风险与下一步]]
 - [[10_Glossary|术语表]]
+- [[11_Data_Contracts_And_Storage|数据契约与存储]]
+- [[12_Service_Deep_Dive|服务深潜]]
+- [[13_Runtime_Control_Runbook|运行控制手册]]
+- [[14_Performance_And_Acceptance_Playbook|性能与验收手册]]
+- [[15_Design_Invariants_And_Decisions|设计不变量与决策]]
+- [[16_Troubleshooting_Playbook|排障手册]]
+- [[17_Testing_And_Change_Guide|测试与变更指南]]
+- [[18_Artifact_And_Directory_Map|目录与 artifact 地图]]
 
 ## 当前一句话结论
 
@@ -33,6 +41,16 @@ Redis worker 后处理、DB-backed evidence 和离线迁移打包能力。当前
 - media-worker deadline-aware 平滑调度把 8 FPS pressure profile 下的 CPU 峰值控制到约 98%，
   evidence lifecycle p95 约 192 秒；
 - 仍缺真实 RTSP 混合输入、长时间 soak、生产硬件 profile、face-worker 大图库验证和 Savant 阶段级 latency。
+
+## 如何使用这个知识库
+
+- 想快速接手项目：读 [[09_AI_Agent_Onboarding|AI agent 快速上手]]。
+- 想理解整体结构：读 [[01_System_Overview|系统总览]]、[[02_Runtime_Data_Flow|运行时数据流]]、
+  [[03_Module_Map|模块地图]]。
+- 想改代码：先读 [[11_Data_Contracts_And_Storage|数据契约与存储]]、
+  [[12_Service_Deep_Dive|服务深潜]] 和 [[17_Testing_And_Change_Guide|测试与变更指南]]。
+- 想跑压测或判断是否生产可用：读 [[14_Performance_And_Acceptance_Playbook|性能与验收手册]]。
+- 想排查线上问题：读 [[16_Troubleshooting_Playbook|排障手册]]。
 
 ## 事实源
 
