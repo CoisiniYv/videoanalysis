@@ -180,7 +180,7 @@ Runtime topology note:
 
 | Area | Problem | Why it matters |
 | --- | --- | --- |
-| face-worker | Single consumer does Postgres insert and synchronous watchlist/gallery pgvector search per face observation | Face observation rate and gallery size can linearly amplify latency after Redis |
+| face-worker | Single consumer does Postgres insert, rule resolution, Qdrant lookup, exact rerank, and event publish per face observation | Face observation rate can still amplify ACK latency even though registered-gallery vector lookup is now within SLA |
 | event-worker | Record request dedupe is now Redis `SET NX EX`, but runtime pressure artifacts still need to show duplicate suppression and low CPU under event storms | A regression to full-stream scan would make every recordable event pay O(N) Redis/JSON cost |
 | media-worker | Materialization active count is a guard, not a finalizer worker pool | ffprobe/ffmpeg/decode work can dominate evidence lifecycle even if inference is healthy |
 | topology/replay shards | 8090 can apply dual-branch plans and clip-worker can route by replay shard, but the dual evidence-chain profile is not yet proven end-to-end | Front-end 8 FPS success can be misread as proof that evidence materialization is also production-ready |
@@ -302,8 +302,10 @@ Harness plan:
 Problem:
 
 `face-worker` handles each face observation by inserting it into PostgreSQL and
-then synchronously running watchlist/gallery matching. The gallery and
-observation vector tables currently lack ANN vector indexes.
+then synchronously running watchlist/gallery matching. Registered-gallery lookup
+is now served by Qdrant plus PostgreSQL exact rerank; historical
+`face_observations` vector search remains a separate pgvector/Qdrant design
+topic.
 
 Dedicated plan:
 
@@ -313,7 +315,8 @@ Dedicated plan:
   persistence/matching decoupling, match-worker scaling, and the decision gate
   before any C++/Rust rewrite.
 - `specs/28_midterm_qdrant_face_gallery_migration_plan.md` is the selected
-  replacement plan for the online registered-gallery search backend. It keeps
+  replacement plan for the online registered-gallery search backend and is
+  complete for the current 5000-person scale gate. It keeps
   PostgreSQL as source of truth, adds Qdrant as a derived vector-serving layer,
   and preserves pgvector as the exact baseline/rollback path.
 
@@ -323,28 +326,28 @@ Current code verification:
   loop, inserts the observation, then calls
   `watchlist_emitter.emit_for_observation()` synchronously for newly inserted
   rows.
-- `services/face-worker/app/vector_store.py` still performs exact pgvector
-  searches with `ORDER BY embedding <=> %(query_embedding)s`.
+- `services/face-worker/app/qdrant_gallery_store.py` performs Qdrant candidate
+  search for registered-gallery lookup and exact reranks candidates from
+  PostgreSQL source-of-truth rows.
+- `services/face-worker/app/vector_store.py` remains the exact pgvector
+  rollback/baseline path and historical observation search helper.
 - `db/migrations/005_face_observations.sql` and
-  `db/migrations/006_gallery_schema.sql` still define btree/person-active
-  indexes, not ANN vector indexes.
+  `db/migrations/006_gallery_schema.sql` still define `vector(512)` columns;
+  Qdrant is the selected registered-gallery index, so pgvector ANN is no longer
+  the primary hot-path plan.
 
 Modification direction:
 
-- Add Qdrant service/config/client support without changing the default
-  backend.
-- Bootstrap and reconcile `person_gallery_embeddings` into Qdrant while keeping
-  PostgreSQL authoritative.
-- Run Qdrant in shadow mode against the current exact pgvector baseline.
-- Cut over `face-worker` gallery lookup only after parity and pressure evidence
-  pass.
-- Keep threshold semantics explicit. During migration, use Qdrant as candidate
-  generator plus exact rerank before emitting a watchlist hit unless parity data
-  justifies disabling rerank.
-- Only after Qdrant cutover or explicit rejection, consider:
+- Keep Qdrant authoritative for registered-gallery lookup and keep
+  `person_gallery_embeddings` as PostgreSQL source of truth.
+- Continue exact rerank unless a dedicated parity run proves approximate-only
+  decisions preserve threshold semantics.
+- Under true RTSP/soak pressure, measure insert, rule resolution, Qdrant query,
+  exact rerank, event publish, and ACK p95/p99.
+- Only if ACK/pending remains high while Qdrant query stays within SLA, consider:
   - batching inserts;
   - decoupling observation persistence from matching;
-  - increasing consumer count;
+  - increasing matcher consumer count;
   - moving matching into a separate queue.
 
 Target effect:
@@ -362,25 +365,27 @@ PASS_POST_INFERENCE_SPEC2_FACE_WORKER_SCALE
 
 Required verification:
 
-- static tests for Qdrant compose/config/default-backend safety;
-- bootstrap/reconcile proof that Qdrant active points match PostgreSQL active
-  gallery rows;
-- shadow parity against pgvector exact for representative gallery sizes;
-- unit/integration tests for watchlist threshold and target-person filtering;
-- pressure evidence showing face-worker lag, Qdrant query p95/p99, fallback
-  count, and outbox sync lag are bounded.
+- completed static tests for Qdrant compose/config/default-backend safety;
+- completed bootstrap/reconcile proof that Qdrant active points match
+  PostgreSQL active gallery rows;
+- completed unit/integration tests for watchlist threshold, target-person
+  filtering, exact rerank, fallback, and payload compatibility;
+- completed pressure evidence showing face-worker lag, Qdrant query p95/p99,
+  fallback count, and outbox sync lag are bounded for the current 5000-person
+  scale gate.
 
 Harness plan:
 
-- Add a Qdrant bootstrap/reconcile harness that can seed representative gallery
-  rows and compare Qdrant output against exact pgvector output.
-- Add a correctness test that compares Qdrant candidates plus exact rerank
+- Keep the Qdrant bootstrap/reconcile harness that can seed representative
+  gallery rows and compare Qdrant output against exact pgvector output.
+- Keep the correctness tests that compare Qdrant candidates plus exact rerank
   against the current exact pgvector ordering for a deterministic dataset.
-- Add watchlist threshold tests that prove target-person filtering and duplicate
+- Keep watchlist threshold tests that prove target-person filtering and duplicate
   suppression do not change when the index/search path changes.
-- Extend the pressure report schema with face-worker consumed count, pending
-  count, Qdrant gallery query p95/p99, fallback count, shadow mismatch count,
-  outbox sync lag, and emitted watchlist hit count.
+- Pressure report schema now includes face-worker pending, Qdrant gallery query
+  p95/p99, fallback count, shadow mismatch count, outbox sync lag, and emitted
+  watchlist hit count. Continue extending it with insert/rule/event/ACK timers
+  before persistence/matching split work.
 
 ### Spec 3 - Media Worker Finalizer Throughput
 
@@ -757,10 +762,17 @@ Harness:
   `gallery_query_duration_ms`, target count, top_k, threshold, and result count.
 - Implemented: pressure report parses `face_worker.gallery_query_latency_ms`
   from logs instead of leaving it permanently `not_enough_data`.
-- Current live DB check showed 3 active `person_gallery_embeddings` / 5 total
-  embeddings and no ANN vector indexes. With this gallery size, exact scan is
-  not the current bottleneck, but the selected scale direction is now Qdrant for
-  representative gallery growth rather than pgvector ANN-first.
+- Completed: Qdrant registered-gallery cutover is authoritative for online
+  watchlist/gallery matching while PostgreSQL remains the source of truth.
+- Completed: 60-route 8 FPS Qdrant authoritative pressure run passed with
+  Qdrant query p95/p99 3ms/4ms, exact rerank p95/p99 1ms/2ms, fallback count 0,
+  and 8090 retained evidence 50/50.
+- Completed: 5000 persons x 4 images, or 20,000 active vectors, Qdrant gRPC
+  benchmark passed with all-search p95/p99 4.037ms/6.427ms.
+- Updated bottleneck attribution: registered-gallery vector lookup is no longer
+  the likely face-worker bottleneck at the current 5000-person scale. The next
+  risk is the synchronous single consumer loop around DB insert, rule
+  resolution, exact rerank, event publish, and ACK latency.
 
 Acceptance:
 
@@ -770,19 +782,17 @@ Acceptance:
 
 Continuation order locked on 2026-06-29:
 
-1. Finish the Qdrant registered-gallery plan in
-   `specs/28_midterm_qdrant_face_gallery_migration_plan.md`.
-2. Treat Qdrant cutover as a vector-serving change only. It must preserve the
+1. Treat Qdrant cutover as a completed vector-serving change only. It preserves the
    existing `watchlist_hit` event contract and must not change Savant,
    event-worker, clip-worker, media-worker, or 8090 evidence semantics.
-3. After Qdrant pressure acceptance, inspect the face-worker cost split:
+2. Inspect the face-worker cost split under true RTSP/soak pressure:
    Redis read/ACK, PostgreSQL insert, rule resolution, Qdrant query, exact
    rerank, event publish, and worker CPU.
-4. If vector lookup is no longer dominant but `security.face_observations`
+3. If vector lookup is no longer dominant but `security.face_observations`
    pending or ACK latency is still high, start Spec 27's persistence/matching
    decoupling.
-5. If the decoupled match queue then backs up, add multiple matcher workers.
-6. Defer Qdrant historical `face_observations` indexing until a separate
+4. If the decoupled match queue then backs up, add multiple matcher workers.
+5. Defer Qdrant historical `face_observations` indexing until a separate
    live-search or historical-search requirement exists.
 
 This order prevents three different optimizations from being mixed into one

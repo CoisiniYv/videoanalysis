@@ -31,7 +31,7 @@ RTSP source
   -> Savant / DeepStream inference
   -> Redis Streams
   -> event-worker / face-worker
-  -> PostgreSQL / pgvector
+  -> PostgreSQL / Qdrant / pgvector rollback
   -> clip-worker Replay job
   -> video-file-sink raw clip
   -> media-worker evidence indexing/finalization
@@ -47,6 +47,8 @@ RTSP source
 ## Source of truth
 
 PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事实源。
+Qdrant 是注册人脸图库的可重建派生索引，只服务在线 gallery/watchlist 查询；它不是人员图库事实源，
+也不改变 evidence 存储方式。
 
 生成文件只作为运行时快照：
 
@@ -63,6 +65,8 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 - 60 路 3 FPS 下游证据链，50/50 playable；
 - 单 4090 同卡双分支 60 路 4 FPS retained evidence；
 - 单 4090 同卡双分支 60 路 8 FPS retained evidence；
+- face-worker 注册图库查询 Qdrant authoritative cutover，60 路 8 FPS 压测 fallback=0；
+- 5000 人 x 4 张图，即 20,000 向量 Qdrant gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms；
 - 8090 可管理性能配置和拓扑配置；
 - clean-machine 离线迁移包支持 Docker images。
 
@@ -71,7 +75,7 @@ PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事�
 - 真实 RTSP 混合输入长时间稳定性；
 - T4 / 弱卡 / 双 GPU 生产 profile；
 - 60 路 16 FPS 推理吞吐；
-- 大图库 face-worker 查询性能；
+- 50k/100k 级别图库、真实 RTSP 长时间 soak 下的 face-worker 端到端 ACK/匹配延迟；
 - Savant 模型阶段级 latency。
 
 ## 设计偏好

@@ -131,8 +131,9 @@ pytest -q harness/tests/test_face_worker_qdrant_backend_static.py
 - match_results 语义；
 - watchlist_hit event payload；
 - source_observation_id 绑定；
-- 大图库 EXPLAIN/p95 计划；
-- Qdrant shadow parity、score/threshold mapping、fallback count、outbox lag；
+- Qdrant score/threshold mapping、fallback count、outbox lag；
+- 20k/50k/100k 规模 benchmark 结果，如果生产图库规模变化；
+- observation insert、rule resolution、exact rerank、event publish、ACK p95/p99；
 - 小目标名单 hybrid routing 不误扩成 all-active。
 
 ## 改 clip-worker

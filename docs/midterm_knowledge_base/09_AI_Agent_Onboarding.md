@@ -135,6 +135,6 @@ docker exec video-analytics-midterm-redis redis-cli XPENDING security.record_req
 
 1. 真实 RTSP 8 FPS 长时间 soak；
 2. 生产硬件 profile；
-3. face-worker 大图库 EXPLAIN / p95；
+3. face-worker 同步链路 ACK/匹配 p95；
 4. Savant 阶段级 latency；
 5. 根据真实压力结果决定是否继续改 media finalizer。

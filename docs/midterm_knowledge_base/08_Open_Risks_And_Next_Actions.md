@@ -46,20 +46,29 @@ tags:
 
 不要把 4090 pressure source 结果直接外推到 T4。
 
-## P1 face-worker 大图库
+## P1 face-worker 同步链路
 
-当前小图库下 gallery query p95 很低，但生产图库会改变复杂度。
+注册图库在线查询已经切到 Qdrant authoritative，并通过 60 路 8 FPS 压测和 20,000 向量 benchmark。
+因此原来的“pgvector 大图库查询是否会线性放大”已经从主要风险降级。
 
-需要：
+当前剩余风险是：`face-worker` 仍在单 consumer loop 中同步完成 DB insert、规则解析、Qdrant 查询、
+exact rerank、event publish 和 ACK。真实 RTSP 长时间运行或更高 face observation 速率下，仍需要确认
+端到端 ACK/pending 是否稳定。
 
-- 构造 100 / 500 / 1000 人图库；
-- 每人多张 embedding；
-- `EXPLAIN ANALYZE`；
-- pressure 下 gallery query p95/p99；
-- 验证 watchlist target-person filtering；
-- 验证阈值正确性。
+已证明：
 
-ANN index 只有在代表性图库证明 exact scan 成本真实存在后再加。若加 ANN，需要 exact rerank 保持阈值语义。
+- 60 路 8 FPS authoritative run 下 Qdrant query p95/p99 为 3ms/4ms；
+- 5000 人 x 4 图，即 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms；
+- fallback count 为 0；
+- `watchlist_hit` payload 和 8090 evidence 语义未改变。
+
+下一步需要：
+
+- 真实 RTSP soak 下记录 observation insert、rule resolution、Qdrant query、exact rerank、event publish、
+  ACK p95/p99；
+- 如果 Qdrant query 已达标但 `security.face_observations` pending/ACK 仍异常，再拆
+  persistence/matching 队列；
+- 如果生产图库增长到 50k/100k active embeddings，再追加同脚本 benchmark。
 
 ## P1 Savant 阶段级 latency
 

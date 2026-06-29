@@ -34,7 +34,9 @@ tags:
 
 ## face-worker
 
-消费 `security.face_observations`，写 `face_observations`，同步做 gallery/watchlist 查询并产生 watchlist hit。
+消费 `security.face_observations`，写 `face_observations`，通过 Qdrant/pgvector rollback path 做
+gallery/watchlist 查询并产生 watchlist hit。当前注册图库查询已是 Qdrant authoritative，但
+observation 入库、规则解析、匹配和事件发布仍在单 consumer loop 中同步串行。
 
 ## clip-worker
 

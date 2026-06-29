@@ -153,7 +153,7 @@ Savant face exporter
   -> security.face_observations
   -> face-worker
   -> face_observations
-  -> pgvector/Qdrant gallery query
+  -> Qdrant gallery query + PostgreSQL exact rerank
   -> watchlist_hit event
   -> event-worker
 ```
@@ -310,8 +310,9 @@ docker exec video-analytics-midterm-redis redis-cli XPENDING security.record_req
 当前经验：
 
 - 最近调查没有证明 PG 写队列/锁等待是 evidence 不完整主因；
-- PG 热路径风险主要在 events list/query、evidence queues、face vector search；
-- 大图库前不要武断上 ANN；当前在线 gallery 检索优化方向是 Qdrant derived index + exact rerank。
+- PG 热路径风险主要在 events list/query、evidence queues、历史 face observation search；
+- 注册图库在线 gallery 检索已经是 Qdrant derived index + exact rerank。若仍有 face-worker backlog，
+  优先看 insert、rule resolution、event publish 和 ACK，而不是先回到 pgvector ANN。
 
 ## 压测失败如何记录
 

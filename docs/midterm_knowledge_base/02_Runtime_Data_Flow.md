@@ -65,7 +65,8 @@ security.events
 security.face_observations
   -> face-worker
   -> face_observations
-  -> gallery/watchlist pgvector query
+  -> Qdrant gallery/watchlist query
+  -> PostgreSQL exact rerank / pgvector rollback path
   -> watchlist_hit event
 
 security.record_requests
@@ -81,6 +82,8 @@ security.frame_annotations
 
 - `event-worker` record request 去重从全 stream `XRANGE` 改为 Redis `SET NX EX` 幂等键。
 - `clip-worker` 对 stale/缺失 DB 事件的 pending record request 会终态清理并 `XACK`。
+- `face-worker` 在线注册图库查询已切到 Qdrant authoritative，PostgreSQL 继续保存图库事实源和
+  exact rerank/rollback 所需向量。
 - pressure report 固定 Redis、PG、worker、media 和 8090 proof 观测结构。
 
 ## Evidence 流
@@ -112,6 +115,9 @@ Evidence 目标不是烧录标注视频，而是：
   -> face crop / embedding
   -> persons
   -> person_gallery_embeddings
+  -> gallery_vector_sync_outbox
+  -> Qdrant face_gallery_current
 ```
 
 干净迁移不迁旧 PostgreSQL，所以人员和人脸库需要在新机器 8090 重新注册，除非另做业务数据迁移。
+Qdrant 数据目录是派生状态，可由 PostgreSQL bootstrap/reconcile 重建，不是干净迁移必需数据。

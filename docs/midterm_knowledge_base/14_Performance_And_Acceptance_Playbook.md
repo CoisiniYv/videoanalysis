@@ -174,40 +174,52 @@ pressure source 通过后，下一步要做真实 RTSP：
 
 ## face-worker 验收
 
-代表性图库：
+当前已完成的注册图库查询验收：
 
-- 100 人；
-- 500 人；
-- 1000 人；
-- 每人多张 embedding。
+- 60 路 8 FPS Qdrant authoritative pressure run；
+- fallback count 为 0；
+- Qdrant query p95/p99 为 3ms/4ms；
+- exact rerank p95/p99 为 1ms/2ms；
+- 8090 retained evidence proof 为 50/50；
+- 5000 人 x 4 张图，即 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。
+
+继续验收的端到端指标：
 
 指标：
 
 - insert p95/p99；
 - gallery query p95/p99；
-- watchlist query p95/p99；
+- exact rerank p95/p99；
+- rule resolution p95/p99；
+- event publish p95/p99；
+- observation ACK p95/p99；
 - Redis lag；
 - emitted watchlist hit；
 - false positive / false negative；
 - threshold correctness；
 - target-person filtering correctness。
 
-只有 exact scan 被证明是瓶颈后，再考虑：
+下一步只有在真实 RTSP 或更高 face observation 速率下出现 ACK/pending 问题时，再考虑：
 
-- Qdrant derived index；
-- hybrid routing，小目标名单继续 exact，高基数/all-active 走 Qdrant；
-- exact rerank；
+- persistence/matching 解耦；
+- 独立 `security.face_match_requests`；
+- 多 matcher worker；
 - per-camera/person cache；
-- 异步 watchlist queue。
+- 低质量 observation skip 策略。
 
-Qdrant cutover 额外门槛：
+Qdrant cutover 已完成门槛：
 
 - PostgreSQL `person_gallery_embeddings` 仍是事实源；
 - Qdrant collection 可以从 PostgreSQL bootstrap/reconcile；
-- shadow parity 无未解释的 watchlist 决策差异；
 - final authoritative run fallback count 为 0；
 - Qdrant query p95/p99、outbox lag、shadow mismatch、fallback count 进入压力报告；
 - `watchlist_hit` payload 和 8090 evidence 查询语义不变。
+
+后续图库规模门槛：
+
+- 当前已覆盖 20,000 active embeddings；
+- 如果生产达到 50,000 / 100,000 active embeddings，需要复跑
+  `services/face-worker/benchmark_qdrant_gallery_scale.py` 并固化 p95/p99。
 
 ## media-worker 验收
 

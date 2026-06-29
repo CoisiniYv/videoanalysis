@@ -1,6 +1,6 @@
 # Project Current Progress Summary
 
-更新时间：2026-06-18
+更新时间：2026-06-29
 
 ## 总体结论
 
@@ -44,8 +44,17 @@ proof 和 truncated pre-window proof 均带审计标签。该修复关闭的是�
 DB identity 正确，不等同于真实 60 路吞吐通过。修改记录见
 `docs/midterm_replay_shard_change_record_2026-06-18.md`。
 
+2026-06-29 已完成 face-worker 注册图库在线检索从 pgvector 主路径到 Qdrant authoritative
+的兼容切换。PostgreSQL 仍是 `persons` / `person_gallery_embeddings` 事实源，Qdrant
+是可重建派生索引，`watchlist_hit` payload、8090 evidence list/detail 和证据存储方式不变。
+60 路 8 FPS Qdrant authoritative 压测通过，fallback count 为 0；5000 人 x 4 张图，即
+20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。当前 face-worker
+剩余风险已从“注册图库向量查询是否能扛住数千人”转为“单 consumer loop 中 DB insert、规则解析、
+exact rerank、event publish 和 ACK 是否需要拆 persistence/matching 队列”。详细记录见
+`docs/midterm_qdrant_face_gallery_cutover_2026-06-29.md`。
+
 ```text
-RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis/PostgreSQL
+RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis/PostgreSQL/Qdrant
   -> event-worker -> clip-worker -> Replay job -> video-file-sink
   -> media-worker evidence sidecar -> 8090 operator portal
 ```
@@ -101,6 +110,8 @@ RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis/Postgr
 - API 镜像使用 `services/api/Dockerfile.face-runtime`，复用 face-worker 运行层，
   避免 API 构建时重复安装 ONNX Runtime/OpenCV/Numpy。
 - 浏览器通过 8090 的 `/media/*` 代理查看上传图和裁剪图。
+- 在线 watchlist/gallery 查询当前走 Qdrant authoritative，PostgreSQL 仍保存图库事实源和
+  exact rerank/rollback 向量；Qdrant 数据可从 PostgreSQL bootstrap/reconcile 重建。
 
 ### 证据生成与查看
 
@@ -142,8 +153,8 @@ bundle 能形成完整链路。
 - `face.live_search`
 
 这些开关可以在 UI/API 层保存或导出部分配置，但还不是完整的 per-camera runtime
-gate。face/watchlist 当前仍主要由 face-worker 和环境变量控制。live search 仍是
-deferred/contract 状态。
+gate。watchlist/gallery matching 当前由 face-worker 承接，图库检索已切到 Qdrant；
+live search 仍是 deferred/contract 状态。
 
 算法控制边界见 `docs/midterm_operator_algorithm_controls_runtime_status.md`。
 

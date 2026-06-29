@@ -109,17 +109,15 @@ tags:
 
 当前注意点：
 
-- 小图库下 exact pgvector search 成本低，不代表生产大图库也低。
-- 100 / 500 / 1000 人图库需要单独 `EXPLAIN ANALYZE` 和 p95/p99。
-- 当前选定的在线图库检索方向是 Qdrant derived index，而不是先在 PostgreSQL 上加 pgvector ANN。
+- 小图库下 exact pgvector search 成本低；生产在线图库检索已经改为 Qdrant derived index。
 - PostgreSQL 仍保存 `person_gallery_embeddings.embedding vector(512)`，作为事实源、rollback path 和 exact rerank 来源。
 - Qdrant 只服务在线 gallery lookup，第一阶段不迁移历史 `face_observations` 相似搜索。
-- Qdrant cutover 前必须 baseline-first：记录 target-person cardinality、pgvector exact p95/p99、阈值边界和
-  face-worker ACK latency。
-- 小目标名单可以继续走 pgvector/exact path；高基数或 all-active 搜索才优先走 Qdrant/hybrid path。
-- Qdrant 结果默认 exact rerank，避免阈值语义漂移。
+- 当前 authoritative runtime 使用 `FACE_VECTOR_BACKEND=qdrant`、
+  `QDRANT_FALLBACK_TO_PGVECTOR=false`、`QDRANT_PREFER_GRPC=true`。
+- Qdrant 结果默认 exact rerank，避免阈值语义漂移；pgvector path 保留为 rollback / exact baseline。
+- 20,000 active vectors benchmark 已证明“数千人员、每人几张图”场景下 Qdrant 查询本身不是当前瓶颈。
 
-计划中的 Qdrant 相关契约：
+Qdrant 相关契约：
 
 - collection：`face_gallery_adaface_512_v1`；
 - alias：`face_gallery_current`；
@@ -128,6 +126,8 @@ tags:
 - distance：Cosine；
 - PostgreSQL outbox：`gallery_vector_sync_outbox`，用于 upsert/delete 同步；
 - Qdrant 数据目录：`/data/video-analytics/qdrant-midterm`，属于可重建派生状态，不是干净迁移必需数据。
+- 已验收指标：60 路 8 FPS Qdrant p95/p99 为 3ms/4ms，20,000 向量 all-search p95/p99 为
+  4.037ms/6.427ms，fallback count 为 0。
 
 ## Evidence 任务表
 

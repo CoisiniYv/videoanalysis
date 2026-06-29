@@ -18,6 +18,7 @@ tags:
 | 单 4090 同卡双分支 60 路 4 FPS | retained-evidence 通过 |
 | 单 4090 同卡双分支 60 路 8 FPS | retained-evidence 通过 |
 | media finalizer pacer 8 FPS | CPU peak 约 98%，lifecycle p95 约 192s |
+| face-worker Qdrant cutover | 60 路 8 FPS fallback=0，20,000 向量 all-search p95/p99=4.037ms/6.427ms |
 
 ## 已完成优化
 
@@ -105,6 +106,28 @@ pressure harness 校验 topology replay shard JSON 和 clip-worker observed JSON
 - pressure report 在 drain 后刷新 logs；
 - fallback count 按 `imageio_ffmpeg_fallback_count=N` 数值求和。
 
+### Face-worker Qdrant 注册图库查询
+
+旧风险：
+
+- 注册图库查询依赖 pgvector exact search；
+- 生产图库扩展到数千人员、每人多图时，查询成本可能随图库规模放大；
+- 8090 watchlist hit 需要保持阈值语义和 payload 不变。
+
+当前结果：
+
+- PostgreSQL 仍是 `persons` / `person_gallery_embeddings` 事实源；
+- Qdrant 是 `face_gallery_current` 派生索引，可从 PostgreSQL rebuild；
+- `FACE_VECTOR_BACKEND=qdrant` authoritative runtime 已通过；
+- 60 路 8 FPS 压测中 Qdrant query p95/p99 为 3ms/4ms，fallback count 为 0；
+- 5000 人 x 4 图，即 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。
+
+剩余风险：
+
+- `face-worker` 仍是单 consumer loop；
+- 后续关注 observation insert、rule resolution、exact rerank、event publish 和 ACK latency；
+- 如果 pending/ACK 异常，下一步是 persistence/matching 解耦，而不是继续优化 pgvector gallery scan。
+
 ## 重要误区
 
 - `16/1` 高入口压力不是 16 FPS 推理能力证明。
@@ -118,6 +141,6 @@ pressure harness 校验 topology replay shard JSON 和 clip-worker observed JSON
 
 1. 真实 RTSP 8 FPS 长时间 soak；
 2. T4 / 双 GPU / 生产硬件 profile；
-3. face-worker 大图库 EXPLAIN / p95；
+3. face-worker 同步链路 ACK/匹配 p95，必要时拆 persistence/matching；
 4. Savant 阶段级 latency；
 5. 如果 lifecycle 超 300s，再评估 media finalizer worker pool / 多容器 claim。

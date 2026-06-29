@@ -263,12 +263,12 @@ PtsFpsGate
 当前瓶颈风险：
 
 - 单 consumer loop；
-- DB insert 和 pgvector 查询同步执行；
-- 生产大图库下 exact search 可能成为 p95/p99 热点；
+- DB insert、规则解析、Qdrant 查询、exact rerank、event publish 和 ACK 仍同步串行；
 - 2026-06-29 baseline 显示当前 3 条 active gallery 的 target-filtered
   pgvector exact p95 约 0.198ms，所以当前小图库不是瓶颈；
-- Qdrant/hybrid cutover 前仍缺 runtime bootstrap/reconcile、shadow parity、
-  authoritative 压测和 60 路 evidence proof。
+- Qdrant authoritative cutover 已完成，60 路 8 FPS 压测 Qdrant p95/p99 为 3ms/4ms；
+- 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms；
+- 当前后续风险不是注册图库 vector search 本身，而是单 worker 同步链路是否需要拆分。
 
 下一步优化应先观测：
 
@@ -280,17 +280,19 @@ PtsFpsGate
 - batch size；
 - Redis lag；
 - target-person cardinality；
-- `EXPLAIN ANALYZE` 在 100/500/1000 人图库下的 plan；
 - Qdrant query p95/p99、fallback count、shadow mismatch count 和 outbox lag。
+- face observation ACK latency；
+- 50k/100k active embeddings 下的 Qdrant benchmark，如果生产图库规模继续扩大。
 
-Qdrant 接入原则：
+Qdrant 运行原则：
 
 - PostgreSQL 继续是人员和图库事实源；
 - Qdrant 是 derived index，可从 PostgreSQL 重建；
-- 默认 `FACE_VECTOR_BACKEND=pgvector`，先 baseline、再 shadow、再 canary；
-- 小目标名单可以保留 pgvector/exact path，高基数和 all-active 查询走 Qdrant；
+- 当前 authoritative runtime 是 `FACE_VECTOR_BACKEND=qdrant`；
+- pgvector 保留为 rollback / exact baseline；
 - Qdrant 默认 exact rerank 后才允许发 `watchlist_hit`；
-- Qdrant 故障不能影响 Savant、Replay、clip-worker 或 media-worker。
+- Qdrant 故障不能影响 Savant、Replay、clip-worker 或 media-worker；
+- 回滚只需要重启 `face-worker`，不需要 DB rollback。
 
 ## clip-worker
 

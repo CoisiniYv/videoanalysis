@@ -61,7 +61,10 @@ PtsFpsGate
 | `event-worker` | `services/event-worker/app/worker.py` | `security.events` | `events`、alerts、evidence tasks、record requests |
 | record publisher | `services/event-worker/app/record_request.py` | event id | Redis `security.record_requests` |
 | `face-worker` | `services/face-worker/app/worker.py` | `security.face_observations` | `face_observations`、watchlist/gallery events |
-| vector store | `services/face-worker/app/vector_store.py` | embedding | pgvector exact search |
+| gallery search selector | `services/face-worker/app/gallery_search.py` | embedding + target persons | `pgvector` / `shadow` / `qdrant` / `hybrid` 后端选择 |
+| Qdrant gallery store | `services/face-worker/app/qdrant_gallery_store.py` | embedding | Qdrant candidate search + PostgreSQL exact rerank |
+| pgvector rollback store | `services/face-worker/app/vector_store.py` | embedding | pgvector exact search / rollback / historical observation search |
+| Qdrant sync | `services/face-worker/sync_qdrant_gallery.py` | PostgreSQL gallery rows / outbox | bootstrap、drain、reconcile、status |
 | `clip-worker` | `services/clip-worker/app/worker.py` | `security.record_requests` | Replay jobs、evidence task updates |
 | replay shards | `services/clip-worker/app/replay_shards.py` | shard map | per-source Replay/video-file-sink routing |
 

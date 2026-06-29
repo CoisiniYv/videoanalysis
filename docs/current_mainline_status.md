@@ -24,6 +24,10 @@ It intentionally avoids historical codename files in the active deployment surfa
   Replay `out_stream` and Savant. Replay remains the full-rate evidence storage
   authority; the forwarder samples/drops only the analysis branch and exposes
   `va_forwarder_*` metrics.
+- Face gallery search: `face-worker` currently uses Qdrant authoritative
+  registered-gallery lookup with PostgreSQL exact rerank and pgvector rollback.
+  PostgreSQL remains the source of truth for `persons` and
+  `person_gallery_embeddings`; Qdrant is a rebuildable derived index.
 - Savant v0.6.0 PTS-reset crash hardening: `savant-security` applies the
   md5-pinned overlay in `modules/savant_security/savant_patches/` before module
   startup, and the API service behind the 8090 management plane runs the
@@ -70,7 +74,8 @@ It intentionally avoids historical codename files in the active deployment surfa
 ```text
 RTSP -> Replay storage -> analysis-forwarder -> Savant inference
   -> Redis events/annotations
-  -> event-worker -> clip-worker -> Replay job -> video-file-sink
+  -> event-worker / face-worker -> PostgreSQL / Qdrant
+  -> clip-worker -> Replay job -> video-file-sink
   -> media-worker evidence sidecar -> 8090 operator portal
 ```
 
@@ -108,6 +113,7 @@ analysis branch through `analysis-forwarder`:
 | Phase 1 analysis-forwarder | Complete for the current two-source runtime. `PASS_PHASE1_FORWARDER` is documented. |
 | Phase 2 single-T4 30 streams | Gated. Readiness and pressure-run scripts exist, but the current development host is not a T4 30-stream environment. |
 | Phase 3 dual-T4 60 streams | Partial. Phase 3A shard routing and dual-4090 validation scaffolding are implemented; real 60-stream throughput, RocksDB write latency, and evidence burst capacity remain gated. |
+| Face gallery search | Qdrant authoritative cutover complete for current scale gate. 60-route 8 FPS pressure fallback=0; 20,000-vector gRPC benchmark all-search p95/p99=4.037ms/6.427ms. Remaining risk is the synchronous face-worker loop, not registered-gallery vector lookup. |
 | Phase 4 production hardening | Not implemented. Requires drills, dashboard thresholds, storage sizing, and runbook. |
 | Evidence proof window fix | Partially implemented and runtime-validated for "event exists but proof window fails"; frontend frame-bound overlay hardening remains open. |
 | Algorithm support matrix | Not implemented as a stable API/UI matrix. Current docs still define the boundary. |

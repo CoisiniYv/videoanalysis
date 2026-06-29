@@ -40,7 +40,10 @@ Redis worker 后处理、DB-backed evidence 和离线迁移打包能力。当前
 - 单 4090 同卡双分支 60 路 4 FPS / 8 FPS retained-evidence pressure source 通过；
 - media-worker deadline-aware 平滑调度把 8 FPS pressure profile 下的 CPU 峰值控制到约 98%，
   evidence lifecycle p95 约 192 秒；
-- 仍缺真实 RTSP 混合输入、长时间 soak、生产硬件 profile、face-worker 大图库验证和 Savant 阶段级 latency。
+- face-worker 注册图库 Qdrant authoritative cutover 通过，20,000 向量 benchmark all-search p95/p99
+  为 4.037ms/6.427ms；
+- 仍缺真实 RTSP 混合输入、长时间 soak、生产硬件 profile、face-worker 同步链路 ACK/匹配延迟验证和
+  Savant 阶段级 latency。
 
 ## 如何使用这个知识库
 

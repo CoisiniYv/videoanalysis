@@ -214,7 +214,7 @@ analysis-forwarder 会降采样；Savant 只处理分析帧。
 - production 要求全事件 evidence；
 - backlog 长期不下降。
 
-## 决策：face-worker 先 baseline，再接 Qdrant/hybrid
+## 决策：face-worker 注册图库查询使用 Qdrant derived index
 
 原因：
 
@@ -222,18 +222,24 @@ analysis-forwarder 会降采样；Savant 只处理分析帧。
 - PostgreSQL ANN 可能改变阈值语义，且仍会把在线检索压力留在主库；
 - Qdrant 更适合作为可重建的图库向量 serving layer；
 - watchlist 命中需要可解释和可回归；
-- 生产图库规模未知。
+- 生产图库可能扩展到数千人员、每人多张图片。
 
-路线：
+当前状态：
 
-1. 先记录当前 pgvector exact baseline、target cardinality、face-worker ACK latency；
-2. 保持 PostgreSQL 为 `person_gallery_embeddings` 事实源；
-3. 增加 Qdrant 作为 derived index；
-4. 通过 PostgreSQL transactional outbox 同步 upsert/delete；
-5. 先 shadow parity，再 canary cutover；
-6. 小目标名单保留 exact path，高基数/all-active 走 Qdrant；
-7. Qdrant 结果默认 exact rerank，阈值语义不变；
-8. 如果 baseline 证明瓶颈不是向量检索，再继续做 persistence/matching 解耦。
+1. PostgreSQL 仍是 `person_gallery_embeddings` 事实源；
+2. Qdrant 是 derived index，可从 PostgreSQL bootstrap/reconcile；
+3. 通过 PostgreSQL transactional outbox 同步 upsert/delete；
+4. 当前 authoritative runtime 为 `FACE_VECTOR_BACKEND=qdrant`；
+5. Qdrant 结果默认 exact rerank，阈值语义不变；
+6. pgvector path 保留为 rollback / exact baseline；
+7. 60 路 8 FPS 压测 fallback=0，Qdrant p95/p99 为 3ms/4ms；
+8. 20,000 向量 benchmark all-search p95/p99 为 4.037ms/6.427ms。
+
+后续路线：
+
+- 如果 `face-worker` 仍有 pending/ACK 压力，优先拆 persistence/matching 队列；
+- 如果图库扩展到 50k/100k active embeddings，再追加 Qdrant 规模 benchmark；
+- 历史 `face_observations` 相似搜索仍是单独产品/索引设计，不混入注册图库 cutover。
 
 ## 决策：干净迁移不携带旧业务数据
 
