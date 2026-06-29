@@ -668,6 +668,7 @@ services:
       QDRANT_DEFAULT_SEGMENT_NUMBER: "${QDRANT_DEFAULT_SEGMENT_NUMBER:-2}"
       QDRANT_HNSW_M: "${QDRANT_HNSW_M:-16}"
       QDRANT_HNSW_EF_CONSTRUCT: "${QDRANT_HNSW_EF_CONSTRUCT:-100}"
+      QDRANT_BATCH_QUERY_ENABLED: "${QDRANT_BATCH_QUERY_ENABLED:-false}"
       BATCH_SIZE: "50"
       POLL_TIMEOUT_MS: "2000"
     volumes:
@@ -678,6 +679,40 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  qdrant-sync-worker:
+    image: video-analytics-midterm-face-worker:latest
+    container_name: video-analytics-midterm-qdrant-sync-worker
+    profiles: ["qdrant"]
+    command: ["python", "/app/sync_qdrant_gallery.py", "--mode", "run"]
+    environment:
+      DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
+      QDRANT_URL: "${QDRANT_URL:-http://qdrant:6333}"
+      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
+      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-face_gallery_current}"
+      QDRANT_BASE_COLLECTION: "${QDRANT_BASE_COLLECTION:-face_gallery_adaface_512_v1}"
+      QDRANT_PREFER_GRPC: "${QDRANT_PREFER_GRPC:-true}"
+      QDRANT_TIMEOUT_SECONDS: "${QDRANT_TIMEOUT_SECONDS:-2.0}"
+      QDRANT_WRITE_WAIT: "${QDRANT_WRITE_WAIT:-true}"
+      QDRANT_INDEXING_THRESHOLD_KB: "${QDRANT_INDEXING_THRESHOLD_KB:-1000}"
+      QDRANT_FULL_SCAN_THRESHOLD_KB: "${QDRANT_FULL_SCAN_THRESHOLD_KB:-1000}"
+      QDRANT_DEFAULT_SEGMENT_NUMBER: "${QDRANT_DEFAULT_SEGMENT_NUMBER:-2}"
+      QDRANT_HNSW_M: "${QDRANT_HNSW_M:-16}"
+      QDRANT_HNSW_EF_CONSTRUCT: "${QDRANT_HNSW_EF_CONSTRUCT:-100}"
+      QDRANT_SYNC_BATCH_SIZE: "${QDRANT_SYNC_BATCH_SIZE:-500}"
+      QDRANT_SYNC_MAX_ATTEMPTS: "${QDRANT_SYNC_MAX_ATTEMPTS:-8}"
+      QDRANT_SYNC_POLL_INTERVAL_SECONDS: "${QDRANT_SYNC_POLL_INTERVAL_SECONDS:-2.0}"
+      QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS: "${QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS:-300}"
+    volumes:
+      - ../services/face-worker:/app:rw
+      - /data/video-analytics/media:/data/video-analytics/media:ro
+      - /data/video-analytics/models:/data/video-analytics/models:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      qdrant:
+        condition: service_started
     restart: unless-stopped
 
   clip-worker:

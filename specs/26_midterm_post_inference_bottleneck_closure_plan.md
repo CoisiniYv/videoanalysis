@@ -764,11 +764,18 @@ Harness:
   from logs instead of leaving it permanently `not_enough_data`.
 - Completed: Qdrant registered-gallery cutover is authoritative for online
   watchlist/gallery matching while PostgreSQL remains the source of truth.
-- Completed: 60-route 8 FPS Qdrant authoritative pressure run passed with
-  Qdrant query p95/p99 3ms/4ms, exact rerank p95/p99 1ms/2ms, fallback count 0,
-  and 8090 retained evidence 50/50.
+- Completed: 60-route 8 FPS Qdrant authoritative final rerun
+  `pressure60_qdrant_final_8fps_20260629T150103Z` passed after clearing old
+  pressure runtime residue. Qdrant query p95/p99 was 4ms/5ms, exact rerank
+  p95/p99 was 2ms/3ms, fallback count 0, shadow mismatch 0, outbox active 0,
+  face-worker pending/lag 0/0, and 8090 retained evidence 50/50.
 - Completed: 5000 persons x 4 images, or 20,000 active vectors, Qdrant gRPC
-  benchmark passed with all-search p95/p99 4.037ms/6.427ms.
+  benchmark rerun passed with all-search p95/p99 4.275ms/6.801ms and top1
+  self/person hit rate 1.0 across target sizes.
+- Completed: Qdrant sync reliability now has an independent `qdrant-sync-worker`
+  long-running outbox drain, stale `processing` reclaim, alias-target
+  verification, and a default-off `search_gallery_batch()` scaffold for a later
+  `_process_batch()` optimization.
 - Updated bottleneck attribution: registered-gallery vector lookup is no longer
   the likely face-worker bottleneck at the current 5000-person scale. The next
   risk is the synchronous single consumer loop around DB insert, rule
@@ -892,6 +899,13 @@ Harness:
   proof wait, replay job elapsed, sink-ready wait, and finalizer wait before
   choosing whether to raise `MEDIA_WORKER_FINALIZER_WORKERS` to 6/8 or optimize
   clip-worker/replay scheduling.
+- Verified: final Qdrant rerun `pressure60_qdrant_final_8fps_20260629T150103Z`
+  also passed after old pressure residue cleanup. It retained 50/50 playable
+  and 8090-queryable evidence, kept duplicate materialization 0, finalizer
+  failures 0, imageio fallback 0, and measured media finalization p95/p99
+  8.141s/8.635s. End-to-end media lifecycle p95/p99 remained 196.192s/221.247s,
+  reinforcing that the next evidence-latency split should focus on proof,
+  Replay job, and sink-ready wait before finalizer start.
 
 Acceptance:
 

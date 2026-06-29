@@ -113,7 +113,7 @@ analysis branch through `analysis-forwarder`:
 | Phase 1 analysis-forwarder | Complete for the current two-source runtime. `PASS_PHASE1_FORWARDER` is documented. |
 | Phase 2 single-T4 30 streams | Gated. Readiness and pressure-run scripts exist, but the current development host is not a T4 30-stream environment. |
 | Phase 3 dual-T4 60 streams | Partial. Phase 3A shard routing and dual-4090 validation scaffolding are implemented; real 60-stream throughput, RocksDB write latency, and evidence burst capacity remain gated. |
-| Face gallery search | Qdrant authoritative cutover complete for current scale gate. 60-route 8 FPS pressure fallback=0; 20,000-vector gRPC benchmark all-search p95/p99=4.037ms/6.427ms. Remaining risk is the synchronous face-worker loop, not registered-gallery vector lookup. |
+| Face gallery search | Qdrant authoritative cutover complete for current scale gate. Final 60-route 8 FPS rerun fallback=0, Qdrant query p95/p99=4ms/5ms; 20,000-vector gRPC benchmark all-search p95/p99=4.275ms/6.801ms with top1 self/person hit rate 1.0. Remaining risk is the synchronous face-worker loop, not registered-gallery vector lookup. |
 | Phase 4 production hardening | Not implemented. Requires drills, dashboard thresholds, storage sizing, and runbook. |
 | Evidence proof window fix | Partially implemented and runtime-validated for "event exists but proof window fails"; frontend frame-bound overlay hardening remains open. |
 | Algorithm support matrix | Not implemented as a stable API/UI matrix. Current docs still define the boundary. |

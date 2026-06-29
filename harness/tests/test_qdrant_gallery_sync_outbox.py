@@ -29,16 +29,22 @@ def test_sync_script_supports_required_modes_and_skip_locked_claim():
         encoding="utf-8"
     )
 
-    for mode in ("bootstrap", "drain-outbox", "reconcile", "rebuild", "status"):
+    for mode in ("bootstrap", "drain-outbox", "reconcile", "rebuild", "status", "run", "watch"):
         assert f'"{mode}"' in text
     assert "FOR UPDATE SKIP LOCKED" in helper
     assert "status IN ('pending', 'retry')" in helper
+    assert "reclaim_stale_processing_rows" in helper
+    assert "status = 'processing'" in helper
+    assert "claimed_at < now()" in helper
     assert "poisoned" in helper
     assert "HnswConfigDiff" in text
     assert "OptimizersConfigDiff" in text
     assert "indexing_threshold" in text
     assert "full_scan_threshold" in text
     assert "update_collection" in text
+    assert "verify_alias_target" in text
+    assert "get_aliases" in text
+    assert "qdrant_sync_loop_started" in text
 
 
 def test_outbox_status_summary_uses_valid_aggregate_filters():

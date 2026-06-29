@@ -36,6 +36,7 @@ def test_default_backend_remains_pgvector(monkeypatch):
         "QDRANT_URL",
         "QDRANT_COLLECTION",
         "QDRANT_FALLBACK_TO_PGVECTOR",
+        "QDRANT_BATCH_QUERY_ENABLED",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -49,12 +50,16 @@ def test_default_backend_remains_pgvector(monkeypatch):
     assert cfg.qdrant_indexing_threshold_kb == 1000
     assert cfg.qdrant_full_scan_threshold_kb == 1000
     assert cfg.qdrant_default_segment_number == 2
+    assert cfg.qdrant_batch_query_enabled is False
+    assert cfg.qdrant_sync_poll_interval_seconds == 2.0
+    assert cfg.qdrant_sync_processing_timeout_seconds == 300
 
 
 def test_midterm_compose_adds_qdrant_inert_profile_and_face_worker_env():
     compose = yaml.safe_load((ROOT / "infra" / "docker-compose.midterm.yml").read_text(encoding="utf-8"))
     qdrant = compose["services"]["qdrant"]
     face_env = compose["services"]["face-worker"]["environment"]
+    sync_worker = compose["services"]["qdrant-sync-worker"]
     env_file = _env_file()
 
     assert qdrant["image"] == "qdrant/qdrant:v1.18.2"
@@ -72,6 +77,16 @@ def test_midterm_compose_adds_qdrant_inert_profile_and_face_worker_env():
     assert env_file["QDRANT_FULL_SCAN_THRESHOLD_KB"] == "1000"
     assert face_env["QDRANT_INDEXING_THRESHOLD_KB"] == "${QDRANT_INDEXING_THRESHOLD_KB:-1000}"
     assert face_env["QDRANT_FULL_SCAN_THRESHOLD_KB"] == "${QDRANT_FULL_SCAN_THRESHOLD_KB:-1000}"
+    assert face_env["QDRANT_BATCH_QUERY_ENABLED"] == "${QDRANT_BATCH_QUERY_ENABLED:-false}"
+    assert env_file["QDRANT_BATCH_QUERY_ENABLED"] == "false"
+    assert env_file["QDRANT_SYNC_POLL_INTERVAL_SECONDS"] == "2.0"
+    assert env_file["QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS"] == "300"
+
+    assert sync_worker["image"] == "video-analytics-midterm-face-worker:latest"
+    assert sync_worker["profiles"] == ["qdrant"]
+    assert sync_worker["command"] == ["python", "/app/sync_qdrant_gallery.py", "--mode", "run"]
+    assert sync_worker["environment"]["QDRANT_SYNC_BATCH_SIZE"] == "${QDRANT_SYNC_BATCH_SIZE:-500}"
+    assert sync_worker["environment"]["QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS"] == "${QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS:-300}"
 
 
 def test_watchlist_hit_payload_accepts_qdrant_result_shape_without_schema_change():
@@ -128,3 +143,7 @@ def test_qdrant_scale_benchmark_uses_temporary_collection_and_target_filters():
     assert "prefer-grpc" in script
     assert "indexing-threshold-kb" in script
     assert "max-p95-ms" in script
+    assert "top1_self_hit_rate" in script
+    assert "top1_person_hit_rate" in script
+    assert "missing_self_count" in script
+    assert "min_score" in script

@@ -9,6 +9,7 @@ import logging
 import os
 import socket
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,7 @@ from app.gallery_sync_outbox import (
     mark_outbox_completed,
     mark_outbox_failed,
     outbox_status_summary,
+    reclaim_stale_processing_rows,
 )
 
 logger = logging.getLogger("sync-qdrant-gallery")
@@ -43,6 +45,8 @@ class SyncConfig:
     batch_size: int
     max_attempts: int
     claimed_by: str
+    poll_interval_seconds: float
+    processing_timeout_seconds: int
     indexing_threshold_kb: int
     full_scan_threshold_kb: int
     default_segment_number: int
@@ -54,11 +58,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("bootstrap", "drain-outbox", "reconcile", "rebuild", "status"),
+        choices=("bootstrap", "drain-outbox", "reconcile", "rebuild", "status", "run", "watch"),
         required=True,
     )
     parser.add_argument("--batch-size", type=int, default=int(os.getenv("QDRANT_SYNC_BATCH_SIZE", "500")))
     parser.add_argument("--max-attempts", type=int, default=int(os.getenv("QDRANT_SYNC_MAX_ATTEMPTS", "8")))
+    parser.add_argument(
+        "--poll-interval-s",
+        type=float,
+        default=float(os.getenv("QDRANT_SYNC_POLL_INTERVAL_SECONDS", "2.0")),
+    )
+    parser.add_argument(
+        "--processing-timeout-s",
+        type=int,
+        default=int(os.getenv("QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS", "300")),
+    )
     return parser.parse_args(argv)
 
 
@@ -82,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=max(1, args.batch_size),
         max_attempts=max(1, args.max_attempts),
         claimed_by=f"{socket.gethostname()}:{os.getpid()}",
+        poll_interval_seconds=max(0.1, args.poll_interval_s),
+        processing_timeout_seconds=max(1, args.processing_timeout_s),
         indexing_threshold_kb=max(1, cfg0.qdrant_indexing_threshold_kb),
         full_scan_threshold_kb=max(1, cfg0.qdrant_full_scan_threshold_kb),
         default_segment_number=max(0, cfg0.qdrant_default_segment_number),
@@ -94,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(status_summary(conn, client, cfg), ensure_ascii=False, indent=2, default=str))
             return 0
         ensure_collection(client, cfg)
+        if args.mode in {"run", "watch"}:
+            run_watch_loop(conn, client, cfg)
+            return 0
         if args.mode == "rebuild":
             recreate_collection(client, cfg)
             ensure_collection(client, cfg)
@@ -197,15 +216,55 @@ def ensure_alias(client: Any, cfg: SyncConfig) -> None:
             cfg.qdrant_alias,
             cfg.qdrant_base_collection,
         )
+        verify_alias_target(client, cfg)
+        return
     except Exception as exc:
         message = str(exc).lower()
         if "already exists" not in message:
             raise
-        logger.info(
-            "qdrant_alias_exists alias=%s collection=%s",
-            cfg.qdrant_alias,
-            cfg.qdrant_base_collection,
+    verify_alias_target(client, cfg)
+    logger.info(
+        "qdrant_alias_exists alias=%s collection=%s",
+        cfg.qdrant_alias,
+        cfg.qdrant_base_collection,
+    )
+
+
+def verify_alias_target(client: Any, cfg: SyncConfig) -> None:
+    targets = qdrant_alias_targets(client, cfg.qdrant_alias)
+    if cfg.qdrant_base_collection not in targets:
+        raise RuntimeError(
+            "Qdrant alias target mismatch: "
+            f"alias={cfg.qdrant_alias!r} expected={cfg.qdrant_base_collection!r} "
+            f"actual={sorted(targets)!r}"
         )
+    wrong_targets = targets - {cfg.qdrant_base_collection}
+    if wrong_targets:
+        raise RuntimeError(
+            "Qdrant alias points to multiple collections: "
+            f"alias={cfg.qdrant_alias!r} expected={cfg.qdrant_base_collection!r} "
+            f"actual={sorted(targets)!r}"
+        )
+
+
+def qdrant_alias_targets(client: Any, alias_name: str) -> set[str]:
+    try:
+        response = client.get_aliases()
+    except Exception as exc:
+        raise RuntimeError(f"unable to inspect Qdrant aliases: {exc}") from exc
+    aliases = getattr(response, "aliases", response)
+    if isinstance(aliases, dict):
+        aliases = aliases.get("aliases", [])
+    targets: set[str] = set()
+    for alias in aliases or []:
+        current_alias = getattr(alias, "alias_name", None)
+        current_collection = getattr(alias, "collection_name", None)
+        if isinstance(alias, dict):
+            current_alias = alias.get("alias_name", current_alias)
+            current_collection = alias.get("collection_name", current_collection)
+        if current_alias == alias_name and current_collection:
+            targets.add(str(current_collection))
+    return targets
 
 
 def ensure_collection_tuning(client: Any, cfg: SyncConfig) -> None:
@@ -264,6 +323,17 @@ def bootstrap(conn: psycopg.Connection, client: Any, cfg: SyncConfig) -> dict[st
 
 
 def drain_outbox(conn: psycopg.Connection, client: Any, cfg: SyncConfig) -> dict[str, Any]:
+    reclaimed = reclaim_stale_processing_rows(
+        conn,
+        timeout_seconds=cfg.processing_timeout_seconds,
+        limit=cfg.batch_size,
+    )
+    if reclaimed:
+        logger.warning(
+            "qdrant_outbox_stale_processing_reclaimed count=%d timeout_seconds=%d",
+            reclaimed,
+            cfg.processing_timeout_seconds,
+        )
     rows = claim_outbox_rows(conn, claimed_by=cfg.claimed_by, limit=cfg.batch_size)
     processed = 0
     failed = 0
@@ -292,8 +362,31 @@ def drain_outbox(conn: psycopg.Connection, client: Any, cfg: SyncConfig) -> dict
                 max_attempts=cfg.max_attempts,
             )
             logger.exception("qdrant_outbox_row_failed id=%s gallery_id=%s", row_id, gallery_id)
-    logger.info("qdrant_outbox_drain_completed processed=%d failed=%d", processed, failed)
-    return {"claimed": len(rows), "processed": processed, "failed": failed}
+    logger.info(
+        "qdrant_outbox_drain_completed reclaimed=%d processed=%d failed=%d",
+        reclaimed,
+        processed,
+        failed,
+    )
+    return {"claimed": len(rows), "processed": processed, "failed": failed, "reclaimed": reclaimed}
+
+
+def run_watch_loop(conn: psycopg.Connection, client: Any, cfg: SyncConfig) -> None:
+    logger.info(
+        "qdrant_sync_loop_started poll_interval_seconds=%.3f processing_timeout_seconds=%d "
+        "batch_size=%d claimed_by=%s",
+        cfg.poll_interval_seconds,
+        cfg.processing_timeout_seconds,
+        cfg.batch_size,
+        cfg.claimed_by,
+    )
+    try:
+        while True:
+            result = drain_outbox(conn, client, cfg)
+            if int(result.get("claimed") or 0) == 0 and int(result.get("reclaimed") or 0) == 0:
+                time.sleep(cfg.poll_interval_seconds)
+    except KeyboardInterrupt:
+        logger.info("qdrant_sync_loop_stopped")
 
 
 def reconcile(conn: psycopg.Connection, client: Any, cfg: SyncConfig) -> dict[str, Any]:
@@ -333,6 +426,15 @@ def status_summary(conn: psycopg.Connection, client: Any, cfg: SyncConfig) -> di
         summary["qdrant_collection"] = json.loads(collection.model_dump_json())
     except Exception as exc:
         summary["qdrant_collection"] = {"status": "not_available", "error": f"{type(exc).__name__}: {exc}"}
+    if cfg.qdrant_alias != cfg.qdrant_base_collection:
+        try:
+            targets = sorted(qdrant_alias_targets(client, cfg.qdrant_alias))
+            summary["qdrant_alias_targets"] = targets
+            summary["qdrant_alias_ok"] = targets == [cfg.qdrant_base_collection]
+        except Exception as exc:
+            summary["qdrant_alias_targets"] = []
+            summary["qdrant_alias_ok"] = False
+            summary["qdrant_alias_error"] = f"{type(exc).__name__}: {exc}"
     return summary
 
 

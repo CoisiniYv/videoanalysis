@@ -32,6 +32,7 @@ class QdrantGallerySettings:
     min_candidates: int
     exact_rerank_enabled: bool
     fallback_to_pgvector: bool
+    batch_query_enabled: bool = False
 
 
 class QdrantGallerySearchBackend:
@@ -74,6 +75,7 @@ class QdrantGallerySearchBackend:
                 min_candidates=cfg.qdrant_min_candidates,
                 exact_rerank_enabled=cfg.qdrant_exact_rerank_enabled,
                 fallback_to_pgvector=cfg.qdrant_fallback_to_pgvector,
+                batch_query_enabled=cfg.qdrant_batch_query_enabled,
             ),
             conn=conn,
             fallback_backend=fallback_backend,
@@ -191,6 +193,119 @@ class QdrantGallerySearchBackend:
             )
             raise
 
+    def search_gallery_batch(
+        self,
+        requests: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        if not requests:
+            return []
+        if not self._settings.batch_query_enabled:
+            return [
+                self.search_gallery(
+                    request["embedding"],
+                    top_k=int(request.get("top_k", 10)),
+                    min_similarity=request.get("min_similarity"),
+                    person_ids=request.get("person_ids"),
+                    include_embedding=bool(request.get("include_embedding", False)),
+                )
+                for request in requests
+            ]
+
+        prepared: list[dict[str, Any] | None] = []
+        query_specs: list[dict[str, Any]] = []
+        for request in requests:
+            person_ids = request.get("person_ids")
+            if person_ids is not None and len(person_ids) == 0:
+                prepared.append(None)
+                continue
+            top_k = max(1, min(int(request.get("top_k", 10)), 100))
+            candidate_limit = max(
+                top_k * max(1, self._settings.candidate_multiplier),
+                max(top_k, self._settings.min_candidates),
+            )
+            spec = {
+                "query_vector": _validate_query_embedding(request["embedding"]),
+                "top_k": top_k,
+                "min_similarity": request.get("min_similarity"),
+                "person_ids": person_ids,
+                "include_embedding": bool(request.get("include_embedding", False)),
+                "candidate_limit": candidate_limit,
+            }
+            prepared.append(spec)
+            query_specs.append(spec)
+
+        if not query_specs:
+            return [[] for _ in requests]
+
+        try:
+            hit_batches = self._query_qdrant_candidates_batch(query_specs)
+            if self._settings.exact_rerank_enabled:
+                candidate_ids = sorted(
+                    {
+                        int(_hit_id(hit))
+                        for hits in hit_batches
+                        for hit in hits
+                    }
+                )
+                rows_by_id = {
+                    int(row["id"]): row
+                    for row in self._fetch_candidate_rows(candidate_ids, person_ids=None)
+                }
+                reranked_batches = [
+                    self._exact_rerank_from_rows(
+                        spec["query_vector"],
+                        hits,
+                        rows_by_id=rows_by_id,
+                        top_k=spec["top_k"],
+                        min_similarity=spec["min_similarity"],
+                        person_ids=spec["person_ids"],
+                        include_embedding=spec["include_embedding"],
+                    )
+                    for spec, hits in zip(query_specs, hit_batches)
+                ]
+            else:
+                reranked_batches = []
+                for spec, hits in zip(query_specs, hit_batches):
+                    rows = _qdrant_hits_to_gallery_rows(hits)
+                    min_similarity = spec["min_similarity"]
+                    if min_similarity is not None:
+                        rows = [
+                            row for row in rows
+                            if float(row.get("similarity") or 0.0) >= min_similarity
+                        ]
+                    rows = rows[: spec["top_k"]]
+                    if not spec["include_embedding"]:
+                        for row in rows:
+                            row.pop("embedding", None)
+                    reranked_batches.append(rows)
+        except Exception:
+            logger.exception(
+                "qdrant_gallery_batch_query_failed_fallback_to_single "
+                "collection=%s request_count=%d",
+                self._settings.collection,
+                len(requests),
+            )
+            return [
+                self.search_gallery(
+                    request["embedding"],
+                    top_k=int(request.get("top_k", 10)),
+                    min_similarity=request.get("min_similarity"),
+                    person_ids=request.get("person_ids"),
+                    include_embedding=bool(request.get("include_embedding", False)),
+                )
+                for request in requests
+            ]
+
+        results: list[list[dict[str, Any]]] = []
+        batch_index = 0
+        for spec in prepared:
+            if spec is None:
+                results.append([])
+            else:
+                results.append(reranked_batches[batch_index])
+                batch_index += 1
+        return results
+
     def _query_qdrant_candidates(
         self,
         query_vector: list[float],
@@ -215,6 +330,44 @@ class QdrantGallerySearchBackend:
         result = self._client.query_points(**kwargs)
         return list(getattr(result, "points", result))
 
+    def _query_qdrant_candidates_batch(
+        self,
+        query_specs: list[dict[str, Any]],
+    ) -> list[list[Any]]:
+        models = self._models or _qdrant_models()
+        if not hasattr(self._client, "query_batch_points") or not hasattr(models, "QueryRequest"):
+            return [
+                self._query_qdrant_candidates(
+                    spec["query_vector"],
+                    limit=spec["candidate_limit"],
+                    person_ids=spec["person_ids"],
+                )
+                for spec in query_specs
+            ]
+        requests = []
+        for spec in query_specs:
+            query_filter = build_qdrant_gallery_filter(
+                person_ids=spec["person_ids"],
+                models=models,
+            )
+            kwargs: dict[str, Any] = {
+                "query": spec["query_vector"],
+                "limit": spec["candidate_limit"],
+                "filter": query_filter,
+                "with_payload": True,
+                "with_vector": False,
+            }
+            if self._settings.search_ef > 0:
+                kwargs["params"] = models.SearchParams(
+                    hnsw_ef=self._settings.search_ef
+                )
+            requests.append(models.QueryRequest(**kwargs))
+        result = self._client.query_batch_points(
+            collection_name=self._settings.collection,
+            requests=requests,
+        )
+        return [list(getattr(item, "points", item)) for item in result]
+
     def _exact_rerank(
         self,
         query_vector: list[float],
@@ -228,16 +381,44 @@ class QdrantGallerySearchBackend:
         candidate_ids = [int(_hit_id(hit)) for hit in qdrant_hits]
         if not candidate_ids:
             return []
-        rows = self._fetch_candidate_rows(candidate_ids, person_ids=person_ids)
-        by_id = {int(row["id"]): row for row in rows}
+        rows_by_id = {
+            int(row["id"]): row
+            for row in self._fetch_candidate_rows(candidate_ids, person_ids=person_ids)
+        }
+        return self._exact_rerank_from_rows(
+            query_vector,
+            qdrant_hits,
+            rows_by_id=rows_by_id,
+            top_k=top_k,
+            min_similarity=min_similarity,
+            person_ids=person_ids,
+            include_embedding=include_embedding,
+        )
+
+    def _exact_rerank_from_rows(
+        self,
+        query_vector: list[float],
+        qdrant_hits: list[Any],
+        *,
+        rows_by_id: dict[int, dict[str, Any]],
+        top_k: int,
+        min_similarity: float | None,
+        person_ids: list[int] | None,
+        include_embedding: bool,
+    ) -> list[dict[str, Any]]:
+        candidate_ids = [int(_hit_id(hit)) for hit in qdrant_hits]
+        person_id_set = {int(value) for value in person_ids} if person_ids is not None else None
         reranked: list[dict[str, Any]] = []
         for candidate_id in candidate_ids:
-            row = by_id.get(candidate_id)
+            row = rows_by_id.get(candidate_id)
             if row is None:
                 logger.warning(
                     "qdrant_candidate_missing_in_postgres gallery_embedding_id=%s",
                     candidate_id,
                 )
+                continue
+            row = dict(row)
+            if person_id_set is not None and int(row["person_id"]) not in person_id_set:
                 continue
             embedding = _coerce_embedding(row.pop("embedding"))
             similarity = _cosine_similarity(query_vector, embedding)

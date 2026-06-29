@@ -38,6 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-sizes", default="2,20,200,all")
     parser.add_argument("--max-p95-ms", type=float, default=0.0)
     parser.add_argument("--max-p99-ms", type=float, default=0.0)
+    parser.add_argument("--min-top1-self-hit-rate", type=float, default=1.0)
+    parser.add_argument("--min-top1-person-hit-rate", type=float, default=1.0)
+    parser.add_argument("--max-missing-self-count", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260629)
     parser.add_argument("--wait-index-s", type=float, default=60.0)
     parser.add_argument("--keep-collection", action="store_true")
@@ -90,6 +93,9 @@ def main() -> int:
                 benchmark,
                 max_p95_ms=args.max_p95_ms,
                 max_p99_ms=args.max_p99_ms,
+                min_top1_self_hit_rate=args.min_top1_self_hit_rate,
+                min_top1_person_hit_rate=args.min_top1_person_hit_rate,
+                max_missing_self_count=args.max_missing_self_count,
             ),
             "elapsed_seconds": round(time.perf_counter() - started, 3),
         }
@@ -236,7 +242,12 @@ def run_benchmark(
     for target_size in target_sizes:
         timings: list[float] = []
         result_counts: list[int] = []
-        for _ in range(max(1, args.queries)):
+        top1_scores: list[float] = []
+        top1_self_hit_count = 0
+        top1_person_hit_count = 0
+        missing_self_count = 0
+        query_count = max(1, args.queries)
+        for _ in range(query_count):
             point_id = rng.randint(1, total_points)
             person_id = ((point_id - 1) // max(1, args.images_per_person)) + 1
             query_filter = build_filter(
@@ -256,12 +267,33 @@ def run_benchmark(
                 search_params=qmodels().SearchParams(hnsw_ef=max(1, args.search_ef)),
             )
             timings.append((time.perf_counter() - start) * 1000.0)
-            result_counts.append(len(getattr(response, "points", response)))
+            hits = list(getattr(response, "points", response))
+            result_counts.append(len(hits))
+            top_hit = hits[0] if hits else None
+            if top_hit is not None:
+                top_hit_id = int(hit_id(top_hit))
+                top_payload = dict(getattr(top_hit, "payload", None) or {})
+                top_person_id = int(top_payload.get("person_id", -1))
+                top_score = float(getattr(top_hit, "score", top_payload.get("score", 0.0)) or 0.0)
+                top1_scores.append(top_score)
+                if top_hit_id == point_id:
+                    top1_self_hit_count += 1
+                if top_person_id == person_id:
+                    top1_person_hit_count += 1
+            if not any(int(hit_id(hit)) == point_id for hit in hits):
+                missing_self_count += 1
         key = "all" if target_size is None else str(target_size)
         results[key] = {
             "target_count": target_size if target_size is not None else "all",
             "query_latency_ms": percentile_summary(timings),
             "result_count": percentile_summary([float(value) for value in result_counts]),
+            "correctness": {
+                "queries": query_count,
+                "top1_self_hit_rate": round(top1_self_hit_count / query_count, 6),
+                "top1_person_hit_rate": round(top1_person_hit_count / query_count, 6),
+                "missing_self_count": missing_self_count,
+                "min_score": round(min(top1_scores), 6) if top1_scores else None,
+            },
         }
     return results
 
@@ -289,6 +321,12 @@ def build_filter(
             )
         )
     return models.Filter(must=must)
+
+
+def hit_id(hit: Any) -> Any:
+    if hasattr(hit, "id"):
+        return getattr(hit, "id")
+    return hit["id"]
 
 
 def deterministic_vector(point_id: int) -> list[float]:
@@ -337,6 +375,9 @@ def acceptance_summary(
     *,
     max_p95_ms: float,
     max_p99_ms: float,
+    min_top1_self_hit_rate: float,
+    min_top1_person_hit_rate: float,
+    max_missing_self_count: int,
 ) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     for target_name, item in benchmark.items():
@@ -363,10 +404,44 @@ def acceptance_summary(
                     "limit_ms": max_p99_ms,
                 }
             )
+        correctness = item.get("correctness") or {}
+        top1_self = float(correctness.get("top1_self_hit_rate") or 0.0)
+        top1_person = float(correctness.get("top1_person_hit_rate") or 0.0)
+        missing_self = int(correctness.get("missing_self_count") or 0)
+        if top1_self < min_top1_self_hit_rate:
+            failures.append(
+                {
+                    "target": target_name,
+                    "metric": "top1_self_hit_rate",
+                    "actual": top1_self,
+                    "minimum": min_top1_self_hit_rate,
+                }
+            )
+        if top1_person < min_top1_person_hit_rate:
+            failures.append(
+                {
+                    "target": target_name,
+                    "metric": "top1_person_hit_rate",
+                    "actual": top1_person,
+                    "minimum": min_top1_person_hit_rate,
+                }
+            )
+        if missing_self > max_missing_self_count:
+            failures.append(
+                {
+                    "target": target_name,
+                    "metric": "missing_self_count",
+                    "actual": missing_self,
+                    "maximum": max_missing_self_count,
+                }
+            )
     return {
         "status": "failed" if failures else "passed",
         "max_p95_ms": max_p95_ms or None,
         "max_p99_ms": max_p99_ms or None,
+        "min_top1_self_hit_rate": min_top1_self_hit_rate,
+        "min_top1_person_hit_rate": min_top1_person_hit_rate,
+        "max_missing_self_count": max_missing_self_count,
         "failures": failures,
     }
 

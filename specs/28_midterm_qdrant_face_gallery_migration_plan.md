@@ -799,6 +799,10 @@ Pass criteria:
   clip-worker, or media-worker.
 - A 60-route authoritative pressure run completed with fallback count 0 and
   unchanged `watchlist_hit` evidence semantics.
+- Final rerun `pressure60_qdrant_final_8fps_20260629T150103Z` kept the same
+  contract after old pressure residue cleanup: retained evidence 50/50,
+  8090 evidence 50/50 OK, fallback 0, shadow mismatch 0, and Qdrant outbox
+  active 0.
 
 ### Stage 5 - Operational Hardening
 
@@ -848,6 +852,13 @@ Pass criteria:
 - `sync_qdrant_gallery.py --mode status` reports collection status, PostgreSQL
   active gallery count, Qdrant points, update queue, payload indexes, and outbox
   counts.
+- `qdrant-sync-worker` now runs the sync loop independently from `face-worker`.
+  The sync loop reclaims stale `processing` outbox rows after timeout and
+  verifies that alias `face_gallery_current` points to
+  `face_gallery_adaface_512_v1`.
+- `QDRANT_BATCH_QUERY_ENABLED=false` keeps batch query disabled by default.
+  The adapter-level `search_gallery_batch()` scaffold exists for the later
+  `_process_batch()` optimization without changing current runtime semantics.
 - Snapshot create/restore is still a later hardening task; PostgreSQL rebuild
   remains the authoritative recovery path for this cutover.
 
@@ -885,29 +896,36 @@ Default SLA:
 2026-06-29 pressure acceptance:
 
 - Report:
-  `/data/video-analytics/artifacts/pressure60_qdrant_authoritative_8fps_20260629T130224Z/report.json`
+  `/data/video-analytics/artifacts/pressure60_qdrant_final_8fps_20260629T150103Z/report.json`
 - 60 routes, 8 FPS, single-GPU dual shard, batch size 4, 300s run plus 600s
   drain.
 - Status `passed`; failure reasons `[]`; warning only
   `validate_seq_iq_expected_sampling_gap`.
-- Qdrant query count 4367, p50 2ms, p95 3ms, p99 4ms, max 11ms.
-- Exact rerank count 4367, p50 1ms, p95 1ms, p99 2ms, max 26ms.
-- Fallback count 0; watchlist hits emitted 626; watchlist emit failed 0.
+- Qdrant query count 3283, p50 2ms, p95 4ms, p99 5ms, max 9ms.
+- Exact rerank count 3283, p50 1ms, p95 2ms, p99 3ms, max 8ms.
+- Face-worker gallery query p50 3ms, p95 6ms, p99 8ms, max 12ms.
+- Fallback count 0; shadow mismatch 0; watchlist hits emitted 630; watchlist
+  emit failed 0.
 - `security.face_observations` pending returned to 0.
 - 8090 retained evidence proof was 50/50 with database index source.
-- Cleanup retained 50 playable bundles: 39 `watchlist_hit`, 11 `intrusion`.
+- Cleanup retained 50 playable bundles: 30 `watchlist_hit`, 20 `intrusion`.
+- Evidence generation latency was explicitly measured: media finalization
+  p95/p99 8.141s/8.635s, lifecycle p95/p99 196.192s/221.247s. The remaining
+  evidence long tail is before finalizer start, not Qdrant lookup.
 
 2026-06-29 gallery-scale acceptance:
 
 - Report:
-  `/data/video-analytics/artifacts/qdrant_scale/qdrant_gallery_scale_5000x4_tuned_grpc_20260629T132453Z.json`
+  `/data/video-analytics/artifacts/qdrant_scale/qdrant_gallery_scale_5000x4_rerun_20260629T150018Z.json`
 - Synthetic gallery: 5000 persons x 4 images = 20,000 active vectors.
 - Temporary collection used gRPC, HNSW indexed all 20,000 vectors, and was
   deleted after the benchmark.
-- All-search latency: p50 1.996ms, p95 4.037ms, p99 6.427ms, max 7.104ms.
-- Target-filtered latency remained under p95 2.025ms for target sizes 2, 20,
+- All-search latency: p50 1.981ms, p95 4.275ms, p99 6.801ms, max 7.833ms.
+- Target-filtered latency remained under p95 1.757ms for target sizes 2, 20,
   and 200.
-- Benchmark acceptance `max_p95_ms=75`, `max_p99_ms=150` passed.
+- Correctness acceptance passed: top1 self hit rate 1.0, top1 person hit rate
+  1.0, missing self count 0 for every target size.
+- Benchmark acceptance `max_p95_ms=50`, `max_p99_ms=150` passed.
 
 ## 8. Rollback Plan
 
@@ -1031,9 +1049,13 @@ PASS_FACE_GALLERY_QDRANT_CUTOVER
 
 2026-06-29 status:
 
-- Qdrant authoritative runtime and 60-route pressure acceptance are complete.
+- Qdrant authoritative runtime and 60-route pressure acceptance are complete,
+  including final rerun `pressure60_qdrant_final_8fps_20260629T150103Z`.
 - PostgreSQL remains source of truth and Qdrant rebuild from PostgreSQL is
   proven through bootstrap/reconcile/status.
+- Outbox insert/update/delete smoke is proven: a temporary gallery row synced to
+  Qdrant, Qdrant+exact top1 matched pgvector exact top1, update drained, delete
+  drained, and the Qdrant point count after delete was 0.
 - Live rollback was tested by restarting only `face-worker` with
   `FACE_VECTOR_BACKEND=pgvector`, observing `backend=pgvector`, then restarting
   only `face-worker` back to `FACE_VECTOR_BACKEND=qdrant` with fallback

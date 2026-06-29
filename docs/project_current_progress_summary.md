@@ -47,8 +47,9 @@ DB identity 正确，不等同于真实 60 路吞吐通过。修改记录见
 2026-06-29 已完成 face-worker 注册图库在线检索从 pgvector 主路径到 Qdrant authoritative
 的兼容切换。PostgreSQL 仍是 `persons` / `person_gallery_embeddings` 事实源，Qdrant
 是可重建派生索引，`watchlist_hit` payload、8090 evidence list/detail 和证据存储方式不变。
-60 路 8 FPS Qdrant authoritative 压测通过，fallback count 为 0；5000 人 x 4 张图，即
-20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。当前 face-worker
+60 路 8 FPS Qdrant authoritative 复测通过，fallback count 为 0，Qdrant query p95/p99 为
+4ms/5ms；5000 人 x 4 张图，即 20,000 向量 gRPC benchmark all-search p95/p99 为
+4.275ms/6.801ms，top1 self/person hit rate 均为 1.0。当前 face-worker
 剩余风险已从“注册图库向量查询是否能扛住数千人”转为“单 consumer loop 中 DB insert、规则解析、
 exact rerank、event publish 和 ACK 是否需要拆 persistence/matching 队列”。详细记录见
 `docs/midterm_qdrant_face_gallery_cutover_2026-06-29.md`。

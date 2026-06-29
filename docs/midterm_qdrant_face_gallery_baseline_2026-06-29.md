@@ -119,11 +119,11 @@ python sync_qdrant_gallery.py --mode drain-outbox
 
 3. 最终运行态已切为 `FACE_VECTOR_BACKEND=qdrant`、
    `QDRANT_FALLBACK_TO_PGVECTOR=false`、`QDRANT_PREFER_GRPC=true`。
-4. 60 路 8 FPS authoritative 压测已通过，Qdrant query p95/p99 为 3ms/4ms，
-   exact rerank p95/p99 为 1ms/2ms，fallback count 为 0，8090 retained evidence
-   proof 为 50/50。
+4. 60 路 8 FPS authoritative 复测已通过，Qdrant query p95/p99 为 4ms/5ms，
+   exact rerank p95/p99 为 2ms/3ms，fallback count 为 0，8090 retained evidence
+   proof 为 50/50；证据生成 finalization p95/p99 为 8.141s/8.635s。
 5. 5000 人 x 4 张图，即 20,000 向量合成 benchmark 已通过，all-search p95/p99
-   为 4.037ms/6.427ms。
+   为 4.275ms/6.801ms，并新增 top1 self/person recall 验收。
 
 最终通过条件：
 

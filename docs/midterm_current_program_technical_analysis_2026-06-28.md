@@ -56,6 +56,9 @@ RTSP source
   可在同一 60 路 8 FPS profile 下保持 50/50 retained playable、8090 50/50 OK、duplicate
   materialization 0、finalizer failed 0，并将 Qdrant-authoritative 基线的 queue wait p95 从约
   302.6 秒降到约 175.5 秒。
+- `pressure60_qdrant_final_8fps_20260629T150103Z` 是清理旧压测证据残留后的最终 Qdrant 复测：
+  60 路 8 FPS 同卡双分支通过，50/50 retained playable、8090 50/50 OK，Qdrant query p95/p99
+  为 4ms/5ms，exact rerank p95/p99 为 2ms/3ms，media finalization p95/p99 为 8.141s/8.635s。
 
 当前主要技术风险不再是“是否能跑通一个告警证据”，而是扩展性和验收边界：
 
@@ -91,8 +94,8 @@ RTSP source
   `images.tar` 并以 `--no-build` 启动，UOS 迁移步骤已固化。
 - face-worker 在线注册人脸图库检索已完成 Qdrant authoritative 切换。PostgreSQL 仍是人员和
   `person_gallery_embeddings` 事实源，Qdrant 是可重建派生索引；60 路 8 FPS Qdrant authoritative
-  压测通过，fallback count 为 0，20,000 向量 gRPC benchmark all-search p95/p99 为
-  4.037ms/6.427ms。
+  复测通过，fallback count 为 0，20,000 向量 gRPC benchmark all-search p95/p99 为
+  4.275ms/6.801ms，top1 self/person hit rate 均为 1.0。
 
 ## 3. 当前部署边界
 
@@ -677,7 +680,7 @@ Toolkit。应用包不迁移旧 PostgreSQL、Redis、Replay RocksDB、证据媒�
 - 已完成：替换 `RecordRequestPublisher.has_request()` 全 stream 扫描。
 - 已完成：pressure60 downstream observability schema 和静态测试。
 - 已完成：注册图库在线查询 Qdrant cutover，60 路 authoritative 压测 fallback=0，20,000 向量
-  gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。
+  gRPC benchmark all-search p95/p99 为 4.275ms/6.801ms，并带 self/person recall 验收。
 - 后续仅对历史 `face_observations` 相似检索补 `EXPLAIN ANALYZE` / Qdrant 方案；注册图库
   pgvector ANN 已不是本阶段首要路线。
 - 已补 harness：`RecordRequestPublisher` 幂等单测、event-worker duplicate/reclaim 测试、
@@ -732,7 +735,7 @@ DB-backed evidence 语义已经替代单纯 sidecar 读取。
   finalizer pool 将 retained profile 的 evidence lifecycle p95 控制在约 181 秒，并保持 8090
   50/50 OK、duplicate materialization 0、finalizer failed 0；
 - 注册图库 Qdrant authoritative cutover 已完成当前 scale gate：60 路 8 FPS 压测 Qdrant p95/p99
-  为 3ms/4ms、fallback=0；20,000 向量 benchmark all-search p95/p99 为 4.037ms/6.427ms；
+  为 4ms/5ms、fallback=0；20,000 向量 benchmark all-search p95/p99 为 4.275ms/6.801ms；
 - 16 FPS 不应作为当前默认生产承诺；
 - T4/弱卡 60 路仍需要按单独计划验收。
 

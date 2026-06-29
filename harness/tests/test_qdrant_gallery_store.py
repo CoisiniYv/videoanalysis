@@ -56,12 +56,18 @@ class _FakeModels:
         def __init__(self, must):
             self.must = must
 
+    class QueryRequest:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
 
 class _FakeClient:
-    def __init__(self, hits=None, error: Exception | None = None):
+    def __init__(self, hits=None, batch_hits=None, error: Exception | None = None):
         self.hits = hits or []
+        self.batch_hits = batch_hits or []
         self.error = error
         self.calls = []
+        self.batch_calls = []
         self.models = _FakeModels
 
     def query_points(self, **kwargs):
@@ -69,6 +75,12 @@ class _FakeClient:
         if self.error is not None:
             raise self.error
         return SimpleNamespace(points=self.hits)
+
+    def query_batch_points(self, **kwargs):
+        self.batch_calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return [SimpleNamespace(points=hits) for hits in self.batch_hits]
 
 
 class _FakeCursor:
@@ -221,6 +233,82 @@ def test_qdrant_error_falls_back_to_pgvector_when_enabled():
     rows = backend.search_gallery(_unit_embedding(), person_ids=[1])
     assert rows[0]["person_id"] == 1
     assert fallback.calls == 1
+
+
+def test_batch_query_disabled_uses_single_query_path():
+    client = _FakeClient(
+        hits=[SimpleNamespace(id=1, score=0.9, payload={"gallery_embedding_id": 1, "person_id": 10})]
+    )
+    backend = QdrantGallerySearchBackend(
+        settings=_settings(exact_rerank_enabled=False, batch_query_enabled=False),
+        conn=_FakeConn([]),
+        client=client,
+    )
+
+    result = backend.search_gallery_batch(
+        [
+            {"embedding": _unit_embedding(), "person_ids": [10]},
+            {"embedding": _unit_embedding(), "person_ids": [10]},
+        ]
+    )
+
+    assert len(result) == 2
+    assert len(client.calls) == 2
+    assert client.batch_calls == []
+
+
+def test_batch_query_enabled_uses_qdrant_batch_and_single_postgres_fetch():
+    query = _unit_embedding()
+    rows = [
+        {
+            "id": 1,
+            "person_id": 10,
+            "person_name": "Reese",
+            "external_person_id": "reese",
+            "source_type": "manual_upload",
+            "embedding_model": "adaface",
+            "is_primary": True,
+            "quality": 0.9,
+            "embedding": query,
+            "created_at": None,
+        },
+        {
+            "id": 2,
+            "person_id": 11,
+            "person_name": "Finch",
+            "external_person_id": "finch",
+            "source_type": "manual_upload",
+            "embedding_model": "adaface",
+            "is_primary": True,
+            "quality": 0.9,
+            "embedding": query,
+            "created_at": None,
+        },
+    ]
+    client = _FakeClient(
+        batch_hits=[
+            [SimpleNamespace(id=1, score=0.99, payload={"gallery_embedding_id": 1, "person_id": 10})],
+            [SimpleNamespace(id=2, score=0.99, payload={"gallery_embedding_id": 2, "person_id": 11})],
+        ]
+    )
+    conn = _FakeConn(rows)
+    backend = QdrantGallerySearchBackend(
+        settings=_settings(batch_query_enabled=True),
+        conn=conn,
+        client=client,
+    )
+
+    result = backend.search_gallery_batch(
+        [
+            {"embedding": query, "person_ids": [10]},
+            {"embedding": query, "person_ids": [11]},
+        ]
+    )
+
+    assert [[row["person_id"] for row in rows] for rows in result] == [[10], [11]]
+    assert len(client.batch_calls) == 1
+    assert len(client.calls) == 0
+    assert len(conn.cursor_obj.executed) == 1
 
 
 def test_hybrid_routes_small_target_to_pgvector_and_large_to_qdrant():

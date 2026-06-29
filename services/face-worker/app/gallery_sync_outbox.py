@@ -44,6 +44,46 @@ def claim_outbox_rows(
             return [dict(row) for row in cur.fetchall()]
 
 
+def reclaim_stale_processing_rows(
+    conn: psycopg.Connection,
+    *,
+    timeout_seconds: int,
+    limit: int,
+) -> int:
+    """Move crash-stuck processing rows back to retry for a future claim."""
+    timeout_seconds = max(1, int(timeout_seconds))
+    limit = max(1, int(limit))
+    with conn.transaction():
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE gallery_vector_sync_outbox
+                SET status = 'retry',
+                    claimed_at = NULL,
+                    claimed_by = NULL,
+                    next_attempt_at = now(),
+                    last_error = %(error)s,
+                    updated_at = now()
+                WHERE id IN (
+                    SELECT id
+                    FROM gallery_vector_sync_outbox
+                    WHERE status = 'processing'
+                      AND claimed_at < now() - (%(timeout_seconds)s || ' seconds')::interval
+                    ORDER BY claimed_at, id
+                    LIMIT %(limit)s
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id
+                """,
+                {
+                    "timeout_seconds": timeout_seconds,
+                    "limit": limit,
+                    "error": f"reclaimed stale processing row after {timeout_seconds}s",
+                },
+            )
+            return len(cur.fetchall())
+
+
 def mark_outbox_completed(conn: psycopg.Connection, row_id: int) -> None:
     with conn.cursor() as cur:
         cur.execute(

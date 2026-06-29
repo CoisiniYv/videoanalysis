@@ -120,9 +120,10 @@ Optimize in this order after the Qdrant decision:
 
 Stop/go metrics for each step:
 
-- Qdrant gallery cutover gate: complete for current scale. 60-route 8 FPS run
-  had Qdrant p95/p99 3ms/4ms, exact rerank p95/p99 1ms/2ms, fallback count 0;
-  20,000-vector gRPC benchmark all-search p95/p99 was 4.037ms/6.427ms.
+- Qdrant gallery cutover gate: complete for current scale. Final 60-route
+  8 FPS rerun had Qdrant p95/p99 4ms/5ms, exact rerank p95/p99 2ms/3ms,
+  fallback count 0; 20,000-vector gRPC benchmark all-search p95/p99 was
+  4.275ms/6.801ms with top1 self/person hit rate 1.0.
 - Worker split gate: observation ACK p95/p99 or Redis pending remains high after
   Qdrant, while Qdrant query latency is already within SLA.
 - Multi-matcher gate: `security.face_match_requests` pending grows or drains too
@@ -272,9 +273,9 @@ Current acceptance evidence:
 
 - 60-route 8 FPS Qdrant authoritative pressure passed with fallback count 0 and
   retained evidence 50/50.
-- Qdrant query p95/p99 was 3ms/4ms; exact rerank p95/p99 was 1ms/2ms.
+- Qdrant query p95/p99 was 4ms/5ms; exact rerank p95/p99 was 2ms/3ms.
 - 5000 persons x 4 images, or 20,000 active vectors, gRPC benchmark all-search
-  p95/p99 was 4.037ms/6.427ms.
+  p95/p99 was 4.275ms/6.801ms with top1 self/person hit rate 1.0.
 
 Acceptance:
 

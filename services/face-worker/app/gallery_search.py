@@ -26,6 +26,12 @@ class GallerySearchBackend(Protocol):
     ) -> list[dict[str, Any]]:
         ...
 
+    def search_gallery_batch(
+        self,
+        requests: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        ...
+
 
 class PgvectorGallerySearchBackend:
     """Rollback-safe wrapper around the existing exact pgvector search."""
@@ -51,6 +57,21 @@ class PgvectorGallerySearchBackend:
             person_ids=person_ids,
             include_embedding=include_embedding,
         )
+
+    def search_gallery_batch(
+        self,
+        requests: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        return [
+            self.search_gallery(
+                request["embedding"],
+                top_k=int(request.get("top_k", 10)),
+                min_similarity=request.get("min_similarity"),
+                person_ids=request.get("person_ids"),
+                include_embedding=bool(request.get("include_embedding", False)),
+            )
+            for request in requests
+        ]
 
 
 class ShadowGallerySearchBackend:
@@ -127,6 +148,23 @@ class ShadowGallerySearchBackend:
             )
         return primary_rows
 
+    def search_gallery_batch(
+        self,
+        requests: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        if hasattr(self._primary, "search_gallery_batch"):
+            return self._primary.search_gallery_batch(requests)
+        return [
+            self.search_gallery(
+                request["embedding"],
+                top_k=int(request.get("top_k", 10)),
+                min_similarity=request.get("min_similarity"),
+                person_ids=request.get("person_ids"),
+                include_embedding=bool(request.get("include_embedding", False)),
+            )
+            for request in requests
+        ]
+
 
 class HybridGallerySearchBackend:
     """Route small target lists to pgvector and larger/broad searches to Qdrant."""
@@ -177,6 +215,21 @@ class HybridGallerySearchBackend:
             person_ids=person_ids,
             include_embedding=include_embedding,
         )
+
+    def search_gallery_batch(
+        self,
+        requests: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        return [
+            self.search_gallery(
+                request["embedding"],
+                top_k=int(request.get("top_k", 10)),
+                min_similarity=request.get("min_similarity"),
+                person_ids=request.get("person_ids"),
+                include_embedding=bool(request.get("include_embedding", False)),
+            )
+            for request in requests
+        ]
 
 
 def build_gallery_search_backend(

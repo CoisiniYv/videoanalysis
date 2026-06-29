@@ -42,6 +42,9 @@ class Config:
     qdrant_default_segment_number: int
     qdrant_hnsw_m: int
     qdrant_hnsw_ef_construct: int
+    qdrant_batch_query_enabled: bool = False
+    qdrant_sync_poll_interval_seconds: float = 2.0
+    qdrant_sync_processing_timeout_seconds: int = 300
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -118,4 +121,11 @@ def load_config() -> Config:
         ),
         qdrant_hnsw_m=int(os.getenv("QDRANT_HNSW_M", "16")),
         qdrant_hnsw_ef_construct=int(os.getenv("QDRANT_HNSW_EF_CONSTRUCT", "100")),
+        qdrant_batch_query_enabled=_bool_env("QDRANT_BATCH_QUERY_ENABLED", "false"),
+        qdrant_sync_poll_interval_seconds=float(
+            os.getenv("QDRANT_SYNC_POLL_INTERVAL_SECONDS", "2.0")
+        ),
+        qdrant_sync_processing_timeout_seconds=int(
+            os.getenv("QDRANT_SYNC_PROCESSING_TIMEOUT_SECONDS", "300")
+        ),
     )
