@@ -658,6 +658,12 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
         "face_worker": {
             "gallery_query_latency_ms": module._not_enough_data("synthetic")
         },
+        "qdrant": {
+            "query_latency_ms": module._not_enough_data("synthetic"),
+            "exact_rerank_latency_ms": module._not_enough_data("synthetic"),
+            "fallback_count": 0,
+            "outbox": module._not_enough_data("synthetic"),
+        },
         "media_worker": {
             "finalization_duration_ms": module._not_enough_data("synthetic"),
             "ffprobe_duration_ms": module._not_enough_data("synthetic"),

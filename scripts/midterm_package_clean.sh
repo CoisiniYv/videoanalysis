@@ -108,6 +108,7 @@ require_dir "$DATA_ROOT/models"
 
 OFFLINE_IMAGES=(
     "redis:7-alpine"
+    "qdrant/qdrant:v1.18.2"
     "pgvector/pgvector:pg16"
     "ghcr.io/insight-platform/savant-replay-x86:v0.6.0"
     "ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1"
@@ -201,6 +202,7 @@ if [[ "$INCLUDE_IMAGES" == true ]]; then
 
     echo "[package] pulling external images for offline deployment..."
     docker pull redis:7-alpine
+    docker pull qdrant/qdrant:v1.18.2
     docker pull pgvector/pgvector:pg16
     docker pull ghcr.io/insight-platform/savant-replay-x86:v0.6.0
     docker pull ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1

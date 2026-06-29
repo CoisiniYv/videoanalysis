@@ -214,22 +214,26 @@ analysis-forwarder 会降采样；Savant 只处理分析帧。
 - production 要求全事件 evidence；
 - backlog 长期不下降。
 
-## 决策：face-worker 先补观测再上 ANN
+## 决策：face-worker 先 baseline，再接 Qdrant/hybrid
 
 原因：
 
 - 小图库 exact search 不是当前瓶颈；
-- ANN 可能改变阈值语义；
+- PostgreSQL ANN 可能改变阈值语义，且仍会把在线检索压力留在主库；
+- Qdrant 更适合作为可重建的图库向量 serving layer；
 - watchlist 命中需要可解释和可回归；
 - 生产图库规模未知。
 
 路线：
 
-1. 构造代表性图库；
-2. 跑 EXPLAIN；
-3. 记录 p95/p99；
-4. 判断 exact 是否足够；
-5. 如需 ANN，增加 exact rerank。
+1. 先记录当前 pgvector exact baseline、target cardinality、face-worker ACK latency；
+2. 保持 PostgreSQL 为 `person_gallery_embeddings` 事实源；
+3. 增加 Qdrant 作为 derived index；
+4. 通过 PostgreSQL transactional outbox 同步 upsert/delete；
+5. 先 shadow parity，再 canary cutover；
+6. 小目标名单保留 exact path，高基数/all-active 走 Qdrant；
+7. Qdrant 结果默认 exact rerank，阈值语义不变；
+8. 如果 baseline 证明瓶颈不是向量检索，再继续做 persistence/matching 解耦。
 
 ## 决策：干净迁移不携带旧业务数据
 

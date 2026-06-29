@@ -153,7 +153,7 @@ Savant face exporter
   -> security.face_observations
   -> face-worker
   -> face_observations
-  -> pgvector gallery query
+  -> pgvector/Qdrant gallery query
   -> watchlist_hit event
   -> event-worker
 ```
@@ -167,6 +167,10 @@ Savant face exporter
 - watchlist threshold；
 - target person filtering；
 - face-worker Redis lag；
+- 当前 `FACE_VECTOR_BACKEND`；
+- Qdrant health / collection alias / vector count；
+- Qdrant outbox pending/failed/lag；
+- fallback-to-pgvector count；
 - `match_results`；
 - `security.events` 是否有 watchlist_hit。
 
@@ -307,7 +311,7 @@ docker exec video-analytics-midterm-redis redis-cli XPENDING security.record_req
 
 - 最近调查没有证明 PG 写队列/锁等待是 evidence 不完整主因；
 - PG 热路径风险主要在 events list/query、evidence queues、face vector search；
-- 大图库前不要武断上 ANN。
+- 大图库前不要武断上 ANN；当前在线 gallery 检索优化方向是 Qdrant derived index + exact rerank。
 
 ## 压测失败如何记录
 

@@ -123,6 +123,7 @@ DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 1
 DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "redis",
     "postgresql",
+    "qdrant",
     "event_worker",
     "face_worker",
     "media_worker",
@@ -2192,6 +2193,19 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         media_throttle_sleep_s = _extract_metric_numbers(text, "throttle_sleep_s")
         media_deadline_slack_s = _extract_metric_numbers(text, "deadline_slack_s")
         face_gallery_query_ms = _extract_metric_ints(text, "gallery_query_duration_ms")
+        qdrant_query_ms = _extract_metric_ints(text, "qdrant_query_duration_ms")
+        qdrant_exact_rerank_ms = _extract_metric_ints(
+            text,
+            "qdrant_exact_rerank_duration_ms",
+        )
+        qdrant_fallback_counts = _extract_metric_ints(
+            text,
+            "qdrant_fallback_count",
+        )
+        qdrant_shadow_mismatch = _extract_metric_ints(
+            text,
+            "qdrant_shadow_mismatch",
+        )
         summary[key] = {
             "line_count": len(text.splitlines()),
             "validate_seq_iq": text.count("validate_seq_iq"),
@@ -2228,6 +2242,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "face_gallery_query_latency_ms": _numeric_distribution(
                 face_gallery_query_ms
             ),
+            "qdrant_query_latency_ms": _numeric_distribution(qdrant_query_ms),
+            "qdrant_exact_rerank_latency_ms": _numeric_distribution(
+                qdrant_exact_rerank_ms
+            ),
+            "qdrant_fallback_count": _metric_sum(qdrant_fallback_counts),
+            "qdrant_shadow_mismatch_count": _metric_sum(qdrant_shadow_mismatch),
             "media_event_finalized": text.count("media_event_finalized"),
             "media_materialization_deferred": text.count(
                 "media_materialization_deferred"
@@ -2645,6 +2665,7 @@ def collect_downstream_observability(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "redis": redis_observability_summary(redis_client),
         "postgresql": postgres_observability_summary(conn, cfg.run_id),
+        "qdrant": qdrant_observability_summary(conn, diagnostics),
         "event_worker": event_worker_observability_summary(diagnostics),
         "face_worker": face_worker_observability_summary(diagnostics),
         "media_worker": media_worker_observability_summary(diagnostics),
@@ -2730,6 +2751,57 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
     except Exception as exc:
         summary["evidence_task_lifecycle_seconds"] = _not_enough_data(
             f"evidence_lifecycle_query_failed:{type(exc).__name__}"
+        )
+    return summary
+
+
+def qdrant_observability_summary(conn, diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = ((diagnostics.get("log_summary") or {}).get("face_worker") or {})
+    summary: dict[str, Any] = {
+        "query_latency_ms": logs.get("qdrant_query_latency_ms")
+        or _not_enough_data("qdrant query logs unavailable"),
+        "exact_rerank_latency_ms": logs.get("qdrant_exact_rerank_latency_ms")
+        or _not_enough_data("qdrant exact-rerank logs unavailable"),
+        "fallback_count": int(logs.get("qdrant_fallback_count") or 0),
+        "shadow_mismatch_count": int(logs.get("qdrant_shadow_mismatch_count") or 0),
+        "outbox": _not_enough_data("gallery_vector_sync_outbox not queried"),
+    }
+    try:
+        row = conn.execute(
+            """
+            SELECT to_regclass('public.gallery_vector_sync_outbox') IS NOT NULL AS exists
+            """
+        ).fetchone()
+        if row and row["exists"]:
+            counts = conn.execute(
+                """
+                SELECT status, count(*) AS count
+                FROM gallery_vector_sync_outbox
+                GROUP BY status
+                ORDER BY status
+                """
+            ).fetchall()
+            lag = conn.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS active,
+                    EXTRACT(EPOCH FROM (now() - min(created_at)))
+                        FILTER (WHERE status IN ('pending', 'retry', 'processing')) AS oldest_active_age_s,
+                    EXTRACT(EPOCH FROM (now() - max(processed_at)))
+                        FILTER (WHERE status = 'completed') AS newest_completed_age_s
+                FROM gallery_vector_sync_outbox
+                """
+            ).fetchone()
+            outbox = _row_json(lag)
+            outbox["status_counts"] = {
+                str(item["status"]): int(item["count"]) for item in counts
+            }
+            summary["outbox"] = outbox
+        else:
+            summary["outbox"] = _not_enough_data("gallery_vector_sync_outbox_missing")
+    except Exception as exc:
+        summary["outbox"] = _not_enough_data(
+            f"gallery_vector_sync_outbox_query_failed:{type(exc).__name__}"
         )
     return summary
 
@@ -2881,6 +2953,7 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
         "postgresql": ("run_summary", "table_stats", "evidence_task_lifecycle_seconds"),
         "event_worker": ("record_request_dedupe",),
         "face_worker": ("gallery_query_latency_ms",),
+        "qdrant": ("query_latency_ms", "exact_rerank_latency_ms", "fallback_count", "outbox"),
         "media_worker": (
             "finalization_duration_ms",
             "ffprobe_duration_ms",

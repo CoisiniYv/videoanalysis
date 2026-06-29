@@ -11,5 +11,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app/ ./app/
 COPY main.py ./main.py
+COPY sync_qdrant_gallery.py ./sync_qdrant_gallery.py
 
 CMD ["python", "main.py"]

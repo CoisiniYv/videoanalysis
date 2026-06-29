@@ -246,6 +246,10 @@ PtsFpsGate
 - `services/face-worker/app/worker.py`
 - `services/face-worker/app/vector_store.py`
 - `services/face-worker/app/watchlist_emitter.py`
+- `services/face-worker/app/gallery_search.py`
+- `services/face-worker/app/qdrant_gallery_store.py`
+- `services/face-worker/app/gallery_sync_outbox.py`
+- `services/face-worker/sync_qdrant_gallery.py`
 
 职责：
 
@@ -261,16 +265,32 @@ PtsFpsGate
 - 单 consumer loop；
 - DB insert 和 pgvector 查询同步执行；
 - 生产大图库下 exact search 可能成为 p95/p99 热点；
-- ANN/EXPLAIN/阈值正确性验证仍缺。
+- 2026-06-29 baseline 显示当前 3 条 active gallery 的 target-filtered
+  pgvector exact p95 约 0.198ms，所以当前小图库不是瓶颈；
+- Qdrant/hybrid cutover 前仍缺 runtime bootstrap/reconcile、shadow parity、
+  authoritative 压测和 60 路 evidence proof。
 
 下一步优化应先观测：
 
 - gallery query p95/p99；
 - watchlist query p95/p99；
 - insert latency；
+- rule-resolution latency；
+- event-publish latency；
 - batch size；
 - Redis lag；
-- `EXPLAIN ANALYZE` 在 100/500/1000 人图库下的 plan。
+- target-person cardinality；
+- `EXPLAIN ANALYZE` 在 100/500/1000 人图库下的 plan；
+- Qdrant query p95/p99、fallback count、shadow mismatch count 和 outbox lag。
+
+Qdrant 接入原则：
+
+- PostgreSQL 继续是人员和图库事实源；
+- Qdrant 是 derived index，可从 PostgreSQL 重建；
+- 默认 `FACE_VECTOR_BACKEND=pgvector`，先 baseline、再 shadow、再 canary；
+- 小目标名单可以保留 pgvector/exact path，高基数和 all-active 查询走 Qdrant；
+- Qdrant 默认 exact rerank 后才允许发 `watchlist_hit`；
+- Qdrant 故障不能影响 Savant、Replay、clip-worker 或 media-worker。
 
 ## clip-worker
 

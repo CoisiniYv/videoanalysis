@@ -23,6 +23,19 @@ class Config:
     watchlist_target_external_person_ids: tuple[str, ...]
     watchlist_target_names: tuple[str, ...]
     watchlist_target_refresh_seconds: int
+    face_vector_backend: str
+    face_vector_small_target_threshold: int
+    qdrant_url: str
+    qdrant_api_key: str
+    qdrant_collection: str
+    qdrant_base_collection: str
+    qdrant_timeout_seconds: float
+    qdrant_search_ef: int
+    qdrant_candidate_multiplier: int
+    qdrant_min_candidates: int
+    qdrant_exact_rerank_enabled: bool
+    qdrant_fallback_to_pgvector: bool
+    qdrant_write_wait: bool
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -69,4 +82,22 @@ def load_config() -> Config:
         watchlist_target_refresh_seconds=int(
             os.getenv("WATCHLIST_TARGET_REFRESH_SECONDS", "30")
         ),
+        face_vector_backend=os.getenv("FACE_VECTOR_BACKEND", "pgvector").strip().lower(),
+        face_vector_small_target_threshold=int(
+            os.getenv("FACE_VECTOR_SMALL_TARGET_THRESHOLD", "5")
+        ),
+        qdrant_url=os.getenv("QDRANT_URL", "http://qdrant:6333"),
+        qdrant_api_key=os.getenv("QDRANT_API_KEY", ""),
+        qdrant_collection=os.getenv("QDRANT_COLLECTION", "face_gallery_current"),
+        qdrant_base_collection=os.getenv(
+            "QDRANT_BASE_COLLECTION",
+            "face_gallery_adaface_512_v1",
+        ),
+        qdrant_timeout_seconds=float(os.getenv("QDRANT_TIMEOUT_SECONDS", "2.0")),
+        qdrant_search_ef=int(os.getenv("QDRANT_SEARCH_EF", "128")),
+        qdrant_candidate_multiplier=int(os.getenv("QDRANT_CANDIDATE_MULTIPLIER", "3")),
+        qdrant_min_candidates=int(os.getenv("QDRANT_MIN_CANDIDATES", "20")),
+        qdrant_exact_rerank_enabled=_bool_env("QDRANT_EXACT_RERANK_ENABLED", "true"),
+        qdrant_fallback_to_pgvector=_bool_env("QDRANT_FALLBACK_TO_PGVECTOR", "true"),
+        qdrant_write_wait=_bool_env("QDRANT_WRITE_WAIT", "true"),
     )

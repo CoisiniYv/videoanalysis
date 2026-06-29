@@ -20,9 +20,9 @@ from app.face_match_event_service import (
     build_watchlist_hit_event,
     publish_security_event,
 )
+from app.gallery_search import build_gallery_search_backend
 from app.redis_consumer import RedisStreamConsumer
 from app.repository import FaceObservationRepository
-from app.vector_store import FaceVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -170,10 +170,18 @@ class WatchlistMatchEmitter:
         self._cfg = cfg
         self._conn = conn
         self._redis = redis_client
-        self._store = FaceVectorStore(conn)
+        self._store = build_gallery_search_backend(cfg, conn)
         self._rule_cache: dict[str, tuple[float, list[WatchlistRuleConfig]]] = {}
         self._env_target_person_ids: list[int] | None = None
         self._last_env_target_refresh = 0.0
+        logger.info(
+            "watchlist gallery search backend initialized backend=%s "
+            "qdrant_collection=%s exact_rerank=%s fallback_to_pgvector=%s",
+            getattr(self._store, "backend_name", cfg.face_vector_backend),
+            cfg.qdrant_collection,
+            cfg.qdrant_exact_rerank_enabled,
+            cfg.qdrant_fallback_to_pgvector,
+        )
 
     def emit_for_observation(self, obs: dict) -> int:
         """Search configured watchlist targets and emit events above threshold."""

@@ -117,6 +117,10 @@ pytest -q harness/tests/test_face_vector_store.py
 pytest -q harness/tests/test_gallery_match.py
 pytest -q harness/tests/test_face_match_evidence_policy.py
 pytest -q harness/tests/test_watchlist_evidence_identity_continuation.py
+# Qdrant 接入后补充：
+pytest -q harness/tests/test_qdrant_gallery_store.py
+pytest -q harness/tests/test_qdrant_gallery_sync_outbox.py
+pytest -q harness/tests/test_face_worker_qdrant_backend_static.py
 ```
 
 必须验证：
@@ -127,7 +131,9 @@ pytest -q harness/tests/test_watchlist_evidence_identity_continuation.py
 - match_results 语义；
 - watchlist_hit event payload；
 - source_observation_id 绑定；
-- 大图库 EXPLAIN/p95 计划。
+- 大图库 EXPLAIN/p95 计划；
+- Qdrant shadow parity、score/threshold mapping、fallback count、outbox lag；
+- 小目标名单 hybrid routing 不误扩成 all-active。
 
 ## 改 clip-worker
 

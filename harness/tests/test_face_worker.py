@@ -47,6 +47,19 @@ class TestFaceWorkerConfig:
             watchlist_target_external_person_ids=(),
             watchlist_target_names=(),
             watchlist_target_refresh_seconds=30,
+            face_vector_backend="pgvector",
+            face_vector_small_target_threshold=5,
+            qdrant_url="http://qdrant:6333",
+            qdrant_api_key="",
+            qdrant_collection="face_gallery_current",
+            qdrant_base_collection="face_gallery_adaface_512_v1",
+            qdrant_timeout_seconds=2.0,
+            qdrant_search_ef=128,
+            qdrant_candidate_multiplier=3,
+            qdrant_min_candidates=20,
+            qdrant_exact_rerank_enabled=True,
+            qdrant_fallback_to_pgvector=True,
+            qdrant_write_wait=True,
         )
         assert cfg.face_observation_stream == "security.face_observations"
         assert cfg.consumer_group == "face-workers"
@@ -67,6 +80,8 @@ class TestFaceWorkerConfig:
         assert cfg.face_observation_stream == "security.face_observations"
         assert cfg.consumer_group == "face-workers"
         assert cfg.consumer_start_id == "0"
+        assert cfg.face_vector_backend == "pgvector"
+        assert cfg.qdrant_collection == "face_gallery_current"
 
     def test_load_config_env_override(self, monkeypatch):
         monkeypatch.setenv("FACE_OBSERVATION_STREAM", "custom.face.stream")
@@ -245,6 +260,19 @@ def _make_watchlist_cfg(**overrides):
         "watchlist_target_external_person_ids": (),
         "watchlist_target_names": (),
         "watchlist_target_refresh_seconds": 30,
+        "face_vector_backend": "pgvector",
+        "face_vector_small_target_threshold": 5,
+        "qdrant_url": "http://qdrant:6333",
+        "qdrant_api_key": "",
+        "qdrant_collection": "face_gallery_current",
+        "qdrant_base_collection": "face_gallery_adaface_512_v1",
+        "qdrant_timeout_seconds": 2.0,
+        "qdrant_search_ef": 128,
+        "qdrant_candidate_multiplier": 3,
+        "qdrant_min_candidates": 20,
+        "qdrant_exact_rerank_enabled": True,
+        "qdrant_fallback_to_pgvector": True,
+        "qdrant_write_wait": True,
     }
     defaults.update(overrides)
     return Config(**defaults)

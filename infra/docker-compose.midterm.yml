@@ -24,6 +24,16 @@ services:
       retries: 5
     restart: unless-stopped
 
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    container_name: video-analytics-midterm-qdrant
+    profiles: ["qdrant"]
+    expose:
+      - "6333"
+    volumes:
+      - /data/video-analytics/qdrant-midterm:/qdrant/storage
+    restart: unless-stopped
+
   api:
     build:
       context: ../services/api
@@ -639,6 +649,19 @@ services:
       WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:midterm:reese,demo:midterm:finch}"
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
       WATCHLIST_TARGET_REFRESH_SECONDS: "30"
+      FACE_VECTOR_BACKEND: "${FACE_VECTOR_BACKEND:-pgvector}"
+      FACE_VECTOR_SMALL_TARGET_THRESHOLD: "${FACE_VECTOR_SMALL_TARGET_THRESHOLD:-5}"
+      QDRANT_URL: "${QDRANT_URL:-http://qdrant:6333}"
+      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
+      QDRANT_COLLECTION: "${QDRANT_COLLECTION:-face_gallery_current}"
+      QDRANT_BASE_COLLECTION: "${QDRANT_BASE_COLLECTION:-face_gallery_adaface_512_v1}"
+      QDRANT_TIMEOUT_SECONDS: "${QDRANT_TIMEOUT_SECONDS:-2.0}"
+      QDRANT_SEARCH_EF: "${QDRANT_SEARCH_EF:-128}"
+      QDRANT_CANDIDATE_MULTIPLIER: "${QDRANT_CANDIDATE_MULTIPLIER:-3}"
+      QDRANT_MIN_CANDIDATES: "${QDRANT_MIN_CANDIDATES:-20}"
+      QDRANT_EXACT_RERANK_ENABLED: "${QDRANT_EXACT_RERANK_ENABLED:-true}"
+      QDRANT_FALLBACK_TO_PGVECTOR: "${QDRANT_FALLBACK_TO_PGVECTOR:-true}"
+      QDRANT_WRITE_WAIT: "${QDRANT_WRITE_WAIT:-true}"
       BATCH_SIZE: "50"
       POLL_TIMEOUT_MS: "2000"
     volumes:

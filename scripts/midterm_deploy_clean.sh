@@ -154,6 +154,7 @@ echo "[deploy] preparing data root $DATA_ROOT..."
 mkdir -p \
     "$DATA_ROOT/downloads" \
     "$DATA_ROOT/artifacts" \
+    "$DATA_ROOT/qdrant-midterm" \
     "$DATA_ROOT/media/evidence" \
     "$DATA_ROOT/media/replay-sink-output/midterm" \
     "$DATA_ROOT/media/midterm-snapshots" \

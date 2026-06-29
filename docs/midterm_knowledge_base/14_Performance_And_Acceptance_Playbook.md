@@ -194,10 +194,20 @@ pressure source 通过后，下一步要做真实 RTSP：
 
 只有 exact scan 被证明是瓶颈后，再考虑：
 
-- ivfflat/hnsw ANN；
+- Qdrant derived index；
+- hybrid routing，小目标名单继续 exact，高基数/all-active 走 Qdrant；
 - exact rerank；
 - per-camera/person cache；
 - 异步 watchlist queue。
+
+Qdrant cutover 额外门槛：
+
+- PostgreSQL `person_gallery_embeddings` 仍是事实源；
+- Qdrant collection 可以从 PostgreSQL bootstrap/reconcile；
+- shadow parity 无未解释的 watchlist 决策差异；
+- final authoritative run fallback count 为 0；
+- Qdrant query p95/p99、outbox lag、shadow mismatch、fallback count 进入压力报告；
+- `watchlist_hit` payload 和 8090 evidence 查询语义不变。
 
 ## media-worker 验收
 

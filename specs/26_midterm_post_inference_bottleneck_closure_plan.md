@@ -14,7 +14,7 @@ It covers the path after Savant has emitted Redis observations/events:
 ```text
 Savant Redis exporters
   -> face-worker / event-worker
-  -> PostgreSQL / pgvector / record request streams
+  -> PostgreSQL / pgvector or Qdrant / record request streams
   -> clip-worker / media-worker
   -> evidence bundles and 8090 evidence APIs
 ```
@@ -28,6 +28,7 @@ This is not a Savant model-chain tuning spec. It must be coordinated with:
 - `docs/midterm_downstream_evidence_performance_2026-06-28.md`
 - `docs/midterm_frontend_inference_performance_2026-06-28.md`
 - `specs/27_midterm_face_worker_vector_matching_optimization_plan.md`
+- `specs/28_midterm_qdrant_face_gallery_migration_plan.md`
 
 ## 2. Current Finding And Checkout Status
 
@@ -79,8 +80,8 @@ Still open:
   reporting `not_enough_data`;
 - gallery and face observation vector searches do not yet have ANN vector
   indexes; current live gallery size was only 3 active embeddings / 5 total
-  embeddings, so ANN should not be added until representative gallery-size
-  EXPLAIN/pressure data proves exact scan cost is real;
+  embeddings, and the selected online gallery-search replacement direction is
+  now Qdrant rather than pgvector ANN-first;
 - media-worker materialization is still organized around one polling process and
   ffprobe/ffmpeg/decode finalization, but 2026-06-29 code now exposes
   `queue_wait_ms`, `lifecycle_elapsed_ms`, and post-Savant finalizer elapsed
@@ -311,6 +312,10 @@ Dedicated plan:
   baseline measurement, observability, query-plan/index closure,
   persistence/matching decoupling, match-worker scaling, and the decision gate
   before any C++/Rust rewrite.
+- `specs/28_midterm_qdrant_face_gallery_migration_plan.md` is the selected
+  replacement plan for the online registered-gallery search backend. It keeps
+  PostgreSQL as source of truth, adds Qdrant as a derived vector-serving layer,
+  and preserves pgvector as the exact baseline/rollback path.
 
 Current code verification:
 
@@ -326,14 +331,17 @@ Current code verification:
 
 Modification direction:
 
-- Add measured query plans first:
-  - gallery search against `person_gallery_embeddings`;
-  - observation search against `face_observations` when used by search flows.
-- Add pgvector ANN indexes where the measured plan proves exact scan cost is a
-  bottleneck.
-- Keep threshold semantics explicit. If ANN recall is introduced, document
-  whether exact rerank is required before emitting a watchlist hit.
-- Only after index/query-plan closure, consider:
+- Add Qdrant service/config/client support without changing the default
+  backend.
+- Bootstrap and reconcile `person_gallery_embeddings` into Qdrant while keeping
+  PostgreSQL authoritative.
+- Run Qdrant in shadow mode against the current exact pgvector baseline.
+- Cut over `face-worker` gallery lookup only after parity and pressure evidence
+  pass.
+- Keep threshold semantics explicit. During migration, use Qdrant as candidate
+  generator plus exact rerank before emitting a watchlist hit unless parity data
+  justifies disabling rerank.
+- Only after Qdrant cutover or explicit rejection, consider:
   - batching inserts;
   - decoupling observation persistence from matching;
   - increasing consumer count;
@@ -354,22 +362,25 @@ PASS_POST_INFERENCE_SPEC2_FACE_WORKER_SCALE
 
 Required verification:
 
-- migration/static tests for vector indexes;
-- `EXPLAIN ANALYZE` before/after for representative gallery sizes;
+- static tests for Qdrant compose/config/default-backend safety;
+- bootstrap/reconcile proof that Qdrant active points match PostgreSQL active
+  gallery rows;
+- shadow parity against pgvector exact for representative gallery sizes;
 - unit/integration tests for watchlist threshold and target-person filtering;
-- pressure evidence showing face-worker lag and gallery query p95 are bounded.
+- pressure evidence showing face-worker lag, Qdrant query p95/p99, fallback
+  count, and outbox sync lag are bounded.
 
 Harness plan:
 
-- Add a query-plan harness that can seed representative gallery rows and capture
-  `EXPLAIN ANALYZE` for gallery lookup and face-observation lookup.
-- Add a correctness test that compares ANN candidate results plus optional exact
-  rerank against the current exact pgvector ordering for a small deterministic
-  dataset.
+- Add a Qdrant bootstrap/reconcile harness that can seed representative gallery
+  rows and compare Qdrant output against exact pgvector output.
+- Add a correctness test that compares Qdrant candidates plus exact rerank
+  against the current exact pgvector ordering for a deterministic dataset.
 - Add watchlist threshold tests that prove target-person filtering and duplicate
   suppression do not change when the index/search path changes.
 - Extend the pressure report schema with face-worker consumed count, pending
-  count, gallery query p95/p99, and emitted watchlist hit count.
+  count, Qdrant gallery query p95/p99, fallback count, shadow mismatch count,
+  outbox sync lag, and emitted watchlist hit count.
 
 ### Spec 3 - Media Worker Finalizer Throughput
 
@@ -724,17 +735,20 @@ Acceptance:
 
 Change:
 
-- Measure exact pgvector query plans first.
-- Add ANN indexes only after the representative plan shows exact scan cost is a
-  real bottleneck.
-- Preserve exact threshold semantics by exact rerank if ANN recall is used.
+- Follow `specs/28_midterm_qdrant_face_gallery_migration_plan.md`.
+- Add Qdrant as the online registered-gallery vector-serving layer while
+  keeping PostgreSQL/pgvector as source of truth, exact baseline, and rollback
+  path.
+- Preserve exact threshold semantics by exact rerank of Qdrant candidates during
+  migration.
 
 Harness:
 
-- Seeded gallery/observation plan harness.
-- Exact-versus-ANN correctness comparison.
+- Qdrant bootstrap/reconcile harness.
+- Exact pgvector-versus-Qdrant shadow correctness comparison.
 - Watchlist threshold and target-person filtering tests.
-- Pressure-log parser test for `gallery_query_duration_ms` p95/p99.
+- Pressure-log parser test for Qdrant gallery p95/p99, fallback count, shadow
+  mismatch count, and sync lag.
 
 2026-06-29 status:
 
@@ -745,14 +759,34 @@ Harness:
   from logs instead of leaving it permanently `not_enough_data`.
 - Current live DB check showed 3 active `person_gallery_embeddings` / 5 total
   embeddings and no ANN vector indexes. With this gallery size, exact scan is
-  not the current bottleneck; defer ANN until representative gallery-size
-  EXPLAIN/pressure evidence exists.
+  not the current bottleneck, but the selected scale direction is now Qdrant for
+  representative gallery growth rather than pgvector ANN-first.
 
 Acceptance:
 
 - `PASS_POST_INFERENCE_SPEC2_FACE_WORKER_SCALE`;
-- bounded face-worker pending and gallery query p95 under the selected gallery
-  size.
+- bounded face-worker pending, Qdrant gallery query p95/p99, fallback count, and
+  outbox sync lag under the selected gallery size.
+
+Continuation order locked on 2026-06-29:
+
+1. Finish the Qdrant registered-gallery plan in
+   `specs/28_midterm_qdrant_face_gallery_migration_plan.md`.
+2. Treat Qdrant cutover as a vector-serving change only. It must preserve the
+   existing `watchlist_hit` event contract and must not change Savant,
+   event-worker, clip-worker, media-worker, or 8090 evidence semantics.
+3. After Qdrant pressure acceptance, inspect the face-worker cost split:
+   Redis read/ACK, PostgreSQL insert, rule resolution, Qdrant query, exact
+   rerank, event publish, and worker CPU.
+4. If vector lookup is no longer dominant but `security.face_observations`
+   pending or ACK latency is still high, start Spec 27's persistence/matching
+   decoupling.
+5. If the decoupled match queue then backs up, add multiple matcher workers.
+6. Defer Qdrant historical `face_observations` indexing until a separate
+   live-search or historical-search requirement exists.
+
+This order prevents three different optimizations from being mixed into one
+change set and keeps pressure reports useful for bottleneck attribution.
 
 ### Stage 4 - Media finalizer throughput
 
