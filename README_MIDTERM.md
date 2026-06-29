@@ -56,6 +56,7 @@ bash scripts/midterm_health.sh
 | `docs/midterm_web_operator_guide.md` | Web 操作台详细使用指南 |
 | `docs/midterm_quick_reference.md` | API/命令/故障排查参考 |
 | `docs/midterm_clean_machine_migration_2026-06-25.md` | 新机器干净迁移说明和打包/部署脚本 |
+| `docs/midterm_uos_clean_machine_migration_steps_2026-06-29.md` | 统信 UOS 新机器全 Docker / 离线迁移步骤 |
 | `docs/midterm_migration_runbook_2026-06-23.md` | 系统迁移打包流程 |
 | `CLAUDE.md` | 开发规则和部署入口说明 |
 

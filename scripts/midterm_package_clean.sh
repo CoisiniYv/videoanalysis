@@ -12,6 +12,7 @@ PACKAGE_DIR="$OUT_ROOT/$MIGRATION_ID"
 PACKAGE_TARBALL="$OUT_ROOT/$MIGRATION_ID.tgz"
 DEPLOY_SCRIPT_COPY="$OUT_ROOT/${MIGRATION_ID}_deploy_clean.sh"
 INCLUDE_ENGINES=false
+INCLUDE_IMAGES=false
 
 usage() {
     cat <<USAGE
@@ -24,6 +25,7 @@ downloads, and models-savant-b.
 
 Options:
   --include-engines        Include TensorRT *.engine files from models
+  --include-images         Build/pull and include Docker images for offline deploy
   --id VALUE               Migration id, default: $MIGRATION_ID
   --out-root PATH          Output root, default: $OUT_ROOT
   -h, --help               Show this help
@@ -39,6 +41,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --include-engines)
             INCLUDE_ENGINES=true
+            shift
+            ;;
+        --include-images)
+            INCLUDE_IMAGES=true
             shift
             ;;
         --id)
@@ -100,8 +106,29 @@ require_file "$DATA_ROOT/models/yolov8_face/yolov8n-face.onnx"
 require_file "$DATA_ROOT/models/adaface/adaface_ir50_webface4m.onnx"
 require_dir "$DATA_ROOT/models"
 
+OFFLINE_IMAGES=(
+    "redis:7-alpine"
+    "pgvector/pgvector:pg16"
+    "ghcr.io/insight-platform/savant-replay-x86:v0.6.0"
+    "ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1"
+    "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0"
+    "video-analytics-midterm-analysis-forwarder:latest"
+    "video-analytics-midterm-face-worker:latest"
+    "video-analytics-midterm-api:latest"
+    "video-analytics-midterm-event-worker:latest"
+    "video-analytics-midterm-clip-worker:latest"
+    "video-analytics-midterm-media-worker:latest"
+    "video-analytics-midterm-evidence-viewer:latest"
+)
+
 mkdir -p "$PACKAGE_DIR"
-rm -f "$PACKAGE_DIR"/repo.tgz "$PACKAGE_DIR"/models.tgz "$PACKAGE_DIR"/SHA256SUMS "$PACKAGE_TARBALL"
+rm -f \
+    "$PACKAGE_DIR"/repo.tgz \
+    "$PACKAGE_DIR"/models.tgz \
+    "$PACKAGE_DIR"/images.tar \
+    "$PACKAGE_DIR"/image_list.txt \
+    "$PACKAGE_DIR"/SHA256SUMS \
+    "$PACKAGE_TARBALL"
 
 echo "[package] writing package directory: $PACKAGE_DIR"
 
@@ -119,6 +146,7 @@ Midterm clean-machine migration package
 This package includes:
 - repo.tgz: current repository snapshot, including untracked files in the working tree
 - models.tgz: /data/video-analytics/models
+- images.tar: Docker images for offline deployment, when --include-images was used
 - deploy_clean.sh: target-machine restore script
 
 This package intentionally excludes old runtime data:
@@ -161,6 +189,37 @@ if [[ "$INCLUDE_ENGINES" != true ]]; then
 fi
 tar -C "$DATA_ROOT" "${MODEL_TAR_EXCLUDES[@]}" -czf "$PACKAGE_DIR/models.tgz" models
 
+if [[ "$INCLUDE_IMAGES" == true ]]; then
+    command -v docker >/dev/null 2>&1 || {
+        echo "docker is required for --include-images" >&2
+        exit 1
+    }
+    docker compose version >/dev/null 2>&1 || {
+        echo "docker compose plugin is required for --include-images" >&2
+        exit 1
+    }
+
+    echo "[package] pulling external images for offline deployment..."
+    docker pull redis:7-alpine
+    docker pull pgvector/pgvector:pg16
+    docker pull ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    docker pull ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    docker pull ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+
+    echo "[package] building local service images..."
+    (
+        cd "$REPO_ROOT"
+        docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml build face-worker
+        docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml build
+    )
+
+    printf '%s\n' "${OFFLINE_IMAGES[@]}" > "$PACKAGE_DIR/image_list.txt"
+    echo "[package] saving Docker images to images.tar..."
+    docker save -o "$PACKAGE_DIR/images.tar" "${OFFLINE_IMAGES[@]}"
+else
+    : > "$PACKAGE_DIR/image_list.txt"
+fi
+
 cp "$REPO_ROOT/scripts/midterm_deploy_clean.sh" "$PACKAGE_DIR/deploy_clean.sh"
 chmod +x "$PACKAGE_DIR/deploy_clean.sh"
 
@@ -183,8 +242,10 @@ created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 repo_root=$REPO_ROOT
 data_root=$DATA_ROOT
 include_engines=$INCLUDE_ENGINES
+include_images=$INCLUDE_IMAGES
 contains_repo_snapshot=true
 contains_models=true
+contains_docker_images=$INCLUDE_IMAGES
 contains_downloads=false
 contains_models_savant_b=false
 contains_postgres_dump=false
@@ -197,7 +258,19 @@ MANIFEST
 
 (
     cd "$PACKAGE_DIR"
-    sha256sum repo.tgz models.tgz deploy_clean.sh manifest.txt README_CLEAN_MIGRATION.txt model_files.sha256 > SHA256SUMS
+    CHECKSUM_FILES=(
+        repo.tgz
+        models.tgz
+        deploy_clean.sh
+        manifest.txt
+        README_CLEAN_MIGRATION.txt
+        model_files.sha256
+        image_list.txt
+    )
+    if [[ "$INCLUDE_IMAGES" == true ]]; then
+        CHECKSUM_FILES+=(images.tar)
+    fi
+    sha256sum "${CHECKSUM_FILES[@]}" > SHA256SUMS
 )
 
 echo "[package] creating single tarball..."

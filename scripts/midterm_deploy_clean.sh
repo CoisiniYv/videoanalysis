@@ -7,6 +7,7 @@ TARGET_ROOT="${MIDTERM_TARGET_ROOT:-/home/user/video-analytics}"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 START_STACK=true
 LOCAL_POSTGRES=false
+SKIP_IMAGE_LOAD=false
 PACKAGE_PATH=""
 
 usage() {
@@ -14,14 +15,16 @@ usage() {
 Usage: bash scripts/midterm_deploy_clean.sh PACKAGE.tgz [OPTIONS]
 
 Restore a clean-machine migration package created by
-scripts/midterm_package_clean.sh. This deploys code and models only; it creates
-empty runtime directories for new evidence, Replay RocksDB, face uploads, and
-artifacts.
+scripts/midterm_package_clean.sh. This deploys code and models, and
+automatically loads images.tar when the package was created with
+--include-images. It creates empty runtime directories for new evidence,
+Replay RocksDB, face uploads, and artifacts.
 
 Options:
   --target PATH          Repository target, default: $TARGET_ROOT
   --data-root PATH       Data root, default: $DATA_ROOT
   --local-postgres       Start with the local-postgres compose profile
+  --skip-image-load      Do not load package images.tar even if present
   --no-start             Restore files and validate compose, but do not start
   -h, --help             Show this help
 
@@ -50,6 +53,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --local-postgres)
             LOCAL_POSTGRES=true
+            shift
+            ;;
+        --skip-image-load)
+            SKIP_IMAGE_LOAD=true
             shift
             ;;
         --no-start)
@@ -104,6 +111,7 @@ fi
 
 REPO_TGZ="$(find "$PACKAGE_DIR" -maxdepth 2 -name repo.tgz -type f | head -n 1)"
 MODELS_TGZ="$(find "$PACKAGE_DIR" -maxdepth 2 -name models.tgz -type f | head -n 1)"
+IMAGES_TAR="$(find "$PACKAGE_DIR" -maxdepth 2 -name images.tar -type f | head -n 1 || true)"
 SHA_FILE="$(find "$PACKAGE_DIR" -maxdepth 2 -name SHA256SUMS -type f | head -n 1 || true)"
 
 [[ -n "$REPO_TGZ" ]] || {
@@ -121,6 +129,15 @@ if [[ -n "$SHA_FILE" && -f "$SHA_FILE" ]]; then
         cd "$(dirname "$SHA_FILE")"
         sha256sum -c SHA256SUMS >/dev/null
     )
+fi
+
+if [[ -n "$IMAGES_TAR" && "$SKIP_IMAGE_LOAD" != true ]]; then
+    command -v docker >/dev/null 2>&1 || {
+        echo "docker is required to load images.tar" >&2
+        exit 1
+    }
+    echo "[deploy] loading Docker images from package..."
+    docker load -i "$IMAGES_TAR"
 fi
 
 if [[ -e "$TARGET_ROOT" && -n "$(find "$TARGET_ROOT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
@@ -185,7 +202,14 @@ echo "[deploy] validating compose config..."
 if [[ "$START_STACK" != true ]]; then
     echo "[deploy] restore complete; stack start skipped by --no-start"
     echo "Next command:"
-    echo "  cd $TARGET_ROOT && bash scripts/midterm_start.sh"
+    NEXT_START_ARGS=()
+    if [[ "$LOCAL_POSTGRES" == true ]]; then
+        NEXT_START_ARGS+=(--local-postgres)
+    fi
+    if [[ -n "$IMAGES_TAR" && "$SKIP_IMAGE_LOAD" != true ]]; then
+        NEXT_START_ARGS+=(--no-build)
+    fi
+    echo "  cd $TARGET_ROOT && bash scripts/midterm_start.sh ${NEXT_START_ARGS[*]}"
     exit 0
 fi
 
@@ -193,6 +217,9 @@ echo "[deploy] starting midterm stack..."
 START_ARGS=()
 if [[ "$LOCAL_POSTGRES" == true ]]; then
     START_ARGS+=(--local-postgres)
+fi
+if [[ -n "$IMAGES_TAR" && "$SKIP_IMAGE_LOAD" != true ]]; then
+    START_ARGS+=(--no-build)
 fi
 
 (
