@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Lock, local
 
 import psycopg
 from psycopg.rows import dict_row
@@ -117,6 +117,8 @@ _PROBE_METRICS = {
     "imageio_ffmpeg_fallback_count": 0,
     "imageio_ffmpeg_fallback_duration_ms": 0,
 }
+_PROBE_METRICS_LOCK = Lock()
+_PROBE_METRICS_LOCAL = local()
 _SINK_PHASES: dict[str, dict[str, object]] = {}
 _SINK_PHASES_LOCK = Lock()
 
@@ -1785,12 +1787,17 @@ def _materialization_timeout_s() -> float:
 
 
 def _probe_metrics_snapshot() -> dict[str, int]:
-    return dict(_PROBE_METRICS)
+    metrics = getattr(_PROBE_METRICS_LOCAL, "metrics", None)
+    if metrics is None:
+        metrics = {key: 0 for key in _PROBE_METRICS}
+        _PROBE_METRICS_LOCAL.metrics = metrics
+    return dict(metrics)
 
 
 def _probe_metrics_delta(before: dict[str, int]) -> dict[str, int]:
+    metrics = _probe_metrics_snapshot()
     return {
-        key: int(_PROBE_METRICS.get(key, 0)) - int(before.get(key, 0))
+        key: int(metrics.get(key, 0)) - int(before.get(key, 0))
         for key in _PROBE_METRICS
     }
 
@@ -1798,14 +1805,44 @@ def _probe_metrics_delta(before: dict[str, int]) -> dict[str, int]:
 def _record_probe_metric(tool: str, duration_s: float) -> None:
     duration_ms = int(max(duration_s, 0.0) * 1000)
     if tool == "ffprobe":
-        _PROBE_METRICS["ffprobe_invocation_count"] += 1
-        _PROBE_METRICS["ffprobe_duration_ms"] += duration_ms
+        updates = {
+            "ffprobe_invocation_count": 1,
+            "ffprobe_duration_ms": duration_ms,
+        }
     elif tool == "imageio_ffmpeg":
-        _PROBE_METRICS["imageio_ffmpeg_fallback_count"] += 1
-        _PROBE_METRICS["imageio_ffmpeg_fallback_duration_ms"] += duration_ms
+        updates = {
+            "imageio_ffmpeg_fallback_count": 1,
+            "imageio_ffmpeg_fallback_duration_ms": duration_ms,
+        }
     else:
-        _PROBE_METRICS["ffmpeg_invocation_count"] += 1
-        _PROBE_METRICS["ffmpeg_duration_ms"] += duration_ms
+        updates = {
+            "ffmpeg_invocation_count": 1,
+            "ffmpeg_duration_ms": duration_ms,
+        }
+    with _PROBE_METRICS_LOCK:
+        for key, value in updates.items():
+            _PROBE_METRICS[key] += value
+    thread_metrics = _probe_metrics_snapshot()
+    for key, value in updates.items():
+        thread_metrics[key] += value
+    _PROBE_METRICS_LOCAL.metrics = thread_metrics
+
+
+def _decoded_frame_count_with_timing(
+    raw_clip_path: Path,
+    *,
+    raw_clip_available: bool,
+    known_frame_count: int | None = None,
+) -> tuple[int, int]:
+    if known_frame_count is not None and known_frame_count >= 0:
+        return int(known_frame_count), 0
+    started = time.monotonic()
+    decoded_frame_count = (
+        read_decoded_video_frame_count(raw_clip_path)
+        if raw_clip_available and raw_clip_path.is_file()
+        else 0
+    )
+    return int(decoded_frame_count), int((time.monotonic() - started) * 1000)
 
 
 def _event_context_from_row(event_id: str, row: tuple) -> dict:
@@ -3974,7 +4011,12 @@ def _finalize_post_savant_evidence_bundle(
     rolling_cache_output_duration_s = _to_float(
         rolling_cache_info.get("output_duration_s")
     )
-    raw_clip_duration = None
+    raw_clip_duration = (
+        rolling_cache_output_duration_s
+        if rolling_cache_output_duration_s is not None
+        and rolling_cache_output_duration_s > 0
+        else None
+    )
     frame_cache_video_crop: dict = {
         "method": "copy",
         "crop_video_to_time_window": False,
@@ -4094,14 +4136,12 @@ def _finalize_post_savant_evidence_bundle(
     )
     decoded_frame_count = None
     if not metadata_has_objects:
-        decoded_started = time.monotonic()
-        decoded_frame_count = (
-            read_decoded_video_frame_count(Path(raw_clip_path))
-            if raw_clip_available and raw_clip_path.is_file()
-            else 0
-        )
-        decoded_frame_count_duration_ms = int(
-            (time.monotonic() - decoded_started) * 1000
+        decoded_frame_count, decoded_frame_count_duration_ms = (
+            _decoded_frame_count_with_timing(
+                raw_clip_path,
+                raw_clip_available=raw_clip_available,
+                known_frame_count=rolling_cache_selected_frame_count,
+            )
         )
 
     if metadata_has_objects:

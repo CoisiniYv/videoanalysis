@@ -175,7 +175,7 @@ def test_evidence_db_index_expanded_rows_can_be_disabled(monkeypatch: Any) -> No
     assert worker._evidence_db_index_expanded_rows_enabled() is True
 
 
-def test_rolling_cache_finalizer_uses_metadata_frame_count_and_probed_duration(
+def test_rolling_cache_finalizer_uses_metadata_frame_count_and_duration(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -301,9 +301,34 @@ def test_rolling_cache_finalizer_uses_metadata_frame_count_and_probed_duration(
     )
 
     assert captured["decoded_video_duration_s"] == 1.75
-    assert probed_paths == [str(output_root / event_id / "raw_clip.mov")]
+    assert probed_paths == []
     assert bundle["raw_clip"].endswith("raw_clip.mov")
     assert bundle["annotation_lines"] == 42
+
+
+def test_rolling_cache_known_frame_count_skips_video_decode(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    raw_clip = tmp_path / "raw_clip.mov"
+    raw_clip.write_bytes(b"video")
+    monkeypatch.setattr(
+        worker,
+        "read_decoded_video_frame_count",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("known rolling-cache frame count must skip decode")
+        ),
+    )
+
+    count, duration_ms = worker._decoded_frame_count_with_timing(
+        raw_clip,
+        raw_clip_available=True,
+        known_frame_count=240,
+    )
+
+    assert count == 240
+    assert duration_ms == 0
 
 
 def test_rolling_cache_ready_check_uses_known_duration_without_ffprobe(
