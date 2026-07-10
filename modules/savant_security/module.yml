@@ -194,6 +194,24 @@ pipeline:
         propagate_track_id: ${parameters.face_secondary_track_id_enabled}
 
     # ------------------------------------------------------------------
+    # FaceRoiExporterPyFunc — optional asynchronous AdaFace input path.
+    # Runs the embedding-independent quality/cadence gate, aligns eligible
+    # faces on the already-decoded GPU frame, and publishes only a bounded
+    # 112x112 JPEG crop plus identity metadata. Disabled by default.
+    # ------------------------------------------------------------------
+    - element: pyfunc
+      name: face_roi_exporter
+      module: custom.pyfuncs.face_roi_exporter
+      class_name: FaceRoiExporterPyFunc
+      kwargs:
+        enabled: ${oc.decode:${oc.env:FACE_ROI_EXPORT_ENABLED, false}}
+        log_every_n_frames: ${oc.decode:${oc.env:FACE_ROI_LOG_EVERY_N, 300}}
+        cameras_config_path: ${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}
+        min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}
+        min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
+        min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
+
+    # ------------------------------------------------------------------
     # AdaFace — face embedding attribute model.
     # Runs on aligned face crops from YOLOv8-Face detections.
     # Outputs 512-d feature vector (NOT L2-normalized).
@@ -208,7 +226,7 @@ pipeline:
         batch_size: ${oc.decode:${oc.env:FACE_EMBEDDING_BATCH_SIZE, 16}}
         precision: fp16
         input:
-          object: yolov8_face.face
+          object: ${oc.env:ADAFACE_INPUT_OBJECT,yolov8_face.face}
           shape: [3, 112, 112]
           offsets: [127.5, 127.5, 127.5]
           scale_factor: 0.007843137254902

@@ -567,6 +567,13 @@ services:
       FACE_REID_MIN_CONFIDENCE: "${FACE_REID_MIN_CONFIDENCE:-0.45}"
       FACE_REID_MIN_FACE_SIZE: "${FACE_REID_MIN_FACE_SIZE:-40}"
       FACE_REID_NORM_TOLERANCE: "${FACE_REID_NORM_TOLERANCE:-0.10}"
+      FACE_ROI_EXPORT_ENABLED: "${FACE_ROI_EXPORT_ENABLED:-false}"
+      FACE_ROI_STREAM: "${FACE_ROI_STREAM:-security.face_rois}"
+      FACE_ROI_STREAM_MAXLEN: "${FACE_ROI_STREAM_MAXLEN:-20000}"
+      FACE_ROI_QUEUE_MAXSIZE: "${FACE_ROI_QUEUE_MAXSIZE:-4096}"
+      FACE_ROI_TTL_MS: "${FACE_ROI_TTL_MS:-5000}"
+      FACE_ROI_JPEG_QUALITY: "${FACE_ROI_JPEG_QUALITY:-95}"
+      ADAFACE_INPUT_OBJECT: "${ADAFACE_INPUT_OBJECT:-yolov8_face.face}"
       FACE_OBSERVATION_EXPORT_ENABLED: "true"
       PERSON_OBSERVATION_EXPORT_ENABLED: "true"
       SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS: "${SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS:-500}"
@@ -673,6 +680,13 @@ services:
       FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-4}"
       FACE_DETECTOR_MODEL_FILE: "${FACE_DETECTOR_MODEL_FILE:-/models/yolov8_face/yolov8n-face.dynamic.onnx}"
       FACE_EMBEDDING_BATCH_SIZE: "${FACE_EMBEDDING_BATCH_SIZE:-16}"
+      FACE_ROI_EXPORT_ENABLED: "${FACE_ROI_EXPORT_ENABLED:-false}"
+      FACE_ROI_STREAM: "${FACE_ROI_STREAM:-security.face_rois}"
+      FACE_ROI_STREAM_MAXLEN: "${FACE_ROI_STREAM_MAXLEN:-20000}"
+      FACE_ROI_QUEUE_MAXSIZE: "${FACE_ROI_QUEUE_MAXSIZE:-4096}"
+      FACE_ROI_TTL_MS: "${FACE_ROI_TTL_MS:-5000}"
+      FACE_ROI_JPEG_QUALITY: "${FACE_ROI_JPEG_QUALITY:-95}"
+      ADAFACE_INPUT_OBJECT: "${ADAFACE_INPUT_OBJECT:-yolov8_face.face}"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis
@@ -743,6 +757,13 @@ services:
       FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-4}"
       FACE_DETECTOR_MODEL_FILE: "${FACE_DETECTOR_MODEL_FILE:-/models/yolov8_face/yolov8n-face.dynamic.onnx}"
       FACE_EMBEDDING_BATCH_SIZE: "${FACE_EMBEDDING_BATCH_SIZE:-16}"
+      FACE_ROI_EXPORT_ENABLED: "${FACE_ROI_EXPORT_ENABLED:-false}"
+      FACE_ROI_STREAM: "${FACE_ROI_STREAM:-security.face_rois}"
+      FACE_ROI_STREAM_MAXLEN: "${FACE_ROI_STREAM_MAXLEN:-20000}"
+      FACE_ROI_QUEUE_MAXSIZE: "${FACE_ROI_QUEUE_MAXSIZE:-4096}"
+      FACE_ROI_TTL_MS: "${FACE_ROI_TTL_MS:-5000}"
+      FACE_ROI_JPEG_QUALITY: "${FACE_ROI_JPEG_QUALITY:-95}"
+      ADAFACE_INPUT_OBJECT: "${ADAFACE_INPUT_OBJECT:-yolov8_face.face}"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
       EVENT_EXPORTER: redis
@@ -983,6 +1004,45 @@ services:
       - /data/video-analytics/models:/data/video-analytics/models:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  adaface-roi-worker:
+    profiles: ["roi-adaface"]
+    build:
+      context: ../services/adaface-roi-worker
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-adaface-roi-worker:latest
+    container_name: video-analytics-midterm-adaface-roi-worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      FACE_ROI_STREAM: "${FACE_ROI_STREAM:-security.face_rois}"
+      FACE_ROI_CONSUMER_GROUP: "${FACE_ROI_CONSUMER_GROUP:-adaface-roi-workers}"
+      FACE_ROI_CONSUMER_NAME: "${FACE_ROI_CONSUMER_NAME:-adaface-roi-worker-1}"
+      FACE_ROI_STREAM_MAXLEN: "${FACE_ROI_STREAM_MAXLEN:-20000}"
+      FACE_ROI_TTL_MS: "${FACE_ROI_TTL_MS:-5000}"
+      FACE_ROI_PENDING_IDLE_MS: "${FACE_ROI_PENDING_IDLE_MS:-5000}"
+      FACE_ROI_POLL_TIMEOUT_MS: "${FACE_ROI_POLL_TIMEOUT_MS:-100}"
+      FACE_ROI_BATCH_TIMEOUT_MS: "${FACE_ROI_BATCH_TIMEOUT_MS:-10}"
+      FACE_OBSERVATION_STREAM: security.face_observations
+      FACE_OBSERVATION_MAXLEN: "${FACE_OBSERVATION_MAXLEN:-10000}"
+      FACE_EMBEDDING_BATCH_SIZE: "${FACE_EMBEDDING_BATCH_SIZE:-16}"
+      ADAFACE_ENGINE_PATH: "${ADAFACE_ENGINE_PATH:-/models/adaface/adaface_ir50_webface4m.onnx_b16_gpu0_fp16.engine}"
+      METRICS_PORT: "8080"
+    volumes:
+      - /data/video-analytics/models:/models:ro
+    ports:
+      - "${ADAFACE_ROI_METRICS_HOST_PORT:-18187}:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
     depends_on:
       redis: { condition: service_healthy }
     restart: unless-stopped
