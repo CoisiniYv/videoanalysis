@@ -272,6 +272,37 @@ def test_start_docker_failure_returns_nonzero(script_mod, sources_path):
     assert len(runner.calls) == 1
 
 
+def test_start_replaces_concurrently_created_container(script_mod, sources_path):
+    runner = _FakeRunner(
+        _fail(
+            stderr=(
+                'Conflict. The container name "/video-analytics-source-primary_rtsp" '
+                "is already in use"
+            ),
+            returncode=125,
+        ),
+        _ok(stdout="replacement-container"),
+        _ok(stdout="abc123def456"),
+    )
+    logs: List[str] = []
+
+    rc = script_mod.main(
+        ["start", "--sources", sources_path, "--source-id", "primary_rtsp"],
+        runner=runner,
+        logger=logs.append,
+    )
+
+    assert rc == 0
+    assert runner.calls[1] == [
+        "docker",
+        "rm",
+        "-f",
+        "video-analytics-source-primary_rtsp",
+    ]
+    assert runner.calls[2][:4] == ["docker", "run", "-d", "--name"]
+    assert any("CONFLICT" in line for line in logs)
+
+
 def test_stop_docker_failure_returns_nonzero(script_mod):
     runner = _FakeRunner(_fail(stderr="no such container"))
     rc = script_mod.main(

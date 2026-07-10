@@ -281,6 +281,28 @@ def cmd_start(
     log(f"START source_id={spec.source_id} container={spec.container_name}")
     log(f"  cmd={_redact_uri_in_cmd(cmd, spec.uri)}")
     result = runner(cmd)
+    conflict_retries = 0
+    while (
+        result.returncode != 0
+        and "container name" in (result.stderr or "").lower()
+        and "already in use" in (result.stderr or "").lower()
+        and conflict_retries < 3
+    ):
+        conflict_retries += 1
+        log(
+            "CONFLICT existing source container was created concurrently; "
+            f"replacing attempt={conflict_retries}"
+        )
+        remove_result = runner(["docker", "rm", "-f", spec.container_name])
+        if remove_result.returncode != 0 and "no such container" not in (
+            remove_result.stderr or ""
+        ).lower():
+            log(
+                "ERROR: failed to replace conflicting source container: "
+                f"{remove_result.stderr.strip()}"
+            )
+            return 4
+        result = runner(cmd)
     if result.returncode != 0:
         log(f"ERROR: docker run failed (rc={result.returncode}): {result.stderr.strip()}")
         return 4
