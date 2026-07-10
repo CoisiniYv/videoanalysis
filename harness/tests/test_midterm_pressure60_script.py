@@ -82,6 +82,7 @@ def _config(module, **overrides):
         "adaface_classifier_async": False,
         "face_secondary_track_id": False,
         "adaface_input_queue": False,
+        "adaface_crop_resize": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1259,6 +1260,29 @@ def test_adaface_input_queue_is_bounded_and_non_leaky(tmp_path) -> None:
         "max-size-bytes": 0,
         "max-size-time": 0,
         "leaky": 0,
+    }
+
+
+def test_adaface_crop_resize_canary_replaces_landmark_preprocessor(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        savant_ablation_stage="full-exporter",
+        adaface_crop_resize=True,
+    )
+
+    generated_path = module.write_savant_ablation_module(cfg)
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    adaface = next(
+        element
+        for element in generated["pipeline"]["elements"]
+        if element.get("name") == "adaface"
+    )
+
+    assert adaface["model"]["input"]["preprocess_object_image"] == {
+        "module": "custom.preprocessors.face_crop_resize",
+        "class_name": "FaceCropResizePreprocessingObjectImageGPU",
     }
 
 

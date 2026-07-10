@@ -362,6 +362,7 @@ class PressureConfig:
     adaface_classifier_async: bool = False
     face_secondary_track_id: bool = False
     adaface_input_queue: bool = False
+    adaface_crop_resize: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -516,6 +517,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Insert a bounded non-leaky GStreamer queue immediately before "
             "AdaFace to isolate upstream face detection scheduling."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-crop-resize",
+        action="store_true",
+        help=(
+            "Replace landmark alignment with bbox crop+resize for a diagnostic "
+            "canary. Do not use as the production face-quality default."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -857,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
         adaface_classifier_async=bool(args.adaface_classifier_async),
         face_secondary_track_id=bool(args.face_secondary_track_id),
         adaface_input_queue=bool(args.adaface_input_queue),
+        adaface_crop_resize=bool(args.adaface_crop_resize),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -2354,6 +2364,19 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
                 },
             },
         )
+    if cfg.adaface_crop_resize:
+        adaface = next(
+            (element for element in selected if element.get("name") == "adaface"),
+            None,
+        )
+        if adaface is None:
+            raise ValueError(
+                "--adaface-crop-resize requires an ablation stage with AdaFace"
+            )
+        adaface["model"]["input"]["preprocess_object_image"] = {
+            "module": "custom.preprocessors.face_crop_resize",
+            "class_name": "FaceCropResizePreprocessingObjectImageGPU",
+        }
     adaface_async_config_path: Path | None = None
     if cfg.adaface_classifier_async:
         adaface = next(
@@ -2385,6 +2408,7 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         "adaface_classifier_async": cfg.adaface_classifier_async,
         "face_secondary_track_id": cfg.face_secondary_track_id,
         "adaface_input_queue": cfg.adaface_input_queue,
+        "adaface_crop_resize": cfg.adaface_crop_resize,
         "adaface_classifier_async_config": (
             str(adaface_async_config_path) if adaface_async_config_path else ""
         ),

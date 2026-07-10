@@ -41,6 +41,7 @@ def write_artifact(
             "adaface_classifier_async": False,
             "face_secondary_track_id": False,
             "adaface_input_queue": False,
+            "adaface_crop_resize": False,
             "batched_push_timeout": timeout_us,
             "stream_count": 60,
             "fps": "4/1",
@@ -97,6 +98,7 @@ def test_summarize_artifact_reads_pressure_report_contract(tmp_path: Path) -> No
     assert row["adaface_classifier_async"] is False
     assert row["face_secondary_track_id"] is False
     assert row["adaface_input_queue"] is False
+    assert row["adaface_crop_resize"] is False
     assert row["forwarded_target_ratio"] == 0.97
     assert row["stage_metrics"]["yolo26_pose"]["batch_full_ratio"] == 0.98
     assert row["events"] == 10
@@ -222,6 +224,7 @@ def test_markdown_contains_run_and_diagnosis() -> None:
                 "adaface_classifier_async": True,
                 "face_secondary_track_id": True,
                 "adaface_input_queue": True,
+                "adaface_crop_resize": True,
                 "batch_timeout_us": 40000,
                 "steady_effective_fps_mean": 3.9,
                 "steady_target_ratio": 0.975,
