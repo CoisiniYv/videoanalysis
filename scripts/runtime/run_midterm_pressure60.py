@@ -2341,6 +2341,18 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             service_doc.setdefault("volumes", []).append(
                 f"{mps_root}:{mps_root}:rw"
             )
+        if cfg.adaface_roi_redis:
+            roi_service = doc["services"][ADAFACE_ROI_WORKER_SERVICE]
+            roi_service["ipc"] = "host"
+            roi_service["environment"].update(
+                {
+                    "CUDA_MPS_PIPE_DIRECTORY": str(pipe_dir),
+                    "CUDA_MPS_LOG_DIRECTORY": str(log_dir),
+                }
+            )
+            roi_service.setdefault("volumes", []).append(
+                f"{mps_root}:{mps_root}:rw"
+            )
     cpu_profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
     for service in (
         "savant-a",

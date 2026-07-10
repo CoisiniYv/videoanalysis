@@ -1526,6 +1526,7 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
         savant_output_mode="metadata-only",
         adaface_roi_redis=True,
         adaface_roi_batch_timeout_ms=40,
+        cuda_mps=True,
     )
 
     override = yaml.safe_load(
@@ -1554,6 +1555,17 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
     worker = override["services"]["adaface-roi-worker"]
     assert worker["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
     assert worker["environment"]["FACE_ROI_BATCH_TIMEOUT_MS"] == "40"
+    assert worker["ipc"] == "host"
+    assert worker["environment"]["CUDA_MPS_PIPE_DIRECTORY"] == (
+        "/tmp/video-analytics-mps-pressure/pipe"
+    )
+    assert worker["environment"]["CUDA_MPS_LOG_DIRECTORY"] == (
+        "/tmp/video-analytics-mps-pressure/log"
+    )
+    assert (
+        "/tmp/video-analytics-mps-pressure:/tmp/video-analytics-mps-pressure:rw"
+        in worker["volumes"]
+    )
     assert worker["environment"]["FACE_ROI_STREAM"] == (
         "security.face_rois.roi_test_run"
     )
