@@ -78,6 +78,7 @@ def _config(module, **overrides):
         "rolling_cache_evidence": False,
         "rolling_cache_enable_coverage_merge": False,
         "cleanup": True,
+        "cuda_mps": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1092,6 +1093,28 @@ def test_dual_shard_pressure_enables_stage_metrics(tmp_path) -> None:
         ] == "true"
 
 
+def test_dual_shard_mps_override_shares_pipe_and_host_ipc(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        dual_shard_api=False,
+        cuda_mps=True,
+    )
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+    mps_root, pipe_dir, log_dir = module.cuda_mps_paths(cfg)
+
+    for service in ("savant-a", "savant-b"):
+        service_doc = override["services"][service]
+        assert service_doc["ipc"] == "host"
+        assert service_doc["environment"]["CUDA_MPS_PIPE_DIRECTORY"] == str(pipe_dir)
+        assert service_doc["environment"]["CUDA_MPS_LOG_DIRECTORY"] == str(log_dir)
+        assert f"{mps_root}:{mps_root}:rw" in service_doc["volumes"]
+
+
 def test_parse_savant_stage_latency_and_batch_occupancy() -> None:
     module = _load_module()
     parsed = module.parse_savant_metrics_text(
@@ -1991,6 +2014,40 @@ def test_pressure_gate_rejects_steady_fps_below_minimum() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "steady_effective_fps_below_minimum" in reasons
+
+
+def test_pressure_gate_requires_live_mps_client_when_enabled() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=1,
+        keep_evidence=0,
+        fps="4/1",
+        min_fps="99/25",
+        cuda_mps=True,
+    )
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 1,
+            "max_savant_sources": 1,
+            "max_savant_send_failures_delta": 0,
+            "queue_full_samples": 0,
+            "steady_effective_fps_sample_count": 2,
+            "steady_effective_fps_mean": 4.0,
+            "steady_effective_fps_meets_minimum": True,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+        "cuda_mps": {"ready": True, "server_list": []},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "cuda_mps_client_unavailable" in reasons
 
 
 def test_runtime_sample_summary_gates_send_failure_delta(tmp_path: Path) -> None:

@@ -63,6 +63,8 @@ DEFAULT_PRESSURE_DRAIN_S = 120
 ROLLING_CACHE_FULL_RATE_MIN_RATIO = 0.90
 SOURCE_CONTROLLER = Path("scripts/runtime/camera_source_controller.py")
 DUAL_SHARD_PROFILE = "dual-4090-two-source"
+CUDA_MPS_CONTAINER = "video-analytics-midterm-cuda-mps-pressure"
+CUDA_MPS_IMAGE_DEFAULT = "ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1"
 DUAL_SHARD_SERVICES = [
     "savant-a",
     "savant-b",
@@ -355,6 +357,7 @@ class PressureConfig:
     savant_ablation_stage: str = "full-evidence"
     savant_output_mode: str = "copy"
     cpu_isolation_profile: str = "none"
+    cuda_mps: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -478,6 +481,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=tuple(CPU_ISOLATION_PROFILES),
         default="none",
         help="Temporary cpuset layout for inference and downstream worker isolation.",
+    )
+    parser.add_argument(
+        "--cuda-mps",
+        action="store_true",
+        help=(
+            "Run both same-GPU Savant branches through a temporary CUDA MPS "
+            "control/server container. The helper is removed during restore."
+        ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
     parser.add_argument("--run-id")
@@ -696,6 +707,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dual-shard-same-gpu cannot be combined with --forwarder-null-sink")
     if args.dual_shard_api and not args.dual_shard_same_gpu:
         raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
+    if args.cuda_mps and not args.dual_shard_same_gpu:
+        raise SystemExit("--cuda-mps requires --dual-shard-same-gpu")
     if args.dual_shard_same_gpu and args.keep_evidence > 0 and not args.dual_shard_api:
         raise SystemExit(
             "--dual-shard-same-gpu with evidence retention requires "
@@ -812,6 +825,7 @@ def main(argv: list[str] | None = None) -> int:
         savant_ablation_stage=args.savant_ablation_stage,
         savant_output_mode=args.savant_output_mode,
         cpu_isolation_profile=args.cpu_isolation_profile,
+        cuda_mps=bool(args.cuda_mps),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -957,6 +971,8 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 max_jobs_per_run="0" if cfg.keep_evidence < 0 else None,
             )
+        if cfg.cuda_mps:
+            report["cuda_mps_start"] = start_cuda_mps(cfg)
         rtsp_republishers = start_rtsp_republishers(cfg)
         insert_pressure_cameras(conn, cfg)
         if cfg.dual_shard_same_gpu:
@@ -1219,6 +1235,8 @@ def main(argv: list[str] | None = None) -> int:
             report["cleanup"] = cleanup
         restore_cameras(conn, original_cameras)
         restore_runtime(cfg, original_perf)
+        if cfg.cuda_mps:
+            report["cuda_mps_stop"] = read_cuda_mps_stop_summary(cfg)
         if original_clip_worker_replay_shards is not None:
             report["clip_worker_replay_shards_restore"] = configure_clip_worker_replay_shards(
                 cfg,
@@ -1464,6 +1482,11 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             return 1
     finally:
+        if cfg.cuda_mps:
+            try:
+                stop_cuda_mps(cfg)
+            except Exception:
+                pass
         if original_worker_cpu_isolation is not None:
             try:
                 restore_worker_cpu_isolation(cfg, original_worker_cpu_isolation)
@@ -1961,6 +1984,20 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             },
         }
     }
+    if cfg.cuda_mps:
+        mps_root, pipe_dir, log_dir = cuda_mps_paths(cfg)
+        for service in ("savant-a", "savant-b"):
+            service_doc = doc["services"][service]
+            service_doc["ipc"] = "host"
+            service_doc["environment"].update(
+                {
+                    "CUDA_MPS_PIPE_DIRECTORY": str(pipe_dir),
+                    "CUDA_MPS_LOG_DIRECTORY": str(log_dir),
+                }
+            )
+            service_doc.setdefault("volumes", []).append(
+                f"{mps_root}:{mps_root}:rw"
+            )
     cpu_profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
     for service in (
         "savant-a",
@@ -1973,6 +2010,222 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             doc["services"].setdefault(service, {})["cpuset"] = cpuset
     write_text(path, yaml.safe_dump(doc, sort_keys=False))
     return path
+
+
+def cuda_mps_paths(cfg: PressureConfig) -> tuple[Path, Path, Path]:
+    root = (cfg.artifact_dir / "cuda-mps").resolve()
+    return root, root / "pipe", root / "log"
+
+
+def _cuda_mps_image() -> str:
+    completed = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            "video-analytics-midterm-savant",
+            "--format",
+            "{{.Config.Image}}",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else CUDA_MPS_IMAGE_DEFAULT
+
+
+def _cuda_mps_container_exists() -> bool:
+    completed = subprocess.run(
+        ["docker", "inspect", CUDA_MPS_CONTAINER],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return completed.returncode == 0
+
+
+def cuda_mps_status(cfg: PressureConfig) -> dict[str, Any]:
+    root, pipe_dir, log_dir = cuda_mps_paths(cfg)
+    status: dict[str, Any] = {
+        "enabled": cfg.cuda_mps,
+        "container": CUDA_MPS_CONTAINER,
+        "root": str(root),
+        "pipe_directory": str(pipe_dir),
+        "log_directory": str(log_dir),
+        "container_exists": _cuda_mps_container_exists(),
+    }
+    if not status["container_exists"]:
+        status["ready"] = False
+        return status
+    inspect = subprocess.run(
+        [
+            "docker",
+            "inspect",
+            CUDA_MPS_CONTAINER,
+            "--format",
+            "{{.State.Status}}|{{.State.Running}}|{{index .Config.Labels \"com.video-analytics.pressure60.run-id\"}}",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    control = subprocess.run(
+        [
+            "docker",
+            "exec",
+            CUDA_MPS_CONTAINER,
+            "bash",
+            "-lc",
+            "echo get_server_list | nvidia-cuda-mps-control",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    status.update(
+        {
+            "inspect": inspect.stdout.strip(),
+            "inspect_rc": inspect.returncode,
+            "control_rc": control.returncode,
+            "server_list": control.stdout.strip().splitlines(),
+            "ready": inspect.returncode == 0 and control.returncode == 0,
+        }
+    )
+    return status
+
+
+def start_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
+    if not cfg.dual_shard_same_gpu:
+        raise RuntimeError("CUDA MPS requires dual_shard_same_gpu")
+    root, pipe_dir, log_dir = cuda_mps_paths(cfg)
+    pipe_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    if _cuda_mps_container_exists():
+        existing = cuda_mps_status(cfg)
+        if cfg.run_id not in str(existing.get("inspect") or ""):
+            raise RuntimeError(
+                f"refusing to replace unrelated CUDA MPS container: {existing}"
+            )
+        subprocess.run(
+            ["docker", "rm", "-f", CUDA_MPS_CONTAINER],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    command = (
+        "set -eu; "
+        "nvidia-cuda-mps-control -d; "
+        "trap 'echo quit | nvidia-cuda-mps-control >/tmp/mps-quit.log 2>&1 || true' TERM INT EXIT; "
+        "while :; do sleep 5; done"
+    )
+    completed = subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--rm",
+            "--pull=never",
+            "--name",
+            CUDA_MPS_CONTAINER,
+            "--label",
+            "com.video-analytics.pressure60.mps=true",
+            "--label",
+            f"com.video-analytics.pressure60.run-id={cfg.run_id}",
+            "--gpus",
+            f"device={cfg.dual_shard_gpu}",
+            "--ipc=host",
+            "-e",
+            f"CUDA_MPS_PIPE_DIRECTORY={pipe_dir}",
+            "-e",
+            f"CUDA_MPS_LOG_DIRECTORY={log_dir}",
+            "-v",
+            f"{root}:{root}:rw",
+            "--entrypoint",
+            "bash",
+            _cuda_mps_image(),
+            "-lc",
+            command,
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    write_text(cfg.artifact_dir / "cuda_mps_start.log", completed.stdout)
+    if completed.returncode != 0:
+        raise RuntimeError(f"CUDA MPS helper failed to start: {completed.stdout.strip()}")
+    deadline = time.time() + 30
+    status: dict[str, Any] = {}
+    while time.time() < deadline:
+        status = cuda_mps_status(cfg)
+        if status.get("ready"):
+            write_json(cfg.artifact_dir / "cuda_mps_start.json", status)
+            return status
+        time.sleep(0.5)
+    stop_cuda_mps(cfg)
+    raise RuntimeError(f"CUDA MPS helper did not become ready: {status}")
+
+
+def stop_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
+    if not _cuda_mps_container_exists():
+        previous_path = cfg.artifact_dir / "cuda_mps_stop.json"
+        try:
+            previous = json.loads(previous_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        if previous.get("stopped"):
+            return previous
+        summary = {
+            "before": cuda_mps_status(cfg),
+            "stop_rc": 0,
+            "stop_output": "already_stopped",
+            "container_exists_after": False,
+            "stopped": True,
+        }
+        write_json(previous_path, summary)
+        return summary
+    before = cuda_mps_status(cfg)
+    logs = subprocess.run(
+        ["docker", "logs", CUDA_MPS_CONTAINER],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    write_text(cfg.artifact_dir / "cuda_mps_container.log", logs.stdout)
+    stop = subprocess.run(
+        ["docker", "stop", "--time", "15", CUDA_MPS_CONTAINER],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if _cuda_mps_container_exists():
+        subprocess.run(
+            ["docker", "rm", "-f", CUDA_MPS_CONTAINER],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    summary = {
+        "before": before,
+        "stop_rc": stop.returncode,
+        "stop_output": stop.stdout.strip(),
+        "container_exists_after": _cuda_mps_container_exists(),
+        "stopped": not _cuda_mps_container_exists(),
+    }
+    write_json(cfg.artifact_dir / "cuda_mps_stop.json", summary)
+    return summary
+
+
+def read_cuda_mps_stop_summary(cfg: PressureConfig) -> dict[str, Any]:
+    path = cfg.artifact_dir / "cuda_mps_stop.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"stopped": not _cuda_mps_container_exists()}
 
 
 def write_savant_ablation_module(cfg: PressureConfig) -> Path:
@@ -3523,6 +3776,8 @@ def sample_runtime(
             overview["_pressure_sample_observed_at"] = datetime.now(timezone.utc).isoformat()
         write_json(samples_dir / f"runtime_{index:03d}.json", overview)
         write_text(samples_dir / f"gpu_{index:03d}.csv", nvidia_smi_csv())
+        if cfg.cuda_mps:
+            write_json(samples_dir / f"mps_{index:03d}.json", cuda_mps_status(cfg))
         write_json(samples_dir / f"docker_stats_{index:03d}.json", docker_stats_json(cfg))
         write_json(samples_dir / f"db_{index:03d}.json", db_summary_connect(cfg))
         if now >= end_at:
@@ -4559,6 +4814,7 @@ def collect_pressure_diagnostics(cfg: PressureConfig) -> dict[str, Any]:
         "source_containers": source_containers,
         "rtsp_republishers": inspect_rtsp_republishers(cfg),
         "log_summary": summarize_logs(cfg),
+        "cuda_mps": cuda_mps_status(cfg) if cfg.cuda_mps else {"enabled": False},
     }
     write_json(cfg.artifact_dir / "pressure_diagnostics.json", diagnostics)
     return diagnostics
@@ -5585,6 +5841,7 @@ def pressure_failure_reasons(
     republish_summary = diagnostics.get("rtsp_republishers") or {}
     log_summary = diagnostics.get("log_summary") or {}
     savant_logs = log_summary.get("savant") or {}
+    mps_summary = diagnostics.get("cuda_mps") or {}
     if not cfg.forwarder_null_sink and cfg.keep_evidence >= 0 and len(kept) < cfg.keep_evidence:
         reasons.append("insufficient_playable_evidence")
     if not cfg.forwarder_null_sink and cfg.keep_evidence < 0 and db_before_cleanup:
@@ -5618,6 +5875,11 @@ def pressure_failure_reasons(
             reasons.append("rtsp_republishers_connection_errors")
     if _sample_savant_send_failures_for_gate(sample_summary) > cfg.max_send_failures:
         reasons.append("savant_send_failures")
+    if cfg.cuda_mps and (
+        not bool(mps_summary.get("ready"))
+        or not (mps_summary.get("server_list") or [])
+    ):
+        reasons.append("cuda_mps_client_unavailable")
     if int(sample_summary.get("steady_effective_fps_sample_count") or 0) <= 0:
         reasons.append("steady_effective_fps_unmeasured")
     elif not bool(sample_summary.get("steady_effective_fps_meets_minimum")):
@@ -6415,6 +6677,8 @@ def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
             stop_dual_shard_runtime(cfg)
         else:
             stop_dual_shard_runtime(cfg)
+        if cfg.cuda_mps:
+            stop_cuda_mps(cfg)
     env = os.environ.copy()
     env.update(
         {

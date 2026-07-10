@@ -3,9 +3,9 @@ set -uo pipefail
 
 phase="${1:-all}"
 case "${phase}" in
-  ablation|output|cpu|timeout|all) ;;
+  ablation|output|cpu|timeout|mps|all) ;;
   *)
-    echo "usage: $0 [ablation|output|cpu|timeout|all]" >&2
+    echo "usage: $0 [ablation|output|cpu|timeout|mps|all]" >&2
     exit 2
     ;;
 esac
@@ -25,6 +25,7 @@ run_case() {
   local output_mode="$3"
   local timeout_us="$4"
   local cpu_profile="$5"
+  local cuda_mps="${6:-0}"
   local run_id="pressure60_${matrix_id}_${case_id}"
 
   echo "MATRIX_CASE_START case=${case_id} run_id=${run_id} stage=${stage} output=${output_mode} timeout_us=${timeout_us} cpu=${cpu_profile}"
@@ -37,6 +38,7 @@ run_case() {
   OUTPUT_MODE="${output_mode}" \
   BATCH_TIMEOUT_US="${timeout_us}" \
   CPU_PROFILE="${cpu_profile}" \
+  CUDA_MPS="${cuda_mps}" \
     bash "${runner}" "${profile}"
   local rc=$?
   echo "MATRIX_CASE_END case=${case_id} run_id=${run_id} rc=${rc}"
@@ -68,16 +70,23 @@ run_timeout() {
   run_case bt03_40ms full-exporter metadata-only 40000 none
 }
 
+run_mps() {
+  run_case mps01_baseline full-exporter metadata-only 10000 none 0
+  run_case mps02_enabled full-exporter metadata-only 10000 none 1
+}
+
 case "${phase}" in
   ablation) run_ablation ;;
   output) run_output ;;
   cpu) run_cpu ;;
   timeout) run_timeout ;;
+  mps) run_mps ;;
   all)
     run_ablation
     run_output
     run_cpu
     run_timeout
+    run_mps
     ;;
 esac
 

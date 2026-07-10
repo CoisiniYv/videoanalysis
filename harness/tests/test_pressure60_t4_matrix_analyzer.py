@@ -37,6 +37,7 @@ def write_artifact(
             "savant_ablation_stage": stage,
             "savant_output_mode": "metadata-only",
             "cpu_isolation_profile": "none",
+            "cuda_mps": False,
             "batched_push_timeout": timeout_us,
             "stream_count": 60,
             "fps": "4/1",
@@ -89,6 +90,7 @@ def test_summarize_artifact_reads_pressure_report_contract(tmp_path: Path) -> No
 
     assert row["steady_effective_fps_mean"] == 3.9
     assert row["steady_target_ratio"] == 0.975
+    assert row["cuda_mps"] is False
     assert row["forwarded_target_ratio"] == 0.97
     assert row["stage_metrics"]["yolo26_pose"]["batch_full_ratio"] == 0.98
     assert row["events"] == 10
@@ -210,6 +212,7 @@ def test_markdown_contains_run_and_diagnosis() -> None:
                 "stage": "pose-only",
                 "output_mode": "copy",
                 "cpu_profile": "none",
+                "cuda_mps": True,
                 "batch_timeout_us": 40000,
                 "steady_effective_fps_mean": 3.9,
                 "steady_target_ratio": 0.975,
@@ -224,4 +227,5 @@ def test_markdown_contains_run_and_diagnosis() -> None:
     rendered = module.markdown(summary)
 
     assert "pressure60_matrix_ab01_pose" in rendered
+    assert "| True |" in rendered
     assert '"nvinfer_dominant_proven": false' in rendered
