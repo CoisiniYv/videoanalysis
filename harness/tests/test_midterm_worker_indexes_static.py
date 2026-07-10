@@ -7,6 +7,11 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "db" / "migrations" / "014_worker_media_indexes.sql"
 QUEUE_MIGRATION = ROOT / "db" / "migrations" / "019_media_worker_events_queue_indexes.sql"
 EVIDENCE_QUEUE_MIGRATION = ROOT / "db" / "migrations" / "020_evidence_queue_playable_indexes.sql"
+EPOCH_BARRIER_MIGRATION = ROOT / "db" / "migrations" / "024_evidence_task_runtime_epoch_barrier.sql"
+READY_CLAIM_MIGRATION = ROOT / "db" / "migrations" / "026_evidence_task_ready_claim_order_idx.sql"
+READY_DEFERRED_MIGRATION = (
+    ROOT / "db" / "migrations" / "027_evidence_task_ready_indexes_terminal_deferred.sql"
+)
 MEDIA_WORKER = ROOT / "services" / "media-worker" / "app" / "worker.py"
 
 
@@ -98,3 +103,32 @@ def test_evidence_queue_indexes_target_downstream_pressure_queries() -> None:
     assert "idx_evidence_tasks_active_event_type_status" in migration
     assert "ON evidence_tasks (event_type, status)" in migration
     assert "_materialization_backlog_depth" in worker
+
+
+def test_epoch_barrier_migration_promotes_runtime_epoch_and_active_index() -> None:
+    migration = _text(EPOCH_BARRIER_MIGRATION)
+
+    assert "ADD COLUMN IF NOT EXISTS runtime_epoch_id TEXT" in migration
+    assert "UPDATE evidence_tasks et" in migration
+    assert "payload->>'runtime_epoch_id'" in migration
+    assert "payload->'media'->>'runtime_epoch_id'" in migration
+    assert "evidence_tasks_runtime_epoch_active_idx" in migration
+    assert "ON evidence_tasks(runtime_epoch_id, source_id, replay_shard_id, updated_at DESC)" in migration
+    assert "materialization_status IN (" in migration
+    assert "status IN (" in migration
+    assert "materialization_status = 'materialization_deferred'" in migration
+
+
+def test_ready_claim_index_matches_rolling_cache_claim_order() -> None:
+    migration = _text(READY_CLAIM_MIGRATION)
+    deferred_fix_migration = _text(READY_DEFERRED_MIGRATION)
+    worker = _text(MEDIA_WORKER)
+
+    assert "CREATE INDEX IF NOT EXISTS evidence_tasks_ready_claim_order_idx" in migration
+    assert "ON evidence_tasks(priority DESC, materialization_ready_at, created_at)" in migration
+    assert "materialization_status IN (" in migration
+    assert "'materialization_deferred'" not in migration
+    assert "DROP INDEX IF EXISTS evidence_tasks_ready_claim_order_idx" in deferred_fix_migration
+    assert "'materialization_deferred'" not in deferred_fix_migration
+    assert "materialization_ready_at <= now()" in worker
+    assert "ORDER BY priority DESC, rolling_cache_ready_at ASC, created_at ASC" in worker

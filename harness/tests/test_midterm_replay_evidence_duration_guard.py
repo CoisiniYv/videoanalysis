@@ -129,6 +129,81 @@ def test_post_savant_final_duration_guard_removes_overlong_raw_clip(
     assert metadata["status"]["clip_status"] == "duration_guard_failed"
 
 
+def test_fast_raw_clip_keeps_overlong_imprecise_replay_output(
+    monkeypatch, tmp_path: Path
+) -> None:
+    sink_dir = tmp_path / "sink" / f"replay-event-{EVENT_ID}-00000000"
+    sink_dir.mkdir(parents=True)
+    source_video = sink_dir / "video.mov"
+    source_video.write_bytes(b"full replay source bytes")
+    metadata_file = sink_dir / "metadata.json"
+    metadata_file.write_text(json.dumps({"job_id": "job-1"}) + "\n", encoding="utf-8")
+    output_root = tmp_path / "evidence"
+
+    monkeypatch.setenv("POST_SAVANT_FAST_RAW_CLIP_ENABLED", "true")
+    monkeypatch.setenv("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", "true")
+    monkeypatch.setenv("POST_SAVANT_DURATION_GUARD_SLACK_SEC", "1")
+    monkeypatch.setenv("EVIDENCE_RUNTIME_EPOCH_STRICT", "false")
+    monkeypatch.setattr(worker, "_load_event_context", lambda _conn, _event_id: _event_context())
+    monkeypatch.setattr(worker, "load_native_metadata", lambda _path: _metadata_rows_outside_window())
+    monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 10)
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 61.35)
+    monkeypatch.setattr(
+        worker,
+        "write_frame_cache_identity_sidecar",
+        lambda **kwargs: _sidecar_result(kwargs, {}),
+    )
+
+    bundle = worker._finalize_post_savant_evidence_bundle(
+        None,
+        event_id=EVENT_ID,
+        meta_dir=str(sink_dir),
+        metadata_file=str(metadata_file),
+        evidence_output_dir=str(output_root),
+    )
+
+    raw_clip = output_root / EVENT_ID / "raw_clip.mov"
+    metadata = _read_json(output_root / EVENT_ID / "metadata.json")
+    summary = _read_json(output_root / EVENT_ID / "summary.json")
+
+    assert raw_clip.read_bytes() == b"full replay source bytes"
+    assert bundle["raw_clip"] == str(raw_clip)
+    assert bundle["clip_status"] == "generated_unverified"
+    assert bundle["duration_guard_failed"] is False
+    assert summary["fast_raw_clip_enabled"] is True
+    assert summary["canonical_clip"] is False
+    assert summary["duration_guard_status"] == "relaxed"
+    assert summary["duration_guard_failed"] is False
+    assert summary["sink_window_guard_status"] == "relaxed"
+    assert summary["sink_window_guard_failed"] is False
+    assert summary["video_crop"]["materialization_mode"] == "fast_raw_copy"
+    assert summary["video_crop"]["crop_video_to_time_window"] is False
+    assert "fast_raw_clip_time_precision_relaxed" in summary["limitations"]
+    assert metadata["media"]["raw_clip_path"] == str(raw_clip)
+    assert metadata["status"]["clip_status"] == "generated_unverified"
+
+
+def test_duration_guard_uses_pts_window_when_requested_duration_is_stale(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POST_SAVANT_DURATION_GUARD_SLACK_SEC", "1")
+
+    guard = worker._post_savant_duration_guard(
+        None,
+        {
+            "requested_duration_s": 10.0,
+            "requested_start_pts": 90_000_000_000,
+            "requested_end_pts": 120_000_000_000,
+        },
+        actual_duration=29.94,
+    )
+
+    assert guard["expected_duration_seconds"] == 30.0
+    assert guard["duration_guard_status"] == "passed"
+    assert guard["duration_guard_failed"] is False
+    assert guard["max_allowed_duration_seconds"] == 31.0
+
+
 def test_sink_metadata_pts_gap_fails_closed_even_when_duration_is_valid(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -175,6 +250,76 @@ def test_sink_metadata_pts_gap_fails_closed_even_when_duration_is_valid(
     assert summary["sink_window_guard_failed"] is True
     assert summary["sink_window_guard_reason"] == "sink_metadata_pts_gap_exceeds_limit"
     assert "sink_window_guard_failed" in summary["production_ready_failures"]
+    assert metadata["media"]["raw_clip_path"] == ""
+    assert metadata["status"]["clip_status"] == "duration_guard_failed"
+
+
+def test_rolling_cache_finalizer_records_probed_raw_clip_duration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    sink_dir = tmp_path / "sink" / f"rolling-cache-event-{EVENT_ID}"
+    sink_dir.mkdir(parents=True)
+    source_video = sink_dir / "video.mov"
+    source_video.write_bytes(b"rolling cache source")
+    metadata_file = sink_dir / "metadata.json"
+    metadata_file.write_text(
+        json.dumps(
+            {
+                "job_id": "rolling-job-1",
+                "rolling_cache": {
+                    "time_domain_crop_applied": True,
+                    "requested_start_pts": 95_000_000_000,
+                    "requested_end_pts": 105_000_000_000,
+                    "actual_start_pts": 95_000_000_000,
+                    "actual_end_pts": 105_000_000_000,
+                    "output_duration_s": 10.0,
+                },
+                "frames": _metadata_rows_inside_window(),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "evidence"
+
+    monkeypatch.setenv("POST_SAVANT_FAST_RAW_CLIP_ENABLED", "true")
+    monkeypatch.setenv("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", "true")
+    monkeypatch.setenv("POST_SAVANT_DURATION_GUARD_SLACK_SEC", "1")
+    monkeypatch.setenv("EVIDENCE_RUNTIME_EPOCH_STRICT", "false")
+    monkeypatch.setattr(worker, "_load_event_context", lambda _conn, _event_id: _event_context())
+    monkeypatch.setattr(worker, "load_native_metadata", lambda _path: _metadata_rows_inside_window())
+    monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 10)
+    monkeypatch.setattr(worker, "_copy_or_crop_video", _write_valid_duration_crop)
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 8.75)
+    monkeypatch.setattr(
+        worker,
+        "write_frame_cache_identity_sidecar",
+        lambda **kwargs: _sidecar_result(kwargs, {}),
+    )
+
+    bundle = worker._finalize_post_savant_evidence_bundle(
+        None,
+        event_id=EVENT_ID,
+        meta_dir=str(sink_dir),
+        metadata_file=str(metadata_file),
+        evidence_output_dir=str(output_root),
+    )
+
+    raw_clip = output_root / EVENT_ID / "raw_clip.mov"
+    summary = _read_json(output_root / EVENT_ID / "summary.json")
+    metadata = _read_json(output_root / EVENT_ID / "metadata.json")
+
+    assert not raw_clip.exists()
+    assert bundle["raw_clip"] == ""
+    assert bundle["clip_status"] == "duration_guard_failed"
+    assert summary["raw_clip_duration"] == 8.75
+    assert summary["expected_duration_seconds"] == 10.0
+    assert summary["duration_guard_status"] == "failed"
+    assert summary["duration_guard_failed"] is True
+    assert summary["duration_guard_reason"] == "raw_clip_duration_below_expected_minus_slack"
+    assert summary["min_allowed_duration_seconds"] == 9.0
+    assert summary["raw_clip_path"] is None
+    assert metadata["media"]["raw_clip_duration"] == 8.75
     assert metadata["media"]["raw_clip_path"] == ""
     assert metadata["status"]["clip_status"] == "duration_guard_failed"
 

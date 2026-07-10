@@ -29,7 +29,7 @@ def test_operator_camera_page_embeds_roi_preview_editor() -> None:
     assert "高级 JSON" in html
     assert html.index('id="zones"') < html.index('id="zone-json"')
     assert "保存 ROI" in html
-    assert "roi-zone-stack-20260627" in html
+    assert "operator-face-trajectory-link-20260709" in html
 
 
 def test_operator_roi_editor_uses_camera_preview_and_existing_zone_api() -> None:
@@ -48,6 +48,9 @@ def test_operator_roi_editor_uses_camera_preview_and_existing_zone_api() -> None
     assert "preferredFinalRoiZone" in js
     assert "prepareRoiEditorForCamera" in js
     assert "zoneRuleBindings" in js
+    assert "function validZoneRows" in js
+    assert "zoneOptionId(zone)" in js
+    assert "validZoneRows(zones)" in js
     assert "appendZoneGroup" in js
     assert "已保存区域" in js
     assert "已保存检测线" in js

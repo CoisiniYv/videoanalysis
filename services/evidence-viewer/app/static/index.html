@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=runtime-cn-20260629" />
+    <link rel="stylesheet" href="/static/style.css?v=face-trajectory-link-20260709" />
   </head>
   <body>
     <div class="app-shell">
@@ -30,8 +30,8 @@
             <small>视频源配置</small>
           </button>
           <button class="top-tab" data-view="people">
-            <span>人员与人脸</span>
-            <small>身份图库</small>
+            <span>人脸轨迹</span>
+            <small>人员查询</small>
           </button>
           <button class="top-tab" data-view="evidence">
             <span>告警证据</span>
@@ -57,7 +57,7 @@
         <header class="workspace-header">
           <div>
             <h2>统一配置台</h2>
-            <p>接入摄像头、维护人脸库，并复核告警录像证据。</p>
+            <p>接入摄像头、维护人脸轨迹，并复核告警录像证据。</p>
           </div>
           <div class="workspace-actions">
             <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="切换黑夜模式" title="切换黑夜模式">
@@ -325,12 +325,15 @@
           <section class="pane people-detail">
             <div class="pane-title">
               <div>
-                <h2>人脸图库</h2>
-                <p>查看已登记的人脸照片</p>
+                <h2>人脸轨迹</h2>
+                <p>按人员查询最近位置和历史出现</p>
               </div>
+              <button id="find-selected-person" type="button">一键找人</button>
               <button id="preview-delete-selected-person" type="button" class="danger" disabled>删除当前人员</button>
             </div>
             <div id="person-profile" class="profile-card">选择人员后显示基本信息</div>
+            <div id="person-latest-location" class="profile-card">选择人员后可查看最近出现位置</div>
+            <div id="person-trajectory" class="profile-card person-trajectory">选择人员后自动加载最近轨迹</div>
             <textarea id="person-detail" class="internal-config" hidden readonly spellcheck="false" placeholder="选择或注册人员后显示详情"></textarea>
             <div id="gallery" class="gallery-grid"></div>
             <div class="sub-section">
@@ -518,16 +521,16 @@
             <div class="pane-title">
               <div>
                 <h2>告警分类</h2>
-                <p>按业务类型筛选录像证据</p>
+                <p>默认展示告警录像证据；需要找人时切到人脸命中</p>
               </div>
               <button id="refreshBundles" type="button">刷新</button>
             </div>
             <div class="alert-category-tabs" role="group" aria-label="告警分类">
-              <button class="category-chip active" type="button" data-event-category="all">全部</button>
-              <button class="category-chip" type="button" data-event-category="identity">名单布控</button>
+              <button class="category-chip active" type="button" data-event-category="all">告警证据</button>
               <button class="category-chip" type="button" data-event-category="perimeter">周界入侵</button>
               <button class="category-chip" type="button" data-event-category="behavior">行为异常</button>
               <button class="category-chip" type="button" data-event-category="crowd">聚集风险</button>
+              <button class="category-chip" type="button" data-event-category="identity">人脸命中</button>
             </div>
             <div class="filter-fields">
               <label>摄像头<input id="filterSourceId" type="text" placeholder="摄像头名称或编号" /></label>
@@ -558,7 +561,7 @@
             <div class="pane-title">
               <div>
                 <h2>证据复核</h2>
-                <p>视频、人员框和人脸识别结果</p>
+                <p>视频告警、人员框和画面标注结果</p>
               </div>
               <div class="status-row">
                 <span class="status-pill" id="healthStatus">证据服务检查中</span>
@@ -574,6 +577,7 @@
               </div>
               <video id="video" controls preload="metadata"></video>
               <canvas id="overlay"></canvas>
+              <div id="imageEvidence" class="image-evidence" hidden></div>
             </div>
 
             <section class="sub-section overlay-controls">
@@ -593,6 +597,7 @@
                 <label class="inline"><input id="showPersons" type="checkbox" checked /> 显示人员框</label>
                 <label class="inline"><input id="showMatched" type="checkbox" checked /> 显示命中人脸</label>
                 <label class="inline"><input id="showUnknown" type="checkbox" checked /> 显示未识别人脸</label>
+                <label class="inline"><input id="showTrajectories" type="checkbox" checked /> 显示轨迹</label>
                 <label class="inline"><input id="showLandmarks" type="checkbox" checked /> 显示关键点</label>
                 <label class="inline"><input id="showLabels" type="checkbox" checked /> 显示标签</label>
               </div>
@@ -754,8 +759,43 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=runtime-config-sync-20260629"></script>
-    <script src="/static/evidence.js?v=evidence-list-fast-20260615"></script>
+    <div id="find-person-dialog" class="modal-backdrop" hidden>
+      <section class="find-person-dialog" role="dialog" aria-modal="true" aria-labelledby="find-person-dialog-title">
+        <div class="pane-title">
+          <div>
+            <h2 id="find-person-dialog-title">一键找人</h2>
+            <p id="find-person-dialog-subtitle">选择人员后查询最新摄像头和图片轨迹，不生成证据录像。</p>
+          </div>
+          <button id="find-person-dialog-close" type="button" aria-label="关闭">关闭</button>
+        </div>
+        <form id="find-person-form" class="find-person-form">
+          <label>最低相似度<input id="find-person-min-similarity" name="min_similarity" type="number" min="0" max="1" step="0.01" value="0.6" /></label>
+          <label>结果数量<input id="find-person-limit" name="limit" type="number" min="1" max="100" step="1" value="20" /></label>
+        </form>
+        <div class="find-person-actions">
+          <button id="run-find-person" type="button" class="primary">查询位置</button>
+          <button id="show-find-person-trajectory" type="button">查看完整轨迹</button>
+        </div>
+        <div id="find-person-latest" class="profile-card">选择人员后可查看最新位置。</div>
+        <div id="find-person-results" class="find-person-results"></div>
+      </section>
+    </div>
+    <div id="image-preview-dialog" class="modal-backdrop" hidden>
+      <section class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="image-preview-title">
+        <div class="pane-title">
+          <div>
+            <h2 id="image-preview-title">图像查看</h2>
+            <p id="image-preview-subtitle">人脸轨迹图片</p>
+          </div>
+          <button id="image-preview-close" type="button" aria-label="关闭">关闭</button>
+        </div>
+        <div class="image-preview-stage">
+          <img id="image-preview-img" alt="轨迹图像" />
+        </div>
+      </section>
+    </div>
+    <script src="/static/operator.js?v=operator-face-trajectory-link-20260709"></script>
+    <script src="/static/evidence.js?v=evidence-face-trajectory-link-20260709"></script>
     <script src="/static/maintenance.js?v=maintenance-execute-control-20260627"></script>
   </body>
 </html>

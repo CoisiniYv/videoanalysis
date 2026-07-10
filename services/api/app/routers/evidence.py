@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -36,6 +39,7 @@ RAW_CLIP_UNAVAILABLE_STATUSES = {
     "finalizing",
 }
 PRODUCTION_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", "/data/video-analytics/media"))
 
 
 def _request_id(request: Request) -> str:
@@ -62,7 +66,7 @@ def evidence_health(request_id: str = Depends(_request_id)) -> dict:
 @router.get("/bundles")
 def evidence_bundles(
     event_type: Optional[str] = Query(None),
-    event_category: Optional[str] = Query(None),
+    event_category: Optional[str] = Query("evidence"),
     source_id: Optional[str] = Query(None),
     camera_id: Optional[str] = Query(None),
     event_id: Optional[str] = Query(None),
@@ -116,6 +120,7 @@ def evidence_bundle_manifest(
 @router.get("/bundles/{event_id}/annotations")
 def evidence_bundle_annotations(
     event_id: str,
+    include_records: bool = Query(default=True),
     repo: EventRepository = Depends(_repo),
     request_id: str = Depends(_request_id),
 ) -> dict:
@@ -131,21 +136,39 @@ def evidence_bundle_annotations(
         for record in repo.list_evidence_overlay_records(event_id)
         if _dict(record).get("displayable") is not False
     ]
+    record_count = len(records)
+    fallback_used = False
+    fallback_reason = None
+    annotation_source_kind = "database_overlay_segments"
+    if not records:
+        artifact_result = _load_artifact_records(
+            row.get("overlay_artifact_uri"),
+            include_records=include_records,
+            filter_displayable=True,
+        )
+        records = artifact_result["records"]
+        record_count = artifact_result["count"]
+        if record_count:
+            fallback_used = True
+            fallback_reason = "database_overlay_segments_empty"
+            annotation_source_kind = "filesystem_overlay_artifact"
+    if not include_records:
+        records = []
     summary = _dict(row.get("summary"))
     sidecar_summary = _dict(summary.get("sidecar_summary"))
     return _ok(
         {
             "event_id": str(row.get("event_id") or event_id),
-            "count": len(records),
-            "raw_count": len(records),
+            "count": record_count,
+            "raw_count": record_count,
             "records": records,
             "annotations": records,
-            "annotation_source": "database",
-            "annotation_source_kind": "database_overlay_segments",
+            "annotation_source": "database" if not fallback_used else "filesystem",
+            "annotation_source_kind": annotation_source_kind,
             "requested_source": "database",
             "annotation_file": None,
-            "fallback_used": False,
-            "fallback_reason": None,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
             "preview": False,
             "production_ready": sidecar_summary.get("production_ready"),
             "timeline_domain": sidecar_summary.get("timeline_domain"),
@@ -174,16 +197,73 @@ def evidence_bundle_sink_metadata(
             "request_id": request_id,
         }
     records = repo.list_evidence_timeline_records(event_id)
+    fallback_used = False
+    fallback_reason = None
+    if not records:
+        artifact_result = _load_artifact_records(row.get("timeline_artifact_uri"))
+        records = artifact_result["records"]
+        fallback_used = bool(artifact_result["count"])
+        fallback_reason = "database_timeline_empty" if fallback_used else None
     return _ok(
         {
             "event_id": str(row.get("event_id") or event_id),
             "count": len(records),
             "records": records,
             "warnings": [],
-            "index_source": "database",
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
+            "index_source": "database" if not fallback_used else "filesystem",
         },
         request_id,
     )
+
+
+def _identity_context_from_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    matched_person = _dict(summary.get("matched_person"))
+    person = _dict(summary.get("person"))
+    match = _dict(summary.get("match"))
+    observation = _dict(summary.get("observation"))
+    person_id = _int_or_none(
+        matched_person.get("person_id")
+        or person.get("person_id")
+        or summary.get("person_id")
+    )
+    person_name = _text(
+        matched_person.get("name")
+        or person.get("name")
+        or summary.get("person_name")
+    )
+    external_person_id = _text(
+        matched_person.get("external_person_id")
+        or person.get("external_person_id")
+        or summary.get("external_person_id")
+    )
+    source_observation_id = _text(
+        summary.get("source_observation_id")
+        or match.get("source_observation_id")
+        or observation.get("source_observation_id")
+    )
+    person_track_id = _text(
+        observation.get("person_track_id")
+        or observation.get("track_id")
+        or summary.get("person_track_id")
+        or summary.get("track_id")
+    )
+    matched = dict(matched_person or person)
+    if person_id is not None:
+        matched["person_id"] = person_id
+    if person_name:
+        matched["name"] = person_name
+    if external_person_id:
+        matched["external_person_id"] = external_person_id
+    return {
+        "matched_person": matched or None,
+        "person_id": person_id,
+        "person_name": person_name or None,
+        "external_person_id": external_person_id or None,
+        "source_observation_id": source_observation_id or None,
+        "person_track_id": person_track_id or None,
+    }
 
 
 def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -193,6 +273,11 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
     event_id = str(row.get("event_id") or "")
     raw_clip_path = _text(row.get("raw_clip_path"))
     media_status = _text(row.get("media_status"))
+    playback_kind = (
+        _text(media.get("playback_kind"))
+        or _text(summary.get("playback_kind"))
+        or ("image" if media_status == "image_ready" else "video")
+    )
     clip_status = (
         _text(row.get("clip_status"))
         or _text(media.get("clip_status"))
@@ -214,6 +299,22 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         or media.get("unknown_face_count")
         or summary.get("unknown_objects")
     )
+    face_crop_url = _media_url_from_raw_clip_uri(
+        _text(row.get("face_crop_uri")) or _text(media.get("face_crop_uri")) or _text(summary.get("face_crop_uri"))
+    )
+    full_frame_url = _media_url_from_raw_clip_uri(
+        _text(row.get("full_frame_uri")) or _text(media.get("full_frame_uri")) or _text(summary.get("full_frame_uri"))
+    )
+    annotated_frame_url = _media_url_from_raw_clip_uri(
+        _text(row.get("annotated_frame_uri")) or _text(media.get("annotated_frame_uri")) or _text(summary.get("annotated_frame_uri"))
+    )
+    image_available = playback_kind == "image" and bool(
+        face_crop_url or full_frame_url or annotated_frame_url
+    )
+    warnings = []
+    if playback_kind == "image" and not image_available and media_status != "image_pending":
+        warnings.append("image_evidence_missing_artifact")
+    identity_context = _identity_context_from_summary(summary)
     return {
         "event_id": event_id,
         "source_event_id": row.get("source_event_id") or "",
@@ -227,9 +328,15 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
             raw_clip_path
             and not media_deleted
             and clip_status not in RAW_CLIP_UNAVAILABLE_STATUSES
+            and playback_kind != "image"
         ),
+        "playback_kind": playback_kind,
+        "image_available": image_available,
+        "face_crop_url": face_crop_url,
+        "full_frame_url": full_frame_url,
+        "annotated_frame_url": annotated_frame_url,
         "raw_clip_name": _basename(raw_clip_path),
-        "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip" if raw_clip_path else None,
+        "raw_clip_url": _media_url_from_raw_clip_uri(raw_clip_path),
         "annotations_available": _is_production_annotations_path(
             row.get("annotations_jsonl_path")
         ),
@@ -242,7 +349,11 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": _iso(row.get("created_at")),
         "media_status": media_status,
         "evidence_state": _text(media.get("evidence_state")) or media_status,
-        "evidence_reason": _text(media.get("evidence_reason") or media.get("error_message")),
+        "evidence_reason": _text(
+            media.get("evidence_reason")
+            or media.get("error_message")
+            or row.get("evidence_reason")
+        ),
         "materialization_status": (
             _text(media.get("materialization_status"))
             or _text(row.get("latest_materialization_status"))
@@ -256,8 +367,9 @@ def _bundle_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "degrade_decision": _dict(media.get("degrade_decision")),
         "evidence_task_count": _int_or_none(row.get("evidence_task_count")) or 0,
         "latest_task_status": row.get("latest_task_status"),
+        **identity_context,
         "index_source": "database",
-        "warnings": [],
+        "warnings": warnings,
     }
 
 
@@ -268,6 +380,24 @@ def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
     event_id = str(row.get("event_id") or "")
     raw_clip_uri = _text(row.get("raw_clip_uri") or row.get("raw_clip_artifact_uri"))
     media_status = _text(row.get("media_status"))
+    playback_kind = (
+        _text(summary.get("playback_kind"))
+        or ("image" if media_status == "image_ready" else "video")
+    )
+    face_crop_uri = _text(row.get("face_crop_uri") or summary.get("face_crop_uri"))
+    full_frame_uri = _text(row.get("full_frame_uri") or summary.get("full_frame_uri"))
+    annotated_frame_uri = _text(
+        row.get("annotated_frame_uri") or summary.get("annotated_frame_uri")
+    )
+    face_crop_url = _media_url_from_raw_clip_uri(face_crop_uri)
+    full_frame_url = _media_url_from_raw_clip_uri(full_frame_uri)
+    annotated_frame_url = _media_url_from_raw_clip_uri(annotated_frame_uri)
+    image_available = playback_kind == "image" and bool(
+        face_crop_url or full_frame_url or annotated_frame_url
+    )
+    warnings = []
+    if playback_kind == "image" and not image_available and media_status != "image_pending":
+        warnings.append("image_evidence_missing_artifact")
     materialization_status = (
         _text(summary.get("materialization_status"))
         or _text(summary.get("clip_status"))
@@ -276,9 +406,17 @@ def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
     raw_clip_unavailable_reason = _raw_clip_unavailable_reason_for_status(
         materialization_status
     )
-    raw_clip_playable = bool(raw_clip_uri and not raw_clip_unavailable_reason)
+    raw_clip_playable = bool(
+        raw_clip_uri and not raw_clip_unavailable_reason and playback_kind != "image"
+    )
+    identity_context = _identity_context_from_summary(summary)
     return {
         "event_id": event_id,
+        "playback_kind": playback_kind,
+        "image_available": image_available,
+        "face_crop_url": face_crop_url,
+        "full_frame_url": full_frame_url,
+        "annotated_frame_url": annotated_frame_url,
         "camera_name": _text(row.get("camera_name") or row.get("camera_table_name")),
         "alarm_machine_time": _iso(row.get("alarm_machine_time") or row.get("event_created_at")),
         "alarm_machine_time_source": "evidence_bundles.alarm_machine_time",
@@ -290,10 +428,18 @@ def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
                 "source_id": row.get("source_id") or "",
                 "camera_id": row.get("camera_id") or "",
                 "camera_name": row.get("camera_name") or row.get("camera_table_name") or "",
+                "person_id": identity_context["person_id"],
+                "person_name": identity_context["person_name"],
+                "external_person_id": identity_context["external_person_id"],
+                "source_observation_id": identity_context["source_observation_id"],
                 "created_at": _iso(row.get("event_created_at")),
             },
             "media": {
                 "raw_clip_path": raw_clip_uri,
+                "playback_kind": playback_kind,
+                "face_crop_path": face_crop_uri,
+                "full_frame_path": full_frame_uri,
+                "annotated_frame_path": annotated_frame_uri,
                 "materialization_status": materialization_status,
                 "materialization_reason": row.get("evidence_reason") or "",
                 "db_index_status": "ready",
@@ -303,7 +449,7 @@ def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
             },
         },
         "summary": summary,
-        "raw_clip_url": f"/api/bundles/{event_id}/media/raw_clip"
+        "raw_clip_url": _media_url_from_raw_clip_uri(raw_clip_uri)
         if raw_clip_playable
         else None,
         "raw_clip_name": _basename(raw_clip_uri),
@@ -313,8 +459,8 @@ def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
         "quota_decision": {},
         "degrade_decision": {},
         "raw_clip_unavailable_reason": raw_clip_unavailable_reason,
-        "annotations_url": f"/api/bundles/{event_id}/annotations",
-        "sink_metadata_url": f"/api/bundles/{event_id}/sink-metadata",
+        "annotations_url": f"/api/v1/evidence/bundles/{event_id}/annotations",
+        "sink_metadata_url": f"/api/v1/evidence/bundles/{event_id}/sink-metadata",
         "available_files": ["raw_clip.mov"] if raw_clip_uri else [],
         "sidecar_available": bool(row.get("overlay_artifact_uri")),
         "production_sidecar_ready": sidecar_summary.get("production_ready") is True,
@@ -326,7 +472,8 @@ def _bundle_manifest_from_index_row(row: dict[str, Any]) -> dict[str, Any]:
         "default_annotation_file": None,
         "sidecar_summary_path": None,
         **_visual_evidence_summary_from_index(row),
-        "warnings": [],
+        **identity_context,
+        "warnings": warnings,
         "index_source": "database",
     }
 
@@ -422,6 +569,104 @@ def _camera_name(
     return None
 
 
+def _load_artifact_records(
+    value: Any,
+    *,
+    include_records: bool = True,
+    filter_displayable: bool = False,
+) -> dict[str, Any]:
+    path_text = _text(value)
+    if not path_text:
+        return {"count": 0, "records": []}
+    path = _resolve_artifact_path(path_text)
+    if not path.is_file():
+        return {"count": 0, "records": []}
+    try:
+        if include_records:
+            text = path.read_text(encoding="utf-8")
+        else:
+            count = 0
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict) and (
+                        not filter_displayable
+                        or _dict(payload).get("displayable") is not False
+                    ):
+                        count += 1
+            return {"count": count, "records": []}
+    except OSError:
+        return {"count": 0, "records": []}
+    stripped = text.lstrip()
+    if not stripped:
+        return {"count": 0, "records": []}
+    if stripped[0] == "[":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return {"count": 0, "records": []}
+        records = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+        if filter_displayable:
+            records = [
+                record
+                for record in records
+                if _dict(record).get("displayable") is not False
+            ]
+        return {"count": len(records), "records": records}
+    if stripped[0] == "{":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("frames"), list):
+            records = [item for item in payload["frames"] if isinstance(item, dict)]
+        elif isinstance(payload, dict):
+            records = [payload]
+        else:
+            records = None
+        if records is not None:
+            if filter_displayable:
+                records = [
+                    record
+                    for record in records
+                    if _dict(record).get("displayable") is not False
+                ]
+            return {"count": len(records), "records": records}
+    records: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and (
+            not filter_displayable or _dict(payload).get("displayable") is not False
+        ):
+            records.append(payload)
+    return {"count": len(records), "records": records}
+
+
+def _resolve_artifact_path(path_text: str) -> Path:
+    path = Path(path_text)
+    if path.is_file():
+        return path
+    if path_text.startswith("/media/"):
+        mapped = MEDIA_ROOT / path_text.removeprefix("/media/").lstrip("/")
+        if mapped.is_file():
+            return mapped
+    if path_text.startswith("/evidence/"):
+        mapped = MEDIA_ROOT / "evidence" / path_text.removeprefix("/evidence/").lstrip("/")
+        if mapped.is_file():
+            return mapped
+    return path
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -470,6 +715,18 @@ def _basename(path: str) -> str | None:
     if not path:
         return None
     return path.rstrip("/").rsplit("/", 1)[-1] or None
+
+
+def _media_url_from_raw_clip_uri(uri: str) -> str | None:
+    text = _text(uri)
+    if not text:
+        return None
+    if text.startswith("/media/"):
+        return text
+    marker = "/media/"
+    if marker in text:
+        return marker + text.split(marker, 1)[1].lstrip("/")
+    return None
 
 
 def _int_or_none(value: Any) -> int | None:

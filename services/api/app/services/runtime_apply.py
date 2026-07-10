@@ -79,8 +79,26 @@ RUNTIME_RESTART_TERMINAL_EVIDENCE_STATES = (
     "materialization_failed",
     "materialization_skipped",
 )
+RUNTIME_EPOCH_BARRIER_TASK_STATES = (
+    "pending",
+    "waiting_proof",
+    "queued",
+    "replay_job_created",
+    "replaying",
+    "materializing",
+    "finalizing",
+)
+RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES = (
+    "manifest_ready",
+    "materialization_pending",
+    "materializing",
+)
+RUNTIME_EPOCH_BARRIER_FORCE_REASON = "epoch_superseded_incomplete"
 DEFAULT_EVIDENCE_GUARD_LIMIT = 12
 DEFAULT_EVIDENCE_GUARD_STALE_AFTER_S = 900.0
+DEFAULT_EPOCH_BARRIER_TIMEOUT_S = 45.0
+DEFAULT_EPOCH_BARRIER_POLL_INTERVAL_S = 1.0
+DEFAULT_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS = 3
 
 LOGGER = logging.getLogger(__name__)
 
@@ -380,9 +398,37 @@ def check_runtime_restart_evidence_guard(
     force: bool = False,
     limit: int = DEFAULT_EVIDENCE_GUARD_LIMIT,
 ) -> dict[str, Any]:
-    """Block full runtime restarts while evidence tasks are still active."""
+    """Block runtime epoch switches until non-terminal evidence tasks settle."""
 
-    blocking_states = list(RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES)
+    blocking_states = list(
+        sorted(
+            set(RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES)
+            | set(RUNTIME_EPOCH_BARRIER_TASK_STATES)
+            | set(RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES)
+        )
+    )
+    timeout_s = max(
+        0.0,
+        _env_float(
+            "CAMERA_RUNTIME_EPOCH_BARRIER_TIMEOUT_S",
+            DEFAULT_EPOCH_BARRIER_TIMEOUT_S,
+        ),
+    )
+    poll_interval_s = max(
+        0.05,
+        _env_float(
+            "CAMERA_RUNTIME_EPOCH_BARRIER_POLL_INTERVAL_S",
+            DEFAULT_EPOCH_BARRIER_POLL_INTERVAL_S,
+        ),
+    )
+    force_recheck_attempts = max(
+        1,
+        _env_int(
+            "CAMERA_RUNTIME_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS",
+            DEFAULT_EPOCH_BARRIER_FORCE_RECHECK_ATTEMPTS,
+        ),
+    )
+    current_runtime_epoch_id = _current_runtime_epoch_id()
     guard: dict[str, Any] = {
         "ok": True,
         "blocked": False,
@@ -391,8 +437,22 @@ def check_runtime_restart_evidence_guard(
         "active_count": 0,
         "stale_count": 0,
         "blocking_states": blocking_states,
+        "current_runtime_epoch_id": current_runtime_epoch_id,
+        "barrier_timeout_s": timeout_s,
+        "barrier_poll_interval_s": poll_interval_s,
+        "force_terminal_reason": RUNTIME_EPOCH_BARRIER_FORCE_REASON,
+        "blocking_task_statuses": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+        "blocking_materialization_statuses": list(
+            RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+        ),
         "tasks": [],
         "stale_tasks": [],
+        "source_breakdown": [],
+        "epoch_breakdown": [],
+        "current_epoch_count": 0,
+        "foreign_epoch_count": 0,
+        "missing_epoch_count": 0,
+        "unknown_current_epoch_count": 0,
     }
     if not _env_bool("CAMERA_RUNTIME_EVIDENCE_GUARD_ENABLED", default=True):
         return {
@@ -401,15 +461,25 @@ def check_runtime_restart_evidence_guard(
             "skip_reason": "camera_runtime_evidence_guard_disabled",
         }
 
+    started = time.monotonic()
+    last_snapshot: dict[str, Any] | None = None
     try:
-        active = _active_evidence_tasks_snapshot(
-            limit=limit,
-            states=blocking_states,
-            stale_after_s=_env_float(
-                "CAMERA_RUNTIME_EVIDENCE_GUARD_STALE_AFTER_S",
-                DEFAULT_EVIDENCE_GUARD_STALE_AFTER_S,
-            ),
-        )
+        while True:
+            last_snapshot = _runtime_epoch_barrier_snapshot(
+                limit=limit,
+                current_runtime_epoch_id=current_runtime_epoch_id,
+            )
+            if int(last_snapshot.get("blocking_count") or 0) <= 0:
+                return {
+                    **guard,
+                    **last_snapshot,
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "active_count": 0,
+                }
+            elapsed = time.monotonic() - started
+            if elapsed >= timeout_s:
+                break
+            time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed)))
     except Exception as exc:
         details = {
             **guard,
@@ -427,11 +497,43 @@ def check_runtime_restart_evidence_guard(
             status_code=503,
         ) from exc
 
-    guard.update(active)
+    snapshot = last_snapshot or {}
+    guard.update(snapshot)
+    guard["waited_seconds"] = round(max(0.0, time.monotonic() - started), 3)
+    guard["active_count"] = int(snapshot.get("blocking_count") or 0)
     if int(guard.get("active_count") or 0) <= 0:
         return guard
     if force:
-        return {**guard, "blocked": False, "forced": True}
+        forced_total = 0
+        for attempt in range(force_recheck_attempts):
+            forced_total += _force_finalize_epoch_blocking_tasks(
+                current_runtime_epoch_id=current_runtime_epoch_id,
+                forced_by=f"runtime_guard:{action}",
+            )
+            snapshot = _runtime_epoch_barrier_snapshot(
+                limit=limit,
+                current_runtime_epoch_id=current_runtime_epoch_id,
+            )
+            guard.update(snapshot)
+            guard["waited_seconds"] = round(max(0.0, time.monotonic() - started), 3)
+            guard["active_count"] = int(snapshot.get("blocking_count") or 0)
+            guard["forced_terminalized_count"] = forced_total
+            guard["force_recheck_attempts"] = attempt + 1
+            if int(guard.get("active_count") or 0) <= 0:
+                return {**guard, "blocked": False, "forced": True}
+            if attempt + 1 < force_recheck_attempts:
+                time.sleep(poll_interval_s)
+        raise RuntimeApplyBlockedError(
+            "runtime restart blocked because evidence tasks remained active after forced epoch barrier",
+            details={
+                **guard,
+                "ok": False,
+                "blocked": True,
+                "forced": True,
+                "force_parameter": "force=true",
+            },
+            status_code=409,
+        )
     raise RuntimeApplyBlockedError(
         "runtime restart blocked because evidence tasks are still active",
         details={
@@ -924,6 +1026,376 @@ def _evidence_guard_task(row: dict[str, Any]) -> dict[str, Any]:
         "age_seconds": _float_or_none(row.get("age_seconds")),
         "error_message": _text(row.get("error_message")),
     }
+
+
+def _runtime_epoch_barrier_snapshot(
+    *,
+    limit: int,
+    current_runtime_epoch_id: str,
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(int(limit or DEFAULT_EVIDENCE_GUARD_LIMIT), 100))
+    with psycopg.connect(
+        get_settings().database_url,
+        row_factory=dict_row,
+        autocommit=True,
+        connect_timeout=1,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidates AS (
+                    SELECT
+                        et.task_id,
+                        et.event_id::text AS event_id,
+                        et.source_event_id,
+                        et.camera_id,
+                        et.source_id,
+                        et.event_type,
+                        et.status,
+                        et.materialization_status,
+                        et.materialization_defer_reason,
+                        et.runtime_epoch_id,
+                        et.replay_shard_id,
+                        et.created_at,
+                        et.updated_at,
+                        et.error_message,
+                        CASE
+                            WHEN COALESCE(NULLIF(et.runtime_epoch_id, ''), '') = ''
+                                THEN 'missing'
+                            WHEN %(current_runtime_epoch_id)s::text = ''
+                                THEN 'unknown_current'
+                            WHEN et.runtime_epoch_id = %(current_runtime_epoch_id)s::text
+                                THEN 'current'
+                            ELSE 'foreign'
+                        END AS epoch_relation,
+                        CASE
+                            WHEN et.materialization_status = 'manifest_ready'
+                                THEN 'manifest_ready'
+                            WHEN et.materialization_status = 'materialization_pending'
+                                THEN 'materialization_pending'
+                            WHEN et.status = 'pending' THEN 'pending'
+                            WHEN et.status = 'waiting_proof' THEN 'waiting_proof'
+                            WHEN et.status = 'queued' THEN 'queued'
+                            WHEN et.status = 'replay_job_created' THEN 'replay_job_created'
+                            WHEN et.status = 'replaying' THEN 'replaying'
+                            WHEN et.materialization_status = 'materializing'
+                                OR et.status = 'materializing'
+                                THEN 'materializing'
+                            WHEN et.status = 'finalizing' THEN 'finalizing'
+                            WHEN et.materialization_status = 'materialization_deferred'
+                                AND COALESCE(et.materialization_defer_reason, '') = ''
+                                THEN 'materialization_deferred_unresolved'
+                            ELSE NULL
+                        END AS blocking_state
+                    FROM evidence_tasks et
+                    WHERE (
+                        et.materialization_status = ANY(%(materialization_states)s)
+                        OR et.status = ANY(%(task_states)s)
+                        OR (
+                            et.materialization_status = 'materialization_deferred'
+                            AND COALESCE(et.materialization_defer_reason, '') = ''
+                        )
+                    )
+                )
+                SELECT
+                    *,
+                    COUNT(*) OVER() AS blocking_count,
+                    COUNT(*) FILTER (WHERE epoch_relation = 'current') OVER() AS current_epoch_count,
+                    COUNT(*) FILTER (WHERE epoch_relation = 'foreign') OVER() AS foreign_epoch_count,
+                    COUNT(*) FILTER (WHERE epoch_relation = 'missing') OVER() AS missing_epoch_count,
+                    COUNT(*) FILTER (WHERE epoch_relation = 'unknown_current') OVER() AS unknown_current_epoch_count,
+                    EXTRACT(EPOCH FROM (now() - COALESCE(updated_at, created_at))) AS age_seconds
+                FROM candidates
+                WHERE blocking_state IS NOT NULL
+                ORDER BY
+                    CASE epoch_relation
+                        WHEN 'foreign' THEN 0
+                        WHEN 'missing' THEN 1
+                        WHEN 'current' THEN 2
+                        ELSE 3
+                    END,
+                    COALESCE(updated_at, created_at) ASC,
+                    task_id ASC
+                LIMIT %(limit)s
+                """,
+                {
+                    "current_runtime_epoch_id": current_runtime_epoch_id,
+                    "task_states": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+                    "materialization_states": list(
+                        RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+                    ),
+                    "limit": bounded_limit,
+                },
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                """
+                WITH candidates AS (
+                    SELECT
+                        COALESCE(et.source_id, '') AS source_id,
+                        COALESCE(et.replay_shard_id, '') AS replay_shard_id,
+                        CASE
+                            WHEN COALESCE(NULLIF(et.runtime_epoch_id, ''), '') = ''
+                                THEN 'missing'
+                            WHEN %(current_runtime_epoch_id)s::text = ''
+                                THEN 'unknown_current'
+                            WHEN et.runtime_epoch_id = %(current_runtime_epoch_id)s::text
+                                THEN 'current'
+                            ELSE 'foreign'
+                        END AS epoch_relation
+                    FROM evidence_tasks et
+                    WHERE (
+                        et.materialization_status = ANY(%(materialization_states)s)
+                        OR et.status = ANY(%(task_states)s)
+                        OR (
+                            et.materialization_status = 'materialization_deferred'
+                            AND COALESCE(et.materialization_defer_reason, '') = ''
+                        )
+                    )
+                )
+                SELECT
+                    source_id,
+                    replay_shard_id,
+                    epoch_relation,
+                    COUNT(*) AS count
+                FROM candidates
+                GROUP BY source_id, replay_shard_id, epoch_relation
+                ORDER BY COUNT(*) DESC, source_id ASC, replay_shard_id ASC, epoch_relation ASC
+                LIMIT %(limit)s
+                """,
+                {
+                    "current_runtime_epoch_id": current_runtime_epoch_id,
+                    "task_states": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+                    "materialization_states": list(
+                        RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+                    ),
+                    "limit": bounded_limit,
+                },
+            )
+            source_rows = cur.fetchall()
+            cur.execute(
+                """
+                WITH candidates AS (
+                    SELECT
+                        COALESCE(et.runtime_epoch_id, '') AS runtime_epoch_id,
+                        CASE
+                            WHEN COALESCE(NULLIF(et.runtime_epoch_id, ''), '') = ''
+                                THEN 'missing'
+                            WHEN %(current_runtime_epoch_id)s::text = ''
+                                THEN 'unknown_current'
+                            WHEN et.runtime_epoch_id = %(current_runtime_epoch_id)s::text
+                                THEN 'current'
+                            ELSE 'foreign'
+                        END AS epoch_relation
+                    FROM evidence_tasks et
+                    WHERE (
+                        et.materialization_status = ANY(%(materialization_states)s)
+                        OR et.status = ANY(%(task_states)s)
+                        OR (
+                            et.materialization_status = 'materialization_deferred'
+                            AND COALESCE(et.materialization_defer_reason, '') = ''
+                        )
+                    )
+                )
+                SELECT
+                    runtime_epoch_id,
+                    epoch_relation,
+                    COUNT(*) AS count
+                FROM candidates
+                GROUP BY runtime_epoch_id, epoch_relation
+                ORDER BY COUNT(*) DESC, runtime_epoch_id ASC
+                LIMIT %(limit)s
+                """,
+                {
+                    "current_runtime_epoch_id": current_runtime_epoch_id,
+                    "task_states": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+                    "materialization_states": list(
+                        RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+                    ),
+                    "limit": bounded_limit,
+                },
+            )
+            epoch_rows = cur.fetchall()
+
+    blocking_count = int(rows[0]["blocking_count"]) if rows else 0
+    current_epoch_count = int(rows[0]["current_epoch_count"]) if rows else 0
+    foreign_epoch_count = int(rows[0]["foreign_epoch_count"]) if rows else 0
+    missing_epoch_count = int(rows[0]["missing_epoch_count"]) if rows else 0
+    unknown_current_epoch_count = int(rows[0]["unknown_current_epoch_count"]) if rows else 0
+    return {
+        "blocking_count": blocking_count,
+        "active_count": blocking_count,
+        "tasks": [_runtime_epoch_barrier_task(row) for row in rows],
+        "source_breakdown": [
+            {
+                "source_id": _text(row.get("source_id")),
+                "replay_shard_id": _text(row.get("replay_shard_id")),
+                "epoch_relation": _text(row.get("epoch_relation")),
+                "count": int(row.get("count") or 0),
+            }
+            for row in source_rows
+        ],
+        "epoch_breakdown": [
+            {
+                "runtime_epoch_id": _text(row.get("runtime_epoch_id")),
+                "epoch_relation": _text(row.get("epoch_relation")),
+                "count": int(row.get("count") or 0),
+            }
+            for row in epoch_rows
+        ],
+        "current_epoch_count": current_epoch_count,
+        "foreign_epoch_count": foreign_epoch_count,
+        "missing_epoch_count": missing_epoch_count,
+        "unknown_current_epoch_count": unknown_current_epoch_count,
+        "orphans_present": (foreign_epoch_count + missing_epoch_count) > 0,
+        "stale_count": 0,
+        "stale_tasks": [],
+    }
+
+
+def _runtime_epoch_barrier_task(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": _text(row.get("task_id")),
+        "event_id": _text(row.get("event_id")),
+        "source_event_id": _text(row.get("source_event_id")),
+        "camera_id": _text(row.get("camera_id")),
+        "source_id": _text(row.get("source_id")),
+        "event_type": _text(row.get("event_type")),
+        "status": _text(row.get("status")),
+        "materialization_status": _text(row.get("materialization_status")),
+        "materialization_defer_reason": _text(row.get("materialization_defer_reason")),
+        "runtime_epoch_id": _text(row.get("runtime_epoch_id")),
+        "replay_shard_id": _text(row.get("replay_shard_id")),
+        "epoch_relation": _text(row.get("epoch_relation")),
+        "blocking_state": _text(row.get("blocking_state")),
+        "created_at": _datetime_text(row.get("created_at")),
+        "updated_at": _datetime_text(row.get("updated_at")),
+        "age_seconds": _float_or_none(row.get("age_seconds")),
+        "error_message": _text(row.get("error_message")),
+    }
+
+
+def _force_finalize_epoch_blocking_tasks(
+    *,
+    current_runtime_epoch_id: str,
+    forced_by: str,
+) -> int:
+    with psycopg.connect(
+        get_settings().database_url,
+        autocommit=True,
+        connect_timeout=1,
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH forced AS (
+                    UPDATE evidence_tasks et
+                    SET status = 'failed',
+                        materialization_status = 'materialization_failed',
+                        materialization_defer_reason = CASE
+                            WHEN COALESCE(et.materialization_defer_reason, '') = ''
+                                THEN %(reason)s::text
+                            ELSE et.materialization_defer_reason
+                        END,
+                        materialization_failure_reason = %(reason)s::text,
+                        error_message = CASE
+                            WHEN COALESCE(et.error_message, '') = ''
+                                THEN %(reason)s::text
+                            ELSE et.error_message
+                        END,
+                        materialization_audit = COALESCE(et.materialization_audit, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'epoch_barrier',
+                                jsonb_build_object(
+                                    'status', 'forced_terminal',
+                                    'reason', %(reason)s::text,
+                                    'forced_at', now(),
+                                    'forced_by', %(forced_by)s::text,
+                                    'current_runtime_epoch_id',
+                                        %(current_runtime_epoch_id)s::text,
+                                    'task_runtime_epoch_id',
+                                        COALESCE(et.runtime_epoch_id, '')
+                                )
+                            ),
+                        updated_at = now()
+                    WHERE (
+                        et.materialization_status = ANY(%(materialization_states)s)
+                        OR et.status = ANY(%(task_states)s)
+                        OR (
+                            et.materialization_status = 'materialization_deferred'
+                            AND COALESCE(et.materialization_defer_reason, '') = ''
+                        )
+                    )
+                    RETURNING et.event_id
+                )
+                UPDATE events e
+                SET media_status = 'failed',
+                    payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'evidence_state', 'failed',
+                                'evidence_reason', %(reason)s::text,
+                                'materialization_status', 'materialization_failed',
+                                'materialization_reason', %(reason)s::text,
+                                'evidence_state_updated_at', now()
+                            ))
+                        ),
+                    updated_at = now()
+                FROM forced
+                WHERE e.id = forced.event_id
+                """,
+                {
+                    "reason": RUNTIME_EPOCH_BARRIER_FORCE_REASON,
+                    "forced_by": forced_by,
+                    "current_runtime_epoch_id": current_runtime_epoch_id,
+                    "task_states": list(RUNTIME_EPOCH_BARRIER_TASK_STATES),
+                    "materialization_states": list(
+                        RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES
+                    ),
+                },
+            )
+            return int(cur.rowcount or 0)
+
+
+def summarize_runtime_epoch_barrier(*, limit: int = DEFAULT_EVIDENCE_GUARD_LIMIT) -> dict[str, Any]:
+    current_runtime_epoch_id = _current_runtime_epoch_id()
+    try:
+        return {
+            "available": True,
+            "current_runtime_epoch_id": current_runtime_epoch_id,
+            **_runtime_epoch_barrier_snapshot(
+                limit=limit,
+                current_runtime_epoch_id=current_runtime_epoch_id,
+            ),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "current_runtime_epoch_id": current_runtime_epoch_id,
+            "error": f"{type(exc).__name__}: {exc}",
+            "blocking_count": 0,
+            "active_count": 0,
+            "tasks": [],
+            "source_breakdown": [],
+            "epoch_breakdown": [],
+            "current_epoch_count": 0,
+            "foreign_epoch_count": 0,
+            "missing_epoch_count": 0,
+            "unknown_current_epoch_count": 0,
+            "orphans_present": False,
+        }
+
+
+def _current_runtime_epoch_id() -> str:
+    value = str(_read_runtime_epoch_state(_runtime_epoch_state_path()).get("runtime_epoch_id") or "")
+    if not value:
+        return ""
+    try:
+        return validate_runtime_epoch_id(value)
+    except RuntimeApplyError:
+        return ""
 
 
 def _text(value: Any) -> str:
@@ -1806,3 +2278,13 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)

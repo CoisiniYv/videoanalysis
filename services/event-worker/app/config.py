@@ -23,10 +23,12 @@ class Config:
     recording_source_id: str
     recording_max_requests_per_run: int
     recording_cooldown_seconds: int
+    recording_cooldown_scope: str
     recording_cooldown_grace_ms: int
     recording_pre_seconds: int
     recording_post_seconds: int
     record_request_dedupe_ttl_seconds: int
+    rolling_cache_suppress_record_requests: bool
     person_observation_stream: str
     person_observation_consumer_group: str
     person_observation_consumer_name: str
@@ -68,6 +70,9 @@ def load_config() -> Config:
         recording_cooldown_seconds=int(
             os.getenv("RECORDING_COOLDOWN_SECONDS", "0")
         ),
+        recording_cooldown_scope=os.getenv(
+            "RECORDING_COOLDOWN_SCOPE", "event_type"
+        ).strip().lower(),
         recording_cooldown_grace_ms=max(
             0, int(os.getenv("RECORDING_COOLDOWN_GRACE_MS", "1000"))
         ),
@@ -80,6 +85,12 @@ def load_config() -> Config:
         record_request_dedupe_ttl_seconds=max(
             1, int(os.getenv("RECORD_REQUEST_DEDUPE_TTL_SECONDS", "86400"))
         ),
+        rolling_cache_suppress_record_requests=os.getenv(
+            "ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS", "false"
+        )
+        .strip()
+        .lower()
+        in ("true", "1", "yes", "on"),
         person_observation_stream=os.getenv(
             "PERSON_OBSERVATION_STREAM", "security.person_observations"
         ),

@@ -41,7 +41,14 @@ def test_face_match_event_carries_observation_stream_session() -> None:
             "timestamp_ms": 1_780_000_000_000,
             "quality": 0.9,
             "face_confidence": 0.8,
-            "payload": {"media": {"stream_session_id": SESSION_A}},
+            "payload": {
+                "media": {
+                    "stream_session_id": SESSION_A,
+                    "frame_uuid": "frame-1",
+                    "frame_pts": 1_000_000_000,
+                    "ntp_timestamp": 1_780_000_123_456_000_000,
+                }
+            },
         },
         gallery_match={
             "id": 123,
@@ -54,6 +61,12 @@ def test_face_match_event_carries_observation_stream_session() -> None:
     )
 
     assert event["payload"]["media"]["stream_session_id"] == SESSION_A
+    assert event["event_ts_ms"] == 1_000
+    assert event["frame_uuid"] == "frame-1"
+    assert event["payload"]["media"]["ntp_timestamp"] == 1_780_000_123_456_000_000
+    assert event["clip_required"] is False
+    assert event["payload"]["media"]["playback_kind"] == "image"
+    assert event["payload"]["media"]["recording_strategy"] == "image_only"
 
 
 def test_record_request_and_replay_labels_carry_stream_session() -> None:

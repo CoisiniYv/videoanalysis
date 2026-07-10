@@ -103,6 +103,7 @@ def build_frame_annotation_message(
                 object_index=object_index,
                 face_index=face_index,
                 source_id=source_id,
+                frame_uuid=frame_uuid,
                 timestamp_ms=timestamp_ms,
                 config=cfg,
             )
@@ -179,6 +180,7 @@ def _build_face_object(
     object_index: int,
     face_index: int,
     source_id: str,
+    frame_uuid: str | None,
     timestamp_ms: int | None,
     config: FrameAnnotationBuildConfig,
 ) -> dict[str, Any] | None:
@@ -199,6 +201,7 @@ def _build_face_object(
         source_observation_id = _build_face_observation_id(
             source_id=source_id,
             track_id=track_int,
+            frame_uuid=frame_uuid,
             timestamp_ms=timestamp_ms,
             face_index=face_index,
         )
@@ -487,19 +490,19 @@ def _build_face_observation_id(
     *,
     source_id: str,
     track_id: int,
+    frame_uuid: str | None,
     timestamp_ms: int | None,
     face_index: int,
 ) -> str | None:
-    if timestamp_ms is None:
+    if frame_uuid is None and timestamp_ms is None:
         return None
-    source_observation_id = build_face_source_observation_id(
+    return build_face_source_observation_id(
         source_id,
         track_id,
-        int(timestamp_ms),
+        int(timestamp_ms or 0),
+        frame_uuid=frame_uuid,
+        face_index=face_index,
     )
-    if face_index > 0:
-        source_observation_id = f"{source_observation_id}:{face_index}"
-    return source_observation_id
 
 
 def _read_float_attr(obj: Any, namespace: str, name: str) -> float | None:

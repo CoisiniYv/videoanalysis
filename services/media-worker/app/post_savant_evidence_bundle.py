@@ -80,6 +80,7 @@ def build_post_savant_evidence_bundle(
     video_integrity_required: bool = False,
     materialization_timeout_s: float | None = None,
     decoded_frame_count_reader: Callable[[Path], int] | None = None,
+    decoded_video_duration_s: float | None = None,
 ) -> EvidenceBundleResult:
     """Create a standard evidence bundle from video-file-sink output."""
 
@@ -188,6 +189,7 @@ def build_post_savant_evidence_bundle(
             native_frames=native_frames,
             video_path=video_path,
             decoded_video_frame_count=decoded_frame_count,
+            decoded_video_duration_s=decoded_video_duration_s,
             max_fps=max_fps,
             min_fps=min_fps,
             fps_gating_applied=fps_gating_applied,
@@ -346,8 +348,7 @@ def _copy_or_crop_video(
     if not crop_video_to_time_window:
         started = time.monotonic()
         if copy_video:
-            shutil.copy2(source_video_path, output_video_path)
-            method = "copy"
+            method = _publish_raw_clip_copy_or_link(source_video_path, output_video_path)
         else:
             if output_video_path.exists():
                 output_video_path.unlink()
@@ -483,6 +484,33 @@ def _copy_or_crop_video(
         "ffmpeg_filter": video_filter,
         "ffmpeg_log_path": str(log_path),
     }
+
+
+def _publish_raw_clip_copy_or_link(source_video_path: Path, output_video_path: Path) -> str:
+    output_video_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = os.getenv("MEDIA_WORKER_RAW_CLIP_PUBLISH_MODE", "hardlink").strip().lower()
+    if mode in {"hardlink", "link", "auto", ""}:
+        try:
+            output_video_path.unlink(missing_ok=True)
+            os.link(source_video_path, output_video_path)
+            return "hardlink"
+        except OSError:
+            if output_video_path.exists():
+                try:
+                    if os.path.samefile(source_video_path, output_video_path):
+                        return "hardlink"
+                except OSError:
+                    pass
+            if mode in {"hardlink", "link"}:
+                logger_mode = "hardlink_failed_falling_back_to_copy"
+            else:
+                logger_mode = "auto_hardlink_failed_falling_back_to_copy"
+            # The caller has no logger in this utility module; preserve the
+            # fast path where possible and silently use a normal copy when the
+            # source and destination live on different filesystems.
+            _ = logger_mode
+    shutil.copy2(source_video_path, output_video_path)
+    return "copy"
 
 
 def _file_size_or_none(path: Path) -> int | None:
@@ -1052,13 +1080,18 @@ def _fps_summary(
     native_frames: list[dict[str, Any]],
     video_path: Path,
     decoded_video_frame_count: int,
+    decoded_video_duration_s: float | None = None,
     max_fps: str | None,
     min_fps: str | None,
     fps_gating_applied: bool | None,
     source_input_fps_estimate: float | None,
 ) -> dict[str, Any]:
     metadata_fps = _metadata_fps_estimate(native_frames)
-    decoded_fps = _decoded_video_fps_estimate(video_path, decoded_video_frame_count)
+    decoded_fps = (
+        decoded_video_frame_count / decoded_video_duration_s
+        if decoded_video_duration_s and decoded_video_duration_s > 0
+        else _decoded_video_fps_estimate(video_path, decoded_video_frame_count)
+    )
     if source_input_fps_estimate is None:
         source_input_fps_estimate = metadata_fps or decoded_fps
     if fps_gating_applied is None:
@@ -1201,6 +1234,9 @@ def _validate_bundle_summary(summary: dict[str, Any]) -> None:
     person_count = int(object_counts.get("person") or 0)
     face_count = int(object_counts.get("face") or 0)
     if person_count <= 0 and face_count <= 0:
+        video_crop = _dict(summary.get("video_crop"))
+        if video_crop.get("materialization_mode") == "rolling_cache_copy":
+            return
         raise ValueError("no_post_savant_person_or_face_objects_found")
 
 

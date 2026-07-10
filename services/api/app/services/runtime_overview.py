@@ -29,6 +29,7 @@ from app.services.runtime_apply import (
     DEFAULT_SAVANT_CONTAINER,
     DEFAULT_VIDEO_SINK_CONTAINER,
     DockerSocketClient,
+    summarize_runtime_epoch_barrier,
 )
 from app.services.savant_supervisor import (
     DEFAULT_DYNAMIC_SOURCE_PREFIX,
@@ -66,6 +67,14 @@ COUNTER_METRICS = {
 GAUGE_METRICS = {
     "va_savant_effective_fps",
     "va_savant_last_frame_age_seconds",
+    "va_savant_frame_annotation_fps",
+    "va_savant_pose_stage_fps",
+    "va_savant_pose_object_fps",
+    "va_savant_face_stage_fps",
+    "va_savant_face_object_fps",
+    "va_savant_adaface_embedding_fps",
+    "va_savant_person_observation_fps",
+    "va_savant_face_observation_fps",
 }
 _RESTART_RATE_CACHE: dict[str, dict[str, float]] = {}
 
@@ -205,6 +214,7 @@ def build_runtime_overview(
         "containers": containers,
         "supervisor": supervisor,
         "evidence": evidence,
+        "epoch_barrier": summarize_runtime_epoch_barrier(limit=cfg.evidence_recent_limit),
         "health": health,
     }
 
@@ -517,6 +527,8 @@ def parse_savant_metrics(text: str) -> dict[str, Any]:
             window = str(labels.get("window") or "")
             if window:
                 row["windows"].setdefault(window, {})[name] = value
+                if name in GAUGE_METRICS:
+                    row["gauges"][name] = value
             elif name in GAUGE_METRICS:
                 row["gauges"][name] = value
             else:
@@ -537,6 +549,16 @@ def parse_savant_metrics(text: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "effective_fps": gauges.get("va_savant_effective_fps"),
                 "last_frame_age_seconds": gauges.get("va_savant_last_frame_age_seconds"),
+                "frame_annotation_fps": gauges.get("va_savant_frame_annotation_fps"),
+                "pose_stage_fps": gauges.get("va_savant_pose_stage_fps"),
+                "pose_object_fps": gauges.get("va_savant_pose_object_fps"),
+                "face_stage_fps": gauges.get("va_savant_face_stage_fps"),
+                "face_object_fps": gauges.get("va_savant_face_object_fps"),
+                "adaface_embedding_fps": gauges.get("va_savant_adaface_embedding_fps"),
+                "person_observation_fps": gauges.get(
+                    "va_savant_person_observation_fps"
+                ),
+                "face_observation_fps": gauges.get("va_savant_face_observation_fps"),
                 "frames_seen_total": counters.get("va_savant_frames_seen_total"),
                 "frame_annotations_exported_total": counters.get(
                     "va_savant_frame_annotations_exported_total"

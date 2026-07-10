@@ -1,127 +1,4 @@
 cameras:
-  00000000-0000-4000-8000-000000000100:
-    enabled: false
-    source_id: primary_rtsp
-    name: Primary RTSP Camera
-    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
-    gpu_id: 0
-    input_type: rtsp
-    rtsp_transport: tcp
-    fps_policy:
-      max_fps: 8/1
-      min_fps: 2/1
-    alert_policy:
-      critical_bypass: false
-      global_alert_cooldown_s: 30
-      store_suppressed_events: true
-      suppress_record_request: true
-    location: primary_rtsp
-    site_id: midterm
-    zones:
-      llll:
-        zone_id: llll
-        zone_type: polygon
-        type: polygon
-        coordinate_space: pixel
-        points:
-        - - 155.0
-          - 81.0
-        - - 37.0
-          - 92.0
-        - - 37.0
-          - 237.0
-        - - 37.0
-          - 564.0
-        - - 14.0
-          - 1049.0
-        - - 863.0
-          - 1068.0
-        - - 1914.0
-          - 1067.0
-        - - 1898.0
-          - 7.0
-        - - 329.0
-          - 28.0
-        - - 259.0
-          - 31.0
-        enabled: true
-      perimeter:
-        zone_id: perimeter
-        zone_type: polygon
-        type: polygon
-        coordinate_space: pixel
-        points:
-        - - 119.0
-          - 35.0
-        - - 83.0
-          - 898.0
-        - - 377.0
-          - 1010.0
-        - - 750.0
-          - 1029.0
-        - - 1623.0
-          - 1031.0
-        - - 1787.0
-          - 1016.0
-        - - 1891.0
-          - 558.0
-        - - 1890.0
-          - 137.0
-        - - 961.0
-          - 26.0
-        enabled: true
-    rules:
-      rule_watchlist:
-        rule_id: rule_watchlist
-        algorithm_id: face.watchlist
-        rule_type: face.watchlist
-        enabled: true
-        config:
-          severity: medium
-          threshold: 0.5
-          cooldown_s: 30
-          target_names:
-          - Reese
-          - Finch
-          min_similarity: 0.75
-          target_person_ids:
-          - 5
-          - 6
-          watchlist_enabled: true
-          live_search_enabled: true
-          target_external_person_ids:
-          - demo:f4_3:reese
-          - demo:f4_3:finch
-        evidence_policy:
-          snapshot_required: true
-          clip_required: true
-          pre_seconds: 5
-          post_seconds: 5
-      primary_intrusion_rule:
-        rule_id: primary_intrusion_rule
-        algorithm_id: behavior.intrusion
-        rule_type: intrusion
-        enabled: true
-        config:
-          zone: llll
-          zone_id: llll
-          severity: medium
-          cooldown_s: 30
-          clip_required: true
-          min_inside_ms: 1
-          min_person_width: 20
-          min_person_height: 40
-          snapshot_required: false
-          max_bbox_area_ratio: 0.9
-          min_person_confidence: 0.25
-          min_visible_keypoints: 0
-        zone_id: llll
-        evidence_policy:
-          snapshot_required: true
-          clip_required: true
-          pre_seconds: 5
-          post_seconds: 5
-    runtime_epoch_id: midterm-20260629T071308Z-3a2dd819
   00000000-0000-4000-8000-781078565686:
     enabled: true
     source_id: source_00000000-0000-4000-8000-781078565686
@@ -143,25 +20,21 @@ cameras:
     zones:
       lab_full_frame:
         zone_id: lab_full_frame
-        zone_type: polygon
-        type: polygon
+        zone_type: line
+        type: line
         coordinate_space: pixel
         points:
-        - - 0.0
-          - 0.0
-        - - 1280.0
-          - 0.0
-        - - 1280.0
-          - 720.0
-        - - 0.0
-          - 720.0
+        - - 640.0
+          - 360.0
+        - - 992.0
+          - 324.0
         enabled: true
     rules:
       rule_chasing:
         rule_id: rule_chasing
         algorithm_id: behavior.chasing
         rule_type: chasing
-        enabled: false
+        enabled: true
         config:
           zone: lab_full_frame
           zone_id: lab_full_frame
@@ -186,7 +59,7 @@ cameras:
         rule_id: rule_crowd_gathering
         algorithm_id: behavior.crowd_gathering
         rule_type: crowd_gathering
-        enabled: false
+        enabled: true
         config:
           zone: lab_full_frame
           eps_px: 180
@@ -251,7 +124,7 @@ cameras:
         rule_id: rule_fall
         algorithm_id: behavior.fall
         rule_type: fall
-        enabled: false
+        enabled: true
         config:
           zone: lab_full_frame
           zone_id: lab_full_frame
@@ -337,5 +210,5 @@ cameras:
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260629T071308Z-3a2dd819
-runtime_epoch_id: midterm-20260629T071308Z-3a2dd819
+    runtime_epoch_id: midterm-20260710T055816Z-c86fe65b
+runtime_epoch_id: midterm-20260710T055816Z-c86fe65b

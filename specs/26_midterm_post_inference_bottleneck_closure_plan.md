@@ -29,6 +29,7 @@ This is not a Savant model-chain tuning spec. It must be coordinated with:
 - `docs/midterm_frontend_inference_performance_2026-06-28.md`
 - `specs/27_midterm_face_worker_vector_matching_optimization_plan.md`
 - `specs/28_midterm_qdrant_face_gallery_migration_plan.md`
+- `specs/29_midterm_evidence_replay_latency_optimization_plan.md`
 
 ## 2. Current Finding And Checkout Status
 
@@ -100,6 +101,11 @@ Still open:
 - 8090 config-sync versus runtime-apply behavior is now covered by static
   regression harnesses so camera rule/ROI edits do not reintroduce unnecessary
   runtime restarts.
+- The Qdrant authoritative pressure run passed, and the remaining evidence
+  latency tail is now tracked in
+  `specs/29_midterm_evidence_replay_latency_optimization_plan.md`. Static
+  review ranks Replay admission, post-Savant proof wait, and Replay-to-sink
+  arrival ahead of finalizer execution as the next optimization targets.
 
 Important boundary:
 

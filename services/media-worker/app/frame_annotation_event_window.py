@@ -174,14 +174,14 @@ def select_frame_annotation_event_window(
     source_id = _require_text(source_id, "source_id")
     camera_id = _require_text(camera_id, "camera_id")
     copied = copy.deepcopy(messages)
-    candidates = [
+    source_camera_candidates_list = [
         message
         for message in copied
         if message.get("source_id") == source_id and message.get("camera_id") == camera_id
     ]
-    source_camera_candidates = len(candidates)
+    source_camera_candidates = len(source_camera_candidates_list)
     candidates, wall_clock_summary = _filter_by_event_wall_clock(
-        candidates,
+        source_camera_candidates_list,
         anchor_event_ts_ms=anchor_event_ts_ms,
         pre_seconds=pre_seconds,
         post_seconds=post_seconds,
@@ -211,6 +211,54 @@ def select_frame_annotation_event_window(
         anchor_frame_pts=anchor_frame_pts,
         median_pts_delta=median_pts_delta,
     )
+
+    wall_clock_anchor_fallback_used = False
+    should_try_wall_clock_anchor_fallback = anchor_index is None
+    if (
+        anchor_frame_uuid
+        and anchor_found_by not in {"frame_uuid", "source_observation_id"}
+    ):
+        should_try_wall_clock_anchor_fallback = True
+    if (
+        anchor_source_observation_id
+        and anchor_found_by != "source_observation_id"
+    ):
+        should_try_wall_clock_anchor_fallback = True
+    if (
+        should_try_wall_clock_anchor_fallback
+        and wall_clock_summary.get("wall_clock_filter_enabled") is True
+        and len(candidates) < source_camera_candidates
+    ):
+        fallback_candidates = copy.deepcopy(source_camera_candidates_list)
+        fallback_candidates.sort(key=_message_sort_key)
+        fallback_median_pts_delta = _median_delta(
+            [
+                int(message["frame_pts"])
+                for message in fallback_candidates
+                if isinstance(message.get("frame_pts"), int)
+            ]
+        )
+        fallback_anchor_index, fallback_anchor_found_by = _find_anchor_index(
+            fallback_candidates,
+            anchor_source_observation_id=anchor_source_observation_id,
+            anchor_frame_uuid=anchor_frame_uuid,
+            anchor_frame_pts=anchor_frame_pts,
+            median_pts_delta=fallback_median_pts_delta,
+        )
+        if fallback_anchor_index is not None:
+            candidates = fallback_candidates
+            median_pts_delta = fallback_median_pts_delta
+            median_timestamp_delta_ms = _median_delta(
+                [
+                    int(message["timestamp_ms"])
+                    for message in candidates
+                    if isinstance(message.get("timestamp_ms"), int)
+                ]
+            )
+            anchor_index = fallback_anchor_index
+            anchor_found_by = f"{fallback_anchor_found_by}_wall_clock_fallback"
+            wall_clock_anchor_fallback_used = True
+
     anchor_found = anchor_index is not None
     missing_reason = None if anchor_found else "missing_anchor_frame"
 
@@ -258,6 +306,7 @@ def select_frame_annotation_event_window(
         "window_frame_count_method": window_frame_count_method,
         "missing_reason": missing_reason,
         "returned_whole_lookback": len(window) == len(candidates) and len(candidates) > max_frames,
+        "wall_clock_anchor_fallback_used": wall_clock_anchor_fallback_used,
         **wall_clock_summary,
     }
     return window, summary

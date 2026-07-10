@@ -7,6 +7,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -46,6 +47,7 @@ def _clip_config(**overrides: Any):
         "database_url": "postgresql://video:video@postgres:5432/video_analytics",
         "consumer_group": "clip-workers-test",
         "consumer_name": "clip-worker-test-1",
+        "consumer_count": 1,
         "poll_timeout_ms": 1,
         "default_pre_seconds": 5,
         "default_post_seconds": 5,
@@ -69,6 +71,13 @@ def _clip_config(**overrides: Any):
         "post_savant_frame_proof_retry_sleep_s": 0.0,
         "post_savant_frame_proof_wait_budget_s": 0.0,
         "post_savant_frame_proof_poll_interval_s": 0.0,
+        "post_savant_frame_proof_fast_path_batch_size": 0,
+        "post_savant_frame_proof_fast_path_lag": 0,
+        "post_savant_frame_proof_fast_path_pending": 0,
+        "frame_annotation_lookup_concurrency": 4,
+        "frame_annotation_range_cache_ttl_s": 0.0,
+        "frame_annotation_range_cache_bucket_ms": 0,
+        "frame_annotation_range_cache_max_entries": 64,
         "post_savant_allow_cross_session_post_window_proof": True,
         "post_savant_allow_truncated_pre_window_proof": True,
         "frame_annotation_stream": "security.frame_annotations",
@@ -85,6 +94,12 @@ def _clip_config(**overrides: Any):
         "evidence_materialization_max_concurrency": 4,
         "evidence_materialization_max_concurrency_per_shard": 2,
         "evidence_materialization_max_concurrency_per_source": 1,
+        "evidence_replay_active_slot_extra_seconds": 5.0,
+        "media_poll_interval_s": 0.0,
+        "midterm_sink_stability_checks": 0,
+        "evidence_replay_sink_stability_budget_s": 0.0,
+        "evidence_replay_finalizer_budget_s": 0.0,
+        "evidence_replay_slot_grace_s": 5.0,
         "evidence_materialization_event_type_quotas": {},
         "evidence_materialization_pressure_level": "normal",
     }
@@ -101,6 +116,56 @@ def _load_report_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_post_savant_materialization_metrics_include_phase_latency() -> None:
+    _activate(MEDIA_WORKER_DIR)
+    from app import worker
+
+    event_context = {
+        "created_at": datetime.fromtimestamp(1, tz=timezone.utc),
+        "payload": {
+            "media": {
+                "evidence_diagnostics": {
+                    "proof_wait_ms": 25,
+                    "record_request_pending_ms": 100,
+                    "replay_job_create_ms": 7,
+                    "replay_slot_hold_ms": 15000,
+                    "replay_job_created_at": "1970-01-01T00:00:02+00:00",
+                }
+            }
+        },
+    }
+    phase = {
+        "sink_metadata_first_seen_at": "1970-01-01T00:00:05+00:00",
+        "sink_video_first_seen_at": "1970-01-01T00:00:06+00:00",
+        "sink_video_stable_at": "1970-01-01T00:00:16+00:00",
+        "sink_ffprobe_ready_at": "1970-01-01T00:00:17+00:00",
+        "finalizer_submitted_at": "1970-01-01T00:00:18+00:00",
+        "finalizer_started_at": "1970-01-01T00:00:20+00:00",
+        "finalizer_submitted_monotonic": 10.0,
+        "finalizer_started_monotonic": 12.0,
+    }
+
+    metrics = worker._post_savant_materialization_metrics(
+        summary={"video_crop": {"crop_video_to_time_window": True}},
+        event_context=event_context,
+        started_at=datetime.fromtimestamp(20, tz=timezone.utc),
+        finished_at=datetime.fromtimestamp(28, tz=timezone.utc),
+        finalization_duration_ms=8000,
+        phase_diagnostics=phase,
+    )
+
+    assert metrics["queue_wait_ms"] == 19000
+    assert metrics["proof_wait_ms"] == 25
+    assert metrics["replay_job_create_ms"] == 7
+    assert metrics["replay_to_sink_metadata_ms"] == 3000
+    assert metrics["sink_metadata_to_video_ms"] == 1000
+    assert metrics["sink_video_to_stable_ms"] == 10000
+    assert metrics["sink_stable_to_ffprobe_ready_ms"] == 1000
+    assert metrics["sink_ffprobe_ready_to_finalizer_start_ms"] == 3000
+    assert metrics["finalizer_pool_wait_ms"] == 2000
+    assert metrics["phase_latency_ms"]["replay_slot_hold_ms"] == 15000
 
 
 def test_manifest_first_initial_status_and_ttl_metadata(monkeypatch) -> None:
@@ -120,11 +185,39 @@ def test_manifest_first_initial_status_and_ttl_metadata(monkeypatch) -> None:
     assert repository._evidence_task_initial_status(
         {**event, "event_type": "watchlist_hit"}
     ) == ("materialization_pending", "")
+    assert repository._evidence_task_initial_status(
+        {
+            **event,
+            "event_type": "watchlist_hit",
+            "algorithm_type": "face_intelligence",
+            "clip_required": False,
+            "snapshot_required": True,
+            "evidence_policy": {
+                "snapshot_required": True,
+                "clip_required": False,
+                "evidence_mode": "image_only",
+                "playback_kind": "image",
+            },
+            "payload": {
+                "media": {
+                    "clip_required": False,
+                    "evidence_mode": "image_only",
+                    "playback_kind": "image",
+                }
+            },
+        }
+    ) == ("materialization_pending", "")
 
     ttl = repository._materialization_ttl_metadata(event)
     assert ttl["replay_ttl_seconds"] == 300
     assert ttl["frame_annotation_ttl_seconds"] == 120
     assert ttl["materialization_deadline_at"] == ttl["annotation_deadline_at"]
+
+    monkeypatch.setenv("EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS", "5")
+    assert repository._materialization_ready_at(
+        event,
+        event["evidence_policy"],
+    ).isoformat() == "2026-05-28T20:26:50+00:00"
 
 
 def test_event_worker_evidence_admission_limits_active_pending_by_source(
@@ -176,7 +269,170 @@ def test_event_worker_evidence_admission_limits_active_pending_by_source(
     assert decision["observed"] == 2
 
 
-def test_event_worker_evidence_admission_source_limit_allows_watchlist_priority(
+def test_media_worker_materializes_watchlist_image_from_rolling_cache(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _activate(MEDIA_WORKER_DIR)
+    from PIL import Image
+    from app import worker
+    from app.rolling_cache import RollingSegment
+
+    cache_dir = tmp_path / "cache-segment"
+    cache_dir.mkdir()
+    video_path = cache_dir / "video.mov"
+    metadata_path = cache_dir / "metadata.json"
+    video_path.write_bytes(b"video")
+    metadata_path.write_text(
+        json.dumps({"frames": [{"pts": 10_000_000_000, "uuid": "frame-1"}]}),
+        encoding="utf-8",
+    )
+    segment = RollingSegment(
+        segment_id="seg-1",
+        source_id="camera-1",
+        runtime_epoch_id="epoch-1",
+        directory=cache_dir,
+        video_path=video_path,
+        metadata_path=metadata_path,
+        first_pts=9_000_000_000,
+        last_pts=11_000_000_000,
+        frame_count=1,
+        size_bytes=4,
+    )
+
+    def fake_extract(_video_path: Path, output_path: Path, *, offset_s: float) -> None:
+        assert offset_s == 1.0
+        Image.new("RGB", (640, 480), color=(20, 30, 40)).save(output_path, "JPEG")
+
+    monkeypatch.setattr(worker, "_extract_full_frame_image", fake_extract)
+    cfg = SimpleNamespace(evidence_output_dir=str(tmp_path / "evidence"))
+    event_context = {
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "event_type": "watchlist_hit",
+        "source_id": "camera-1",
+        "camera_id": "cam-1",
+        "frame_uuid": "frame-1",
+        "payload": {
+            "match": {"source_observation_id": "face:camera-1:7:10000"},
+            "matched_person": {"name": "Reese"},
+            "observation": {
+                "face_bbox": {
+                    "format": "cxcywh",
+                    "values": [320, 240, 160, 120],
+                    "coordinate_space": "pixel",
+                }
+            },
+            "media": {"frame_pts": 10_000_000_000, "frame_uuid": "frame-1"},
+        },
+    }
+
+    result = worker._materialize_face_image_from_rolling_cache(
+        cfg=cfg,
+        row={"event_id": event_context["event_id"], "source_id": "camera-1"},
+        event_context=event_context,
+        segments=[segment],
+        runtime_epoch_id="epoch-1",
+    )
+
+    assert Path(str(result["full_frame_path"])).is_file()
+    assert Path(str(result["face_crop_path"])).is_file()
+    assert Path(str(result["annotated_frame_path"])).is_file()
+    assert result["crop_status"] == "ready"
+    assert result["annotation_box"] == (240, 180, 400, 300)
+    assert result["crop_box"] == (208, 156, 432, 324)
+    assert result["source_observation_id"] == "face:camera-1:7:10000"
+
+
+def test_media_worker_watchlist_image_uses_nearest_cache_frame_for_small_gap(
+    tmp_path: Path,
+) -> None:
+    _activate(MEDIA_WORKER_DIR)
+    from app import worker
+    from app.rolling_cache import RollingSegment
+
+    cache_dir = tmp_path / "cache-segment"
+    cache_dir.mkdir()
+    video_path = cache_dir / "video.mov"
+    metadata_path = cache_dir / "metadata.json"
+    video_path.write_bytes(b"video")
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "frames": [
+                    {"pts": 10_000_000_000, "uuid": "near-frame"},
+                    {"pts": 12_000_000_000, "uuid": "far-frame"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    segment = RollingSegment(
+        segment_id="seg-1",
+        source_id="camera-1",
+        runtime_epoch_id="epoch-1",
+        directory=cache_dir,
+        video_path=video_path,
+        metadata_path=metadata_path,
+        first_pts=9_000_000_000,
+        last_pts=10_000_000_000,
+        frame_count=2,
+        size_bytes=4,
+    )
+    event_context = {
+        "frame_uuid": "missing-frame",
+        "payload": {"media": {"frame_pts": 10_200_000_000}},
+    }
+
+    frame = worker._rolling_cache_frame_for_image_event(event_context, [segment])
+
+    assert frame["segment"] == segment
+    assert frame["pts"] == 10_000_000_000
+    assert frame["frame_uuid"] == "near-frame"
+    assert frame["frame_selection"] == "nearest_metadata"
+
+
+def test_media_worker_watchlist_image_rejects_distant_cache_frame(
+    tmp_path: Path,
+) -> None:
+    _activate(MEDIA_WORKER_DIR)
+    from app import worker
+    from app.rolling_cache import RollingCacheCoverageMiss, RollingSegment
+
+    cache_dir = tmp_path / "cache-segment"
+    cache_dir.mkdir()
+    video_path = cache_dir / "video.mov"
+    metadata_path = cache_dir / "metadata.json"
+    video_path.write_bytes(b"video")
+    metadata_path.write_text(
+        json.dumps({"frames": [{"pts": 10_000_000_000, "uuid": "old-frame"}]}),
+        encoding="utf-8",
+    )
+    segment = RollingSegment(
+        segment_id="seg-1",
+        source_id="camera-1",
+        runtime_epoch_id="epoch-1",
+        directory=cache_dir,
+        video_path=video_path,
+        metadata_path=metadata_path,
+        first_pts=9_000_000_000,
+        last_pts=10_000_000_000,
+        frame_count=1,
+        size_bytes=4,
+    )
+    event_context = {
+        "frame_uuid": "missing-frame",
+        "payload": {"media": {"frame_pts": 11_000_000_000}},
+    }
+
+    try:
+        worker._rolling_cache_frame_for_image_event(event_context, [segment])
+    except RollingCacheCoverageMiss as exc:
+        assert str(exc) == "face_image_frame_not_found"
+    else:  # pragma: no cover - assertion clarity
+        raise AssertionError("distant frame must not be accepted for face evidence")
+
+
+def test_event_worker_evidence_admission_source_limit_blocks_watchlist_priority(
     monkeypatch,
 ) -> None:
     _activate(EVENT_WORKER_DIR)
@@ -219,10 +475,10 @@ def test_event_worker_evidence_admission_source_limit_allows_watchlist_priority(
         event_type="watchlist_hit",
     )
 
-    assert decision["allowed"] is True
-    assert decision["high_priority"] is True
-    assert decision["source_limit_bypassed_for_priority"] is True
-    assert decision["source_observed"] == 2
+    assert decision["allowed"] is False
+    assert decision["reason"] == "admission_source_active_limit_reached"
+    assert decision["scope"] == "source"
+    assert decision["observed"] == 2
 
 
 def test_event_worker_evidence_admission_event_type_budget_prioritizes_watchlist(
@@ -397,6 +653,8 @@ def test_expire_materialization_deadlines_marks_expired_state() -> None:
     assert "'materializing'" in conn.cursor_obj.sql
     assert "'replay_job_created'" in conn.cursor_obj.sql
     assert "materialization_deadline_at <= now()" in conn.cursor_obj.sql
+    assert "materialization_audit->'rolling_cache'->>'status'" in conn.cursor_obj.sql
+    assert "l.bundle_event_id = evidence_tasks.event_id" in conn.cursor_obj.sql
 
 
 def test_storage_quota_decision_marks_hard_limit(tmp_path: Path) -> None:

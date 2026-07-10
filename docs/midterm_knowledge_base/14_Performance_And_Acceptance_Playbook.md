@@ -22,6 +22,32 @@ tags:
 | 60 路 16/1 高入口压力 | 证据链保住样本 | 不是 16 FPS 推理证明 |
 | media finalizer pacer 8 FPS | CPU peak 约 98%，50/50 playable | 单进程模型仍需真实 soak 观察 |
 
+## Canonical 60 路单卡双分支 Profile
+
+当前 60 路单卡双分支压测口径以
+`docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md` 为准。
+
+固定项：
+
+- `--dual-shard-same-gpu --dual-shard-gpu 0 --dual-shard-source-mode balanced`；
+- 60 路拆成 `30+30`，不得退回单 Savant branch；
+- `--batch-size 4 --pose-batch-size 4 --face-detector-batch-size 4 --face-embedding-batch-size 16`；
+- `--duration-s 400 --drain-s 120 --pressure-algorithm-cooldown-s 60`；
+- `--evidence-shard-count 4 --rolling-cache-evidence`；
+- evidence window 固定为 `--evidence-policy-groups 5:5,10:10,15:15`
+  和 `--evidence-group-size 20`；
+- `--rolling-cache-prefill-s 25`，保证 15 秒前录窗口有缓存预热；
+- 8090 visual gate 必须检查 DB-backed timeline/overlay rows、bbox、人员框和轨迹；
+- 8 FPS stress profile 使用 `--fps 8/1`；
+- 单 T4 生产探测 profile 使用同一套拓扑和 batch，仅把 `--fps` 改为 `4/1`。
+
+优先使用包装脚本，避免漏掉同卡双分支或 cooldown：
+
+```bash
+bash scripts/runtime/run_pressure60_dual1gpu_profile.sh 8fps-stress
+bash scripts/runtime/run_pressure60_dual1gpu_profile.sh 4fps-t4
+```
+
 ## 不同测试的含义
 
 ### Forwarder null sink
@@ -83,6 +109,10 @@ tags:
 - playable 50/50；
 - media lifecycle p95/p99 在 deadline 内；
 - 8090 list/detail proof OK。
+- 视频证据只能是前后 `5s/10s/15s` 三组窗口，且实际长度接近
+  `10s/20s/30s`。
+- 标注不能只靠 filesystem fallback；DB overlay/timeline rows、人员框、bbox
+  和轨迹都要可见。
 
 ## 指标解释
 

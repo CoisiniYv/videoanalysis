@@ -55,3 +55,37 @@ def test_adapter_reads_tracker_attr_when_direct_track_id_is_invalid() -> None:
     assert len(result.observations) == 1
     assert result.observations[0].track_id == 42
     assert result.observations[0].camera_id == "cam_lab"
+
+
+def test_adapter_prefers_epoch_pts_over_stale_ntp_timestamp() -> None:
+    _isolate_savant_security_modules()
+    adapter = importlib.import_module("custom.adapters.person_pose_adapter")
+    frame_meta = SimpleNamespace(
+        source_id="source_lab",
+        frame_num=7,
+        pts=1_783_333_931_920_500_000,
+        ntp_timestamp=1_783_334_137_267,
+        objects=[_Obj()],
+    )
+
+    result = adapter.build_person_pose_observations(frame_meta, camera_id="cam_lab")
+
+    assert len(result.observations) == 1
+    assert result.observations[0].timestamp_ms == 1_783_333_931_920
+
+
+def test_adapter_keeps_ntp_timestamp_when_pts_is_relative() -> None:
+    _isolate_savant_security_modules()
+    adapter = importlib.import_module("custom.adapters.person_pose_adapter")
+    frame_meta = SimpleNamespace(
+        source_id="source_lab",
+        frame_num=7,
+        pts=1_000_000_000,
+        ntp_timestamp=1_783_334_137_267,
+        objects=[_Obj()],
+    )
+
+    result = adapter.build_person_pose_observations(frame_meta, camera_id="cam_lab")
+
+    assert len(result.observations) == 1
+    assert result.observations[0].timestamp_ms == 1_783_334_137_267

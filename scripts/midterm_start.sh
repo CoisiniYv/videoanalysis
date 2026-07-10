@@ -250,10 +250,37 @@ ensure_yolov8_face_symlinks() {
     fi
 }
 
+env_file_value() {
+    local key="$1"
+    awk -F= -v key="$key" '
+        $0 !~ /^[[:space:]]*#/ && $1 == key {
+            sub(/^[^=]*=/, "")
+            print
+            exit
+        }
+    ' "$ENV_FILE"
+}
+
+model_container_path_to_host() {
+    local path="$1"
+    if [[ "$path" == /models/* ]]; then
+        printf '%s/models/%s\n' "$DATA_ROOT" "${path#/models/}"
+    elif [[ "$path" == /* ]]; then
+        printf '%s\n' "$path"
+    fi
+}
+
 check_model_assets() {
     log_info "Checking required model assets..."
 
     ensure_yolov8_face_symlinks
+
+    local pose_model_file="${POSE_MODEL_FILE:-$(env_file_value POSE_MODEL_FILE)}"
+    local face_detector_model_file="${FACE_DETECTOR_MODEL_FILE:-$(env_file_value FACE_DETECTOR_MODEL_FILE)}"
+    local pose_model_host
+    local face_detector_model_host
+    pose_model_host="$(model_container_path_to_host "$pose_model_file")"
+    face_detector_model_host="$(model_container_path_to_host "$face_detector_model_file")"
 
     local required_models=(
         "$DATA_ROOT/models/yolo26_pose/yolo26_pose.onnx"
@@ -261,6 +288,8 @@ check_model_assets() {
         "$DATA_ROOT/models/yolov8_face.onnx"
         "$DATA_ROOT/models/adaface/adaface_ir50_webface4m.onnx"
     )
+    [[ -z "$pose_model_host" ]] || required_models+=("$pose_model_host")
+    [[ -z "$face_detector_model_host" ]] || required_models+=("$face_detector_model_host")
 
     local missing=()
     local model
@@ -272,6 +301,7 @@ check_model_assets() {
         log_error "Missing required model assets:"
         printf '  - %s\n' "${missing[@]}" >&2
         log_error "Restore the migration models.tgz into $DATA_ROOT before starting this stack"
+        log_error "For batch>1 YOLO, generate dynamic assets with: bash scripts/tools/build_yolo_dynamic_batch_engines.sh"
         return 1
     fi
 

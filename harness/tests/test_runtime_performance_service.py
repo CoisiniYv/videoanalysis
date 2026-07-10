@@ -163,8 +163,8 @@ def _fake_runtime() -> FakeDockerClient:
             "MAX_FPS": "8/1",
             "MIN_FPS": "2/1",
             "POSE_INFER_INTERVAL": "1",
-            "FACE_INFER_INTERVAL": "2",
-            "FACE_EMBEDDING_INFER_INTERVAL": "2",
+            "FACE_INFER_INTERVAL": "7",
+            "FACE_EMBEDDING_INFER_INTERVAL": "7",
             "SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS": "500",
             "SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS": "500",
             "SAVANT_REDIS_EXPORTER_QUEUE_MAXSIZE": "8192",
@@ -197,11 +197,15 @@ def test_performance_config_uses_runtime_env_without_saved_file(tmp_path: Path) 
     assert result["saved_config"]["forwarder_send_retries"] == 3
     assert result["saved_config"]["forwarder_send_hwm"] == 1000
     assert result["saved_config"]["savant_max_fps"] == "8/1"
-    assert result["saved_config"]["savant_batch_size"] == 1
-    assert result["saved_config"]["pose_batch_size"] == 1
-    assert result["saved_config"]["face_detector_batch_size"] == 1
+    assert result["saved_config"]["savant_batch_size"] == 4
+    assert result["saved_config"]["pose_batch_size"] == 4
+    assert result["saved_config"]["face_detector_batch_size"] == 4
     assert result["saved_config"]["face_embedding_batch_size"] == 16
-    assert result["saved_config"]["max_parallel_streams"] == 4
+    assert result["saved_config"]["max_parallel_streams"] == 64
+    assert result["defaults"]["savant_batch_size"] == 4
+    assert result["defaults"]["pose_batch_size"] == 4
+    assert result["defaults"]["face_detector_batch_size"] == 4
+    assert result["defaults"]["max_parallel_streams"] == 64
     assert result["saved_config"]["frame_annotation_write_timeout_ms"] == 500
     assert result["saved_config"]["frame_annotation_redis_queue_maxsize"] == 8192
     assert result["saved_config"]["savant_redis_write_retries"] == 10

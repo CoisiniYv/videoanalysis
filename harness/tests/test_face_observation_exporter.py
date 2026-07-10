@@ -142,6 +142,25 @@ class TestIdempotencyKey:
         id2 = build_face_source_observation_id("cam2", 42, 1000)
         assert id1 != id2
 
+    def test_uuid_anchor_format_when_frame_uuid_available(self):
+        obs_id = build_face_source_observation_id(
+            "cam1",
+            42,
+            1000,
+            frame_uuid="frame-1",
+            face_index=0,
+        )
+        assert obs_id == "face:cam1:uuid:frame-1:0"
+
+    def test_legacy_face_index_still_disambiguates_without_uuid(self):
+        obs_id = build_face_source_observation_id(
+            "cam1",
+            42,
+            1000,
+            face_index=1,
+        )
+        assert obs_id == "face:cam1:42:1000:1"
+
 
 class TestOnlyReidAllowedExported:
     def test_reid_allowed_field(self):

@@ -123,6 +123,28 @@ def test_async_writer_drains_to_redis_stream_in_background() -> None:
     writer.close()
 
 
+def test_async_writer_can_override_stream_per_message() -> None:
+    FakeRedisModule.client = FakeRedisClient()
+    writer = AsyncRedisStreamWriter(
+        redis_url="redis://redis:6379/0",
+        stream="security.test",
+        maxlen=10,
+        component="test_writer",
+        redis_module=FakeRedisModule,
+    )
+
+    assert writer.enqueue(
+        {"a": "1"},
+        stream="security.test.source-a",
+        maxlen=5,
+    ) is True
+    assert writer.flush(timeout_s=1.0) is True
+    assert FakeRedisModule.client.entries == [
+        ("security.test.source-a", {"a": "1"}, 5, True)
+    ]
+    writer.close()
+
+
 def test_async_writer_retries_transient_redis_write_error() -> None:
     flaky = FlakyRedisClient(failures=1)
     FakeRedisModule.client = flaky

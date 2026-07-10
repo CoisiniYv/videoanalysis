@@ -138,8 +138,8 @@ modules/savant_replay/config.midterm.replay-b.json
 The only required difference is `out_stream.url`:
 
 ```text
-replay-a -> dealer+connect:tcp://analysis-forwarder-a:5557
-replay-b -> dealer+connect:tcp://analysis-forwarder-b:5557
+replay-a -> dealer+connect:tcp://replay-raw-fanout-a:5557
+replay-b -> dealer+connect:tcp://replay-raw-fanout-b:5557
 ```
 
 Acceptance:

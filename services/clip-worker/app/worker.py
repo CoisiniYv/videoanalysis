@@ -6,10 +6,13 @@ import json
 import logging
 import signal
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from collections.abc import Callable
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 import psycopg
 from redis import Redis
@@ -18,16 +21,27 @@ from app.config import Config, load_config
 from app.replay_client import ReplayClient, _uuid7_timestamp_ms
 from app.replay_shards import ReplayShard, ReplayShardConfigError
 from app.repository import (
+    active_replay_slot_counts,
     expire_materialization_deadlines,
     get_evidence_diagnostics,
+    record_replay_job_for_slot,
     record_request_target_exists,
+    release_replay_slot,
     terminal_evidence_state,
+    try_acquire_replay_slot,
     update_clip_status,
 )
 
 logger = logging.getLogger(__name__)
 
 shutdown_requested = False
+_proof_lookup_semaphores: dict[int, threading.BoundedSemaphore] = {}
+_proof_lookup_semaphores_lock = threading.Lock()
+_frame_annotation_range_cache_lock = threading.Lock()
+_frame_annotation_range_cache: OrderedDict[
+    tuple[str, int, int, str, str],
+    "FrameAnnotationRangeCacheEntry",
+] = OrderedDict()
 MISSING_KEYFRAME_ERROR = "missing_keyframe_uuid_and_anchored_lookup_unavailable"
 _MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
 _MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000
@@ -45,6 +59,21 @@ FRAME_DOMAIN_SESSION_POLICY_STRICT = "strict_single_session"
 FRAME_DOMAIN_SESSION_POLICY_CROSS_POST = "post_window_cross_session_pts_verified"
 PRE_WINDOW_POLICY_FULL = "full_requested_window"
 PRE_WINDOW_POLICY_TRUNCATED = "truncated_to_current_session"
+
+
+@contextmanager
+def _proof_lookup_concurrency_gate(limit: int):
+    limit = max(1, int(limit or 1))
+    with _proof_lookup_semaphores_lock:
+        semaphore = _proof_lookup_semaphores.get(limit)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(limit)
+            _proof_lookup_semaphores[limit] = semaphore
+    semaphore.acquire()
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 
 @dataclass(frozen=True)
@@ -66,15 +95,24 @@ class ActiveReplayJob:
 
 
 @dataclass(frozen=True)
+class ReplaySlotTiming:
+    replay_duration_seconds_effective: float
+    replay_duration_effective_reason: str
+    timeout_budget_s: float
+
+
+@dataclass(frozen=True)
 class ReplayRoute:
     shard: ReplayShard
     client: ReplayClient
+    mapping_version: str = "unversioned"
 
     def diagnostics(self) -> dict[str, str]:
         return {
             "shard_id": self.shard.shard_id,
             "replay_api_url": self.shard.replay_api_url,
             "replay_job_sink_url": self.shard.replay_job_sink_url,
+            "mapping_version": self.mapping_version,
         }
 
 
@@ -100,6 +138,44 @@ class ReplayFrameDomainProofs:
     effective_start_pts: int = 0
     pre_window_truncated: bool = False
     pre_window_policy: str = PRE_WINDOW_POLICY_FULL
+
+
+@dataclass(frozen=True)
+class FrameAnnotationRangeCacheEntry:
+    cached_at_monotonic: float
+    entries: list[tuple[str, dict[str, object]]]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _elapsed_ms_since(started: float) -> int:
+    return int(max(0.0, time.monotonic() - started) * 1000)
+
+
+def _message_age_ms(msg_id: object) -> int | None:
+    age_s = _message_age_seconds(msg_id)
+    if age_s is None:
+        return None
+    return int(age_s * 1000)
+
+
+def _active_replay_counts(
+    active_jobs: list[ActiveReplayJob],
+    *,
+    shard_id: str,
+    source_id: str,
+) -> dict[str, int]:
+    return {
+        "replay_active_global_count": len(active_jobs),
+        "replay_active_shard_count": sum(
+            1 for job in active_jobs if job.shard_id == shard_id
+        ),
+        "replay_active_source_count": sum(
+            1 for job in active_jobs if job.source_id == str(source_id)
+        ),
+    }
 
 
 def _request_identity(req: dict) -> str:
@@ -242,6 +318,78 @@ def _replay_duration_seconds(
     return float(offset_seconds_override) + float(post_seconds)
 
 
+def _effective_replay_slot_timing(
+    cfg: Config,
+    req: dict,
+    *,
+    pre_seconds: int,
+    post_seconds: int,
+    offset_seconds_override: float | None,
+    duration_seconds_override: float | None,
+) -> ReplaySlotTiming:
+    request_duration = _to_float(req.get("replay_duration_seconds"))
+    duration_override = _to_float(req.get("duration_seconds_override"))
+    if request_duration is not None:
+        duration_s = max(float(request_duration), 0.0)
+        reason = "request.replay_duration_seconds"
+    elif duration_override is not None:
+        duration_s = max(float(duration_override), 0.0)
+        reason = "duration_seconds_override"
+    elif offset_seconds_override is not None:
+        duration_s = max(float(offset_seconds_override), 0.0) + max(
+            float(post_seconds),
+            0.0,
+        )
+        reason = "computed_offset_seconds_override_plus_post_seconds"
+    elif duration_seconds_override is not None:
+        duration_s = max(float(duration_seconds_override), 0.0)
+        reason = "duration_seconds_override"
+    else:
+        duration_s = max(float(pre_seconds), 0.0) + max(float(post_seconds), 0.0)
+        reason = "fallback_pre_seconds_plus_post_seconds"
+
+    poll_stability_s = (
+        max(float(cfg.media_poll_interval_s), 0.0)
+        * max(int(cfg.midterm_sink_stability_checks), 0)
+    )
+    timeout_budget_s = (
+        duration_s
+        + poll_stability_s
+        + max(float(cfg.evidence_replay_sink_stability_budget_s), 0.0)
+        + max(float(cfg.evidence_replay_finalizer_budget_s), 0.0)
+        + max(float(cfg.evidence_replay_slot_grace_s), 0.0)
+    )
+    return ReplaySlotTiming(
+        replay_duration_seconds_effective=duration_s,
+        replay_duration_effective_reason=reason,
+        timeout_budget_s=timeout_budget_s,
+    )
+
+
+def _resulting_stream_id_from_job_request(job_request: dict | None) -> str:
+    if not isinstance(job_request, dict):
+        return ""
+    configuration = job_request.get("configuration")
+    if isinstance(configuration, dict):
+        value = configuration.get("resulting_stream_id")
+        if value:
+            return str(value)
+        labels = configuration.get("labels")
+        if isinstance(labels, dict) and labels.get("resulting_stream_id"):
+            return str(labels["resulting_stream_id"])
+    return ""
+
+
+def _sink_instance_from_url(sink_url: str) -> str:
+    if "video-file-sink-a" in sink_url:
+        return "video-file-sink-a"
+    if "video-file-sink-b" in sink_url:
+        return "video-file-sink-b"
+    if "video-file-sink" in sink_url:
+        return "video-file-sink"
+    return sink_url or "unknown"
+
+
 def _event_to_keyframe_delta_seconds(
     *,
     event_frame_uuid: str | None,
@@ -317,6 +465,47 @@ def _exclusive_older_stream_id(stream_id: object) -> str:
     if value.startswith("("):
         return value
     return f"({value}"
+
+
+def _bucket_frame_annotation_range_bound(
+    value: str,
+    *,
+    bucket_ms: int,
+    upper: bool,
+) -> str:
+    if bucket_ms <= 0 or value in {"", "-", "+"}:
+        return value
+    stream_ms = _redis_stream_id_ms(value)
+    if stream_ms is None:
+        return value
+    if upper:
+        bucketed_ms = ((int(stream_ms) // bucket_ms) + 1) * bucket_ms - 1
+    else:
+        bucketed_ms = (int(stream_ms) // bucket_ms) * bucket_ms
+    return _redis_stream_id_from_ms(bucketed_ms, upper=upper)
+
+
+def _stream_id_within_bounds(
+    stream_id: str,
+    *,
+    range_min: str,
+    range_max: str,
+) -> bool:
+    stream_tuple = _stream_id_tuple(stream_id)
+    if range_min not in {"", "-"} and stream_tuple < _stream_id_tuple(range_min):
+        return False
+    if range_max not in {"", "+"}:
+        max_text = range_max[1:] if range_max.startswith("(") else range_max
+        max_tuple = _stream_id_tuple(max_text)
+        return stream_tuple < max_tuple if range_max.startswith("(") else stream_tuple <= max_tuple
+    return True
+
+
+def _stream_id_tuple(value: object) -> tuple[int, int]:
+    text = _decode_text(value).strip()
+    text = text[1:] if text.startswith("(") else text
+    first, _, second = text.partition("-")
+    return (_int_or_none(first) or 0, _int_or_none(second) or 0)
 
 
 def _pts_epoch_ms_or_none(value: object) -> int | None:
@@ -395,6 +584,122 @@ def _iter_frame_annotation_entries(
         next_max = _exclusive_older_stream_id(last_stream_id)
         if not next_max or next_max == previous_max:
             break
+
+
+def _read_frame_annotation_range_entries(
+    redis_client: Redis,
+    *,
+    stream_name: str,
+    max_scan: int,
+    page_count: int,
+    range_min: str = "-",
+    range_max: str = "+",
+    cache_ttl_s: float = 0.0,
+    cache_bucket_ms: int = 0,
+    cache_max_entries: int = 64,
+) -> list[tuple[str, dict[str, object]]]:
+    def read_entries(read_min: str, read_max: str) -> list[tuple[str, dict[str, object]]]:
+        parsed: list[tuple[str, dict[str, object]]] = []
+        for entry in _iter_frame_annotation_entries(
+            redis_client,
+            stream_name=stream_name,
+            max_scan=max_scan,
+            page_count=page_count,
+            range_min=read_min,
+            range_max=read_max,
+        ):
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            message = _message_from_frame_annotation_fields(entry[1])
+            if not isinstance(message, dict):
+                continue
+            parsed.append((_decode_text(entry[0]), message))
+        return parsed
+
+    ttl_s = max(0.0, float(cache_ttl_s or 0.0))
+    bucket_ms = max(0, int(cache_bucket_ms or 0))
+    if ttl_s <= 0.0:
+        return [
+            entry
+            for entry in read_entries(range_min or "-", range_max or "+")
+            if _stream_id_within_bounds(
+                entry[0],
+                range_min=range_min or "-",
+                range_max=range_max or "+",
+            )
+        ]
+
+    read_min = _bucket_frame_annotation_range_bound(
+        range_min or "-",
+        bucket_ms=bucket_ms,
+        upper=False,
+    )
+    read_max = _bucket_frame_annotation_range_bound(
+        range_max or "+",
+        bucket_ms=bucket_ms,
+        upper=True,
+    )
+    key = (
+        stream_name,
+        max(1, int(max_scan)),
+        max(1, int(page_count)),
+        read_min,
+        read_max,
+    )
+    now = time.monotonic()
+    with _frame_annotation_range_cache_lock:
+        cached = _frame_annotation_range_cache.get(key)
+        if cached is not None and now - cached.cached_at_monotonic <= ttl_s:
+            _frame_annotation_range_cache.move_to_end(key)
+            return [
+                entry
+                for entry in cached.entries
+                if _stream_id_within_bounds(
+                    entry[0],
+                    range_min=range_min or "-",
+                    range_max=range_max or "+",
+                )
+            ]
+        entries = read_entries(read_min, read_max)
+        _frame_annotation_range_cache[key] = FrameAnnotationRangeCacheEntry(
+            cached_at_monotonic=now,
+            entries=entries,
+        )
+        _frame_annotation_range_cache.move_to_end(key)
+        while len(_frame_annotation_range_cache) > max(1, int(cache_max_entries)):
+            _frame_annotation_range_cache.popitem(last=False)
+        return [
+            entry
+            for entry in entries
+            if _stream_id_within_bounds(
+                entry[0],
+                range_min=range_min or "-",
+                range_max=range_max or "+",
+            )
+        ]
+
+
+def _iter_frame_annotation_lookup_entries(
+    redis_client: Redis,
+    *,
+    stream_name: str,
+    count: int,
+    page_count: int | None = None,
+    range_min: str = "-",
+    range_max: str = "+",
+    cached_entries: list[object] | None = None,
+):
+    if cached_entries is not None:
+        yield from cached_entries
+        return
+    yield from _iter_frame_annotation_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+    )
 
 
 def _fields_to_dict(value: object) -> dict[str, object]:
@@ -720,15 +1025,17 @@ def _find_frame_annotation_anchor(
     require_keyframe: bool = False,
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
+    cached_entries: list[object] | None = None,
 ) -> FrameAnnotationAnchor | None:
     candidates: list[FrameAnnotationAnchor] = []
-    for entry in _iter_frame_annotation_entries(
+    for entry in _iter_frame_annotation_lookup_entries(
         redis_client,
         stream_name=stream_name,
-        max_scan=max(1, int(count)),
-        page_count=max(1, int(page_count or count)),
+        count=count,
+        page_count=page_count,
         range_min=range_min,
         range_max=range_max,
+        cached_entries=cached_entries,
     ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
@@ -872,18 +1179,20 @@ def _find_anchor_keyframe_pts_match(
     range_max: str = "+",
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
+    cached_entries: list[object] | None = None,
 ) -> tuple[int, int] | None:
     """Return ``(match_rank, pts)`` for the exact Replay keyframe UUID."""
     if not anchor_keyframe_uuid:
         return None
     candidates: list[tuple[int, int]] = []
-    for entry in _iter_frame_annotation_entries(
+    for entry in _iter_frame_annotation_lookup_entries(
         redis_client,
         stream_name=stream_name,
-        max_scan=max(1, int(count)),
-        page_count=max(1, int(page_count or count)),
+        count=count,
+        page_count=page_count,
         range_min=range_min,
         range_max=range_max,
+        cached_entries=cached_entries,
     ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
@@ -935,16 +1244,18 @@ def _anchor_keyframe_uuid_is_proven_keyframe(
     range_max: str = "+",
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
+    cached_entries: list[object] | None = None,
 ) -> bool:
     if not anchor_keyframe_uuid:
         return False
-    for entry in _iter_frame_annotation_entries(
+    for entry in _iter_frame_annotation_lookup_entries(
         redis_client,
         stream_name=stream_name,
-        max_scan=max(1, int(count)),
-        page_count=max(1, int(page_count or count)),
+        count=count,
+        page_count=page_count,
         range_min=range_min,
         range_max=range_max,
+        cached_entries=cached_entries,
     ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
@@ -1219,6 +1530,43 @@ def _redis_stream_group_diagnostics(
     return diagnostics
 
 
+def _post_savant_proof_fast_path_reason(
+    cfg: Config,
+    *,
+    record_request_batch_size: int,
+    stream_diagnostics: dict[str, object],
+) -> str:
+    """Return why the proof wait should be single-shot under backlog pressure."""
+    batch_threshold = max(
+        0,
+        int(getattr(cfg, "post_savant_frame_proof_fast_path_batch_size", 0) or 0),
+    )
+    if batch_threshold > 0 and record_request_batch_size >= batch_threshold:
+        return "record_request_batch_backlog"
+
+    lag_threshold = max(
+        0,
+        int(getattr(cfg, "post_savant_frame_proof_fast_path_lag", 0) or 0),
+    )
+    lag = _int_or_none(stream_diagnostics.get("lag"))
+    if lag_threshold > 0 and lag is not None and lag >= lag_threshold:
+        return "record_request_lag_backlog"
+
+    pending_threshold = max(
+        0,
+        int(getattr(cfg, "post_savant_frame_proof_fast_path_pending", 0) or 0),
+    )
+    pending = _int_or_none(stream_diagnostics.get("pending"))
+    if (
+        pending_threshold > 0
+        and pending is not None
+        and pending >= pending_threshold
+    ):
+        return "record_request_pending_backlog"
+
+    return ""
+
+
 def _post_savant_anchor_error_retryable(req: dict, error_message: str) -> bool:
     if "missing_stream_session_id" in error_message:
         return False
@@ -1428,6 +1776,10 @@ def _queue_clip_request(
     msg_id: object,
     active_job_count: int,
     max_concurrent_jobs: int,
+    active_shard_count: int = 0,
+    active_source_count: int = 0,
+    record_request_pending_ms: int | None = None,
+    clip_worker_claimed_at: str = "",
     replay_shard: dict | None = None,
     quota_decision: dict | None = None,
 ) -> None:
@@ -1435,9 +1787,16 @@ def _queue_clip_request(
     diagnostics = {
         "queue_reason": reason,
         "active_job_count": active_job_count,
+        "replay_active_global_count": active_job_count,
+        "replay_active_shard_count": active_shard_count,
+        "replay_active_source_count": active_source_count,
         "max_concurrent_jobs": max_concurrent_jobs,
         "redis_delivery_retry_count": retry_count,
         "queued_age_seconds": retry_age_s,
+        "record_request_pending_ms": record_request_pending_ms,
+        "clip_worker_claimed_at": clip_worker_claimed_at or None,
+        "replay_admission_deferred_at": _utc_now_iso(),
+        "replay_admission_reason": reason,
         "quota_decision": quota_decision or {},
     }
     if replay_shard:
@@ -1445,7 +1804,8 @@ def _queue_clip_request(
     logger.info(
         "clip_worker_queued request_id=%s event_id=%s reason=%s "
         "active_job_count=%s max_concurrent_jobs=%s retry_count=%s "
-        "queued_age_s=%s error=%s",
+        "queued_age_s=%s replay_active_shard_count=%s "
+        "replay_active_source_count=%s error=%s",
         request_id,
         event_id,
         reason,
@@ -1453,6 +1813,8 @@ def _queue_clip_request(
         max_concurrent_jobs,
         retry_count,
         retry_age_s,
+        active_shard_count,
+        active_source_count,
         error_message,
     )
     update_clip_status(
@@ -1487,6 +1849,7 @@ def _derive_start_window_frame_from_keyframe_reference(
     min_frame_uuid_ms: int | None = None,
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
+    cached_entries: list[object] | None = None,
 ) -> FrameAnnotationAnchor | None:
     """Find a start-window coverage frame that references a known keyframe.
 
@@ -1496,13 +1859,14 @@ def _derive_start_window_frame_from_keyframe_reference(
     event/record_request ``anchor_keyframe_uuid``.
     """
     candidates: list[FrameAnnotationAnchor] = []
-    for entry in _iter_frame_annotation_entries(
+    for entry in _iter_frame_annotation_lookup_entries(
         redis_client,
         stream_name=stream_name,
-        max_scan=max(1, int(count)),
-        page_count=max(1, int(page_count or count)),
+        count=count,
+        page_count=page_count,
         range_min=range_min,
         range_max=range_max,
+        cached_entries=cached_entries,
     ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
@@ -1591,16 +1955,18 @@ def _derive_truncated_start_window_frame(
     min_frame_uuid_ms: int | None = None,
     runtime_epoch_id: str = "",
     stream_session_id: str = "",
+    cached_entries: list[object] | None = None,
 ) -> FrameAnnotationAnchor | None:
     """Find the earliest current-session decodable point before the event."""
     candidates: list[FrameAnnotationAnchor] = []
-    for entry in _iter_frame_annotation_entries(
+    for entry in _iter_frame_annotation_lookup_entries(
         redis_client,
         stream_name=stream_name,
-        max_scan=max(1, int(count)),
-        page_count=max(1, int(page_count or count)),
+        count=count,
+        page_count=page_count,
         range_min=range_min,
         range_max=range_max,
+        cached_entries=cached_entries,
     ):
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
@@ -1704,6 +2070,9 @@ def _find_replay_frame_domain_proofs(
     allow_cross_session_post_window: bool = False,
     allow_truncated_pre_window: bool = False,
     event_frame_pts: int | None = None,
+    range_cache_ttl_s: float = 0.0,
+    range_cache_bucket_ms: int = 0,
+    range_cache_max_entries: int = 64,
 ) -> ReplayFrameDomainProofs | None:
     if range_min is None or range_max is None:
         range_min, range_max = _frame_annotation_stream_bounds(
@@ -1712,6 +2081,25 @@ def _find_replay_frame_domain_proofs(
             min_start_stream_ms=min_start_stream_ms,
             min_post_stream_ms=min_post_stream_ms,
         )
+    cached_entries: list[object] = []
+    for stream_id, message in _read_frame_annotation_range_entries(
+        redis_client,
+        stream_name=stream_name,
+        max_scan=max(1, int(count)),
+        page_count=max(1, int(page_count or count)),
+        range_min=range_min,
+        range_max=range_max,
+        cache_ttl_s=range_cache_ttl_s,
+        cache_bucket_ms=range_cache_bucket_ms,
+        cache_max_entries=range_cache_max_entries,
+    ):
+        if not _frame_annotation_matches_domain(message, runtime_epoch_id, ""):
+            continue
+        if str(message.get("source_id") or "") != str(source_id):
+            continue
+        if str(message.get("camera_id") or "") != str(camera_id):
+            continue
+        cached_entries.append((stream_id, message))
     post_window_frame = _find_frame_annotation_anchor(
         redis_client,
         stream_name=stream_name,
@@ -1728,6 +2116,7 @@ def _find_replay_frame_domain_proofs(
         min_frame_uuid_ms=min_post_frame_uuid_ms,
         runtime_epoch_id=runtime_epoch_id,
         stream_session_id=stream_session_id,
+        cached_entries=cached_entries,
     )
     if post_window_frame is None and allow_cross_session_post_window:
         post_window_frame = _find_frame_annotation_anchor(
@@ -1746,6 +2135,7 @@ def _find_replay_frame_domain_proofs(
             min_frame_uuid_ms=min_post_frame_uuid_ms,
             runtime_epoch_id=runtime_epoch_id,
             stream_session_id="",
+            cached_entries=cached_entries,
         )
         if post_window_frame is not None:
             post_window_frame = replace(
@@ -1771,6 +2161,7 @@ def _find_replay_frame_domain_proofs(
         require_keyframe=True,
         runtime_epoch_id=runtime_epoch_id,
         stream_session_id=stream_session_id,
+        cached_entries=cached_entries,
     )
     if start_window_frame is None:
         start_window_frame = _derive_start_window_frame_from_keyframe_reference(
@@ -1789,6 +2180,7 @@ def _find_replay_frame_domain_proofs(
             min_frame_uuid_ms=min_start_frame_uuid_ms,
             runtime_epoch_id=runtime_epoch_id,
             stream_session_id=stream_session_id,
+            cached_entries=cached_entries,
         )
     if start_window_frame is None:
         if not allow_truncated_pre_window or event_frame_pts is None:
@@ -1809,6 +2201,7 @@ def _find_replay_frame_domain_proofs(
             min_frame_uuid_ms=min_start_frame_uuid_ms,
             runtime_epoch_id=runtime_epoch_id,
             stream_session_id=stream_session_id,
+            cached_entries=cached_entries,
         )
     if start_window_frame is None:
         return None
@@ -2171,46 +2564,64 @@ def _prepare_post_savant_replay_request(
         slack_seconds=cfg.frame_annotation_anchor_wall_clock_slack_s,
     )
     for attempt in range(attempts):
-        proofs = _find_replay_frame_domain_proofs(
-            redis_client,
-            stream_name=cfg.frame_annotation_stream,
-            source_id=str(source_id),
-            camera_id=str(camera_id or source_id),
-            requested_start_pts=requested_start_pts,
-            requested_end_pts=requested_end_pts,
-            count=cfg.frame_annotation_anchor_lookback_count,
-            page_count=cfg.frame_annotation_anchor_page_count,
-            range_min=range_min,
-            range_max=range_max,
-            min_start_stream_ms=min_start_keyframe_stream_ms,
-            min_post_stream_ms=min_anchor_stream_ms,
-            max_start_pts_delta_ns=(
-                int(max(pre_seconds, 0) * PTS_TIME_BASE) + max_anchor_pts_delta_ns
-            ),
-            max_post_pts_delta_ns=max_anchor_pts_delta_ns,
-            max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
-            min_start_frame_uuid_ms=min_start_keyframe_uuid_ms,
-            min_post_frame_uuid_ms=min_anchor_frame_uuid_ms,
-            runtime_epoch_id=runtime_epoch_id,
-            stream_session_id=stream_session_id,
-            allow_cross_session_post_window=bool(
-                getattr(
+        with _proof_lookup_concurrency_gate(
+            getattr(cfg, "frame_annotation_lookup_concurrency", 1)
+        ):
+            proofs = _find_replay_frame_domain_proofs(
+                redis_client,
+                stream_name=cfg.frame_annotation_stream,
+                source_id=str(source_id),
+                camera_id=str(camera_id or source_id),
+                requested_start_pts=requested_start_pts,
+                requested_end_pts=requested_end_pts,
+                count=cfg.frame_annotation_anchor_lookback_count,
+                page_count=cfg.frame_annotation_anchor_page_count,
+                range_min=range_min,
+                range_max=range_max,
+                min_start_stream_ms=min_start_keyframe_stream_ms,
+                min_post_stream_ms=min_anchor_stream_ms,
+                max_start_pts_delta_ns=(
+                    int(max(pre_seconds, 0) * PTS_TIME_BASE) + max_anchor_pts_delta_ns
+                ),
+                max_post_pts_delta_ns=max_anchor_pts_delta_ns,
+                max_keyframe_pts_delta_ns=max_keyframe_pts_delta_ns,
+                min_start_frame_uuid_ms=min_start_keyframe_uuid_ms,
+                min_post_frame_uuid_ms=min_anchor_frame_uuid_ms,
+                runtime_epoch_id=runtime_epoch_id,
+                stream_session_id=stream_session_id,
+                allow_cross_session_post_window=bool(
+                    getattr(
+                        cfg,
+                        "post_savant_allow_cross_session_post_window_proof",
+                        False,
+                    )
+                ),
+                allow_truncated_pre_window=bool(
+                    getattr(
+                        cfg,
+                        "post_savant_allow_truncated_pre_window_proof",
+                        False,
+                    )
+                ),
+                event_frame_pts=_int_or_none(
+                    req.get("event_frame_pts") or req.get("frame_pts")
+                ),
+                range_cache_ttl_s=getattr(
                     cfg,
-                    "post_savant_allow_cross_session_post_window_proof",
-                    False,
-                )
-            ),
-            allow_truncated_pre_window=bool(
-                getattr(
+                    "frame_annotation_range_cache_ttl_s",
+                    0.0,
+                ),
+                range_cache_bucket_ms=getattr(
                     cfg,
-                    "post_savant_allow_truncated_pre_window_proof",
-                    False,
-                )
-            ),
-            event_frame_pts=_int_or_none(
-                req.get("event_frame_pts") or req.get("frame_pts")
-            ),
-        )
+                    "frame_annotation_range_cache_bucket_ms",
+                    0,
+                ),
+                range_cache_max_entries=getattr(
+                    cfg,
+                    "frame_annotation_range_cache_max_entries",
+                    64,
+                ),
+            )
         candidate_uuid = keyframe_uuid
         candidate_source = keyframe_source
         if proofs is not None and candidate_uuid is None:
@@ -2404,22 +2815,24 @@ def _prepare_post_savant_replay_request(
             deadline_reached = (
                 wait_deadline_at is not None and now_after_lookup >= wait_deadline_at
             )
-            diagnostics = (
-                _post_savant_frame_proof_diagnostics(
-                    redis_client,
-                    cfg,
-                    req,
-                    source_id=str(source_id),
-                    camera_id=str(camera_id or source_id),
-                    target_pts=target_pts,
-                    requested_start_pts=requested_start_pts,
-                    requested_end_pts=requested_end_pts,
-                    runtime_epoch_id=runtime_epoch_id,
-                    stream_session_id=stream_session_id,
-                )
-                if is_first_wait or is_last_wait or deadline_reached
-                else {}
-            )
+            if is_first_wait or is_last_wait or deadline_reached:
+                with _proof_lookup_concurrency_gate(
+                    getattr(cfg, "frame_annotation_lookup_concurrency", 1)
+                ):
+                    diagnostics = _post_savant_frame_proof_diagnostics(
+                        redis_client,
+                        cfg,
+                        req,
+                        source_id=str(source_id),
+                        camera_id=str(camera_id or source_id),
+                        target_pts=target_pts,
+                        requested_start_pts=requested_start_pts,
+                        requested_end_pts=requested_end_pts,
+                        runtime_epoch_id=runtime_epoch_id,
+                        stream_session_id=stream_session_id,
+                    )
+            else:
+                diagnostics = {}
             diagnostics["proof_attempt"] = attempt + 1
             diagnostics["proof_attempts"] = attempts
             diagnostics["proof_wait_budget_s"] = wait_budget_s
@@ -2494,6 +2907,9 @@ def _replay_job_labels(
         "replay_duration_extra_slack_s",
         "replay_duration_seconds",
         "runtime_epoch_id",
+        "record_request_shard_id",
+        "consumer_resolved_shard_id",
+        "shard_mapping_version",
         "stream_session_id",
     ):
         value = req.get(key)
@@ -2526,6 +2942,7 @@ def _clip_gate_decision(
     *,
     jobs_created: int,
     active_jobs: list[ActiveReplayJob],
+    active_counts: dict[str, int] | None = None,
     shard_id: str,
     source_id: str,
     camera_id: str,
@@ -2536,9 +2953,14 @@ def _clip_gate_decision(
 ) -> ClipGateDecision:
     high_priority_types = set(cfg.evidence_high_priority_event_types) or PRIORITY_EVENT_TYPES
     is_priority_event = event_type in high_priority_types
-    active_job_count = len(active_jobs)
-    active_for_shard = sum(1 for job in active_jobs if job.shard_id == shard_id)
-    active_for_source = sum(1 for job in active_jobs if job.source_id == source_id)
+    if active_counts is not None:
+        active_job_count = int(active_counts.get("replay_active_global_count") or 0)
+        active_for_shard = int(active_counts.get("replay_active_shard_count") or 0)
+        active_for_source = int(active_counts.get("replay_active_source_count") or 0)
+    else:
+        active_job_count = len(active_jobs)
+        active_for_shard = sum(1 for job in active_jobs if job.shard_id == shard_id)
+        active_for_source = sum(1 for job in active_jobs if job.source_id == source_id)
     pressure_level = str(cfg.evidence_materialization_pressure_level or "normal").lower()
     if pressure_level == "hard":
         return ClipGateDecision(
@@ -2600,11 +3022,7 @@ def _clip_gate_decision(
             },
         )
     max_global = cfg.evidence_materialization_max_concurrency
-    if (
-        max_global > 0
-        and active_job_count >= max_global
-        and not is_priority_event
-    ):
+    if max_global > 0 and active_job_count >= max_global:
         return ClipGateDecision(
             allowed=False,
             reason="max_concurrent_reached",
@@ -2616,7 +3034,7 @@ def _clip_gate_decision(
             },
         )
     max_per_shard = cfg.evidence_materialization_max_concurrency_per_shard
-    if max_per_shard > 0 and active_for_shard >= max_per_shard and not is_priority_event:
+    if max_per_shard > 0 and active_for_shard >= max_per_shard:
         return ClipGateDecision(
             allowed=False,
             reason="max_concurrent_per_shard_reached",
@@ -2629,7 +3047,7 @@ def _clip_gate_decision(
             },
         )
     max_per_source = cfg.evidence_materialization_max_concurrency_per_source
-    if max_per_source > 0 and active_for_source >= max_per_source and not is_priority_event:
+    if max_per_source > 0 and active_for_source >= max_per_source:
         return ClipGateDecision(
             allowed=False,
             reason="max_concurrent_per_source_reached",
@@ -2681,9 +3099,21 @@ def _ensure_group(client: Redis, stream: str, group: str) -> None:
 
 
 def connect_redis(cfg: Config) -> Redis:
-    client = Redis.from_url(cfg.redis_url, decode_responses=False)
+    poll_timeout_s = max(0.0, float(cfg.poll_timeout_ms) / 1000.0)
+    socket_timeout_s = max(10.0, poll_timeout_s + 5.0)
+    client = Redis.from_url(
+        cfg.redis_url,
+        decode_responses=False,
+        socket_timeout=socket_timeout_s,
+        socket_connect_timeout=5.0,
+        health_check_interval=30,
+    )
     client.ping()
-    logger.info("connected to redis url=%s", cfg.redis_url)
+    logger.info(
+        "connected to redis url=%s socket_timeout_s=%.1f",
+        cfg.redis_url,
+        socket_timeout_s,
+    )
     return client
 
 
@@ -2698,7 +3128,11 @@ def _resolve_replay_route(
     if client is None:
         client = ReplayClient(shard.replay_api_url)
         replay_clients[shard.replay_api_url] = client
-    return ReplayRoute(shard=shard, client=client)
+    return ReplayRoute(
+        shard=shard,
+        client=client,
+        mapping_version=cfg.replay_shards.mapping_version,
+    )
 
 
 def run_worker(
@@ -2718,14 +3152,21 @@ def run_worker(
     last_expire_check_at = 0.0
 
     logger.info(
-        "clip-worker started stream=%s group=%s replay=%s "
+        "clip-worker started stream=%s group=%s consumer=%s replay=%s "
         "max_jobs_per_run=%s run_once=%s max_jobs_per_run_effective=%s "
         "max_concurrent_jobs=%s per_camera_cooldown_seconds=%s "
         "pending_claim_min_idle_ms=%s pending_claim_count=%s "
         "pending_claim_interval_s=%s deferred_retry_max_attempts=%s "
         "stop_condition_mode=%s replay_fps=%s replay_duration_extra_slack_s=%s "
-        "allow_unbounded_keyframe_fallback=%s replay_shards_enabled=%s",
-        stream, group, cfg.replay_api_url,
+        "allow_unbounded_keyframe_fallback=%s replay_shards_enabled=%s "
+        "frame_annotation_lookup_concurrency=%s "
+        "frame_annotation_range_cache_ttl_s=%s "
+        "frame_annotation_range_cache_bucket_ms=%s "
+        "frame_annotation_range_cache_max_entries=%s",
+        stream,
+        group,
+        consumer,
+        cfg.replay_api_url,
         cfg.max_jobs_per_run,
         cfg.run_once,
         "enabled" if _max_jobs_limit_enabled(cfg) else "disabled",
@@ -2740,6 +3181,10 @@ def run_worker(
         cfg.replay_duration_extra_slack_s,
         cfg.allow_unbounded_keyframe_fallback,
         cfg.replay_shards.enabled,
+        cfg.frame_annotation_lookup_concurrency,
+        getattr(cfg, "frame_annotation_range_cache_ttl_s", 0.0),
+        getattr(cfg, "frame_annotation_range_cache_bucket_ms", 0),
+        getattr(cfg, "frame_annotation_range_cache_max_entries", 0),
     )
 
     total_processed = 0
@@ -2790,6 +3235,7 @@ def run_worker(
                 continue
 
             for _stream_name, entries in result:
+                record_request_batch_size = len(entries)
                 for msg_id, fields in entries:
                     retry_count = _retry_count_for_msg(msg_id, pending_delivery_counts)
                     req = _parse_request(fields)
@@ -2820,6 +3266,16 @@ def run_worker(
                     keyframe_uuid, keyframe_source = _keyframe_from_request(req)
                     replay_anchor_req = req
                     post_savant_media_request = _is_post_savant_media_request(req)
+                    clip_worker_claimed_at = _utc_now_iso()
+                    record_request_pending_ms = _message_age_ms(msg_id)
+                    phase_diagnostics: dict[str, object] = {
+                        "record_request_stream_id": _message_id_text(msg_id),
+                        "record_request_pending_ms": record_request_pending_ms,
+                        "clip_worker_claimed_at": clip_worker_claimed_at,
+                        "redis_delivery_retry_count": retry_count,
+                        "record_request_batch_size": record_request_batch_size,
+                    }
+                    proof_wait_diagnostics: dict[str, object] = {}
                     now_monotonic = time.monotonic()
                     active_jobs = [
                         job for job in active_jobs if job.until_monotonic > now_monotonic
@@ -2868,6 +3324,7 @@ def run_worker(
                         )
                     except ReplayShardConfigError as exc:
                         diagnostics = {
+                            **phase_diagnostics,
                             "source_id": source_id,
                             "replay_shard_error": str(exc),
                             "replay_shards": cfg.replay_shards.to_dict(),
@@ -2888,11 +3345,75 @@ def run_worker(
                         continue
                     replay = replay_route.client
                     replay_shard = replay_route.diagnostics()
+                    record_request_shard_id = str(
+                        req.get("record_request_shard_id")
+                        or req.get("replay_shard_id")
+                        or ""
+                    ).strip()
+                    record_request_mapping_version = str(
+                        req.get("shard_mapping_version")
+                        or req.get("replay_shard_mapping_version")
+                        or ""
+                    ).strip()
+                    consumer_resolved_shard_id = replay_route.shard.shard_id
+                    shard_mapping_mismatch = bool(
+                        record_request_shard_id
+                        and record_request_shard_id != consumer_resolved_shard_id
+                    )
+                    if shard_mapping_mismatch:
+                        logger.warning(
+                            "replay_shard_mapping_mismatch request_id=%s "
+                            "event_id=%s source_id=%s record_request_shard_id=%s "
+                            "consumer_resolved_shard_id=%s "
+                            "record_request_mapping_version=%s "
+                            "consumer_mapping_version=%s",
+                            request_id,
+                            event_id,
+                            source_id,
+                            record_request_shard_id,
+                            consumer_resolved_shard_id,
+                            record_request_mapping_version,
+                            replay_route.mapping_version,
+                        )
+                    replay_counts = active_replay_slot_counts(
+                        pg_conn,
+                        shard_id=replay_route.shard.shard_id,
+                        source_id=str(source_id),
+                    )
+                    replay_slot_count_source = "postgres"
+                    if replay_counts is None:
+                        replay_counts = _active_replay_counts(
+                            active_jobs,
+                            shard_id=replay_route.shard.shard_id,
+                            source_id=str(source_id),
+                        )
+                        replay_slot_count_source = "local_fallback"
+                    phase_diagnostics.update(replay_counts)
+                    phase_diagnostics["replay_shard"] = replay_shard
+                    phase_diagnostics["record_request_shard_id"] = (
+                        record_request_shard_id
+                    )
+                    phase_diagnostics["consumer_resolved_shard_id"] = (
+                        consumer_resolved_shard_id
+                    )
+                    phase_diagnostics["shard_mapping_version"] = (
+                        replay_route.mapping_version
+                    )
+                    phase_diagnostics["record_request_shard_mapping_version"] = (
+                        record_request_mapping_version
+                    )
+                    phase_diagnostics["replay_shard_mapping_mismatch"] = (
+                        shard_mapping_mismatch
+                    )
+                    phase_diagnostics["replay_slot_count_source"] = (
+                        replay_slot_count_source
+                    )
 
                     schedule_gate = _clip_gate_decision(
                         cfg,
                         jobs_created=jobs_created,
                         active_jobs=active_jobs,
+                        active_counts=replay_counts,
                         shard_id=replay_route.shard.shard_id,
                         source_id=str(source_id),
                         camera_id=str(camera_id),
@@ -2929,8 +3450,18 @@ def run_worker(
                                 error_message=schedule_gate.error_message,
                                 retry_count=retry_count,
                                 msg_id=msg_id,
-                                active_job_count=len(active_jobs),
+                                active_job_count=replay_counts[
+                                    "replay_active_global_count"
+                                ],
                                 max_concurrent_jobs=cfg.evidence_materialization_max_concurrency,
+                                active_shard_count=replay_counts[
+                                    "replay_active_shard_count"
+                                ],
+                                active_source_count=replay_counts[
+                                    "replay_active_source_count"
+                                ],
+                                record_request_pending_ms=record_request_pending_ms,
+                                clip_worker_claimed_at=clip_worker_claimed_at,
                                 replay_shard=replay_shard,
                                 quota_decision=schedule_gate.quota_decision,
                             )
@@ -2981,7 +3512,7 @@ def run_worker(
 
                     if post_savant_media_request:
                         frame_proof_wait_started = time.monotonic()
-                        proof_wait_diagnostics: dict[str, object] = {}
+                        proof_wait_started_at = _utc_now_iso()
                         proof_wait_attempt_count = 0
                         proof_retry_count = _persisted_proof_retry_count(
                             pg_conn,
@@ -2994,6 +3525,38 @@ def run_worker(
                             wait_budget_override = 0.0
                             poll_interval_override = 0.0
                             attempts_override = 1
+                        else:
+                            stream_diagnostics = _redis_stream_group_diagnostics(
+                                redis_client,
+                                stream=stream,
+                                group=group,
+                            )
+                            fast_path_reason = _post_savant_proof_fast_path_reason(
+                                cfg,
+                                record_request_batch_size=record_request_batch_size,
+                                stream_diagnostics=stream_diagnostics,
+                            )
+                            if fast_path_reason:
+                                wait_budget_override = 0.0
+                                poll_interval_override = 0.0
+                                attempts_override = 1
+                                phase_diagnostics[
+                                    "proof_wait_fast_path_reason"
+                                ] = fast_path_reason
+                                phase_diagnostics[
+                                    "proof_wait_fast_path_stream"
+                                ] = stream_diagnostics
+                                logger.info(
+                                    "clip_worker_proof_wait_fast_path "
+                                    "request_id=%s event_id=%s reason=%s "
+                                    "batch_size=%s redis_pending=%s redis_lag=%s",
+                                    request_id,
+                                    event_id,
+                                    fast_path_reason,
+                                    record_request_batch_size,
+                                    stream_diagnostics.get("pending"),
+                                    stream_diagnostics.get("lag"),
+                                )
 
                         def _mark_waiting_proof(
                             attempt: int,
@@ -3003,6 +3566,10 @@ def run_worker(
                         ) -> None:
                             nonlocal proof_wait_diagnostics, proof_wait_attempt_count
                             proof_wait_diagnostics = dict(diagnostics)
+                            proof_wait_diagnostics.update(phase_diagnostics)
+                            proof_wait_diagnostics["proof_wait_started_at"] = (
+                                proof_wait_started_at
+                            )
                             proof_wait_diagnostics["proof_retry_count"] = proof_retry_count
                             proof_wait_diagnostics["redis_delivery_retry_count"] = retry_count
                             proof_wait_attempt_count = attempt
@@ -3041,14 +3608,36 @@ def run_worker(
                             attempts_override=attempts_override,
                         )
                         frame_proof_wait_seconds = time.monotonic() - frame_proof_wait_started
+                        proof_wait_finished_at = _utc_now_iso()
+                        proof_wait_ms = int(frame_proof_wait_seconds * 1000)
                         logger.info(
                             "clip_worker_frame_proof_wait request_id=%s event_id=%s "
-                            "frame_proof_wait_seconds=%.3f anchor_ready=%s",
+                            "frame_proof_wait_seconds=%.3f proof_wait_ms=%s "
+                            "anchor_ready=%s",
                             req.get("request_id"),
                             event_id,
                             frame_proof_wait_seconds,
+                            proof_wait_ms,
                             anchor_error is None and replay_anchor_req is not None,
                         )
+                        if anchor_error is None and replay_anchor_req is not None:
+                            proof_wait_diagnostics.update(phase_diagnostics)
+                            proof_wait_diagnostics["proof_wait_seconds"] = (
+                                frame_proof_wait_seconds
+                            )
+                            proof_wait_diagnostics["proof_wait_ms"] = proof_wait_ms
+                            proof_wait_diagnostics["proof_wait_started_at"] = (
+                                proof_wait_started_at
+                            )
+                            proof_wait_diagnostics["proof_wait_finished_at"] = (
+                                proof_wait_finished_at
+                            )
+                            proof_wait_diagnostics["proof_retry_count"] = (
+                                proof_retry_count
+                            )
+                            proof_wait_diagnostics["redis_delivery_retry_count"] = (
+                                retry_count
+                            )
                         if anchor_error is not None or replay_anchor_req is None:
                             target_pts = _frame_annotation_anchor_target_pts(
                                 req,
@@ -3076,6 +3665,13 @@ def run_worker(
                                 )
                             proof_wait_diagnostics["proof_wait_seconds"] = (
                                 frame_proof_wait_seconds
+                            )
+                            proof_wait_diagnostics["proof_wait_ms"] = proof_wait_ms
+                            proof_wait_diagnostics["proof_wait_started_at"] = (
+                                proof_wait_started_at
+                            )
+                            proof_wait_diagnostics["proof_wait_finished_at"] = (
+                                proof_wait_finished_at
                             )
                             proof_retryable = _post_savant_anchor_error_retryable(
                                 req,
@@ -3280,52 +3876,336 @@ def run_worker(
                             replay_anchor_req.get("replay_offset_seconds")
                         ),
                     )
+                    explicit_replay_duration_seconds = _to_float(
+                        replay_anchor_req.get("replay_duration_seconds")
+                    )
+                    explicit_duration_seconds_override = _to_float(
+                        replay_anchor_req.get("duration_seconds_override")
+                    )
                     duration_seconds_override = _replay_duration_seconds(
                         pre_seconds=pre_seconds,
                         post_seconds=post_seconds,
                         offset_seconds_override=offset_seconds_override,
-                        explicit_duration_seconds=_to_float(
-                            replay_anchor_req.get("replay_duration_seconds")
+                        explicit_duration_seconds=(
+                            explicit_replay_duration_seconds
+                            if explicit_replay_duration_seconds is not None
+                            else explicit_duration_seconds_override
                         ),
                     )
-                    job_id = replay.create_job(
-                        source_id=source_id,
-                        keyframe_uuid=keyframe_uuid,
+                    replay_slot_timing = _effective_replay_slot_timing(
+                        cfg,
+                        replay_anchor_req,
                         pre_seconds=pre_seconds,
                         post_seconds=post_seconds,
-                        sink_endpoint=replay_route.shard.replay_job_sink_url,
-                        labels=_replay_job_labels(
-                            event_id,
-                            replay_anchor_req,
-                            replay_offset_seconds=offset_seconds_override,
-                            replay_duration_seconds=duration_seconds_override,
-                        ),
-                        stop_condition_mode=stop_condition_mode,
-                        fallback_reason=fallback_reason,
-                        fps=cfg.replay_fps,
                         offset_seconds_override=offset_seconds_override,
                         duration_seconds_override=duration_seconds_override,
                     )
+                    sink_instance = _sink_instance_from_url(
+                        replay_route.shard.replay_job_sink_url
+                    )
+                    atomic_admission = try_acquire_replay_slot(
+                        pg_conn,
+                        event_id=event_id,
+                        source_id=str(source_id),
+                        camera_id=str(camera_id or ""),
+                        replay_shard=replay_shard,
+                        sink_instance=sink_instance,
+                        replay_duration_seconds_effective=(
+                            replay_slot_timing.replay_duration_seconds_effective
+                        ),
+                        replay_duration_effective_reason=(
+                            replay_slot_timing.replay_duration_effective_reason
+                        ),
+                        timeout_budget_s=replay_slot_timing.timeout_budget_s,
+                        max_global=cfg.evidence_materialization_max_concurrency,
+                        max_per_shard=(
+                            cfg.evidence_materialization_max_concurrency_per_shard
+                        ),
+                        max_per_source=(
+                            cfg.evidence_materialization_max_concurrency_per_source
+                        ),
+                    )
+                    if atomic_admission is None:
+                        _queue_clip_request(
+                            pg_conn,
+                            event_id=event_id,
+                            request_id=request_id,
+                            reason="atomic_replay_admission_unavailable",
+                            error_message="atomic Replay admission unavailable",
+                            retry_count=retry_count,
+                            msg_id=msg_id,
+                            active_job_count=replay_counts[
+                                "replay_active_global_count"
+                            ],
+                            max_concurrent_jobs=(
+                                cfg.evidence_materialization_max_concurrency
+                            ),
+                            active_shard_count=replay_counts[
+                                "replay_active_shard_count"
+                            ],
+                            active_source_count=replay_counts[
+                                "replay_active_source_count"
+                            ],
+                            record_request_pending_ms=record_request_pending_ms,
+                            clip_worker_claimed_at=clip_worker_claimed_at,
+                            replay_shard=replay_shard,
+                            quota_decision={
+                                "scope": "replay_admission",
+                                "admission_mode": "atomic",
+                                "reason": "unavailable",
+                            },
+                        )
+                        total_processed += 1
+                        continue
+                    admission_counts = atomic_admission.get("counts")
+                    if isinstance(admission_counts, dict):
+                        phase_diagnostics.update(admission_counts)
+                        replay_counts.update(admission_counts)
+                    phase_diagnostics["replay_slot_count_source"] = "postgres_atomic"
+                    phase_diagnostics["replay_admission_mode"] = "atomic"
+                    if not bool(atomic_admission.get("acquired")):
+                        reason = str(
+                            atomic_admission.get("reason")
+                            or "atomic_replay_admission_denied"
+                        )
+                        if reason == "replay_slot_terminal_state":
+                            logger.info(
+                                "clip_worker_acked_terminal_replay_slot "
+                                "request_id=%s event_id=%s msg_id=%s "
+                                "record_request_pending_ms=%s",
+                                request_id,
+                                event_id,
+                                msg_id,
+                                record_request_pending_ms,
+                            )
+                            seen_requests.add(request_id)
+                            redis_client.xack(stream, group, msg_id)
+                            total_processed += 1
+                            continue
+                        _queue_clip_request(
+                            pg_conn,
+                            event_id=event_id,
+                            request_id=request_id,
+                            reason=reason,
+                            error_message=str(
+                                atomic_admission.get("error_message") or reason
+                            ),
+                            retry_count=retry_count,
+                            msg_id=msg_id,
+                            active_job_count=replay_counts[
+                                "replay_active_global_count"
+                            ],
+                            max_concurrent_jobs=(
+                                cfg.evidence_materialization_max_concurrency
+                            ),
+                            active_shard_count=replay_counts[
+                                "replay_active_shard_count"
+                            ],
+                            active_source_count=replay_counts[
+                                "replay_active_source_count"
+                            ],
+                            record_request_pending_ms=record_request_pending_ms,
+                            clip_worker_claimed_at=clip_worker_claimed_at,
+                            replay_shard=replay_shard,
+                            quota_decision=(
+                                atomic_admission.get("quota_decision")
+                                if isinstance(
+                                    atomic_admission.get("quota_decision"),
+                                    dict,
+                                )
+                                else {"admission_mode": "atomic"}
+                            ),
+                        )
+                        total_processed += 1
+                        continue
+                    replay_job_create_started = time.monotonic()
+                    replay_job_create_started_at = _utc_now_iso()
+                    try:
+                        job_id = replay.create_job(
+                            source_id=source_id,
+                            keyframe_uuid=keyframe_uuid,
+                            pre_seconds=pre_seconds,
+                            post_seconds=post_seconds,
+                            sink_endpoint=replay_route.shard.replay_job_sink_url,
+                            labels=_replay_job_labels(
+                                event_id,
+                                {
+                                    **replay_anchor_req,
+                                    "record_request_shard_id": (
+                                        record_request_shard_id
+                                    ),
+                                    "consumer_resolved_shard_id": (
+                                        consumer_resolved_shard_id
+                                    ),
+                                    "shard_mapping_version": (
+                                        replay_route.mapping_version
+                                    ),
+                                },
+                                replay_offset_seconds=offset_seconds_override,
+                                replay_duration_seconds=duration_seconds_override,
+                            ),
+                            stop_condition_mode=stop_condition_mode,
+                            fallback_reason=fallback_reason,
+                            fps=cfg.replay_fps,
+                            offset_seconds_override=offset_seconds_override,
+                            duration_seconds_override=duration_seconds_override,
+                        )
+                    except Exception as exc:
+                        replay_job_create_ms = _elapsed_ms_since(
+                            replay_job_create_started
+                        )
+                        replay_job_created_at = _utc_now_iso()
+                        logger.exception(
+                            "replay_job_creation_exception request_id=%s event_id=%s",
+                            req.get("request_id"),
+                            event_id,
+                        )
+                        update_clip_status(
+                            pg_conn, event_id, "failed",
+                            error_message=f"Replay job creation failed: {exc}",
+                            diagnostics={
+                                **phase_diagnostics,
+                                **proof_wait_diagnostics,
+                                "replay_job_create_started_at": (
+                                    replay_job_create_started_at
+                                ),
+                                "replay_job_create_ms": replay_job_create_ms,
+                                "replay_job_create_failed_at": replay_job_created_at,
+                            },
+                            replay_shard=replay_shard,
+                        )
+                        release_replay_slot(
+                            pg_conn,
+                            event_id=event_id,
+                            release_reason="replay_job_create_exception",
+                        )
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
+                        total_processed += 1
+                        continue
+                    replay_job_create_ms = _elapsed_ms_since(replay_job_create_started)
+                    replay_job_created_at = _utc_now_iso()
 
                     if job_id:
+                        resulting_stream_id = _resulting_stream_id_from_job_request(
+                            replay.last_job_request
+                        )
+                        if not resulting_stream_id:
+                            runtime_epoch_id = str(
+                                replay_anchor_req.get("runtime_epoch_id") or ""
+                            ).strip()
+                            resulting_stream_id = (
+                                f"replay-{runtime_epoch_id}-event-{event_id}"
+                                if runtime_epoch_id
+                                else f"replay-event-{event_id}"
+                            )
+                        replay_slot_hold_s = float(replay_slot_timing.timeout_budget_s)
+                        replay_slot_hold_ms = int(replay_slot_hold_s * 1000)
+                        replay_job_diagnostics = {
+                            **phase_diagnostics,
+                            **proof_wait_diagnostics,
+                            "replay_job_create_started_at": replay_job_create_started_at,
+                            "replay_job_created_at": replay_job_created_at,
+                            "replay_job_create_ms": replay_job_create_ms,
+                            "replay_slot_release_mode": "completion_aware",
+                            "replay_slot_hold_ms": replay_slot_hold_ms,
+                            "replay_slot_timeout_budget_s": replay_slot_hold_s,
+                            "replay_duration_seconds_effective": (
+                                replay_slot_timing.replay_duration_seconds_effective
+                            ),
+                            "replay_duration_effective_reason": (
+                                replay_slot_timing.replay_duration_effective_reason
+                            ),
+                            "replay_resulting_stream_id": resulting_stream_id,
+                            "sink_instance": sink_instance,
+                            "media_poll_interval_s": cfg.media_poll_interval_s,
+                            "midterm_sink_stability_checks": (
+                                cfg.midterm_sink_stability_checks
+                            ),
+                            "replay_sink_stability_budget_s": (
+                                cfg.evidence_replay_sink_stability_budget_s
+                            ),
+                            "replay_finalizer_budget_s": (
+                                cfg.evidence_replay_finalizer_budget_s
+                            ),
+                            "replay_slot_grace_s": cfg.evidence_replay_slot_grace_s,
+                            "replay_slot_hold_extra_seconds": (
+                                cfg.evidence_replay_active_slot_extra_seconds
+                            ),
+                            "replay_active_global_count_before_create": replay_counts[
+                                "replay_active_global_count"
+                            ],
+                            "replay_active_shard_count_before_create": replay_counts[
+                                "replay_active_shard_count"
+                            ],
+                            "replay_active_source_count_before_create": replay_counts[
+                                "replay_active_source_count"
+                            ],
+                        }
                         logger.info(
                             "replay_job_created job_id=%s request_id=%s event_id=%s",
                             job_id,
                             req.get("request_id"),
                             event_id,
                         )
+                        logger.info(
+                            "clip_worker_phase_timing event_id=%s request_id=%s "
+                            "record_request_pending_ms=%s proof_wait_ms=%s "
+                            "replay_job_create_ms=%s replay_slot_hold_ms=%s "
+                            "replay_duration_seconds_effective=%s "
+                            "replay_duration_effective_reason=%s "
+                            "replay_slot_release_mode=%s "
+                            "replay_active_global_count=%s "
+                            "replay_active_shard_count=%s "
+                            "replay_active_source_count=%s",
+                            event_id,
+                            request_id,
+                            record_request_pending_ms,
+                            replay_job_diagnostics.get("proof_wait_ms"),
+                            replay_job_create_ms,
+                            replay_slot_hold_ms,
+                            replay_slot_timing.replay_duration_seconds_effective,
+                            replay_slot_timing.replay_duration_effective_reason,
+                            "completion_aware",
+                            replay_counts["replay_active_global_count"],
+                            replay_counts["replay_active_shard_count"],
+                            replay_counts["replay_active_source_count"],
+                        )
                         update_clip_status(
                             pg_conn, event_id, "replay_job_created",
                             replay_job_id=job_id,
                             replay_job_request=replay.last_job_request,
+                            diagnostics=replay_job_diagnostics,
                             replay_shard=replay_shard,
+                        )
+                        slot_acquired = record_replay_job_for_slot(
+                            pg_conn,
+                            event_id=event_id,
+                            replay_job_id=job_id,
+                            resulting_stream_id=resulting_stream_id,
+                        )
+                        logger.info(
+                            "replay_slot_acquired event_id=%s job_id=%s "
+                            "slot_acquired=%s source_id=%s replay_shard_id=%s "
+                            "sink_instance=%s resulting_stream_id=%s "
+                            "replay_duration_seconds_effective=%s "
+                            "timeout_budget_s=%s",
+                            event_id,
+                            job_id,
+                            slot_acquired,
+                            source_id,
+                            replay_route.shard.shard_id,
+                            sink_instance,
+                            resulting_stream_id,
+                            replay_slot_timing.replay_duration_seconds_effective,
+                            replay_slot_timing.timeout_budget_s,
                         )
                         jobs_created += 1
                         active_jobs.append(
                             ActiveReplayJob(
                                 until_monotonic=(
                                     time.monotonic()
-                                    + float(pre_seconds + post_seconds + 5)
+                                    + replay_slot_hold_s
                                 ),
                                 shard_id=replay_route.shard.shard_id,
                                 source_id=str(source_id),
@@ -3346,7 +4226,19 @@ def run_worker(
                         update_clip_status(
                             pg_conn, event_id, "failed",
                             error_message="Replay job creation returned None",
+                            diagnostics={
+                                **phase_diagnostics,
+                                **proof_wait_diagnostics,
+                                "replay_job_create_started_at": replay_job_create_started_at,
+                                "replay_job_create_ms": replay_job_create_ms,
+                                "replay_job_create_failed_at": replay_job_created_at,
+                            },
                             replay_shard=replay_shard,
+                        )
+                        release_replay_slot(
+                            pg_conn,
+                            event_id=event_id,
+                            release_reason="replay_job_create_failed",
                         )
 
                     seen_requests.add(request_id)

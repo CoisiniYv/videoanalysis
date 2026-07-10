@@ -144,6 +144,8 @@ services:
     volumes:
       - ../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro
       - /data/video-analytics/replay-midterm:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout: { condition: service_started }
     restart: unless-stopped
 
   replay-a:
@@ -159,7 +161,7 @@ services:
       - ../modules/savant_replay/config.midterm.replay-a.json:/opt/etc/config.json:ro
       - /data/video-analytics/replay-midterm-a:/opt/rocksdb:rw
     depends_on:
-      analysis-forwarder-a: { condition: service_started }
+      replay-raw-fanout-a: { condition: service_started }
     restart: unless-stopped
 
   replay-b:
@@ -175,7 +177,222 @@ services:
       - ../modules/savant_replay/config.midterm.replay-b.json:/opt/etc/config.json:ro
       - /data/video-analytics/replay-midterm-b:/opt/rocksdb:rw
     depends_on:
+      replay-raw-fanout-b: { condition: service_started }
+    restart: unless-stopped
+
+  replay-c:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-c
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_C_HOST_PORT:-8398}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-c.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-c:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout-a: { condition: service_started }
+    restart: unless-stopped
+
+  replay-d:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-d
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_D_HOST_PORT:-8498}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-d.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-d:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout-b: { condition: service_started }
+    restart: unless-stopped
+
+  replay-e:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-e
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_E_HOST_PORT:-8598}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-e.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-e:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout-a: { condition: service_started }
+    restart: unless-stopped
+
+  replay-f:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-f
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_F_HOST_PORT:-8698}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-f.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-f:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout-b: { condition: service_started }
+    restart: unless-stopped
+
+  replay-g:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-g
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_G_HOST_PORT:-8798}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-g.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-g:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout-a: { condition: service_started }
+    restart: unless-stopped
+
+  replay-h:
+    image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
+    container_name: video-analytics-midterm-replay-h
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    ports:
+      - "${REPLAY_H_HOST_PORT:-8898}:8080"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_PATH: /opt/rocksdb
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-h.json:/opt/etc/config.json:ro
+      - /data/video-analytics/replay-midterm-h:/opt/rocksdb:rw
+    depends_on:
+      replay-raw-fanout-b: { condition: service_started }
+    restart: unless-stopped
+
+  replay-raw-fanout:
+    build:
+      context: ../services/analysis-forwarder
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-analysis-forwarder:latest
+    container_name: video-analytics-midterm-replay-raw-fanout
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://analysis-forwarder:5557
+      FORWARDER_RAW_OUT_ENDPOINT: pub+bind:tcp://0.0.0.0:5560
+      FORWARDER_SAMPLER_ENABLED: "false"
+      FORWARDER_QUEUE_MAX_SIZE: "${REPLAY_RAW_FANOUT_QUEUE_MAX_SIZE:-8192}"
+      FORWARDER_RECEIVE_TIMEOUT_MS: "${REPLAY_RAW_FANOUT_RECEIVE_TIMEOUT_MS:-1000}"
+      FORWARDER_RECEIVE_HWM: "${REPLAY_RAW_FANOUT_RECEIVE_HWM:-10000}"
+      FORWARDER_SEND_TIMEOUT_MS: "${REPLAY_RAW_FANOUT_SEND_TIMEOUT_MS:-1000}"
+      FORWARDER_SEND_RETRIES: "${REPLAY_RAW_FANOUT_SEND_RETRIES:-2}"
+      FORWARDER_SEND_HWM: "${REPLAY_RAW_FANOUT_SEND_HWM:-10000}"
+      FORWARDER_METRICS_PORT: "8081"
+    ports:
+      - "${REPLAY_RAW_FANOUT_METRICS_HOST_PORT:-18184}:8081"
+    depends_on:
+      analysis-forwarder: { condition: service_started }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  replay-raw-fanout-a:
+    build:
+      context: ../services/analysis-forwarder
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-analysis-forwarder:latest
+    container_name: video-analytics-midterm-replay-raw-fanout-a
+    profiles: ["dual-4090-two-source"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://analysis-forwarder-a:5557
+      FORWARDER_RAW_OUT_ENDPOINT: pub+bind:tcp://0.0.0.0:5560
+      FORWARDER_SAMPLER_ENABLED: "false"
+      FORWARDER_QUEUE_MAX_SIZE: "${REPLAY_RAW_FANOUT_QUEUE_MAX_SIZE:-8192}"
+      FORWARDER_RECEIVE_TIMEOUT_MS: "${REPLAY_RAW_FANOUT_RECEIVE_TIMEOUT_MS:-1000}"
+      FORWARDER_RECEIVE_HWM: "${REPLAY_RAW_FANOUT_RECEIVE_HWM:-10000}"
+      FORWARDER_SEND_TIMEOUT_MS: "${REPLAY_RAW_FANOUT_SEND_TIMEOUT_MS:-1000}"
+      FORWARDER_SEND_RETRIES: "${REPLAY_RAW_FANOUT_SEND_RETRIES:-2}"
+      FORWARDER_SEND_HWM: "${REPLAY_RAW_FANOUT_SEND_HWM:-10000}"
+      FORWARDER_METRICS_PORT: "8081"
+    ports:
+      - "${REPLAY_RAW_FANOUT_A_METRICS_HOST_PORT:-18185}:8081"
+    depends_on:
+      analysis-forwarder-a: { condition: service_started }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  replay-raw-fanout-b:
+    build:
+      context: ../services/analysis-forwarder
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-analysis-forwarder:latest
+    container_name: video-analytics-midterm-replay-raw-fanout-b
+    profiles: ["dual-4090-two-source"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
+      FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://analysis-forwarder-b:5557
+      FORWARDER_RAW_OUT_ENDPOINT: pub+bind:tcp://0.0.0.0:5560
+      FORWARDER_SAMPLER_ENABLED: "false"
+      FORWARDER_QUEUE_MAX_SIZE: "${REPLAY_RAW_FANOUT_QUEUE_MAX_SIZE:-8192}"
+      FORWARDER_RECEIVE_TIMEOUT_MS: "${REPLAY_RAW_FANOUT_RECEIVE_TIMEOUT_MS:-1000}"
+      FORWARDER_RECEIVE_HWM: "${REPLAY_RAW_FANOUT_RECEIVE_HWM:-10000}"
+      FORWARDER_SEND_TIMEOUT_MS: "${REPLAY_RAW_FANOUT_SEND_TIMEOUT_MS:-1000}"
+      FORWARDER_SEND_RETRIES: "${REPLAY_RAW_FANOUT_SEND_RETRIES:-2}"
+      FORWARDER_SEND_HWM: "${REPLAY_RAW_FANOUT_SEND_HWM:-10000}"
+      FORWARDER_METRICS_PORT: "8081"
+    ports:
+      - "${REPLAY_RAW_FANOUT_B_METRICS_HOST_PORT:-18186}:8081"
+    depends_on:
       analysis-forwarder-b: { condition: service_started }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   analysis-forwarder:
@@ -190,6 +407,7 @@ services:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
       FORWARDER_OUT_ENDPOINT: "${FORWARDER_OUT_ENDPOINT:-dealer+connect:tcp://savant-security:5557}"
+      FORWARDER_RAW_OUT_ENDPOINT: "${FORWARDER_RAW_OUT_ENDPOINT:-null://}"
       ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
       ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
       FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"
@@ -202,8 +420,6 @@ services:
       FORWARDER_METRICS_PORT: "8081"
     ports:
       - "${FORWARDER_METRICS_HOST_PORT:-18081}:8081"
-    depends_on:
-      - replay-service
     healthcheck:
       test:
         [
@@ -231,6 +447,7 @@ services:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
       FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-a:5557
+      FORWARDER_RAW_OUT_ENDPOINT: null://
       ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
       ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
       FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"
@@ -272,6 +489,7 @@ services:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
       FORWARDER_OUT_ENDPOINT: dealer+connect:tcp://savant-b:5557
+      FORWARDER_RAW_OUT_ENDPOINT: null://
       ANALYSIS_FPS: "${ANALYSIS_FPS:-8/1}"
       ANALYSIS_MIN_FPS: "${ANALYSIS_MIN_FPS:-2/1}"
       FORWARDER_SAMPLER_ENABLED: "${FORWARDER_SAMPLER_ENABLED:-true}"
@@ -322,14 +540,16 @@ services:
       METRICS_TIME_PERIOD: "5"
       METRICS_HISTORY: "100"
       METRICS_EXTRA_LABELS: '{"service":"savant-security","profile":"midterm"}'
-      BATCH_SIZE: "${BATCH_SIZE:-1}"
-      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-4}"
+      BATCH_SIZE: "${BATCH_SIZE:-4}"
+      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-64}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
       MAX_FPS: "${MAX_FPS:-8/1}"
       MIN_FPS: "${MIN_FPS:-2/1}"
       BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
-      POSE_BATCH_SIZE: "${POSE_BATCH_SIZE:-1}"
+      POSE_BATCH_SIZE: "${POSE_BATCH_SIZE:-4}"
+      POSE_MODEL_FILE: "${POSE_MODEL_FILE:-/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx}"
+      POSE_DECODER_LAYOUT: "${POSE_DECODER_LAYOUT:-decoded_56}"
       POSE_INFER_INTERVAL: "${POSE_INFER_INTERVAL:-1}"
       POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
       POSE_KEYPOINT_THRESHOLD: "${POSE_KEYPOINT_THRESHOLD:-0.35}"
@@ -337,9 +557,10 @@ services:
       POSE_SELECTOR_NMS_IOU_THRESHOLD: "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
       POSE_MIN_WIDTH: "${POSE_MIN_WIDTH:-60}"
       POSE_MIN_HEIGHT: "${POSE_MIN_HEIGHT:-100}"
-      FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-1}"
-      FACE_INFER_INTERVAL: "${FACE_INFER_INTERVAL:-2}"
-      FACE_EMBEDDING_INFER_INTERVAL: "${FACE_EMBEDDING_INFER_INTERVAL:-2}"
+      FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-4}"
+      FACE_DETECTOR_MODEL_FILE: "${FACE_DETECTOR_MODEL_FILE:-/models/yolov8_face/yolov8n-face.dynamic.onnx}"
+      FACE_INFER_INTERVAL: "${FACE_INFER_INTERVAL:-7}"
+      FACE_EMBEDDING_INFER_INTERVAL: "${FACE_EMBEDDING_INFER_INTERVAL:-7}"
       FACE_EMBEDDING_BATCH_SIZE: "${FACE_EMBEDDING_BATCH_SIZE:-16}"
       FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
       FACE_REID_MIN_INTERVAL_MS: "${FACE_REID_MIN_INTERVAL_MS:-1000}"
@@ -357,6 +578,10 @@ services:
       FRAME_ANNOTATION_STREAM: security.frame_annotations
       FRAME_ANNOTATION_TTL_SECONDS: "${FRAME_ANNOTATION_TTL_SECONDS:-600}"
       FRAME_ANNOTATION_REDIS_MAXLEN: "${FRAME_ANNOTATION_REDIS_MAXLEN:-200000}"
+      FRAME_ANNOTATION_SOURCE_STREAM_ENABLED: "${FRAME_ANNOTATION_SOURCE_STREAM_ENABLED:-false}"
+      FRAME_ANNOTATION_SOURCE_STREAM_PATTERN: "${FRAME_ANNOTATION_SOURCE_STREAM_PATTERN:-security.frame_annotations.__source_id__}"
+      FRAME_ANNOTATION_STREAM_MODE: "${FRAME_ANNOTATION_STREAM_MODE:-global}"
+      FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN: "${FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN:-5000}"
       FRAME_ANNOTATION_WRITE_TIMEOUT_MS: "${FRAME_ANNOTATION_WRITE_TIMEOUT_MS:-500}"
       FRAME_ANNOTATION_REDIS_QUEUE_MAXSIZE: "${FRAME_ANNOTATION_REDIS_QUEUE_MAXSIZE:-8192}"
       FRAME_ANNOTATION_INCLUDE_KEYPOINTS: compact
@@ -435,15 +660,18 @@ services:
       METRICS_TIME_PERIOD: "5"
       METRICS_HISTORY: "100"
       METRICS_EXTRA_LABELS: '{"service":"savant-a","profile":"dual-4090-two-source"}'
-      BATCH_SIZE: "${BATCH_SIZE:-1}"
-      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-4}"
+      BATCH_SIZE: "${BATCH_SIZE:-4}"
+      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-64}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
       MAX_FPS: "${MAX_FPS:-8/1}"
       MIN_FPS: "${MIN_FPS:-2/1}"
       BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
-      POSE_BATCH_SIZE: "${POSE_BATCH_SIZE:-1}"
-      FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-1}"
+      POSE_BATCH_SIZE: "${POSE_BATCH_SIZE:-4}"
+      POSE_MODEL_FILE: "${POSE_MODEL_FILE:-/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx}"
+      POSE_DECODER_LAYOUT: "${POSE_DECODER_LAYOUT:-decoded_56}"
+      FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-4}"
+      FACE_DETECTOR_MODEL_FILE: "${FACE_DETECTOR_MODEL_FILE:-/models/yolov8_face/yolov8n-face.dynamic.onnx}"
       FACE_EMBEDDING_BATCH_SIZE: "${FACE_EMBEDDING_BATCH_SIZE:-16}"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
@@ -502,15 +730,18 @@ services:
       METRICS_TIME_PERIOD: "5"
       METRICS_HISTORY: "100"
       METRICS_EXTRA_LABELS: '{"service":"savant-b","profile":"dual-4090-two-source"}'
-      BATCH_SIZE: "${BATCH_SIZE:-1}"
-      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-4}"
+      BATCH_SIZE: "${BATCH_SIZE:-4}"
+      MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-64}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
       MAX_FPS: "${MAX_FPS:-8/1}"
       MIN_FPS: "${MIN_FPS:-2/1}"
       BATCHED_PUSH_TIMEOUT: "${BATCHED_PUSH_TIMEOUT:-40000}"
-      POSE_BATCH_SIZE: "${POSE_BATCH_SIZE:-1}"
-      FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-1}"
+      POSE_BATCH_SIZE: "${POSE_BATCH_SIZE:-4}"
+      POSE_MODEL_FILE: "${POSE_MODEL_FILE:-/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx}"
+      POSE_DECODER_LAYOUT: "${POSE_DECODER_LAYOUT:-decoded_56}"
+      FACE_DETECTOR_BATCH_SIZE: "${FACE_DETECTOR_BATCH_SIZE:-4}"
+      FACE_DETECTOR_MODEL_FILE: "${FACE_DETECTOR_MODEL_FILE:-/models/yolov8_face/yolov8n-face.dynamic.onnx}"
       FACE_EMBEDDING_BATCH_SIZE: "${FACE_EMBEDDING_BATCH_SIZE:-16}"
       REDIS_URL: redis://redis:6379/0
       EVENT_STREAM: security.events
@@ -544,9 +775,76 @@ services:
       start_period: 15m
     restart: unless-stopped
 
+  rolling-cache-sink:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-rolling-cache-sink
+    profiles: ["rolling-cache"]
+    entrypoint: ["/bin/sh", "/opt/rolling-cache-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: sub+connect:tcp://replay-raw-fanout:5560
+      ROLLING_CACHE_ROOT: ${ROLLING_CACHE_ROOT:-/media/rolling-cache}
+      ROLLING_CACHE_SEGMENT_SECONDS: "${ROLLING_CACHE_SEGMENT_SECONDS:-4}"
+      ROLLING_CACHE_FPS: "${ROLLING_CACHE_FPS:-24}"
+      ROLLING_CACHE_SEGMENT_FRAMES: "${ROLLING_CACHE_SEGMENT_FRAMES:-}"
+      ROLLING_CACHE_RUNTIME_EPOCH_ID: "${ROLLING_CACHE_RUNTIME_EPOCH_ID:-}"
+      RUNTIME_EPOCH_STATE_PATH: /media/replay-sink-output/midterm/.current_epoch.json
+      METADATA_JSON_FORMAT: native
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/rolling_cache_sink_entrypoint.sh:/opt/rolling-cache-sink-entrypoint.sh:ro
+    depends_on:
+      replay-raw-fanout: { condition: service_started }
+    restart: unless-stopped
+
+  rolling-cache-sink-a:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-rolling-cache-sink-a
+    profiles: ["rolling-cache-dual"]
+    entrypoint: ["/bin/sh", "/opt/rolling-cache-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: sub+connect:tcp://replay-raw-fanout-a:5560
+      ROLLING_CACHE_ROOT: ${ROLLING_CACHE_ROOT:-/media/rolling-cache}
+      ROLLING_CACHE_SEGMENT_SECONDS: "${ROLLING_CACHE_SEGMENT_SECONDS:-4}"
+      ROLLING_CACHE_FPS: "${ROLLING_CACHE_FPS:-24}"
+      ROLLING_CACHE_SEGMENT_FRAMES: "${ROLLING_CACHE_SEGMENT_FRAMES:-}"
+      ROLLING_CACHE_RUNTIME_EPOCH_ID: "${ROLLING_CACHE_RUNTIME_EPOCH_ID:-}"
+      RUNTIME_EPOCH_STATE_PATH: /media/replay-sink-output/midterm/.current_epoch.json
+      METADATA_JSON_FORMAT: native
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/rolling_cache_sink_entrypoint.sh:/opt/rolling-cache-sink-entrypoint.sh:ro
+    depends_on:
+      replay-raw-fanout-a: { condition: service_started }
+    restart: unless-stopped
+
+  rolling-cache-sink-b:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-rolling-cache-sink-b
+    profiles: ["rolling-cache-dual"]
+    entrypoint: ["/bin/sh", "/opt/rolling-cache-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: sub+connect:tcp://replay-raw-fanout-b:5560
+      ROLLING_CACHE_ROOT: ${ROLLING_CACHE_ROOT:-/media/rolling-cache}
+      ROLLING_CACHE_SEGMENT_SECONDS: "${ROLLING_CACHE_SEGMENT_SECONDS:-4}"
+      ROLLING_CACHE_FPS: "${ROLLING_CACHE_FPS:-24}"
+      ROLLING_CACHE_SEGMENT_FRAMES: "${ROLLING_CACHE_SEGMENT_FRAMES:-}"
+      ROLLING_CACHE_RUNTIME_EPOCH_ID: "${ROLLING_CACHE_RUNTIME_EPOCH_ID:-}"
+      RUNTIME_EPOCH_STATE_PATH: /media/replay-sink-output/midterm/.current_epoch.json
+      METADATA_JSON_FORMAT: native
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/rolling_cache_sink_entrypoint.sh:/opt/rolling-cache-sink-entrypoint.sh:ro
+    depends_on:
+      replay-raw-fanout-b: { condition: service_started }
+    restart: unless-stopped
+
   source-adapter:
     image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
     container_name: video-analytics-midterm-source-adapter
+    profiles: ["legacy-primary-rtsp"]
     entrypoint:
       [
         "/opt/savant/adapters/gst/sources/rtsp.sh",
@@ -591,6 +889,7 @@ services:
       RECORDING_SOURCE_ID: "${RECORDING_SOURCE_ID:-}"
       RECORDING_MAX_REQUESTS_PER_RUN: "${RECORDING_MAX_REQUESTS_PER_RUN:-0}"
       RECORDING_COOLDOWN_SECONDS: "${RECORDING_COOLDOWN_SECONDS:-30}"
+      RECORDING_COOLDOWN_SCOPE: "${RECORDING_COOLDOWN_SCOPE:-algorithm}"
       RECORDING_COOLDOWN_GRACE_MS: "${RECORDING_COOLDOWN_GRACE_MS:-1000}"
       DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
       DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"
@@ -601,9 +900,16 @@ services:
       EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY: "${EVIDENCE_MATERIALIZATION_DEFER_LOW_PRIORITY:-false}"
       EVIDENCE_REPLAY_TTL_SECONDS: "${EVIDENCE_REPLAY_TTL_SECONDS:-300}"
       EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS: "${EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS:-600}"
+      EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS: "${EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS:-0}"
+      EVIDENCE_DENSITY_PROFILE: "${EVIDENCE_DENSITY_PROFILE:-normal}"
       EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL: "${EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL:-240}"
-      EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE: "${EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE:-2}"
+      EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE: "${EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE:-1}"
       EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE: "${EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE:-intrusion:40}"
+      ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS: "${ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS:-false}"
+      EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED: "${EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED:-false}"
+      EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS: "${EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS:-30}"
+      EVIDENCE_EVENT_COVERAGE_EVENT_TYPES: "${EVIDENCE_EVENT_COVERAGE_EVENT_TYPES:-intrusion,watchlist_hit,live_search_hit}"
+      EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS: "${EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS:-60}"
       DEFAULT_REPLAY_SOURCE_ID: primary_rtsp
       WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:midterm:reese,demo:midterm:finch}"
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
@@ -733,6 +1039,7 @@ services:
       REPLAY_SHARDS_CONFIG_PATH: "${REPLAY_SHARDS_CONFIG_PATH:-}"
       CONSUMER_GROUP: clip-workers-midterm
       CONSUMER_NAME: clip-worker-midterm-1
+      CLIP_WORKER_CONSUMER_COUNT: "${CLIP_WORKER_CONSUMER_COUNT:-8}"
       POLL_TIMEOUT_MS: "5000"
       DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
       DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"
@@ -746,10 +1053,17 @@ services:
       EVIDENCE_REPLAY_TTL_SECONDS: "${EVIDENCE_REPLAY_TTL_SECONDS:-300}"
       EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS: "${EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS:-600}"
       EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED: "${EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED:-true}"
-      EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY: "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY:-8}"
-      EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD: "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-4}"
+      EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY: "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY:-36}"
+      EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD: "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-9}"
       EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE: "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE:-1}"
+      EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS: "${EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS:-0}"
+      MEDIA_POLL_INTERVAL_S: "${MEDIA_POLL_INTERVAL_S:-2}"
+      MIDTERM_SINK_STABILITY_CHECKS: "${MIDTERM_SINK_STABILITY_CHECKS:-2}"
+      EVIDENCE_REPLAY_SLOT_SINK_STABILITY_BUDGET_S: "${EVIDENCE_REPLAY_SLOT_SINK_STABILITY_BUDGET_S:-60}"
+      EVIDENCE_REPLAY_SLOT_FINALIZER_BUDGET_S: "${EVIDENCE_REPLAY_SLOT_FINALIZER_BUDGET_S:-0}"
+      EVIDENCE_REPLAY_SLOT_GRACE_S: "${EVIDENCE_REPLAY_SLOT_GRACE_S:-5}"
       EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS: "${EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS:-}"
+      EVIDENCE_DENSITY_PROFILE: "${EVIDENCE_DENSITY_PROFILE:-normal}"
       EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL: "${EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL:-normal}"
       CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS: "${CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS:-5000}"
       CLIP_WORKER_PENDING_CLAIM_COUNT: "${CLIP_WORKER_PENDING_CLAIM_COUNT:-10}"
@@ -760,6 +1074,7 @@ services:
       REPLAY_FPS: "${REPLAY_FPS:-24}"
       REPLAY_DURATION_EXTRA_SLACK_S: "${REPLAY_DURATION_EXTRA_SLACK_S:-5}"
       REPLAY_FORCE_CONSTANT_CADENCE: "${REPLAY_FORCE_CONSTANT_CADENCE:-true}"
+      REPLAY_TS_SYNC: "${REPLAY_TS_SYNC:-false}"
       REPLAY_ANCHOR_STRATEGY: event_keyframe
       KEYFRAME_LOOKUP_RETRIES: "${KEYFRAME_LOOKUP_RETRIES:-8}"
       KEYFRAME_LOOKUP_RETRY_SLEEP_S: "${KEYFRAME_LOOKUP_RETRY_SLEEP_S:-1.0}"
@@ -767,6 +1082,13 @@ services:
       POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S: "${POST_SAVANT_FRAME_PROOF_RETRY_SLEEP_S:-1.0}"
       POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S: "${POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S:-3}"
       POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S: "${POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S:-0.5}"
+      POST_SAVANT_FRAME_PROOF_FAST_PATH_BATCH_SIZE: "${POST_SAVANT_FRAME_PROOF_FAST_PATH_BATCH_SIZE:-0}"
+      POST_SAVANT_FRAME_PROOF_FAST_PATH_LAG: "${POST_SAVANT_FRAME_PROOF_FAST_PATH_LAG:-0}"
+      POST_SAVANT_FRAME_PROOF_FAST_PATH_PENDING: "${POST_SAVANT_FRAME_PROOF_FAST_PATH_PENDING:-0}"
+      CLIP_WORKER_FRAME_ANNOTATION_LOOKUP_CONCURRENCY: "${CLIP_WORKER_FRAME_ANNOTATION_LOOKUP_CONCURRENCY:-8}"
+      CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_TTL_S: "${CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_TTL_S:-0.75}"
+      CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_BUCKET_MS: "${CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_BUCKET_MS:-1000}"
+      CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_MAX_ENTRIES: "${CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_MAX_ENTRIES:-64}"
       POST_SAVANT_ALLOW_CROSS_SESSION_POST_WINDOW_PROOF: "${POST_SAVANT_ALLOW_CROSS_SESSION_POST_WINDOW_PROOF:-true}"
       POST_SAVANT_ALLOW_TRUNCATED_PRE_WINDOW_PROOF: "${POST_SAVANT_ALLOW_TRUNCATED_PRE_WINDOW_PROOF:-true}"
       FRAME_ANNOTATION_STREAM: security.frame_annotations
@@ -842,6 +1164,126 @@ services:
       video-file-sink: { condition: service_started }
     restart: unless-stopped
 
+  video-file-sink-c:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-c
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-c.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink-d:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-d
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-d.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink-e:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-e
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-e.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink-f:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-f
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-f.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink-g:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-g
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-g.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
+  video-file-sink-h:
+    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    container_name: video-analytics-midterm-video-file-sink-h
+    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      ZMQ_ENDPOINT: router+bind:tcp://0.0.0.0:6666
+      CHUNK_SIZE: "0"
+      METADATA_JSON_FORMAT: native
+      VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH: "true"
+      VIDEO_FILE_SINK_CREATED_BY: video-file-sink-h.startup
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - ../scripts/runtime/video_file_sink_entrypoint.sh:/opt/video-file-sink-entrypoint.sh:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      video-file-sink: { condition: service_started }
+    restart: unless-stopped
+
   media-worker:
     build:
       context: ../services/media-worker
@@ -860,19 +1302,21 @@ services:
       SNAPSHOT_OUTPUT_DIR: /media/midterm-snapshots
       ANNOTATED_OUTPUT_DIR: /media/midterm-snapshots/annotated
       EVIDENCE_OUTPUT_DIR: /media/evidence
-      MIDTERM_SINK_STABILITY_CHECKS: "2"
+      MIDTERM_SINK_STABILITY_CHECKS: "${MIDTERM_SINK_STABILITY_CHECKS:-2}"
       MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES: "${MEDIA_INVALID_SINK_OUTPUT_MAX_RETRIES:-3}"
       MEDIA_WORKER_STATE_PATH: "${MEDIA_WORKER_STATE_PATH:-/media/replay-sink-output/midterm/.media-worker.processed.json}"
       MEDIA_SINK_SCAN_MAX_METADATA_FILES: "${MEDIA_SINK_SCAN_MAX_METADATA_FILES:-20000}"
-      MEDIA_POLL_INTERVAL_S: "5"
+      MEDIA_POLL_INTERVAL_S: "${MEDIA_POLL_INTERVAL_S:-2}"
       MEDIA_PROBE_TIMEOUT_S: "${MEDIA_PROBE_TIMEOUT_S:-30}"
       MEDIA_DECODE_TIMEOUT_S: "${MEDIA_DECODE_TIMEOUT_S:-120}"
       MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE: "${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
       MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S: "${MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S:-180}"
       MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG: "${MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG:-200}"
       MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL: "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
-      MEDIA_WORKER_FINALIZER_WORKERS: "${MEDIA_WORKER_FINALIZER_WORKERS:-4}"
-      MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S: "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
+      MEDIA_WORKER_FINALIZER_WORKERS: "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
+      MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL: "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
+      MEDIA_WORKER_FINALIZER_SOURCE_SERIAL: "${MEDIA_WORKER_FINALIZER_SOURCE_SERIAL:-false}"
+      MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S: "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0}"
       MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S: "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S:-90}"
       MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT: "${MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT:-4}"
       MEDIA_WORKER_FFMPEG_X264_PRESET: "${MEDIA_WORKER_FFMPEG_X264_PRESET:-ultrafast}"
@@ -900,6 +1344,13 @@ services:
       FRAME_CACHE_SIDECAR_LOOKBACK_COUNT: "${FRAME_CACHE_SIDECAR_LOOKBACK_COUNT:-20000}"
       FRAME_CACHE_SIDECAR_RANGE_COUNT: "${FRAME_CACHE_SIDECAR_RANGE_COUNT:-2000}"
       FRAME_CACHE_SIDECAR_MAX_SCAN: "${FRAME_CACHE_SIDECAR_MAX_SCAN:-20000}"
+      FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS: "${FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS:-0}"
+      FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S: "${FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S:-0}"
+      FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES: "${FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES:-0}"
+      FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED: "${FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED:-false}"
+      FRAME_CACHE_SIDECAR_SOURCE_STREAM_PATTERN: "${FRAME_CACHE_SIDECAR_SOURCE_STREAM_PATTERN:-security.frame_annotations.__source_id__}"
+      FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL: "${FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL:-true}"
+      EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED: "${EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED:-true}"
       FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE: "${FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE:-event_window}"
       FRAME_CACHE_SIDECAR_OUTPUT_ANNOTATIONS: annotations.frame_cache.identity.jsonl
       FRAME_CACHE_SIDECAR_OUTPUT_SUMMARY: summary.frame_cache.identity.json
@@ -910,6 +1361,21 @@ services:
       FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS: "${FRAME_CACHE_CANONICAL_MAX_DURATION_SECONDS:-12.5}"
       FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS: "${FRAME_CACHE_CANONICAL_EVENT_CENTER_TOLERANCE_SECONDS:-0.75}"
       FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED: "true"
+      POST_SAVANT_FAST_RAW_CLIP_ENABLED: "${POST_SAVANT_FAST_RAW_CLIP_ENABLED:-true}"
+      EVIDENCE_DENSITY_PROFILE: "${EVIDENCE_DENSITY_PROFILE:-normal}"
+      ROLLING_CACHE_ENABLED: "${ROLLING_CACHE_ENABLED:-false}"
+      ROLLING_CACHE_MATERIALIZATION_ENABLED: "${ROLLING_CACHE_MATERIALIZATION_ENABLED:-false}"
+      ROLLING_CACHE_SOURCES: "${ROLLING_CACHE_SOURCES:-}"
+      ROLLING_CACHE_ROOT: "${ROLLING_CACHE_ROOT:-/media/rolling-cache}"
+      ROLLING_CACHE_MATERIALIZED_ROOT: "${ROLLING_CACHE_MATERIALIZED_ROOT:-/media/rolling-cache-materialized}"
+      ROLLING_CACHE_RETENTION_SECONDS: "${ROLLING_CACHE_RETENTION_SECONDS:-300}"
+      ROLLING_CACHE_SEGMENT_SECONDS: "${ROLLING_CACHE_SEGMENT_SECONDS:-4}"
+      ROLLING_CACHE_FALLBACK_TO_REPLAY: "${ROLLING_CACHE_FALLBACK_TO_REPLAY:-true}"
+      ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL: "${ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL:-16}"
+      ROLLING_CACHE_MATERIALIZATION_WORKERS: "${ROLLING_CACHE_MATERIALIZATION_WORKERS:-1}"
+      ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S: "${ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S:-1}"
+      ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS: "${ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS:-1}"
+      ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS: "${ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS:-120}"
       EVIDENCE_VERSION: midterm
       EVIDENCE_SCHEMA_VERSION: 2.0-midterm
       EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS: "false"
@@ -923,9 +1389,9 @@ services:
       MIN_FPS: "${MIN_FPS:-2/1}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       FACE_CONFIDENCE_THRESHOLD: "${FACE_CONFIDENCE_THRESHOLD:-0.50}"
-      POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_CONFIDENCE_THRESHOLD: "${POSE_CONFIDENCE_THRESHOLD:-0.60}"
       POSE_KEYPOINT_THRESHOLD: "${POSE_KEYPOINT_THRESHOLD:-0.35}"
-      POSE_SELECTOR_CONFIDENCE_THRESHOLD: "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.50}"
+      POSE_SELECTOR_CONFIDENCE_THRESHOLD: "${POSE_SELECTOR_CONFIDENCE_THRESHOLD:-0.60}"
       POSE_SELECTOR_NMS_IOU_THRESHOLD: "${POSE_SELECTOR_NMS_IOU_THRESHOLD:-0.50}"
       POSE_MIN_WIDTH: "${POSE_MIN_WIDTH:-60}"
       POSE_MIN_HEIGHT: "${POSE_MIN_HEIGHT:-100}"

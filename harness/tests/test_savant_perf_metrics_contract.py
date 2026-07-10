@@ -25,6 +25,9 @@ REQUIRED_METRICS = [
     "va_savant_adaface_embeddings_total",
     "va_savant_person_observations_exported_total",
     "va_savant_face_observations_exported_total",
+    "va_savant_pose_stage_fps",
+    "va_savant_face_stage_fps",
+    "va_savant_adaface_embedding_fps",
 ]
 REGISTERED_COUNTERS = [
     "va_savant_frames_seen",
@@ -43,6 +46,14 @@ REGISTERED_GAUGES = [
     "va_savant_effective_fps",
     "va_savant_last_frame_age_seconds",
     "va_savant_sources_active",
+    "va_savant_frame_annotation_fps",
+    "va_savant_pose_stage_fps",
+    "va_savant_pose_object_fps",
+    "va_savant_face_stage_fps",
+    "va_savant_face_object_fps",
+    "va_savant_adaface_embedding_fps",
+    "va_savant_person_observation_fps",
+    "va_savant_face_observation_fps",
 ]
 
 
@@ -56,6 +67,10 @@ def test_savant_perf_metrics_pyfunc_is_wired_after_frame_annotation_exporter() -
     element = next(element for element in elements if element.get("name") == "savant_perf_metrics")
     assert element["module"] == "custom.pyfuncs.savant_perf_metrics"
     assert element["class_name"] == "SavantPerfMetricsPyFunc"
+    assert "SAVANT_PERF_METRICS_ENABLED" in str(element["kwargs"]["enabled"])
+    assert "SAVANT_PERF_METRICS_STAGE_RATES_ENABLED" in str(
+        element["kwargs"]["stage_rates_enabled"]
+    )
 
 
 def test_savant_perf_metrics_exposes_stable_va_savant_names() -> None:

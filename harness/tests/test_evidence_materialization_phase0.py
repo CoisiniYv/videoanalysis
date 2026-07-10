@@ -498,6 +498,21 @@ def test_media_worker_claim_uses_skip_locked_for_idempotent_finalization() -> No
     assert "terminal_states" in params
 
 
+def test_media_worker_claim_missing_is_not_claimed() -> None:
+    worker = _activate_media_worker()
+    conn = _FakeConnection()
+    conn.cursor_obj.fetchone = lambda: ("missing",)  # type: ignore[method-assign]
+
+    result = worker._claim_media_finalization(
+        conn,
+        event_id="11111111-1111-4111-8111-111111111111",
+        sink_path="/media/rolling-cache-materialized/example",
+        worker_id="finalizer-1",
+    )
+
+    assert result == {"status": "missing", "claimed": False}
+
+
 def test_media_worker_finalizer_pool_schedules_different_sources(monkeypatch) -> None:
     worker = _activate_media_worker()
     conn = _FakeConnection()
@@ -637,6 +652,75 @@ def test_media_worker_finalizer_pool_keeps_same_source_serial(monkeypatch) -> No
     assert updated == 2
     assert recorded.count("source-a") == 1
     assert recorded.count("source-b") == 1
+
+
+def test_media_worker_finalizer_pool_can_parallelize_same_source_fast_path(
+    monkeypatch,
+) -> None:
+    worker = _activate_media_worker()
+    conn = _FakeConnection()
+    recorded: list[str] = []
+    event_ids = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    ]
+    metadata_files = [
+        {"labels": {"event_id": event_ids[0]}, "_meta_dir": "/tmp/a1"},
+        {"labels": {"event_id": event_ids[1]}, "_meta_dir": "/tmp/a2"},
+        {"labels": {"event_id": event_ids[2]}, "_meta_dir": "/tmp/a3"},
+    ]
+    schedule_rows = {
+        event_id: {"source_id": "source-a", "replay_shard_id": "replay-a"}
+        for event_id in event_ids
+    }
+
+    def fake_job(job: object, **_kwargs: object) -> int:
+        recorded.append(job.event_id)
+        return 1
+
+    monkeypatch.setattr(worker, "_find_video_file", lambda _meta_dir: "/tmp/video.mov")
+    monkeypatch.setattr(
+        worker,
+        "_sink_output_ready_for_finalizer",
+        lambda **_kwargs: (True, "ready"),
+    )
+    monkeypatch.setattr(worker, "_process_single_finalizer_job", fake_job)
+
+    updated = worker._process_sink_output_with_finalizer_pool(
+        conn,
+        "/tmp/sink",
+        set(),
+        metadata_files=metadata_files,
+        schedule_rows=schedule_rows,
+        scan_stats={"scan_duration_ms": 0, "metadata_files_visited": 3},
+        evidence_output_dir="/tmp/evidence",
+        candidate_dirs=None,
+        invalid_output_failures=None,
+        midterm_sink_stability_checks=1,
+        processed_state_path=None,
+        sink_scan_max_metadata_files=None,
+        materialization_timeout_s=180,
+        materialization_max_backlog=0,
+        materialization_max_per_poll=0,
+        materialization_throttle_sleep_s=0,
+        materialization_throttle_deadline_guard_s=0,
+        materialization_finalizer_workers=4,
+        materialization_finalizer_max_per_source_per_poll=4,
+        materialization_finalizer_source_serial=False,
+        materialization_database_url="postgresql://example",
+        evidence_final_root_max_bytes=0,
+        evidence_incoming_root_max_bytes=0,
+        replay_sink_output_max_bytes=0,
+        evidence_storage_warning_ratio=0.8,
+        evidence_storage_critical_ratio=0.9,
+        evidence_storage_hard_ratio=1.0,
+        cleanup_replay_sink_output_enabled=False,
+        cleanup_replay_sink_output_statuses=("ready",),
+    )
+
+    assert updated == 3
+    assert set(recorded) == set(event_ids)
 
 
 def test_media_worker_finalizer_pool_preserves_terminal_processed_state(

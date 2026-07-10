@@ -85,21 +85,25 @@ Current facts:
   `FACE_DETECTOR_BATCH_SIZE`, `FACE_EMBEDDING_BATCH_SIZE`,
   `MAX_PARALLEL_STREAMS`, and `BATCHED_PUSH_TIMEOUT` from env-backed compose
   defaults;
-- `infra/env/midterm.env` currently keeps conservative defaults:
-  `BATCH_SIZE=1`, `POSE_BATCH_SIZE=1`, `FACE_DETECTOR_BATCH_SIZE=1`,
-  `FACE_EMBEDDING_BATCH_SIZE=16`, `MAX_PARALLEL_STREAMS=4`, and
+- `infra/env/midterm.env` now keeps the explicit 60-stream 8 FPS acceptance
+  operating point:
+  `BATCH_SIZE=4`, `POSE_BATCH_SIZE=4`, `FACE_DETECTOR_BATCH_SIZE=4`,
+  `FACE_EMBEDDING_BATCH_SIZE=16`, `MAX_PARALLEL_STREAMS=64`, and
   `BATCHED_PUSH_TIMEOUT=40000`;
-- `module.yml` defaults still match those conservative batch sizes;
+- `module.yml` still has safe env fallback defaults, but the midterm compose/env
+  contract prevents the active 60-stream profile from silently returning to
+  detector batch 1;
 - the dual 4090 profile changes output codec to `copy`, but still leaves model
   batch and parallel-stream sizing as T4-unproven defaults;
 - no T4 TensorRT batch/latency operating point is recorded.
 
 Risk:
 
-At 30 streams per shard, batch 1 and `MAX_PARALLEL_STREAMS=4` are the most likely
-GPU utilization ceiling before the forwarder or Redis exporters are optimized.
-The face detector is especially sensitive because `FACE_DETECTOR_BATCH_SIZE=1`
-may require dynamic-batch ONNX/TensorRT export before it can be raised safely.
+At 30 streams per shard, silently falling back to detector batch 1 or
+`MAX_PARALLEL_STREAMS=4` is now treated as a deployment regression, not a
+valid 60-stream profile. Remaining pressure failures after batch 4 / parallel
+64 should be diagnosed as runtime throughput, sharding, exporter, or model
+engine issues rather than hidden baseline misconfiguration.
 
 Required closure:
 

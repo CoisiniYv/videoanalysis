@@ -233,7 +233,9 @@ http://127.0.0.1:8090/operator
 8090 当前可以保存并应用 Forwarder/Savant FPS、模型 infer interval 和
 `BATCHED_PUSH_TIMEOUT`；应用时会按差异重建 `analysis-forwarder` 和/或
 `savant-security`，并复用 evidence restart guard。模型 batch 和
-`MAX_PARALLEL_STREAMS` 仍建议通过 env 加压测验证，不应在迁移时顺手调大。
+`MAX_PARALLEL_STREAMS` 仍建议通过 env 加压测验证。当前 midterm 主线已把 60 路
+8 FPS 验收档固化为 detector batch 4 / parallel 64；不要在迁移时静默退回
+batch 1，除非显式切到 low-capacity/debug profile。
 
 可以直接通过 env 调整的是：
 
@@ -260,11 +262,11 @@ MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG
 当前 compose 中 batch 已不是写死值，默认值在 `infra/env/midterm.env`：
 
 ```text
-BATCH_SIZE=1
-POSE_BATCH_SIZE=1
-FACE_DETECTOR_BATCH_SIZE=1
+BATCH_SIZE=4
+POSE_BATCH_SIZE=4
+FACE_DETECTOR_BATCH_SIZE=4
 FACE_EMBEDDING_BATCH_SIZE=16
-MAX_PARALLEL_STREAMS=4
+MAX_PARALLEL_STREAMS=64
 BATCHED_PUSH_TIMEOUT=40000
 SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS=50
 SAVANT_REDIS_EXPORTER_CONNECT_TIMEOUT_MS=50

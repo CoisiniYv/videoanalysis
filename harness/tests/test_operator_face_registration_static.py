@@ -45,11 +45,11 @@ def test_operator_page_is_chinese_console_ui() -> None:
     assert "统一配置台" in html
     assert "运行概览" in html
     assert "摄像头管理" in html
-    assert "人员与人脸" in html
+    assert "人脸轨迹" in html
     assert "告警证据" in html
     assert "报警机器时间" in html
     assert "人脸注册" in html
-    assert "人脸图库" in html
+    assert "一键找人" in html
     assert "人脸图片" in html
     assert "开始注册" in html
     assert "theme-toggle" in html
@@ -79,6 +79,32 @@ def test_operator_js_uses_real_camera_and_people_apis() -> None:
     assert "prepareFaceRegistrationFormData" in js
     assert "selectedExternalPersonId" in js
     assert "dev_mock" not in js
+
+
+def test_operator_separates_face_trajectory_from_evidence_viewer() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    operator_js = _text(STATIC_ROOT / "operator.js")
+    evidence_js = _text(STATIC_ROOT / "evidence.js")
+
+    assert "find-person-dialog" in html
+    assert "image-preview-dialog" in html
+    assert "不生成证据录像" in html
+    assert 'data-event-category="identity"' in html
+    assert 'value="0.6"' in html
+    assert "`${API}/people/${encodeURIComponent(personId)}/find" in operator_js
+    assert 'params.set("include_unregistered_sources", "true")' in operator_js
+    assert "window.operatorPeople" in operator_js
+    assert "openPersonById" in operator_js
+    assert "`${API}/people/${encodeURIComponent(selectedPersonId)}/trajectory" not in operator_js
+    assert "selectedPersonRequestId" in operator_js
+    assert "data-image-preview-url" in operator_js
+    assert "bindImagePreviewButtons" in operator_js
+    assert 'params.set("event_category", "evidence")' in evidence_js
+    assert 'EVIDENCE_VISIBLE_CATEGORIES = new Set(["all", "perimeter", "behavior", "crowd", "identity"])' in evidence_js
+    assert "人脸轨迹命中" in evidence_js
+    assert "查看此人轨迹" in evidence_js
+    assert "openPersonTrajectoryFromBundle" in evidence_js
+    assert 'id === "filterPerson" && input.value.trim() && state.activeCategory === "all"' in evidence_js
 
 
 def test_operator_gallery_renders_registered_face_images() -> None:
@@ -185,7 +211,7 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=runtime-config-sync-20260629" in html
+    assert "operator.js?v=operator-face-trajectory-link-20260709" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js

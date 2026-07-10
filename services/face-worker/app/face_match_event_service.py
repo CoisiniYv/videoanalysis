@@ -27,9 +27,11 @@ LIVE_SEARCH_HIT_EVENT_TYPE = "live_search_hit"
 DEFAULT_FACE_MATCH_THRESHOLD = 0.50
 DEFAULT_EVIDENCE_POLICY = {
     "snapshot_required": True,
-    "clip_required": True,
+    "clip_required": False,
     "pre_seconds": 5,
     "post_seconds": 5,
+    "evidence_mode": "image_only",
+    "playback_kind": "image",
 }
 MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON = (
     "Midterm face match evidence created the evidence task, but production "
@@ -67,6 +69,16 @@ def _jsonable(value: Any) -> Any:
         return value
     except TypeError:
         return str(value)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def build_source_event_id(source_observation_id: str, person_id: int) -> str:
@@ -118,17 +130,23 @@ def _observation_media(observation: dict[str, Any]) -> dict[str, Any]:
     return media if isinstance(media, dict) else {}
 
 
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _event_ts_ms_from_observation(
     observation: dict[str, Any],
     media: dict[str, Any],
 ) -> int:
-    """Return business/cooldown event time without using frame PTS when possible."""
-    try:
-        ntp_timestamp_ns = int(media.get("ntp_timestamp") or 0)
-    except (TypeError, ValueError):
-        ntp_timestamp_ns = 0
-    if ntp_timestamp_ns > 0:
-        return ntp_timestamp_ns // 1_000_000
+    """Return frame-domain event time for frame-origin face matches."""
+    frame_pts_ns = _int_or_none(media.get("frame_pts"))
+    if frame_pts_ns is not None and frame_pts_ns > 0:
+        return frame_pts_ns // 1_000_000
     return int(observation.get("timestamp_ms") or 0)
 
 
@@ -165,6 +183,15 @@ def build_watchlist_hit_event(
         **DEFAULT_EVIDENCE_POLICY,
         **(evidence_policy or {}),
     }
+    clip_required = _truthy(effective_policy.get("clip_required", False))
+    evidence_mode = str(
+        effective_policy.get("evidence_mode")
+        or ("video_clip" if clip_required else "image_only")
+    )
+    playback_kind = str(
+        effective_policy.get("playback_kind")
+        or ("video" if clip_required else "image")
+    )
     target_person_id_list = [int(value) for value in (target_person_ids or [])]
     target_external_id_list = [str(value) for value in (target_external_person_ids or [])]
     target_name_list = [str(value) for value in (target_names or [])]
@@ -218,15 +245,21 @@ def build_watchlist_hit_event(
         },
         "media": {
             "snapshot_required": True,
-            "clip_required": True,
-            "media_status": "not_implemented",
-            "snapshot_status": "not_implemented",
-            "clip_status": "not_implemented",
-            "metadata_status": "not_implemented",
+            "clip_required": clip_required,
+            "evidence_mode": evidence_mode,
+            "playback_kind": playback_kind,
+            "frame_identity_anchor": "frame_uuid",
+            "time_domain": "savant_frame",
+            "media_status": "image_pending" if not clip_required else "not_implemented",
+            "snapshot_status": "image_pending" if not clip_required else "not_implemented",
+            "clip_status": "not_required" if not clip_required else "not_implemented",
+            "metadata_status": "image_pending" if not clip_required else "not_implemented",
+            "snapshot_path": observation.get("snapshot_path"),
+            "crop_path": observation.get("crop_path"),
             "raw_clip_path": None,
             "annotated_clip_path": None,
             "metadata_path": None,
-            "recording_strategy": "reserved",
+            "recording_strategy": "image_only" if not clip_required else "reserved",
             "pre_seconds": effective_policy["pre_seconds"],
             "post_seconds": effective_policy["post_seconds"],
             "frame_uuid": frame_uuid,
@@ -240,7 +273,7 @@ def build_watchlist_hit_event(
             "time_base": source_media.get("time_base"),
             "metadata_source": source_media.get("metadata_source"),
             "stream_session_id": source_media.get("stream_session_id"),
-            "error_message": MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON,
+            "error_message": None if not clip_required else MIDTERM_FACE_MATCH_NOT_IMPLEMENTED_REASON,
         },
     }
 
@@ -269,7 +302,7 @@ def build_watchlist_hit_event(
         "rule_name": rule_name,
         "description": f"Watchlist hit for {person_name}".strip(),
         "snapshot_required": True,
-        "clip_required": True,
+        "clip_required": clip_required,
         "evidence_policy": dict(effective_policy),
         "payload": payload,
     }

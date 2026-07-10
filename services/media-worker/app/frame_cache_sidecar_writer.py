@@ -11,8 +11,11 @@ from __future__ import annotations
 import copy
 import json
 import socket
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
@@ -53,6 +56,9 @@ FORBIDDEN_IMAGE_FIELDS = {
     "base64_image",
     "frame_bytes",
 }
+
+_RANGE_CACHE_LOCK = Lock()
+_RANGE_CACHE: OrderedDict[tuple[Any, ...], tuple[float, list[tuple[str, dict[str, Any]]]]] = OrderedDict()
 
 
 class RedisStreamReadClient:
@@ -774,7 +780,13 @@ def _read_frame_annotations(
     stream_session_id_set = set(stream_session_ids)
     stream_session_filter_mode = _stream_session_filter_mode(config)
     stream_session_filter_strict = stream_session_filter_mode == "strict"
-    stream_name = str(config.get("stream_name") or "security.frame_annotations")
+    base_stream_name = str(config.get("stream_name") or "security.frame_annotations")
+    source_stream_used = False
+    if bool(config.get("source_stream_enabled")) and source_id:
+        stream_name = _source_frame_annotation_stream_name(config, str(source_id))
+        source_stream_used = True
+    else:
+        stream_name = base_stream_name
     lookback_count = int(config.get("lookback_count") or 10000)
     max_scan = int(config.get("max_scan") or 20000)
     range_count = int(config.get("range_count") or 2000)
@@ -799,6 +811,8 @@ def _read_frame_annotations(
         post_seconds = 5.0
     summary = {
         "stream_name": stream_name,
+        "base_stream_name": base_stream_name,
+        "source_stream_used": source_stream_used,
         "read_mode": read_mode,
         "bounded_range_used": read_mode == "bounded_stream_id_range",
         "range_max": range_max,
@@ -843,7 +857,53 @@ def _read_frame_annotations(
     next_max = range_max
     stop_reason = "max_scan_reached"
     stream_order = 0
-    while summary["entries_scanned_total"] < max_scan:
+    cached_range = _cached_frame_annotation_range(
+        client=client,
+        stream_name=stream_name,
+        range_max=range_max,
+        range_min=range_min,
+        max_scan=max_scan,
+        config=config,
+    )
+    if cached_range is not None:
+        summary["range_cache_enabled"] = True
+        summary["range_cache_hit"] = bool(cached_range.get("cache_hit"))
+        summary["range_cache_key"] = cached_range.get("cache_key")
+        summary["pages_read"] = 1 if cached_range.get("entries") else 0
+        for stream_id, message in cached_range.get("entries", []):
+            summary["entries_scanned"] += 1
+            summary["entries_scanned_total"] += 1
+            if not isinstance(message, dict):
+                summary["messages_invalid"] += 1
+                continue
+            if (
+                runtime_epoch_id
+                and str(message.get("runtime_epoch_id") or "").strip() != runtime_epoch_id
+            ):
+                summary["messages_filtered_runtime_epoch"] += 1
+                continue
+            if source_id is not None and message.get("source_id") != source_id:
+                summary["messages_filtered_source"] += 1
+                continue
+            if camera_id is not None and message.get("camera_id") != camera_id:
+                summary["messages_filtered_camera"] += 1
+                continue
+            if stream_session_id_set and (
+                str(message.get("stream_session_id") or "").strip()
+                not in stream_session_id_set
+            ):
+                if stream_session_filter_strict:
+                    summary["messages_filtered_stream_session"] += 1
+                    continue
+                summary["messages_stream_session_mismatch"] += 1
+            normalized = copy.deepcopy(message)
+            normalized["_stream_id"] = stream_id
+            normalized["_stream_order"] = stream_order
+            stream_order += 1
+            messages.append(normalized)
+        stop_reason = "range_exhausted"
+
+    while cached_range is None and summary["entries_scanned_total"] < max_scan:
         page_remaining = max_scan - int(summary["entries_scanned_total"])
         page_count = min(max(count, 1), page_remaining)
         entries = list(
@@ -917,6 +977,20 @@ def _read_frame_annotations(
             break
     summary["stop_reason"] = stop_reason
     summary["anchor_found"] = _frame_annotation_anchor_found(messages, anchor=anchor)
+    if (
+        source_stream_used
+        and not messages
+        and bool(config.get("source_stream_fallback_global"))
+    ):
+        fallback_config = dict(config)
+        fallback_config["source_stream_enabled"] = False
+        fallback_messages, fallback_summary = _read_frame_annotations(
+            redis_client=redis_client,
+            config=fallback_config,
+            event=event,
+        )
+        fallback_summary["source_stream_fallback_from"] = stream_name
+        return fallback_messages, fallback_summary
 
     messages.sort(key=lambda item: (item.get("frame_pts") is None, int(item.get("frame_pts") or 0), str(item.get("frame_uuid") or "")))
     pts_values = [int(item["frame_pts"]) for item in messages if isinstance(item.get("frame_pts"), int)]
@@ -967,7 +1041,75 @@ def _frame_cache_stream_range(
         int(event_ms - _freshness_before_seconds(config, pre_seconds) * 1000),
     )
     upper_ms = int(event_ms + _freshness_after_seconds(config, post_seconds) * 1000)
+    bucket_ms = int(config.get("range_cache_bucket_ms") or 0)
+    if bucket_ms > 0:
+        lower_ms = (lower_ms // bucket_ms) * bucket_ms
+        upper_ms = ((upper_ms + bucket_ms - 1) // bucket_ms) * bucket_ms
     return f"{upper_ms}-999999", f"{lower_ms}-0", "bounded_stream_id_range"
+
+
+def _cached_frame_annotation_range(
+    *,
+    client: Any,
+    stream_name: str,
+    range_max: str,
+    range_min: str,
+    max_scan: int,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    ttl_s = _float_or_none(config.get("range_cache_ttl_s")) or 0.0
+    max_entries = int(config.get("range_cache_max_entries") or 0)
+    if ttl_s <= 0 or max_entries <= 0:
+        return None
+    key = (
+        str(config.get("redis_url") or ""),
+        stream_name,
+        range_max,
+        range_min,
+        int(max_scan),
+    )
+    now = time.monotonic()
+    with _RANGE_CACHE_LOCK:
+        cached = _RANGE_CACHE.get(key)
+        if cached is not None:
+            created, entries = cached
+            if now - created <= ttl_s:
+                _RANGE_CACHE.move_to_end(key)
+                return {
+                    "cache_hit": True,
+                    "cache_key": _range_cache_key_label(key),
+                    "entries": entries,
+                }
+            _RANGE_CACHE.pop(key, None)
+
+    raw_entries = list(
+        client.xrevrange(
+            stream_name,
+            max=range_max,
+            min=range_min,
+            count=max(1, int(max_scan)),
+        )
+    )
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for entry in raw_entries[: max(1, int(max_scan))]:
+        stream_id, fields = _split_entry(entry)
+        message = _message_from_fields(fields)
+        if isinstance(message, dict):
+            entries.append((stream_id, message))
+    with _RANGE_CACHE_LOCK:
+        _RANGE_CACHE[key] = (now, entries)
+        _RANGE_CACHE.move_to_end(key)
+        while len(_RANGE_CACHE) > max_entries:
+            _RANGE_CACHE.popitem(last=False)
+    return {
+        "cache_hit": False,
+        "cache_key": _range_cache_key_label(key),
+        "entries": entries,
+    }
+
+
+def _range_cache_key_label(key: tuple[Any, ...]) -> str:
+    return "|".join(str(part) for part in key[1:])
 
 
 def _runtime_epoch_id_from_event(event: dict[str, Any]) -> str:
@@ -2425,6 +2567,23 @@ def _text_or_none(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return _decode_text(value)
+
+
+def _source_frame_annotation_stream_name(config: dict[str, Any], source_id: str) -> str:
+    safe_source_id = "".join(
+        ch if ch.isalnum() or ch in "._:-" else "_"
+        for ch in str(source_id or "").strip()
+    )
+    pattern = str(
+        config.get("source_stream_pattern")
+        or "security.frame_annotations.{source_id}"
+    )
+    try:
+        if "{source_id}" not in pattern and "__source_id__" in pattern:
+            return pattern.replace("__source_id__", safe_source_id)
+        return pattern.format(source_id=safe_source_id)
+    except Exception:
+        return f"security.frame_annotations.{safe_source_id}"
 
 
 def _env_text(name: str, default: str = "") -> str:

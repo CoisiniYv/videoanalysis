@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -162,6 +163,345 @@ def test_success_prune_removes_frame_cache_dropped_debug_sidecar(tmp_path: Path)
         "annotations.frame_cache.identity.jsonl",
     ]
     assert result["errors"] == 0
+
+
+def test_evidence_db_index_expanded_rows_can_be_disabled(monkeypatch: Any) -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "false")
+    assert worker._evidence_db_index_expanded_rows_enabled() is False
+
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+    assert worker._evidence_db_index_expanded_rows_enabled() is True
+
+
+def test_rolling_cache_finalizer_uses_metadata_frame_count_and_probed_duration(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    event_id = "22222222-2222-4222-8222-222222222222"
+    sink_dir = tmp_path / "rolling-cache-materialized" / event_id
+    sink_dir.mkdir(parents=True)
+    (sink_dir / "video.mov").write_bytes(b"raw clip bytes")
+    metadata_file = sink_dir / "metadata.json"
+    metadata_file.write_text(
+        json.dumps(
+            {
+                "job_id": f"rolling-cache-event-{event_id}",
+                "rolling_cache": {
+                    "selected_frame_count": 42,
+                    "output_duration_s": 1.75,
+                    "time_domain_crop_applied": True,
+                    "actual_start_pts": 1_000_000_000,
+                    "actual_end_pts": 2_750_000_000,
+                    "requested_start_pts": 1_000_000_000,
+                    "requested_end_pts": 2_750_000_000,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "evidence"
+    captured: dict[str, object] = {}
+
+    def fake_build_post_savant_evidence_bundle(**kwargs: object):
+        captured.update(kwargs)
+        reader = kwargs["decoded_frame_count_reader"]
+        assert callable(reader)
+        assert reader(Path("unused.mov")) == 42
+        assert kwargs["decoded_video_duration_s"] == 1.75
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        raw_clip = output_dir / "raw_clip.mov"
+        raw_clip.write_bytes(b"raw clip bytes")
+        sink_metadata = output_dir / "sink_metadata.json"
+        sink_metadata.write_text("{}\n", encoding="utf-8")
+        annotations = output_dir / "annotations.frame_cache.identity.jsonl"
+        annotations.write_text("{}\n", encoding="utf-8")
+        summary_path = output_dir / "summary.json"
+        summary = {
+            "annotation_status": "complete",
+            "annotation_source": "frame_annotation_cache",
+            "sidecar_frame_count": 42,
+            "decoded_video_frame_count": 42,
+            "raw_clip_duration": 1.75,
+            "time_window": {
+                "requested_duration_s": 1.75,
+                "actual_start_pts": 1_000_000_000,
+                "actual_end_pts": 2_750_000_000,
+            },
+            "object_counts": {"person": 1, "face": 0, "known_face": 0},
+            "production_ready": True,
+            "runtime_epoch_id": CURRENT_EPOCH,
+            "video_crop": {"materialization_mode": "rolling_cache_copy"},
+        }
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        return worker._EvidenceBundleView(
+            output_dir=output_dir,
+            raw_clip_path=raw_clip,
+            sink_metadata_path=sink_metadata,
+            production_sidecar_path=annotations,
+            summary_path=summary_path,
+            summary=summary,
+        )
+
+    monkeypatch.setenv("EVIDENCE_RUNTIME_EPOCH_STRICT", "false")
+    monkeypatch.setattr(
+        worker,
+        "_load_event_context",
+        lambda _conn, _event_id: {
+            "event_id": event_id,
+            "source_event_id": "source-event",
+            "event_type": "intrusion",
+            "camera_id": "camera-1",
+            "source_id": "source-1",
+            "created_at": "2026-06-12T01:00:00Z",
+            "event_ts_ms": 1_000,
+            "payload": {"media": {}},
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "load_native_metadata",
+        lambda _path: [
+            {
+                "type": "VideoFrame",
+                "frame_uuid": "frame-1",
+                "frame_pts": 1_000_000_000,
+                "duration": 41_666_666,
+                "objects": [{"label": "person"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        worker,
+        "read_decoded_video_frame_count",
+        lambda _path: (_ for _ in ()).throw(AssertionError("ffprobe frame count path should not run")),
+    )
+    probed_paths: list[str] = []
+
+    def fake_probe_duration(path: str) -> float:
+        probed_paths.append(path)
+        return 1.75
+
+    monkeypatch.setattr(worker, "_probe_video_duration_seconds", fake_probe_duration)
+    monkeypatch.setattr(
+        worker,
+        "build_post_savant_evidence_bundle",
+        fake_build_post_savant_evidence_bundle,
+    )
+
+    bundle = worker._finalize_post_savant_evidence_bundle(
+        object(),
+        event_id=event_id,
+        meta_dir=str(sink_dir),
+        metadata_file=str(metadata_file),
+        evidence_output_dir=str(output_root),
+    )
+
+    assert captured["decoded_video_duration_s"] == 1.75
+    assert probed_paths == [str(output_root / event_id / "raw_clip.mov")]
+    assert bundle["raw_clip"].endswith("raw_clip.mov")
+    assert bundle["annotation_lines"] == 42
+
+
+def test_rolling_cache_ready_check_uses_known_duration_without_ffprobe(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    video = tmp_path / "video.mov"
+    metadata = tmp_path / "metadata.json"
+    video.write_bytes(b"video")
+    metadata.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_duration_seconds",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("ready check should trust rolling-cache duration")
+        ),
+    )
+
+    ready, reason = worker._sink_output_ready_for_finalizer(
+        video_file=str(video),
+        metadata_file=str(metadata),
+        known_duration_s=2.5,
+    )
+    assert ready is True
+    assert reason == "ready"
+
+
+def test_rolling_cache_candidates_do_not_claim_before_ready_at() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: dict[str, Any]) -> None:
+            self.sql = sql
+            self.params = params
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.cursor_obj = _Cursor()
+
+        def cursor(self, *_args: Any, **_kwargs: Any) -> _Cursor:
+            return self.cursor_obj
+
+    conn = _Conn()
+    cfg = SimpleNamespace(
+        rolling_cache_sources=("source-1",),
+        rolling_cache_materialization_max_per_poll=16,
+        rolling_cache_segment_seconds=4,
+        rolling_cache_materialization_ready_segment_grace_seconds=1.0,
+    )
+
+    assert worker._rolling_cache_candidate_tasks(conn, cfg) == []
+    assert "rolling_cache_ready_at <= now()" in conn.cursor_obj.sql
+    assert "et.materialization_ready_at <= now()" in conn.cursor_obj.sql
+    assert conn.cursor_obj.params["segment_ready_delay_s"] == 5.0
+    assert "materialization_deferred" in worker.ROLLING_CACHE_TASK_STATUSES
+
+
+def test_rolling_cache_coverage_miss_deferred_tasks_are_retryable() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    assert "materialization_deferred" in worker.ROLLING_CACHE_TASK_STATUSES
+
+
+def test_rolling_cache_claim_preserves_existing_processing_deadline() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    class _Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: dict[str, Any]) -> None:
+            self.sql = sql
+            self.params = params
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.cursor_obj = _Cursor()
+
+        def cursor(self) -> _Cursor:
+            return self.cursor_obj
+
+    conn = _Conn()
+    ready_at = "2026-07-06T01:02:03+00:00"
+
+    assert worker._claim_rolling_cache_task(
+        conn,
+        event_id=EVENT_ID,
+        ready_at=ready_at,
+        processing_deadline_s=45.0,
+    )
+    assert "materialization_deadline_at = COALESCE(" in conn.cursor_obj.sql
+    assert "processing_deadline_s" in conn.cursor_obj.sql
+    assert conn.cursor_obj.params["ready_at"] == ready_at
+    assert conn.cursor_obj.params["processing_deadline_s"] == 45.0
+
+
+def test_rolling_cache_defer_sets_retry_ready_at() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: dict[str, Any]) -> None:
+            self.sql = sql
+            self.params = params
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.cursor_obj = _Cursor()
+
+        def cursor(self) -> _Cursor:
+            return self.cursor_obj
+
+    conn = _Conn()
+    worker._defer_rolling_cache_task(
+        conn,
+        event_id=EVENT_ID,
+        reason="rolling_cache_requested_window_not_fully_covered:post_gap_ns=100",
+        retry_after_s=1.5,
+    )
+
+    assert "materialization_ready_at =" in conn.cursor_obj.sql
+    assert "retry_after_s" in conn.cursor_obj.sql
+    assert conn.cursor_obj.params["retry_after_s"] == 1.5
+
+
+def test_rolling_cache_deadline_miss_is_terminal_failed_not_expired() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    class _Cursor:
+        rowcount = 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: dict[str, Any]) -> None:
+            self.sql = sql
+            self.params = params
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.cursor_obj = _Cursor()
+
+        def cursor(self) -> _Cursor:
+            return self.cursor_obj
+
+    conn = _Conn()
+    cfg = SimpleNamespace(rolling_cache_sources=("source-1",))
+
+    assert worker._expire_overdue_rolling_cache_tasks(conn, cfg) == 2
+    assert "SET status = 'materialization_failed'" in conn.cursor_obj.sql
+    assert "materialization_failure_reason" in conn.cursor_obj.sql
+    assert "'rolling_cache_materialization_deadline_missed'" in conn.cursor_obj.sql
+    assert "materialization_expired_reason = NULL" in conn.cursor_obj.sql
+
+
+def test_rolling_cache_coverage_retry_waits_for_observed_gap() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    retry_after_s = worker._rolling_cache_coverage_retry_after_s(
+        RuntimeError("rolling_cache_requested_window_not_fully_covered:post_gap_ns=1873500104")
+    )
+    assert abs(retry_after_s - 2.873500104) < 0.000001
+    assert worker._rolling_cache_coverage_retry_after_s(RuntimeError("no_overlapping_segments")) == 2.0
+
+
+def test_known_sink_duration_reads_rolling_cache_metadata() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    assert (
+        worker._known_sink_output_duration_seconds(
+            {"rolling_cache": {"output_duration_s": "3.25"}}
+        )
+        == 3.25
+    )
 
 
 def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> None:
@@ -357,6 +697,101 @@ def test_frame_cache_reader_paginates_bounded_range_until_source_anchor() -> Non
     assert summary["messages_retained"] == 3
     assert summary["anchor_found"] is True
     assert summary["stop_reason"] == "event_window_satisfied"
+
+
+def test_frame_cache_reader_reuses_bucketed_range_cache() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    writer._RANGE_CACHE.clear()
+    event_ms = 1781226000000
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def xrevrange(
+            self,
+            name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            self.calls.append({"name": name, "max": max, "min": min, "count": count})
+            return [
+                (
+                    f"{event_ms}-0",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                "source-1-frame",
+                                source_id="source-1",
+                                camera_id="camera-1",
+                                timestamp_ms=event_ms,
+                            )
+                        )
+                    },
+                ),
+                (
+                    f"{event_ms}-1",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                "source-2-frame",
+                                source_id="source-2",
+                                camera_id="camera-2",
+                                timestamp_ms=event_ms,
+                            )
+                        )
+                    },
+                ),
+            ]
+
+    redis = FakeRedis()
+    config = {
+        "stream_name": "security.frame_annotations",
+        "range_count": 2,
+        "max_scan": 30,
+        "pre_seconds": 5,
+        "post_seconds": 5,
+        "range_cache_bucket_ms": 10000,
+        "range_cache_ttl_s": 60,
+        "range_cache_max_entries": 4,
+    }
+
+    first, first_summary = writer._read_frame_annotations(
+        redis_client=redis,
+        config=config,
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "source-1-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {"runtime_epoch_id": CURRENT_EPOCH},
+        },
+    )
+    second, second_summary = writer._read_frame_annotations(
+        redis_client=redis,
+        config=config,
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-2",
+            "camera_id": "camera-2",
+            "frame_uuid": "source-2-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {"runtime_epoch_id": CURRENT_EPOCH},
+        },
+    )
+
+    assert [item["frame_uuid"] for item in first] == ["source-1-frame"]
+    assert [item["frame_uuid"] for item in second] == ["source-2-frame"]
+    assert len(redis.calls) == 1
+    assert redis.calls[0]["count"] == 30
+    assert first_summary["range_cache_hit"] is False
+    assert second_summary["range_cache_hit"] is True
 
 
 def test_frame_cache_reader_event_window_mode_retains_same_source_session_mismatch() -> None:
@@ -557,6 +992,26 @@ def test_missing_frame_metadata_keeps_playable_clip_degraded_not_failed() -> Non
     assert worker._evidence_state_for_clip_status(clip_status) == "materialized"
 
 
+def test_timeline_reconciliation_unverified_keeps_playable_clip_degraded() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    summary = {
+        "production_ready": False,
+        "annotation_status": "timeline_reconciliation_unverified",
+        "duration_guard_status": "relaxed",
+        "duration_guard_failed": False,
+        "epoch_guard_status": "relaxed",
+        "epoch_guard_failed": False,
+        "sink_window_guard_status": "relaxed",
+        "sink_window_guard_failed": False,
+    }
+
+    clip_status = worker._summary_clip_status(summary)
+
+    assert clip_status == "generated_unverified"
+    assert worker._evidence_state_for_clip_status(clip_status) == "materialized"
+
+
 def _frame_annotation(
     frame_uuid: str,
     *,
@@ -578,3 +1033,42 @@ def _frame_annotation(
         "stream_session_id": stream_session_id,
         "objects": [],
     }
+
+
+def test_media_worker_does_not_resurrect_epoch_superseded_tasks() -> None:
+    source = (REPO_ROOT / "services" / "media-worker" / "app" / "worker.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "EPOCH_SUPERSEDED_INCOMPLETE_REASON" in source
+    assert "materialization_failure_reason" in source
+    assert "superseded_reason" in source
+
+
+def test_rolling_cache_uses_independent_ready_poll_interval(monkeypatch: Any) -> None:
+    config = _activate("media-worker", "app.config")
+    worker_source = (
+        REPO_ROOT / "services" / "media-worker" / "app" / "worker.py"
+    ).read_text(encoding="utf-8")
+
+    monkeypatch.setenv("ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S", "0.5")
+    cfg = config.load_config()
+
+    assert cfg.rolling_cache_materialization_poll_interval_s == 0.5
+    assert "next_rolling_cache_poll_at" in worker_source
+    assert "next_general_poll_at" in worker_source
+    assert "runner=rolling_cache_runner" in worker_source
+    assert "class _RollingCacheMaterializationRunner" in worker_source
+    assert "future.done()" in worker_source
+
+
+def test_rolling_cache_runtime_errors_are_terminal_not_deferred() -> None:
+    source = (REPO_ROOT / "services" / "media-worker" / "app" / "worker.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "def _fail_rolling_cache_task" in source
+    assert "def _rolling_cache_failure_reason" in source
+    assert "status = 'materialization_failed'" in source
+    assert "materialization_failure_reason = %(reason)s" in source
+    assert "reason=_rolling_cache_failure_reason(exc)" in source

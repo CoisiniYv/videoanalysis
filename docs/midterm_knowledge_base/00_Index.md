@@ -30,6 +30,7 @@ tags:
 - [[16_Troubleshooting_Playbook|排障手册]]
 - [[17_Testing_And_Change_Guide|测试与变更指南]]
 - [[18_Artifact_And_Directory_Map|目录与 artifact 地图]]
+- Canonical pressure profile: `docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md`
 
 ## 当前一句话结论
 
@@ -38,6 +39,10 @@ Redis worker 后处理、DB-backed evidence 和离线迁移打包能力。当前
 
 - 60 路 3 FPS 下游证据链通过；
 - 单 4090 同卡双分支 60 路 4 FPS / 8 FPS retained-evidence pressure source 通过；
+- 当前 60 路单卡双分支压测必须按
+  `docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md` 固定拓扑、batch、
+  cooldown、duration、drain、`5:5/10:10/15:15` 证据窗口以及 DB-backed
+  overlay/timeline visual gate；
 - media-worker deadline-aware 平滑调度把 8 FPS pressure profile 下的 CPU 峰值控制到约 98%，
   evidence lifecycle p95 约 192 秒；
 - face-worker 注册图库 Qdrant authoritative cutover 通过，20,000 向量 benchmark all-search p95/p99

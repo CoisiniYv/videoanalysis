@@ -31,17 +31,32 @@ def build_face_source_observation_id(
     source_id: str,
     track_id: int,
     timestamp_ms: int,
+    *,
+    frame_uuid: str | None = None,
+    face_index: int | None = None,
 ) -> str:
     """Generate a deterministic, idempotent ``source_observation_id``.
 
-    Format: ``face:{source_id}:{track_id_or_no_track}:{timestamp_ms}``
+    Preferred format when a Savant frame UUID is available:
+    ``face:{source_id}:uuid:{frame_uuid}:{face_index}``
+
+    Legacy fallback format:
+    ``face:{source_id}:{track_id_or_no_track}:{timestamp_ms}``
 
     When ``track_id <= 0`` the track segment is replaced with ``"no_track"``.
     The timestamp ensures uniqueness for untracked detections at the same
-    source.
+    source. The legacy format is preserved for callers that do not yet carry
+    frame UUID metadata.
     """
+    if frame_uuid:
+        index_part = int(face_index or 0)
+        return f"face:{source_id}:uuid:{frame_uuid}:{index_part}"
+
     track_part = str(track_id) if track_id > 0 else "no_track"
-    return f"face:{source_id}:{track_part}:{timestamp_ms}"
+    legacy_id = f"face:{source_id}:{track_part}:{timestamp_ms}"
+    if face_index is not None and int(face_index) > 0:
+        legacy_id = f"{legacy_id}:{int(face_index)}"
+    return legacy_id
 
 
 @dataclass

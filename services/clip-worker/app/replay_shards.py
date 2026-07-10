@@ -37,6 +37,7 @@ class ReplayShardMap:
     shards: tuple[ReplayShard, ...]
     default_shard_id: str
     explicit: bool
+    mapping_version: str = "implicit-default"
 
     def __post_init__(self) -> None:
         if not self.shards:
@@ -78,6 +79,7 @@ class ReplayShardMap:
             "enabled": self.enabled,
             "explicit": self.explicit,
             "default_shard_id": self.default_shard_id,
+            "mapping_version": self.mapping_version,
             "shards": [shard.to_dict() for shard in self.shards],
         }
 
@@ -110,6 +112,7 @@ def load_replay_shard_map(
             ),
             default_shard_id=DEFAULT_SHARD_ID,
             explicit=False,
+            mapping_version="implicit-default",
         )
     try:
         doc = json.loads(raw)
@@ -136,6 +139,13 @@ def parse_replay_shard_map(
     if not isinstance(raw_shards, list) or not raw_shards:
         raise ReplayShardConfigError("replay shard config requires a non-empty shards list")
     default_shard_id = str(doc.get("default_shard_id") or "").strip()
+    mapping_version = str(
+        doc.get("mapping_version")
+        or doc.get("version")
+        or "unversioned"
+    ).strip()
+    if not mapping_version:
+        mapping_version = "unversioned"
     shards: list[ReplayShard] = []
     assigned_sources: dict[str, str] = {}
     for raw_shard in raw_shards:
@@ -179,6 +189,7 @@ def parse_replay_shard_map(
         shards=tuple(shards),
         default_shard_id=default_shard_id,
         explicit=True,
+        mapping_version=mapping_version,
     )
 
 

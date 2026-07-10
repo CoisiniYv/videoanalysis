@@ -1,6 +1,10 @@
 """Savant complex-model converter for YOLO26-pose ONNX.
 
-Output format ``[B, N, 57]`` (post_nms_57)::
+Supported output formats include dynamic-batch ``decoded_56`` and legacy
+``post_nms_57``.  ``decoded_56`` is the production batch>1 path because the
+exported post-NMS TopK branch is batch-unsafe.
+
+Legacy ``[B, N, 57]`` (post_nms_57)::
 
     0:4   = bbox (x1, y1, x2, y2)
     4     = confidence

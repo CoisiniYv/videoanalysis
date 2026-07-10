@@ -23,6 +23,7 @@ if root_path not in sys.path:
 from custom.services.frame_annotation_exporter import (  # noqa: E402
     FrameAnnotationExporterConfig,
     FrameAnnotationExportRuntime,
+    _stream_mode,
 )
 from custom.services.stream_session import StreamSessionTracker  # noqa: E402
 
@@ -179,3 +180,10 @@ def test_stream_session_tolerates_small_rollback_and_tracks_large_reset() -> Non
     assert cumulative_large_rollback != first
     assert after_rollback == cumulative_large_rollback
     assert forward_jump == cumulative_large_rollback
+
+
+def test_frame_annotation_stream_mode_accepts_global_and_source_alias() -> None:
+    assert _stream_mode("global_and_source") == "dual"
+    assert _stream_mode("global-and-source") == "dual"
+    assert _stream_mode("global+source") == "dual"
+    assert _stream_mode("dual") == "dual"

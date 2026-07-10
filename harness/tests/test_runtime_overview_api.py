@@ -14,6 +14,7 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
     sys.modules.pop(_mod, None)
 
 import app.routers.runtime as runtime_router
+import app.services.runtime_overview as runtime_overview_module
 from app.services.runtime_overview import (
     RuntimeOverviewConfig,
     _reset_restart_rate_cache_for_tests,
@@ -30,6 +31,9 @@ va_savant_sources_active 2
 va_savant_frames_seen_total{source_id="primary_rtsp"} 120
 va_savant_frame_annotations_exported_total{source_id="primary_rtsp"} 118
 va_savant_effective_fps{source_id="primary_rtsp"} 7.8
+va_savant_pose_stage_fps{source_id="primary_rtsp",window="10s"} 7.8
+va_savant_face_stage_fps{source_id="primary_rtsp",window="10s"} 1.0
+va_savant_adaface_embedding_fps{source_id="primary_rtsp",window="10s"} 0.5
 va_savant_last_frame_age_seconds{source_id="primary_rtsp"} 0.4
 va_savant_pose_objects_total{source_id="primary_rtsp"} 44
 va_savant_face_objects_total{source_id="primary_rtsp"} 18
@@ -154,6 +158,9 @@ def test_parse_savant_metrics_returns_per_source_summary() -> None:
     ]
     primary = parsed["sources"][0]
     assert primary["effective_fps"] == 7.8
+    assert primary["pose_stage_fps"] == 7.8
+    assert primary["face_stage_fps"] == 1.0
+    assert primary["adaface_embedding_fps"] == 0.5
     assert primary["last_frame_age_seconds"] == 0.4
     assert primary["frames_seen_total"] == 120
     assert primary["pose_objects_total"] == 44
@@ -177,8 +184,25 @@ def test_parse_forwarder_metrics_returns_queue_and_per_source_summary() -> None:
     ]
 
 
-def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None:
+def test_runtime_overview_aggregates_metrics_containers_and_supervisor(monkeypatch) -> None:
     _reset_restart_rate_cache_for_tests()
+    monkeypatch.setattr(
+        runtime_overview_module,
+        "summarize_runtime_epoch_barrier",
+        lambda **_kwargs: {
+            "available": True,
+            "current_runtime_epoch_id": "midterm-current",
+            "blocking_count": 1,
+            "active_count": 1,
+            "foreign_epoch_count": 1,
+            "missing_epoch_count": 0,
+            "unknown_current_epoch_count": 0,
+            "source_breakdown": [],
+            "epoch_breakdown": [],
+            "tasks": [],
+            "orphans_present": True,
+        },
+    )
 
     overview = build_runtime_overview(
         config=RuntimeOverviewConfig(metrics_url="http://savant-security:8080/metrics"),
@@ -210,6 +234,8 @@ def test_runtime_overview_aggregates_metrics_containers_and_supervisor() -> None
     assert dynamic_source["restart_count"] == 12
     assert dynamic_source["restart_count_warning"] is True
     assert dynamic_source["restart_rate_per_min"] is None
+    assert overview["epoch_barrier"]["current_runtime_epoch_id"] == "midterm-current"
+    assert overview["epoch_barrier"]["orphans_present"] is True
     assert overview["health"]["ok"] is False
     assert overview["health"]["source_count"] == 2
     assert "source_frame_age_high" in overview["health"]["issues"]

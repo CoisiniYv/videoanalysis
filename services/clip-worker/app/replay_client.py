@@ -146,6 +146,7 @@ class ReplayClient:
         fps: int = 30,
         offset_seconds_override: float | None = None,
         duration_seconds_override: float | None = None,
+        ts_sync: bool | None = None,
     ) -> Optional[str]:
         """PUT /api/v1/job — create a re-streaming job.
 
@@ -160,6 +161,9 @@ class ReplayClient:
         Returns:
             job_id string, or None on failure.
         """
+        replay_ts_sync = (
+            _env_bool("REPLAY_TS_SYNC", False) if ts_sync is None else bool(ts_sync)
+        )
         payload = build_job_payload(
             source_id=source_id,
             keyframe_uuid=keyframe_uuid,
@@ -173,6 +177,7 @@ class ReplayClient:
             force_constant_cadence=_env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True),
             offset_seconds_override=offset_seconds_override,
             duration_seconds_override=duration_seconds_override,
+            ts_sync=replay_ts_sync,
         )
         self.last_job_request = payload
 
@@ -207,6 +212,7 @@ class ReplayClient:
                         force_constant_cadence=True,
                         offset_seconds_override=offset_seconds_override,
                         duration_seconds_override=duration_seconds_override,
+                        ts_sync=replay_ts_sync,
                     )
                 )
                 if stop_condition_mode == "ts_delta_sec":
@@ -226,6 +232,7 @@ class ReplayClient:
                             force_constant_cadence=True,
                             offset_seconds_override=offset_seconds_override,
                             duration_seconds_override=duration_seconds_override,
+                            ts_sync=replay_ts_sync,
                         )
                     )
             elif stop_condition_mode == "ts_delta_sec":
@@ -243,6 +250,7 @@ class ReplayClient:
                         force_constant_cadence=True,
                         offset_seconds_override=offset_seconds_override,
                         duration_seconds_override=duration_seconds_override,
+                        ts_sync=replay_ts_sync,
                     )
                 )
 
@@ -380,11 +388,17 @@ DELIVERY_DURATION_EXTRA_SLACK_S = 10
 
 
 def _max_delivery_duration_seconds(expected_seconds: float) -> int:
-    # Replay delivery is real-time paced under ts_sync. The extra slack covers
-    # anchor_wait_duration plus one idle pause near the current max_idle_duration.
+    # This is a watchdog ceiling, not the expected export latency. With
+    # REPLAY_TS_SYNC=false, evidence export should run as fast as Replay and the
+    # sink can accept frames; with ts_sync enabled it may still take wall-clock
+    # media duration plus slack.
     return max(
         MIN_DELIVERY_DURATION_S,
-        int(math.ceil(max(float(expected_seconds), 0.0) + DELIVERY_DURATION_EXTRA_SLACK_S)),
+        int(
+            math.ceil(
+                max(float(expected_seconds), 0.0) + DELIVERY_DURATION_EXTRA_SLACK_S
+            )
+        ),
     )
 
 
@@ -402,6 +416,7 @@ def build_job_payload(
     force_constant_cadence: bool | None = None,
     offset_seconds_override: float | None = None,
     duration_seconds_override: float | None = None,
+    ts_sync: bool | None = None,
 ) -> Dict[str, Any]:
     """Build the Replay REST job request body used by clip-worker."""
     event_id = labels.get("event_id", "unknown") if labels else "unknown"
@@ -437,8 +452,11 @@ def build_job_payload(
         if force_constant_cadence is None
         else bool(force_constant_cadence)
     )
+    use_ts_sync = (
+        _env_bool("REPLAY_TS_SYNC", False) if ts_sync is None else bool(ts_sync)
+    )
     configuration: Dict[str, Any] = {
-        "ts_sync": True,
+        "ts_sync": use_ts_sync,
         "skip_intermediary_eos": False,
         "send_eos": True,
         "stop_on_incorrect_ts": False,

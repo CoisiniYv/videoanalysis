@@ -46,6 +46,43 @@ It intentionally avoids historical codename files in the active deployment surfa
   keyframe to `requested_start_pts`; do not flip it negative. Current playback
   validation used ready bundle `f208b550-6b34-44ff-a847-3219041349ea` and latest
   8090 listing `3acfac74-6c54-4045-820b-b659df3894da`.
+- The earlier rolling-cache pressure conclusion is invalid for evidence-video
+  fidelity: the cache sink was subscribed to the analysis-forwarder raw branch,
+  so it was still coupled to the inference-facing forwarder path. The topology
+  has been corrected so Replay `out_stream` feeds `replay-raw-fanout` first;
+  rolling-cache subscribes to that pre-analysis fanout and the sampler-facing
+  `analysis-forwarder` is downstream of it. A fresh 60-route pressure run must
+  prove segment/evidence FPS from this corrected tap before calling the path
+  validated again.
+- Historical run
+  `rollingcache_live_p60_finalclean4_20260704T171638Z` remains useful as a
+  worker/materialization datapoint, but it is no longer accepted as proof of
+  full-rate rolling-cache evidence because it used the old forwarder-side cache
+  tap.
+- 2026-07-05 recount failure diagnosis is now closed at the code level: the
+  pressure runner had been recreating `rolling-cache-sink*` before runtime
+  apply/restart finished, so the sinks latched stale `runtime_epoch_id` values
+  and kept writing segments into old epoch roots. The current runner now starts
+  rolling-cache sinks only after the new runtime epoch exists, passes
+  `ROLLING_CACHE_RUNTIME_EPOCH_ID` explicitly, captures rolling-cache sink logs
+  into the artifact, and rolling-cache lookup stays within the requested
+  `runtime_epoch_id` instead of scanning every historical epoch for the same
+  `source_id`.
+- 2026-07-05 runtime epoch barrier is now implemented on the production
+  restart/apply path. `evidence_tasks.runtime_epoch_id` is a first-class column,
+  runtime restart guards now wait on non-terminal epoch-scoped evidence tasks,
+  `force=true` promotes remaining tasks to explicit
+  `epoch_superseded_incomplete` terminal state through one conditional DB
+  update, and runtime overview exposes epoch-barrier orphan diagnostics instead
+  of relying on manual media-worker log inspection.
+- `security.record_requests` stayed at 0 for the historical rolling-cache run,
+  which means evidence generation no longer depended on one Replay job per
+  event in that high-density materialization experiment.
+- Runtime performance observability is documented in
+  `docs/midterm_runtime_performance_observability.md`. 8090 runtime overview
+  now surfaces per-camera rolling pose-stage FPS, face-stage FPS, and
+  AdaFace embedding rate from the lightweight `va_savant_*` metrics. Heavy
+  dumps such as pose converter debug output remain disabled by default.
 - Operator algorithm-control runtime status:
   `docs/midterm_operator_algorithm_controls_runtime_status.md`.
 - 2026-06-11 progress snapshot and next-plan baseline:
@@ -72,15 +109,34 @@ It intentionally avoids historical codename files in the active deployment surfa
 ## Current Runtime Chain
 
 ```text
-RTSP -> Replay storage -> analysis-forwarder -> Savant inference
+RTSP -> Replay storage -> replay-raw-fanout -> analysis-forwarder -> Savant inference
+  -> Redis events/annotations
+  -> event-worker / face-worker -> PostgreSQL / Qdrant
+  -> media-worker rolling-cache materialization / covered-by aliasing
+  -> 8090 operator portal
+
+Rolling-cache side tap:
+
+Replay storage -> replay-raw-fanout -> rolling-cache sink segments
+  -> media-worker rolling-cache materialization / covered-by aliasing
+  -> 8090 operator portal
+
+Fallback path:
+
+RTSP -> Replay storage -> replay-raw-fanout -> analysis-forwarder -> Savant inference
   -> Redis events/annotations
   -> event-worker / face-worker -> PostgreSQL / Qdrant
   -> clip-worker -> Replay job -> video-file-sink
   -> media-worker evidence sidecar -> 8090 operator portal
 ```
 
-Evidence remains full-rate because `raw_clip.mov` is generated from
-Replay/video-file-sink jobs, not from the sampled analysis branch.
+Evidence must remain full-rate because rolling-cache now derives from the
+Replay output before the analysis-forwarder sampler/resampler. The current
+midterm defaults favor fast, more
+complete playable evidence retention over strict exact-window clipping:
+rolling-cache outputs are GOP/segment-level approximate `rolling_cache_copy`
+clips, and the Replay fallback still uses `POST_SAVANT_FAST_RAW_CLIP_ENABLED=true`
+to publish non-canonical `generated_unverified` clips instead of dropping them.
 
 ## Current Calibration
 
@@ -112,7 +168,7 @@ analysis branch through `analysis-forwarder`:
 | Phase 0.5 forwarder spike | Complete. Savant image can use `savant_rs`; current ingress gate drops before decode on the ZMQ path. |
 | Phase 1 analysis-forwarder | Complete for the current two-source runtime. `PASS_PHASE1_FORWARDER` is documented. |
 | Phase 2 single-T4 30 streams | Gated. Readiness and pressure-run scripts exist, but the current development host is not a T4 30-stream environment. |
-| Phase 3 dual-T4 60 streams | Partial. Phase 3A shard routing and dual-4090 validation scaffolding are implemented; real 60-stream throughput, RocksDB write latency, and evidence burst capacity remain gated. |
+| Phase 3 dual-T4 60 streams | Re-opened for evidence-video fidelity. Earlier rolling-cache pressure runs are materialization datapoints only because the cache tap was after/inside the inference-facing forwarder path. The corrected pre-analysis `replay-raw-fanout` topology must pass a fresh 60-route run with segment/evidence FPS proof before this is called validated again. |
 | Face gallery search | Qdrant authoritative cutover complete for current scale gate. Final 60-route 8 FPS rerun fallback=0, Qdrant query p95/p99=4ms/5ms; 20,000-vector gRPC benchmark all-search p95/p99=4.275ms/6.801ms with top1 self/person hit rate 1.0. Remaining risk is the synchronous face-worker loop, not registered-gallery vector lookup. |
 | Phase 4 production hardening | Not implemented. Requires drills, dashboard thresholds, storage sizing, and runbook. |
 | Evidence proof window fix | Partially implemented and runtime-validated for "event exists but proof window fails"; frontend frame-bound overlay hardening remains open. |

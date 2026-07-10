@@ -341,7 +341,7 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         status="production_ready",
         status_reason=(
             "face-worker resolves enabled per-camera face.watchlist rules from "
-            "camera_rules and searches only the configured target persons"
+            "camera_rules and emits image/latest-location evidence by default"
         ),
     ),
     "face.live_search": _support(
@@ -350,12 +350,14 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         category="face",
         configurable=False,
         per_camera_gate=False,
-        runtime_detecting=False,
-        event_enabled=False,
-        evidence_enabled=False,
+        runtime_detecting=True,
+        event_enabled=True,
+        evidence_enabled=True,
         production_ready=False,
         status="deferred",
-        status_reason="live_search_hit is contract-only until the runtime path exists",
+        status_reason=(
+            "live search uses face.watchlist image/latest-location evidence semantics"
+        ),
         requires_runtime_apply=False,
     ),
 }

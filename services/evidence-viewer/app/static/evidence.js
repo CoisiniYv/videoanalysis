@@ -5,7 +5,9 @@ const ALERT_REDS = new Set(["#D50000", "#FF0000", "#E53935", "#FF1744"]);
 const DEFAULT_SOURCE_WIDTH = 1920;
 const DEFAULT_SOURCE_HEIGHT = 1080;
 const DEFAULT_SHOW_PERSON_BOXES = true;
+const DEFAULT_SHOW_MATCHED_FACES = true;
 const DEFAULT_SHOW_UNKNOWN_FACES = true;
+const DEFAULT_SHOW_TRAJECTORIES = true;
 const FACE_OVERLAY_POLICY = "sparse_observation";
 const CAMERA_INDEX_API = "/api/v1/cameras";
 const ROLE_RENDER_WINDOW_MS = {
@@ -17,9 +19,9 @@ const ROLE_RENDER_WINDOW_MS = {
 };
 const OVERLAY_DEDUP_IOU_THRESHOLD = 0.75;
 const EVIDENCE_INDEX_API = "/api/v1/evidence";
-const EVIDENCE_BUNDLE_API = "/api";
 const BUNDLE_PAGE_SIZE = 50;
 const EVIDENCE_STATE_STORAGE_KEY = "operator-evidence-view-state";
+const EVIDENCE_VISIBLE_CATEGORIES = new Set(["all", "perimeter", "behavior", "crowd", "identity"]);
 const FILTER_INPUT_IDS = [
   "filterEventType",
   "filterSourceId",
@@ -71,12 +73,14 @@ const dom = {
   categoryButtons: document.querySelectorAll("[data-event-category]"),
   video: document.getElementById("video"),
   canvas: document.getElementById("overlay"),
+  imageEvidence: document.getElementById("imageEvidence"),
   annotationSourceBanner: document.getElementById("annotationSourceBanner"),
   annotationSource: document.getElementById("annotationSource"),
   previewDeleteCurrentEvidence: document.getElementById("preview-delete-current-evidence"),
   showPersons: document.getElementById("showPersons"),
   showMatched: document.getElementById("showMatched"),
   showUnknown: document.getElementById("showUnknown"),
+  showTrajectories: document.getElementById("showTrajectories"),
   showLandmarks: document.getElementById("showLandmarks"),
   showLabels: document.getElementById("showLabels"),
   holdMs: document.getElementById("holdMs"),
@@ -159,10 +163,65 @@ function formatAlarmMachineTime(value) {
 }
 
 function addWarning(message) {
-  if (message) {
-    state.warnings.add(message);
-  }
+  if (!message || state.warnings.has(message)) return;
+  state.warnings.add(message);
   renderWarnings();
+}
+
+function playbackKind(manifest = state.manifest) {
+  const summary = manifest?.summary || {};
+  const media = manifest?.metadata?.media || {};
+  return textOrNull(manifest?.playback_kind || media.playback_kind || summary.playback_kind) || "video";
+}
+
+function imageEvidenceUrls(manifest = state.manifest) {
+  const summary = manifest?.summary || {};
+  const media = manifest?.metadata?.media || {};
+  return {
+    crop: textOrNull(manifest?.face_crop_url || media.face_crop_url || summary.face_crop_url || summary.face_crop_uri),
+    full: textOrNull(manifest?.full_frame_url || media.full_frame_url || summary.full_frame_url || summary.full_frame_uri),
+    annotated: textOrNull(manifest?.annotated_frame_url || media.annotated_frame_url || summary.annotated_frame_url || summary.annotated_frame_uri)
+  };
+}
+
+function hideImageEvidence() {
+  if (!dom.imageEvidence) return;
+  dom.imageEvidence.hidden = true;
+  dom.imageEvidence.innerHTML = "";
+  if (dom.video) dom.video.hidden = false;
+  if (dom.canvas) dom.canvas.hidden = false;
+}
+
+function renderImageEvidence() {
+  if (!dom.imageEvidence) return;
+  const urls = imageEvidenceUrls();
+  const mainUrl = urls.annotated || urls.full || urls.crop;
+  dom.imageEvidence.innerHTML = "";
+  dom.imageEvidence.hidden = false;
+  if (!mainUrl) {
+    const empty = document.createElement("div");
+    empty.className = "image-evidence-empty";
+    empty.textContent = "图片证据暂不可用";
+    dom.imageEvidence.appendChild(empty);
+    addWarning("image_evidence_missing_artifact");
+    return;
+  }
+  const main = document.createElement("div");
+  main.className = "image-evidence-main";
+  const mainImg = document.createElement("img");
+  mainImg.src = mainUrl;
+  mainImg.alt = "人脸命中全帧";
+  main.appendChild(mainImg);
+  dom.imageEvidence.appendChild(main);
+  if (urls.crop && urls.crop !== mainUrl) {
+    const crop = document.createElement("div");
+    crop.className = "image-evidence-crop";
+    const cropImg = document.createElement("img");
+    cropImg.src = urls.crop;
+    cropImg.alt = "命中人脸";
+    crop.appendChild(cropImg);
+    dom.imageEvidence.appendChild(crop);
+  }
 }
 
 function annotationSourceLabel(source) {
@@ -176,7 +235,8 @@ function annotationSourceLabel(source) {
 
 function eventTypeLabel(value) {
   const labels = {
-    watchlist_hit: "名单命中",
+    watchlist_hit: "人脸轨迹命中",
+    live_search_hit: "一键找人命中",
     intrusion: "入侵告警",
     loitering: "徘徊告警",
     crowd_gathering: "聚集告警",
@@ -189,11 +249,11 @@ function eventTypeLabel(value) {
 
 function eventCategoryLabel(value) {
   const labels = {
-    identity: "名单布控",
+    identity: "人脸轨迹",
     perimeter: "周界入侵",
     behavior: "行为异常",
     crowd: "聚集风险",
-    all: "全部"
+    all: "告警证据"
   };
   return labels[value] || labels[eventCategoryForType(value)] || "未分类";
 }
@@ -207,6 +267,37 @@ function eventCategoryForType(value) {
   return "all";
 }
 
+function matchedPersonForBundle(bundle = {}) {
+  const matched = bundle.matched_person && typeof bundle.matched_person === "object"
+    ? bundle.matched_person
+    : {};
+  const personId = textOrNull(bundle.person_id) || textOrNull(matched.person_id);
+  const externalId = textOrNull(bundle.external_person_id) || textOrNull(matched.external_person_id);
+  const name = textOrNull(bundle.person_name) || textOrNull(matched.name);
+  return { personId, externalId, name };
+}
+
+function matchedPersonLabel(bundle = {}) {
+  const person = matchedPersonForBundle(bundle);
+  return person.name || person.externalId || (person.personId ? `人员 ${person.personId}` : "");
+}
+
+function openPersonTrajectoryFromBundle(bundle = {}) {
+  const person = matchedPersonForBundle(bundle);
+  if (!person.personId) {
+    addWarning("identity_bundle_missing_person_id");
+    return false;
+  }
+  if (!window.operatorPeople?.openPersonById) {
+    window.location.hash = "#people";
+    addWarning("person_trajectory_bridge_unavailable");
+    return false;
+  }
+  window.operatorPeople.openPersonById(person.personId, { openFindDialog: true })
+    .catch(err => addWarning(`person_trajectory_open_failed:${err.message}`));
+  return true;
+}
+
 function clipStatusLabel(value) {
   const labels = {
     ready: "可查看",
@@ -214,7 +305,11 @@ function clipStatusLabel(value) {
     generated_corrupt: "录像需复核",
     failed: "生成失败",
     pending: "生成中",
-    not_implemented: "未生成"
+    not_implemented: "未生成",
+    image_pending: "图片生成中",
+    not_required: "无需录像",
+    image_ready: "图片就绪",
+    image_missing: "图片缺失"
   };
   return labels[value] || value || "-";
 }
@@ -237,6 +332,10 @@ function evidenceStateLabel(bundle = {}) {
     queued: "生成中",
     replaying: "生成中",
     finalizing: "生成中",
+    image_pending: "图片生成中",
+    image_ready: "图片就绪",
+    image_missing: "图片缺失",
+    materialized: "可查看",
     ready: "可查看",
     failed: "生成失败"
   };
@@ -252,6 +351,9 @@ function warningLabel(value) {
   if (text.includes("bundle_load_failed")) return "证据列表加载失败，请稍后刷新。";
   if (text.includes("bundle_detail_load_failed")) return "证据详情加载失败，已尝试切换到其他证据。";
   if (text.includes("raw_clip_missing")) return "该事件缺少可播放录像。";
+  if (text.includes("image_evidence_missing_artifact") || text.includes("face_image_artifact_missing")) {
+    return "该人脸命中缺少可展示图片。";
+  }
   if (text.includes("missing:")) return "部分证据文件缺失，结果可能不完整。";
   if (text.includes("invalid_json") || text.includes("invalid_jsonl")) return "证据数据格式异常，结果需复核。";
   if (text.includes("production_sidecar") || text.includes("legacy") || text.includes("fallback")) {
@@ -385,7 +487,8 @@ function restoreEvidenceState() {
   }
   state.bundleLimit = BUNDLE_PAGE_SIZE;
   if (payload.activeCategory) {
-    state.activeCategory = String(payload.activeCategory);
+    const storedCategory = String(payload.activeCategory);
+    state.activeCategory = EVIDENCE_VISIBLE_CATEGORIES.has(storedCategory) ? storedCategory : "all";
   }
   state.selectedEventId = payload.selectedEventId ? String(payload.selectedEventId) : null;
   const filters = payload.filters && typeof payload.filters === "object" ? payload.filters : {};
@@ -417,8 +520,11 @@ function bundleQueryString() {
   for (const [key, value] of Object.entries(filters)) {
     if (value) params.set(key, value);
   }
-  if (state.activeCategory && state.activeCategory !== "all") {
-    params.set("event_category", state.activeCategory);
+  const activeCategory = EVIDENCE_VISIBLE_CATEGORIES.has(state.activeCategory) ? state.activeCategory : "all";
+  if (activeCategory !== "all") {
+    params.set("event_category", activeCategory);
+  } else {
+    params.set("event_category", "evidence");
   }
   params.set("limit", String(state.bundleLimit));
   params.set("offset", String(state.bundleOffset));
@@ -426,10 +532,11 @@ function bundleQueryString() {
 }
 
 function categoryFilteredBundles(bundles) {
-  if (!state.activeCategory || state.activeCategory === "all") {
-    return bundles;
+  const activeCategory = EVIDENCE_VISIBLE_CATEGORIES.has(state.activeCategory) ? state.activeCategory : "all";
+  if (activeCategory === "all") {
+    return bundles.filter(bundle => eventCategoryForType(bundle.event_type) !== "identity");
   }
-  return bundles.filter(bundle => eventCategoryForType(bundle.event_type) === state.activeCategory);
+  return bundles.filter(bundle => eventCategoryForType(bundle.event_type) === activeCategory);
 }
 
 function defaultSelectedBundle(bundles) {
@@ -464,6 +571,7 @@ function clearFailedBundleSelection() {
   state.frameLookup = null;
   dom.video.removeAttribute("src");
   dom.video.load();
+  hideImageEvidence();
   updateEvidenceDeleteButton();
   renderBundleList();
 }
@@ -542,11 +650,14 @@ function renderBundleList() {
     sub.className = "bundle-sub";
     const alarmTime = formatAlarmMachineTime(bundle.alarm_machine_time);
     const evidenceStateText = evidenceStateLabel(bundle);
+    const isIdentity = eventCategoryForType(bundle.event_type) === "identity";
+    const personLabel = isIdentity ? matchedPersonLabel(bundle) : "";
     sub.textContent = [
       eventCategoryLabel(bundle.event_type),
+      personLabel ? `人员 ${personLabel}` : "",
       cameraDisplayName(bundle),
       alarmTime ? `报警 ${alarmTime}` : "",
-      clipStatusLabel(bundle.clip_status),
+      isIdentity ? "点击查看此人轨迹" : clipStatusLabel(bundle.clip_status),
       evidenceStateText,
       evidenceStatusLabel(bundle.visual_evidence_status),
       `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
@@ -556,7 +667,18 @@ function renderBundleList() {
       button.title = reason;
     }
     button.append(main, sub);
-    button.addEventListener("click", () => selectBundle(bundle.event_id));
+    if (isIdentity) {
+      const action = document.createElement("span");
+      action.className = "bundle-action";
+      action.textContent = "查看此人轨迹";
+      button.appendChild(action);
+    }
+    button.addEventListener("click", () => {
+      if (isIdentity && openPersonTrajectoryFromBundle(bundle)) {
+        return;
+      }
+      selectBundle(bundle.event_id);
+    });
     dom.bundleList.appendChild(button);
   }
 }
@@ -614,6 +736,7 @@ function resetBundleSelection() {
   state.warnings = new Set();
   dom.video.removeAttribute("src");
   dom.video.load();
+  hideImageEvidence();
   if (ctx) {
     ctx.clearRect(0, 0, dom.canvas.width || 0, dom.canvas.height || 0);
   }
@@ -668,6 +791,7 @@ function clearBundleDetailForLoading(eventId) {
   dom.video.pause();
   dom.video.removeAttribute("src");
   dom.video.load();
+  hideImageEvidence();
   if (ctx) {
     ctx.clearRect(0, 0, dom.canvas.width || 0, dom.canvas.height || 0);
   }
@@ -730,11 +854,17 @@ async function selectBundle(eventId, options = {}) {
   const annotationSource = dom.annotationSource?.value || state.annotationSource || "auto";
   state.annotationSource = annotationSource;
   const annotationParams = new URLSearchParams({ source: annotationSource });
-  const [manifest, annotationsPayload, sinkPayload] = await Promise.all([
-    fetchJson(`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}`),
-    fetchJson(`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}/annotations?${annotationParams.toString()}`),
-    fetchJson(`${EVIDENCE_BUNDLE_API}/bundles/${encodeURIComponent(eventId)}/sink-metadata`)
-  ]);
+  const manifest = await fetchJson(`${EVIDENCE_INDEX_API}/bundles/${encodeURIComponent(eventId)}`);
+  const isImageEvidence = playbackKind(manifest) === "image";
+  const [annotationsPayload, sinkPayload] = isImageEvidence
+    ? [
+        { records: [], annotations: [], warnings: [] },
+        { records: [], warnings: [] }
+      ]
+    : await Promise.all([
+        fetchJson(`${EVIDENCE_INDEX_API}/bundles/${encodeURIComponent(eventId)}/annotations?${annotationParams.toString()}`),
+        fetchJson(`${EVIDENCE_INDEX_API}/bundles/${encodeURIComponent(eventId)}/sink-metadata`)
+      ]);
   if (!selectionStillCurrent(requestId, eventId)) {
     return;
   }
@@ -756,22 +886,37 @@ async function selectBundle(eventId, options = {}) {
   state.frameLookup = buildSinkFrameLookup(state.sinkRecords);
   state.sourceWidth = Number(first?.width || dom.video.videoWidth || DEFAULT_SOURCE_WIDTH);
   state.sourceHeight = Number(first?.height || dom.video.videoHeight || DEFAULT_SOURCE_HEIGHT);
-  if (state.firstVideoFramePts === null) {
+  if (!isImageEvidence && state.firstVideoFramePts === null) {
     addWarning("sink_metadata_first_pts_missing");
   }
 
   prepareAnnotations();
   const nextVideoSrc = manifest.raw_clip_url || "";
   const nextVideoHref = nextVideoSrc ? new URL(nextVideoSrc, window.location.href).href : "";
-  if (!preserveVideo || previousVideoSrc !== nextVideoHref) {
+  if (isImageEvidence) {
+    dom.video.pause();
+    dom.video.removeAttribute("src");
+    dom.video.load();
+    dom.video.hidden = true;
+    dom.canvas.hidden = true;
+    if (ctx) {
+      ctx.clearRect(0, 0, dom.canvas.width || 0, dom.canvas.height || 0);
+    }
+    renderImageEvidence();
+  } else if (!preserveVideo || previousVideoSrc !== nextVideoHref) {
+    hideImageEvidence();
     if (nextVideoHref) {
       dom.video.src = nextVideoHref;
       dom.video.load();
+      if (!preserveVideo) {
+        seekVideoToInitialOverlayTime();
+      }
     } else {
       dom.video.removeAttribute("src");
       dom.video.load();
     }
   } else {
+    hideImageEvidence();
     dom.video.currentTime = previousVideoTime;
     if (!previousPaused) {
       dom.video.play().catch(err => addWarning(`video_resume_failed:${err.message}`));
@@ -969,14 +1114,44 @@ function prepareAnnotations() {
     .sort((a, b) => a._overlayTimeSec - b._overlayTimeSec);
 }
 
+function initialOverlayTimeSec() {
+  const firstDisplayable = state.preparedAnnotations.find(line => line._overlayTimeSec !== null);
+  return firstDisplayable ? Math.max(0, Number(firstDisplayable._overlayTimeSec) || 0) : null;
+}
+
+function seekVideoToInitialOverlayTime() {
+  const target = initialOverlayTimeSec();
+  if (target === null || !dom.video) return;
+  const applySeek = () => {
+    const duration = Number(dom.video.duration);
+    const boundedTarget = Number.isFinite(duration) && duration > 0
+      ? clamp(target, 0, Math.max(0, duration - 0.05))
+      : target;
+    try {
+      dom.video.currentTime = boundedTarget;
+      drawOverlay();
+    } catch (err) {
+      addWarning(`initial_overlay_seek_failed:${err.message}`);
+    }
+  };
+  if (dom.video.readyState >= 1) {
+    applySeek();
+  } else {
+    dom.video.addEventListener("loadedmetadata", applySeek, { once: true });
+  }
+}
+
 function normalizeBbox(bbox, sourceWidth, sourceHeight) {
   if (!bbox) {
     addWarning("bbox_missing");
     return null;
   }
-  let format = String(bbox.format || "cxcywh").toLowerCase();
+  let format = String(bbox.format || "").toLowerCase();
   let rawValues = null;
-  if (Array.isArray(bbox.values)) {
+  if (Array.isArray(bbox)) {
+    rawValues = bbox;
+    format = format || "xyxy";
+  } else if (Array.isArray(bbox.values)) {
     rawValues = bbox.values;
   } else if (Array.isArray(bbox.xyxy)) {
     rawValues = bbox.xyxy;
@@ -987,6 +1162,24 @@ function normalizeBbox(bbox, sourceWidth, sourceHeight) {
   } else if (Array.isArray(bbox.cxcywh)) {
     rawValues = bbox.cxcywh;
     format = "cxcywh";
+  } else if (
+    ["x1", "y1", "x2", "y2"].every(key => bbox[key] !== undefined)
+  ) {
+    rawValues = [bbox.x1, bbox.y1, bbox.x2, bbox.y2];
+    format = "xyxy";
+  } else if (
+    ["left", "top", "right", "bottom"].every(key => bbox[key] !== undefined)
+  ) {
+    rawValues = [bbox.left, bbox.top, bbox.right, bbox.bottom];
+    format = "xyxy";
+  } else if (
+    bbox.x !== undefined &&
+    bbox.y !== undefined &&
+    (bbox.width !== undefined || bbox.w !== undefined) &&
+    (bbox.height !== undefined || bbox.h !== undefined)
+  ) {
+    rawValues = [bbox.x, bbox.y, bbox.width ?? bbox.w, bbox.height ?? bbox.h];
+    format = "xywh";
   }
   if (!rawValues || rawValues.length < 4) {
     addWarning("bbox_missing");
@@ -996,6 +1189,18 @@ function normalizeBbox(bbox, sourceWidth, sourceHeight) {
   if (values.some(value => !Number.isFinite(value))) {
     addWarning("bbox_invalid_values");
     return null;
+  }
+  const coordinateSpace = String(bbox.coordinate_space || bbox.coordinateSpace || "").toLowerCase();
+  const usesNormalizedCoordinates = coordinateSpace.includes("normalized") ||
+    values.every(value => value >= 0 && value <= 1);
+  if (!format) {
+    format = inferBboxFormat(values, sourceWidth, sourceHeight, usesNormalizedCoordinates);
+  }
+  if (usesNormalizedCoordinates) {
+    values[0] *= sourceWidth;
+    values[1] *= sourceHeight;
+    values[2] *= sourceWidth;
+    values[3] *= sourceHeight;
   }
   let x1;
   let y1;
@@ -1028,6 +1233,17 @@ function normalizeBbox(bbox, sourceWidth, sourceHeight) {
     return null;
   }
   return { x1, y1, x2, y2 };
+}
+
+function inferBboxFormat(values, sourceWidth, sourceHeight, normalized) {
+  const [a, b, c, d] = values;
+  const width = normalized ? 1 : sourceWidth;
+  const height = normalized ? 1 : sourceHeight;
+  const looksLikeXyxy = c > a && d > b && c <= width * 1.1 && d <= height * 1.1;
+  if (looksLikeXyxy) return "xyxy";
+  const looksLikeXywh = a + c <= width * 1.1 && b + d <= height * 1.1;
+  if (looksLikeXywh) return "xywh";
+  return "cxcywh";
 }
 
 function clamp(value, min, max) {
@@ -1320,6 +1536,84 @@ function dedupeOverlayItems(items, sourceWidth, sourceHeight, currentTime) {
   return kept;
 }
 
+function bboxCenter(rect) {
+  if (!rect) return null;
+  return {
+    x: rect.x1 + (rect.x2 - rect.x1) / 2,
+    y: rect.y1 + (rect.y2 - rect.y1) / 2
+  };
+}
+
+function trajectoryPointsForItem(item, currentTime, sourceWidth, sourceHeight) {
+  if (!item?.key || objectRole(item.obj) !== "person_context") return [];
+  const points = [];
+  const maxAgeSec = 15;
+  for (const line of state.preparedAnnotations) {
+    if (line._overlayTimeSec === null || line._overlayTimeSec === undefined) continue;
+    if (line._overlayTimeSec > currentTime + 0.5) continue;
+    if (currentTime - line._overlayTimeSec > maxAgeSec) continue;
+    for (const [objectIndex, obj] of objectsForLine(line).entries()) {
+      if (objectRole(obj) !== "person_context") continue;
+      if (objectTrackKey(obj, line, objectIndex) !== item.key) continue;
+      const bbox = normalizeBbox(obj.bbox, sourceWidth, sourceHeight);
+      const center = bboxCenter(bbox);
+      if (!center) continue;
+      points.push({
+        ...center,
+        timeSec: line._overlayTimeSec,
+        obj,
+        line
+      });
+    }
+  }
+  return points
+    .sort((a, b) => a.timeSec - b.timeSec)
+    .slice(-64);
+}
+
+function drawTrajectoryTrails(items, currentTime, sourceWidth, sourceHeight, uniformScale, offsetX, offsetY) {
+  if (!dom.showTrajectories?.checked) return;
+  const drawnKeys = new Set();
+  for (const item of items || []) {
+    if (!item?.key || drawnKeys.has(item.key)) continue;
+    if (objectRole(item.obj) !== "person_context") continue;
+    const points = trajectoryPointsForItem(item, currentTime, sourceWidth, sourceHeight);
+    if (points.length < 2) continue;
+    drawnKeys.add(item.key);
+    const style = styleForObject(item.obj);
+    ctx.save();
+    ctx.strokeStyle = style.bboxColor;
+    ctx.globalAlpha = 0.78;
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const x = point.x * uniformScale + offsetX;
+      const y = point.y * uniformScale + offsetY;
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.stroke();
+    const last = points[points.length - 1];
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = style.bboxColor;
+    ctx.beginPath();
+    ctx.arc(
+      last.x * uniformScale + offsetX,
+      last.y * uniformScale + offsetY,
+      3.5,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
 function findActiveAnnotations(currentTime) {
   if (!state.preparedAnnotations.length) {
     return { line: null, lines: [], items: [], targetMs: Math.round(currentTime * 1000), mode: "none", matchedMs: null };
@@ -1339,7 +1633,7 @@ function findActiveAnnotations(currentTime) {
       const dtMs = (currentTime - line._overlayTimeSec) * 1000;
       if (dtMs < -aheadMs || dtMs > holdMs) continue;
       const key = objectTrackKey(obj, line, objectIndex);
-      const candidate = { obj, line, key };
+      const candidate = { obj, line, key, objectIndex };
       const previous = byObject.get(key);
       if (
         !previous ||
@@ -1421,43 +1715,67 @@ function drawOverlay() {
     state.overlayFrameRequest = null;
     return;
   }
-  resizeCanvas();
-  const displayWidth = dom.canvas.clientWidth;
-  const displayHeight = dom.canvas.clientHeight;
-  ctx.clearRect(0, 0, displayWidth, displayHeight);
-
-  const currentTime = dom.video.currentTime;
-  const active = findActiveAnnotations(currentTime);
-  const sourceWidth = dom.video.videoWidth || state.sourceWidth || DEFAULT_SOURCE_WIDTH;
-  const sourceHeight = dom.video.videoHeight || state.sourceHeight || DEFAULT_SOURCE_HEIGHT;
-  const visibleItems = (active.items || []).filter(item => objectVisible(item.obj));
-  const overlayItems = dedupeOverlayItems(visibleItems, sourceWidth, sourceHeight, currentTime);
-
-  // Use uniform scale to handle object-fit: contain letterboxing.
-  // The display rect has the video's intrinsic aspect ratio, but we
-  // compute a uniform scale from the source-to-display ratio to prevent
-  // any bbox distortion from non-uniform scaling.
-  const scaleX = displayWidth / sourceWidth;
-  const scaleY = displayHeight / sourceHeight;
-  const uniformScale = Math.min(scaleX, scaleY);
-  const offsetX_display = (displayWidth - sourceWidth * uniformScale) / 2;
-  const offsetY_display = (displayHeight - sourceHeight * uniformScale) / 2;
-
-  for (const { obj, line } of overlayItems) {
-    const bbox = normalizeBbox(obj.bbox, sourceWidth, sourceHeight);
-    if (!bbox) continue;
-    const style = styleForObject(obj);
-    const x = bbox.x1 * uniformScale + offsetX_display;
-    const y = bbox.y1 * uniformScale + offsetY_display;
-    const w = (bbox.x2 - bbox.x1) * uniformScale;
-    const h = (bbox.y2 - bbox.y1) * uniformScale;
-    ctx.strokeStyle = style.bboxColor;
-    ctx.lineWidth = style.lineWidth;
-    ctx.strokeRect(x, y, w, h);
-    drawLandmarks(obj.landmarks?.points || [], uniformScale, uniformScale, style.bboxColor, offsetX_display, offsetY_display);
-    drawLabel(labelForObject(obj, line), x, y, style.labelColor);
+  if (playbackKind() === "image") {
+    state.overlayFrameRequest = requestAnimationFrame(drawOverlay);
+    return;
   }
-  updateDebug(active, overlayItems.length);
+  try {
+    resizeCanvas();
+    const displayWidth = dom.canvas.clientWidth;
+    const displayHeight = dom.canvas.clientHeight;
+    ctx.clearRect(0, 0, displayWidth, displayHeight);
+
+    const currentTime = dom.video.currentTime;
+    const active = findActiveAnnotations(currentTime);
+    const sourceWidth = dom.video.videoWidth || state.sourceWidth || DEFAULT_SOURCE_WIDTH;
+    const sourceHeight = dom.video.videoHeight || state.sourceHeight || DEFAULT_SOURCE_HEIGHT;
+    const visibleItems = (active.items || []).filter(item => objectVisible(item.obj));
+    const overlayItems = dedupeOverlayItems(visibleItems, sourceWidth, sourceHeight, currentTime);
+
+    // Use uniform scale to handle object-fit: contain letterboxing.
+    // The display rect has the video's intrinsic aspect ratio, but we
+    // compute a uniform scale from the source-to-display ratio to prevent
+    // any bbox distortion from non-uniform scaling.
+    const scaleX = displayWidth / sourceWidth;
+    const scaleY = displayHeight / sourceHeight;
+    const uniformScale = Math.min(scaleX, scaleY);
+    const offsetX_display = (displayWidth - sourceWidth * uniformScale) / 2;
+    const offsetY_display = (displayHeight - sourceHeight * uniformScale) / 2;
+
+    drawTrajectoryTrails(
+      overlayItems,
+      currentTime,
+      sourceWidth,
+      sourceHeight,
+      uniformScale,
+      offsetX_display,
+      offsetY_display
+    );
+
+    let drawnObjects = 0;
+    for (const { obj, line } of overlayItems) {
+      try {
+        const bbox = normalizeBbox(obj?.bbox, sourceWidth, sourceHeight);
+        if (!bbox) continue;
+        const style = styleForObject(obj || {});
+        const x = bbox.x1 * uniformScale + offsetX_display;
+        const y = bbox.y1 * uniformScale + offsetY_display;
+        const w = (bbox.x2 - bbox.x1) * uniformScale;
+        const h = (bbox.y2 - bbox.y1) * uniformScale;
+        ctx.strokeStyle = style.bboxColor;
+        ctx.lineWidth = style.lineWidth;
+        ctx.strokeRect(x, y, w, h);
+        drawLandmarks(obj?.landmarks?.points || [], uniformScale, uniformScale, style.bboxColor, offsetX_display, offsetY_display);
+        drawLabel(labelForObject(obj || {}, line), x, y, style.labelColor);
+        drawnObjects += 1;
+      } catch (err) {
+        addWarning(`overlay_object_render_failed:${err.message}`);
+      }
+    }
+    updateDebug(active, drawnObjects);
+  } catch (err) {
+    addWarning(`overlay_render_failed:${err.message}`);
+  }
   state.overlayFrameRequest = requestAnimationFrame(drawOverlay);
 }
 
@@ -1504,6 +1822,7 @@ function renderDetails() {
   const status = metadata.status || {};
   const validation = media.clip_validation || {};
   const clipStatus = status.clip_status || summary.clip_status || "unknown";
+  const isImageEvidence = playbackKind() === "image";
   const decodeWarnings = Number(validation.decode_error_count || 0);
   const corrupt = clipStatus === "generated_corrupt" || decodeWarnings > 0;
 
@@ -1525,9 +1844,9 @@ function renderDetails() {
     summary.alarm_machine_time ||
     summary.event_created_at
   ));
-  setText("rawClipStatus", clipStatusLabel(clipStatus));
-  setText("clipValidation", corrupt ? `录像已生成，画面质量需复核` : "已验证");
-  setText("firstVideoPts", state.firstVideoFramePts);
+  setText("rawClipStatus", isImageEvidence ? "图片证据" : clipStatusLabel(clipStatus));
+  setText("clipValidation", isImageEvidence ? "图片已就绪" : (corrupt ? `录像已生成，画面质量需复核` : "已验证"));
+  setText("firstVideoPts", isImageEvidence ? "-" : state.firstVideoFramePts);
   setText("sourceSize", `${state.sourceWidth}x${state.sourceHeight}`);
   setText("annotationLines", summary.annotation_lines ?? state.annotations.length);
   setText("personContextObjects", summary.person_context_count);
@@ -1538,7 +1857,7 @@ function renderDetails() {
   setText("unknownObjects", summary.unknown_objects);
   setText("colorsUsed", Array.isArray(summary.colors_used) ? summary.colors_used.join(", ") : "");
 
-  dom.clipWarning.hidden = !corrupt;
+  dom.clipWarning.hidden = isImageEvidence || !corrupt;
   dom.clipWarning.textContent = corrupt
     ? "录像需复核"
     : "";
@@ -1593,6 +1912,7 @@ for (const input of [
   dom.showPersons,
   dom.showMatched,
   dom.showUnknown,
+  dom.showTrajectories,
   dom.showLandmarks,
   dom.showLabels,
   dom.holdMs,
@@ -1631,7 +1951,8 @@ dom.nextBundles?.addEventListener("click", () => {
 });
 for (const button of dom.categoryButtons || []) {
   button.addEventListener("click", () => {
-    state.activeCategory = button.dataset.eventCategory || "all";
+    const category = button.dataset.eventCategory || "all";
+    state.activeCategory = EVIDENCE_VISIBLE_CATEGORIES.has(category) ? category : "all";
     syncCategoryButtons();
     state.bundleOffset = 0;
     resetBundleSelection();
@@ -1643,6 +1964,10 @@ for (const id of FILTER_INPUT_IDS) {
   const input = document.getElementById(id);
   if (!input) continue;
   input.addEventListener("change", () => {
+    if (id === "filterPerson" && input.value.trim() && state.activeCategory === "all") {
+      state.activeCategory = "identity";
+      syncCategoryButtons();
+    }
     state.bundleOffset = 0;
     resetBundleSelection();
     persistEvidenceState();
@@ -1669,7 +1994,11 @@ dom.video.addEventListener("loadedmetadata", () => {
 
 function applyOverlayDefaults() {
   dom.showPersons.checked = DEFAULT_SHOW_PERSON_BOXES;
+  dom.showMatched.checked = DEFAULT_SHOW_MATCHED_FACES;
   dom.showUnknown.checked = DEFAULT_SHOW_UNKNOWN_FACES;
+  if (dom.showTrajectories) {
+    dom.showTrajectories.checked = DEFAULT_SHOW_TRAJECTORIES;
+  }
   applyAnnotationSourceLabels();
 }
 

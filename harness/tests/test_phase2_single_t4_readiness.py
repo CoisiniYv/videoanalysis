@@ -67,7 +67,7 @@ def _write_inputs(tmp_path: Path, *, source_count: int = 30, replay_url: str | N
         json.dumps(
             {
                 "out_stream": {
-                    "url": replay_url or "dealer+connect:tcp://analysis-forwarder:5557"
+                    "url": replay_url or "dealer+connect:tcp://replay-raw-fanout:5557"
                 }
             }
         ),
@@ -132,7 +132,7 @@ def test_phase2_readiness_requires_forwarder_topology(tmp_path: Path) -> None:
         )
     )
 
-    assert results["replay_out_stream_targets_forwarder"].ok is False
+    assert results["replay_out_stream_targets_raw_fanout"].ok is False
 
 
 def test_phase2_runtime_checks_require_30_runtime_sources() -> None:

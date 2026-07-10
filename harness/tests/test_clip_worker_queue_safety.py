@@ -39,6 +39,7 @@ def _clip_config(**overrides: Any):
         "database_url": "postgresql://video:video@postgres:5432/video_analytics",
         "consumer_group": "clip-workers-test",
         "consumer_name": "clip-worker-test-1",
+        "consumer_count": 1,
         "poll_timeout_ms": 1,
         "default_pre_seconds": 5,
         "default_post_seconds": 5,
@@ -62,6 +63,13 @@ def _clip_config(**overrides: Any):
         "post_savant_frame_proof_retry_sleep_s": 0.0,
         "post_savant_frame_proof_wait_budget_s": 0.0,
         "post_savant_frame_proof_poll_interval_s": 0.0,
+        "post_savant_frame_proof_fast_path_batch_size": 0,
+        "post_savant_frame_proof_fast_path_lag": 0,
+        "post_savant_frame_proof_fast_path_pending": 0,
+        "frame_annotation_lookup_concurrency": 4,
+        "frame_annotation_range_cache_ttl_s": 0.0,
+        "frame_annotation_range_cache_bucket_ms": 0,
+        "frame_annotation_range_cache_max_entries": 64,
         "post_savant_allow_cross_session_post_window_proof": True,
         "post_savant_allow_truncated_pre_window_proof": True,
         "frame_annotation_stream": "security.frame_annotations",
@@ -78,6 +86,12 @@ def _clip_config(**overrides: Any):
         "evidence_materialization_max_concurrency": 1,
         "evidence_materialization_max_concurrency_per_shard": 0,
         "evidence_materialization_max_concurrency_per_source": 0,
+        "evidence_replay_active_slot_extra_seconds": 5.0,
+        "media_poll_interval_s": 0.0,
+        "midterm_sink_stability_checks": 0,
+        "evidence_replay_sink_stability_budget_s": 0.0,
+        "evidence_replay_finalizer_budget_s": 0.0,
+        "evidence_replay_slot_grace_s": 5.0,
         "evidence_materialization_event_type_quotas": {},
         "evidence_materialization_pressure_level": "normal",
     }
@@ -202,6 +216,34 @@ class _FakeRedis:
         return [{"name": b"clip-workers-test", "pending": len(self.pending_requests), "lag": 0}]
 
 
+def test_clip_worker_redis_socket_timeout_exceeds_blocking_poll(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    captured: dict[str, Any] = {}
+
+    class _Client:
+        def ping(self) -> None:
+            captured["ping"] = True
+
+    class _RedisFactory:
+        @staticmethod
+        def from_url(url: str, **kwargs: Any) -> _Client:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return _Client()
+
+    monkeypatch.setattr(worker, "Redis", _RedisFactory)
+
+    worker.connect_redis(_clip_config(poll_timeout_ms=15_000))
+
+    assert captured["url"] == "redis://redis:6379/0"
+    assert captured["kwargs"]["socket_timeout"] == 20.0
+    assert captured["kwargs"]["socket_connect_timeout"] == 5.0
+    assert captured["kwargs"]["health_check_interval"] == 30
+    assert captured["ping"] is True
+
+
 class _FakeReplay:
     instances: list["_FakeReplay"] = []
 
@@ -223,8 +265,10 @@ class _FakeReplay:
 
 
 class _DiagnosticsCursor:
-    def __init__(self, diagnostics: dict[str, Any]) -> None:
-        self.diagnostics = diagnostics
+    def __init__(self, conn: "_DiagnosticsConn") -> None:
+        self.conn = conn
+        self.current_sql = ""
+        self.rowcount = 1
 
     def __enter__(self) -> "_DiagnosticsCursor":
         return self
@@ -232,19 +276,72 @@ class _DiagnosticsCursor:
     def __exit__(self, *_exc: object) -> None:
         return None
 
-    def execute(self, *_args, **_kwargs) -> None:
+    def execute(self, sql: str, params: dict[str, Any] | None = None, **_kwargs) -> None:
+        self.current_sql = sql
+        if params:
+            self.conn.current_source_id = str(params.get("source_id") or "source-1")
+            self.conn.max_global = int(params.get("max_global") or 0)
+            self.conn.max_per_source = int(params.get("max_per_source") or 0)
         return None
 
     def fetchone(self):
-        return {"diagnostics": self.diagnostics}
+        if "decision.global_count" in self.current_sql:
+            source_count = (
+                1
+                if self.conn.active_slots
+                and self.conn.active_source_id == self.conn.current_source_id
+                else 0
+            )
+            acquired = True
+            deny_reason = ""
+            if self.conn.max_global > 0 and self.conn.active_slots >= self.conn.max_global:
+                acquired = False
+                deny_reason = "max_concurrent_reached"
+            elif (
+                self.conn.max_per_source > 0
+                and source_count >= self.conn.max_per_source
+            ):
+                acquired = False
+                deny_reason = "max_concurrent_per_source_reached"
+            if acquired:
+                self.conn.active_slots += 1
+                self.conn.active_source_id = self.conn.current_source_id
+            return {
+                "global_count": self.conn.active_slots - (1 if acquired else 0),
+                "shard_count": self.conn.active_slots - (1 if acquired else 0),
+                "source_count": source_count,
+                "deny_reason": deny_reason,
+                "acquired": acquired,
+                "event_updated": acquired,
+            }
+        if "count(*) AS global_count" in self.current_sql:
+            source_count = (
+                1
+                if self.conn.active_slots
+                and self.conn.active_source_id == self.conn.current_source_id
+                else 0
+            )
+            return {
+                "global_count": self.conn.active_slots,
+                "shard_count": self.conn.active_slots,
+                "source_count": source_count,
+            }
+        if "task_updated" in self.current_sql:
+            return {"task_updated": True, "event_updated": True}
+        return {"diagnostics": self.conn.diagnostics}
 
 
 class _DiagnosticsConn:
     def __init__(self, diagnostics: dict[str, Any] | None = None) -> None:
         self.diagnostics = diagnostics or {}
+        self.active_slots = 0
+        self.active_source_id = ""
+        self.current_source_id = "source-1"
+        self.max_global = 0
+        self.max_per_source = 0
 
     def cursor(self) -> _DiagnosticsCursor:
-        return _DiagnosticsCursor(self.diagnostics)
+        return _DiagnosticsCursor(self)
 
 
 def _request(event_suffix: str, *, event_type: str = "intrusion") -> dict[str, Any]:
@@ -269,6 +366,7 @@ def _two_replay_shards():
     return parse_replay_shard_map(
         {
             "default_shard_id": "replay-a",
+            "mapping_version": "phase2-test",
             "shards": [
                 {
                     "shard_id": "replay-a",
@@ -420,15 +518,112 @@ def test_post_savant_frame_proof_pages_bounded_event_window(monkeypatch) -> None
             post_savant_frame_proof_poll_interval_s=0.0,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.proof_reads > 1
     assert redis_client.acked == ["1-0"]
     assert updates[-1]["status"] == "replay_job_created"
+    diagnostics = updates[-1]["diagnostics"]
+    assert diagnostics["proof_wait_ms"] >= 0
+    assert diagnostics["replay_job_create_ms"] >= 0
+    assert diagnostics["replay_slot_release_mode"] == "completion_aware"
+    assert diagnostics["replay_slot_hold_ms"] >= 15000
+    assert diagnostics["replay_active_global_count_before_create"] == 0
+    assert diagnostics["record_request_stream_id"] == "1-0"
     labels = _FakeReplay.instances[-1].last_job_request["labels"]
     assert labels["post_window_frame_uuid"] == "post-window-frame"
     assert labels["start_window_frame_uuid"] == "start-keyframe"
+
+
+def test_frame_annotation_range_cache_reuses_burst_window(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    base_ms = 1_780_000_000_000
+    start_pts = base_ms * 1_000_000
+    event_pts = (base_ms + 5_000) * 1_000_000
+    end_pts = (base_ms + 10_000) * 1_000_000
+    redis_client = _FakeRedis(
+        frame_annotations=[
+            _frame_annotation(
+                frame_uuid="source-1-post",
+                frame_pts=end_pts,
+                stream_id=f"{base_ms + 10000}-0",
+                source_id="source-1",
+                camera_id="camera-1",
+                keyframe_uuid="source-1-start",
+                keyframe_pts=start_pts,
+            ),
+            _frame_annotation(
+                frame_uuid="source-1-start",
+                frame_pts=start_pts,
+                stream_id=f"{base_ms}-0",
+                source_id="source-1",
+                camera_id="camera-1",
+                keyframe_uuid="source-1-start",
+                keyframe_pts=start_pts,
+            ),
+            _frame_annotation(
+                frame_uuid="source-2-post",
+                frame_pts=end_pts,
+                stream_id=f"{base_ms + 10000}-1",
+                source_id="source-2",
+                camera_id="camera-2",
+                keyframe_uuid="source-2-start",
+                keyframe_pts=start_pts,
+            ),
+            _frame_annotation(
+                frame_uuid="source-2-start",
+                frame_pts=start_pts,
+                stream_id=f"{base_ms}-1",
+                source_id="source-2",
+                camera_id="camera-2",
+                keyframe_uuid="source-2-start",
+                keyframe_pts=start_pts,
+            ),
+        ],
+    )
+    worker._frame_annotation_range_cache.clear()
+
+    first = worker._find_replay_frame_domain_proofs(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="source-1",
+        camera_id="camera-1",
+        requested_start_pts=start_pts,
+        requested_end_pts=end_pts,
+        count=100,
+        page_count=100,
+        max_start_pts_delta_ns=5 * worker.PTS_TIME_BASE,
+        max_post_pts_delta_ns=worker.PTS_TIME_BASE,
+        runtime_epoch_id="epoch-1",
+        stream_session_id="session-1",
+        range_cache_ttl_s=10.0,
+        range_cache_bucket_ms=1000,
+    )
+    second = worker._find_replay_frame_domain_proofs(
+        redis_client,
+        stream_name="security.frame_annotations",
+        source_id="source-2",
+        camera_id="camera-2",
+        requested_start_pts=start_pts,
+        requested_end_pts=end_pts,
+        count=100,
+        page_count=100,
+        max_start_pts_delta_ns=5 * worker.PTS_TIME_BASE,
+        max_post_pts_delta_ns=worker.PTS_TIME_BASE,
+        runtime_epoch_id="epoch-1",
+        stream_session_id="session-1",
+        range_cache_ttl_s=10.0,
+        range_cache_bucket_ms=1000,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.post_window_frame.frame_uuid == "source-1-post"
+    assert second.post_window_frame.frame_uuid == "source-2-post"
+    assert redis_client.proof_reads == 1
 
 
 def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None:
@@ -450,7 +645,7 @@ def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None
     worker.run_worker(
         _clip_config(max_concurrent_jobs=1, pending_claim_count=0),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["1-0"]
@@ -458,6 +653,10 @@ def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None
     assert updates[-1]["evidence_state"] == "materialization_deferred"
     assert updates[-1]["diagnostics"]["active_job_count"] == 1
     assert updates[-1]["diagnostics"]["max_concurrent_jobs"] == 1
+    assert updates[-1]["diagnostics"]["replay_active_global_count"] == 1
+    assert updates[-1]["diagnostics"]["replay_admission_reason"].startswith(
+        "max_concurrent"
+    )
     assert all(update["status"] != "skipped_by_poc_limit" for update in updates)
 
 
@@ -499,6 +698,45 @@ def test_post_savant_concurrency_queue_does_not_wait_for_proof(monkeypatch) -> N
     assert updates[-1]["evidence_state"] == "materialization_deferred"
 
 
+def test_post_savant_proof_wait_fast_path_triggers_on_record_request_batch() -> None:
+    _activate()
+    import app.worker as worker
+
+    reason = worker._post_savant_proof_fast_path_reason(
+        _clip_config(post_savant_frame_proof_fast_path_batch_size=2),
+        record_request_batch_size=10,
+        stream_diagnostics={"pending": 0, "lag": 0},
+    )
+
+    assert reason == "record_request_batch_backlog"
+
+
+def test_post_savant_proof_wait_fast_path_triggers_on_stream_lag() -> None:
+    _activate()
+    import app.worker as worker
+
+    reason = worker._post_savant_proof_fast_path_reason(
+        _clip_config(post_savant_frame_proof_fast_path_lag=1),
+        record_request_batch_size=1,
+        stream_diagnostics={"pending": 0, "lag": 5},
+    )
+
+    assert reason == "record_request_lag_backlog"
+
+
+def test_post_savant_proof_wait_fast_path_disabled_for_single_live_request() -> None:
+    _activate()
+    import app.worker as worker
+
+    reason = worker._post_savant_proof_fast_path_reason(
+        _clip_config(post_savant_frame_proof_fast_path_batch_size=2),
+        record_request_batch_size=1,
+        stream_diagnostics={"pending": 0, "lag": 0},
+    )
+
+    assert reason == ""
+
+
 def test_pending_entry_is_claimed_and_processed(monkeypatch) -> None:
     _activate()
     import app.worker as worker
@@ -520,7 +758,7 @@ def test_pending_entry_is_claimed_and_processed(monkeypatch) -> None:
     worker.run_worker(
         _clip_config(max_concurrent_jobs=0),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.claims == 1
@@ -554,7 +792,7 @@ def test_terminal_pending_entry_is_acked_without_replay(monkeypatch) -> None:
     worker.run_worker(
         _clip_config(max_concurrent_jobs=0),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.claims == 1
@@ -592,7 +830,7 @@ def test_stale_pending_entry_without_db_target_is_acked_without_replay(
     worker.run_worker(
         _clip_config(max_concurrent_jobs=0),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.claims == 1
@@ -621,7 +859,7 @@ def test_replay_job_routes_to_source_shard(monkeypatch) -> None:
     worker.run_worker(
         _clip_config(max_concurrent_jobs=0, replay_shards=_two_replay_shards()),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["1-0"]
@@ -633,6 +871,54 @@ def test_replay_job_routes_to_source_shard(monkeypatch) -> None:
     assert updates[-1]["status"] == "replay_job_created"
     assert updates[-1]["replay_shard"]["shard_id"] == "replay-b"
     assert updates[-1]["replay_shard"]["replay_api_url"] == "http://replay-b:8080"
+    assert updates[-1]["replay_shard"]["mapping_version"] == "phase2-test"
+    diagnostics = updates[-1]["diagnostics"]
+    assert diagnostics["record_request_shard_id"] == ""
+    assert diagnostics["consumer_resolved_shard_id"] == "replay-b"
+    assert diagnostics["shard_mapping_version"] == "phase2-test"
+    assert diagnostics["replay_shard_mapping_mismatch"] is False
+    assert replay.jobs[0]["labels"]["consumer_resolved_shard_id"] == "replay-b"
+    assert replay.jobs[0]["labels"]["shard_mapping_version"] == "phase2-test"
+
+
+def test_replay_job_records_request_consumer_shard_mismatch(monkeypatch) -> None:
+    _activate()
+    import app.worker as worker
+
+    request = {
+        **_request("022"),
+        "source_id": "source-b",
+        "record_request_shard_id": "replay-a",
+        "shard_mapping_version": "phase2-old",
+    }
+    redis_client = _FakeRedis([request])
+    updates: list[dict[str, Any]] = []
+
+    def fake_update_clip_status(_pg_conn, event_id, status, **kwargs):
+        updates.append({"event_id": event_id, "status": status, **kwargs})
+        return True
+
+    _FakeReplay.instances.clear()
+    worker.shutdown_requested = False
+    monkeypatch.setattr(worker, "ReplayClient", _FakeReplay)
+    monkeypatch.setattr(worker, "update_clip_status", fake_update_clip_status)
+
+    worker.run_worker(
+        _clip_config(max_concurrent_jobs=0, replay_shards=_two_replay_shards()),
+        redis_client,
+        _DiagnosticsConn(),
+    )
+
+    assert redis_client.acked == ["1-0"]
+    diagnostics = updates[-1]["diagnostics"]
+    assert diagnostics["record_request_shard_id"] == "replay-a"
+    assert diagnostics["consumer_resolved_shard_id"] == "replay-b"
+    assert diagnostics["record_request_shard_mapping_version"] == "phase2-old"
+    assert diagnostics["shard_mapping_version"] == "phase2-test"
+    assert diagnostics["replay_shard_mapping_mismatch"] is True
+    replay = _FakeReplay.instances[0]
+    assert replay.jobs[0]["labels"]["record_request_shard_id"] == "replay-a"
+    assert replay.jobs[0]["labels"]["consumer_resolved_shard_id"] == "replay-b"
 
 
 def test_unknown_source_fails_before_replay_job(monkeypatch) -> None:
@@ -655,7 +941,7 @@ def test_unknown_source_fails_before_replay_job(monkeypatch) -> None:
     worker.run_worker(
         _clip_config(max_concurrent_jobs=0, replay_shards=_two_replay_shards()),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["1-0"]
@@ -680,7 +966,7 @@ def test_deferred_retry_budget_exhaustion_fails_closed(monkeypatch) -> None:
 
     acked = worker._defer_clip_request(
         redis_client,
-        object(),
+        _DiagnosticsConn(),
         stream="security.record_requests",
         group="clip-workers-test",
         msg_id="1-0",
@@ -723,7 +1009,7 @@ def test_concurrency_queue_does_not_fail_on_retry_budget(monkeypatch) -> None:
     worker.run_worker(
         _clip_config(max_concurrent_jobs=1, deferred_retry_max_attempts=5),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["9-0"]
@@ -733,7 +1019,7 @@ def test_concurrency_queue_does_not_fail_on_retry_budget(monkeypatch) -> None:
     assert updates[-1]["attempt_count"] == 7
 
 
-def test_priority_event_bypasses_replay_concurrency(monkeypatch) -> None:
+def test_priority_event_does_not_bypass_hard_replay_concurrency(monkeypatch) -> None:
     _activate()
     import app.worker as worker
 
@@ -757,15 +1043,16 @@ def test_priority_event_bypasses_replay_concurrency(monkeypatch) -> None:
     worker.run_worker(
         _clip_config(max_concurrent_jobs=1, pending_claim_count=0),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
-    assert redis_client.acked == ["1-0", "2-0"]
-    assert [update["status"] for update in updates] == [
-        "replay_job_created",
-        "replay_job_created",
-    ]
-    assert len(_FakeReplay.instances[-1].jobs) == 2
+    assert redis_client.acked == ["1-0"]
+    assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
+    assert updates[-1]["evidence_state"] == "materialization_deferred"
+    assert updates[-1]["diagnostics"]["replay_admission_reason"] == (
+        "max_concurrent_reached"
+    )
+    assert len(_FakeReplay.instances[-1].jobs) == 1
 
 
 class _RepoCursor:
@@ -862,7 +1149,7 @@ def test_post_savant_missing_frame_proof_defers_with_diagnostics(monkeypatch) ->
             post_savant_frame_proof_poll_interval_s=0.0,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == []
@@ -1036,7 +1323,7 @@ def test_post_savant_cross_session_post_window_proof_can_create_job(monkeypatch)
             post_savant_allow_cross_session_post_window_proof=True,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["1-0"]
@@ -1112,7 +1399,7 @@ def test_post_savant_cross_session_post_window_proof_can_be_disabled(
             post_savant_allow_cross_session_post_window_proof=False,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == []
@@ -1200,7 +1487,7 @@ def test_post_savant_truncated_pre_window_can_create_job(monkeypatch) -> None:
             post_savant_allow_truncated_pre_window_proof=True,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["1-0"]
@@ -1280,7 +1567,7 @@ def test_post_savant_truncated_pre_window_can_be_disabled(monkeypatch) -> None:
             post_savant_allow_truncated_pre_window_proof=False,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == []
@@ -1338,7 +1625,7 @@ def test_post_savant_frame_proof_wait_respects_deadline(monkeypatch) -> None:
             post_savant_frame_proof_poll_interval_s=0.01,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
     elapsed_s = worker.time.monotonic() - started
 
@@ -1415,7 +1702,7 @@ def test_post_savant_frame_proof_succeeds_after_local_poll(monkeypatch) -> None:
             post_savant_frame_proof_poll_interval_s=0.01,
         ),
         redis_client,
-        object(),
+        _DiagnosticsConn(),
     )
 
     assert redis_client.acked == ["1-0"]

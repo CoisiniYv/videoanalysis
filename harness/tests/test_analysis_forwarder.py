@@ -79,9 +79,17 @@ def _install_fake_savant_rs() -> None:
     class FakeBlockingWriter:
         def __init__(self, config) -> None:
             self.config = config
+            self.sent: list[tuple[str, object, bytes]] = []
 
         def start(self) -> None:
             pass
+
+        def send_message(self, topic: str, message, content: bytes):
+            self.sent.append((topic, message, content))
+            class WriterResultSuccess:
+                pass
+
+            return WriterResultSuccess()
 
         def shutdown(self) -> None:
             pass
@@ -169,6 +177,7 @@ def test_null_sink_counts_forwarded_without_savant_writer() -> None:
     config = main_mod.ForwarderConfig(
         in_endpoint="router+bind:tcp://0.0.0.0:5557",
         out_endpoint="null://diagnostic",
+        raw_out_endpoint="",
         analysis_fps="8/1",
         min_fps="2/1",
         sampler_enabled=True,
@@ -189,6 +198,48 @@ def test_null_sink_counts_forwarded_without_savant_writer() -> None:
         "WriterResultSuccess"
     )
     assert "va_forwarder_null_sink_enabled 1" in forwarder.metrics.render_prometheus()
+
+
+def test_raw_branch_fanout_happens_before_sampling_drop() -> None:
+    main_mod = _load_main_module()
+    config = main_mod.ForwarderConfig(
+        in_endpoint="router+bind:tcp://0.0.0.0:5557",
+        out_endpoint="null://diagnostic",
+        raw_out_endpoint="pub+bind:tcp://0.0.0.0:5560",
+        analysis_fps="1/1",
+        min_fps="1/1",
+        sampler_enabled=True,
+        queue_max_size=8,
+        receive_timeout_ms=100,
+        receive_hwm=10,
+        send_timeout_ms=100,
+        send_retries=0,
+        send_hwm=10,
+        metrics_port=8081,
+    )
+
+    forwarder = main_mod.AnalysisForwarder(config)
+    frame0 = _Frame("cam", pts=0, keyframe=False)
+    frame1 = _Frame("cam", pts=100_000_000, keyframe=False)
+    def video_message(frame):
+        message = types.SimpleNamespace()
+        message.is_video_frame = lambda: True
+        message.as_video_frame = lambda: frame
+        message.is_end_of_stream = lambda: False
+        message.is_shutdown = lambda: False
+        return types.SimpleNamespace(message=message, content=b"x")
+
+    item0 = forwarder._build_queue_item(video_message(frame0))
+    item1 = forwarder._build_queue_item(video_message(frame1))
+
+    assert item0 is not None
+    assert item1 is None
+    metrics_text = forwarder.metrics.render_prometheus()
+    assert 'va_forwarder_raw_frames_forwarded_total{source_id="cam"} 2' in metrics_text
+    assert 'va_forwarder_frames_dropped_total{source_id="cam"} 1' in metrics_text
+    raw_writer = forwarder.raw_writer
+    assert raw_writer.config["endpoint"] == "pub+bind:tcp://0.0.0.0:5560"
+    assert len(raw_writer.sent) == 2
 
 
 def test_phase05_passthrough_probe_is_available() -> None:

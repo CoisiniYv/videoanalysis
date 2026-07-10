@@ -180,6 +180,7 @@ def docker_run_command(
     network: str,
     image: str,
     rtsp_transport_params: str = DEFAULT_RTSP_TRANSPORT_PARAMS,
+    ffmpeg_timeout_ms: int = 20000,
     extra_volumes: Optional[List[str]] = None,
 ) -> List[str]:
     """Construct ``docker run -d ...`` for *spec*."""
@@ -200,7 +201,7 @@ def docker_run_command(
         "-e", "SYNC_OUTPUT=false",
         "-e", "BUFFER_LEN=2000",
         "-e", f"EOS_ON_START={eos_on_start}",
-        "-e", "FFMPEG_TIMEOUT_MS=20000",
+        "-e", f"FFMPEG_TIMEOUT_MS={max(1000, int(ffmpeg_timeout_ms or 20000))}",
         "-e", "DOWNLOAD_PATH=/tmp/video-loop-cache",
         "--entrypoint", _adapter_entrypoint_for(spec.uri),
     ]
@@ -274,6 +275,7 @@ def cmd_start(
         network=args.network,
         image=args.adapter_image,
         rtsp_transport_params=args.rtsp_transport_params,
+        ffmpeg_timeout_ms=args.ffmpeg_timeout_ms,
         extra_volumes=extra_volumes,
     )
     log(f"START source_id={spec.source_id} container={spec.container_name}")
@@ -377,6 +379,12 @@ def main(
             "RTSP_TRANSPORT env passed to RTSP adapters "
             f"(default: {DEFAULT_RTSP_TRANSPORT_PARAMS})"
         ),
+    )
+    common.add_argument(
+        "--ffmpeg-timeout-ms",
+        type=int,
+        default=int(os.environ.get("CAMERA_SOURCE_FFMPEG_TIMEOUT_MS", "20000")),
+        help="FFMPEG_TIMEOUT_MS env passed to source adapters.",
     )
     common.add_argument(
         "--testvideo-mount",

@@ -18,10 +18,21 @@ except Exception:  # pragma: no cover - Savant is available only in runtime imag
 class SavantPerfMetricsPyFunc(NvDsPyFuncPlugin):
     """Emit stable ``va_savant_*`` metrics by source_id."""
 
-    def __init__(self, fps_window_s: float = 10.0, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        fps_window_s: float = 10.0,
+        enabled: bool = True,
+        stage_rates_enabled: bool = True,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
+        self._enabled = bool(enabled)
+        self._stage_rates_enabled = bool(stage_rates_enabled)
         self._fps_window_s = max(float(fps_window_s), 1.0)
         self._frame_times: dict[str, deque[float]] = defaultdict(deque)
+        self._rate_events: dict[str, dict[str, deque[float]]] = defaultdict(
+            lambda: defaultdict(deque)
+        )
         self._last_seen: dict[str, float] = {}
         self._counters = {
             "frames_seen": _metric(
@@ -110,10 +121,60 @@ class SavantPerfMetricsPyFunc(NvDsPyFuncPlugin):
                 "Number of sources observed within the rolling FPS window.",
                 [],
             ),
+            "frame_annotation_fps": _metric(
+                "gauge",
+                "va_savant_frame_annotation_fps",
+                "Frame annotation export rate over a short rolling window.",
+                ["source_id", "window"],
+            ),
+            "pose_stage_fps": _metric(
+                "gauge",
+                "va_savant_pose_stage_fps",
+                "Frames per second reaching the pose-stage metrics point.",
+                ["source_id", "window"],
+            ),
+            "pose_object_fps": _metric(
+                "gauge",
+                "va_savant_pose_object_fps",
+                "Person objects per second observed after pose/tracker stages.",
+                ["source_id", "window"],
+            ),
+            "face_stage_fps": _metric(
+                "gauge",
+                "va_savant_face_stage_fps",
+                "Frames per second reaching the face-stage metrics point.",
+                ["source_id", "window"],
+            ),
+            "face_object_fps": _metric(
+                "gauge",
+                "va_savant_face_object_fps",
+                "Face objects per second observed after face detector stages.",
+                ["source_id", "window"],
+            ),
+            "adaface_embedding_fps": _metric(
+                "gauge",
+                "va_savant_adaface_embedding_fps",
+                "AdaFace embeddings per second observed on face objects.",
+                ["source_id", "window"],
+            ),
+            "person_observation_fps": _metric(
+                "gauge",
+                "va_savant_person_observation_fps",
+                "Person observation opportunities per second.",
+                ["source_id", "window"],
+            ),
+            "face_observation_fps": _metric(
+                "gauge",
+                "va_savant_face_observation_fps",
+                "Face observations allowed for export per second.",
+                ["source_id", "window"],
+            ),
         }
 
     def process_frame(self, buffer: Any, frame_meta: Any) -> None:
         del buffer
+        if not self._enabled:
+            return
         now = time.time()
         source_id = str(getattr(frame_meta, "source_id", "") or "unknown")
         objects = list(getattr(frame_meta, "objects", []) or [])
@@ -146,6 +207,21 @@ class SavantPerfMetricsPyFunc(NvDsPyFuncPlugin):
             self._inc("face_observations_exported", source_id, face_export_count)
 
         self._observe_fps(source_id, now)
+        if self._stage_rates_enabled:
+            self._observe_stage_rates(
+                source_id,
+                now,
+                {
+                    "frame_annotation_fps": 1,
+                    "pose_stage_fps": 1,
+                    "pose_object_fps": person_count,
+                    "face_stage_fps": 1,
+                    "face_object_fps": face_count,
+                    "adaface_embedding_fps": embedding_count,
+                    "person_observation_fps": person_count,
+                    "face_observation_fps": face_export_count,
+                },
+            )
 
     def _inc(self, key: str, source_id: str, value: int = 1) -> None:
         _inc(self._counters[key], {"source_id": source_id}, value)
@@ -169,6 +245,23 @@ class SavantPerfMetricsPyFunc(NvDsPyFuncPlugin):
             _set(self._gauges["last_frame_age"], {"source_id": sid}, now - last_seen)
         active = sum(1 for last_seen in self._last_seen.values() if now - last_seen <= self._fps_window_s)
         _set(self._gauges["sources_active"], {}, float(active))
+
+    def _observe_stage_rates(
+        self,
+        source_id: str,
+        now: float,
+        counts: dict[str, int],
+    ) -> None:
+        labels = {"source_id": source_id, "window": f"{int(self._fps_window_s)}s"}
+        cutoff = now - self._fps_window_s
+        for key, count in counts.items():
+            windows = self._rate_events[source_id]
+            events = windows[key]
+            for _ in range(max(0, int(count or 0))):
+                events.append(now)
+            while events and events[0] < cutoff:
+                events.popleft()
+            _set(self._gauges[key], labels, len(events) / self._fps_window_s)
 
 
 def _metric(kind: str, name: str, description: str, labels: list[str]) -> Any:

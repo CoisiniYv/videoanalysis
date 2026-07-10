@@ -11,6 +11,8 @@ let selectedCameraId = "";
 let people = [];
 let selectedPersonId = "";
 let selectedPerson = null;
+let selectedPersonRequestId = 0;
+let pendingOpenPersonId = "";
 let faceRegistrationMode = "new";
 let algorithms = [];
 let algorithmSupportMatrix = [];
@@ -99,6 +101,8 @@ const peopleEl = document.getElementById("people");
 const peopleSearchEl = document.getElementById("people-search");
 const faceRegistrationForm = document.getElementById("face-registration-form");
 const personProfileEl = document.getElementById("person-profile");
+const personLatestLocationEl = document.getElementById("person-latest-location");
+const personTrajectoryEl = document.getElementById("person-trajectory");
 const personDetailEl = document.getElementById("person-detail");
 const galleryEl = document.getElementById("gallery");
 const faceRegistrationSummaryEl = document.getElementById("face-registration-summary");
@@ -107,6 +111,21 @@ const registerNewPersonBtn = document.getElementById("register-new-person");
 const appendSelectedPersonBtn = document.getElementById("append-selected-person");
 const registrationModeStatusEl = document.getElementById("registration-mode-status");
 const previewDeleteSelectedPersonBtn = document.getElementById("preview-delete-selected-person");
+const findSelectedPersonBtn = document.getElementById("find-selected-person");
+const findPersonDialogEl = document.getElementById("find-person-dialog");
+const findPersonDialogCloseBtn = document.getElementById("find-person-dialog-close");
+const findPersonFormEl = document.getElementById("find-person-form");
+const findPersonMinSimilarityEl = document.getElementById("find-person-min-similarity");
+const findPersonLimitEl = document.getElementById("find-person-limit");
+const runFindPersonBtn = document.getElementById("run-find-person");
+const showFindPersonTrajectoryBtn = document.getElementById("show-find-person-trajectory");
+const findPersonLatestEl = document.getElementById("find-person-latest");
+const findPersonResultsEl = document.getElementById("find-person-results");
+const imagePreviewDialogEl = document.getElementById("image-preview-dialog");
+const imagePreviewCloseBtn = document.getElementById("image-preview-close");
+const imagePreviewTitleEl = document.getElementById("image-preview-title");
+const imagePreviewSubtitleEl = document.getElementById("image-preview-subtitle");
+const imagePreviewImgEl = document.getElementById("image-preview-img");
 const THEME_STORAGE_KEY = "operator-theme";
 const ACTIVE_VIEW_STORAGE_KEY = "operator-active-view";
 const EVIDENCE_COUNT_STORAGE_KEY = "operator-evidence-count";
@@ -130,7 +149,9 @@ const templates = {
     },
     evidence_policy: {
       snapshot_required: true,
-      clip_required: true,
+      clip_required: false,
+      evidence_mode: "image_only",
+      playback_kind: "image",
       pre_seconds: 5,
       post_seconds: 5,
     },
@@ -289,7 +310,7 @@ const operatorAlgorithmMeta = {
   },
   "face.watchlist": {
     title: "名单命中",
-    subtitle: "按摄像头名单",
+    subtitle: "按摄像头名单、图片轨迹与最近位置",
   },
 };
 
@@ -465,9 +486,15 @@ async function request(path, options = {}) {
     throw new Error(`接口返回不是有效 JSON：${text.slice(0, 200)}`);
   }
   if (!response.ok || body.error) {
-    const error = new Error(body.error?.message || body.error?.detail || `HTTP ${response.status}`);
+    const validationDetail = Array.isArray(body.detail)
+      ? body.detail.map((item) => {
+          const loc = Array.isArray(item.loc) ? item.loc.join(".") : "";
+          return `${loc}: ${item.msg || JSON.stringify(item)}`;
+        }).join("; ")
+      : (typeof body.detail === "string" ? body.detail : "");
+    const error = new Error(body.error?.message || body.error?.detail || validationDetail || `HTTP ${response.status}`);
     error.status = response.status;
-    error.details = body.error?.details || null;
+    error.details = body.error?.details || body.detail || null;
     throw error;
   }
   return body.data ?? body;
@@ -792,8 +819,8 @@ function defaultRoiZoneId(type = roiZoneTypeEl?.value) {
 function nextRoiZoneId(type = roiZoneTypeEl?.value) {
   const prefix = type === "line" ? "tripwire" : "roi";
   const existing = new Set(
-    (currentZones || [])
-      .map((zone) => String(zone.zone_id || zone.zone_name || ""))
+    validZoneRows(currentZones)
+      .map(zoneOptionId)
       .filter(Boolean)
   );
   for (let index = 1; index <= 99; index += 1) {
@@ -911,12 +938,12 @@ function drawRoiCanvas() {
   ctx.clearRect(0, 0, display.width, display.height);
   if (!roiState.imageLoaded) return;
 
-  for (const zone of currentZones || []) {
-    const points = (zone.points || [])
-      .map((point) => sourcePointToDisplay(point, zone.coordinate_space || "pixel"))
+  for (const zone of validZoneRows(currentZones)) {
+    const points = (Array.isArray(zone?.points) ? zone.points : [])
+      .map((point) => sourcePointToDisplay(point, zone?.coordinate_space || "pixel"))
       .filter(Boolean);
     if (points.length < 2) continue;
-    const closed = zone.zone_type === "polygon";
+    const closed = zone?.zone_type === "polygon";
     drawZonePath(ctx, points, {
       closed,
       stroke: "rgba(45, 212, 191, 0.7)",
@@ -983,7 +1010,7 @@ function writeRoiZoneJson({ allowIncomplete = false } = {}) {
   try {
     const zone = roiZoneFromDraft();
     zoneJson.value = JSON.stringify(zone, null, 2);
-    setRoiStatus(`${roiTypeLabel()} ${zone.zone_id}：${zone.points.length} 个点`);
+    setRoiStatus(`${roiTypeLabel()} ${zoneOptionId(zone)}：${(zone.points || []).length} 个点`);
     return zone;
   } catch (e) {
     if (!allowIncomplete) throw e;
@@ -1024,10 +1051,10 @@ function rulePolygonZoneId(rule) {
 }
 
 function preferredFinalRoiZone(zones = [], rules = []) {
-  const polygonZones = (zones || []).filter((zone) => zone.zone_type === "polygon");
+  const polygonZones = validZoneRows(zones).filter((zone) => zone?.zone_type === "polygon");
   if (!polygonZones.length) return null;
   const byId = new Map(
-    polygonZones.map((zone) => [String(zone.zone_id || zone.zone_name || ""), zone])
+    polygonZones.map((zone) => [zoneOptionId(zone), zone]).filter(([zoneId]) => zoneId)
   );
   const enabledRules = (rules || []).filter((rule) => rule.enabled !== false);
   const intrusionRule = enabledRules.find((rule) => rule.algorithm_id === "behavior.intrusion");
@@ -1042,13 +1069,13 @@ function preferredFinalRoiZone(zones = [], rules = []) {
 
 function loadZoneIntoRoiEditor(zone) {
   if (!zone) return;
-  if (roiZoneIdEl) roiZoneIdEl.value = zone.zone_id || zone.zone_name || defaultRoiZoneId(zone.zone_type);
-  const type = zone.zone_type === "line" || zone.zone_type === "direction_line" ? "line" : "polygon";
+  if (roiZoneIdEl) roiZoneIdEl.value = zoneOptionId(zone) || defaultRoiZoneId(zone?.zone_type);
+  const type = zone?.zone_type === "line" || zone?.zone_type === "direction_line" ? "line" : "polygon";
   const source = roiSourceDimensions();
-  const points = (zone.points || []).map((point) => {
+  const points = (Array.isArray(zone?.points) ? zone.points : []).map((point) => {
     const xy = normalizeRoiPoint(point);
     if (!xy) return null;
-    if ((zone.coordinate_space || "pixel") === "normalized") {
+    if ((zone?.coordinate_space || "pixel") === "normalized") {
       return [xy[0] * source.width, xy[1] * source.height];
     }
     return xy;
@@ -1062,7 +1089,7 @@ function prepareRoiEditorForCamera(zones = [], rules = currentRules) {
   const finalZone = preferredFinalRoiZone(zones, rules);
   if (finalZone) {
     loadZoneIntoRoiEditor(finalZone);
-    setRoiStatus(`最终检测区域：${finalZone.zone_id || finalZone.zone_name}`);
+    setRoiStatus(`最终检测区域：${zoneOptionId(finalZone)}`);
     return;
   }
   startNewRoiDraft("polygon");
@@ -1330,6 +1357,16 @@ function zoneTypeLabel(zone) {
   return ["line", "direction_line"].includes(zone?.zone_type) ? "检测线" : "区域";
 }
 
+function validZoneRows(zones = []) {
+  return (Array.isArray(zones) ? zones : []).filter(
+    (zone) => zone && typeof zone === "object"
+  );
+}
+
+function zoneOptionId(zone) {
+  return String(zone?.zone_id || zone?.zone_name || "");
+}
+
 function zonePointBounds(points = []) {
   const normalized = points.map(normalizeRoiPoint).filter(Boolean);
   if (!normalized.length) return "";
@@ -1358,29 +1395,30 @@ function zoneRuleBindings(zone) {
 
 function createZoneListItem(zone, finalZoneId) {
   const item = document.createElement("div");
-  const zoneId = zone.zone_id || zone.zone_name || "";
+  const zoneId = zoneOptionId(zone);
+  const zoneName = String(zone?.zone_name || "");
   const typeLabel = zoneTypeLabel(zone);
-  const points = zone.points || [];
+  const points = Array.isArray(zone?.points) ? zone.points : [];
   const pointUnit = typeLabel === "检测线" ? "端点" : "点";
   const bounds = zonePointBounds(points);
   const bindings = zoneRuleBindings(zone);
   const isFinalZone = typeLabel === "区域" && zoneId && zoneId === finalZoneId;
   item.className = `zone-item zone-item-${typeLabel === "检测线" ? "line" : "polygon"}`;
   item.innerHTML =
-    `<div class="zone-item-header">` +
+      `<div class="zone-item-header">` +
       `<div class="zone-item-main">` +
         `<strong>${escapeHtml(zoneId)}</strong>` +
-        `<div class="muted">${escapeHtml(zone.zone_name && zone.zone_name !== zoneId ? zone.zone_name : typeLabel)}</div>` +
+        `<div class="muted">${escapeHtml(zoneName && zoneName !== zoneId ? zoneName : typeLabel)}</div>` +
       `</div>` +
       `<div class="zone-badges">` +
         `<span class="zone-chip">${escapeHtml(typeLabel)}</span>` +
-        `<span class="zone-chip ${zone.enabled === false ? "disabled" : "enabled"}">${zone.enabled === false ? "停用" : "启用"}</span>` +
+        `<span class="zone-chip ${zone?.enabled === false ? "disabled" : "enabled"}">${zone?.enabled === false ? "停用" : "启用"}</span>` +
         `${isFinalZone ? `<span class="zone-chip final">最终检测区域</span>` : ""}` +
       `</div>` +
     `</div>` +
     `<div class="zone-meta-grid">` +
       `<span>${points.length} 个${pointUnit}</span>` +
-      `<span>${escapeHtml(zone.coordinate_space || "pixel")}</span>` +
+      `<span>${escapeHtml(zone?.coordinate_space || "pixel")}</span>` +
       `<span>${escapeHtml(bounds || "未记录坐标")}</span>` +
     `</div>` +
     `<div class="zone-binding-list">` +
@@ -1395,33 +1433,34 @@ function createZoneListItem(zone, finalZoneId) {
   item.querySelector('[data-action="edit-zone"]').addEventListener("click", (e) => {
     e.stopPropagation();
     zoneJson.value = JSON.stringify({
-      zone_id: zone.zone_id,
-      zone_name: zone.zone_name || "",
-      zone_type: zone.zone_type,
-      coordinate_space: zone.coordinate_space || "pixel",
-      points: zone.points || [],
-      enabled: zone.enabled !== false,
+      zone_id: zoneId,
+      zone_name: zoneName,
+      zone_type: zone?.zone_type || "polygon",
+      coordinate_space: zone?.coordinate_space || "pixel",
+      points,
+      enabled: zone?.enabled !== false,
     }, null, 2);
     loadZoneIntoRoiEditor(zone);
   });
   item.querySelector('[data-action="delete-zone"]').addEventListener("click", (e) => {
     e.stopPropagation();
-    deleteZone(zone.zone_id);
+    if (zoneId) deleteZone(zoneId);
   });
   return item;
 }
 
 function appendZoneGroup({ title, rows, emptyText, finalZoneId }) {
+  const safeRows = validZoneRows(rows);
   const group = document.createElement("section");
   group.className = "zone-list-group";
   const header = document.createElement("div");
   header.className = "zone-list-title";
-  header.innerHTML = `<h3>${escapeHtml(title)}</h3><span>${rows.length}</span>`;
+  header.innerHTML = `<h3>${escapeHtml(title)}</h3><span>${safeRows.length}</span>`;
   group.appendChild(header);
   const list = document.createElement("div");
   list.className = "zone-list-items";
-  if (rows.length) {
-    rows.forEach((zone) => list.appendChild(createZoneListItem(zone, finalZoneId)));
+  if (safeRows.length) {
+    safeRows.forEach((zone) => list.appendChild(createZoneListItem(zone, finalZoneId)));
   } else {
     list.innerHTML = `<div class="zone-list-empty">${escapeHtml(emptyText)}</div>`;
   }
@@ -1430,12 +1469,12 @@ function appendZoneGroup({ title, rows, emptyText, finalZoneId }) {
 }
 
 function renderZones(zones) {
-  currentZones = zones || [];
+  currentZones = validZoneRows(zones);
   zonesEl.innerHTML = "";
   const finalZone = preferredFinalRoiZone(currentZones, currentRules);
-  const finalZoneId = finalZone ? String(finalZone.zone_id || finalZone.zone_name || "") : "";
-  const polygonZones = currentZones.filter((zone) => zone.zone_type === "polygon");
-  const lineZones = currentZones.filter((zone) => ["line", "direction_line"].includes(zone.zone_type));
+  const finalZoneId = zoneOptionId(finalZone);
+  const polygonZones = currentZones.filter((zone) => zone?.zone_type === "polygon");
+  const lineZones = currentZones.filter((zone) => ["line", "direction_line"].includes(zone?.zone_type));
   appendZoneGroup({
     title: "已保存区域",
     rows: polygonZones,
@@ -1544,24 +1583,26 @@ function renderZoneSelectors() {
   if (!ruleZoneEl || !ruleLineEl) return;
   const previousZone = ruleZoneEl.value;
   const previousLine = ruleLineEl.value;
-  const polygonZones = currentZones.filter((z) => z.zone_type === "polygon");
-  const lineZones = currentZones.filter((z) => ["line", "direction_line"].includes(z.zone_type));
+  const polygonZones = validZoneRows(currentZones).filter((z) => z?.zone_type === "polygon");
+  const lineZones = validZoneRows(currentZones).filter((z) => ["line", "direction_line"].includes(z?.zone_type));
   const renderOptions = (select, rows, emptyLabel) => {
     select.innerHTML = `<option value="">${emptyLabel}</option>`;
     for (const zone of rows) {
-      const id = zone.zone_id || zone.zone_name;
+      const id = zoneOptionId(zone);
+      if (!id) continue;
+      const zoneName = String(zone?.zone_name || "");
       const option = document.createElement("option");
       option.value = id;
-      option.textContent = zone.zone_name && zone.zone_name !== id ? `${zone.zone_name} (${id})` : id;
+      option.textContent = zoneName && zoneName !== id ? `${zoneName} (${id})` : id;
       select.appendChild(option);
     }
   };
   renderOptions(ruleZoneEl, polygonZones, "不绑定区域");
   renderOptions(ruleLineEl, lineZones, "不绑定检测线");
-  if (previousZone && polygonZones.some((zone) => (zone.zone_id || zone.zone_name) === previousZone)) {
+  if (previousZone && polygonZones.some((zone) => zoneOptionId(zone) === previousZone)) {
     ruleZoneEl.value = previousZone;
   }
-  if (previousLine && lineZones.some((zone) => (zone.zone_id || zone.zone_name) === previousLine)) {
+  if (previousLine && lineZones.some((zone) => zoneOptionId(zone) === previousLine)) {
     ruleLineEl.value = previousLine;
   }
   renderQuickAlgorithmControls();
@@ -1625,10 +1666,6 @@ function renderBehaviorAlgorithmControls(algorithmId, config, disabledAttr) {
   return "";
 }
 
-function zoneOptionId(zone) {
-  return zone.zone_id || zone.zone_name || "";
-}
-
 function operatorApplyBadge(algorithmId, rule, applyState) {
   if (algorithmId === "face.watchlist") {
     if (rule?.enabled === false) {
@@ -1650,7 +1687,7 @@ function renderQuickAlgorithmControls() {
     algorithmControlsEl.innerHTML = `<div class="muted">请选择摄像头。</div>`;
     return;
   }
-  const polygonZones = currentZones.filter((z) => z.zone_type === "polygon");
+  const polygonZones = validZoneRows(currentZones).filter((z) => z?.zone_type === "polygon");
   algorithmControlsEl.innerHTML = "";
   for (const algorithmId of quickAlgorithmIds) {
     const support = supportForAlgorithm(algorithmId);
@@ -1678,8 +1715,10 @@ function renderQuickAlgorithmControls() {
           `<option value="">未绑定</option>` +
           polygonZones.map((zone) => {
             const id = zoneOptionId(zone);
+            if (!id) return "";
+            const zoneName = String(zone?.zone_name || "");
             const selected = id === selectedZone ? " selected" : "";
-            return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(zone.zone_name && zone.zone_name !== id ? `${zone.zone_name} (${id})` : id)}</option>`;
+            return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(zoneName && zoneName !== id ? `${zoneName} (${id})` : id)}</option>`;
           }).join("") +
         `</select></label>`
       : "";
@@ -1752,6 +1791,34 @@ function formatAge(value) {
   if (!Number.isFinite(num)) return "--";
   if (num < 60) return `${formatInteger(num)}s`;
   return `${formatNumber(num / 60)}m`;
+}
+
+function formatPercent(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "--";
+  return `${Math.round(num * 100)}%`;
+}
+
+function formatTime(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) && numeric > 946684800000
+    ? new Date(numeric)
+    : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
+}
+
+function personLookupParams({ minSimilarity = 0.6, limit = 20 } = {}) {
+  const params = new URLSearchParams();
+  if (minSimilarity !== undefined && minSimilarity !== "") {
+    params.set("min_similarity", minSimilarity);
+  }
+  if (limit) {
+    params.set("limit", limit);
+  }
+  params.set("include_unregistered_sources", "true");
+  return params;
 }
 
 function cameraForSourceId(sourceId) {
@@ -2183,6 +2250,9 @@ function renderRuntimeSourceTable(sources) {
       `<td>${sourceCellHtml(source.source_id)}</td>` +
       `<td><span class="runtime-state-chip ${stale ? "warn" : "ok"}">${escapeHtml(stateText)}</span></td>` +
       `<td>${formatNumber(source.effective_fps)}</td>` +
+      `<td>${formatNumber(source.pose_stage_fps)}</td>` +
+      `<td>${formatNumber(source.face_stage_fps)}</td>` +
+      `<td>${formatNumber(source.adaface_embedding_fps)}</td>` +
       `<td>${formatNumber(source.last_frame_age_seconds)}</td>` +
       `<td>${formatInteger(source.frames_seen_total)}</td>` +
       `<td>${formatInteger(source.frame_annotations_exported_total)}</td>` +
@@ -2194,7 +2264,7 @@ function renderRuntimeSourceTable(sources) {
   runtimeSourceTableEl.innerHTML =
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>摄像头</th><th>运行判断</th><th>有效 FPS</th><th>最近帧延迟</th><th>已处理帧</th>` +
+        `<th>摄像头</th><th>运行判断</th><th>有效 FPS</th><th>Pose FPS</th><th>Face FPS</th><th>AdaFace/s</th><th>最近帧延迟</th><th>已处理帧</th>` +
         `<th>标注帧</th><th>人体</th><th>人脸</th><th>人脸特征</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
@@ -2459,8 +2529,8 @@ async function loadCameras() {
 
 async function loadEvidenceCount() {
   try {
-    const data = await request(`${API}/maintenance/storage/summary`);
-    setEvidenceCount(data.evidence?.bundle_count);
+    const data = await request(`${API}/evidence/bundles?limit=1&offset=0`);
+    setEvidenceCount(data.total);
   } catch (_err) {
     setEvidenceCount(null);
   }
@@ -2498,7 +2568,9 @@ async function loadPeople() {
   const data = await request(`${API}/people${suffix}`);
   people = data.people || [];
   const selectedStillVisible = people.some((person) => String(person.person_id) === String(selectedPersonId));
-  if (!selectedStillVisible) {
+  if (!selectedStillVisible && pendingOpenPersonId && String(selectedPersonId) === String(pendingOpenPersonId)) {
+    // Keep deep-linked selections even when the current list page/search does not contain that person.
+  } else if (!selectedStillVisible) {
     selectedPersonId = "";
     selectedPerson = null;
   }
@@ -2561,14 +2633,25 @@ function renderPeople() {
 
 async function selectPerson(personId) {
   clearMessages();
+  const requestId = ++selectedPersonRequestId;
   selectedPersonId = String(personId);
+  selectedPerson = null;
+  personDetailEl.value = "";
+  renderPersonLatestLocation(null);
+  renderPersonTrajectory([]);
   const data = await request(`${API}/people/${encodeURIComponent(personId)}`);
+  if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
+    return;
+  }
   selectedPerson = data.person || null;
   personDetailEl.value = JSON.stringify(data.person, null, 2);
   renderPersonProfile(data.person);
   renderGallery(data.gallery || []);
   if (appendSelectedPersonBtn) {
     appendSelectedPersonBtn.disabled = false;
+  }
+  if (findSelectedPersonBtn) {
+    findSelectedPersonBtn.disabled = false;
   }
   if (faceRegistrationMode === "append") {
     fillRegistrationForPerson(data.person);
@@ -2580,7 +2663,11 @@ async function selectPerson(personId) {
   if (previewDeleteSelectedPersonBtn) {
     previewDeleteSelectedPersonBtn.disabled = false;
   }
-  setStatus(`人员 ${personId}`);
+  await findSelectedPersonLatestLocation(personId, requestId);
+  if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
+    return;
+  }
+  setStatus(`人员 ${personId} 轨迹已加载`);
 }
 
 function renderPersonProfile(person) {
@@ -2592,6 +2679,249 @@ function renderPersonProfile(person) {
     `<div class="muted">状态：${person.is_active ? "有效" : "停用"}</div>` +
     `<div class="muted">${person.description || "暂无描述"}</div>`;
 }
+
+function locationImageUrl(location) {
+  return location?.annotated_frame_url || location?.full_frame_url || location?.face_crop_url || "";
+}
+
+function openImagePreview(imageUrl, title, subtitle) {
+  if (!imageUrl || !imagePreviewDialogEl || !imagePreviewImgEl) return;
+  imagePreviewImgEl.src = imageUrl;
+  imagePreviewImgEl.alt = title || "轨迹图像";
+  if (imagePreviewTitleEl) imagePreviewTitleEl.textContent = title || "图像查看";
+  if (imagePreviewSubtitleEl) imagePreviewSubtitleEl.textContent = subtitle || "人脸轨迹图片";
+  imagePreviewDialogEl.hidden = false;
+}
+
+function closeImagePreview() {
+  if (imagePreviewDialogEl) imagePreviewDialogEl.hidden = true;
+  if (imagePreviewImgEl) imagePreviewImgEl.removeAttribute("src");
+}
+
+function previewButtonHtml(imageUrl, title, subtitle, className, altText) {
+  if (!imageUrl) return "";
+  return (
+    `<button type="button" class="${className}" data-image-preview-url="${escapeHtml(imageUrl)}" ` +
+      `data-image-preview-title="${escapeHtml(title || "图像查看")}" ` +
+      `data-image-preview-subtitle="${escapeHtml(subtitle || "人脸轨迹图片")}">` +
+      `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(altText || "轨迹图片")}" loading="lazy" />` +
+    `</button>`
+  );
+}
+
+function bindImagePreviewButtons(root) {
+  if (!root) return;
+  root.querySelectorAll("[data-image-preview-url]").forEach((button) => {
+    button.addEventListener("click", () => {
+      openImagePreview(
+        button.dataset.imagePreviewUrl,
+        button.dataset.imagePreviewTitle,
+        button.dataset.imagePreviewSubtitle
+      );
+    });
+  });
+}
+
+function trajectorySourceLabel(source) {
+  const labels = {
+    watchlist_event: "名单命中",
+    gallery_observation: "图库轨迹",
+    person_search_observation: "人脸观察",
+    live_search_hit: "一键找人"
+  };
+  return labels[source] || source || "轨迹";
+}
+
+function renderPersonLatestLocation(location) {
+  if (!personLatestLocationEl) return;
+  if (!selectedPersonId) {
+    personLatestLocationEl.textContent = "选择人员后可查看最近出现位置";
+    return;
+  }
+  if (!location) {
+    personLatestLocationEl.innerHTML =
+      `<strong>最近位置</strong>` +
+      `<div class="muted">暂无命中记录，点击“查找此人”刷新。</div>`;
+    return;
+  }
+  const cameraName = location.camera_name || location.source_id || location.camera_id || "未知摄像头";
+  const imageUrl = locationImageUrl(location);
+  const timeText = formatTime(location.event_ts_ms || location.event_created_at || location.observation_timestamp_ms);
+  personLatestLocationEl.innerHTML =
+    `<strong>最近位置：${escapeHtml(cameraName)}</strong>` +
+    `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
+    `<div class="muted">相似度：${escapeHtml(formatPercent(location.similarity))}</div>` +
+    previewButtonHtml(imageUrl, `最近位置：${cameraName}`, timeText || "人脸轨迹图片", "image-preview-trigger gallery-preview-trigger", "最近命中图片");
+  bindImagePreviewButtons(personLatestLocationEl);
+}
+
+function renderPersonTrajectory(rows) {
+  if (!personTrajectoryEl) return;
+  const trajectory = Array.isArray(rows) ? rows : [];
+  if (!selectedPersonId) {
+    personTrajectoryEl.textContent = "选择人员后可查看最近轨迹";
+    return;
+  }
+  if (!trajectory.length) {
+    personTrajectoryEl.innerHTML =
+      `<strong>最近轨迹</strong>` +
+      `<div class="muted">暂无轨迹记录，点击“查找此人”刷新。</div>`;
+    return;
+  }
+  const items = trajectory.slice(0, 12).map((row) => {
+    const cameraName = row.camera_name || row.source_id || row.camera_id || "未知摄像头";
+    const timeText = formatTime(row.event_ts_ms || row.event_created_at || row.observation_timestamp_ms);
+    const imageUrl = locationImageUrl(row);
+    return (
+      `<div class="trajectory-row">` +
+        (imageUrl
+          ? previewButtonHtml(imageUrl, cameraName, timeText || "轨迹图片", "image-preview-trigger trajectory-preview-trigger", "轨迹图片")
+          : `<div class="trajectory-thumb-empty"></div>`) +
+        `<div>` +
+          `<strong>${escapeHtml(cameraName)}</strong>` +
+          `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
+          `<div class="muted">${escapeHtml(trajectorySourceLabel(row.trajectory_source))} | 相似度 ${escapeHtml(formatPercent(row.similarity))}</div>` +
+        `</div>` +
+      `</div>`
+    );
+  }).join("");
+  personTrajectoryEl.innerHTML =
+    `<strong>最近轨迹</strong>` +
+    `<div class="trajectory-list">${items}</div>`;
+  bindImagePreviewButtons(personTrajectoryEl);
+}
+
+async function findSelectedPersonLatestLocation(personId = selectedPersonId, requestId = selectedPersonRequestId) {
+  if (!selectedPersonId) return;
+  clearMessages();
+  if (findSelectedPersonBtn) findSelectedPersonBtn.disabled = true;
+  try {
+    const params = personLookupParams({ limit: 20, minSimilarity: 0.6 });
+    const data = await request(`${API}/people/${encodeURIComponent(personId)}/find?${params.toString()}`);
+    if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
+      return;
+    }
+    renderPersonLatestLocation(data.latest_location || null);
+    renderPersonTrajectory(data.results || data.trajectory || []);
+    setStatus(data.latest_location ? "已刷新人脸轨迹" : "暂无最近位置");
+  } finally {
+    if (findSelectedPersonBtn) findSelectedPersonBtn.disabled = false;
+  }
+}
+
+function renderFindPersonLatest(location) {
+  if (!findPersonLatestEl) return;
+  if (!location) {
+    findPersonLatestEl.innerHTML =
+      `<strong>最新位置</strong>` +
+      `<div class="muted">暂未找到该人员的近期图片命中。</div>`;
+    return;
+  }
+  const cameraName = location.camera_name || location.source_id || location.camera_id || "未知摄像头";
+  const imageUrl = locationImageUrl(location);
+  const timeText = formatTime(location.event_ts_ms || location.event_created_at || location.observation_timestamp_ms);
+  findPersonLatestEl.innerHTML =
+    `<strong>最新位置：${escapeHtml(cameraName)}</strong>` +
+    `<div class="muted">${escapeHtml(timeText || "-")} | 相似度 ${escapeHtml(formatPercent(location.similarity))}</div>` +
+    previewButtonHtml(imageUrl, `最新位置：${cameraName}`, timeText || "一键找人图片", "image-preview-trigger gallery-preview-trigger", "最新位置图片");
+  bindImagePreviewButtons(findPersonLatestEl);
+}
+
+function renderFindPersonResults(rows) {
+  if (!findPersonResultsEl) return;
+  const results = Array.isArray(rows) ? rows : [];
+  if (!results.length) {
+    findPersonResultsEl.innerHTML = `<div class="result-card">暂无找人结果。</div>`;
+    return;
+  }
+  findPersonResultsEl.innerHTML = results.map((row) => {
+    const cameraName = row.camera_name || row.source_id || row.camera_id || "未知摄像头";
+    const timeText = formatTime(row.event_ts_ms || row.event_created_at || row.observation_timestamp_ms);
+    const imageUrl = locationImageUrl(row);
+    return (
+      `<article class="find-person-result">` +
+        (imageUrl
+          ? previewButtonHtml(imageUrl, cameraName, timeText || "找人结果图片", "image-preview-trigger find-person-preview-trigger", "找人结果图片")
+          : `<div class="trajectory-thumb-empty"></div>`) +
+        `<div>` +
+          `<strong>${escapeHtml(cameraName)}</strong>` +
+          `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
+          `<div class="muted">${escapeHtml(trajectorySourceLabel(row.trajectory_source))} | 相似度 ${escapeHtml(formatPercent(row.similarity))}</div>` +
+        `</div>` +
+      `</article>`
+    );
+  }).join("");
+  bindImagePreviewButtons(findPersonResultsEl);
+}
+
+async function runFindPerson() {
+  if (!selectedPersonId) {
+    showError("请先选择人员。");
+    return;
+  }
+  const personId = selectedPersonId;
+  const requestId = selectedPersonRequestId;
+  clearMessages();
+  if (runFindPersonBtn) runFindPersonBtn.disabled = true;
+  try {
+    const params = personLookupParams({
+      minSimilarity: findPersonMinSimilarityEl?.value,
+      limit: findPersonLimitEl?.value,
+    });
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const data = await request(`${API}/people/${encodeURIComponent(personId)}/find${suffix}`);
+    if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
+      return;
+    }
+    renderFindPersonLatest(data.latest_location || null);
+    renderFindPersonResults(data.results || []);
+    renderPersonLatestLocation(data.latest_location || null);
+    renderPersonTrajectory(data.results || []);
+    setStatus(data.latest_location ? "一键找人已返回最新位置" : "一键找人暂无结果");
+  } finally {
+    if (runFindPersonBtn) runFindPersonBtn.disabled = false;
+  }
+}
+
+function openFindPersonDialog() {
+  if (!selectedPersonId) {
+    showError("请先选择人员。");
+    return;
+  }
+  if (findPersonDialogEl) findPersonDialogEl.hidden = false;
+  renderFindPersonLatest(null);
+  renderFindPersonResults([]);
+  runFindPerson().catch((e) => showError(e.message));
+}
+
+function closeFindPersonDialog() {
+  if (findPersonDialogEl) findPersonDialogEl.hidden = true;
+}
+
+async function openPersonById(personId, options = {}) {
+  const targetId = String(personId || "").trim();
+  if (!targetId) {
+    showError("未找到可跳转的人员 ID。");
+    return;
+  }
+  pendingOpenPersonId = targetId;
+  selectedPersonId = targetId;
+  if (peopleSearchEl) peopleSearchEl.value = "";
+  activateTopView("people", true);
+  try {
+    await selectPerson(targetId);
+    if (options.openFindDialog) {
+      openFindPersonDialog();
+    }
+  } finally {
+    pendingOpenPersonId = "";
+  }
+}
+
+window.operatorPeople = {
+  openPersonById,
+  openFindPersonDialog,
+};
 
 function selectedPersonDeleteRequest() {
   const person = selectedPerson || people.find((item) => String(item.person_id) === String(selectedPersonId)) || {};
@@ -3121,7 +3451,7 @@ async function saveZone({ bindRules = false } = {}) {
     return;
   }
   const config = await request(`${API}/cameras/${selectedCameraId}/config`);
-  const exists = (config.zones || []).some((z) => z.zone_id === body.zone_id);
+  const exists = validZoneRows(config.zones).some((z) => zoneOptionId(z) === body.zone_id);
   const bindRuleRefs = bindRules && body.zone_type === "polygon";
   const bindQuery = bindRuleRefs ? "?bind_rules=true" : "";
   const path = exists
@@ -3133,7 +3463,7 @@ async function saveZone({ bindRules = false } = {}) {
 }
 
 async function deleteZone(zoneId) {
-  if (!selectedCameraId) return;
+  if (!selectedCameraId || !zoneId) return;
   clearMessages();
   await request(`${API}/cameras/${selectedCameraId}/zones/${encodeURIComponent(zoneId)}`, {
     method: "DELETE",
@@ -3390,6 +3720,28 @@ document.getElementById("refresh-people").addEventListener("click", () => {
 });
 peopleSearchEl.addEventListener("input", () => {
   loadPeople().catch((e) => showError(e.message));
+});
+findSelectedPersonBtn?.addEventListener("click", () => {
+  openFindPersonDialog();
+});
+findPersonDialogCloseBtn?.addEventListener("click", closeFindPersonDialog);
+findPersonDialogEl?.addEventListener("click", (event) => {
+  if (event.target === findPersonDialogEl) closeFindPersonDialog();
+});
+imagePreviewCloseBtn?.addEventListener("click", closeImagePreview);
+imagePreviewDialogEl?.addEventListener("click", (event) => {
+  if (event.target === imagePreviewDialogEl) closeImagePreview();
+});
+findPersonFormEl?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runFindPerson().catch((e) => showError(e.message));
+});
+runFindPersonBtn?.addEventListener("click", () => {
+  runFindPerson().catch((e) => showError(e.message));
+});
+showFindPersonTrajectoryBtn?.addEventListener("click", () => {
+  closeFindPersonDialog();
+  activateTopView("people", true);
 });
 
 document.getElementById("new-camera").addEventListener("click", () => {

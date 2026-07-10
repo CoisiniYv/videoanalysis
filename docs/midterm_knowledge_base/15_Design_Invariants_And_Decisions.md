@@ -195,6 +195,14 @@ analysis-forwarder 会降采样；Savant 只处理分析帧。
 影响：
 
 - 4090 优化档优先 dual_same_gpu；
+- 当前 60 路单卡双分支压测必须使用
+  `docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md`：
+  `60` 路、`400s`、`drain 120s`、cooldown `60s`、YOLO pose batch `4`、
+  YOLO face batch `4`、AdaFace batch `16`、4 个 evidence shard、
+  rolling-cache evidence、`5:5/10:10/15:15` 固定证据窗口、DB-backed
+  timeline/overlay visual gate；
+- 8 FPS stress run 使用 `--fps 8/1`，单 T4 生产探测使用同一方法但改成
+  `--fps 4/1`；
 - topology 和 replay shard 必须保持一致；
 - clip-worker 必须按 shard 路由 Replay job。
 

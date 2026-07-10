@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +36,15 @@ import yaml
 from psycopg.rows import dict_row
 from redis import Redis
 
+TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from parse_video_file_sink_pressure import (  # noqa: E402
+    aggregate_video_file_sink_metrics,
+    parse_video_file_sink_log,
+)
+
 
 DEFAULT_DB_URL = "postgresql://video:video@127.0.0.1:5432/video_analytics"
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6396/0"
@@ -46,6 +56,10 @@ DEFAULT_ARTIFACT_ROOT = Path("/data/video-analytics/artifacts")
 DEFAULT_EVIDENCE_ROOT = Path("/data/video-analytics/media/evidence")
 DEFAULT_REPLAY_EPOCH_ROOT = Path("/data/video-analytics/media/replay-sink-output/midterm/epochs")
 DEFAULT_MODULE_CONFIG_PATH = Path("modules/savant_security/config/cameras.midterm.yml")
+DEFAULT_PRESSURE_FPS = "8/1"
+DEFAULT_PRESSURE_DURATION_S = 600
+DEFAULT_PRESSURE_DRAIN_S = 120
+ROLLING_CACHE_FULL_RATE_MIN_RATIO = 0.90
 SOURCE_CONTROLLER = Path("scripts/runtime/camera_source_controller.py")
 DUAL_SHARD_PROFILE = "dual-4090-two-source"
 DUAL_SHARD_SERVICES = [
@@ -53,8 +67,24 @@ DUAL_SHARD_SERVICES = [
     "savant-b",
     "analysis-forwarder-a",
     "analysis-forwarder-b",
+    "replay-raw-fanout-a",
+    "replay-raw-fanout-b",
+    "video-file-sink-a",
+    "video-file-sink-b",
+    "video-file-sink-c",
+    "video-file-sink-d",
+    "video-file-sink-e",
+    "video-file-sink-f",
+    "video-file-sink-g",
+    "video-file-sink-h",
     "replay-a",
     "replay-b",
+    "replay-c",
+    "replay-d",
+    "replay-e",
+    "replay-f",
+    "replay-g",
+    "replay-h",
 ]
 DUAL_SHARD_SINGLE_SERVICES = ["source-adapter", "analysis-forwarder", "savant-security"]
 DUAL_SHARD_FORWARDER_METRICS = {
@@ -94,7 +124,6 @@ SAVANT_GAUGE_METRICS = {
 ACTIVE_MATERIALIZATION_STATES = {
     "manifest_ready",
     "materialization_pending",
-    "materialization_deferred",
     "materializing",
 }
 ACTIVE_TASK_STATES = {
@@ -119,7 +148,7 @@ SECURITY_STREAMS = [
     "security.record_requests",
     "security.alerts",
 ]
-DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 1
+DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 4
 DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "redis",
     "postgresql",
@@ -127,13 +156,84 @@ DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "event_worker",
     "face_worker",
     "media_worker",
+    "phase_latency_ms",
+    "replay_admission",
+    "replay_topology",
+    "video_file_sink",
     "evidence_8090",
 )
+PRESSURE_OBSERVED_WINDOW_SLACK_S = 60.0
+EVIDENCE_WINDOW_DURATION_TOLERANCE_S = 1.25
+PRESSURE_COOLDOWN_SECONDS = 30
+PRESSURE_COOLDOWN_GRACE_MS = 1000
+PRESSURE_COOLDOWN_EVENT_TYPES = ("intrusion", "watchlist_hit")
 WORKER_CONTAINER_NAMES = {
     "event_worker": "video-analytics-midterm-event-worker",
     "face_worker": "video-analytics-midterm-face-worker",
     "media_worker": "video-analytics-midterm-media-worker",
     "clip_worker": "video-analytics-midterm-clip-worker",
+}
+
+
+def remove_prefix(value: str, prefix: str) -> str:
+    if value.startswith(prefix):
+        return value[len(prefix) :]
+    return value
+
+
+VIDEO_FILE_SINK_CONTAINERS = {
+    "video-file-sink": "video-analytics-midterm-video-file-sink",
+    "video-file-sink-a": "video-analytics-midterm-video-file-sink-a",
+    "video-file-sink-b": "video-analytics-midterm-video-file-sink-b",
+    "video-file-sink-c": "video-analytics-midterm-video-file-sink-c",
+    "video-file-sink-d": "video-analytics-midterm-video-file-sink-d",
+    "video-file-sink-e": "video-analytics-midterm-video-file-sink-e",
+    "video-file-sink-f": "video-analytics-midterm-video-file-sink-f",
+    "video-file-sink-g": "video-analytics-midterm-video-file-sink-g",
+    "video-file-sink-h": "video-analytics-midterm-video-file-sink-h",
+}
+REPLAY_TOPOLOGY_CONTAINERS = {
+    "replay-service": "video-analytics-midterm-replay-service",
+    "replay-a": "video-analytics-midterm-replay-a",
+    "replay-b": "video-analytics-midterm-replay-b",
+    "replay-c": "video-analytics-midterm-replay-c",
+    "replay-d": "video-analytics-midterm-replay-d",
+    "replay-e": "video-analytics-midterm-replay-e",
+    "replay-f": "video-analytics-midterm-replay-f",
+    "replay-g": "video-analytics-midterm-replay-g",
+    "replay-h": "video-analytics-midterm-replay-h",
+    **VIDEO_FILE_SINK_CONTAINERS,
+}
+VIDEO_FILE_SINK_LOG_PATHS = {
+    "video-file-sink": "video_file_sink_logs_since_start.txt",
+    "video-file-sink-a": "video_file_sink_a_logs_since_start.txt",
+    "video-file-sink-b": "video_file_sink_b_logs_since_start.txt",
+    "video-file-sink-c": "video_file_sink_c_logs_since_start.txt",
+    "video-file-sink-d": "video_file_sink_d_logs_since_start.txt",
+    "video-file-sink-e": "video_file_sink_e_logs_since_start.txt",
+    "video-file-sink-f": "video_file_sink_f_logs_since_start.txt",
+    "video-file-sink-g": "video_file_sink_g_logs_since_start.txt",
+    "video-file-sink-h": "video_file_sink_h_logs_since_start.txt",
+}
+EVIDENCE_SHARD_IDS = (
+    "replay-a",
+    "replay-b",
+    "replay-c",
+    "replay-d",
+    "replay-e",
+    "replay-f",
+    "replay-g",
+    "replay-h",
+)
+EVIDENCE_SHARD_BRANCH = {
+    "replay-a": "a",
+    "replay-b": "b",
+    "replay-c": "a",
+    "replay-d": "b",
+    "replay-e": "a",
+    "replay-f": "b",
+    "replay-g": "a",
+    "replay-h": "b",
 }
 
 
@@ -148,6 +248,8 @@ class PressureConfig:
     pose_batch_size: int
     face_detector_batch_size: int
     face_embedding_batch_size: int
+    face_infer_interval: int
+    face_embedding_infer_interval: int
     max_parallel_streams: int
     batched_push_timeout: int
     duration_s: int
@@ -157,6 +259,9 @@ class PressureConfig:
     keep_evidence: int
     evidence_group_size: int
     evidence_policy_groups: tuple[tuple[int, int], ...]
+    pressure_materialization_event_type_quotas: str
+    pressure_disable_evidence_admission: bool
+    pressure_algorithm_cooldown_s: int
     artifact_dir: Path
     db_url: str
     redis_url: str
@@ -171,6 +276,8 @@ class PressureConfig:
     rtsp_republish_input_uri: str
     rtsp_republish_mode: str
     rtsp_republish_warmup_s: int
+    rtsp_republish_input_offset_s: float
+    rtsp_republish_input_loop: bool
     max_send_failures: int
     max_exited_sources: int
     max_validate_seq_iq: int
@@ -178,26 +285,46 @@ class PressureConfig:
     dual_shard_same_gpu: bool
     dual_shard_api: bool
     dual_shard_gpu: str
+    dual_shard_source_mode: str
+    evidence_shard_count: int
+    rolling_cache_evidence: bool
+    rolling_cache_enable_coverage_merge: bool
     cleanup: bool
+    rolling_cache_prefill_s: int = 0
+    rolling_cache_postfill_s: int = 0
+    pressure_source_visibility_timeout_s: int = 180
+    pressure_source_visibility_poll_s: int = 5
+    pressure_source_visibility_stable_samples: int = 2
+    pressure_source_visibility_restart_attempts: int = 1
+    pressure_source_ffmpeg_timeout_ms: int = 60000
+    pressure_source_start_stagger_s: float = 0.5
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a full midterm 60-source pressure test through 8090 runtime control."
     )
-    parser.add_argument("--fps", default="2/1", help="Target analysis/Savant FPS, e.g. 2/1.")
+    parser.add_argument("--fps", default=DEFAULT_PRESSURE_FPS, help="Target pressure FPS, e.g. 8/1.")
     parser.add_argument("--min-fps", default="1/1")
     parser.add_argument("--streams", type=int, default=60)
-    parser.add_argument("--duration-s", type=int, default=300)
+    parser.add_argument("--duration-s", type=int, default=DEFAULT_PRESSURE_DURATION_S)
     parser.add_argument("--sample-interval-s", type=int, default=30)
-    parser.add_argument("--drain-s", type=int, default=300)
+    parser.add_argument("--drain-s", type=int, default=DEFAULT_PRESSURE_DRAIN_S)
     parser.add_argument(
         "--guard-wait-s",
         type=int,
         default=1200,
         help="Seconds to wait for existing evidence tasks after quiescing current sources.",
     )
-    parser.add_argument("--keep-evidence", type=int, default=50)
+    parser.add_argument(
+        "--keep-evidence",
+        type=int,
+        default=-1,
+        help=(
+            "Number of playable evidence clips to retain in the report; use -1 "
+            "for all playable evidence. Defaults to -1 for high-density acceptance."
+        ),
+    )
     parser.add_argument(
         "--evidence-group-size",
         type=int,
@@ -210,6 +337,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Comma-separated pre:post seconds for pressure evidence groups. "
             "With --streams=60 and --evidence-group-size=10 this creates 6 groups."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-materialization-event-type-quotas",
+        default="auto",
+        help=(
+            "Temporary clip-worker materialization quotas for retained-evidence "
+            "pressure runs. Use 'auto' to derive a 20%% headroom quota from "
+            "--keep-evidence, or empty/off to disable."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-disable-evidence-admission",
+        action="store_true",
+        help=(
+            "Temporarily disable event-worker evidence admission/cooldown limits "
+            "for pressure runs that need every recordable event to attempt materialization."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-algorithm-cooldown-s",
+        type=int,
+        default=PRESSURE_COOLDOWN_SECONDS,
+        help=(
+            "Per source+algorithm cooldown for pressure cameras. Use 60 to cap "
+            "a 60-camera, 2-algorithm, 600s run near 1200 events."
         ),
     )
     parser.add_argument("--batch-size", type=int, default=4)
@@ -230,6 +383,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=16,
         help="AdaFace embedding batch size.",
+    )
+    parser.add_argument(
+        "--face-infer-interval",
+        type=int,
+        default=None,
+        help=(
+            "YOLOv8-Face nvinfer interval. Defaults to a value derived from "
+            "--fps so face detector inference is about 1 FPS."
+        ),
+    )
+    parser.add_argument(
+        "--face-embedding-infer-interval",
+        type=int,
+        default=None,
+        help=(
+            "AdaFace nvinfer interval. Defaults to --face-infer-interval, "
+            "so embedding inference is also about 1 FPS."
+        ),
     )
     parser.add_argument("--max-parallel-streams", type=int, default=64)
     parser.add_argument("--batched-push-timeout", type=int, default=40000)
@@ -276,6 +447,91 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Seconds to let ffmpeg republishers warm up before 8090 runtime restart.",
     )
     parser.add_argument(
+        "--rtsp-republish-input-offset-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Deterministic input offset for host ffmpeg republishers. "
+            "Use with a fixed local file or VOD URI to make pressure runs comparable."
+        ),
+    )
+    parser.add_argument(
+        "--rtsp-republish-input-loop",
+        action="store_true",
+        help=(
+            "Loop the republisher input indefinitely. Intended for deterministic "
+            "fixed-file pressure runs whose source file may be shorter than the run."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-prefill-s",
+        type=int,
+        default=0,
+        help=(
+            "Seconds to let pressure sources fill rolling-cache segments before "
+            "the measured window starts. Pressure DB rows from the warmup are "
+            "deleted before sampling so pre-roll evidence windows are possible."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-postfill-s",
+        type=int,
+        default=0,
+        help=(
+            "Seconds to keep pressure sources running after the measured window "
+            "so tail events can accumulate post-roll rolling-cache coverage. "
+            "Events created after the measured cutoff are pruned before drain."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-source-visibility-timeout-s",
+        type=int,
+        default=180,
+        help=(
+            "Seconds to wait for every pressure source to be visible in "
+            "forwarder/Savant metrics before starting the measured window."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-source-visibility-poll-s",
+        type=int,
+        default=5,
+        help="Polling interval for the pressure source visibility barrier.",
+    )
+    parser.add_argument(
+        "--pressure-source-visibility-stable-samples",
+        type=int,
+        default=2,
+        help="Consecutive all-visible samples required before sampling starts.",
+    )
+    parser.add_argument(
+        "--pressure-source-visibility-restart-attempts",
+        type=int,
+        default=1,
+        help=(
+            "Number of restart attempts for pressure source adapters still "
+            "missing from runtime metrics during the visibility barrier."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-source-ffmpeg-timeout-ms",
+        type=int,
+        default=60000,
+        help=(
+            "FFMPEG_TIMEOUT_MS for pressure source adapters. 60 parallel RTSP "
+            "pulls can exceed the default 20s source startup budget."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-source-start-stagger-s",
+        type=float,
+        default=0.5,
+        help=(
+            "Seconds to wait between pressure source adapter starts. This avoids "
+            "a 60-way RTSP pull startup burst against the local republisher."
+        ),
+    )
+    parser.add_argument(
         "--max-send-failures",
         type=int,
         default=0,
@@ -319,6 +575,42 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="0",
         help="Physical GPU id used by both Savant branches in --dual-shard-same-gpu mode.",
     )
+    parser.add_argument(
+        "--dual-shard-source-mode",
+        choices=("balanced", "all-a", "all-b"),
+        default="balanced",
+        help=(
+            "Source placement for dual-shard pressure runs. Use all-a/all-b for "
+            "single-shard capacity probes before changing shard count."
+        ),
+    )
+    parser.add_argument(
+        "--evidence-shard-count",
+        type=int,
+        choices=(2, 4, 8),
+        default=4,
+        help=(
+            "Replay/video-file-sink evidence shard count for dual-shard pressure "
+            "runs. The inference topology remains dual, but evidence export can "
+            "be split across four or eight Replay/sink outlets."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-evidence",
+        action="store_true",
+        help=(
+            "Canary mode: suppress per-event Replay record requests and let "
+            "media-worker materialize evidence from rolling cache segments."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-enable-coverage-merge",
+        action="store_true",
+        help=(
+            "Enable same-source event coverage/alias merge during rolling-cache "
+            "pressure canaries."
+        ),
+    )
     parser.add_argument("--no-cleanup", action="store_true")
     return parser.parse_args(argv)
 
@@ -341,6 +633,11 @@ def main(argv: list[str] | None = None) -> int:
         dual_shard_same_gpu=args.dual_shard_same_gpu,
         dual_shard_api=args.dual_shard_api,
     )
+    face_infer_interval = (
+        args.face_infer_interval
+        if args.face_infer_interval is not None
+        else infer_interval_for_target_fps(args.fps, target_fps=Fraction(1, 1))
+    )
     artifact_dir = (args.artifact_root / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     cfg = PressureConfig(
@@ -353,6 +650,12 @@ def main(argv: list[str] | None = None) -> int:
         pose_batch_size=args.pose_batch_size or args.batch_size,
         face_detector_batch_size=args.face_detector_batch_size or args.batch_size,
         face_embedding_batch_size=args.face_embedding_batch_size,
+        face_infer_interval=face_infer_interval,
+        face_embedding_infer_interval=(
+            args.face_embedding_infer_interval
+            if args.face_embedding_infer_interval is not None
+            else face_infer_interval
+        ),
         max_parallel_streams=args.max_parallel_streams,
         batched_push_timeout=args.batched_push_timeout,
         duration_s=args.duration_s,
@@ -363,6 +666,17 @@ def main(argv: list[str] | None = None) -> int:
         evidence_group_size=args.evidence_group_size,
         evidence_policy_groups=parse_evidence_policy_groups(
             args.evidence_policy_groups
+        ),
+        pressure_materialization_event_type_quotas=(
+            pressure_materialization_event_type_quotas(
+                args.pressure_materialization_event_type_quotas,
+                keep_evidence=args.keep_evidence,
+            )
+        ),
+        pressure_disable_evidence_admission=args.pressure_disable_evidence_admission,
+        pressure_algorithm_cooldown_s=max(
+            1,
+            int(args.pressure_algorithm_cooldown_s or PRESSURE_COOLDOWN_SECONDS),
         ),
         artifact_dir=artifact_dir,
         db_url=args.db_url,
@@ -378,6 +692,10 @@ def main(argv: list[str] | None = None) -> int:
         rtsp_republish_input_uri=args.rtsp_republish_input_uri or args.rtsp_uri,
         rtsp_republish_mode=args.rtsp_republish_mode,
         rtsp_republish_warmup_s=args.rtsp_republish_warmup_s,
+        rtsp_republish_input_offset_s=max(0.0, float(args.rtsp_republish_input_offset_s or 0.0)),
+        rtsp_republish_input_loop=bool(args.rtsp_republish_input_loop),
+        rolling_cache_prefill_s=max(0, int(args.rolling_cache_prefill_s or 0)),
+        rolling_cache_postfill_s=max(0, int(args.rolling_cache_postfill_s or 0)),
         max_send_failures=args.max_send_failures,
         max_exited_sources=args.max_exited_sources,
         max_validate_seq_iq=args.max_validate_seq_iq,
@@ -385,7 +703,37 @@ def main(argv: list[str] | None = None) -> int:
         dual_shard_same_gpu=args.dual_shard_same_gpu,
         dual_shard_api=args.dual_shard_api,
         dual_shard_gpu=str(args.dual_shard_gpu),
+        dual_shard_source_mode=args.dual_shard_source_mode,
+        evidence_shard_count=args.evidence_shard_count,
+        rolling_cache_evidence=bool(args.rolling_cache_evidence),
+        rolling_cache_enable_coverage_merge=bool(
+            args.rolling_cache_enable_coverage_merge
+        ),
         cleanup=not args.no_cleanup,
+        pressure_source_visibility_timeout_s=max(
+            0,
+            int(args.pressure_source_visibility_timeout_s or 0),
+        ),
+        pressure_source_visibility_poll_s=max(
+            1,
+            int(args.pressure_source_visibility_poll_s or 1),
+        ),
+        pressure_source_visibility_stable_samples=max(
+            1,
+            int(args.pressure_source_visibility_stable_samples or 1),
+        ),
+        pressure_source_visibility_restart_attempts=max(
+            0,
+            int(args.pressure_source_visibility_restart_attempts or 0),
+        ),
+        pressure_source_ffmpeg_timeout_ms=max(
+            1000,
+            int(args.pressure_source_ffmpeg_timeout_ms or 60000),
+        ),
+        pressure_source_start_stagger_s=max(
+            0.0,
+            float(args.pressure_source_start_stagger_s or 0.0),
+        ),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -400,9 +748,14 @@ def main(argv: list[str] | None = None) -> int:
     original_perf: dict[str, Any] | None = None
     original_topology: dict[str, Any] | None = None
     original_clip_worker_replay_shards: dict[str, str] | None = None
+    original_event_worker_evidence_env: dict[str, str] | None = None
+    original_media_worker_rolling_env: dict[str, str] | None = None
+    original_rolling_cache_sink_states: dict[str, dict[str, Any]] | None = None
     original_cameras: list[dict[str, Any]] = []
     runtime_epoch_root: str | None = None
     rtsp_republishers: list[subprocess.Popen] = []
+    pressure_started_monotonic: float | None = None
+    pressure_sources_path: Path | None = None
     started_at = datetime.now(timezone.utc)
     try:
         original_perf = api_json(cfg.api_base, "GET", "/runtime/performance-config")["data"][
@@ -412,10 +765,20 @@ def main(argv: list[str] | None = None) -> int:
             "saved_config"
         ]
         original_clip_worker_replay_shards = clip_worker_replay_shard_env_snapshot()
+        original_event_worker_evidence_env = event_worker_evidence_env_snapshot()
+        original_media_worker_rolling_env = media_worker_rolling_cache_env_snapshot()
+        original_rolling_cache_sink_states = rolling_cache_sink_state_snapshot()
         original_cameras = fetch_cameras(conn)
         write_json(cfg.artifact_dir / "cameras_before.json", original_cameras)
         write_json(cfg.artifact_dir / "performance_before.json", original_perf)
         write_json(cfg.artifact_dir / "topology_before.json", original_topology)
+
+        if cfg.cleanup:
+            report["initial_evidence_cleanup"] = clear_existing_evidence_state(conn)
+            write_json(
+                cfg.artifact_dir / "initial_evidence_cleanup.json",
+                report["initial_evidence_cleanup"],
+            )
 
         active = prepare_evidence_guard(conn, cfg, report)
         if active["blocking_count"] and not cfg.force_runtime_restart:
@@ -451,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
                     "pose_batch_size": cfg.pose_batch_size,
                     "face_detector_batch_size": cfg.face_detector_batch_size,
                     "face_embedding_batch_size": cfg.face_embedding_batch_size,
+                    "face_infer_interval": cfg.face_infer_interval,
+                    "face_embedding_infer_interval": cfg.face_embedding_infer_interval,
                     "max_parallel_streams": cfg.max_parallel_streams,
                     "batched_push_timeout": cfg.batched_push_timeout,
                     "gpu": cfg.dual_shard_gpu,
@@ -469,15 +834,113 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             save_performance_config(cfg, original_perf)
+        if cfg.rolling_cache_evidence:
+            event_worker_pressure = configure_rolling_cache_workers_for_pressure(cfg)
+        else:
+            event_worker_pressure = configure_event_worker_for_pressure(cfg)
+        if event_worker_pressure is not None:
+            report[
+                "rolling_cache_pressure"
+                if cfg.rolling_cache_evidence
+                else "event_worker_pressure_admission"
+            ] = event_worker_pressure
+        if cfg.rolling_cache_evidence:
+            report["rolling_cache_sinks_stopped_before_reconfigure"] = (
+                stop_rolling_cache_sinks_before_pressure_reconfigure(cfg)
+            )
+        if original_clip_worker_replay_shards is not None and (
+            cfg.keep_evidence < 0 or cfg.pressure_materialization_event_type_quotas
+        ):
+            report["clip_worker_pressure_limits"] = configure_clip_worker_replay_shards(
+                cfg,
+                replay_shards_json=original_clip_worker_replay_shards.get(
+                    "REPLAY_SHARDS_JSON",
+                    "",
+                ),
+                replay_shards_config_path=original_clip_worker_replay_shards.get(
+                    "REPLAY_SHARDS_CONFIG_PATH",
+                    "",
+                ),
+                artifact_name="compose_recreate_clip_worker_pressure_limits.log",
+                materialization_event_type_quotas=cfg.pressure_materialization_event_type_quotas,
+                density_profile="high_density" if cfg.rolling_cache_evidence else None,
+                materialization_pressure_level=(
+                    "high_density" if cfg.rolling_cache_evidence else None
+                ),
+                max_jobs_per_run="0" if cfg.keep_evidence < 0 else None,
+            )
         rtsp_republishers = start_rtsp_republishers(cfg)
         insert_pressure_cameras(conn, cfg)
         if cfg.dual_shard_same_gpu:
             if cfg.dual_shard_api:
+                start_dual_shard_runtime(cfg)
                 topology = save_and_apply_topology_config(cfg)
-                clip_worker_shards = configure_clip_worker_for_topology_shards(
-                    cfg,
-                    topology,
-                )
+                recreate_dual_video_sinks_for_current_epoch(cfg)
+                if cfg.rolling_cache_evidence:
+                    report["rolling_cache_sinks_pressure"] = (
+                        start_rolling_cache_sinks_for_pressure(
+                            cfg,
+                            runtime_epoch_id=str(
+                                topology.get("runtime_epoch_id") or ""
+                            ),
+                        )
+                    )
+                if cfg.evidence_shard_count > 2:
+                    shard_plan = write_dual_shard_pressure_sources(conn, cfg)
+                    replay_shards_doc = json.loads(
+                        Path(str(shard_plan["shard_plan_path"])).read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    replay_shards_json = _compact_json(replay_shards_doc)
+                    clip_worker_shards = configure_clip_worker_replay_shards(
+                        cfg,
+                        replay_shards_json=replay_shards_json,
+                        replay_shards_config_path="",
+                        artifact_name="compose_recreate_clip_worker_replay_shards.log",
+                        materialization_event_type_quotas=(
+                            cfg.pressure_materialization_event_type_quotas
+                        ),
+                        density_profile="high_density" if cfg.rolling_cache_evidence else None,
+                        materialization_pressure_level=(
+                            "high_density" if cfg.rolling_cache_evidence else None
+                        ),
+                        max_jobs_per_run="0" if cfg.keep_evidence < 0 else None,
+                        materialization_max_concurrency=(
+                            _evidence_materialization_global_limit(
+                                cfg.evidence_shard_count
+                            )
+                        ),
+                    )
+                    clip_worker_shards.update(
+                        {
+                            "topology_replay_shards_path": shard_plan[
+                                "shard_plan_path"
+                            ],
+                            "shard_count": cfg.evidence_shard_count,
+                            "source_count": cfg.stream_count,
+                            "mapping_version": replay_shards_doc.get(
+                                "mapping_version",
+                                "",
+                            ),
+                        }
+                    )
+                    write_json(
+                        cfg.artifact_dir / "clip_worker_replay_shards_pressure.json",
+                        clip_worker_shards,
+                    )
+                    pressure_sources_path = Path(str(shard_plan["sources_path"]))
+                    pressure_started_monotonic = time.time()
+                    start_pressure_sources_from_manifest(
+                        cfg,
+                        sources_path=pressure_sources_path,
+                    )
+                else:
+                    pressure_started_monotonic = time.time()
+                    clip_worker_shards = configure_clip_worker_for_topology_shards(
+                        cfg,
+                        topology,
+                    )
                 write_json(cfg.artifact_dir / "runtime_restart_pressure.json", topology)
                 report["steps"].append(
                     {
@@ -486,6 +949,7 @@ def main(argv: list[str] | None = None) -> int:
                         "runtime_epoch_id": topology.get("runtime_epoch_id"),
                         "sources_config_path": topology.get("sources_config_path"),
                         "replay_shards_path": topology.get("replay_shards_path"),
+                        "evidence_shard_count": cfg.evidence_shard_count,
                         "clip_worker_replay_shards": clip_worker_shards,
                     }
                 )
@@ -493,10 +957,19 @@ def main(argv: list[str] | None = None) -> int:
                 module_config = sync_module_config_snapshot(cfg)
                 shard_plan = write_dual_shard_pressure_sources(conn, cfg)
                 start_dual_shard_runtime(cfg)
+                pressure_sources_path = Path(str(shard_plan["sources_path"]))
+                pressure_started_monotonic = time.time()
                 start_pressure_sources_from_manifest(
                     cfg,
-                    sources_path=Path(str(shard_plan["sources_path"])),
+                    sources_path=pressure_sources_path,
                 )
+                if cfg.rolling_cache_evidence:
+                    report["rolling_cache_sinks_pressure"] = (
+                        start_rolling_cache_sinks_for_pressure(
+                            cfg,
+                            runtime_epoch_id=current_runtime_epoch_id(),
+                        )
+                    )
                 report["steps"].append(
                     {
                         "name": "dual_shard_same_gpu_started",
@@ -507,21 +980,52 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
         elif cfg.forwarder_null_sink:
+            pressure_started_monotonic = time.time()
             restart = apply_sources_only(cfg, "runtime_sources_apply_pressure.json")
             write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
             report["steps"].append({"name": "forwarder_null_sources_started"})
         else:
+            pressure_started_monotonic = time.time()
             restart = restart_camera_runtime(cfg)
             runtime_epoch_root = restart.get("runtime_epoch_root")
+            if cfg.rolling_cache_evidence:
+                report["rolling_cache_sinks_pressure"] = start_rolling_cache_sinks_for_pressure(
+                    cfg,
+                    runtime_epoch_id=str(restart.get("runtime_epoch_id") or ""),
+                )
             write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
             report["steps"].append({"name": "runtime_started", "runtime_epoch_root": runtime_epoch_root})
 
-        sample_runtime(cfg, started_at)
-        diagnostics = collect_pressure_diagnostics(cfg)
-        report["diagnostics"] = diagnostics
+        report["pressure_source_visibility"] = wait_for_pressure_source_visibility(
+            cfg,
+            sources_path=pressure_sources_path,
+        )
+
+        report["pressure_sampling_window"] = sample_runtime(
+            cfg,
+            started_at,
+            pressure_started_monotonic=prepare_pressure_sampling_window(
+                conn,
+                cfg,
+                pressure_started_monotonic=pressure_started_monotonic,
+            ),
+        )
+        report["pressure_sampling_cutoff"] = pressure_event_sampling_cutoff(conn, cfg)
+        report["rolling_cache_postfill"] = rolling_cache_postfill_after_sampling(cfg)
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
+        report["pressure_event_quiescence"] = wait_for_pressure_event_quiescence(
+            cfg,
+            redis_client,
+        )
+        report["pressure_post_sample_cleanup"] = clear_pressure_post_sample_rows(
+            conn,
+            cfg,
+            report["pressure_sampling_cutoff"],
+        )
+        diagnostics = collect_pressure_diagnostics(cfg)
+        report["diagnostics"] = diagnostics
         kept: list[dict[str, Any]] = []
         if cfg.forwarder_null_sink:
             report["kept_evidence_count"] = 0
@@ -532,12 +1036,41 @@ def main(argv: list[str] | None = None) -> int:
             kept = select_kept_evidence(conn, cfg)
             write_kept_csv(cfg, kept)
             report["kept_evidence_count"] = len(kept)
-            report["kept_evidence"] = kept[: cfg.keep_evidence]
+            report["kept_evidence"] = kept if cfg.keep_evidence < 0 else kept[: cfg.keep_evidence]
         capture_runtime_logs_since_start(cfg, started_at)
         diagnostics["log_summary"] = summarize_logs(cfg)
         write_json(cfg.artifact_dir / "pressure_diagnostics.json", diagnostics)
         report["db_summary_before_cleanup"] = db_summary(conn, cfg.run_id)
         write_json(cfg.artifact_dir / "db_summary_before_cleanup.json", report["db_summary_before_cleanup"])
+        report["non_materialized_task_details"] = non_materialized_task_details(
+            conn,
+            cfg.run_id,
+        )
+        write_json(
+            cfg.artifact_dir / "non_materialized_task_details.json",
+            report["non_materialized_task_details"],
+        )
+        if cfg.rolling_cache_evidence:
+            report["rolling_cache_segment_visibility"] = (
+                collect_rolling_cache_segment_visibility(cfg)
+            )
+            report["rolling_cache_full_rate_gate"] = rolling_cache_full_rate_gate(
+                cfg,
+                report["rolling_cache_segment_visibility"],
+                report.get("rolling_cache_sinks_pressure"),
+            )
+            write_json(
+                cfg.artifact_dir / "rolling_cache_segment_visibility.json",
+                report["rolling_cache_segment_visibility"],
+            )
+        report["evidence_window_validation"] = evidence_window_validation_summary(
+            cfg,
+            kept,
+        )
+        write_json(
+            cfg.artifact_dir / "evidence_window_validation.json",
+            report["evidence_window_validation"],
+        )
         report["downstream_observability"] = collect_downstream_observability(
             cfg,
             conn,
@@ -545,7 +1078,33 @@ def main(argv: list[str] | None = None) -> int:
             kept=kept,
             diagnostics=diagnostics,
         )
-        report["failure_reasons"] = pressure_failure_reasons(cfg, kept, diagnostics)
+        report["failure_reasons"] = pressure_failure_reasons(
+            cfg,
+            kept,
+            diagnostics,
+            db_before_cleanup=report["db_summary_before_cleanup"],
+            event_quiescence=report.get("pressure_event_quiescence"),
+            post_sample_cleanup=report.get("pressure_post_sample_cleanup"),
+        )
+        evidence_8090 = (
+            report.get("downstream_observability", {}).get("evidence_8090", {})
+        )
+        if evidence_8090.get("annotation_failed"):
+            report["failure_reasons"].append("evidence_8090_annotations_missing")
+        if cfg.rolling_cache_evidence:
+            report["failure_reasons"].extend(
+                rolling_cache_full_rate_failure_reasons(
+                    report.get("rolling_cache_full_rate_gate") or {}
+                )
+            )
+            report["failure_reasons"].extend(
+                evidence_annotation_failure_reasons(evidence_8090)
+            )
+            report["failure_reasons"].extend(
+                evidence_window_failure_reasons(
+                    report.get("evidence_window_validation") or {}
+                )
+            )
         report["warnings"] = pressure_warnings(
             cfg,
             diagnostics,
@@ -553,6 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         keep_event_ids = {str(row["event_id"]) for row in kept}
+        keep_event_ids.update(select_covered_event_ids_for_bundles(conn, cfg, keep_event_ids))
         if cfg.cleanup:
             cleanup = cleanup_pressure_data(
                 conn,
@@ -576,7 +1136,56 @@ def main(argv: list[str] | None = None) -> int:
                     "",
                 ),
                 artifact_name="compose_restore_clip_worker_replay_shards.log",
+                materialization_event_type_quotas=(
+                    original_clip_worker_replay_shards.get(
+                        "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+                        "",
+                    )
+                ),
+                density_profile=original_clip_worker_replay_shards.get(
+                    "EVIDENCE_DENSITY_PROFILE",
+                    "",
+                ),
+                materialization_pressure_level=original_clip_worker_replay_shards.get(
+                    "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
+                    "",
+                ),
+                max_jobs_per_run=original_clip_worker_replay_shards.get(
+                    "CLIP_WORKER_MAX_JOBS_PER_RUN",
+                    "",
+                ),
             )
+        if original_event_worker_evidence_env is not None:
+            report["event_worker_evidence_admission_restore"] = (
+                configure_event_worker_evidence_admission(
+                    cfg,
+                    values=original_event_worker_evidence_env,
+                    artifact_name="compose_restore_event_worker_evidence_admission.log",
+                )
+            )
+        if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
+            report["media_worker_rolling_cache_restore"] = (
+                configure_media_worker_rolling_cache(
+                    cfg,
+                    values=original_media_worker_rolling_env,
+                    artifact_name="compose_restore_media_worker_rolling_cache.log",
+                )
+            )
+        if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
+            report["rolling_cache_sinks_restore"] = restore_rolling_cache_sinks_after_pressure(
+                cfg,
+                original_states=original_rolling_cache_sink_states,
+                artifact_name="compose_restore_rolling_cache_sinks.log",
+            )
+            if not _env_bool(
+                (original_media_worker_rolling_env or {}).get("ROLLING_CACHE_ENABLED", "")
+            ):
+                report["rolling_cache_sinks_stop_after_pressure"] = (
+                    stop_rolling_cache_sinks_after_pressure(
+                        cfg,
+                        artifact_name="compose_stop_rolling_cache_sinks_after_pressure.log",
+                    )
+                )
         if original_topology is not None:
             api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         if cfg.cleanup:
@@ -587,6 +1196,15 @@ def main(argv: list[str] | None = None) -> int:
                 keep_event_ids=keep_event_ids,
                 runtime_epoch_root=runtime_epoch_root,
             )
+        else:
+            report["pressure_runtime_cleanup_after_restore"] = cleanup_pressure_runtime_only(
+                conn,
+                redis_client,
+                cfg,
+            )
+        report["source_container_cleanup_stable"] = (
+            remove_pressure_source_containers_until_stable(cfg.run_id)
+        )
         report["db_summary_after_cleanup"] = db_summary(conn, cfg.run_id)
         report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
         report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
@@ -629,14 +1247,53 @@ def main(argv: list[str] | None = None) -> int:
                         "",
                     ),
                     artifact_name="compose_restore_clip_worker_replay_shards_after_interrupt.log",
+                    materialization_event_type_quotas=(
+                        original_clip_worker_replay_shards.get(
+                            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+                            "",
+                        )
+                    ),
+                    density_profile=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_DENSITY_PROFILE",
+                        "",
+                    ),
+                    materialization_pressure_level=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
+                        "",
+                    ),
+                    max_jobs_per_run=original_clip_worker_replay_shards.get(
+                        "CLIP_WORKER_MAX_JOBS_PER_RUN",
+                        "",
+                    ),
+                )
+            if original_event_worker_evidence_env is not None:
+                configure_event_worker_evidence_admission(
+                    cfg,
+                    values=original_event_worker_evidence_env,
+                    artifact_name="compose_restore_event_worker_evidence_admission_after_interrupt.log",
+                )
+            if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
+                configure_media_worker_rolling_cache(
+                    cfg,
+                    values=original_media_worker_rolling_env,
+                    artifact_name="compose_restore_media_worker_rolling_cache_after_interrupt.log",
+                )
+            if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
+                restore_rolling_cache_sinks_after_pressure(
+                    cfg,
+                    original_states=original_rolling_cache_sink_states,
+                    artifact_name="compose_restore_rolling_cache_sinks_after_interrupt.log",
                 )
             if original_topology is not None:
                 api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
         finally:
             return 130
     except Exception as exc:
+        error_traceback = traceback.format_exc()
         report["status"] = "failed_exception"
         report["error"] = repr(exc)
+        report["traceback"] = error_traceback
+        write_text(cfg.artifact_dir / "failed_exception_traceback.txt", error_traceback)
         write_json(cfg.artifact_dir / "report.json", report)
         print(f"PRESSURE_RUN_FAILED error={exc!r} artifact_dir={cfg.artifact_dir}", file=sys.stderr)
         try:
@@ -664,6 +1321,42 @@ def main(argv: list[str] | None = None) -> int:
                         "",
                     ),
                     artifact_name="compose_restore_clip_worker_replay_shards_after_failure.log",
+                    materialization_event_type_quotas=(
+                        original_clip_worker_replay_shards.get(
+                            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+                            "",
+                        )
+                    ),
+                    density_profile=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_DENSITY_PROFILE",
+                        "",
+                    ),
+                    materialization_pressure_level=original_clip_worker_replay_shards.get(
+                        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
+                        "",
+                    ),
+                    max_jobs_per_run=original_clip_worker_replay_shards.get(
+                        "CLIP_WORKER_MAX_JOBS_PER_RUN",
+                        "",
+                    ),
+                )
+            if original_event_worker_evidence_env is not None:
+                configure_event_worker_evidence_admission(
+                    cfg,
+                    values=original_event_worker_evidence_env,
+                    artifact_name="compose_restore_event_worker_evidence_admission_after_failure.log",
+                )
+            if cfg.rolling_cache_evidence and original_media_worker_rolling_env is not None:
+                configure_media_worker_rolling_cache(
+                    cfg,
+                    values=original_media_worker_rolling_env,
+                    artifact_name="compose_restore_media_worker_rolling_cache_after_failure.log",
+                )
+            if cfg.rolling_cache_evidence and original_rolling_cache_sink_states is not None:
+                restore_rolling_cache_sinks_after_pressure(
+                    cfg,
+                    original_states=original_rolling_cache_sink_states,
+                    artifact_name="compose_restore_rolling_cache_sinks_after_failure.log",
                 )
             if original_topology is not None:
                 api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
@@ -700,6 +1393,15 @@ def _jsonable_config(cfg: PressureConfig) -> dict[str, Any]:
     return data
 
 
+def infer_interval_for_target_fps(fps: str, *, target_fps: Fraction) -> int:
+    source_fps = Fraction(str(fps))
+    if source_fps <= 0 or target_fps <= 0:
+        return 0
+    ratio = source_fps / target_fps
+    every_n_frames = (ratio.numerator + ratio.denominator - 1) // ratio.denominator
+    return max(0, int(every_n_frames) - 1)
+
+
 def parse_evidence_policy_groups(value: str) -> tuple[tuple[int, int], ...]:
     groups: list[tuple[int, int]] = []
     for raw_item in str(value or "").split(","):
@@ -725,6 +1427,24 @@ def parse_evidence_policy_groups(value: str) -> tuple[tuple[int, int], ...]:
     return tuple(groups)
 
 
+def pressure_materialization_event_type_quotas(
+    value: str,
+    *,
+    keep_evidence: int,
+) -> str:
+    requested = str(value or "").strip()
+    if requested.lower() in {"", "0", "off", "false", "none", "disabled"}:
+        return ""
+    if requested.lower() != "auto":
+        return requested
+    if keep_evidence <= 0:
+        return ""
+    total = max(int(keep_evidence) + 10, (int(keep_evidence) * 6 + 4) // 5)
+    watchlist = max(1, int(round(total * 0.4)))
+    intrusion = max(1, total - watchlist)
+    return f"intrusion:{intrusion},watchlist_hit:{watchlist}"
+
+
 def evidence_policy_for_index(cfg: PressureConfig, index: int) -> dict[str, Any]:
     group_size = max(1, int(cfg.evidence_group_size))
     group_index = min(int(index) // group_size, len(cfg.evidence_policy_groups) - 1)
@@ -737,6 +1457,17 @@ def evidence_policy_for_index(cfg: PressureConfig, index: int) -> dict[str, Any]
         "pressure_group_index": group_index,
         "pressure_group_size": group_size,
         "pressure_total_seconds": pre_seconds + post_seconds,
+    }
+
+
+def face_image_evidence_policy() -> dict[str, Any]:
+    return {
+        "pre_seconds": 5,
+        "post_seconds": 5,
+        "clip_required": False,
+        "snapshot_required": True,
+        "evidence_mode": "image_only",
+        "playback_kind": "image",
     }
 
 
@@ -876,12 +1607,17 @@ def set_compose_operating_point(cfg: PressureConfig) -> None:
         "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
         "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
         "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+        "FACE_INFER_INTERVAL": str(cfg.face_infer_interval),
+        "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
         "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
         "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
         "ANALYSIS_FPS": cfg.fps,
         "ANALYSIS_MIN_FPS": cfg.min_fps,
         "MAX_FPS": cfg.fps,
         "MIN_FPS": cfg.min_fps,
+        "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
+        "FRAME_ANNOTATION_STREAM_MODE": "dual",
+        "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
     }
     services = ["analysis-forwarder", "savant-security"]
     if cfg.forwarder_null_sink:
@@ -933,12 +1669,17 @@ def start_dual_shard_runtime(cfg: PressureConfig) -> None:
             "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
             "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
             "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+            "FACE_INFER_INTERVAL": str(cfg.face_infer_interval),
+            "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
             "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
             "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
             "ANALYSIS_FPS": cfg.fps,
             "ANALYSIS_MIN_FPS": cfg.min_fps,
             "MAX_FPS": cfg.fps,
             "MIN_FPS": cfg.min_fps,
+            "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
+            "FRAME_ANNOTATION_STREAM_MODE": "dual",
+            "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
             "SAVANT_A_NVIDIA_VISIBLE_DEVICES": cfg.dual_shard_gpu,
             "SAVANT_B_NVIDIA_VISIBLE_DEVICES": cfg.dual_shard_gpu,
             "SAVANT_B_CUDA_VISIBLE_DEVICES": "0",
@@ -989,6 +1730,42 @@ def stop_dual_shard_runtime(cfg: PressureConfig) -> None:
     )
 
 
+def recreate_dual_video_sinks_for_current_epoch(cfg: PressureConfig) -> None:
+    override_path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
+    compose = [
+        "docker",
+        "compose",
+        "--env-file",
+        cfg.env_file,
+        "-f",
+        cfg.compose_file,
+    ]
+    if override_path.exists():
+        compose.extend(["-f", str(override_path)])
+    compose.extend(
+        [
+            "--profile",
+            DUAL_SHARD_PROFILE,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "video-file-sink-a",
+            "video-file-sink-b",
+            "video-file-sink-c",
+            "video-file-sink-d",
+            "video-file-sink-e",
+            "video-file-sink-f",
+            "video-file-sink-g",
+            "video-file-sink-h",
+        ]
+    )
+    run(
+        compose,
+        cfg.artifact_dir / "compose_recreate_dual_video_sinks_current_epoch.log",
+    )
+
+
 def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
     path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
     device = str(cfg.dual_shard_gpu)
@@ -1001,8 +1778,13 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
                     "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
                     "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+                    "FACE_INFER_INTERVAL": str(cfg.face_infer_interval),
+                    "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
                     "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
                     "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
+                    "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
+                    "FRAME_ANNOTATION_STREAM_MODE": "dual",
+                    "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
                 },
                 "deploy": {
                     "resources": {
@@ -1026,8 +1808,13 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "POSE_BATCH_SIZE": str(cfg.pose_batch_size),
                     "FACE_DETECTOR_BATCH_SIZE": str(cfg.face_detector_batch_size),
                     "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+                    "FACE_INFER_INTERVAL": str(cfg.face_infer_interval),
+                    "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
                     "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
                     "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
+                    "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
+                    "FRAME_ANNOTATION_STREAM_MODE": "dual",
+                    "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
                 },
                 "deploy": {
                     "resources": {
@@ -1112,6 +1899,8 @@ def save_performance_config(cfg: PressureConfig, original: dict[str, Any]) -> No
             "pose_batch_size": cfg.pose_batch_size,
             "face_detector_batch_size": cfg.face_detector_batch_size,
             "face_embedding_batch_size": cfg.face_embedding_batch_size,
+            "face_infer_interval": cfg.face_infer_interval,
+            "face_embedding_infer_interval": cfg.face_embedding_infer_interval,
             "max_parallel_streams": cfg.max_parallel_streams,
             "batched_push_timeout": cfg.batched_push_timeout,
         }
@@ -1138,6 +1927,8 @@ def topology_pressure_payload(cfg: PressureConfig) -> dict[str, Any]:
         "pose_batch_size": cfg.pose_batch_size,
         "face_detector_batch_size": cfg.face_detector_batch_size,
         "face_embedding_batch_size": cfg.face_embedding_batch_size,
+        "face_infer_interval": cfg.face_infer_interval,
+        "face_embedding_infer_interval": cfg.face_embedding_infer_interval,
         "max_parallel_streams": cfg.max_parallel_streams,
         "analysis_fps": cfg.fps,
         "analysis_min_fps": cfg.min_fps,
@@ -1145,15 +1936,26 @@ def topology_pressure_payload(cfg: PressureConfig) -> dict[str, Any]:
         "savant_min_fps": cfg.min_fps,
         "batched_push_timeout": cfg.batched_push_timeout,
     }
-    return {
+    payload: dict[str, Any] = {
         "topology_mode": "dual_same_gpu",
-        "shard_strategy": "balanced",
+        "shard_strategy": (
+            "manual"
+            if cfg.dual_shard_source_mode in {"all-a", "all-b"}
+            else "balanced"
+        ),
         "streams_per_branch": max(1, cfg.stream_count // 2),
         "branches": {
             "a": dict(branch),
             "b": dict(branch),
         },
     }
+    if cfg.dual_shard_source_mode in {"all-a", "all-b"}:
+        target_branch = "a" if cfg.dual_shard_source_mode == "all-a" else "b"
+        payload["manual_assignments"] = {
+            f"{cfg.run_id}_{index:02d}": target_branch
+            for index in range(cfg.stream_count)
+        }
+    return payload
 
 
 def save_and_apply_topology_config(cfg: PressureConfig) -> dict[str, Any]:
@@ -1197,16 +1999,599 @@ def docker_container_env(name: str) -> dict[str, str]:
     return result
 
 
+def docker_container_state(name: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        ["docker", "inspect", name, "--format", "{{json .State}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if completed.returncode != 0:
+        return {
+            "container": name,
+            "exists": False,
+            "running": False,
+            "status": "missing",
+            "inspect_error": completed.stdout.strip(),
+        }
+    try:
+        state = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {
+            "container": name,
+            "exists": True,
+            "running": False,
+            "status": "inspect_parse_failed",
+            "inspect_error": completed.stdout.strip(),
+        }
+    health = state.get("Health") if isinstance(state, dict) else None
+    return {
+        "container": name,
+        "exists": True,
+        "running": bool((state or {}).get("Running")),
+        "status": str((state or {}).get("Status") or ""),
+        "health": (
+            str(health.get("Status") or "")
+            if isinstance(health, dict)
+            else ""
+        ),
+    }
+
+
 def clip_worker_replay_shard_env_snapshot() -> dict[str, str]:
     env = docker_container_env("video-analytics-midterm-clip-worker")
     return {
         "REPLAY_SHARDS_JSON": env.get("REPLAY_SHARDS_JSON", ""),
         "REPLAY_SHARDS_CONFIG_PATH": env.get("REPLAY_SHARDS_CONFIG_PATH", ""),
+        "EVIDENCE_DENSITY_PROFILE": env.get("EVIDENCE_DENSITY_PROFILE", ""),
+        "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS": env.get(
+            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+            "",
+        ),
+        "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL": env.get(
+            "EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL",
+            "",
+        ),
+        "CLIP_WORKER_MAX_JOBS_PER_RUN": env.get("CLIP_WORKER_MAX_JOBS_PER_RUN", ""),
+        "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY": env.get(
+            "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY",
+            "",
+        ),
+        "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD": env.get(
+            "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD",
+            "",
+        ),
     }
+
+
+def event_worker_evidence_env_snapshot() -> dict[str, str]:
+    env = docker_container_env("video-analytics-midterm-event-worker")
+    keys = (
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL",
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE",
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE",
+        "RECORDING_COOLDOWN_SECONDS",
+        "RECORDING_COOLDOWN_SCOPE",
+        "ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS",
+        "EVIDENCE_DENSITY_PROFILE",
+        "EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+        "EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED",
+        "EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS",
+        "EVIDENCE_EVENT_COVERAGE_EVENT_TYPES",
+        "EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS",
+    )
+    return {key: env.get(key, "") for key in keys}
+
+
+def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
+    env = docker_container_env("video-analytics-midterm-media-worker")
+    keys = (
+        "ROLLING_CACHE_ENABLED",
+        "ROLLING_CACHE_MATERIALIZATION_ENABLED",
+        "ROLLING_CACHE_SOURCES",
+        "ROLLING_CACHE_ROOT",
+        "ROLLING_CACHE_MATERIALIZED_ROOT",
+        "ROLLING_CACHE_RETENTION_SECONDS",
+        "ROLLING_CACHE_SEGMENT_SECONDS",
+        "ROLLING_CACHE_FALLBACK_TO_REPLAY",
+        "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL",
+        "ROLLING_CACHE_MATERIALIZATION_WORKERS",
+        "ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S",
+        "ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+        "ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS",
+        "EVIDENCE_DENSITY_PROFILE",
+        "POST_SAVANT_FAST_RAW_CLIP_ENABLED",
+        "FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS",
+        "FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S",
+        "FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES",
+        "FRAME_CACHE_SIDECAR_MAX_SCAN",
+        "FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN",
+        "FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED",
+        "FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL",
+        "EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED",
+    )
+    return {key: env.get(key, "") for key in keys}
+
+
+def rolling_cache_sink_state_snapshot() -> dict[str, dict[str, Any]]:
+    containers = {
+        "rolling-cache-sink": "video-analytics-midterm-rolling-cache-sink",
+        "rolling-cache-sink-a": "video-analytics-midterm-rolling-cache-sink-a",
+        "rolling-cache-sink-b": "video-analytics-midterm-rolling-cache-sink-b",
+    }
+    return {
+        service: docker_container_state(container)
+        for service, container in containers.items()
+    }
+
+
+def pressure_source_ids(cfg: PressureConfig) -> list[str]:
+    return [f"{cfg.run_id}_{index:02d}" for index in range(cfg.stream_count)]
+
+
+def _env_bool(value: str) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def configure_media_worker_rolling_cache(
+    cfg: PressureConfig,
+    *,
+    values: dict[str, str],
+    artifact_name: str,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    env.update(values)
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "media-worker",
+        ],
+        cfg.artifact_dir / artifact_name,
+        env=env,
+    )
+    observed = media_worker_rolling_cache_env_snapshot()
+    summary = {"requested": values, "observed": observed}
+    write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    for key, expected in values.items():
+        if expected == "":
+            continue
+        if observed.get(key, "") != expected:
+            raise RuntimeError(
+                f"media-worker {key} was not applied after compose recreate"
+            )
+    return summary
+
+
+def start_rolling_cache_sinks_for_pressure(
+    cfg: PressureConfig,
+    *,
+    runtime_epoch_id: str = "",
+) -> dict[str, Any]:
+    if cfg.dual_shard_same_gpu:
+        profiles = [DUAL_SHARD_PROFILE, "rolling-cache-dual"]
+        services = ["rolling-cache-sink-a", "rolling-cache-sink-b"]
+        dependency_services = ["replay-raw-fanout-a", "replay-raw-fanout-b"]
+    else:
+        profiles = ["rolling-cache"]
+        services = ["rolling-cache-sink"]
+        dependency_services = ["replay-raw-fanout"]
+    input_fps_probe = probe_video_input_fps(cfg.rtsp_uri)
+    rolling_cache_input_fps = (
+        float(input_fps_probe.get("fps") or 0.0)
+        or _fps_to_float(os.environ.get("ROLLING_CACHE_FPS", ""))
+        or 24.0
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "ROLLING_CACHE_ROOT": "/media/rolling-cache",
+            "ROLLING_CACHE_SEGMENT_SECONDS": "4",
+            "ROLLING_CACHE_FPS": _format_fps_float(rolling_cache_input_fps),
+            "ROLLING_CACHE_RUNTIME_EPOCH_ID": runtime_epoch_id,
+        }
+    )
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            *[item for profile in profiles for item in ("--profile", profile)],
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            *services,
+        ],
+        cfg.artifact_dir / "compose_recreate_rolling_cache_sinks.log",
+        env=env,
+    )
+    service_states = {
+        service: docker_container_state(
+            "video-analytics-midterm-rolling-cache-sink"
+            if service == "rolling-cache-sink"
+            else f"video-analytics-midterm-{service}"
+        )
+        for service in services
+    }
+    dependency_states = {
+        service: docker_container_state(f"video-analytics-midterm-{service}")
+        for service in dependency_services
+    }
+    missing_dependencies = [
+        service
+        for service, state in dependency_states.items()
+        if not bool(state.get("running"))
+    ]
+    summary = {
+        "profiles": profiles,
+        "services": services,
+        "dependency_services": dependency_services,
+        "runtime_epoch_id": runtime_epoch_id,
+        "input_fps_probe": input_fps_probe,
+        "rolling_cache_expected_raw_fps": rolling_cache_input_fps,
+        "states": service_states,
+        "dependency_states": dependency_states,
+        "missing_dependencies": missing_dependencies,
+    }
+    write_json(cfg.artifact_dir / "rolling_cache_sinks_pressure.json", summary)
+    if missing_dependencies:
+        raise RuntimeError(
+            "rolling cache raw fanout dependencies are not running: "
+            + ",".join(missing_dependencies)
+        )
+    return summary
+
+
+def stop_rolling_cache_sinks_before_pressure_reconfigure(
+    cfg: PressureConfig,
+) -> dict[str, Any]:
+    if cfg.dual_shard_same_gpu:
+        profiles = [DUAL_SHARD_PROFILE, "rolling-cache-dual"]
+        services = ["rolling-cache-sink-a", "rolling-cache-sink-b"]
+    else:
+        profiles = ["rolling-cache"]
+        services = ["rolling-cache-sink"]
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            *[item for profile in profiles for item in ("--profile", profile)],
+            "stop",
+            *services,
+        ],
+        cfg.artifact_dir / "compose_stop_rolling_cache_sinks_before_reconfigure.log",
+        check=False,
+    )
+    states = {
+        service: docker_container_state(
+            "video-analytics-midterm-rolling-cache-sink"
+            if service == "rolling-cache-sink"
+            else f"video-analytics-midterm-{service}"
+        )
+        for service in services
+    }
+    summary = {"profiles": profiles, "services": services, "states": states}
+    write_json(
+        cfg.artifact_dir / "rolling_cache_sinks_stopped_before_reconfigure.json",
+        summary,
+    )
+    return summary
+
+
+def restore_rolling_cache_sinks_after_pressure(
+    cfg: PressureConfig,
+    *,
+    original_states: dict[str, dict[str, Any]],
+    artifact_name: str,
+) -> dict[str, Any]:
+    if cfg.dual_shard_same_gpu:
+        profiles = [DUAL_SHARD_PROFILE, "rolling-cache-dual"]
+        services = ["rolling-cache-sink-a", "rolling-cache-sink-b"]
+    else:
+        profiles = ["rolling-cache"]
+        services = ["rolling-cache-sink"]
+    services_to_stop = [
+        service
+        for service in services
+        if not bool((original_states.get(service) or {}).get("running"))
+    ]
+    if services_to_stop:
+        run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                cfg.env_file,
+                "-f",
+                cfg.compose_file,
+                *[item for profile in profiles for item in ("--profile", profile)],
+                "stop",
+                *services_to_stop,
+            ],
+            cfg.artifact_dir / artifact_name,
+            check=False,
+        )
+    else:
+        write_text(
+            cfg.artifact_dir / artifact_name,
+            "No rolling-cache sink services were stopped; all pressure services were already running before the run.\n",
+        )
+    summary = {
+        "profiles": profiles,
+        "services": services,
+        "stopped": services_to_stop,
+        "original": original_states,
+        "after": rolling_cache_sink_state_snapshot(),
+    }
+    write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    return summary
+
+
+def stop_rolling_cache_sinks_after_pressure(
+    cfg: PressureConfig,
+    *,
+    artifact_name: str,
+) -> dict[str, Any]:
+    containers = [
+        "video-analytics-midterm-rolling-cache-sink",
+        "video-analytics-midterm-rolling-cache-sink-a",
+        "video-analytics-midterm-rolling-cache-sink-b",
+    ]
+    run(
+        ["docker", "stop", *containers],
+        cfg.artifact_dir / artifact_name,
+        check=False,
+    )
+    summary = {
+        "containers": containers,
+        "after": rolling_cache_sink_state_snapshot(),
+    }
+    write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    return summary
+
+
+def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[str, Any] | None:
+    if not cfg.rolling_cache_evidence:
+        return None
+    max_policy_window_s = max(
+        1,
+        max(
+            int(pre_seconds) + int(post_seconds)
+            for pre_seconds, post_seconds in cfg.evidence_policy_groups
+        ),
+    )
+    event_values = {
+        "ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS": "true",
+        "EVIDENCE_DENSITY_PROFILE": "high_density",
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL": "0",
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE": "0",
+        "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE": "0",
+        "EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED": (
+            "true" if cfg.rolling_cache_enable_coverage_merge else "false"
+        ),
+        "EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS": "60",
+        "EVIDENCE_EVENT_COVERAGE_EVENT_TYPES": (
+            "intrusion,watchlist_hit,live_search_hit"
+        ),
+        "EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS": str(max_policy_window_s),
+        # Pressure runs need the same cooldown semantics as the generated
+        # camera policies: one 30s budget per camera and algorithm, not one
+        # shared budget per camera across intrusion/watchlist events.
+        "RECORDING_COOLDOWN_SCOPE": "algorithm",
+        # Task readiness is event time + post window + rolling segment close /
+        # index-visible delay, so natural waiting never consumes a media-worker
+        # slot. Live pressure p95 showed 5s was still early; 9s matches the
+        # observed segment-visible tail without pushing real processing into
+        # worker occupancy.
+        "EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS": "9",
+    }
+    if cfg.pressure_disable_evidence_admission:
+        event_values.update(
+            {
+                "EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL": "0",
+                "EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE": "0",
+                "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE": "0",
+                "RECORDING_COOLDOWN_SECONDS": "0",
+            }
+        )
+    media_values = {
+        "EVIDENCE_DENSITY_PROFILE": "high_density",
+        "ROLLING_CACHE_ENABLED": "true",
+        "ROLLING_CACHE_MATERIALIZATION_ENABLED": "true",
+        "ROLLING_CACHE_SOURCES": ",".join(pressure_source_ids(cfg)),
+        "ROLLING_CACHE_ROOT": "/media/rolling-cache",
+        "ROLLING_CACHE_MATERIALIZED_ROOT": "/media/rolling-cache-materialized",
+        "ROLLING_CACHE_RETENTION_SECONDS": str(
+            max(900, cfg.duration_s + cfg.drain_s + 120)
+        ),
+        "ROLLING_CACHE_SEGMENT_SECONDS": "4",
+        # Pressure acceptance must prove the Replay raw tap -> rolling-cache
+        # path. Falling back to Replay jobs can silently mix in the legacy
+        # video-file-sink route and hide a wrong tap point.
+        "ROLLING_CACHE_FALLBACK_TO_REPLAY": "false",
+        "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL": str(
+            max(16, min(256, cfg.stream_count * 4))
+        ),
+        "ROLLING_CACHE_MATERIALIZATION_WORKERS": str(
+            max(4, min(64, cfg.stream_count or 1))
+        ),
+        "ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S": "1",
+        # Fallback for tasks created before materialization_ready_at existed.
+        # Keep it aligned with the event-worker ready_at grace so old rows do
+        # not get claimed earlier than newly inserted rows.
+        "ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS": "9",
+        "ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS": "120",
+        # Finalizer sidecar generation otherwise re-reads and reparses the same
+        # multi-source frame-annotation Redis ranges once per evidence event.
+        # Bucketed range caching keeps the operator overlays intact while
+        # avoiding the 60-source fan-out cost in pressure runs.
+        "FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS": "10000",
+        "FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S": "900",
+        "FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES": "64",
+        "FRAME_CACHE_SIDECAR_MAX_SCAN": "30000",
+        "FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN": str(
+            max(1000, cfg.stream_count * 40)
+        ),
+        "FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED": "true",
+        "FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL": "false",
+        # Canonical pressure evidence must be reviewable from the same
+        # DB-backed 8090 path operators use: timeline rows, overlay rows,
+        # person boxes, and track trails are acceptance artifacts, not
+        # optional filesystem fallbacks.
+        "EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED": "true",
+    }
+    return {
+        "event_worker": configure_event_worker_evidence_admission(
+            cfg,
+            values=event_values,
+            artifact_name="compose_recreate_event_worker_rolling_cache.log",
+        ),
+        "media_worker": configure_media_worker_rolling_cache(
+            cfg,
+            values=media_values,
+            artifact_name="compose_recreate_media_worker_rolling_cache.log",
+        ),
+    }
+
+
+def configure_event_worker_evidence_admission(
+    cfg: PressureConfig,
+    *,
+    values: dict[str, str],
+    artifact_name: str,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    env.update(values)
+    run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "event-worker",
+        ],
+        cfg.artifact_dir / artifact_name,
+        env=env,
+    )
+    observed = event_worker_evidence_env_snapshot()
+    summary = {"requested": values, "observed": observed}
+    write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    for key, expected in values.items():
+        if expected == "":
+            continue
+        if observed.get(key, "") != expected:
+            raise RuntimeError(
+                f"event-worker {key} was not applied after compose recreate"
+            )
+    return summary
+
+
+def configure_event_worker_for_pressure(cfg: PressureConfig) -> dict[str, Any] | None:
+    if not cfg.pressure_disable_evidence_admission:
+        return None
+    return configure_event_worker_evidence_admission(
+        cfg,
+        values={
+            "EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL": "0",
+            "EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE": "0",
+            "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE": "0",
+            "RECORDING_COOLDOWN_SECONDS": "0",
+        },
+        artifact_name="compose_recreate_event_worker_pressure_admission.log",
+    )
+
+
+def replay_topology_summary() -> dict[str, Any]:
+    env = clip_worker_replay_shard_env_snapshot()
+    shard_json = env.get("REPLAY_SHARDS_JSON", "")
+    shard_config_path = env.get("REPLAY_SHARDS_CONFIG_PATH", "")
+    containers = {
+        service: docker_container_state(container_name)
+        for service, container_name in REPLAY_TOPOLOGY_CONTAINERS.items()
+    }
+    shard_services = ["replay-a", "replay-b", "video-file-sink-a", "video-file-sink-b"]
+    for shard_id in EVIDENCE_SHARD_IDS[2:]:
+        suffix = remove_prefix(shard_id, "replay-")
+        if shard_id in shard_json:
+            shard_services.extend([shard_id, f"video-file-sink-{suffix}"])
+    shard_containers_running = all(
+        bool(containers.get(service, {}).get("running")) for service in shard_services
+    )
+    shard_config_present = bool(shard_json.strip() or shard_config_path.strip())
+    dual_replay_enabled = shard_config_present and shard_containers_running
+    reason_details: list[str] = []
+    if not shard_config_path.strip() and not shard_json.strip():
+        reason_details.append("REPLAY_SHARDS_CONFIG_PATH empty and REPLAY_SHARDS_JSON empty")
+    stopped = [
+        service
+        for service in shard_services
+        if not bool(containers.get(service, {}).get("running"))
+    ]
+    if stopped:
+        reason_details.append(
+            "replay/video-file-sink shard containers stopped: " + ",".join(stopped)
+        )
+    topology = "dual_shard" if dual_replay_enabled else "single_sink"
+    summary: dict[str, Any] = {
+        "replay_topology": topology,
+        "dual_replay_enabled": dual_replay_enabled,
+        "reason": (
+            ""
+            if dual_replay_enabled
+            else "REPLAY_SHARDS_CONFIG_PATH empty or replay/video-file-sink shard containers stopped"
+        ),
+        "reason_details": reason_details,
+        "clip_worker": {
+            "REPLAY_SHARDS_CONFIG_PATH": shard_config_path,
+            "REPLAY_SHARDS_JSON_present": bool(shard_json.strip()),
+            "REPLAY_SHARDS_JSON_bytes": len(shard_json.encode("utf-8")),
+            "REPLAY_SHARDS_JSON_sha256": (
+                hashlib.sha256(shard_json.encode("utf-8")).hexdigest()
+                if shard_json
+                else ""
+            ),
+            "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS": env.get(
+                "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+                "",
+            ),
+        },
+        "containers": containers,
+    }
+    if dual_replay_enabled:
+        summary.update({service: containers[service] for service in shard_services})
+    return summary
 
 
 def _compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _evidence_materialization_global_limit(shard_count: int) -> str:
+    per_shard = int(os.getenv("EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD", "9"))
+    return str(max(1, shard_count) * max(1, per_shard))
 
 
 def configure_clip_worker_replay_shards(
@@ -1215,6 +2600,11 @@ def configure_clip_worker_replay_shards(
     replay_shards_json: str,
     replay_shards_config_path: str,
     artifact_name: str,
+    materialization_event_type_quotas: str | None = None,
+    density_profile: str | None = None,
+    materialization_pressure_level: str | None = None,
+    max_jobs_per_run: str | None = None,
+    materialization_max_concurrency: str | None = None,
 ) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(
@@ -1223,6 +2613,20 @@ def configure_clip_worker_replay_shards(
             "REPLAY_SHARDS_CONFIG_PATH": replay_shards_config_path,
         }
     )
+    if materialization_event_type_quotas is not None:
+        env["EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS"] = (
+            materialization_event_type_quotas
+        )
+    if density_profile is not None:
+        env["EVIDENCE_DENSITY_PROFILE"] = density_profile
+    if materialization_pressure_level is not None:
+        env["EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL"] = materialization_pressure_level
+    if max_jobs_per_run is not None:
+        env["CLIP_WORKER_MAX_JOBS_PER_RUN"] = max_jobs_per_run
+    if materialization_max_concurrency is not None:
+        env["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY"] = (
+            materialization_max_concurrency
+        )
     run(
         [
             "docker",
@@ -1244,11 +2648,31 @@ def configure_clip_worker_replay_shards(
     observed = clip_worker_replay_shard_env_snapshot()
     observed_json = observed.get("REPLAY_SHARDS_JSON", "")
     observed_config_path = observed.get("REPLAY_SHARDS_CONFIG_PATH", "")
+    observed_event_type_quotas = observed.get(
+        "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS",
+        "",
+    )
+    observed_density_profile = observed.get("EVIDENCE_DENSITY_PROFILE", "")
+    observed_pressure_level = observed.get("EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL", "")
+    observed_max_jobs_per_run = observed.get("CLIP_WORKER_MAX_JOBS_PER_RUN", "")
+    observed_materialization_max_concurrency = observed.get(
+        "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY",
+        "",
+    )
+    observed_materialization_max_concurrency_per_shard = observed.get(
+        "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD",
+        "",
+    )
     summary = {
         "container": "video-analytics-midterm-clip-worker",
         "replay_shards_json_sha256": digest,
         "replay_shards_config_path": replay_shards_config_path,
         "replay_shards_json_bytes": len(replay_shards_json.encode("utf-8")),
+        "materialization_event_type_quotas": (
+            materialization_event_type_quotas
+            if materialization_event_type_quotas is not None
+            else ""
+        ),
         "observed_replay_shards_json_sha256": (
             hashlib.sha256(observed_json.encode("utf-8")).hexdigest()
             if observed_json
@@ -1256,6 +2680,28 @@ def configure_clip_worker_replay_shards(
         ),
         "observed_replay_shards_config_path": observed_config_path,
         "observed_replay_shards_json_bytes": len(observed_json.encode("utf-8")),
+        "density_profile": density_profile if density_profile is not None else "",
+        "observed_density_profile": observed_density_profile,
+        "materialization_pressure_level": (
+            materialization_pressure_level
+            if materialization_pressure_level is not None
+            else ""
+        ),
+        "observed_materialization_pressure_level": observed_pressure_level,
+        "observed_materialization_event_type_quotas": observed_event_type_quotas,
+        "max_jobs_per_run": max_jobs_per_run if max_jobs_per_run is not None else "",
+        "observed_max_jobs_per_run": observed_max_jobs_per_run,
+        "materialization_max_concurrency": (
+            materialization_max_concurrency
+            if materialization_max_concurrency is not None
+            else ""
+        ),
+        "observed_materialization_max_concurrency": (
+            observed_materialization_max_concurrency
+        ),
+        "observed_materialization_max_concurrency_per_shard": (
+            observed_materialization_max_concurrency_per_shard
+        ),
     }
     write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
     if observed_json != replay_shards_json:
@@ -1265,6 +2711,40 @@ def configure_clip_worker_replay_shards(
     if observed_config_path != replay_shards_config_path:
         raise RuntimeError(
             "clip-worker REPLAY_SHARDS_CONFIG_PATH was not applied after compose recreate"
+        )
+    if (
+        materialization_event_type_quotas is not None
+        and observed_event_type_quotas != materialization_event_type_quotas
+    ):
+        raise RuntimeError(
+            "clip-worker EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS was not applied "
+            "after compose recreate"
+        )
+    if density_profile is not None and observed_density_profile != (
+        density_profile or "normal"
+    ):
+        raise RuntimeError(
+            "clip-worker EVIDENCE_DENSITY_PROFILE was not applied after compose recreate"
+        )
+    if materialization_pressure_level is not None and observed_pressure_level != (
+        materialization_pressure_level or "normal"
+    ):
+        raise RuntimeError(
+            "clip-worker EVIDENCE_MATERIALIZATION_PRESSURE_LEVEL was not applied "
+            "after compose recreate"
+        )
+    if max_jobs_per_run is not None and observed_max_jobs_per_run != max_jobs_per_run:
+        raise RuntimeError(
+            "clip-worker CLIP_WORKER_MAX_JOBS_PER_RUN was not applied after compose recreate"
+        )
+    if (
+        materialization_max_concurrency is not None
+        and observed_materialization_max_concurrency
+        != materialization_max_concurrency
+    ):
+        raise RuntimeError(
+            "clip-worker EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY was not applied "
+            "after compose recreate"
         )
     return summary
 
@@ -1277,12 +2757,24 @@ def configure_clip_worker_for_topology_shards(
     if not replay_shards_path.exists():
         raise RuntimeError(f"topology replay shard file not found: {replay_shards_path}")
     replay_shards_doc = json.loads(replay_shards_path.read_text(encoding="utf-8"))
+    replay_shards_doc.setdefault("mapping_version", f"{cfg.run_id}:topology:v1")
     replay_shards_json = _compact_json(replay_shards_doc)
     summary = configure_clip_worker_replay_shards(
         cfg,
         replay_shards_json=replay_shards_json,
         replay_shards_config_path="",
         artifact_name="compose_recreate_clip_worker_replay_shards.log",
+        materialization_event_type_quotas=(
+            cfg.pressure_materialization_event_type_quotas
+        ),
+        density_profile="high_density" if cfg.rolling_cache_evidence else None,
+        materialization_pressure_level=(
+            "high_density" if cfg.rolling_cache_evidence else None
+        ),
+        max_jobs_per_run="0" if cfg.keep_evidence < 0 else None,
+        materialization_max_concurrency=_evidence_materialization_global_limit(
+            len(replay_shards_doc.get("shards") or [])
+        ),
     )
     summary.update(
         {
@@ -1296,6 +2788,7 @@ def configure_clip_worker_for_topology_shards(
                 for shard in replay_shards_doc.get("shards") or []
                 if isinstance(shard, dict)
             ),
+            "mapping_version": replay_shards_doc.get("mapping_version", ""),
         }
     )
     write_json(cfg.artifact_dir / "clip_worker_replay_shards_pressure.json", summary)
@@ -1306,53 +2799,52 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
     with conn.transaction():
         conn.execute("UPDATE cameras SET enabled=false, updated_at=now()")
         for index in range(cfg.stream_count):
-            camera_id = uuid.uuid4()
+            camera_id = str(uuid.uuid4())
             source_id = f"{cfg.run_id}_{index:02d}"
             zone_id = f"{source_id}_full_frame"
             camera_name = f"pressure {index:02d}"
             rtsp_uri = pressure_rtsp_uri(cfg, index=index, source_id=source_id)
             evidence_policy = evidence_policy_for_index(cfg, index)
-            metadata = {
-                "pressure_run_id": cfg.run_id,
-                "pressure_index": index,
-                "pressure_group_index": evidence_policy["pressure_group_index"],
-                "pressure_group_size": evidence_policy["pressure_group_size"],
-                "pressure_evidence_pre_seconds": evidence_policy["pre_seconds"],
-                "pressure_evidence_post_seconds": evidence_policy["post_seconds"],
-                "pressure_evidence_total_seconds": evidence_policy[
-                    "pressure_total_seconds"
-                ],
-                "created_by": "run_midterm_pressure60.py",
-                "rtsp_republished": bool(cfg.rtsp_republish_output_base),
+            watchlist_evidence_policy = face_image_evidence_policy()
+            alert_policy = {
+                "global_alert_cooldown_s": cfg.pressure_algorithm_cooldown_s,
+                "cooldown_scope": "algorithm",
+                "critical_bypass": False,
+                "store_suppressed_events": True,
             }
             points = [[0.0, 0.0], [1920.0, 0.0], [1920.0, 1080.0], [0.0, 1080.0]]
             conn.execute(
                 """
-                INSERT INTO cameras (id, name, stream_url, enabled, metadata, source_id, rtsp_url, site_id, location, gpu_id, input_type, rtsp_transport, fps_policy, alert_policy)
-                VALUES (%s, %s, %s, true, %s::jsonb, %s, %s, 'pressure', %s, 0, 'rtsp', 'tcp', '{}'::jsonb, '{}'::jsonb)
+                INSERT INTO cameras (
+                    id, source_id, name, rtsp_url, site_id, location, gpu_id,
+                    enabled, input_type, rtsp_transport, fps_policy, alert_policy
+                )
+                VALUES (%s, %s, %s, %s, 'pressure', %s, 0, true, 'rtsp', 'tcp', '{}'::jsonb, %s::jsonb)
                 """,
                 (
-                    camera_id,
+                    str(camera_id),
+                    source_id,
                     camera_name,
                     rtsp_uri,
-                    json.dumps(metadata),
-                    source_id,
-                    rtsp_uri,
                     f"pressure-{index:02d}",
+                    json.dumps(alert_policy),
                 ),
             )
             conn.execute(
                 """
-                INSERT INTO camera_zones (camera_id, name, polygon, enabled, zone_id, zone_name, zone_type, coordinate_space, points, payload)
-                VALUES (%s, %s, %s::jsonb, true, %s, %s, 'polygon', 'pixel', %s::jsonb, '{}'::jsonb)
+                INSERT INTO camera_zones (
+                    camera_id, zone_id, zone_name, zone_type,
+                    coordinate_space, points, enabled, payload
+                )
+                VALUES (%s, %s, %s, 'polygon', 'pixel', %s::jsonb, true, '{}'::jsonb)
                 """,
-                (camera_id, "full frame", json.dumps(points), zone_id, "full frame", json.dumps(points)),
+                (camera_id, zone_id, "full frame", json.dumps(points)),
             )
             intrusion_config = {
                 "zone": zone_id,
                 "zone_id": zone_id,
                 "severity": "medium",
-                "cooldown_s": 30,
+                "cooldown_s": cfg.pressure_algorithm_cooldown_s,
                 "min_inside_ms": 1000,
                 "min_person_width": 20,
                 "min_person_height": 40,
@@ -1366,7 +2858,7 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                 "severity": "medium",
                 "threshold": 0.60,
                 "min_similarity": 0.60,
-                "cooldown_s": 30,
+                "cooldown_s": cfg.pressure_algorithm_cooldown_s,
                 "watchlist_enabled": True,
                 "live_search_enabled": True,
                 "target_names": ["Reese", "Finch"],
@@ -1394,7 +2886,7 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                     camera_id,
                     json.dumps(watchlist_config),
                     f"{source_id}_watchlist",
-                    json.dumps(evidence_policy),
+                    json.dumps(watchlist_evidence_policy),
                 ),
             )
 
@@ -1411,6 +2903,26 @@ def sync_module_config_snapshot(cfg: PressureConfig) -> dict[str, Any]:
     }
 
 
+def _active_evidence_shard_ids(cfg: PressureConfig) -> list[str]:
+    count = int(cfg.evidence_shard_count or 2)
+    if count not in (2, 4, 8):
+        raise ValueError(f"unsupported evidence_shard_count={count}")
+    return list(EVIDENCE_SHARD_IDS[:count])
+
+
+def _evidence_shard_for_index(
+    cfg: PressureConfig,
+    *,
+    index: int,
+    shard_ids: list[str],
+) -> str:
+    if cfg.dual_shard_source_mode == "all-a":
+        return "replay-a"
+    if cfg.dual_shard_source_mode == "all-b":
+        return "replay-b"
+    return shard_ids[index % len(shard_ids)]
+
+
 def write_dual_shard_pressure_sources(conn, cfg: PressureConfig) -> dict[str, Any]:
     rows = conn.execute(
         """
@@ -1425,13 +2937,13 @@ def write_dual_shard_pressure_sources(conn, cfg: PressureConfig) -> dict[str, An
         raise RuntimeError(
             f"expected {cfg.stream_count} pressure cameras, found {len(rows)}"
         )
-    split_at = max(1, cfg.stream_count // 2)
-    source_ids_by_shard = {"replay-a": [], "replay-b": []}
+    shard_ids = _active_evidence_shard_ids(cfg)
+    source_ids_by_shard: dict[str, list[str]] = {shard_id: [] for shard_id in shard_ids}
     sources: dict[str, dict[str, Any]] = {}
     for index, row in enumerate(rows):
         camera = _row_json(row)
         source_id = str(camera["source_id"])
-        shard_id = "replay-a" if index < split_at else "replay-b"
+        shard_id = _evidence_shard_for_index(cfg, index=index, shard_ids=shard_ids)
         source_ids_by_shard[shard_id].append(source_id)
         sources[str(camera["id"])] = {
             "camera_id": str(camera["id"]),
@@ -1450,31 +2962,33 @@ def write_dual_shard_pressure_sources(conn, cfg: PressureConfig) -> dict[str, An
     )
     shard_plan = {
         "default_shard_id": "replay-a",
+        "mapping_version": f"{cfg.run_id}:evidence-shards-{len(shard_ids)}:v1",
         "shards": [
             {
-                "shard_id": "replay-a",
-                "replay_api_url": "http://replay-a:8080",
-                "in_stream_endpoint": "dealer+connect:tcp://replay-a:5555",
-                "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-a:6666",
-                "source_ids": source_ids_by_shard["replay-a"],
-            },
-            {
-                "shard_id": "replay-b",
-                "replay_api_url": "http://replay-b:8080",
-                "in_stream_endpoint": "dealer+connect:tcp://replay-b:5555",
-                "replay_job_sink_url": "dealer+connect:tcp://video-file-sink-b:6666",
-                "source_ids": source_ids_by_shard["replay-b"],
-            },
+                "shard_id": shard_id,
+                "replay_api_url": f"http://{shard_id}:8080",
+                "in_stream_endpoint": f"dealer+connect:tcp://{shard_id}:5555",
+                "replay_job_sink_url": (
+                    "dealer+connect:tcp://"
+                    f"video-file-sink-{remove_prefix(shard_id, 'replay-')}:6666"
+                ),
+                "source_ids": source_ids_by_shard[shard_id],
+            }
+            for shard_id in shard_ids
         ],
     }
-    shard_plan_path = cfg.artifact_dir / "replay_shards.dual-shard.pressure.json"
+    shard_plan_path = cfg.artifact_dir / (
+        f"replay_shards.evidence-{len(shard_ids)}.pressure.json"
+    )
     write_json(shard_plan_path, shard_plan)
     result = {
         "sources_path": str(sources_path),
         "shard_plan_path": str(shard_plan_path),
+        "source_mode": cfg.dual_shard_source_mode,
+        "evidence_shard_count": len(shard_ids),
         "shards": {
-            "replay-a": len(source_ids_by_shard["replay-a"]),
-            "replay-b": len(source_ids_by_shard["replay-b"]),
+            shard_id: len(source_ids_by_shard[shard_id])
+            for shard_id in shard_ids
         },
     }
     write_json(cfg.artifact_dir / "dual_shard_source_plan.json", result)
@@ -1513,6 +3027,8 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
             input_uri=cfg.rtsp_republish_input_uri,
             output_uri=output_uri,
             mode=cfg.rtsp_republish_mode,
+            input_offset_s=cfg.rtsp_republish_input_offset_s,
+            input_loop=cfg.rtsp_republish_input_loop,
         )
         log_path = log_dir / f"{source_id}.log"
         log_fh = log_path.open("wb")
@@ -1529,6 +3045,8 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
             {
                 "source_id": source_id,
                 "input_uri": cfg.rtsp_republish_input_uri,
+                "input_offset_s": cfg.rtsp_republish_input_offset_s,
+                "input_loop": cfg.rtsp_republish_input_loop,
                 "output_uri": output_uri,
                 "mode": cfg.rtsp_republish_mode,
                 "pid": proc.pid,
@@ -1557,7 +3075,10 @@ def rtsp_republish_command(
     input_uri: str,
     output_uri: str,
     mode: str,
+    input_offset_s: float = 0.0,
+    input_loop: bool = False,
 ) -> list[str]:
+    input_is_local_file = "://" not in input_uri or input_uri.startswith("file://")
     command = [
         ffmpeg,
         "-hide_banner",
@@ -1566,11 +3087,15 @@ def rtsp_republish_command(
         "warning",
         "-fflags",
         "+genpts",
-        "-use_wallclock_as_timestamps",
-        "1",
     ]
+    if not input_is_local_file:
+        command.extend(["-use_wallclock_as_timestamps", "1"])
     if input_uri.startswith(("rtsp://", "rtsps://")):
         command.extend(["-rtsp_transport", "tcp"])
+    if input_loop:
+        command.extend(["-stream_loop", "-1"])
+    if input_offset_s > 0:
+        command.extend(["-ss", _format_seconds(input_offset_s)])
     command.extend(["-re", "-i", input_uri, "-map", "0:v:0", "-an"])
     if mode == "transcode":
         command.extend(
@@ -1581,6 +3106,14 @@ def rtsp_republish_command(
                 "ultrafast",
                 "-tune",
                 "zerolatency",
+                "-g",
+                "8",
+                "-keyint_min",
+                "8",
+                "-sc_threshold",
+                "0",
+                "-bf",
+                "0",
                 "-pix_fmt",
                 "yuv420p",
             ]
@@ -1603,6 +3136,10 @@ def rtsp_republish_command(
         ]
     )
     return command
+
+
+def _format_seconds(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
 def stop_rtsp_republishers(processes: list[subprocess.Popen], cfg: PressureConfig) -> None:
@@ -1640,10 +3177,25 @@ def restart_camera_runtime(cfg: PressureConfig) -> dict[str, Any]:
     return response["data"]
 
 
-def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
+def current_runtime_epoch_id() -> str:
+    state_path = Path("/data/video-analytics/media/replay-sink-output/midterm/.current_epoch.json")
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str((payload or {}).get("runtime_epoch_id") or "")
+
+
+def sample_runtime(
+    cfg: PressureConfig,
+    started_at: datetime,
+    *,
+    pressure_started_monotonic: float | None = None,
+) -> dict[str, Any]:
     samples_dir = cfg.artifact_dir / "samples"
     samples_dir.mkdir(exist_ok=True)
-    end_at = time.time() + cfg.duration_s
+    sampling_started_wall = datetime.now(timezone.utc)
+    end_at = (pressure_started_monotonic or time.time()) + cfg.duration_s
     index = 0
     while True:
         now = time.time()
@@ -1662,6 +3214,426 @@ def sample_runtime(cfg: PressureConfig, started_at: datetime) -> None:
         index += 1
         time.sleep(max(1, min(cfg.sample_interval_s, end_at - now)))
     capture_runtime_logs_since_start(cfg, started_at)
+    summary = {
+        "status": "completed",
+        "duration_s": cfg.duration_s,
+        "sample_count": index + 1,
+        "started_at": sampling_started_wall.isoformat(),
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json(cfg.artifact_dir / "pressure_sampling_window.json", summary)
+    return summary
+
+
+def pressure_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
+    if cfg.dual_shard_same_gpu:
+        return dual_shard_runtime_overview(cfg)
+    return api_json(cfg.api_base, "GET", "/runtime/overview", timeout_s=10)["data"]
+
+
+def pressure_source_visibility_snapshot(cfg: PressureConfig) -> dict[str, Any]:
+    expected = set(pressure_source_ids(cfg))
+    try:
+        overview = pressure_runtime_overview(cfg)
+    except Exception as exc:
+        return {
+            "status": "overview_unavailable",
+            "error": f"{type(exc).__name__}: {exc}",
+            "expected_count": len(expected),
+            "forwarder_visible_count": 0,
+            "savant_visible_count": 0 if not cfg.forwarder_null_sink else len(expected),
+            "missing_forwarder_sources": sorted(expected),
+            "missing_savant_sources": [] if cfg.forwarder_null_sink else sorted(expected),
+        }
+
+    forwarder_sources = _dedupe_sources_by_id(
+        ((overview.get("forwarder") or {}).get("sources") or []),
+        score_keys=(
+            "frames_seen_total",
+            "frames_forwarded_total",
+            "frames_dropped_total",
+            "savant_send_failures_total",
+        ),
+    )
+    savant_sources = _dedupe_sources_by_id(
+        ((overview.get("metrics") or {}).get("sources") or []),
+        score_keys=(
+            "frames_seen_total",
+            "pose_objects_total",
+            "face_objects_total",
+            "person_observations_exported_total",
+            "face_observations_exported_total",
+        ),
+    )
+    forwarder_visible = _metric_visible_source_ids(
+        forwarder_sources,
+        expected,
+        "frames_seen_total",
+    )
+    if cfg.forwarder_null_sink:
+        savant_visible = set(expected)
+    else:
+        savant_visible = _metric_visible_source_ids(
+            savant_sources,
+            expected,
+            "frames_seen_total",
+        )
+    missing_forwarder = sorted(expected - forwarder_visible)
+    missing_savant = sorted(expected - savant_visible)
+    status = "all_visible" if not missing_forwarder and not missing_savant else "waiting"
+    return {
+        "status": status,
+        "expected_count": len(expected),
+        "forwarder_visible_count": len(forwarder_visible),
+        "savant_visible_count": len(savant_visible),
+        "missing_forwarder_sources": missing_forwarder,
+        "missing_savant_sources": missing_savant,
+        "forwarder_visible_sources": sorted(forwarder_visible),
+        "savant_visible_sources": sorted(savant_visible),
+        "forwarder_total_sources": len(forwarder_sources),
+        "savant_total_sources": len(savant_sources),
+        "forwarder_queue_depth": (
+            (overview.get("forwarder") or {}).get("global") or {}
+        ).get("queue_depth"),
+    }
+
+
+def _metric_visible_source_ids(
+    sources: list[dict[str, Any]],
+    expected: set[str],
+    metric_name: str,
+) -> set[str]:
+    visible: set[str] = set()
+    for source in sources:
+        source_id = str(source.get("source_id") or "")
+        if source_id not in expected:
+            continue
+        try:
+            value = float(source.get(metric_name) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            visible.add(source_id)
+    return visible
+
+
+def wait_for_pressure_source_visibility(
+    cfg: PressureConfig,
+    *,
+    sources_path: Path | None = None,
+) -> dict[str, Any]:
+    if cfg.stream_count <= 0 or cfg.pressure_source_visibility_timeout_s <= 0:
+        summary = {
+            "status": "skipped",
+            "reason": "disabled",
+            "timeout_s": cfg.pressure_source_visibility_timeout_s,
+        }
+        write_json(cfg.artifact_dir / "pressure_source_visibility_ready.json", summary)
+        return summary
+
+    started_at = datetime.now(timezone.utc)
+    deadline = time.time() + cfg.pressure_source_visibility_timeout_s
+    stable_samples = 0
+    restart_attempts = 0
+    snapshots: list[dict[str, Any]] = []
+    restart_history: list[dict[str, Any]] = []
+    last_snapshot: dict[str, Any] = {}
+
+    while True:
+        snapshot = pressure_source_visibility_snapshot(cfg)
+        snapshot["observed_at"] = datetime.now(timezone.utc).isoformat()
+        snapshot["stable_samples"] = stable_samples
+        snapshots.append(snapshot)
+        if len(snapshots) > 200:
+            snapshots = snapshots[-200:]
+        last_snapshot = snapshot
+
+        if snapshot.get("status") == "all_visible":
+            stable_samples += 1
+            if stable_samples >= cfg.pressure_source_visibility_stable_samples:
+                summary = {
+                    "status": "ready",
+                    "started_at": started_at.isoformat(),
+                    "ready_at": datetime.now(timezone.utc).isoformat(),
+                    "timeout_s": cfg.pressure_source_visibility_timeout_s,
+                    "poll_s": cfg.pressure_source_visibility_poll_s,
+                    "stable_samples_required": (
+                        cfg.pressure_source_visibility_stable_samples
+                    ),
+                    "stable_samples": stable_samples,
+                    "restart_attempts": restart_attempts,
+                    "restart_history": restart_history,
+                    "last_snapshot": snapshot,
+                }
+                write_json(
+                    cfg.artifact_dir / "pressure_source_visibility_ready.json",
+                    summary,
+                )
+                write_json(
+                    cfg.artifact_dir / "pressure_source_visibility_snapshots.json",
+                    snapshots,
+                )
+                return summary
+        else:
+            stable_samples = 0
+
+        now = time.time()
+        if now >= deadline:
+            # Only restart adapters that the forwarder has not seen at all.
+            # A source can be forwarder-visible while Savant has not yet emitted
+            # per-source metrics under load; restarting that live adapter creates
+            # a stream discontinuity and can make the Savant pipeline unstable.
+            missing = sorted(set(snapshot.get("missing_forwarder_sources") or []))
+            if (
+                missing
+                and sources_path is not None
+                and restart_attempts < cfg.pressure_source_visibility_restart_attempts
+            ):
+                restart_attempts += 1
+                restart_history.append(
+                    restart_pressure_source_ids_from_manifest(
+                        cfg,
+                        sources_path=sources_path,
+                        source_ids=missing,
+                        attempt=restart_attempts,
+                    )
+                )
+                deadline = time.time() + cfg.pressure_source_visibility_timeout_s
+                stable_samples = 0
+                continue
+
+            summary = {
+                "status": "failed",
+                "started_at": started_at.isoformat(),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "timeout_s": cfg.pressure_source_visibility_timeout_s,
+                "poll_s": cfg.pressure_source_visibility_poll_s,
+                "stable_samples_required": (
+                    cfg.pressure_source_visibility_stable_samples
+                ),
+                "stable_samples": stable_samples,
+                "restart_attempts": restart_attempts,
+                "restart_history": restart_history,
+                "last_snapshot": last_snapshot,
+                "source_containers": inspect_pressure_source_containers(cfg.run_id),
+            }
+            write_json(
+                cfg.artifact_dir / "pressure_source_visibility_ready.json",
+                summary,
+            )
+            write_json(
+                cfg.artifact_dir / "pressure_source_visibility_snapshots.json",
+                snapshots,
+            )
+            raise RuntimeError(
+                "pressure source visibility barrier failed: "
+                f"missing_forwarder={last_snapshot.get('missing_forwarder_sources') or []} "
+                f"missing_savant={last_snapshot.get('missing_savant_sources') or []}"
+            )
+
+        time.sleep(
+            max(
+                1,
+                min(cfg.pressure_source_visibility_poll_s, max(deadline - now, 1)),
+            )
+        )
+
+
+def prepare_pressure_sampling_window(
+    conn,
+    cfg: PressureConfig,
+    *,
+    pressure_started_monotonic: float | None = None,
+) -> float | None:
+    started_at = datetime.now(timezone.utc)
+    if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
+        time.sleep(cfg.rolling_cache_prefill_s)
+    cleanup = clear_pressure_warmup_rows(conn, cfg)
+    sampling_started_monotonic = time.time()
+    summary = {
+        "status": "completed",
+        "prefill_s": (
+            cfg.rolling_cache_prefill_s if cfg.rolling_cache_evidence else 0
+        ),
+        "started_at": started_at.isoformat(),
+        "sampling_started_at": datetime.now(timezone.utc).isoformat(),
+        "cleanup": cleanup,
+    }
+    write_json(cfg.artifact_dir / "rolling_cache_prefill_summary.json", summary)
+    return sampling_started_monotonic
+
+
+def remove_tree_best_effort(path: Path) -> tuple[bool, str | None]:
+    if not path.exists():
+        return False, None
+    try:
+        shutil.rmtree(path)
+        return True, None
+    except FileNotFoundError:
+        return False, None
+    except OSError as exc:
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def clear_pressure_warmup_rows(conn, cfg: PressureConfig) -> dict[str, Any]:
+    source_ids = pressure_source_ids(cfg)
+    event_rows = conn.execute(
+        "SELECT id::text FROM events WHERE source_id = ANY(%(source_ids)s)",
+        {"source_ids": source_ids},
+    ).fetchall()
+    event_ids = [str(row["id"]) for row in event_rows]
+    removed_dirs = 0
+    remove_failures: list[dict[str, str]] = []
+    for event_id in event_ids:
+        target = cfg.evidence_root / event_id
+        removed, error = remove_tree_best_effort(target)
+        if removed:
+            removed_dirs += 1
+        if error:
+            remove_failures.append({"event_id": event_id, "error": error})
+    with conn.transaction():
+        face_deleted = conn.execute(
+            "DELETE FROM face_observations WHERE source_id = ANY(%(source_ids)s)",
+            {"source_ids": source_ids},
+        ).rowcount
+        person_deleted = conn.execute(
+            "DELETE FROM person_bbox_observations WHERE source_id = ANY(%(source_ids)s)",
+            {"source_ids": source_ids},
+        ).rowcount
+        event_deleted = conn.execute(
+            "DELETE FROM events WHERE source_id = ANY(%(source_ids)s)",
+            {"source_ids": source_ids},
+        ).rowcount
+    return {
+        "event_rows_deleted": event_deleted or 0,
+        "face_observation_rows_deleted": face_deleted or 0,
+        "person_observation_rows_deleted": person_deleted or 0,
+        "evidence_dirs_removed": removed_dirs,
+        "evidence_dir_remove_failures": len(remove_failures),
+        "evidence_dir_remove_failure_samples": remove_failures[:20],
+    }
+
+
+def pressure_event_sampling_cutoff(conn, cfg: PressureConfig) -> dict[str, Any]:
+    cutoff_created_at = datetime.now(timezone.utc)
+    source_ids = pressure_source_ids(cfg)
+    row = conn.execute(
+        """
+        SELECT count(*) AS event_count,
+               max(event_ts_ms) AS max_event_ts_ms,
+               max(created_at) AS max_created_at
+        FROM events
+        WHERE source_id = ANY(%(source_ids)s)
+        """,
+        {"source_ids": source_ids},
+    ).fetchone() or {}
+    summary = {
+        "status": "captured",
+        "created_at_cutoff": cutoff_created_at.isoformat(),
+        "event_count_at_cutoff": int(row.get("event_count") or 0),
+        "max_event_ts_ms_at_cutoff": _safe_int(row.get("max_event_ts_ms")),
+        "max_created_at_at_cutoff": (
+            row.get("max_created_at").isoformat()
+            if row.get("max_created_at") is not None
+            else None
+        ),
+    }
+    write_json(cfg.artifact_dir / "pressure_sampling_cutoff.json", summary)
+    return summary
+
+
+def rolling_cache_postfill_after_sampling(cfg: PressureConfig) -> dict[str, Any]:
+    summary = {
+        "status": "skipped",
+        "postfill_s": 0,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "ended_at": None,
+    }
+    if cfg.rolling_cache_evidence and cfg.rolling_cache_postfill_s > 0:
+        summary["status"] = "completed"
+        summary["postfill_s"] = cfg.rolling_cache_postfill_s
+        time.sleep(cfg.rolling_cache_postfill_s)
+    summary["ended_at"] = datetime.now(timezone.utc).isoformat()
+    write_json(cfg.artifact_dir / "rolling_cache_postfill_summary.json", summary)
+    return summary
+
+
+def clear_pressure_post_sample_rows(
+    conn,
+    cfg: PressureConfig,
+    cutoff: dict[str, Any],
+) -> dict[str, Any]:
+    cutoff_raw = str(cutoff.get("created_at_cutoff") or "")
+    if not cutoff_raw:
+        return {"status": "skipped", "reason": "missing_created_at_cutoff"}
+    cutoff_created_at = datetime.fromisoformat(cutoff_raw.replace("Z", "+00:00"))
+    source_ids = pressure_source_ids(cfg)
+    event_rows = conn.execute(
+        """
+        SELECT id::text
+        FROM events
+        WHERE source_id = ANY(%(source_ids)s)
+          AND created_at > %(cutoff_created_at)s
+        """,
+        {"source_ids": source_ids, "cutoff_created_at": cutoff_created_at},
+    ).fetchall()
+    event_ids = [str(row["id"]) for row in event_rows]
+    removed_dirs = 0
+    remove_failures: list[dict[str, str]] = []
+    for event_id in event_ids:
+        target = cfg.evidence_root / event_id
+        removed, error = remove_tree_best_effort(target)
+        if removed:
+            removed_dirs += 1
+        if error:
+            remove_failures.append({"event_id": event_id, "error": error})
+    with conn.transaction():
+        face_deleted = conn.execute(
+            """
+            DELETE FROM face_observations
+            WHERE source_id = ANY(%(source_ids)s)
+              AND created_at > %(cutoff_created_at)s
+            """,
+            {"source_ids": source_ids, "cutoff_created_at": cutoff_created_at},
+        ).rowcount
+        person_deleted = conn.execute(
+            """
+            DELETE FROM person_bbox_observations
+            WHERE source_id = ANY(%(source_ids)s)
+              AND created_at > %(cutoff_created_at)s
+            """,
+            {"source_ids": source_ids, "cutoff_created_at": cutoff_created_at},
+        ).rowcount
+        event_deleted = conn.execute(
+            """
+            DELETE FROM events
+            WHERE source_id = ANY(%(source_ids)s)
+              AND created_at > %(cutoff_created_at)s
+            """,
+            {"source_ids": source_ids, "cutoff_created_at": cutoff_created_at},
+        ).rowcount
+    post_cleanup_db_ingest = db_pressure_event_ingest_summary(
+        conn,
+        cfg.run_id,
+        cooldown_s=cfg.pressure_algorithm_cooldown_s,
+    )
+    summary = {
+        "status": "completed",
+        "created_at_cutoff": cutoff_raw,
+        "event_rows_deleted": event_deleted or 0,
+        "face_observation_rows_deleted": face_deleted or 0,
+        "person_observation_rows_deleted": person_deleted or 0,
+        "evidence_dirs_removed": removed_dirs,
+        "evidence_dir_remove_failures": len(remove_failures),
+        "evidence_dir_remove_failure_samples": remove_failures[:20],
+        "post_cleanup_db_ingest": post_cleanup_db_ingest,
+    }
+    write_json(cfg.artifact_dir / "pressure_post_sample_cleanup.json", summary)
+    return summary
 
 
 def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) -> None:
@@ -1687,15 +3659,55 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
     run(["docker", "logs", "--since", since, "video-analytics-midterm-clip-worker"], cfg.artifact_dir / "clip_worker_logs_since_start.txt", check=False)
     run(["docker", "logs", "--since", since, "video-analytics-midterm-event-worker"], cfg.artifact_dir / "event_worker_logs_since_start.txt", check=False)
     run(["docker", "logs", "--since", since, "video-analytics-midterm-face-worker"], cfg.artifact_dir / "face_worker_logs_since_start.txt", check=False)
+    if cfg.dual_shard_same_gpu:
+        run(
+            ["docker", "logs", "--since", since, "video-analytics-midterm-rolling-cache-sink-a"],
+            cfg.artifact_dir / "rolling_cache_sink_a_logs_since_start.txt",
+            check=False,
+        )
+        run(
+            ["docker", "logs", "--since", since, "video-analytics-midterm-rolling-cache-sink-b"],
+            cfg.artifact_dir / "rolling_cache_sink_b_logs_since_start.txt",
+            check=False,
+        )
+    else:
+        run(
+            ["docker", "logs", "--since", since, "video-analytics-midterm-rolling-cache-sink"],
+            cfg.artifact_dir / "rolling_cache_sink_logs_since_start.txt",
+            check=False,
+        )
+    for sink_instance, container_name in VIDEO_FILE_SINK_CONTAINERS.items():
+        run(
+            ["docker", "logs", "--since", since, container_name],
+            cfg.artifact_dir / VIDEO_FILE_SINK_LOG_PATHS[sink_instance],
+            check=False,
+        )
 
 
 def start_pressure_sources_from_manifest(cfg: PressureConfig, *, sources_path: Path) -> None:
     remove_pressure_source_containers(cfg.run_id)
+    entries = start_pressure_source_ids_from_manifest(
+        cfg,
+        sources_path=sources_path,
+        source_ids=pressure_source_ids(cfg),
+        log_name="source_controller_start_dual_shard",
+    )
+    write_json(cfg.artifact_dir / "source_controller_start_dual_shard.json", entries)
+
+
+def start_pressure_source_ids_from_manifest(
+    cfg: PressureConfig,
+    *,
+    sources_path: Path,
+    source_ids: list[str],
+    log_name: str,
+) -> list[dict[str, Any]]:
     log_path = cfg.artifact_dir / "source_controller_start_dual_shard.log"
+    if log_name != "source_controller_start_dual_shard":
+        log_path = cfg.artifact_dir / f"{log_name}.log"
     entries: list[dict[str, Any]] = []
     with log_path.open("w", encoding="utf-8") as log_fh:
-        for index in range(cfg.stream_count):
-            source_id = f"{cfg.run_id}_{index:02d}"
+        for index, source_id in enumerate(source_ids):
             cmd = [
                 sys.executable,
                 str(SOURCE_CONTROLLER),
@@ -1724,9 +3736,83 @@ def start_pressure_sources_from_manifest(cfg: PressureConfig, *, sources_path: P
                 }
             )
             if completed.returncode != 0:
-                write_json(cfg.artifact_dir / "source_controller_start_dual_shard.json", entries)
                 raise RuntimeError(f"failed to start pressure source {source_id}")
-    write_json(cfg.artifact_dir / "source_controller_start_dual_shard.json", entries)
+            if cfg.pressure_source_start_stagger_s > 0 and index + 1 < len(source_ids):
+                time.sleep(cfg.pressure_source_start_stagger_s)
+    return entries
+
+
+def restart_pressure_source_ids_from_manifest(
+    cfg: PressureConfig,
+    *,
+    sources_path: Path,
+    source_ids: list[str],
+    attempt: int,
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    log_name = f"source_controller_visibility_restart_{attempt}"
+    log_path = cfg.artifact_dir / f"{log_name}.log"
+    with log_path.open("w", encoding="utf-8") as log_fh:
+        for source_id in source_ids:
+            stop_cmd = [
+                sys.executable,
+                str(SOURCE_CONTROLLER),
+                "stop",
+                "--sources",
+                str(sources_path),
+                "--source-id",
+                source_id,
+                "--ffmpeg-timeout-ms",
+                str(cfg.pressure_source_ffmpeg_timeout_ms),
+            ]
+            stop = subprocess.run(
+                stop_cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            start_cmd = [
+                sys.executable,
+                str(SOURCE_CONTROLLER),
+                "start",
+                "--sources",
+                str(sources_path),
+                "--source-id",
+                source_id,
+                "--ffmpeg-timeout-ms",
+                str(cfg.pressure_source_ffmpeg_timeout_ms),
+            ]
+            start = subprocess.run(
+                start_cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            log_fh.write(f"$ {' '.join(stop_cmd)}\n{stop.stdout}")
+            if stop.stdout and not stop.stdout.endswith("\n"):
+                log_fh.write("\n")
+            log_fh.write(f"$ {' '.join(start_cmd)}\n{start.stdout}")
+            if start.stdout and not start.stdout.endswith("\n"):
+                log_fh.write("\n")
+            entries.append(
+                {
+                    "source_id": source_id,
+                    "stop_returncode": stop.returncode,
+                    "start_returncode": start.returncode,
+                    "stop_output_tail": stop.stdout[-1000:],
+                    "start_output_tail": start.stdout[-1000:],
+                }
+            )
+    summary = {
+        "attempt": attempt,
+        "source_ids": source_ids,
+        "log_path": str(log_path),
+        "entries": entries,
+    }
+    write_json(cfg.artifact_dir / f"{log_name}.json", summary)
+    return summary
 
 
 def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
@@ -1735,17 +3821,95 @@ def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
             "UPDATE cameras SET enabled=false, updated_at=now() WHERE source_id LIKE %s",
             (f"{cfg.run_id}_%",),
         )
-    if cfg.dual_shard_same_gpu:
-        removed = remove_pressure_source_containers(cfg.run_id)
-        write_json(
-            cfg.artifact_dir / "runtime_sources_apply_stop_pressure.json",
-            {"dual_shard_same_gpu": True, "removed_source_containers": removed},
+    sources_apply = apply_sources_only(
+        cfg,
+        "runtime_sources_apply_stop_pressure_sources.json",
+        raise_on_error=False,
+    )
+    source_logs = capture_pressure_source_logs(cfg, artifact_name="source_adapter_logs")
+    removed = remove_pressure_source_containers(cfg.run_id)
+    stable_removal = remove_pressure_source_containers_until_stable(cfg.run_id)
+    sources_apply_error = sources_apply.get("error")
+    write_json(
+        cfg.artifact_dir / "runtime_sources_apply_stop_pressure.json",
+        {
+            "direct_source_container_stop": True,
+            "reason": "preserve_current_runtime_epoch_until_evidence_drain",
+            "dual_shard_same_gpu": bool(cfg.dual_shard_same_gpu),
+            "sources_apply": sources_apply,
+            "sources_apply_error_ignored": bool(
+                sources_apply_error and stable_removal.get("stable")
+            ),
+            "source_logs": source_logs,
+            "removed_source_containers": removed,
+            "stable_source_container_removal": stable_removal,
+        },
+    )
+    if not stable_removal.get("stable"):
+        raise RuntimeError(
+            "pressure sources did not stay removed before evidence drain; "
+            f"summary={stable_removal}"
         )
-        return
-    apply_sources_only(cfg, "runtime_sources_apply_stop_pressure.json")
 
 
-def apply_sources_only(cfg: PressureConfig, artifact_name: str) -> dict[str, Any]:
+def capture_pressure_source_logs(
+    cfg: PressureConfig,
+    *,
+    artifact_name: str,
+    tail_lines: int = 300,
+) -> dict[str, Any]:
+    prefix = f"video-analytics-source-{cfg.run_id}_"
+    completed = subprocess.run(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    names = [
+        name
+        for name in completed.stdout.splitlines()
+        if name.startswith(prefix)
+    ]
+    log_dir = cfg.artifact_dir / artifact_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    captured: list[dict[str, Any]] = []
+    for name in names:
+        source_id = remove_prefix(name, "video-analytics-source-")
+        log_path = log_dir / f"{source_id}.log"
+        result = subprocess.run(
+            ["docker", "logs", "--tail", str(max(1, tail_lines)), name],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        log_path.write_text(result.stdout or "", encoding="utf-8")
+        captured.append(
+            {
+                "container": name,
+                "source_id": source_id,
+                "returncode": result.returncode,
+                "log_path": str(log_path),
+                "bytes": log_path.stat().st_size,
+            }
+        )
+    summary = {
+        "container_count": len(names),
+        "captured_count": len(captured),
+        "artifact_dir": str(log_dir),
+        "logs": captured[:20],
+    }
+    write_json(cfg.artifact_dir / f"{artifact_name}.json", summary)
+    return summary
+
+
+def apply_sources_only(
+    cfg: PressureConfig,
+    artifact_name: str,
+    *,
+    raise_on_error: bool = True,
+) -> dict[str, Any]:
     response = api_json(
         cfg.api_base,
         "POST",
@@ -1753,7 +3917,7 @@ def apply_sources_only(cfg: PressureConfig, artifact_name: str) -> dict[str, Any
         timeout_s=180,
     )
     write_json(cfg.artifact_dir / artifact_name, response)
-    if response.get("error"):
+    if response.get("error") and raise_on_error:
         raise RuntimeError(f"runtime source apply failed: {response['error']}")
     return response
 
@@ -1764,10 +3928,311 @@ def wait_for_drain(cfg: PressureConfig) -> None:
     while time.time() < deadline:
         summary = db_summary_connect(cfg)
         snapshots.append({"observed_at": datetime.now(timezone.utc).isoformat(), "summary": summary})
-        if summary["playable_bundles"] >= cfg.keep_evidence:
+        if cfg.keep_evidence >= 0 and summary["playable_bundles"] >= cfg.keep_evidence:
+            break
+        event_count = int(summary.get("events") or 0)
+        distinct_playable = int(
+            summary.get("distinct_events_with_playable_evidence") or 0
+        )
+        blocking_count = int(summary.get("blocking_materialization_tasks") or 0)
+        terminal_nonplayable = int(
+            summary.get("distinct_events_with_terminal_nonplayable_outcome") or 0
+        )
+        suppressed_events = int(summary.get("suppressed_events") or 0)
+        if cfg.keep_evidence < 0 and event_count == 0 and blocking_count == 0:
+            break
+        if (
+            cfg.keep_evidence < 0
+            and event_count > 0
+            and blocking_count == 0
+            and distinct_playable + suppressed_events >= event_count
+        ):
             break
         time.sleep(10)
     write_json(cfg.artifact_dir / "drain_snapshots.json", snapshots)
+
+
+def wait_for_pressure_event_quiescence(
+    cfg: PressureConfig,
+    redis_client: Redis,
+    *,
+    stable_samples_required: int = 2,
+    poll_s: int = 10,
+) -> dict[str, Any]:
+    """Wait until stopped pressure sources no longer add run-scoped events.
+
+    Evidence drain must not restore lab/new runtime epochs while old pressure
+    frames are still landing as DB events. Redis streams retain consumed history,
+    so the gate checks run-id stream entry counts for stability rather than zero.
+    """
+    timeout_s = max(1.0, float(cfg.drain_s)) + max(
+        60.0,
+        float(poll_s * stable_samples_required * 2),
+    )
+    deadline = time.time() + timeout_s
+    snapshots: list[dict[str, Any]] = []
+    stable_samples = 0
+    last_key: tuple[Any, ...] | None = None
+    while time.time() < deadline:
+        source_containers = inspect_pressure_source_containers(cfg.run_id)
+        db_ingest = db_pressure_event_ingest_summary_connect(cfg)
+        redis_ingest = redis_run_id_stream_summary(redis_client, cfg.run_id)
+        key = _pressure_event_quiescence_key(db_ingest, redis_ingest)
+        stable_samples = stable_samples + 1 if key == last_key else 1
+        last_key = key
+        snapshot = {
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "stable_samples": stable_samples,
+            "stable_samples_required": stable_samples_required,
+            "source_containers": {
+                "total": source_containers.get("total", 0),
+                "running": source_containers.get("running", 0),
+            },
+            "db_ingest": db_ingest,
+            "redis_ingest": redis_ingest,
+        }
+        snapshots.append(snapshot)
+        no_pressure_sources = int(source_containers.get("total") or 0) == 0
+        if no_pressure_sources and stable_samples >= stable_samples_required:
+            summary = {
+                "status": "quiesced",
+                "timeout_s": timeout_s,
+                "stable_samples": stable_samples,
+                "stable_samples_required": stable_samples_required,
+                "last_snapshot": snapshot,
+            }
+            write_json(cfg.artifact_dir / "pressure_event_quiescence_snapshots.json", snapshots)
+            write_json(cfg.artifact_dir / "pressure_event_quiescence_summary.json", summary)
+            return summary
+        time.sleep(max(1, min(poll_s, int(max(1, deadline - time.time())))))
+    summary = {
+        "status": "timeout",
+        "timeout_s": timeout_s,
+        "stable_samples": stable_samples,
+        "stable_samples_required": stable_samples_required,
+        "last_snapshot": snapshots[-1] if snapshots else {},
+    }
+    write_json(cfg.artifact_dir / "pressure_event_quiescence_snapshots.json", snapshots)
+    write_json(cfg.artifact_dir / "pressure_event_quiescence_summary.json", summary)
+    raise RuntimeError(
+        "pressure event ingest did not quiesce before evidence drain; "
+        f"last_snapshot={summary['last_snapshot']}"
+    )
+
+
+def _pressure_event_quiescence_key(
+    db_ingest: dict[str, Any],
+    redis_ingest: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
+        int(db_ingest.get("events") or 0),
+        int(db_ingest.get("new_events") or 0),
+        int(db_ingest.get("suppressed_events") or 0),
+        str(db_ingest.get("max_event_ts_ms") or ""),
+        str(db_ingest.get("max_created_at") or ""),
+        int(redis_ingest.get("total_run_id_entries") or 0),
+    )
+
+
+def db_pressure_event_ingest_summary_connect(cfg: PressureConfig) -> dict[str, Any]:
+    with psycopg.connect(cfg.db_url, row_factory=dict_row) as conn:
+        return db_pressure_event_ingest_summary(
+            conn,
+            cfg.run_id,
+            cooldown_s=cfg.pressure_algorithm_cooldown_s,
+        )
+
+
+def db_pressure_event_ingest_summary(
+    conn,
+    run_id: str,
+    *,
+    cooldown_s: int = PRESSURE_COOLDOWN_SECONDS,
+) -> dict[str, Any]:
+    prefix = f"{run_id}_%"
+    row = conn.execute(
+        """
+        SELECT
+          count(*) AS events,
+          count(*) FILTER (WHERE status = 'new') AS new_events,
+          count(*) FILTER (WHERE status = 'suppressed') AS suppressed_events,
+          count(DISTINCT source_id) AS source_count,
+          min(event_ts_ms) AS min_event_ts_ms,
+          max(event_ts_ms) AS max_event_ts_ms,
+          COALESCE((max(event_ts_ms) - min(event_ts_ms)) / 1000.0, 0) AS event_ts_span_s,
+          min(created_at) AS min_created_at,
+          max(created_at) AS max_created_at,
+          COALESCE(EXTRACT(EPOCH FROM (max(created_at) - min(created_at))), 0) AS created_at_span_s,
+          COALESCE(
+            max(EXTRACT(EPOCH FROM (created_at - to_timestamp(event_ts_ms / 1000.0))))
+              FILTER (WHERE event_ts_ms IS NOT NULL),
+            0
+          ) AS max_created_minus_event_ts_s
+        FROM events
+        WHERE source_id LIKE %s
+        """,
+        (prefix,),
+    ).fetchone()
+    summary = _row_json(row)
+    cooldown_s = max(1, int(cooldown_s or PRESSURE_COOLDOWN_SECONDS))
+    summary[f"cooldown_algorithm_{cooldown_s}s"] = (
+        db_pressure_algorithm_cooldown_summary(
+            conn,
+            run_id,
+            cooldown_s=cooldown_s,
+            grace_ms=PRESSURE_COOLDOWN_GRACE_MS,
+            event_types=PRESSURE_COOLDOWN_EVENT_TYPES,
+        )
+    )
+    return summary
+
+
+def db_pressure_algorithm_cooldown_summary(
+    conn,
+    run_id: str,
+    *,
+    cooldown_s: int,
+    grace_ms: int,
+    event_types: tuple[str, ...],
+) -> dict[str, Any]:
+    prefix = f"{run_id}_%"
+    threshold_ms = max(0, cooldown_s * 1000 - max(0, grace_ms))
+    rows = conn.execute(
+        """
+        WITH ordered AS (
+          SELECT
+            source_id,
+            event_type,
+            event_ts_ms,
+            LAG(event_ts_ms) OVER (
+              PARTITION BY source_id, event_type
+              ORDER BY event_ts_ms, created_at, id
+            ) AS prev_event_ts_ms
+          FROM events
+          WHERE source_id LIKE %(prefix)s
+            AND status = 'new'
+            AND event_type = ANY(%(event_types)s)
+            AND event_ts_ms IS NOT NULL
+        ),
+        deltas AS (
+          SELECT
+            source_id,
+            event_type,
+            event_ts_ms - prev_event_ts_ms AS delta_ms
+          FROM ordered
+          WHERE prev_event_ts_ms IS NOT NULL
+        )
+        SELECT
+          count(*) FILTER (WHERE delta_ms < %(threshold_ms)s) AS violation_count,
+          min(delta_ms) AS min_delta_ms
+        FROM deltas
+        """,
+        {
+            "prefix": prefix,
+            "event_types": list(event_types),
+            "threshold_ms": threshold_ms,
+        },
+    ).fetchone()
+    source_count = conn.execute(
+        """
+        SELECT count(DISTINCT source_id) AS source_count
+        FROM events
+        WHERE source_id LIKE %s
+        """,
+        (prefix,),
+    ).fetchone()
+    type_rows = conn.execute(
+        """
+        SELECT event_type, count(*) AS count
+        FROM events
+        WHERE source_id LIKE %(prefix)s
+          AND status = 'new'
+          AND event_type = ANY(%(event_types)s)
+        GROUP BY event_type
+        ORDER BY event_type
+        """,
+        {"prefix": prefix, "event_types": list(event_types)},
+    ).fetchall()
+    summary = _row_json(rows)
+    source_total = int((_row_json(source_count).get("source_count") or 0))
+    span_s = float(
+        db_pressure_event_span_seconds(conn, run_id)
+    )
+    windows_per_source_type = int(span_s // max(cooldown_s, 1)) + 1 if source_total else 0
+    summary.update(
+        {
+            "cooldown_s": cooldown_s,
+            "grace_ms": grace_ms,
+            "threshold_ms": threshold_ms,
+            "scope": "source:event_type",
+            "event_types": list(event_types),
+            "source_count": source_total,
+            "observed_event_ts_span_s": span_s,
+            "paper_upper_bound_new_events": (
+                source_total * len(event_types) * windows_per_source_type
+            ),
+            "new_events_by_type": [_row_json(row) for row in type_rows],
+        }
+    )
+    return summary
+
+
+def db_pressure_event_span_seconds(conn, run_id: str) -> float:
+    row = conn.execute(
+        """
+        SELECT COALESCE((max(event_ts_ms) - min(event_ts_ms)) / 1000.0, 0) AS span_s
+        FROM events
+        WHERE source_id LIKE %s
+        """,
+        (f"{run_id}_%",),
+    ).fetchone()
+    try:
+        return float((_row_json(row).get("span_s") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def redis_run_id_stream_summary(redis_client: Redis, run_id: str) -> dict[str, Any]:
+    token = run_id.encode("utf-8")
+    streams: dict[str, Any] = {}
+    total = 0
+    for stream in SECURITY_STREAMS:
+        count = 0
+        last_id = b"-"
+        last_matching_id = b""
+        while True:
+            rows = redis_client.xrange(stream, min=last_id, max=b"+", count=500)
+            if not rows:
+                break
+            for entry_id, fields in rows:
+                if entry_id == last_id:
+                    continue
+                haystack = b" ".join(
+                    key + b"=" + value
+                    for key, value in fields.items()
+                    if isinstance(key, bytes) and isinstance(value, bytes)
+                )
+                if token in haystack:
+                    count += 1
+                    last_matching_id = entry_id
+                last_id = entry_id
+            if len(rows) < 500:
+                break
+        streams[stream] = {
+            "run_id_entries": count,
+            "last_matching_id": _decode_redis_value(last_matching_id) if last_matching_id else "",
+        }
+        total += count
+    return {"total_run_id_entries": total, "streams": streams}
+
+
+def _summary_materialization_expired_count(summary: dict[str, Any]) -> int:
+    return sum(
+        int(row.get("count") or 0)
+        for row in summary.get("task_statuses") or []
+        if isinstance(row, dict)
+        and row.get("materialization_status") == "materialization_expired"
+    )
 
 
 def collect_pressure_diagnostics(cfg: PressureConfig) -> dict[str, Any]:
@@ -1805,6 +4270,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     final_savant_adaface_embeddings = 0.0
     final_savant_person_observations = 0.0
     final_savant_face_observations = 0.0
+    baseline_send_failures: float | None = None
+    max_send_failures_delta = 0.0
     stable_samples = 0
     for path in sorted(samples_dir.glob("runtime_*.json")):
         try:
@@ -1814,8 +4281,25 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             continue
         metrics = payload.get("metrics") or {}
         forwarder = payload.get("forwarder") or {}
-        savant_sources = metrics.get("sources") or []
-        forwarder_sources = forwarder.get("sources") or []
+        savant_sources = _dedupe_sources_by_id(
+            metrics.get("sources") or [],
+            score_keys=(
+                "frames_seen_total",
+                "pose_objects_total",
+                "face_objects_total",
+                "person_observations_exported_total",
+                "face_observations_exported_total",
+            ),
+        )
+        forwarder_sources = _dedupe_sources_by_id(
+            forwarder.get("sources") or [],
+            score_keys=(
+                "frames_seen_total",
+                "frames_forwarded_total",
+                "frames_dropped_total",
+                "savant_send_failures_total",
+            ),
+        )
         sample_index = path.stem.rsplit("_", 1)[-1]
         stats = _read_docker_stats_sample(samples_dir / f"docker_stats_{sample_index}.json")
         effective_fps = []
@@ -1829,10 +4313,14 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             float(source.get("savant_send_failures_total") or 0.0)
             for source in forwarder_sources
         )
+        if baseline_send_failures is None:
+            baseline_send_failures = send_failures
+        send_failures_delta = max(0.0, send_failures - baseline_send_failures)
         max_queue_depth = max(max_queue_depth, queue_depth)
         if queue_depth >= 2048:
             queue_full_samples += 1
         max_send_failures = max(max_send_failures, send_failures)
+        max_send_failures_delta = max(max_send_failures_delta, send_failures_delta)
         max_forwarder_sources = max(max_forwarder_sources, len(forwarder_sources))
         max_savant_sources = max(max_savant_sources, len(savant_sources))
         forwarder_seen = sum(float(source.get("frames_seen_total") or 0.0) for source in forwarder_sources)
@@ -1896,7 +4384,11 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         }
         for key, value in worker_cpu.items():
             max_worker_cpu_percent[key] = max(max_worker_cpu_percent[key], value)
-        if len(forwarder_sources) >= cfg.stream_count and queue_depth <= 0 and send_failures <= cfg.max_send_failures:
+        if (
+            len(forwarder_sources) >= cfg.stream_count
+            and queue_depth <= 0
+            and send_failures_delta <= cfg.max_send_failures
+        ):
             stable_samples += 1
         rows.append(
             {
@@ -1906,6 +4398,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "forwarder_sources": len(forwarder_sources),
                 "queue_depth": queue_depth,
                 "savant_send_failures_total": send_failures,
+                "savant_send_failures_delta": send_failures_delta,
                 "forwarder_frames_seen_total": int(forwarder_seen),
                 "forwarder_frames_forwarded_total": int(forwarder_forwarded),
                 "forwarder_frames_dropped_total": int(forwarder_dropped),
@@ -1938,6 +4431,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "max_forwarder_queue_depth": max_queue_depth,
         "queue_full_samples": queue_full_samples,
         "max_savant_send_failures_total": int(max_send_failures),
+        "baseline_savant_send_failures_total": int(baseline_send_failures or 0),
+        "max_savant_send_failures_delta": int(max_send_failures_delta),
         "max_forwarder_sources": max_forwarder_sources,
         "max_savant_sources": max_savant_sources,
         "final_forwarder_frames_seen_total": int(final_forwarder_seen),
@@ -1978,6 +4473,33 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     return summary
 
 
+def _dedupe_sources_by_id(
+    sources: list[dict[str, Any]],
+    *,
+    score_keys: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    by_source: dict[str, dict[str, Any]] = {}
+    by_score: dict[str, float] = {}
+    anonymous: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id") or "")
+        if not source_id:
+            anonymous.append(source)
+            continue
+        score = 0.0
+        for key in score_keys:
+            try:
+                score += float(source.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+        if source_id not in by_source or score >= by_score.get(source_id, -1.0):
+            by_source[source_id] = source
+            by_score[source_id] = score
+    return [*by_source.values(), *anonymous]
+
+
 def save_pressure_source_logs(cfg: PressureConfig, source_summary: dict[str, Any]) -> None:
     log_dir = cfg.artifact_dir / "source_adapter_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -2002,6 +4524,19 @@ def inspect_rtsp_republishers(cfg: PressureConfig) -> dict[str, Any]:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:
         return {"enabled": True, "error": repr(exc)}
+    stop_path = cfg.artifact_dir / "rtsp_republish_stop.json"
+    stopped_pids: set[int] = set()
+    if stop_path.exists():
+        try:
+            stop_rows = json.loads(stop_path.read_text(encoding="utf-8"))
+        except Exception:
+            stop_rows = []
+        if isinstance(stop_rows, list):
+            stopped_pids = {
+                int(row.get("pid") or 0)
+                for row in stop_rows
+                if isinstance(row, dict) and int(row.get("pid") or 0) > 0
+            }
     items: list[dict[str, Any]] = []
     for item in manifest:
         log_path = Path(str(item.get("log_path") or ""))
@@ -2018,11 +4553,13 @@ def inspect_rtsp_republishers(cfg: PressureConfig) -> dict[str, Any]:
             )
             if not completed.stdout.strip():
                 returncode = "exited_or_missing"
+        stopped_intentionally = pid in stopped_pids
         items.append(
             {
                 "source_id": item.get("source_id"),
                 "pid": pid,
                 "returncode": returncode,
+                "stopped_intentionally": stopped_intentionally,
                 "log_path": str(log_path),
                 "non_monotonic_dts": text.lower().count("non-monoton"),
                 "negative_timestamp": text.lower().count("negative"),
@@ -2030,11 +4567,18 @@ def inspect_rtsp_republishers(cfg: PressureConfig) -> dict[str, Any]:
                 + text.lower().count("connection timed out"),
             }
         )
-    exited = [item for item in items if item.get("returncode") is not None]
+    exited = [
+        item
+        for item in items
+        if item.get("returncode") is not None
+        and not bool(item.get("stopped_intentionally"))
+    ]
+    stopped = [item for item in items if bool(item.get("stopped_intentionally"))]
     summary = {
         "enabled": True,
         "total": len(items),
         "exited": len(exited),
+        "stopped_intentionally": len(stopped),
         "non_monotonic_dts_total": sum(int(item.get("non_monotonic_dts") or 0) for item in items),
         "negative_timestamp_total": sum(int(item.get("negative_timestamp") or 0) for item in items),
         "connection_error_total": sum(int(item.get("connection_errors") or 0) for item in items),
@@ -2165,6 +4709,137 @@ def _percentile(sorted_values: list[float], quantile: float) -> float:
     return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
 
 
+def collect_rolling_cache_segment_visibility(
+    cfg: PressureConfig,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Approximate segment close/index visibility lag from finalized metadata.
+
+    The rolling-cache lookup is filesystem-backed: a segment becomes visible to
+    lookup when its finalized ``metadata.json`` exists. The native frame PTS in
+    this deployment is epoch-ns, so ``metadata.json`` mtime minus the last frame
+    PTS is a practical close/index-visible lag estimate. If a future source
+    emits stream-relative PTS, the lag distribution is intentionally omitted
+    instead of mixing clock domains.
+    """
+
+    root = root or pressure_rolling_cache_root_host()
+    source_prefix = f"{cfg.run_id}_"
+    segment_durations_s: list[float] = []
+    frame_counts: list[int] = []
+    segment_frame_rates_fps: list[float] = []
+    visibility_lags_s: list[float] = []
+    source_ids: set[str] = set()
+    sampled_paths: list[str] = []
+    skipped_clock_domain = 0
+    parse_errors = 0
+    metadata_paths = sorted(root.rglob("metadata.json")) if root.exists() else []
+    for metadata_path in metadata_paths:
+        if "materialized" in metadata_path.parts:
+            continue
+        source_id = _source_id_from_segment_metadata_path(metadata_path)
+        if not source_id.startswith(source_prefix):
+            continue
+        try:
+            frames = _load_segment_metadata_frames(metadata_path)
+        except Exception:
+            parse_errors += 1
+            continue
+        if not frames:
+            continue
+        pts_values = [
+            _int_or_none(row.get("pts") if isinstance(row, dict) else None)
+            for row in frames
+        ]
+        pts_values = [value for value in pts_values if value is not None]
+        if not pts_values:
+            continue
+        source_ids.add(source_id)
+        frame_counts.append(len(pts_values))
+        first_pts = min(pts_values)
+        last_pts = max(pts_values)
+        duration_s = max(0.0, (last_pts - first_pts) / 1_000_000_000.0)
+        segment_durations_s.append(duration_s)
+        if duration_s > 0:
+            segment_frame_rates_fps.append(len(pts_values) / duration_s)
+        # Treat only plausible epoch-ns PTS as comparable with filesystem mtime.
+        last_pts_epoch_s = last_pts / 1_000_000_000.0
+        if 946684800.0 <= last_pts_epoch_s <= 4102444800.0:
+            visibility_lags_s.append(metadata_path.stat().st_mtime - last_pts_epoch_s)
+            if len(sampled_paths) < 20:
+                sampled_paths.append(str(metadata_path))
+        else:
+            skipped_clock_domain += 1
+
+    return {
+        "root": str(root),
+        "source_prefix": source_prefix,
+        "metadata_files_scanned": len(metadata_paths),
+        "segments_measured": len(frame_counts),
+        "source_count": len(source_ids),
+        "frame_count": _numeric_distribution(frame_counts),
+        "segment_duration_s": _numeric_distribution(segment_durations_s),
+        "segment_frame_rate_fps": _numeric_distribution(segment_frame_rates_fps),
+        "metadata_visible_lag_s": _numeric_distribution(visibility_lags_s),
+        "skipped_clock_domain": skipped_clock_domain,
+        "parse_errors": parse_errors,
+        "sampled_metadata_paths": sampled_paths,
+        "interpretation": (
+            "metadata_visible_lag_s approximates segment close/index-visible lag "
+            "because rolling-cache lookup scans finalized metadata.json files; "
+            "it is omitted for non-epoch PTS."
+        ),
+    }
+
+
+def _source_id_from_segment_metadata_path(path: Path) -> str:
+    parts = path.parts
+    for index, part in enumerate(parts[:-1]):
+        if part == "epochs" and index + 2 < len(parts):
+            return parts[index + 2].rstrip("%")
+    return ""
+
+
+def _load_segment_metadata_frames(path: Path) -> list[dict[str, Any]]:
+    text = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        rows: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+    if isinstance(payload, dict):
+        frames = payload.get("frames")
+        return [row for row in frames if isinstance(row, dict)] if isinstance(frames, list) else []
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    return []
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_log_field(line: str, field: str) -> str:
     match = re.search(rf"\b{re.escape(field)}=([^\s]+)", line)
     return match.group(1) if match else ""
@@ -2217,6 +4892,38 @@ def _media_finalizer_line_metrics(text: str) -> dict[str, Any]:
     }
 
 
+def _log_field_counts(text: str, *, marker: str, field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        if marker not in line:
+            continue
+        value = _extract_log_field(line, field)
+        if not value:
+            value = "unknown"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _log_metric_numbers_for_lines(
+    text: str,
+    *,
+    marker: str,
+    field: str,
+) -> list[float]:
+    values: list[float] = []
+    for line in text.splitlines():
+        if marker not in line:
+            continue
+        value = _extract_log_field(line, field)
+        if not value:
+            continue
+        try:
+            values.append(float(value))
+        except ValueError:
+            continue
+    return values
+
+
 def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
     paths = {
         "savant": cfg.artifact_dir / "savant_logs_since_start.txt",
@@ -2242,8 +4949,58 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             text,
             "imageio_ffmpeg_fallback_count",
         )
+        media_replay_to_sink_metadata_ms = _extract_metric_ints(
+            text,
+            "replay_to_sink_metadata_ms",
+        )
+        media_sink_metadata_to_video_ms = _extract_metric_ints(
+            text,
+            "sink_metadata_to_video_ms",
+        )
+        media_sink_video_to_stable_ms = _extract_metric_ints(
+            text,
+            "sink_video_to_stable_ms",
+        )
+        media_sink_stable_to_ffprobe_ready_ms = _extract_metric_ints(
+            text,
+            "sink_stable_to_ffprobe_ready_ms",
+        )
+        media_sink_ffprobe_ready_to_finalizer_start_ms = _extract_metric_ints(
+            text,
+            "sink_ffprobe_ready_to_finalizer_start_ms",
+        )
+        media_finalizer_pool_wait_ms = _extract_metric_ints(
+            text,
+            "finalizer_pool_wait_ms",
+        )
         media_throttle_sleep_s = _extract_metric_numbers(text, "throttle_sleep_s")
         media_deadline_slack_s = _extract_metric_numbers(text, "deadline_slack_s")
+        clip_record_request_pending_ms = _extract_metric_ints(
+            text,
+            "record_request_pending_ms",
+        )
+        clip_proof_wait_ms = _extract_metric_ints(text, "proof_wait_ms")
+        clip_replay_job_create_ms = _extract_metric_ints(
+            text,
+            "replay_job_create_ms",
+        )
+        clip_replay_slot_hold_ms = _extract_metric_ints(
+            text,
+            "replay_slot_hold_ms",
+        )
+        replay_duration_seconds_effective = _extract_metric_numbers(
+            text,
+            "replay_duration_seconds_effective",
+        )
+        replay_slot_timeout_budget_s = _extract_metric_numbers(
+            text,
+            "timeout_budget_s",
+        )
+        replay_slot_release_sink_stable_ms = _log_metric_numbers_for_lines(
+            text,
+            marker="replay_slot_released",
+            field="sink_video_to_stable_ms",
+        )
         face_gallery_query_ms = _extract_metric_ints(text, "gallery_query_duration_ms")
         qdrant_query_ms = _extract_metric_ints(text, "qdrant_query_duration_ms")
         qdrant_exact_rerank_ms = _extract_metric_ints(
@@ -2338,6 +5095,51 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "media_ffprobe_duration_ms": _numeric_distribution(media_ffprobe_ms),
             "media_ffmpeg_duration_ms": _numeric_distribution(media_ffmpeg_ms),
+            "media_replay_to_sink_metadata_ms": _numeric_distribution(
+                media_replay_to_sink_metadata_ms
+            ),
+            "media_sink_metadata_to_video_ms": _numeric_distribution(
+                media_sink_metadata_to_video_ms
+            ),
+            "media_sink_video_to_stable_ms": _numeric_distribution(
+                media_sink_video_to_stable_ms
+            ),
+            "media_sink_stable_to_ffprobe_ready_ms": _numeric_distribution(
+                media_sink_stable_to_ffprobe_ready_ms
+            ),
+            "media_sink_ffprobe_ready_to_finalizer_start_ms": _numeric_distribution(
+                media_sink_ffprobe_ready_to_finalizer_start_ms
+            ),
+            "media_finalizer_pool_wait_ms": _numeric_distribution(
+                media_finalizer_pool_wait_ms
+            ),
+            "clip_record_request_pending_ms": _numeric_distribution(
+                clip_record_request_pending_ms
+            ),
+            "clip_proof_wait_ms": _numeric_distribution(clip_proof_wait_ms),
+            "clip_replay_job_create_ms": _numeric_distribution(
+                clip_replay_job_create_ms
+            ),
+            "clip_replay_slot_hold_ms": _numeric_distribution(
+                clip_replay_slot_hold_ms
+            ),
+            "replay_slot_acquired": text.count("replay_slot_acquired"),
+            "replay_slot_acquire_success": text.count("slot_acquired=True"),
+            "replay_slot_released": text.count("replay_slot_released"),
+            "replay_slot_release_reasons": _log_field_counts(
+                text,
+                marker="replay_slot_released",
+                field="release_reason",
+            ),
+            "replay_slot_release_sink_video_to_stable_ms": _numeric_distribution(
+                replay_slot_release_sink_stable_ms
+            ),
+            "replay_duration_seconds_effective": _numeric_distribution(
+                replay_duration_seconds_effective
+            ),
+            "replay_slot_timeout_budget_s": _numeric_distribution(
+                replay_slot_timeout_budget_s
+            ),
             "media_throttle_sleep_s": _numeric_distribution(media_throttle_sleep_s),
             "media_deadline_slack_s": _numeric_distribution(media_deadline_slack_s),
             "media_finalizer_worker_counts": media_finalizer_metrics.get(
@@ -2365,6 +5167,18 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 0,
             ),
         }
+    sink_instances: dict[str, dict[str, Any]] = {}
+    for sink_instance, filename in VIDEO_FILE_SINK_LOG_PATHS.items():
+        path = cfg.artifact_dir / filename
+        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        metrics = parse_video_file_sink_log(text, sink_instance=sink_instance)
+        metrics["line_count"] = len(text.splitlines())
+        metrics["log_path"] = str(path)
+        sink_instances[sink_instance] = metrics
+    summary["video_file_sink"] = {
+        "instances": sink_instances,
+        "aggregate": aggregate_video_file_sink_metrics(sink_instances),
+    }
     return summary
 
 
@@ -2372,6 +5186,9 @@ def pressure_failure_reasons(
     cfg: PressureConfig,
     kept: list[dict[str, Any]],
     diagnostics: dict[str, Any],
+    db_before_cleanup: dict[str, Any] | None = None,
+    event_quiescence: dict[str, Any] | None = None,
+    post_sample_cleanup: dict[str, Any] | None = None,
 ) -> list[str]:
     reasons: list[str] = []
     sample_summary = diagnostics.get("sample_summary") or {}
@@ -2379,20 +5196,38 @@ def pressure_failure_reasons(
     republish_summary = diagnostics.get("rtsp_republishers") or {}
     log_summary = diagnostics.get("log_summary") or {}
     savant_logs = log_summary.get("savant") or {}
-    if not cfg.forwarder_null_sink and len(kept) < cfg.keep_evidence:
+    if not cfg.forwarder_null_sink and cfg.keep_evidence >= 0 and len(kept) < cfg.keep_evidence:
         reasons.append("insufficient_playable_evidence")
+    if not cfg.forwarder_null_sink and cfg.keep_evidence < 0 and db_before_cleanup:
+        event_count = int(db_before_cleanup.get("events") or 0)
+        distinct_playable = int(
+            db_before_cleanup.get("distinct_events_with_playable_evidence") or 0
+        )
+        blocking_count = int(db_before_cleanup.get("blocking_materialization_tasks") or 0)
+        terminal_nonplayable = int(
+            db_before_cleanup.get("distinct_events_with_terminal_nonplayable_outcome") or 0
+        )
+        if distinct_playable + terminal_nonplayable < event_count:
+            reasons.append("event_outcomes_unaccounted")
+        if blocking_count > 0:
+            reasons.append("materialization_unresolved_present")
+        expired_count = _summary_materialization_expired_count(db_before_cleanup)
+        if expired_count:
+            reasons.append("materialization_expired_present")
     if int(source_summary.get("exited") or 0) > cfg.max_exited_sources:
         reasons.append("source_containers_exited")
     if int(source_summary.get("restart_count_total") or 0) > 0:
         reasons.append("source_containers_restarted")
     if int(source_summary.get("negative_pts_error_total") or 0) > 0:
         reasons.append("source_adapter_negative_pts")
+    if cfg.rolling_cache_evidence and cfg.keep_evidence >= 0:
+        reasons.append("rolling_cache_acceptance_must_keep_all_evidence")
     if bool(republish_summary.get("enabled")):
         if int(republish_summary.get("exited") or 0) > 0:
             reasons.append("rtsp_republishers_exited")
         if int(republish_summary.get("connection_error_total") or 0) > 0:
             reasons.append("rtsp_republishers_connection_errors")
-    if int(sample_summary.get("max_savant_send_failures_total") or 0) > cfg.max_send_failures:
+    if _sample_savant_send_failures_for_gate(sample_summary) > cfg.max_send_failures:
         reasons.append("savant_send_failures")
     if (
         cfg.keep_evidence > 0
@@ -2409,13 +5244,243 @@ def pressure_failure_reasons(
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:
         reasons.append("forwarder_did_not_see_all_sources")
+    if int(sample_summary.get("max_forwarder_sources") or 0) > cfg.stream_count:
+        reasons.append("forwarder_saw_extra_sources")
     if int(sample_summary.get("queue_full_samples") or 0) > 0:
         reasons.append("forwarder_queue_full")
     if not cfg.forwarder_null_sink and int(sample_summary.get("max_savant_sources") or 0) < cfg.stream_count:
         reasons.append("savant_did_not_see_all_sources")
+    if not cfg.forwarder_null_sink and int(sample_summary.get("max_savant_sources") or 0) > cfg.stream_count:
+        reasons.append("savant_saw_extra_sources")
+    if _pressure_observed_window_exceeded(
+        cfg,
+        event_quiescence,
+        post_sample_cleanup=post_sample_cleanup,
+    ):
+        reasons.append("pressure_observed_window_exceeded")
     if not cfg.forwarder_null_sink and _validate_seq_iq_is_failure(cfg, diagnostics, reasons):
         reasons.append("validate_seq_iq_exceeded")
     return reasons
+
+
+def rolling_cache_full_rate_gate(
+    cfg: PressureConfig,
+    segment_visibility: dict[str, Any],
+    sink_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    expected_fps = (
+        _float_or_none((sink_summary or {}).get("rolling_cache_expected_raw_fps"))
+        if isinstance(sink_summary, dict)
+        else None
+    )
+    if expected_fps is None:
+        expected_fps = _fps_to_float(cfg.fps) or 0.0
+    min_fps = expected_fps * ROLLING_CACHE_FULL_RATE_MIN_RATIO
+    rate = segment_visibility.get("segment_frame_rate_fps") or {}
+    p50 = _float_or_none(rate.get("p50")) if isinstance(rate, dict) else None
+    source_count = int(segment_visibility.get("source_count") or 0)
+    segments_measured = int(segment_visibility.get("segments_measured") or 0)
+    return {
+        "expected_fps": expected_fps,
+        "expected_fps_source": "rolling_cache_raw_input"
+        if isinstance(sink_summary, dict)
+        and sink_summary.get("rolling_cache_expected_raw_fps") is not None
+        else "analysis_fps_fallback",
+        "min_full_rate_fps": min_fps,
+        "min_full_rate_ratio": ROLLING_CACHE_FULL_RATE_MIN_RATIO,
+        "observed_segment_frame_rate_p50": p50,
+        "segments_measured": segments_measured,
+        "source_count": source_count,
+        "stream_count": cfg.stream_count,
+        "full_rate_ok": bool(
+            segments_measured > 0
+            and source_count >= cfg.stream_count
+            and expected_fps > 0
+            and p50 is not None
+            and p50 >= min_fps
+        ),
+    }
+
+
+def rolling_cache_full_rate_failure_reasons(gate: dict[str, Any]) -> list[str]:
+    if not gate:
+        return ["rolling_cache_full_rate_unmeasured"]
+    reasons: list[str] = []
+    if int(gate.get("segments_measured") or 0) <= 0:
+        reasons.append("rolling_cache_segments_unmeasured")
+    if int(gate.get("source_count") or 0) < int(gate.get("stream_count") or 0):
+        reasons.append("rolling_cache_missing_source_segments")
+    if not bool(gate.get("full_rate_ok")):
+        reasons.append("rolling_cache_segment_fps_below_full_rate")
+    return sorted(set(reasons))
+
+
+def evidence_window_validation_summary(
+    cfg: PressureConfig,
+    kept: list[dict[str, Any]],
+) -> dict[str, Any]:
+    allowed_windows = {
+        (int(pre_seconds), int(post_seconds))
+        for pre_seconds, post_seconds in cfg.evidence_policy_groups
+    }
+    video_rows = [
+        row for row in kept
+        if not bool(row.get("image_evidence"))
+    ]
+    unexpected_windows: list[dict[str, Any]] = []
+    duration_mismatches: list[dict[str, Any]] = []
+    missing_policy: list[dict[str, Any]] = []
+    missing_duration: list[dict[str, Any]] = []
+    by_window: dict[str, int] = {}
+
+    for row in video_rows:
+        event_id = str(row.get("event_id") or "")
+        pair = _evidence_policy_pair_from_row(row)
+        if pair is None:
+            missing_policy.append({"event_id": event_id})
+            continue
+        pre_seconds, post_seconds = pair
+        window_key = f"{pre_seconds}:{post_seconds}"
+        by_window[window_key] = by_window.get(window_key, 0) + 1
+        if pair not in allowed_windows:
+            unexpected_windows.append(
+                {
+                    "event_id": event_id,
+                    "source_id": row.get("source_id"),
+                    "pre_seconds": pre_seconds,
+                    "post_seconds": post_seconds,
+                }
+            )
+        duration = _float_or_none(row.get("actual_raw_clip_duration_seconds"))
+        duration_source = "ffprobe"
+        if duration is None:
+            duration = _float_or_none(row.get("raw_clip_duration_seconds"))
+            duration_source = "database"
+        if duration is None:
+            missing_duration.append({"event_id": event_id, "window": window_key})
+            continue
+        expected_total = float(pre_seconds + post_seconds)
+        delta = abs(duration - expected_total)
+        if delta > EVIDENCE_WINDOW_DURATION_TOLERANCE_S:
+            duration_mismatches.append(
+                {
+                    "event_id": event_id,
+                    "source_id": row.get("source_id"),
+                    "window": window_key,
+                    "expected_duration_s": expected_total,
+                    "observed_duration_s": duration,
+                    "duration_source": duration_source,
+                    "delta_s": delta,
+                }
+            )
+
+    failures = {
+        "unexpected_window_count": len(unexpected_windows),
+        "duration_mismatch_count": len(duration_mismatches),
+        "missing_policy_count": len(missing_policy),
+        "missing_duration_count": len(missing_duration),
+    }
+    return {
+        "status": "passed" if not any(failures.values()) else "failed",
+        "video_count": len(video_rows),
+        "allowed_windows": [
+            f"{pre_seconds}:{post_seconds}"
+            for pre_seconds, post_seconds in sorted(allowed_windows)
+        ],
+        "duration_tolerance_s": EVIDENCE_WINDOW_DURATION_TOLERANCE_S,
+        "by_window": dict(sorted(by_window.items())),
+        "failures": failures,
+        "unexpected_windows": unexpected_windows[:20],
+        "duration_mismatches": duration_mismatches[:20],
+        "missing_policy": missing_policy[:20],
+        "missing_duration": missing_duration[:20],
+    }
+
+
+def evidence_window_failure_reasons(summary: dict[str, Any]) -> list[str]:
+    failures = summary.get("failures") if isinstance(summary, dict) else {}
+    if not isinstance(failures, dict):
+        return ["evidence_window_validation_unmeasured"]
+    reasons: list[str] = []
+    if int(failures.get("unexpected_window_count") or 0) > 0:
+        reasons.append("evidence_unexpected_window_policy")
+    if int(failures.get("duration_mismatch_count") or 0) > 0:
+        reasons.append("evidence_clip_duration_mismatch")
+    if int(failures.get("missing_policy_count") or 0) > 0:
+        reasons.append("evidence_window_policy_missing")
+    if int(failures.get("missing_duration_count") or 0) > 0:
+        reasons.append("evidence_clip_duration_missing")
+    return reasons
+
+
+def _evidence_policy_pair_from_row(row: dict[str, Any]) -> tuple[int, int] | None:
+    for pre_key, post_key in (
+        ("expected_pre_seconds", "expected_post_seconds"),
+        ("rule_pre_seconds", "rule_post_seconds"),
+    ):
+        pre_seconds = _int_or_none(row.get(pre_key))
+        post_seconds = _int_or_none(row.get(post_key))
+        if (
+            pre_seconds is not None
+            and post_seconds is not None
+            and pre_seconds >= 0
+            and post_seconds >= 0
+        ):
+            return pre_seconds, post_seconds
+    return None
+
+
+def evidence_annotation_failure_reasons(evidence_8090: dict[str, Any]) -> list[str]:
+    retained = int(evidence_8090.get("retained_count") or 0)
+    checked = int(evidence_8090.get("annotation_checked_count") or 0)
+    ok = int(evidence_8090.get("annotation_ok_count") or 0)
+    skipped = int(evidence_8090.get("annotation_skipped_zero_expected_count") or 0)
+    if retained <= 0:
+        return []
+    reasons: list[str] = []
+    if checked + skipped < retained:
+        reasons.append("evidence_8090_annotations_unchecked_or_zero")
+    if ok < checked:
+        reasons.append("evidence_8090_annotations_incomplete")
+    if int(evidence_8090.get("annotation_fallback_count") or 0) > 0:
+        reasons.append("evidence_8090_annotations_filesystem_fallback")
+    if int(evidence_8090.get("annotation_bbox_missing_count") or 0) > 0:
+        reasons.append("evidence_8090_annotation_bbox_missing")
+    if int(evidence_8090.get("annotation_person_context_missing_count") or 0) > 0:
+        reasons.append("evidence_8090_person_context_missing")
+    if int(evidence_8090.get("timeline_missing_count") or 0) > 0:
+        reasons.append("evidence_8090_timeline_missing")
+    if int(evidence_8090.get("timeline_fallback_count") or 0) > 0:
+        reasons.append("evidence_8090_timeline_filesystem_fallback")
+    return reasons
+
+
+def _pressure_observed_window_exceeded(
+    cfg: PressureConfig,
+    event_quiescence: dict[str, Any] | None,
+    *,
+    post_sample_cleanup: dict[str, Any] | None = None,
+) -> bool:
+    db_ingest = None
+    if isinstance(post_sample_cleanup, dict):
+        candidate = post_sample_cleanup.get("post_cleanup_db_ingest")
+        if isinstance(candidate, dict):
+            db_ingest = candidate
+    if db_ingest is None and event_quiescence:
+        snapshot = event_quiescence.get("last_snapshot") or {}
+        candidate = snapshot.get("db_ingest")
+        if isinstance(candidate, dict):
+            db_ingest = candidate
+    if db_ingest is None:
+        return False
+    max_allowed_s = cfg.duration_s + PRESSURE_OBSERVED_WINDOW_SLACK_S
+    try:
+        event_ts_span_s = float(db_ingest.get("event_ts_span_s") or 0)
+    except (TypeError, ValueError):
+        event_ts_span_s = 0.0
+    if event_ts_span_s > max_allowed_s:
+        return True
+    return False
 
 
 def pressure_warnings(
@@ -2451,8 +5516,7 @@ def _validate_seq_iq_is_failure(
     sample_summary = diagnostics.get("sample_summary") or {}
     source_summary = diagnostics.get("source_containers") or {}
     ingress_unhealthy = (
-        int(sample_summary.get("max_savant_send_failures_total") or 0)
-        > cfg.max_send_failures
+        _sample_savant_send_failures_for_gate(sample_summary) > cfg.max_send_failures
         or int(sample_summary.get("queue_full_samples") or 0)
         > 0
         or int(source_summary.get("exited") or 0) > cfg.max_exited_sources
@@ -2468,17 +5532,43 @@ def _validate_seq_iq_is_failure(
     return bool(source_visibility_failed.intersection(current_reasons))
 
 
+def _sample_savant_send_failures_for_gate(sample_summary: dict[str, Any]) -> int:
+    if "max_savant_send_failures_delta" in sample_summary:
+        return int(sample_summary.get("max_savant_send_failures_delta") or 0)
+    return int(sample_summary.get("max_savant_send_failures_total") or 0)
+
+
 def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
+    limit_sql = "" if cfg.keep_evidence < 0 else "LIMIT %s"
+    params: tuple[Any, ...]
+    if cfg.keep_evidence < 0:
+        params = (f"{cfg.run_id}_%",)
+    else:
+        params = (f"{cfg.run_id}_%", cfg.keep_evidence)
     rows = conn.execute(
-        """
+        f"""
         SELECT eb.event_id, eb.source_id, eb.camera_id, eb.camera_name, eb.event_type,
                eb.evidence_state, eb.media_status, eb.raw_clip_uri, eb.raw_clip_size_bytes,
+               eb.summary->>'playback_kind' AS playback_kind,
+               face_crop.uri AS face_crop_uri,
+               full_frame.uri AS full_frame_uri,
+               annotated_frame.uri AS annotated_frame_uri,
+               eb.annotation_count,
                eb.raw_clip_duration_seconds, eb.created_at, e.created_at AS event_created_at,
-               e.payload, c.metadata AS camera_metadata,
+               e.payload, NULL::jsonb AS camera_metadata,
                rule_policy.evidence_policy AS rule_evidence_policy
         FROM evidence_bundles eb
         JOIN events e ON e.id = eb.event_id
         LEFT JOIN cameras c ON c.id::text = eb.camera_id
+        LEFT JOIN evidence_artifacts face_crop
+          ON face_crop.event_id = eb.event_id
+         AND face_crop.artifact_type = 'face_crop'
+        LEFT JOIN evidence_artifacts full_frame
+          ON full_frame.event_id = eb.event_id
+         AND full_frame.artifact_type = 'full_frame'
+        LEFT JOIN evidence_artifacts annotated_frame
+          ON annotated_frame.event_id = eb.event_id
+         AND annotated_frame.artifact_type = 'annotated_frame'
         LEFT JOIN LATERAL (
             SELECT cr.evidence_policy
             FROM camera_rules cr
@@ -2499,12 +5589,18 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
             LIMIT 1
         ) rule_policy ON true
         WHERE eb.source_id LIKE %s
-          AND eb.raw_clip_uri IS NOT NULL
-          AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
+          AND (
+              (
+                eb.raw_clip_uri IS NOT NULL
+                AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
+              )
+              OR COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+              OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+          )
         ORDER BY random()
-        LIMIT %s
+        {limit_sql}
         """,
-        (f"{cfg.run_id}_%", cfg.keep_evidence),
+        params,
     ).fetchall()
     kept = []
     for row in rows:
@@ -2512,6 +5608,19 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
         raw_clip_path = raw_clip_uri_to_path(cfg.evidence_root, str(item.get("raw_clip_uri") or ""))
         item["raw_clip_path"] = str(raw_clip_path) if raw_clip_path else ""
         item["raw_clip_exists"] = bool(raw_clip_path and raw_clip_path.is_file())
+        item["actual_raw_clip_duration_seconds"] = (
+            probe_local_video_duration_seconds(raw_clip_path)
+            if raw_clip_path and raw_clip_path.is_file()
+            else None
+        )
+        item["image_evidence"] = (
+            item.get("playback_kind") == "image"
+            or item.get("media_status") == "image_ready"
+        )
+        item["image_artifact_exists"] = any(
+            bool(str(item.get(key) or "").strip())
+            for key in ("face_crop_uri", "full_frame_uri", "annotated_frame_uri")
+        )
         camera_metadata = item.get("camera_metadata")
         if isinstance(camera_metadata, dict):
             item["pressure_group_index"] = camera_metadata.get("pressure_group_index")
@@ -2529,8 +5638,33 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
             item["rule_pre_seconds"] = rule_policy.get("pre_seconds")
             item["rule_post_seconds"] = rule_policy.get("post_seconds")
         kept.append(item)
-    kept = [row for row in kept if row["raw_clip_exists"]]
-    return kept[: cfg.keep_evidence]
+    kept = [
+        row
+        for row in kept
+        if row["raw_clip_exists"] or bool(row.get("image_evidence"))
+    ]
+    return kept if cfg.keep_evidence < 0 else kept[: cfg.keep_evidence]
+
+
+def select_covered_event_ids_for_bundles(
+    conn,
+    cfg: PressureConfig,
+    bundle_event_ids: set[str],
+) -> set[str]:
+    if not bundle_event_ids:
+        return set()
+    rows = conn.execute(
+        """
+        SELECT l.event_id
+        FROM evidence_event_links l
+        JOIN events e ON e.id = l.event_id
+        WHERE l.bundle_event_id = ANY(%s::uuid[])
+          AND l.relation = 'covered_by'
+          AND e.source_id LIKE %s
+        """,
+        (list(bundle_event_ids), f"{cfg.run_id}_%"),
+    ).fetchall()
+    return {str(row["event_id"]) for row in rows}
 
 
 def write_kept_csv(cfg: PressureConfig, kept: list[dict[str, Any]]) -> None:
@@ -2553,6 +5687,7 @@ def write_kept_csv(cfg: PressureConfig, kept: list[dict[str, Any]]) -> None:
         "raw_clip_path",
         "raw_clip_size_bytes",
         "raw_clip_duration_seconds",
+        "actual_raw_clip_duration_seconds",
         "created_at",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -2578,12 +5713,30 @@ def cleanup_pressure_data(
             (prefix, list(keep_event_ids)),
         ).fetchall()
     ]
+    kept_source_observation_ids = [
+        str(row["source_observation_id"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT e.payload->'match'->>'source_observation_id' AS source_observation_id
+            FROM events e
+            WHERE e.id = ANY(%s::uuid[])
+              AND COALESCE(e.payload->'match'->>'source_observation_id', '') <> ''
+            """,
+            (list(keep_event_ids),),
+        ).fetchall()
+    ]
+    run_event_ids = sorted(set(deleted_event_ids) | set(keep_event_ids))
     cleanup: dict[str, Any] = {"deleted_event_count": len(deleted_event_ids)}
     for event_id in deleted_event_ids:
         shutil.rmtree(cfg.evidence_root / event_id, ignore_errors=True)
     with conn.transaction():
         cleanup["deleted_face_observations"] = conn.execute(
-            "DELETE FROM face_observations WHERE source_id LIKE %s", (prefix,)
+            """
+            DELETE FROM face_observations
+            WHERE source_id LIKE %s
+              AND NOT (source_observation_id = ANY(%s::text[]))
+            """,
+            (prefix, kept_source_observation_ids),
         ).rowcount
         cleanup["deleted_person_bbox_observations"] = conn.execute(
             "DELETE FROM person_bbox_observations WHERE source_id LIKE %s", (prefix,)
@@ -2603,14 +5756,211 @@ def cleanup_pressure_data(
         cleanup["deleted_cameras"] = conn.execute(
             "DELETE FROM cameras WHERE source_id LIKE %s", (prefix,)
         ).rowcount
+    cleanup["runtime_sources_apply_after_camera_cleanup"] = apply_sources_only(
+        cfg,
+        "runtime_sources_apply_after_pressure_cleanup.json",
+    )
     cleanup["redis_deleted"] = cleanup_redis_streams(redis_client, cfg.run_id)
     cleanup["removed_source_containers"] = remove_pressure_source_containers(cfg.run_id)
+    cleanup["removed_rolling_cache"] = remove_pressure_rolling_cache_artifacts(
+        conn,
+        cfg,
+        event_ids=run_event_ids,
+    )
     if runtime_epoch_root:
         epoch_path = Path(runtime_epoch_root)
-        if epoch_path.is_dir() and epoch_path.is_relative_to(cfg.replay_epoch_root):
+        try:
+            epoch_path.relative_to(cfg.replay_epoch_root)
+            is_under_epoch_root = True
+        except ValueError:
+            is_under_epoch_root = False
+        if epoch_path.is_dir() and is_under_epoch_root:
             shutil.rmtree(epoch_path, ignore_errors=True)
             cleanup["removed_runtime_epoch_root"] = str(epoch_path)
     return cleanup
+
+
+def cleanup_pressure_runtime_only(
+    conn,
+    redis_client: Redis,
+    cfg: PressureConfig,
+) -> dict[str, Any]:
+    prefix = f"{cfg.run_id}_%"
+    cleanup: dict[str, Any] = {}
+    with conn.transaction():
+        cleanup["deleted_rules"] = conn.execute(
+            "DELETE FROM camera_rules WHERE camera_id IN (SELECT id FROM cameras WHERE source_id LIKE %s)",
+            (prefix,),
+        ).rowcount
+        cleanup["deleted_zones"] = conn.execute(
+            "DELETE FROM camera_zones WHERE camera_id IN (SELECT id FROM cameras WHERE source_id LIKE %s)",
+            (prefix,),
+        ).rowcount
+        cleanup["deleted_cameras"] = conn.execute(
+            "DELETE FROM cameras WHERE source_id LIKE %s", (prefix,)
+        ).rowcount
+    cleanup["runtime_sources_apply_after_camera_cleanup"] = apply_sources_only(
+        cfg,
+        "runtime_sources_apply_after_pressure_runtime_cleanup.json",
+    )
+    cleanup["redis_deleted"] = cleanup_redis_streams(redis_client, cfg.run_id)
+    cleanup["removed_source_containers"] = remove_pressure_source_containers(cfg.run_id)
+    cleanup["removed_rolling_cache"] = remove_pressure_rolling_cache_artifacts(
+        conn,
+        cfg,
+    )
+    return cleanup
+
+
+def pressure_rolling_cache_root_host() -> Path:
+    return Path(
+        os.environ.get(
+            "PRESSURE_ROLLING_CACHE_ROOT_HOST",
+            "/data/video-analytics/media/rolling-cache",
+        )
+    )
+
+
+def pressure_rolling_cache_materialized_root_host() -> Path:
+    return Path(
+        os.environ.get(
+            "PRESSURE_ROLLING_CACHE_MATERIALIZED_ROOT_HOST",
+            "/data/video-analytics/media/rolling-cache-materialized",
+        )
+    )
+
+
+def clear_existing_evidence_state(conn) -> dict[str, Any]:
+    """Start pressure runs from a clean evidence/event/cache footprint."""
+    cleanup: dict[str, Any] = {}
+    evidence_root = Path("/data/video-analytics/media/evidence")
+    removed_evidence_dirs = 0
+    if evidence_root.exists():
+        for child in list(evidence_root.iterdir()):
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+                removed_evidence_dirs += 1
+            else:
+                child.unlink(missing_ok=True)
+                removed_evidence_dirs += 1
+    cleanup["removed_evidence_paths"] = removed_evidence_dirs
+
+    for key, root in (
+        ("removed_rolling_cache_root", pressure_rolling_cache_root_host()),
+        (
+            "removed_rolling_cache_materialized_root",
+            pressure_rolling_cache_materialized_root_host(),
+        ),
+    ):
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+            cleanup[key] = True
+        else:
+            cleanup[key] = False
+        root.mkdir(parents=True, exist_ok=True)
+
+    with conn.transaction():
+        cleanup["deleted_face_observations"] = conn.execute(
+            "DELETE FROM face_observations"
+        ).rowcount
+        cleanup["deleted_person_bbox_observations"] = conn.execute(
+            "DELETE FROM person_bbox_observations"
+        ).rowcount
+        cleanup["deleted_events"] = conn.execute("DELETE FROM events").rowcount
+    return cleanup
+
+
+def remove_pressure_rolling_cache_artifacts(
+    conn,
+    cfg: PressureConfig,
+    *,
+    event_ids: list[str] | None = None,
+    materialized_root: Path | None = None,
+) -> dict[str, Any]:
+    source_prefix = f"{cfg.run_id}_"
+    removed_source_dirs = 0
+    root = pressure_rolling_cache_root_host()
+    for path in list(root.rglob("*")) if root.exists() else []:
+        if not path.is_dir():
+            continue
+        name = path.name.rstrip("%")
+        if name.startswith(source_prefix):
+            shutil.rmtree(path, ignore_errors=True)
+            removed_source_dirs += 1
+
+    discovered_event_ids = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM events WHERE source_id LIKE %s",
+            (f"{cfg.run_id}_%",),
+        ).fetchall()
+    ]
+    materialized_event_ids = sorted(set(event_ids or []) | set(discovered_event_ids))
+    removed_materialized_dirs = 0
+    materialized_root = (
+        pressure_rolling_cache_materialized_root_host()
+        if materialized_root is None
+        else materialized_root
+    )
+    removed_paths: set[Path] = set()
+    if materialized_root.exists():
+        for event_id in materialized_event_ids:
+            for path in materialized_root.rglob(event_id):
+                resolved = path.resolve(strict=False)
+                if path.is_dir() and resolved not in removed_paths:
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed_paths.add(resolved)
+                    removed_materialized_dirs += 1
+        for metadata_path in list(materialized_root.rglob("metadata.json")):
+            event_dir = metadata_path.parent
+            resolved = event_dir.resolve(strict=False)
+            if resolved in removed_paths or not event_dir.is_dir():
+                continue
+            if _rolling_cache_materialized_dir_belongs_to_run(
+                metadata_path,
+                source_prefix=source_prefix,
+            ):
+                shutil.rmtree(event_dir, ignore_errors=True)
+                removed_paths.add(resolved)
+                removed_materialized_dirs += 1
+        _remove_empty_dirs_under(materialized_root)
+    return {
+        "source_dirs": removed_source_dirs,
+        "materialized_dirs": removed_materialized_dirs,
+    }
+
+
+def _rolling_cache_materialized_dir_belongs_to_run(
+    metadata_path: Path,
+    *,
+    source_prefix: str,
+) -> bool:
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    labels = metadata.get("labels")
+    labels = labels if isinstance(labels, dict) else {}
+    candidates = (
+        metadata.get("source_id"),
+        metadata.get("replay_source_id"),
+        labels.get("source_id"),
+        labels.get("replay_source_id"),
+    )
+    return any(str(value or "").startswith(source_prefix) for value in candidates)
+
+
+def _remove_empty_dirs_under(root: Path) -> None:
+    if not root.exists():
+        return
+    dirs = [path for path in root.rglob("*") if path.is_dir()]
+    for path in sorted(dirs, key=lambda item: len(item.parts), reverse=True):
+        try:
+            path.rmdir()
+        except OSError:
+            continue
 
 
 def cleanup_after_aborted_run(
@@ -2621,12 +5971,22 @@ def cleanup_after_aborted_run(
     *,
     runtime_epoch_root: str | None,
 ) -> None:
-    if not cfg.cleanup:
-        return
+    stop_summary: dict[str, Any] = {}
     try:
         stop_pressure_sources(conn, cfg)
+        stop_summary["pressure_sources_stopped"] = True
     except Exception as exc:
         report["stop_pressure_sources_after_abort_error"] = repr(exc)
+        stop_summary["pressure_sources_stopped"] = False
+        stop_summary["error"] = repr(exc)
+    if not cfg.cleanup:
+        report["cleanup_after_abort"] = {
+            **stop_summary,
+            "skipped_data_cleanup": True,
+            "reason": "no_cleanup_preserves_evidence_artifacts",
+        }
+        write_json(cfg.artifact_dir / "report.json", report)
+        return
     try:
         report["cleanup_after_abort"] = cleanup_pressure_data(
             conn,
@@ -2640,9 +6000,15 @@ def cleanup_after_aborted_run(
     write_json(cfg.artifact_dir / "report.json", report)
 
 
+def _is_pressure_source_id(source_id: str) -> bool:
+    return bool(re.match(r"^rc\d+_", str(source_id or "")))
+
+
 def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
     with conn.transaction():
         for camera in cameras:
+            if _is_pressure_source_id(str(camera.get("source_id") or "")):
+                continue
             conn.execute(
                 "UPDATE cameras SET enabled=%s, updated_at=now() WHERE id=%s",
                 (bool(camera["enabled"]), camera["id"]),
@@ -2653,16 +6019,21 @@ def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
     if cfg.dual_shard_same_gpu:
         if cfg.dual_shard_api:
             api_json(cfg.api_base, "POST", "/runtime/control/dual/stop", timeout_s=360)
+            stop_dual_shard_runtime(cfg)
         else:
             stop_dual_shard_runtime(cfg)
     env = os.environ.copy()
     env.update(
         {
-            "BATCH_SIZE": str(original_perf.get("savant_batch_size", 1)),
-            "POSE_BATCH_SIZE": str(original_perf.get("pose_batch_size", 1)),
-            "FACE_DETECTOR_BATCH_SIZE": str(original_perf.get("face_detector_batch_size", 1)),
+            "BATCH_SIZE": str(original_perf.get("savant_batch_size", 4)),
+            "POSE_BATCH_SIZE": str(original_perf.get("pose_batch_size", 4)),
+            "FACE_DETECTOR_BATCH_SIZE": str(original_perf.get("face_detector_batch_size", 4)),
             "FACE_EMBEDDING_BATCH_SIZE": str(original_perf.get("face_embedding_batch_size", 16)),
-            "MAX_PARALLEL_STREAMS": str(original_perf.get("max_parallel_streams", 4)),
+            "FACE_INFER_INTERVAL": str(original_perf.get("face_infer_interval", 7)),
+            "FACE_EMBEDDING_INFER_INTERVAL": str(
+                original_perf.get("face_embedding_infer_interval", 7)
+            ),
+            "MAX_PARALLEL_STREAMS": str(original_perf.get("max_parallel_streams", 64)),
             "BATCHED_PUSH_TIMEOUT": str(original_perf.get("batched_push_timeout", 40000)),
             "ANALYSIS_FPS": str(original_perf.get("analysis_fps", "8/1")),
             "ANALYSIS_MIN_FPS": str(original_perf.get("analysis_min_fps", "2/1")),
@@ -2704,14 +6075,167 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     row = conn.execute(
         """
+        WITH run_events AS (
+          SELECT id, status
+          FROM events
+          WHERE source_id LIKE %(prefix)s
+        ),
+        run_tasks AS (
+          SELECT event_id, materialization_status, status,
+                 materialization_defer_reason, materialization_ready_at
+          FROM evidence_tasks
+          WHERE source_id LIKE %(prefix)s
+        ),
+        parent_playable_events AS (
+          SELECT DISTINCT eb.event_id
+          FROM evidence_bundles eb
+          JOIN run_events re ON re.id = eb.event_id
+          WHERE (
+              eb.raw_clip_uri IS NOT NULL
+              AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
+            )
+             OR COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+             OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+        ),
+        parent_video_playable_events AS (
+          SELECT DISTINCT eb.event_id
+          FROM evidence_bundles eb
+          JOIN run_events re ON re.id = eb.event_id
+          WHERE eb.raw_clip_uri IS NOT NULL
+            AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
+        ),
+        parent_image_ready_events AS (
+          SELECT DISTINCT eb.event_id
+          FROM evidence_bundles eb
+          JOIN run_events re ON re.id = eb.event_id
+          WHERE COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+             OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+        ),
+        covered_events_distinct AS (
+          SELECT DISTINCT l.event_id
+          FROM evidence_event_links l
+          JOIN run_events re ON re.id = l.event_id
+          WHERE l.relation = 'covered_by'
+        ),
+        covered_playable_events_distinct AS (
+          SELECT DISTINCT l.event_id
+          FROM evidence_event_links l
+          JOIN run_events re ON re.id = l.event_id
+          JOIN evidence_bundles eb ON eb.event_id = l.bundle_event_id
+          WHERE l.relation = 'covered_by'
+            AND eb.raw_clip_uri IS NOT NULL
+            AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
+        ),
+        distinct_events_with_playable_evidence AS (
+          SELECT event_id FROM parent_playable_events
+          UNION
+          SELECT event_id FROM covered_playable_events_distinct
+        ),
+        distinct_events_with_terminal_nonplayable_outcome AS (
+          SELECT DISTINCT rt.event_id
+          FROM run_tasks rt
+          WHERE rt.event_id NOT IN (
+              SELECT event_id FROM distinct_events_with_playable_evidence
+          )
+            AND (
+              rt.materialization_status IN (
+                'materialization_expired',
+                'materialization_failed',
+                'materialization_skipped'
+              )
+              OR (
+                rt.materialization_status = 'materialization_deferred'
+                AND COALESCE(rt.materialization_defer_reason, '') <> ''
+                AND rt.materialization_defer_reason <> 'covered_by_existing_evidence'
+	              )
+	            )
+          UNION
+          SELECT re.id
+          FROM run_events re
+          WHERE re.status = 'suppressed'
+            AND re.id NOT IN (
+                SELECT event_id FROM distinct_events_with_playable_evidence
+            )
+        ),
+        blocking_materialization_events AS (
+          SELECT DISTINCT rt.event_id
+          FROM run_tasks rt
+          WHERE rt.materialization_status IN (
+              'manifest_ready',
+              'materialization_pending',
+              'materializing'
+          )
+             OR (
+               rt.materialization_status = 'materialization_deferred'
+               AND COALESCE(rt.materialization_defer_reason, '') = ''
+             )
+        )
         SELECT
           (SELECT count(*) FROM cameras WHERE source_id LIKE %(prefix)s) AS cameras,
-          (SELECT count(*) FROM events WHERE source_id LIKE %(prefix)s) AS events,
+          (SELECT count(*) FROM run_events) AS events,
+          (SELECT count(*) FROM run_events WHERE status = 'suppressed') AS suppressed_events,
+          (SELECT count(*) FROM run_events WHERE status <> 'suppressed') AS unsuppressed_events,
           (SELECT count(*) FROM evidence_tasks WHERE source_id LIKE %(prefix)s) AS tasks,
           (SELECT count(*) FROM evidence_bundles WHERE source_id LIKE %(prefix)s) AS bundles,
-          (SELECT count(*) FROM evidence_bundles WHERE source_id LIKE %(prefix)s AND raw_clip_uri IS NOT NULL AND COALESCE(raw_clip_size_bytes, 0) > 0) AS playable_bundles
+          (SELECT count(*) FROM parent_playable_events) AS playable_bundles,
+          (SELECT count(*) FROM parent_video_playable_events) AS behavior_video_playable_bundles,
+          (SELECT count(*) FROM parent_image_ready_events) AS face_image_ready_bundles,
+          (SELECT count(*) FROM covered_events_distinct) AS covered_events,
+          (SELECT count(*) FROM covered_playable_events_distinct) AS covered_playable_events,
+          (
+            SELECT count(*)
+            FROM evidence_tasks
+            WHERE source_id LIKE %(prefix)s
+              AND materialization_status = ANY(%(active_materialization_states)s)
+          ) AS active_materialization_tasks,
+          (
+            SELECT count(*)
+            FROM run_tasks rt
+            WHERE rt.materialization_status IN (
+                'manifest_ready',
+                'materialization_pending',
+                'pending'
+            )
+              AND (
+                rt.materialization_ready_at IS NULL
+                OR rt.materialization_ready_at <= now()
+              )
+          ) AS ready_waiting_materialization_tasks,
+          (
+            SELECT count(*)
+            FROM run_tasks rt
+            WHERE rt.materialization_status IN (
+                'manifest_ready',
+                'materialization_pending',
+                'pending'
+            )
+              AND rt.materialization_ready_at > now()
+          ) AS unready_waiting_materialization_tasks,
+          (SELECT count(*) FROM distinct_events_with_playable_evidence) AS distinct_events_with_playable_evidence,
+          (
+            SELECT count(*)
+            FROM run_events re
+            WHERE re.id NOT IN (SELECT event_id FROM distinct_events_with_playable_evidence)
+          ) AS distinct_events_without_playable_evidence,
+          (
+            SELECT count(*)
+            FROM run_events re
+            WHERE re.id IN (SELECT event_id FROM covered_events_distinct)
+              AND re.id NOT IN (SELECT event_id FROM covered_playable_events_distinct)
+          ) AS covered_but_not_playable_distinct_events,
+          (
+            SELECT count(*)
+            FROM distinct_events_with_terminal_nonplayable_outcome
+          ) AS distinct_events_with_terminal_nonplayable_outcome,
+          (
+            SELECT count(*)
+            FROM blocking_materialization_events
+          ) AS blocking_materialization_tasks
         """,
-        {"prefix": prefix},
+        {
+            "prefix": prefix,
+            "active_materialization_states": sorted(ACTIVE_MATERIALIZATION_STATES),
+        },
     ).fetchone()
     statuses = conn.execute(
         """
@@ -2733,6 +6257,49 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
     return data
 
 
+def non_materialized_task_details(conn, run_id: str) -> list[dict[str, Any]]:
+    prefix = f"{run_id}_%"
+    rows = conn.execute(
+        """
+        SELECT
+          et.task_id,
+          et.event_id,
+          et.source_event_id,
+          et.source_id,
+          et.event_type,
+          et.event_ts_ms,
+          et.pre_seconds,
+          et.post_seconds,
+          et.status,
+          et.materialization_status,
+          et.materialization_defer_reason,
+          et.materialization_failure_reason,
+          et.materialization_expired_reason,
+          et.runtime_epoch_id,
+          et.materialization_ready_at,
+          et.materialization_deadline_at,
+          et.materialization_attempt_count,
+          et.created_at AS task_created_at,
+          et.updated_at AS task_updated_at,
+          e.status AS event_status,
+          e.media_status AS event_media_status,
+          e.created_at AS event_created_at,
+          e.payload->'media' AS event_media,
+          l.bundle_event_id,
+          l.reason AS coverage_reason,
+          l.metadata AS coverage_metadata
+        FROM evidence_tasks et
+        LEFT JOIN events e ON e.id = et.event_id
+        LEFT JOIN evidence_event_links l ON l.event_id = et.event_id
+        WHERE et.source_id LIKE %(prefix)s
+          AND COALESCE(et.materialization_status, '') <> 'materialized'
+        ORDER BY et.created_at, et.source_id, et.event_type
+        """,
+        {"prefix": prefix},
+    ).fetchall()
+    return [_row_json(row) for row in rows]
+
+
 def collect_downstream_observability(
     cfg: PressureConfig,
     conn,
@@ -2741,6 +6308,8 @@ def collect_downstream_observability(
     kept: list[dict[str, Any]],
     diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
+    replay_topology = replay_topology_summary()
+    video_file_sink = video_file_sink_observability_summary(diagnostics)
     summary = {
         "schema_version": DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2750,9 +6319,18 @@ def collect_downstream_observability(
         "event_worker": event_worker_observability_summary(diagnostics),
         "face_worker": face_worker_observability_summary(diagnostics),
         "media_worker": media_worker_observability_summary(diagnostics),
+        "phase_latency_ms": evidence_phase_latency_summary(diagnostics),
+        "replay_admission": replay_admission_observability_summary(diagnostics),
+        "replay_topology": replay_topology,
+        "video_file_sink": video_file_sink,
         "evidence_8090": evidence_8090_observability_summary(cfg, kept),
     }
     validate_downstream_observability_schema(summary)
+    write_json(cfg.artifact_dir / "replay_topology_summary.json", replay_topology)
+    write_json(
+        cfg.artifact_dir / "video_file_sink_pressure_summary.json",
+        video_file_sink,
+    )
     write_json(cfg.artifact_dir / "downstream_observability_summary.json", summary)
     return summary
 
@@ -2832,6 +6410,60 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
     except Exception as exc:
         summary["evidence_task_lifecycle_seconds"] = _not_enough_data(
             f"evidence_lifecycle_query_failed:{type(exc).__name__}"
+        )
+    try:
+        row = conn.execute(
+            """
+            WITH measured AS (
+                SELECT
+                    et.materialization_ready_at,
+                    NULLIF(
+                        et.materialization_audit->'rolling_cache'->>'claimed_at',
+                        ''
+                    )::timestamptz AS claimed_at,
+                    et.last_materialization_at
+                FROM evidence_tasks et
+                WHERE et.source_id LIKE %s
+                  AND et.materialization_ready_at IS NOT NULL
+                  AND et.materialization_audit ? 'rolling_cache'
+            ),
+            deltas AS (
+                SELECT
+                    EXTRACT(EPOCH FROM (claimed_at - materialization_ready_at)) AS ready_to_claim_s,
+                    EXTRACT(EPOCH FROM (last_materialization_at - claimed_at)) AS claim_to_materialized_s
+                FROM measured
+                WHERE claimed_at IS NOT NULL
+            )
+            SELECT
+                count(*) AS count,
+                count(*) FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_count,
+                percentile_cont(0.50) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                    FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_p50_s,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                    FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_p95_s,
+                percentile_cont(1.00) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                    FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_max_s,
+                count(*) FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_count,
+                percentile_cont(0.50) WITHIN GROUP (ORDER BY claim_to_materialized_s)
+                    FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_p50_s,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY claim_to_materialized_s)
+                    FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_p95_s,
+                percentile_cont(1.00) WITHIN GROUP (ORDER BY claim_to_materialized_s)
+                    FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_max_s
+            FROM deltas
+            """,
+            (f"{run_id}_%",),
+        ).fetchone()
+        ready_metrics = _row_json(row)
+        ready_metrics["status"] = (
+            "measured"
+            if int(ready_metrics.get("ready_to_claim_count") or 0) > 0
+            else "not_enough_data"
+        )
+        summary["rolling_cache_ready_schedule_seconds"] = ready_metrics
+    except Exception as exc:
+        summary["rolling_cache_ready_schedule_seconds"] = _not_enough_data(
+            f"rolling_cache_ready_schedule_query_failed:{type(exc).__name__}"
         )
     return summary
 
@@ -2981,11 +6613,107 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         or _not_enough_data("ffprobe logs unavailable"),
         "ffmpeg_duration_ms": logs.get("media_ffmpeg_duration_ms")
         or _not_enough_data("ffmpeg logs unavailable"),
+        "replay_to_sink_metadata_ms": logs.get("media_replay_to_sink_metadata_ms")
+        or _not_enough_data("Replay-to-sink metadata logs unavailable"),
+        "sink_metadata_to_video_ms": logs.get("media_sink_metadata_to_video_ms")
+        or _not_enough_data("sink metadata-to-video logs unavailable"),
+        "sink_video_to_stable_ms": logs.get("media_sink_video_to_stable_ms")
+        or _not_enough_data("sink video stability logs unavailable"),
+        "sink_stable_to_ffprobe_ready_ms": logs.get(
+            "media_sink_stable_to_ffprobe_ready_ms"
+        )
+        or _not_enough_data("sink ffprobe readiness logs unavailable"),
+        "sink_ffprobe_ready_to_finalizer_start_ms": logs.get(
+            "media_sink_ffprobe_ready_to_finalizer_start_ms"
+        )
+        or _not_enough_data("finalizer start readiness logs unavailable"),
+        "finalizer_pool_wait_ms": logs.get("media_finalizer_pool_wait_ms")
+        or _not_enough_data("finalizer pool wait logs unavailable"),
         "cpu_percent": (
             (diagnostics.get("sample_summary") or {})
             .get("max_worker_cpu_percent", {})
             .get("media_worker")
         ),
+    }
+
+
+def video_file_sink_observability_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = ((diagnostics.get("log_summary") or {}).get("video_file_sink") or {})
+    instances = logs.get("instances") if isinstance(logs, dict) else None
+    aggregate = logs.get("aggregate") if isinstance(logs, dict) else None
+    return {
+        "instances": instances if isinstance(instances, dict) else {},
+        "aggregate": aggregate
+        if isinstance(aggregate, dict)
+        else _not_enough_data("video-file-sink logs unavailable"),
+    }
+
+
+def replay_admission_observability_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = diagnostics.get("log_summary") or {}
+    clip_logs = logs.get("clip_worker") or {}
+    media_logs = logs.get("media_worker") or {}
+    return {
+        "slot_acquired_count": int(clip_logs.get("replay_slot_acquired") or 0),
+        "slot_acquire_success_count": int(
+            clip_logs.get("replay_slot_acquire_success") or 0
+        ),
+        "slot_released_count": int(media_logs.get("replay_slot_released") or 0),
+        "slot_release_reasons": media_logs.get("replay_slot_release_reasons") or {},
+        "duration_seconds_effective": clip_logs.get(
+            "replay_duration_seconds_effective"
+        )
+        or _not_enough_data("Replay effective duration logs unavailable"),
+        "timeout_budget_s": clip_logs.get("replay_slot_timeout_budget_s")
+        or _not_enough_data("Replay slot timeout budget logs unavailable"),
+        "release_sink_video_to_stable_ms": media_logs.get(
+            "replay_slot_release_sink_video_to_stable_ms"
+        )
+        or _not_enough_data("Replay slot release logs unavailable"),
+    }
+
+
+def evidence_phase_latency_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    logs = diagnostics.get("log_summary") or {}
+    clip_logs = logs.get("clip_worker") or {}
+    media_logs = logs.get("media_worker") or {}
+    return {
+        "clip_worker": {
+            "record_request_pending_ms": clip_logs.get(
+                "clip_record_request_pending_ms"
+            )
+            or _not_enough_data("clip record request pending logs unavailable"),
+            "proof_wait_ms": clip_logs.get("clip_proof_wait_ms")
+            or _not_enough_data("clip proof wait logs unavailable"),
+            "replay_job_create_ms": clip_logs.get("clip_replay_job_create_ms")
+            or _not_enough_data("Replay job create logs unavailable"),
+            "replay_slot_hold_ms": clip_logs.get("clip_replay_slot_hold_ms")
+            or _not_enough_data("Replay slot hold logs unavailable"),
+        },
+        "media_worker": {
+            "replay_to_sink_metadata_ms": media_logs.get(
+                "media_replay_to_sink_metadata_ms"
+            )
+            or _not_enough_data("Replay-to-sink metadata logs unavailable"),
+            "sink_metadata_to_video_ms": media_logs.get(
+                "media_sink_metadata_to_video_ms"
+            )
+            or _not_enough_data("sink metadata-to-video logs unavailable"),
+            "sink_video_to_stable_ms": media_logs.get(
+                "media_sink_video_to_stable_ms"
+            )
+            or _not_enough_data("sink video stability logs unavailable"),
+            "sink_stable_to_ffprobe_ready_ms": media_logs.get(
+                "media_sink_stable_to_ffprobe_ready_ms"
+            )
+            or _not_enough_data("sink ffprobe readiness logs unavailable"),
+            "sink_ffprobe_ready_to_finalizer_start_ms": media_logs.get(
+                "media_sink_ffprobe_ready_to_finalizer_start_ms"
+            )
+            or _not_enough_data("finalizer start readiness logs unavailable"),
+            "finalizer_pool_wait_ms": media_logs.get("media_finalizer_pool_wait_ms")
+            or _not_enough_data("finalizer pool wait logs unavailable"),
+        },
     }
 
 
@@ -2997,13 +6725,28 @@ def evidence_8090_observability_summary(
         "retained_count": len(kept),
         "checked_count": 0,
         "ok_count": 0,
+        "timeline_checked_count": 0,
+        "timeline_ok_count": 0,
+        "timeline_missing_count": 0,
+        "timeline_fallback_count": 0,
+        "annotation_checked_count": 0,
+        "annotation_ok_count": 0,
+        "annotation_skipped_zero_expected_count": 0,
+        "annotation_fallback_count": 0,
+        "annotation_bbox_missing_count": 0,
+        "annotation_person_context_missing_count": 0,
+        "annotation_count_mismatch_count": 0,
         "failed": [],
+        "timeline_failed": [],
+        "annotation_failed": [],
+        "annotation_count_mismatches": [],
     }
     try:
         result["health"] = api_json(cfg.api_base, "GET", "/evidence/health", timeout_s=10)
     except Exception as exc:
         result["health"] = _not_enough_data(f"health_request_failed:{type(exc).__name__}")
-    for row in kept[: max(0, cfg.keep_evidence)]:
+    observability_limit = len(kept) if cfg.keep_evidence < 0 else max(0, cfg.keep_evidence)
+    for row in kept[:observability_limit]:
         event_id = str(row.get("event_id") or "")
         if not event_id:
             continue
@@ -3034,10 +6777,219 @@ def evidence_8090_observability_summary(
                     "observed_event_id": data.get("event_id"),
                 }
             )
+            continue
+        summary_data = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+        is_image_evidence = _evidence_row_is_image(row, data)
+        if not is_image_evidence:
+            result["timeline_checked_count"] += 1
+            try:
+                sink_response = api_json(
+                    cfg.api_base,
+                    "GET",
+                    f"/evidence/bundles/{event_id}/sink-metadata",
+                    timeout_s=10,
+                )
+            except Exception as exc:
+                result["timeline_missing_count"] += 1
+                result["timeline_failed"].append(
+                    {
+                        "event_id": event_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            else:
+                sink_data = sink_response.get("data") or {}
+                sink_count = _safe_int(sink_data.get("count"))
+                if sink_response.get("error") or sink_count <= 0:
+                    result["timeline_missing_count"] += 1
+                    result["timeline_failed"].append(
+                        {
+                            "event_id": event_id,
+                            "observed_timeline_rows": sink_count,
+                            "error": (
+                                sink_response.get("error")
+                                or "sink_metadata_missing_from_8090_endpoint"
+                            ),
+                        }
+                    )
+                else:
+                    result["timeline_ok_count"] += 1
+                    if bool(sink_data.get("fallback_used")):
+                        result["timeline_fallback_count"] += 1
+        expected_annotations = _safe_int(
+            row.get("annotation_count")
+            or data.get("annotation_lines")
+            or summary_data.get("annotation_lines")
+        )
+        if expected_annotations <= 0:
+            if is_image_evidence:
+                result["annotation_skipped_zero_expected_count"] += 1
+            else:
+                result["annotation_checked_count"] += 1
+                result["annotation_failed"].append(
+                    {
+                        "event_id": event_id,
+                        "error": "video_annotations_expected_zero",
+                    }
+                )
+            continue
+        result["annotation_checked_count"] += 1
+        try:
+            annotation_response = api_json(
+                cfg.api_base,
+                "GET",
+                f"/evidence/bundles/{event_id}/annotations?include_records=true",
+                timeout_s=10,
+            )
+        except Exception as exc:
+            result["annotation_failed"].append(
+                {
+                    "event_id": event_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        if annotation_response.get("error"):
+            result["annotation_failed"].append(
+                {
+                    "event_id": event_id,
+                    "error": annotation_response["error"],
+                }
+            )
+            continue
+        annotation_data = annotation_response.get("data") or {}
+        observed_annotations = _safe_int(annotation_data.get("count"))
+        records = annotation_data.get("records") or annotation_data.get("annotations") or []
+        object_summary = _annotation_object_summary(records if isinstance(records, list) else [])
+        annotation_ok = observed_annotations > 0
+        if observed_annotations < expected_annotations:
+            result["annotation_count_mismatch_count"] += 1
+            result["annotation_count_mismatches"].append(
+                {
+                    "event_id": event_id,
+                    "observed_annotations": observed_annotations,
+                    "expected_annotations": expected_annotations,
+                    "source": annotation_data.get("source"),
+                    "reason": "db_overlay_rows_can_merge_clip_frame_index",
+                }
+            )
+            if observed_annotations <= 0:
+                annotation_ok = False
+                result["annotation_failed"].append(
+                    {
+                        "event_id": event_id,
+                        "observed_annotations": observed_annotations,
+                        "expected_annotations": expected_annotations,
+                        "error": "annotations_missing_from_8090_endpoint",
+                    }
+                )
+        if bool(annotation_data.get("fallback_used")):
+            result["annotation_fallback_count"] += 1
+            annotation_ok = False
+            result["annotation_failed"].append(
+                {
+                    "event_id": event_id,
+                    "observed_annotations": observed_annotations,
+                    "expected_annotations": expected_annotations,
+                    "error": "annotations_database_overlay_missing_filesystem_fallback_used",
+                }
+            )
+        if object_summary["bbox_object_count"] <= 0:
+            result["annotation_bbox_missing_count"] += 1
+            annotation_ok = False
+            result["annotation_failed"].append(
+                {
+                    "event_id": event_id,
+                    "observed_annotations": observed_annotations,
+                    "expected_annotations": expected_annotations,
+                    "error": "annotation_bbox_objects_missing",
+                }
+            )
+        if (
+            _evidence_video_requires_person_context(row, data)
+            and object_summary["person_context_count"] <= 0
+        ):
+            result["annotation_person_context_missing_count"] += 1
+            annotation_ok = False
+            result["annotation_failed"].append(
+                {
+                    "event_id": event_id,
+                    "observed_annotations": observed_annotations,
+                    "expected_annotations": expected_annotations,
+                    "error": "annotation_person_context_missing",
+                }
+            )
+        if annotation_ok:
+            result["annotation_ok_count"] += 1
     result["status"] = (
         "measured" if result["checked_count"] else "not_enough_data"
     )
     return result
+
+
+def _evidence_row_is_image(row: dict[str, Any], manifest: dict[str, Any]) -> bool:
+    if bool(row.get("image_evidence")):
+        return True
+    playback_kind = str(manifest.get("playback_kind") or "").lower()
+    if playback_kind == "image":
+        return True
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    media = metadata.get("media") if isinstance(metadata.get("media"), dict) else {}
+    return str(media.get("playback_kind") or "").lower() == "image"
+
+
+def _evidence_video_requires_person_context(
+    row: dict[str, Any],
+    manifest: dict[str, Any],
+) -> bool:
+    if _evidence_row_is_image(row, manifest):
+        return False
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    event = metadata.get("event") if isinstance(metadata.get("event"), dict) else {}
+    event_type = str(
+        row.get("event_type")
+        or event.get("event_type")
+        or manifest.get("event_type")
+        or ""
+    )
+    return event_type in {"intrusion", "loitering", "running", "crowd_gathering", "fall", "chasing"}
+
+
+def _annotation_object_summary(records: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {
+        "record_count": len(records),
+        "object_count": 0,
+        "bbox_object_count": 0,
+        "person_context_count": 0,
+        "face_count": 0,
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        objects = record.get("objects")
+        record_objects = list(objects) if isinstance(objects, list) else []
+        if isinstance(record.get("object_type"), str) and isinstance(record.get("bbox"), dict):
+            record_objects.append(record)
+        for obj in record_objects:
+            if not isinstance(obj, dict):
+                continue
+            summary["object_count"] += 1
+            if isinstance(obj.get("bbox"), dict):
+                summary["bbox_object_count"] += 1
+            object_type = str(obj.get("object_type") or "")
+            annotation_role = str(obj.get("annotation_role") or "")
+            if object_type == "face":
+                summary["face_count"] += 1
+            if object_type == "person" or annotation_role == "person_context":
+                summary["person_context_count"] += 1
+    return summary
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
@@ -3050,7 +7002,12 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
         missing.append("schema_version")
     nested_requirements = {
         "redis": ("streams",),
-        "postgresql": ("run_summary", "table_stats", "evidence_task_lifecycle_seconds"),
+        "postgresql": (
+            "run_summary",
+            "table_stats",
+            "evidence_task_lifecycle_seconds",
+            "rolling_cache_ready_schedule_seconds",
+        ),
         "event_worker": ("record_request_dedupe",),
         "face_worker": ("gallery_query_latency_ms",),
         "qdrant": ("query_latency_ms", "exact_rerank_latency_ms", "fallback_count", "outbox"),
@@ -3060,10 +7017,26 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
             "throttle_sleep_s",
             "deadline_slack_s",
             "claim_wait_ms",
+            "replay_to_sink_metadata_ms",
+            "sink_metadata_to_video_ms",
+            "sink_video_to_stable_ms",
+            "sink_stable_to_ffprobe_ready_ms",
+            "sink_ffprobe_ready_to_finalizer_start_ms",
+            "finalizer_pool_wait_ms",
             "queue_wait_ms_by_source",
             "queue_wait_ms_by_shard",
             "duplicate_materialization_count",
         ),
+        "phase_latency_ms": ("clip_worker", "media_worker"),
+        "replay_admission": (
+            "slot_acquired_count",
+            "slot_released_count",
+            "duration_seconds_effective",
+            "timeout_budget_s",
+            "release_sink_video_to_stable_ms",
+        ),
+        "replay_topology": ("replay_topology", "dual_replay_enabled", "containers"),
+        "video_file_sink": ("instances", "aggregate"),
         "evidence_8090": ("retained_count", "checked_count", "ok_count"),
     }
     for section, keys in nested_requirements.items():
@@ -3129,6 +7102,29 @@ def cleanup_redis_streams(redis_client: Redis, run_id: str) -> dict[str, int]:
             if len(rows) < 500:
                 break
         deleted[stream] = int(redis_client.xdel(stream, *ids)) if ids else 0
+    deleted_source_streams = 0
+    deleted_source_stream_entries = 0
+    pattern = f"security.frame_annotations.{run_id}_*"
+    try:
+        for key in redis_client.scan_iter(match=pattern, count=500):
+            key_name = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else str(key)
+            try:
+                stream_len = int(redis_client.xlen(key) or 0)
+            except Exception:
+                stream_len = 0
+            if redis_client.delete(key):
+                deleted_source_streams += 1
+                deleted_source_stream_entries += stream_len
+            deleted[key_name] = stream_len
+    except Exception:
+        # Best-effort cleanup: the global streams above remain authoritative for
+        # older pressure runs, and source-specific streams are bounded by maxlen.
+        deleted["security.frame_annotations.source_stream_cleanup_error"] = -1
+    if deleted_source_streams:
+        deleted["security.frame_annotations.source_streams_deleted"] = deleted_source_streams
+        deleted["security.frame_annotations.source_stream_entries_deleted"] = (
+            deleted_source_stream_entries
+        )
     return deleted
 
 
@@ -3149,6 +7145,34 @@ def remove_pressure_source_containers(run_id: str) -> list[str]:
     return names
 
 
+def remove_pressure_source_containers_until_stable(
+    run_id: str,
+    *,
+    stable_checks: int = 3,
+    max_checks: int = 12,
+    sleep_s: float = 2.0,
+) -> dict[str, Any]:
+    removed: list[str] = []
+    consecutive_empty = 0
+    checks = 0
+    while checks < max_checks and consecutive_empty < stable_checks:
+        checks += 1
+        names = remove_pressure_source_containers(run_id)
+        if names:
+            removed.extend(names)
+            consecutive_empty = 0
+        else:
+            consecutive_empty += 1
+        if consecutive_empty < stable_checks:
+            time.sleep(sleep_s)
+    return {
+        "checks": checks,
+        "stable": consecutive_empty >= stable_checks,
+        "removed_count": len(removed),
+        "removed": removed,
+    }
+
+
 def raw_clip_uri_to_path(evidence_root: Path, uri: str) -> Path | None:
     prefix = "/media/evidence/"
     if not uri.startswith(prefix):
@@ -3157,6 +7181,35 @@ def raw_clip_uri_to_path(evidence_root: Path, uri: str) -> Path | None:
     if "/" not in rel:
         return None
     return evidence_root / rel
+
+
+def probe_local_video_duration_seconds(path: Path, *, timeout_s: float = 10.0) -> float | None:
+    if not path.is_file():
+        return None
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_s,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return _float_or_none((completed.stdout or "").strip())
 
 
 def api_json(
@@ -3515,6 +7568,87 @@ def _parse_percent(value: str) -> float:
         return float(str(value).strip().rstrip("%"))
     except Exception:
         return 0.0
+
+
+def probe_video_input_fps(uri: str) -> dict[str, Any]:
+    """Probe the raw media cadence entering Replay.
+
+    ``cfg.fps`` is the analysis/resampler target. Rolling cache is intentionally
+    tapped before that resampler, so its segment sizing and full-rate gate must
+    use the raw input FPS instead.
+    """
+
+    result: dict[str, Any] = {
+        "uri": uri,
+        "status": "unmeasured",
+        "fps": None,
+        "rate": "",
+    }
+    if not uri:
+        result["reason"] = "empty_uri"
+        return result
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+    ]
+    if str(uri).startswith("rtsp://"):
+        command.extend(["-rtsp_transport", "tcp"])
+    command.extend(
+        [
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate,r_frame_rate",
+            "-of",
+            "json",
+            uri,
+        ]
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=20,
+        )
+    except FileNotFoundError:
+        result["status"] = "failed"
+        result["reason"] = "ffprobe_missing"
+        return result
+    except subprocess.TimeoutExpired:
+        result["status"] = "failed"
+        result["reason"] = "ffprobe_timeout"
+        return result
+    if completed.returncode != 0:
+        result["status"] = "failed"
+        result["reason"] = completed.stderr.strip()[-500:] or "ffprobe_failed"
+        return result
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        result["status"] = "failed"
+        result["reason"] = "ffprobe_invalid_json"
+        return result
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    stream = streams[0] if isinstance(streams, list) and streams else {}
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        rate = str(stream.get(key) or "")
+        fps = _fps_to_float(rate)
+        if fps > 0:
+            result.update({"status": "measured", "fps": fps, "rate": rate, "field": key})
+            return result
+    result["status"] = "failed"
+    result["reason"] = "no_valid_frame_rate"
+    return result
+
+
+def _format_fps_float(value: float) -> str:
+    if abs(value - round(value)) < 0.001:
+        return str(int(round(value)))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 def _fps_to_float(value: str) -> float:

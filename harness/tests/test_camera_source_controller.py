@@ -156,6 +156,28 @@ def test_start_builds_docker_run(script_mod, sources_path):
     assert "/opt/savant/adapters/gst/sources/rtsp.sh" in cmd
 
 
+def test_start_accepts_custom_ffmpeg_timeout(script_mod, sources_path):
+    runner = _FakeRunner(_ok(stdout="abc123def456"))
+    rc = script_mod.main(
+        [
+            "start",
+            "--sources", sources_path,
+            "--source-id", "primary_rtsp",
+            "--ffmpeg-timeout-ms", "60000",
+        ],
+        runner=runner,
+        logger=lambda msg: None,
+    )
+    assert rc == 0
+    env_pairs = [
+        runner.calls[0][i + 1]
+        for i, p in enumerate(runner.calls[0])
+        if p == "-e"
+    ]
+    env_dict = dict(s.split("=", 1) for s in env_pairs)
+    assert env_dict["FFMPEG_TIMEOUT_MS"] == "60000"
+
+
 # ===========================================================================
 # 3. stop uses the stable container name
 # ===========================================================================

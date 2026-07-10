@@ -8,6 +8,11 @@ Supports two ONNX output layouts:
     shape  = [batch, 56, num_predictions]  or  [batch, num_predictions, 56]
     Needs NMS.
 
+**decoded_56**::
+    shape  = [batch, num_predictions, 56]  or  [batch, 56, num_predictions]
+    Decoded xyxy/confidence/keypoint rows from the dynamic-batch ONNX graph.
+    Needs per-batch-slot NMS but does not apply sigmoid again.
+
 **post_nms_57**::
     shape  = [batch, num_detections, 57]
     Already post-NMS.
@@ -21,6 +26,7 @@ from typing import List, Tuple
 import numpy as np
 
 DECODER_LAYOUT_RAW_56 = "raw_56"
+DECODER_LAYOUT_DECODED_56 = "decoded_56"
 DECODER_LAYOUT_POST_NMS_57 = "post_nms_57"
 
 
@@ -69,6 +75,8 @@ def decode_pose_output(
     raw = _ensure_3d(raw, config.layout)
     if config.layout == DECODER_LAYOUT_POST_NMS_57:
         dets = _decode_post_nms_57(raw, config)
+    elif config.layout == DECODER_LAYOUT_DECODED_56:
+        dets = _decode_decoded_56(raw, config)
     else:
         dets = _decode_raw_56(raw, config)
     return dets, config.layout
@@ -145,6 +153,42 @@ def _decode_post_nms_57(raw: np.ndarray, cfg: DecoderConfig) -> List[PoseDetecti
     for b in range(raw.shape[0]):
         results.extend(_decode_post_nms_57_one(raw[b], cfg))
     return results
+
+
+def _decode_decoded_56(raw: np.ndarray, cfg: DecoderConfig) -> List[PoseDetection]:
+    if raw.shape[1] == cfg.num_channels and raw.shape[2] != cfg.num_channels:
+        raw = raw.transpose(0, 2, 1)
+    results: List[PoseDetection] = []
+    for b in range(raw.shape[0]):
+        results.extend(_decode_decoded_56_one(raw[b], cfg))
+    return results
+
+
+def _decode_decoded_56_one(tensor: np.ndarray, cfg: DecoderConfig) -> List[PoseDetection]:
+    N, C = tensor.shape
+    if C != cfg.num_channels:
+        raise ValueError(f"decoded_56: expected {cfg.num_channels} channels, got {C}.")
+    confs = tensor[:, cfg.conf_start]
+    mask = confs >= cfg.confidence_threshold
+    if not mask.any():
+        return []
+    tensor = tensor[mask]
+    confs = confs[mask]
+    kpts_flat = tensor[:, cfg.kpt_start : cfg.kpt_start + cfg.kpt_total]
+    kpts_all = kpts_flat.reshape(-1, cfg.num_keypoints, cfg.kpt_step)
+    candidates: List[PoseDetection] = []
+    for i in range(tensor.shape[0]):
+        candidates.append(
+            PoseDetection(
+                bbox=(float(tensor[i, 0]), float(tensor[i, 1]),
+                      float(tensor[i, 2]), float(tensor[i, 3])),
+                confidence=float(confs[i]),
+                keypoints=kpts_all[i].copy(),
+                label=0,
+            )
+        )
+    keep = _nms(candidates, cfg.nms_threshold, cfg.nms_top_k)
+    return [candidates[i] for i in keep]
 
 
 def _decode_post_nms_57_one(tensor: np.ndarray, cfg: DecoderConfig) -> List[PoseDetection]:

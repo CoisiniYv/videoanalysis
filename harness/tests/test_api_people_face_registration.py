@@ -39,6 +39,7 @@ NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
 
 class FakePeopleRepository:
     def __init__(self) -> None:
+        self.last_trajectory_kwargs: dict[str, Any] = {}
         self.people = {
             10: {
                 "id": 10,
@@ -79,6 +80,32 @@ class FakePeopleRepository:
                 }
             ]
         }
+        self.trajectory_rows = [
+            {
+                "event_id": "11111111-1111-1111-1111-111111111111",
+                "source_event_id": "watchlist:1",
+                "event_type": "watchlist_hit",
+                "person_id": 10,
+                "person_name": "Reese",
+                "external_person_id": "demo:midterm:reese",
+                "camera_id": "cam-lab",
+                "source_id": "lab",
+                "camera_name": "lab",
+                "event_ts_ms": 1_000_000,
+                "event_created_at": NOW,
+                "similarity": 0.91,
+                "source_observation_id": "face:lab:uuid:frame-1:0",
+                "observation_timestamp_ms": 1_000_000,
+                "face_bbox": [10, 20, 30, 40],
+                "person_bbox": None,
+                "face_crop_uri": "/data/video-analytics/media/faces/reese-crop.jpg",
+                "full_frame_uri": "/data/video-analytics/media/faces/reese-frame.jpg",
+                "annotated_frame_uri": "/data/video-analytics/media/faces/reese-annotated.jpg",
+                "evidence_media_status": "image_ready",
+                "evidence_summary": {"playback_kind": "image"},
+                "trajectory_source": "watchlist_event",
+            }
+        ]
 
     def list_people(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         rows = list(self.people.values())
@@ -89,6 +116,22 @@ class FakePeopleRepository:
 
     def list_gallery(self, person_id: int) -> list[dict[str, Any]]:
         return self.gallery.get(person_id, [])
+
+    def latest_location(self, person_id: int, **kwargs: Any) -> dict[str, Any] | None:
+        rows = self.trajectory(person_id, **kwargs, limit=1, offset=0)
+        return rows[0] if rows else None
+
+    def trajectory(self, person_id: int, **kwargs: Any) -> list[dict[str, Any]]:
+        self.last_trajectory_kwargs = dict(kwargs)
+        rows = [row for row in self.trajectory_rows if row["person_id"] == person_id]
+        min_similarity = float(kwargs.get("min_similarity") or 0.0)
+        rows = [row for row in rows if float(row["similarity"] or 0.0) >= min_similarity]
+        camera_id = kwargs.get("camera_id")
+        if camera_id:
+            rows = [row for row in rows if row["camera_id"] == camera_id]
+        limit = int(kwargs.get("limit") or 50)
+        offset = int(kwargs.get("offset") or 0)
+        return rows[offset:offset + limit]
 
 
 @dataclass
@@ -155,6 +198,33 @@ def test_people_list_and_detail(client: TestClient) -> None:
     assert detail["gallery"][0]["gallery_embedding_id"] == 99
     assert detail["gallery"][0]["source_image_url"] == "/media/face-registration/reese.jpg"
     assert "embedding" not in detail["gallery"][0]
+
+
+def test_people_find_returns_image_trajectory_without_evidence_video(client: TestClient) -> None:
+    resp = client.get("/api/v1/people/10/find?limit=10&min_similarity=0.7")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["mode"] == "person_lookup"
+    assert data["latest_location"]["playback_kind"] == "image"
+    assert data["latest_location"]["result_mode"] == "latest_camera_hit"
+    assert data["latest_location"]["annotated_frame_url"] == "/media/faces/reese-annotated.jpg"
+    assert data["results"][0]["trajectory_source"] == "watchlist_event"
+    assert data["query"]["limit"] == 10
+
+
+def test_people_find_defaults_to_nonzero_similarity_threshold(client: TestClient) -> None:
+    resp = client.get("/api/v1/people/10/find?limit=10")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["query"]["min_similarity"] == 0.6
+    assert data["query"]["include_unregistered_sources"] is False
+
+
+def test_people_find_can_explicitly_include_unregistered_sources(client: TestClient) -> None:
+    resp = client.get("/api/v1/people/10/find?limit=10&include_unregistered_sources=true")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["query"]["include_unregistered_sources"] is True
 
 
 def test_register_face_upload_forces_real_manual_upload_path(

@@ -20,6 +20,12 @@ DEFAULT_SIDECAR_CONFIG = {
     "lookback_count": 10000,
     "range_count": 2000,
     "max_scan": 20000,
+    "range_cache_bucket_ms": 0,
+    "range_cache_ttl_s": 0.0,
+    "range_cache_max_entries": 0,
+    "source_stream_enabled": False,
+    "source_stream_pattern": "security.frame_annotations.{source_id}",
+    "source_stream_fallback_global": True,
     "stream_session_filter_mode": "strict",
     "max_events_per_run": 5,
     "annotations_filename": "annotations.frame_cache.identity.jsonl",
@@ -111,6 +117,30 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
             "max_scan": _positive_int(
                 source.get("FRAME_CACHE_SIDECAR_MAX_SCAN"),
                 int(config["max_scan"]),
+            ),
+            "range_cache_bucket_ms": _positive_int(
+                source.get("FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS"),
+                int(config.get("range_cache_bucket_ms") or 0),
+            ),
+            "range_cache_ttl_s": _positive_float(
+                source.get("FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S"),
+                float(config.get("range_cache_ttl_s") or 0.0),
+            ),
+            "range_cache_max_entries": _positive_int(
+                source.get("FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES"),
+                int(config.get("range_cache_max_entries") or 0),
+            ),
+            "source_stream_enabled": _boolish(
+                source.get("FRAME_CACHE_SIDECAR_SOURCE_STREAM_ENABLED"),
+                bool(config.get("source_stream_enabled")),
+            ),
+            "source_stream_pattern": str(
+                source.get("FRAME_CACHE_SIDECAR_SOURCE_STREAM_PATTERN")
+                or config["source_stream_pattern"]
+            ),
+            "source_stream_fallback_global": _boolish(
+                source.get("FRAME_CACHE_SIDECAR_SOURCE_STREAM_FALLBACK_GLOBAL"),
+                bool(config.get("source_stream_fallback_global")),
             ),
             "stream_session_filter_mode": str(
                 source.get("FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE")

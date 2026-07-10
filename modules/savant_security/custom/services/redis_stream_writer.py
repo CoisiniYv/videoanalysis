@@ -77,7 +77,7 @@ class AsyncRedisStreamWriter:
         self.dropped_count = 0
         self.write_error_count = 0
         self._closed = False
-        self._queue: queue.Queue[dict[str, Any] | object] = queue.Queue(
+        self._queue: queue.Queue[tuple[str, int, dict[str, Any]] | object] = queue.Queue(
             maxsize=self.queue_maxsize
         )
         self._client = self._create_client(redis_module)
@@ -100,13 +100,25 @@ class AsyncRedisStreamWriter:
             retry_sleep_ms=self.retry_sleep_ms,
         )
 
-    def enqueue(self, fields: dict[str, Any]) -> bool:
+    def enqueue(
+        self,
+        fields: dict[str, Any],
+        *,
+        stream: str | None = None,
+        maxlen: int | None = None,
+    ) -> bool:
         if self._closed:
             self.dropped_count += 1
             self._log("drop", reason="writer_closed")
             return False
         try:
-            self._queue.put_nowait(dict(fields))
+            self._queue.put_nowait(
+                (
+                    str(stream or self.stream),
+                    int(self.maxlen if maxlen is None else maxlen),
+                    dict(fields),
+                )
+            )
         except queue.Full:
             self.dropped_count += 1
             self._log("drop", reason="queue_full", dropped_count=self.dropped_count)
@@ -150,7 +162,8 @@ class AsyncRedisStreamWriter:
             try:
                 if fields is _STOP:
                     return
-                self._xadd_with_retries(fields)
+                stream, maxlen, payload = fields
+                self._xadd_with_retries(payload, stream=stream, maxlen=maxlen)
             except Exception as exc:
                 self.write_error_count += 1
                 self._log(
@@ -161,15 +174,21 @@ class AsyncRedisStreamWriter:
             finally:
                 self._queue.task_done()
 
-    def _xadd_with_retries(self, fields: dict[str, Any]) -> None:
+    def _xadd_with_retries(
+        self,
+        fields: dict[str, Any],
+        *,
+        stream: str,
+        maxlen: int,
+    ) -> None:
         attempts = self.write_retries + 1
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
                 self._client.xadd(
-                    self.stream,
+                    stream,
                     fields,
-                    maxlen=self.maxlen,
+                    maxlen=maxlen,
                     approximate=True,
                 )
                 return

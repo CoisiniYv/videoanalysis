@@ -1,6 +1,6 @@
 # Project Current Progress Summary
 
-更新时间：2026-06-29
+更新时间：2026-07-05
 
 ## 总体结论
 
@@ -54,8 +54,81 @@ DB identity 正确，不等同于真实 60 路吞吐通过。修改记录见
 exact rerank、event publish 和 ACK 是否需要拆 persistence/matching 队列”。详细记录见
 `docs/midterm_qdrant_face_gallery_cutover_2026-06-29.md`。
 
+2026-07-04 已完成 midterm evidence 证据生成链路 Phase 2 性能修复。最终采纳
+4 个 Replay/video-file-sink evidence shard，加全局 materialization concurrency
+`36`、per-shard limit `9`。60 路 8 FPS、证据窗口 5/10/20 的完整压测通过：
+`pressure60_phase24b_evidence4_global36_8fps_prepost_5_10_20_20260704T0208`，
+`status=passed`、`kept_evidence=60`、`record_request_pending_ms p95=45.55s`、
+`sink_video_to_stable_ms p95=72.85ms`、`max_concurrent_reached=0`。8 shard 探索
+也保留了 60 条证据，但 `record_request_pending_ms p95=61.36s` 略高于验收线，
+因此不作为默认配置。详细记录见
+`docs/midterm_evidence_pipeline_sharding_diagnosis_2026-07-03.md`。
+
+同日补齐运行态性能可观测性说明和轻量 stage-rate 指标：8090 runtime overview
+可以按摄像头展示 rolling `Pose FPS`、`Face FPS`、`AdaFace/s`，对应 Savant
+`va_savant_pose_stage_fps`、`va_savant_face_stage_fps` 和
+`va_savant_adaface_embedding_fps`。常开指标保持轻量，重诊断默认关闭；详细说明见
+`docs/midterm_runtime_performance_observability.md`。
+
+2026-07-05 又补了一轮 rolling-cache recount 失配修复：问题不是 Replay slot，
+而是 pressure runner 在 runtime apply/restart 之前就先重建
+`rolling-cache-sink*`，导致 sink 进程把旧的 `runtime_epoch_id` 固定在环境里，
+后续 segment 落进历史 epoch 目录；media-worker lookup 又会跨历史 epoch 扫描同
+一 `source_id`，因此出现 `no_overlapping_segments` 和 coverage 命中不稳定。
+当前已完成三项修复：
+
+1. pressure runner 改成先完成 runtime apply/restart，再启动 rolling-cache sink；
+2. 启动 sink 时显式传入 `ROLLING_CACHE_RUNTIME_EPOCH_ID`；
+3. rolling-cache lookup 在已知 `runtime_epoch_id` 时只查该 epoch，不再把历史
+   epoch 混入本轮 evidence materialization。
+
+同时 pressure artifact 现在会单独保留 `rolling_cache_sink*_logs_since_start.txt`
+便于直接核对写入侧 coverage。
+
+同日又修正了 rolling-cache full-generation 的统计口径和 coverage 子事件状态：
+
+1. `covered_by` 子事件现在会在 `evidence_tasks.materialization_defer_reason`
+   中显式写 `covered_by_existing_evidence`，不再把大量 coverage defer 混成
+   `reason=NULL`；
+2. `db_summary` / `wait_for_drain` / failure gate 改为按
+   **distinct event coverage** 判断 run 是否真正收敛，不再用
+   `playable_bundles + covered_playable_events` 这种会重复计数的近似值；
+3. 新增 `distinct_events_with_playable_evidence`、
+   `distinct_events_without_playable_evidence`、
+   `distinct_events_with_terminal_nonplayable_outcome`、
+   `blocking_materialization_tasks` 等字段，方便直接看“哪些 event 已经有可播放证据、
+   哪些还在等待、哪些是明确终态失败”。
+
+同日还完成了生产运行时的 **epoch barrier** 首版落地，不再只是 pressure runner
+侧的收尾修补：
+
+1. `evidence_tasks` 新增一等字段 `runtime_epoch_id`，migration 会从历史 event
+   payload 回填已有行；
+2. `runtime restart` / `topology apply` / 8090 runtime control 共用新的 barrier，
+   默认先等待旧 epoch 非终态任务 drain，超时时 `force=false` 返回 `409 blocked`；
+3. `force=true` 会在切换动作内部把剩余非终态任务通过单次条件更新显式终态化为
+   `epoch_superseded_incomplete`，不再允许“老 epoch 任务卡在 pending/materializing
+   但没有任何 worker 会再处理”的沉默悬空；
+4. media-worker 的 materialized/ready 回写路径增加了
+   `epoch_superseded_incomplete` 保护，避免 barrier 已经判失败的任务被后续旧 worker
+   成功回写“复活”；
+5. 8090 runtime overview 后端增加 `epoch_barrier` 诊断摘要，可直接看到当前
+   runtime epoch、阻塞任务数和 orphan 信号。
+
 ```text
-RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis/PostgreSQL/Qdrant
+RTSP -> Replay storage -> replay-raw-fanout -> analysis-forwarder -> Savant inference -> Redis/PostgreSQL/Qdrant
+  -> event-worker
+  -> 8090 operator portal
+
+Rolling-cache side tap:
+
+Replay storage -> replay-raw-fanout -> rolling-cache sink segments
+  -> media-worker rolling-cache materialization / covered_by alias
+  -> 8090 operator portal
+
+Fallback:
+
+RTSP -> Replay storage -> replay-raw-fanout -> analysis-forwarder -> Savant inference -> Redis/PostgreSQL/Qdrant
   -> event-worker -> clip-worker -> Replay job -> video-file-sink
   -> media-worker evidence sidecar -> 8090 operator portal
 ```
@@ -119,6 +192,14 @@ RTSP -> Replay storage -> analysis-forwarder -> Savant inference -> Redis/Postgr
 - Replay-first 证据链路已接通。
 - `analysis-forwarder` 已插入 Replay `out_stream` 与 Savant 之间，用于分析分支
   采样、drop-on-backpressure 和 `va_forwarder_*` 指标输出；它不是证据视频来源。
+- 60 路 evidence pressure 目标当前采用 4 个 Replay/video-file-sink export shard；
+  pressure runner 支持 2/4/8 shard，并记录 stable source->shard manifest、
+  mapping version 和 mismatch diagnostics。
+- `infra/env/midterm.env` 默认 `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY=36`，
+  `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD=9`，
+  `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE=1`。
+- 8090 runtime overview 已按摄像头展示 Savant rolling stage rate：
+  `Pose FPS`、`Face FPS`、`AdaFace/s`，并保留累计人体、人脸、人脸特征计数。
 - evidence bundle 当前包含 `raw_clip.mov`、`sink_metadata.json`、
   `annotations.frame_cache.identity.jsonl`、`summary.frame_cache.identity.json`、
   `metadata.json`。
@@ -178,6 +259,38 @@ video-file-sink/media-worker burst capacity 已通过。后续仍需执行 10 ->
 staged runtime pressure test。
 
 详细记录：`docs/midterm_replay_shard_change_record_2026-06-18.md`。
+
+### 2026-07-04 60 路 evidence Phase 2 性能修复
+
+问题：`REPLAY_TS_SYNC=false` 和 clip-worker 多 consumer 后，Replay/sink 本身已不再按
+素材原始时间重流，但 60 路突发证据仍出现 `record_request_pending_ms` 尾部超 60s。
+根因继续下移到 Replay/sink 出口分片不足、clip-worker 全局 materialization limit
+未随 shard 数放大，以及 media-worker/finalizer 后处理尾部。
+
+当前状态：已补 artifact 分析、drain 检查、stable shard manifest、mapping mismatch
+diagnostics、4/8 shard Replay/sink 配置和 pressure runner 自动并发配置。最终采纳
+4 shard + global limit 36。验收压测：
+
+```text
+run_id=pressure60_phase24b_evidence4_global36_8fps_prepost_5_10_20_20260704T0208
+artifact_dir=/data/video-analytics/artifacts/pressure60_phase24b_evidence4_global36_8fps_prepost_5_10_20_20260704T0208
+status=passed
+kept_evidence=60
+record_request_pending_ms p95=45549.8ms
+proof_wait_ms p95=6571.45ms
+sink_video_to_stable_ms p95=72.85ms
+max_concurrent_reached=0
+```
+
+边界：该结果证明当前机器上的 60 路 8 FPS evidence burst 能满足“总保留 60 条可播放证据”
+和 `record_request_pending_ms p95 < 60s`；它不等价于“每一路摄像头都至少保留一条证据”。
+如需验证每路覆盖率，应在 pressure report 中增加 `sources_with_events` 和
+`sources_with_playable_evidence` gate。
+
+剩余风险：`media_worker.queue_wait_ms` / `replay_to_sink_metadata_ms` 仍有 2 分钟级
+长尾。下一阶段若要继续压缩“事件触发到人能看到证据”的时间，应优先考虑 media-worker
+分片或独立 finalizer service，以及同源短时间多事件合并策略，而不是继续单纯增加
+Replay/sink shard 数。
 
 ### 2026-06-12 最近 24 小时性能修复
 
@@ -274,8 +387,10 @@ Replay 进入长时间 send retry，source-adapter 随后出现
 - Phase 0C 保留 live RTSP `SYNC_OUTPUT=false`，固定源和动态源创建路径一致。
 - Phase 0D 证明 RTSP adapter entrypoint 不读取 send-timeout/retry env，因此
   不添加假保护配置。
-- Phase 1 已增加 `services/analysis-forwarder/`，Replay 输出改为
-  `dealer+connect:tcp://analysis-forwarder:5557`，forwarder 再写 Savant。
+- Phase 1 已增加 `services/analysis-forwarder/`；2026-07-06 后 Replay 输出先到
+  `dealer+connect:tcp://replay-raw-fanout:5557`，rolling-cache 在这个
+  pre-analysis fanout 上取原始帧，fanout 再写 `analysis-forwarder:5557` 给
+  Savant 采样/推理。
 
 详细记录：
 
@@ -330,8 +445,9 @@ overlay frame-identity hardening，以及“无 upstream event”的检测/规�
    8090 浏览器入口接入，需要单独实现。
 6. runtime apply/restart 依赖 Docker socket 和容器网络名；部署机需要保持
    compose project、网络、容器命名与 midterm 配置一致。
-7. evidence fail-closed 后会保留诊断文件，但不会发布不可信 raw clip；上线验收时
-   需要把“无 raw clip 但有失败原因”当作保护行为，而不是静默成功。
+7. 当前默认开启 fast raw clip：60 路压力下优先发布可播放 raw clip，并把不精确
+   时间边界标记为 `generated_unverified` / `duration_guard_status=relaxed`，而不是
+   删除证据。严格 canonical 裁剪与 overlay 可信绑定仍需单独验收。
 8. Phase 2/3 的 30/60 路能力必须在真实 T4 和足够源数上验证；当前 dev runtime
    的两源稳定性不能外推为生产容量。
 9. Lab camera “人走过但无 evidence”必须先分清无 upstream event 还是 event 已产生
@@ -351,9 +467,67 @@ overlay frame-identity hardening，以及“无 upstream event”的检测/规�
    annotations 通过宽时间窗口画错框。
 6. 在真实 T4 30 路环境运行 Phase 2 readiness 和 pressure runner，生成
    `PASS_PHASE2_SINGLE_T4_30` 后再更新 operating point。
-7. 在已完成 Phase 3A shard routing 最小闭环的基础上，继续执行 10 -> 30 -> 60
-   staged pressure test，并落实 `specs/21` 的 evidence IO 优化，避免
-   `replay-sink-output` 成为 60 路下的磁盘瓶颈。
+7. Rolling cache 已进入 MVP 代码阶段，详见
+   `specs/30_midterm_rolling_cache_evidence_plan.md`：
+   已新增确定性 republish offset/loop、rolling-cache sink entrypoint、
+   media-worker segment lookup/materialization fast path，以及
+   `ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS` canary 开关。同源事件覆盖/合并
+   MVP 也已加在 `EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED=false` 后面，子事件
+   语义为 `covered_by_event`，不是 `materialization_skipped`。单路 runtime
+   canary `rolling_cache_canary_20260704T130505Z` 已证明 writer 可以写约
+   4s segment，media-worker 可以生成 `rolling_cache_copy` playable bundle，
+   artifact 在
+   `/data/video-analytics/artifacts/rolling_cache_canary_20260704T130505Z`。
+   8 路 deterministic canary
+   `rollingcache_canary8c_20260704T133300Z` 也已通过：
+   event-worker suppress record requests、media-worker rolling source filter、
+   rolling-cache sink 启动/恢复逻辑和 8090 DB evidence detail 均闭环；
+   retained evidence 均为 `materialization_mode=rolling_cache_copy`，Replay slot
+   使用为 0，artifact 在
+   `/data/video-analytics/artifacts/rollingcache_canary8c_20260704T133300Z`。
+   60 路 8 FPS deterministic run
+   `rollingcache_p60_8fps2_20260704T134217Z` 也已跑完并清理干净：
+   40 个事件、36 个 8090 可打开的 `rolling_cache_copy` bundle、Replay slot 使用
+   为 0，artifact 在
+   `/data/video-analytics/artifacts/rollingcache_p60_8fps2_20260704T134217Z`。
+   但这不是最终性能验收：固定 `testVideo/test.mp4` 事件密度太低，没有触及旧
+   150-195 playable ceiling；且 4 个事件没有 playable bundle，后续 runner 已改为
+   在 `--keep-evidence -1` 下把这种情况判为失败。下一步需要更高事件密度的
+   deterministic 输入，或 live `1080movie` exploratory stress，证明高压事件量下
+   playable/covered evidence 仍显著高于旧 Replay ceiling。
+8. 在 corrected `replay-raw-fanout` rolling-cache tap 通过后，跑 60 路 8 FPS、600s、5/10/20 窗口压测，
+   关注 `rolling_cache_copy` 数量、Replay fallback 数量、
+   `materialization_expired`、120s drain 内落盘、rolling segment/evidence FPS
+   proof、annotation coverage 和 8090 样本播放质量。
+
+### Rolling cache final live stress update - 2026-07-04
+
+当前 rolling cache MVP 曾完成一轮 60 路 8 FPS、400s live high-density stress，
+但 2026-07-06 已判定这轮不能作为证据视频帧率/流畅度验收：当时
+rolling-cache sink 订阅的是 `analysis-forwarder:5560`，仍然耦合在推理前向器
+路径里；正确路径应为 Replay 后、analysis-forwarder/resampler 前的
+`replay-raw-fanout:5560`。
+
+- artifact:
+  `/data/video-analytics/artifacts/rollingcache_live_p60_finalclean4_20260704T171638Z`;
+- runner status: `passed`；
+- before cleanup: 759 events、383 playable bundles、580 covered events、397
+  covered playable events；
+- post-reconcile retained state: 519 events、519 playable bundles/aliases、519
+  `materialized` tasks；
+- active evidence tasks: 0；
+- active Replay slots: 0；
+- pressure source containers: 0；
+- `security.record_requests`: 0，说明 evidence fast path 绕开了 per-event Replay
+  job。
+
+这轮只能保留为 worker/materialization datapoint，不能继续声称突破旧 Replay
+证据链路约 150-195 playable bundles / 400s 的产能天花板。当前证据语义是
+rolling-cache segment/GOP 级近似裁剪，优先保留可播放 raw clip；
+同源连续事件通过 `covered_by` alias 合并，不再用 `materialization_skipped` 假装
+成功。下一轮必须基于 corrected `replay-raw-fanout` 拓扑重新进行 60 路 8 FPS、600s
+压测，并把 120s drain 内全部 evidence 落盘、rolling segment/evidence 的实际
+FPS、以及 annotation coverage 作为通过条件。
 
 ## 详细文档索引
 

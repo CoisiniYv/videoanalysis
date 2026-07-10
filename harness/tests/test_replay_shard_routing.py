@@ -383,8 +383,8 @@ def test_dual_4090_replay_configs_forward_to_matching_forwarders() -> None:
     assert replay_a["in_stream"]["url"] == "router+bind:tcp://0.0.0.0:5555"
     assert replay_b["in_stream"]["url"] == "router+bind:tcp://0.0.0.0:5555"
     assert replay_a["out_stream"]["url"] == (
-        "dealer+connect:tcp://analysis-forwarder-a:5557"
+        "dealer+connect:tcp://replay-raw-fanout-a:5557"
     )
     assert replay_b["out_stream"]["url"] == (
-        "dealer+connect:tcp://analysis-forwarder-b:5557"
+        "dealer+connect:tcp://replay-raw-fanout-b:5557"
     )

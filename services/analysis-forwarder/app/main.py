@@ -27,6 +27,7 @@ SUCCESS_RESULTS = {"WriterResultSuccess", "WriterResultAck"}
 class ForwarderConfig:
     in_endpoint: str
     out_endpoint: str
+    raw_out_endpoint: str
     analysis_fps: str
     min_fps: str
     sampler_enabled: bool
@@ -43,6 +44,7 @@ class ForwarderConfig:
         return cls(
             in_endpoint=os.getenv("FORWARDER_IN_ENDPOINT", "router+bind:tcp://0.0.0.0:5557"),
             out_endpoint=os.getenv("FORWARDER_OUT_ENDPOINT", "dealer+connect:tcp://savant-security:5557"),
+            raw_out_endpoint=os.getenv("FORWARDER_RAW_OUT_ENDPOINT", ""),
             analysis_fps=os.getenv("ANALYSIS_FPS", os.getenv("MAX_FPS", "8/1")),
             min_fps=os.getenv("ANALYSIS_MIN_FPS", os.getenv("MIN_FPS", "2/1")),
             sampler_enabled=_bool_env("FORWARDER_SAMPLER_ENABLED", True),
@@ -90,6 +92,8 @@ class ForwarderMetrics:
                 "forwarded": "va_forwarder_frames_forwarded_total",
                 "dropped": "va_forwarder_frames_dropped_total",
                 "send_failures": "va_forwarder_savant_send_failures_total",
+                "raw_forwarded": "va_forwarder_raw_frames_forwarded_total",
+                "raw_send_failures": "va_forwarder_raw_send_failures_total",
             }
             for key, prom_name in metric_names.items():
                 lines.append(f"# TYPE {prom_name} counter")
@@ -142,25 +146,33 @@ class AnalysisForwarder:
             receive_timeout=config.receive_timeout_ms,
             receive_hwm=config.receive_hwm,
         )
-        if _is_null_endpoint(config.out_endpoint):
-            self.writer = NullWriter()
+        self.raw_writer = self._build_writer(config.raw_out_endpoint)
+        self.raw_sink_enabled = not isinstance(self.raw_writer, NullWriter)
+        self.writer = self._build_writer(config.out_endpoint)
+        if isinstance(self.writer, NullWriter):
             self.metrics.null_sink_enabled = 1
-        else:
-            writer_config = WriterConfigBuilder(config.out_endpoint)
-            writer_config.with_send_timeout(config.send_timeout_ms)
-            writer_config.with_send_retries(config.send_retries)
-            writer_config.with_send_hwm(config.send_hwm)
-            self.writer = BlockingWriter(writer_config.build())
+
+    def _build_writer(self, endpoint: str) -> BlockingWriter | "NullWriter":
+        if _is_null_endpoint(endpoint):
+            return NullWriter()
+        writer_config = WriterConfigBuilder(endpoint)
+        writer_config.with_send_timeout(self.config.send_timeout_ms)
+        writer_config.with_send_retries(self.config.send_retries)
+        writer_config.with_send_hwm(self.config.send_hwm)
+        return BlockingWriter(writer_config.build())
 
     def run(self) -> None:
         sink_mode = "null" if self.metrics.null_sink_enabled else "savant"
         LOGGER.info(
-            "starting forwarder in=%s out=%s sink_mode=%s",
+            "starting forwarder in=%s out=%s raw_out=%s sink_mode=%s raw_sink=%s",
             self.config.in_endpoint,
             self.config.out_endpoint,
+            self.config.raw_out_endpoint or "<disabled>",
             sink_mode,
+            "enabled" if self.raw_sink_enabled else "disabled",
         )
         self.reader.start()
+        self.raw_writer.start()
         self.writer.start()
         writer_thread = threading.Thread(target=self._write_loop, name="forwarder-writer", daemon=True)
         writer_thread.start()
@@ -191,6 +203,7 @@ class AnalysisForwarder:
             video_frame = message.as_video_frame()
             source_id = str(video_frame.source_id or "")
             self.metrics.inc(source_id, "seen")
+            self._fanout_raw(source_id, message, zmq_message.content or b"")
             if not self.sampler.admit(video_frame):
                 self.metrics.inc(source_id, "dropped")
                 return None
@@ -205,6 +218,7 @@ class AnalysisForwarder:
         if message.is_end_of_stream():
             eos = message.as_end_of_stream()
             source_id = str(eos.source_id or "")
+            self._fanout_raw(source_id, message, zmq_message.content or b"")
             return ForwarderMessage(
                 topic=source_id,
                 message=message,
@@ -225,6 +239,25 @@ class AnalysisForwarder:
         LOGGER.warning("dropping unsupported message type: %r", message)
         self.metrics.inc("_unsupported", "dropped")
         return None
+
+    def _fanout_raw(self, source_id: str, message: Any, content: bytes) -> None:
+        if not self.raw_sink_enabled:
+            return
+        try:
+            result = self.raw_writer.send_message(source_id, message, content)
+        except Exception as exc:
+            LOGGER.warning("failed to send raw branch source_id=%s: %s", source_id, exc)
+            self.metrics.inc(source_id or "_unknown_source", "raw_send_failures")
+            return
+        if type(result).__name__ not in SUCCESS_RESULTS:
+            LOGGER.warning(
+                "raw branch send was not successful source_id=%s result=%r",
+                source_id,
+                result,
+            )
+            self.metrics.inc(source_id or "_unknown_source", "raw_send_failures")
+            return
+        self.metrics.inc(source_id or "_unknown_source", "raw_forwarded")
 
     def _write_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -250,7 +283,7 @@ class AnalysisForwarder:
 
     def _shutdown(self) -> None:
         self.metrics.running = 0
-        for endpoint in (self.writer, self.reader):
+        for endpoint in (self.writer, self.raw_writer, self.reader):
             try:
                 endpoint.shutdown()
             except AttributeError:

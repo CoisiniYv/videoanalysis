@@ -153,11 +153,11 @@ def config_from_env() -> RuntimeTopologyConfig:
 
 
 DEFAULT_BRANCH = {
-    "savant_batch_size": 1,
-    "pose_batch_size": 1,
-    "face_detector_batch_size": 1,
+    "savant_batch_size": 4,
+    "pose_batch_size": 4,
+    "face_detector_batch_size": 4,
     "face_embedding_batch_size": 16,
-    "max_parallel_streams": 4,
+    "max_parallel_streams": 64,
     "analysis_fps": "8/1",
     "analysis_min_fps": "2/1",
     "savant_max_fps": "8/1",
@@ -656,11 +656,11 @@ def _branch_config(branch_id: str, raw: dict[str, Any], *, gpu_id: int) -> Branc
     return BranchConfig(
         branch_id=branch_id,
         gpu_id=gpu_id,
-        savant_batch_size=int(raw.get("savant_batch_size", 1)),
-        pose_batch_size=int(raw.get("pose_batch_size", 1)),
-        face_detector_batch_size=int(raw.get("face_detector_batch_size", 1)),
+        savant_batch_size=int(raw.get("savant_batch_size", 4)),
+        pose_batch_size=int(raw.get("pose_batch_size", 4)),
+        face_detector_batch_size=int(raw.get("face_detector_batch_size", 4)),
         face_embedding_batch_size=int(raw.get("face_embedding_batch_size", 16)),
-        max_parallel_streams=int(raw.get("max_parallel_streams", 4)),
+        max_parallel_streams=int(raw.get("max_parallel_streams", 64)),
         analysis_fps=str(raw.get("analysis_fps", "8/1")),
         analysis_min_fps=str(raw.get("analysis_min_fps", "2/1")),
         savant_max_fps=str(raw.get("savant_max_fps", "8/1")),

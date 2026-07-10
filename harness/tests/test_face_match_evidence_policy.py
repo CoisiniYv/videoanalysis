@@ -51,7 +51,7 @@ def test_watchlist_hit_default_evidence_policy_is_5_plus_5() -> None:
     assert event["payload"]["media"]["post_seconds"] == 5
 
 
-def test_watchlist_hit_event_time_uses_ntp_timestamp_not_frame_pts() -> None:
+def test_watchlist_hit_event_time_uses_frame_pts_not_ntp_timestamp() -> None:
     service = _activate_face_service()
 
     event = service.build_watchlist_hit_event(
@@ -81,7 +81,10 @@ def test_watchlist_hit_event_time_uses_ntp_timestamp_not_frame_pts() -> None:
         threshold=0.5,
     )
 
-    assert event["event_ts_ms"] == 1_781_191_630_112
-    assert event["start_ts_ms"] == 1_781_191_630_112
-    assert event["end_ts_ms"] == 1_781_191_630_112
+    assert event["event_ts_ms"] == 1_000
+    assert event["start_ts_ms"] == 1_000
+    assert event["end_ts_ms"] == 1_000
     assert event["payload"]["observation"]["timestamp_ms"] == 1_000
+    assert event["payload"]["media"]["ntp_timestamp"] == 1_781_191_630_112_867_000
+    assert event["payload"]["media"]["frame_identity_anchor"] == "frame_uuid"
+    assert event["payload"]["media"]["time_domain"] == "savant_frame"

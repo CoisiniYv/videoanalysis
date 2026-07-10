@@ -144,10 +144,43 @@ def upsert_evidence_bundle_index(
 
     artifacts = [
         ("raw_clip", raw_clip, _content_type(raw_clip), None, raw_clip_size, raw_clip_sha, {"filename": raw_clip.name if raw_clip else None}),
-        ("overlay_annotations", annotations_path if annotations_path.is_file() else None, "application/x-ndjson", None, _file_size(annotations_path), None, {"records": annotation_count}),
-        ("sink_timeline", sink_metadata_path if sink_metadata_path.is_file() else None, "application/json", None, _file_size(sink_metadata_path), None, {}),
-        ("bundle_summary", bundle / BUNDLE_SUMMARY_FILE if (bundle / BUNDLE_SUMMARY_FILE).is_file() else None, "application/json", None, _file_size(bundle / BUNDLE_SUMMARY_FILE), None, {}),
     ]
+    if not include_overlays:
+        artifacts.append(
+            (
+                "overlay_annotations",
+                annotations_path if annotations_path.is_file() else None,
+                "application/x-ndjson",
+                None,
+                _file_size(annotations_path),
+                None,
+                {"records": annotation_count},
+            )
+        )
+    if not include_timeline:
+        artifacts.append(
+            (
+                "sink_timeline",
+                sink_metadata_path if sink_metadata_path.is_file() else None,
+                "application/json",
+                None,
+                _file_size(sink_metadata_path),
+                None,
+                {},
+            )
+        )
+    if not (include_timeline and include_overlays):
+        artifacts.append(
+            (
+                "bundle_summary",
+                bundle / BUNDLE_SUMMARY_FILE if (bundle / BUNDLE_SUMMARY_FILE).is_file() else None,
+                "application/json",
+                None,
+                _file_size(bundle / BUNDLE_SUMMARY_FILE),
+                None,
+                {},
+            )
+        )
     ffmpeg_log = bundle / FFMPEG_LOG_FILE
     if media_status != "materialized" and ffmpeg_log.is_file():
         artifacts.append(
@@ -244,13 +277,34 @@ def _upsert_artifact(
 
 def _upsert_timeline(conn: psycopg.Connection, *, event_id: str, path: Path) -> int:
     rows = _load_records(path)
-    count = 0
-    with conn.cursor() as cur:
-        for index, record in enumerate(rows):
-            frame_index = _int_or_none(record.get("clip_frame_index"))
-            if frame_index is None:
-                frame_index = index
-            cur.execute(
+    params = []
+    for index, record in enumerate(rows):
+        frame_index = _int_or_none(record.get("clip_frame_index"))
+        if frame_index is None:
+            frame_index = index
+        params.append(
+            {
+                "event_id": event_id,
+                "clip_frame_index": frame_index,
+                "frame_uuid": _text(record.get("frame_uuid") or record.get("uuid")),
+                "frame_pts": _int_or_none(record.get("frame_pts") or record.get("pts")),
+                "frame_dts": _int_or_none(record.get("frame_dts") or record.get("dts")),
+                "duration_ns": _int_or_none(record.get("duration")),
+                "timestamp_ms": _int_or_none(record.get("timestamp_ms")),
+                "width": _int_or_none(record.get("width")),
+                "height": _int_or_none(record.get("height")),
+                "source_id": _text(record.get("source_id")),
+                "camera_id": _text(record.get("camera_id")),
+                "stream_session_id": _text(record.get("stream_session_id")),
+                "keyframe_uuid": _text(record.get("keyframe_uuid")),
+                "metadata": Jsonb(record),
+            }
+        )
+    if not params:
+        return 0
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.executemany(
                 """
                 INSERT INTO evidence_frame_timeline (
                     event_id, clip_frame_index, frame_uuid, frame_pts, frame_dts,
@@ -278,39 +332,48 @@ def _upsert_timeline(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
                     keyframe_uuid = EXCLUDED.keyframe_uuid,
                     metadata = EXCLUDED.metadata
                 """,
-                {
-                    "event_id": event_id,
-                    "clip_frame_index": frame_index,
-                    "frame_uuid": _text(record.get("frame_uuid") or record.get("uuid")),
-                    "frame_pts": _int_or_none(record.get("frame_pts") or record.get("pts")),
-                    "frame_dts": _int_or_none(record.get("frame_dts") or record.get("dts")),
-                    "duration_ns": _int_or_none(record.get("duration")),
-                    "timestamp_ms": _int_or_none(record.get("timestamp_ms")),
-                    "width": _int_or_none(record.get("width")),
-                    "height": _int_or_none(record.get("height")),
-                    "source_id": _text(record.get("source_id")),
-                    "camera_id": _text(record.get("camera_id")),
-                    "stream_session_id": _text(record.get("stream_session_id")),
-                    "keyframe_uuid": _text(record.get("keyframe_uuid")),
-                    "metadata": Jsonb(record),
-                },
+                params,
             )
-            count += 1
-    return count
+    return len(params)
 
 
 def _upsert_overlays(conn: psycopg.Connection, *, event_id: str, path: Path) -> int:
     rows = _load_records(path)
-    count = 0
-    with conn.cursor() as cur:
-        for index, record in enumerate(rows):
-            frame_index = _int_or_none(record.get("clip_frame_index"))
-            if frame_index is None:
-                frame_index = index
-            objects = record.get("objects")
-            if not isinstance(objects, list):
-                objects = []
-            cur.execute(
+    records_by_frame: dict[int, dict[str, Any]] = {}
+    for index, record in enumerate(rows):
+        frame_index = _int_or_none(record.get("clip_frame_index"))
+        if frame_index is None:
+            frame_index = index
+        objects = record.get("objects")
+        if not isinstance(objects, list):
+            objects = []
+        existing = records_by_frame.get(frame_index)
+        if existing is None:
+            merged_record = dict(record)
+            merged_objects = list(objects)
+        else:
+            merged_record = dict(existing["record"])
+            merged_record.update(record)
+            merged_objects = list(existing["objects"]) + list(objects)
+            merged_record["objects"] = merged_objects
+        frame_pts = _int_or_none(record.get("frame_pts") or record.get("pts"))
+        t_ms = _int_or_none(record.get("t_ms"))
+        records_by_frame[frame_index] = {
+            "clip_frame_index": frame_index,
+            "frame_uuid": _text(record.get("frame_uuid") or record.get("uuid"))
+            or (existing or {}).get("frame_uuid"),
+            "frame_pts": frame_pts if frame_pts is not None else (existing or {}).get("frame_pts"),
+            "t_ms": t_ms if t_ms is not None else (existing or {}).get("t_ms"),
+            "object_count": len(merged_objects),
+            "objects": merged_objects,
+            "record": merged_record,
+        }
+    records = [records_by_frame[key] for key in sorted(records_by_frame)]
+    if not records:
+        return 0
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.executemany(
                 """
                 INSERT INTO evidence_overlay_segments (
                     event_id, clip_frame_index, frame_uuid, frame_pts, t_ms,
@@ -329,19 +392,17 @@ def _upsert_overlays(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
                     objects = EXCLUDED.objects,
                     record = EXCLUDED.record
                 """,
-                {
-                    "event_id": event_id,
-                    "clip_frame_index": frame_index,
-                    "frame_uuid": _text(record.get("frame_uuid") or record.get("uuid")),
-                    "frame_pts": _int_or_none(record.get("frame_pts") or record.get("pts")),
-                    "t_ms": _int_or_none(record.get("t_ms")),
-                    "object_count": len(objects),
-                    "objects": Jsonb(objects),
-                    "record": Jsonb(record),
-                },
+                [
+                    {
+                        **record,
+                        "event_id": event_id,
+                        "objects": Jsonb(record["objects"]),
+                        "record": Jsonb(record["record"]),
+                    }
+                    for record in records
+                ],
             )
-            count += 1
-    return count
+    return len(records)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -367,6 +428,15 @@ def _load_records(path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             return []
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    if stripped[0] == "{":
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict) and isinstance(value.get("frames"), list):
+            return [item for item in value["frames"] if isinstance(item, dict)]
+        if isinstance(value, dict):
+            return [value]
     records: list[dict[str, Any]] = []
     for line in text.splitlines():
         if not line.strip():
@@ -418,6 +488,15 @@ def _materialization(summary: dict[str, Any], sidecar_summary: dict[str, Any]) -
         "epoch_guard_status",
         "epoch_guard_failed",
         "epoch_guard_reason",
+        "materialization_mode",
+        "rolling_cache_enabled",
+        "rolling_cache",
+        "canonical_clip",
+        "requested_start_pts",
+        "requested_end_pts",
+        "actual_start_pts",
+        "actual_end_pts",
+        "segment_ids",
     )
     return {key: summary.get(key) for key in keys if key in summary} | {
         "production_ready": bool(sidecar_summary.get("production_ready")),

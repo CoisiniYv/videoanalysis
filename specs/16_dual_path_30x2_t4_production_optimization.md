@@ -67,9 +67,10 @@ Implemented / kept:
 - Phase 0.5: the current Savant image can use `savant_rs` passthrough, and the
   ZMQ source path calls the ingress filter before building the downstream
   GStreamer buffer.
-- Phase 1: `services/analysis-forwarder/` is inserted between Replay and
-  Savant; Replay `out_stream` targets `analysis-forwarder:5557`; forwarder
-  targets `savant-security:5557`; runtime overview renders `va_forwarder_*`
+- Phase 1: `services/analysis-forwarder/` is inserted before Savant; current
+  Replay `out_stream` targets `replay-raw-fanout:5557`, the fanout exposes the
+  rolling-cache raw branch before sampling, then forwards to
+  `analysis-forwarder:5557`; runtime overview renders `va_forwarder_*`
   metrics.
 
 Current topology:
@@ -404,8 +405,10 @@ savant_rs wheel — **not** plain `python:3.12-slim`).
   (`services/analysis-forwarder/app/sampler.py`, or shared `libs/`), reusing the
   PTS-domain, keyframe-always-pass logic from
   `modules/savant_security/custom/filters/pts_fps_gate.py`.
-- Read side: bind `router+bind:tcp://0.0.0.0:5557`; Replay `out_stream` →
-  `dealer+connect:tcp://analysis-forwarder:5557`.
+- Read side: `replay-raw-fanout` binds `router+bind:tcp://0.0.0.0:5557`;
+  Replay `out_stream` → `dealer+connect:tcp://replay-raw-fanout:5557`.
+  The fanout then forwards full-rate frames to `analysis-forwarder:5557` and
+  publishes raw frames to the rolling-cache sink before sampling.
 - Write side: `dealer+connect:tcp://savant-security:5557`; Savant keeps
   `router+bind:5557`.
 - **Bounded queue + drop-on-full:** never block the read side (blocking would

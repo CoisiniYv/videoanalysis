@@ -26,6 +26,8 @@ class Config:
     materialization_max_backlog: int
     materialization_max_per_poll: int
     materialization_finalizer_workers: int
+    materialization_finalizer_max_per_source_per_poll: int
+    materialization_finalizer_source_serial: bool
     materialization_throttle_sleep_s: float
     materialization_throttle_deadline_guard_s: float
     materialization_cpu_thread_limit: int
@@ -37,6 +39,19 @@ class Config:
     evidence_storage_hard_ratio: float
     cleanup_replay_sink_output_enabled: bool
     cleanup_replay_sink_output_statuses: tuple[str, ...]
+    rolling_cache_enabled: bool
+    rolling_cache_materialization_enabled: bool
+    rolling_cache_root: str
+    rolling_cache_materialized_root: str
+    rolling_cache_retention_seconds: int
+    rolling_cache_segment_seconds: int
+    rolling_cache_sources: tuple[str, ...]
+    rolling_cache_fallback_to_replay: bool
+    rolling_cache_materialization_max_per_poll: int
+    rolling_cache_materialization_workers: int
+    rolling_cache_materialization_poll_interval_s: float
+    rolling_cache_materialization_ready_segment_grace_seconds: float
+    rolling_cache_materialization_processing_deadline_seconds: float
 
 
 def load_config() -> Config:
@@ -92,6 +107,16 @@ def load_config() -> Config:
             1,
             int(os.getenv("MEDIA_WORKER_FINALIZER_WORKERS", "1")),
         ),
+        materialization_finalizer_max_per_source_per_poll=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL", "1")),
+        ),
+        materialization_finalizer_source_serial=os.getenv(
+            "MEDIA_WORKER_FINALIZER_SOURCE_SERIAL", "true"
+        )
+        .strip()
+        .lower()
+        in ("true", "1", "yes"),
         materialization_throttle_sleep_s=max(
             0.0,
             float(os.getenv("MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S", "0")),
@@ -143,5 +168,72 @@ def load_config() -> Config:
                 "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES", "ready"
             ).split(",")
             if status.strip()
+        ),
+        rolling_cache_enabled=os.getenv("ROLLING_CACHE_ENABLED", "false")
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        rolling_cache_materialization_enabled=os.getenv(
+            "ROLLING_CACHE_MATERIALIZATION_ENABLED", "false"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        rolling_cache_root=os.getenv(
+            "ROLLING_CACHE_ROOT",
+            "/media/rolling-cache",
+        ),
+        rolling_cache_materialized_root=os.getenv(
+            "ROLLING_CACHE_MATERIALIZED_ROOT",
+            "/media/rolling-cache-materialized",
+        ),
+        rolling_cache_retention_seconds=max(
+            0,
+            int(os.getenv("ROLLING_CACHE_RETENTION_SECONDS", "300")),
+        ),
+        rolling_cache_segment_seconds=max(
+            1,
+            int(os.getenv("ROLLING_CACHE_SEGMENT_SECONDS", "4")),
+        ),
+        rolling_cache_sources=tuple(
+            source.strip()
+            for source in os.getenv("ROLLING_CACHE_SOURCES", "").split(",")
+            if source.strip()
+        ),
+        rolling_cache_fallback_to_replay=os.getenv(
+            "ROLLING_CACHE_FALLBACK_TO_REPLAY", "true"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        rolling_cache_materialization_max_per_poll=max(
+            1,
+            int(os.getenv("ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL", "16")),
+        ),
+        rolling_cache_materialization_workers=max(
+            1,
+            int(os.getenv("ROLLING_CACHE_MATERIALIZATION_WORKERS", "1")),
+        ),
+        rolling_cache_materialization_poll_interval_s=max(
+            0.1,
+            float(os.getenv("ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S", "1.0")),
+        ),
+        rolling_cache_materialization_ready_segment_grace_seconds=max(
+            0.0,
+            float(
+                os.getenv(
+                    "ROLLING_CACHE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+                    "1.0",
+                )
+            ),
+        ),
+        rolling_cache_materialization_processing_deadline_seconds=max(
+            1.0,
+            float(
+                os.getenv(
+                    "ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS",
+                    "120.0",
+                )
+            ),
         ),
     )

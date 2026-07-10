@@ -24,7 +24,7 @@ def test_operator_has_chinese_storage_maintenance_entry() -> None:
     assert "存储维护" in html
     assert "/static/maintenance.js" in html
     assert "/static/operator.js?v=" in html
-    assert "evidence-list-fast-20260615" in html
+    assert "face-trajectory-find-20260708" in html
     assert "maintenance-execute-control-20260627" in html
     assert "删除后不会自动重新生成证据" in html
     assert "删除必须先 preview" in html
@@ -83,7 +83,7 @@ def test_evidence_and_people_pages_open_maintenance_delete_preview() -> None:
     assert "删除当前人员" in html
     assert "openDeleteDialog" in operator_js
     assert "loadEvidenceCount" in operator_js
-    assert '`${API}/maintenance/storage/summary`' in operator_js
+    assert '"/storage/summary"' in maintenance_js
     assert "ACTIVE_VIEW_STORAGE_KEY" in operator_js
     assert "EVIDENCE_COUNT_STORAGE_KEY" in operator_js
     assert "initialTopView" in operator_js

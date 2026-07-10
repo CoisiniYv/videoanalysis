@@ -66,8 +66,8 @@ def evaluate_phase2_readiness(
             % (_matching_gpu_count(gpu_names, gpu_name_substring), ",".join(gpu_names) or "<none>"),
         ),
         CheckResult(
-            "replay_out_stream_targets_forwarder",
-            _nested_get(replay_doc, "out_stream", "url") == "dealer+connect:tcp://analysis-forwarder:5557",
+            "replay_out_stream_targets_raw_fanout",
+            _nested_get(replay_doc, "out_stream", "url") == "dealer+connect:tcp://replay-raw-fanout:5557",
             f"url={_nested_get(replay_doc, 'out_stream', 'url')!r}",
         ),
         CheckResult(

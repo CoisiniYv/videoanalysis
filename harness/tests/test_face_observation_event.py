@@ -55,6 +55,34 @@ class TestBuildSourceObservationId:
         id2 = build_face_source_observation_id("cam2", 42, 1000)
         assert id1 != id2
 
+    def test_uuid_anchor_format_when_frame_uuid_available(self):
+        oid = build_face_source_observation_id(
+            "cam1",
+            42,
+            1710000000000,
+            frame_uuid="frame-uuid-1",
+            face_index=0,
+        )
+        assert oid == "face:cam1:uuid:frame-uuid-1:0"
+
+    def test_uuid_anchor_face_index_disambiguates_multiple_faces(self):
+        id1 = build_face_source_observation_id(
+            "cam1",
+            42,
+            1000,
+            frame_uuid="frame-uuid-1",
+            face_index=0,
+        )
+        id2 = build_face_source_observation_id(
+            "cam1",
+            42,
+            1000,
+            frame_uuid="frame-uuid-1",
+            face_index=1,
+        )
+        assert id1 != id2
+        assert id2 == "face:cam1:uuid:frame-uuid-1:1"
+
 
 class TestEventToDict:
     def test_all_fields_present(self):

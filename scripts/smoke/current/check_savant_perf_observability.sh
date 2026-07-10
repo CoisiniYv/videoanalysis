@@ -82,6 +82,9 @@ REQUIRED_BY_SOURCE = [
     "va_savant_adaface_embeddings_total",
     "va_savant_person_observations_exported_total",
     "va_savant_face_observations_exported_total",
+    "va_savant_pose_stage_fps",
+    "va_savant_face_stage_fps",
+    "va_savant_adaface_embedding_fps",
 ]
 MUST_ADVANCE = [
     "va_savant_frames_seen_total",

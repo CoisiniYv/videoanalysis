@@ -202,7 +202,17 @@ def _recording_gate_ts_ms(event: dict) -> int:
     return ts_ms
 
 
-def _recording_cooldown_key(source_id: str, event_type: str) -> str:
+def _recording_cooldown_key(
+    source_id: str,
+    event_type: str,
+    *,
+    scope: str = "event_type",
+) -> str:
+    scope_value = str(scope or "event_type").strip().lower()
+    if scope_value == "source":
+        return source_id or str(event_type or "_unknown_event")
+    if scope_value == "global":
+        return "_global"
     event_part = str(event_type or "_unknown_event")
     return f"{source_id}:{event_part}" if source_id else event_part
 
@@ -274,10 +284,12 @@ def _handle_event(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
+    recording_cooldown_scope: str = "event_type",
     recording_cooldown_grace_ms: int = 1000,
     recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
     runtime_epoch_id: str = "",
+    rolling_cache_suppress_record_requests: bool = False,
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -367,11 +379,26 @@ def _handle_event(
         source_id = _resolve_source_id(event, "")
         event_type = event.get("event_type", "")
         if clip_required or payload_clip:
+            if rolling_cache_suppress_record_requests:
+                logger.info(
+                    "record_request_skipped source_event_id=%s source_id=%s "
+                    "event_type=%s reason=rolling_cache_materialization_enabled",
+                    source_event_id,
+                    source_id,
+                    event_type,
+                )
+                if not consumer.ack(msg_id):
+                    logger.error("ack failed for msg_id=%s", msg_id)
+                return newly_inserted, event_id
             existing_status = repo.get_media_clip_status(source_event_id)
             allowed = True
             skip_reason = ""
             recording_gate_ts_ms = _recording_gate_ts_ms(event)
-            cooldown_key = _recording_cooldown_key(source_id, event_type)
+            cooldown_key = _recording_cooldown_key(
+                source_id,
+                event_type,
+                scope=recording_cooldown_scope,
+            )
 
             if recording_event_types and event_type not in recording_event_types:
                 allowed = False
@@ -616,10 +643,12 @@ def _process_batch(
     recording_source_id: str = "",
     recording_max_requests_per_run: int = 0,
     recording_cooldown_seconds: int = 0,
+    recording_cooldown_scope: str = "event_type",
     recording_cooldown_grace_ms: int = 1000,
     recording_pre_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["pre_seconds"],
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
     runtime_epoch_id: str = "",
+    rolling_cache_suppress_record_requests: bool = False,
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -642,10 +671,14 @@ def _process_batch(
             recording_source_id=recording_source_id,
             recording_max_requests_per_run=recording_max_requests_per_run,
             recording_cooldown_seconds=recording_cooldown_seconds,
+            recording_cooldown_scope=recording_cooldown_scope,
             recording_cooldown_grace_ms=recording_cooldown_grace_ms,
             recording_pre_seconds=recording_pre_seconds,
             recording_post_seconds=recording_post_seconds,
             runtime_epoch_id=runtime_epoch_id,
+            rolling_cache_suppress_record_requests=(
+                rolling_cache_suppress_record_requests
+            ),
         )
         if new:
             inserted += 1
@@ -758,7 +791,8 @@ def run_worker(
         "worker started stream=%s group=%s consumer=%s alert_stream=%s "
         "recording_enabled=%s record_request_stream=%s recording_event_types=%s "
         "recording_source_id=%s recording_max_requests_per_run=%s "
-        "recording_cooldown_seconds=%s recording_cooldown_grace_ms=%s "
+        "recording_cooldown_seconds=%s recording_cooldown_scope=%s "
+        "recording_cooldown_grace_ms=%s "
         "recording_pre_seconds=%s "
         "recording_post_seconds=%s record_request_dedupe_ttl_seconds=%s "
         "person_observation_enabled=%s "
@@ -774,6 +808,7 @@ def run_worker(
         cfg.recording_source_id,
         cfg.recording_max_requests_per_run,
         cfg.recording_cooldown_seconds,
+        cfg.recording_cooldown_scope,
         cfg.recording_cooldown_grace_ms,
         cfg.recording_pre_seconds,
         cfg.recording_post_seconds,
@@ -857,10 +892,14 @@ def run_worker(
                     recording_source_id=cfg.recording_source_id,
                     recording_max_requests_per_run=cfg.recording_max_requests_per_run,
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                    recording_cooldown_scope=cfg.recording_cooldown_scope,
                     recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
                     recording_pre_seconds=cfg.recording_pre_seconds,
                     recording_post_seconds=cfg.recording_post_seconds,
                     runtime_epoch_id=runtime_epoch_id,
+                    rolling_cache_suppress_record_requests=(
+                        cfg.rolling_cache_suppress_record_requests
+                    ),
                 )
                 total_inserted += ins
                 total_duplicates += dup
@@ -887,10 +926,14 @@ def run_worker(
                     recording_source_id=cfg.recording_source_id,
                     recording_max_requests_per_run=cfg.recording_max_requests_per_run,
                     recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+                    recording_cooldown_scope=cfg.recording_cooldown_scope,
                     recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
                     recording_pre_seconds=cfg.recording_pre_seconds,
                     recording_post_seconds=cfg.recording_post_seconds,
                     runtime_epoch_id=runtime_epoch_id,
+                    rolling_cache_suppress_record_requests=(
+                        cfg.rolling_cache_suppress_record_requests
+                    ),
                 )
                 total_inserted += ins
                 total_duplicates += dup

@@ -77,7 +77,7 @@ pipeline:
         interval: ${parameters.pose_infer_interval}
       model:
         format: onnx
-        model_file: /models/yolo26_pose/yolo26_pose.onnx
+        model_file: ${oc.env:POSE_MODEL_FILE,/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx}
         batch_size: ${oc.decode:${oc.env:POSE_BATCH_SIZE, 1}}
         precision: fp16
         input:
@@ -91,7 +91,7 @@ pipeline:
             module: custom.converters.yolo26_pose
             class_name: Yolo26PoseConverter
             kwargs:
-              decoder_layout: post_nms_57
+              decoder_layout: ${oc.env:POSE_DECODER_LAYOUT,decoded_56}
               confidence_threshold: ${parameters.pose_confidence_threshold}
               keypoint_threshold: ${parameters.pose_keypoint_threshold}
               force_nms: ${parameters.pose_force_nms}
@@ -150,7 +150,7 @@ pipeline:
         interval: ${parameters.face_infer_interval}
       model:
         format: onnx
-        model_file: /models/yolov8_face/yolov8n-face.onnx
+        model_file: ${oc.env:FACE_DETECTOR_MODEL_FILE,/models/yolov8_face/yolov8n-face.dynamic.onnx}
         batch_size: ${oc.decode:${oc.env:FACE_DETECTOR_BATCH_SIZE, 1}}
         precision: fp16
         input:
@@ -278,6 +278,10 @@ pipeline:
         include_landmarks: ${oc.env:FRAME_ANNOTATION_INCLUDE_LANDMARKS, compact}
         include_embedding: ${oc.decode:${oc.env:FRAME_ANNOTATION_INCLUDE_EMBEDDING, false}}
         redis_maxlen: ${oc.decode:${oc.env:FRAME_ANNOTATION_REDIS_MAXLEN, 10000}}
+        source_stream_enabled: ${oc.decode:${oc.env:FRAME_ANNOTATION_SOURCE_STREAM_ENABLED, false}}
+        source_stream_pattern: ${oc.env:FRAME_ANNOTATION_SOURCE_STREAM_PATTERN, security.frame_annotations.__source_id__}
+        stream_mode: ${oc.env:FRAME_ANNOTATION_STREAM_MODE, global}
+        source_redis_maxlen: ${oc.decode:${oc.env:FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN, 5000}}
         write_timeout_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_WRITE_TIMEOUT_MS, 500}}
         min_interval_ms: ${oc.decode:${oc.env:FRAME_ANNOTATION_EXPORT_MIN_INTERVAL_MS, 0}}
 
@@ -290,4 +294,6 @@ pipeline:
       module: custom.pyfuncs.savant_perf_metrics
       class_name: SavantPerfMetricsPyFunc
       kwargs:
+        enabled: ${oc.decode:${oc.env:SAVANT_PERF_METRICS_ENABLED, true}}
         fps_window_s: ${oc.decode:${oc.env:SAVANT_PERF_METRICS_FPS_WINDOW_S, 10}}
+        stage_rates_enabled: ${oc.decode:${oc.env:SAVANT_PERF_METRICS_STAGE_RATES_ENABLED, true}}

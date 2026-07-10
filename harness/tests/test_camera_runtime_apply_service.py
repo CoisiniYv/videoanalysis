@@ -533,6 +533,169 @@ def test_runtime_apply_force_records_evidence_guard_and_continues(
     assert "/containers/video-analytics-midterm-replay-service/restart?t=10" in called_paths
 
 
+def test_runtime_epoch_barrier_blocks_with_epoch_diagnostics(monkeypatch) -> None:
+    monkeypatch.setenv("CAMERA_RUNTIME_EPOCH_BARRIER_TIMEOUT_S", "0")
+    monkeypatch.setattr(runtime_apply, "_current_runtime_epoch_id", lambda: "midterm-current")
+    monkeypatch.setattr(
+        runtime_apply,
+        "_runtime_epoch_barrier_snapshot",
+        lambda **_kwargs: {
+            "blocking_count": 2,
+            "active_count": 2,
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "event_id": "event-1",
+                    "runtime_epoch_id": "midterm-current",
+                    "epoch_relation": "current",
+                    "blocking_state": "materializing",
+                }
+            ],
+            "source_breakdown": [
+                {
+                    "source_id": "source_lab",
+                    "replay_shard_id": "replay-a",
+                    "epoch_relation": "current",
+                    "count": 2,
+                }
+            ],
+            "epoch_breakdown": [
+                {
+                    "runtime_epoch_id": "midterm-current",
+                    "epoch_relation": "current",
+                    "count": 2,
+                }
+            ],
+            "current_epoch_count": 2,
+            "foreign_epoch_count": 0,
+            "missing_epoch_count": 0,
+            "unknown_current_epoch_count": 0,
+            "orphans_present": False,
+            "stale_count": 0,
+            "stale_tasks": [],
+        },
+    )
+
+    try:
+        runtime_apply.check_runtime_restart_evidence_guard(action="restart", force=False)
+    except runtime_apply.RuntimeApplyBlockedError as exc:
+        assert exc.status_code == 409
+        assert exc.details["current_runtime_epoch_id"] == "midterm-current"
+        assert exc.details["active_count"] == 2
+        assert exc.details["source_breakdown"][0]["source_id"] == "source_lab"
+        assert exc.details["tasks"][0]["epoch_relation"] == "current"
+    else:
+        raise AssertionError("epoch barrier should block while non-terminal tasks remain")
+
+
+def test_runtime_epoch_barrier_force_terminalizes_and_settles(monkeypatch) -> None:
+    monkeypatch.setenv("CAMERA_RUNTIME_EPOCH_BARRIER_TIMEOUT_S", "0")
+    monkeypatch.setattr(runtime_apply, "_current_runtime_epoch_id", lambda: "midterm-current")
+    snapshots = iter(
+        [
+            {
+                "blocking_count": 1,
+                "active_count": 1,
+                "tasks": [
+                    {
+                        "task_id": "task-1",
+                        "event_id": "event-1",
+                        "runtime_epoch_id": "midterm-current",
+                        "epoch_relation": "current",
+                        "blocking_state": "materializing",
+                    }
+                ],
+                "source_breakdown": [],
+                "epoch_breakdown": [],
+                "current_epoch_count": 1,
+                "foreign_epoch_count": 0,
+                "missing_epoch_count": 0,
+                "unknown_current_epoch_count": 0,
+                "orphans_present": False,
+                "stale_count": 0,
+                "stale_tasks": [],
+            },
+            {
+                "blocking_count": 0,
+                "active_count": 0,
+                "tasks": [],
+                "source_breakdown": [],
+                "epoch_breakdown": [],
+                "current_epoch_count": 0,
+                "foreign_epoch_count": 0,
+                "missing_epoch_count": 0,
+                "unknown_current_epoch_count": 0,
+                "orphans_present": False,
+                "stale_count": 0,
+                "stale_tasks": [],
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        runtime_apply,
+        "_runtime_epoch_barrier_snapshot",
+        lambda **_kwargs: next(snapshots),
+    )
+    forced: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        runtime_apply,
+        "_force_finalize_epoch_blocking_tasks",
+        lambda *, current_runtime_epoch_id, forced_by: forced.append(
+            (current_runtime_epoch_id, forced_by)
+        )
+        or 1,
+    )
+
+    result = runtime_apply.check_runtime_restart_evidence_guard(action="restart", force=True)
+
+    assert result["forced"] is True
+    assert result["forced_terminalized_count"] == 1
+    assert forced == [("midterm-current", "runtime_guard:restart")]
+
+
+def test_force_epoch_barrier_uses_single_conditional_update(monkeypatch) -> None:
+    class FakeCursor:
+        sql = ""
+        params: dict[str, Any] = {}
+        rowcount = 3
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, params: dict[str, Any]) -> None:
+            self.sql = sql
+            self.params = params
+
+    class FakeConn:
+        cursor_obj = FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return self.cursor_obj
+
+    fake_conn = FakeConn()
+    monkeypatch.setattr(runtime_apply.psycopg, "connect", lambda *_args, **_kwargs: fake_conn)
+
+    updated = runtime_apply._force_finalize_epoch_blocking_tasks(
+        current_runtime_epoch_id="midterm-current",
+        forced_by="runtime_guard:restart",
+    )
+
+    assert updated == 3
+    assert "UPDATE evidence_tasks et" in fake_conn.cursor_obj.sql
+    assert "materialization_status = 'materialization_failed'" in fake_conn.cursor_obj.sql
+    assert "SELECT" not in fake_conn.cursor_obj.sql
+    assert fake_conn.cursor_obj.params["reason"] == "epoch_superseded_incomplete"
+
+
 def test_runtime_apply_fails_before_sources_when_savant_not_ready(
     monkeypatch,
     tmp_path: Path,

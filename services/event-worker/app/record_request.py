@@ -204,6 +204,15 @@ def build_record_request(
     stream_session_id = _first_policy_value(event, "stream_session_id")
     if stream_session_id is not None and str(stream_session_id).strip():
         record["stream_session_id"] = str(stream_session_id)
+    for key in (
+        "record_request_shard_id",
+        "replay_shard_id",
+        "shard_mapping_version",
+        "replay_shard_mapping_version",
+    ):
+        value = _first_policy_value(event, key)
+        if value is not None and str(value).strip():
+            record[key] = str(value)
     _apply_post_savant_policy(record, event)
     _normalize_anchor_keyframe_uuid(record, event)
     _apply_event_frame_timeline(record, event)

@@ -323,11 +323,12 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
 
         # Idempotency key: deterministic per face per frame
         source_observation_id = build_face_source_observation_id(
-            source_id, track_id, timestamp_ms,
+            source_id,
+            track_id,
+            timestamp_ms,
+            frame_uuid=(frame_anchor or {}).get("frame_uuid"),
+            face_index=face_index,
         )
-        # Add face_index to disambiguate multiple faces at same timestamp
-        if face_index > 0:
-            source_observation_id = f"{source_observation_id}:{face_index}"
 
         # Compute embedding norm
         emb_norm = math.sqrt(sum(x * x for x in feature)) if feature else 0.0

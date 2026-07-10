@@ -18,6 +18,7 @@ from pathlib import Path
 from threading import Lock
 
 import psycopg
+from psycopg.rows import dict_row
 
 from app.annotated_snapshot import generate_annotated_snapshot
 from app.config import Config, load_config
@@ -41,6 +42,12 @@ from app.post_savant_metadata_annotation_builder import (
     SIDECAR_SUMMARY_FILE,
 )
 from app.production_sidecar_policy import load_frame_cache_sidecar_config
+from app.rolling_cache import (
+    RollingCacheCoverageMiss,
+    RollingSegment,
+    find_segments,
+    materialize_window,
+)
 from app.snapshot import generate_snapshot
 
 logger = logging.getLogger(__name__)
@@ -69,12 +76,14 @@ DEFAULT_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S = 0.0
 DEFAULT_MATERIALIZATION_CPU_THREAD_LIMIT = 0
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
+IMAGE_EVIDENCE_NEAREST_FRAME_TOLERANCE_NS = 500_000_000
 INVALID_SINK_OUTPUT_MARKER = ".media-worker.invalid.json"
 ANNOTATION_STATUS_UNAVAILABLE = "unavailable"
 BUNDLE_STATUS_DURATION_GUARD_FAILED = "duration_guard_failed"
 BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED = "generated_annotation_failed"
 MATERIALIZATION_STATUS_DEFERRED = "materialization_deferred"
 MATERIALIZATION_STATUS_FAILED = "materialization_failed"
+EPOCH_SUPERSEDED_INCOMPLETE_REASON = "epoch_superseded_incomplete"
 MATERIALIZATION_BACKLOG_STATUSES = (
     "pending",
     "replaying",
@@ -108,6 +117,8 @@ _PROBE_METRICS = {
     "imageio_ffmpeg_fallback_count": 0,
     "imageio_ffmpeg_fallback_duration_ms": 0,
 }
+_SINK_PHASES: dict[str, dict[str, object]] = {}
+_SINK_PHASES_LOCK = Lock()
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -209,6 +220,32 @@ def _cleanup_processed_sink_output(
         deleted_bytes,
     )
     return {"status": "deleted", "deleted_bytes": deleted_bytes}
+
+
+def _cleanup_orphan_sink_output(
+    *,
+    meta_dir: str,
+    sink_root: str,
+    event_id: str,
+) -> dict[str, object]:
+    """Delete a sink output whose event/task row no longer exists."""
+    try:
+        return _cleanup_processed_sink_output(
+            meta_dir=meta_dir,
+            sink_root=sink_root,
+            event_id=event_id,
+            clip_status="orphan",
+            enabled=True,
+            allowed_statuses=("orphan",),
+        )
+    except OSError as exc:
+        logger.warning(
+            "orphan_sink_output_cleanup_failed event_id=%s meta_dir=%s error=%s",
+            event_id,
+            meta_dir,
+            exc,
+        )
+        return {"status": "failed", "deleted_bytes": 0, "error": str(exc)}
 
 
 def _metadata_scan_limit(limit: int | None = None) -> int:
@@ -385,6 +422,7 @@ def _sink_output_ready_for_finalizer(
     *,
     video_file: str,
     metadata_file: str,
+    known_duration_s: float | None = None,
 ) -> tuple[bool, str]:
     """Return whether video-file-sink output is safe to publish as evidence."""
     video_path = Path(video_file)
@@ -400,9 +438,25 @@ def _sink_output_ready_for_finalizer(
     except OSError:
         return False, "metadata_file_missing"
 
+    if known_duration_s is not None and known_duration_s > 0:
+        return True, "ready"
+
     if _probe_video_duration_seconds(video_file) is None:
         return False, "video_duration_unavailable"
     return True, "ready"
+
+
+def _known_sink_output_duration_seconds(meta: dict | None) -> float | None:
+    """Return a trusted duration already produced by the sink/materializer."""
+    if not isinstance(meta, dict):
+        return None
+    rolling_cache = meta.get("rolling_cache")
+    if isinstance(rolling_cache, dict):
+        duration = _to_float(rolling_cache.get("output_duration_s"))
+        if duration is not None and duration > 0:
+            return duration
+    duration = _to_float(meta.get("output_duration_s") or meta.get("duration_s"))
+    return duration if duration is not None and duration > 0 else None
 
 
 def _invalid_sink_output_max_retries() -> int:
@@ -629,12 +683,377 @@ def _set_event_db_index_status(
         )
 
 
+def _evidence_event_links_table_exists(pg_conn: psycopg.Connection) -> bool:
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.evidence_event_links')")
+            row = cur.fetchone()
+            return bool(row and row[0])
+    except Exception:
+        logger.exception("failed to check evidence_event_links table")
+        return False
+
+
+def _upsert_covered_event_aliases(
+    pg_conn: psycopg.Connection,
+    *,
+    bundle_event_id: str,
+) -> int:
+    """Publish DB aliases for events covered by *bundle_event_id* evidence."""
+
+    if not bundle_event_id or not _evidence_event_links_table_exists(pg_conn):
+        return 0
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH parent AS (
+                    SELECT *
+                    FROM evidence_bundles
+                    WHERE event_id = %(bundle_event_id)s::uuid
+                ),
+                linked AS (
+                    SELECT
+                        l.event_id,
+                        l.bundle_event_id,
+                        l.relation,
+                        l.reason,
+                        l.metadata AS link_metadata,
+                        e.source_event_id,
+                        e.camera_id::text AS camera_id,
+                        e.source_id,
+                        e.event_type,
+                        e.created_at AS event_created_at,
+                        c.name AS camera_name
+                    FROM evidence_event_links l
+                    JOIN events e ON e.id = l.event_id
+                    LEFT JOIN cameras c
+                      ON c.id::text = e.camera_id::text
+                      OR c.source_id = e.source_id
+                    WHERE l.bundle_event_id = %(bundle_event_id)s::uuid
+                      AND l.relation = 'covered_by'
+                ),
+                inserted AS (
+                    INSERT INTO evidence_bundles (
+                        event_id, source_event_id, camera_id, source_id,
+                        camera_name, event_type, event_created_at,
+                        alarm_machine_time, media_status, evidence_state,
+                        evidence_reason, raw_clip_uri, raw_clip_size_bytes,
+                        raw_clip_duration_seconds, raw_clip_sha256,
+                        raw_clip_content_type, annotation_status,
+                        annotation_count, matched_objects, unknown_objects,
+                        visual_evidence_status, frontend_overlay_required,
+                        summary, materialization
+                    )
+                    SELECT
+                        linked.event_id,
+                        linked.source_event_id,
+                        linked.camera_id,
+                        linked.source_id,
+                        linked.camera_name,
+                        linked.event_type,
+                        linked.event_created_at,
+                        linked.event_created_at,
+                        parent.media_status,
+                        parent.evidence_state,
+                        'covered_by_event:' || linked.bundle_event_id::text,
+                        parent.raw_clip_uri,
+                        parent.raw_clip_size_bytes,
+                        parent.raw_clip_duration_seconds,
+                        parent.raw_clip_sha256,
+                        parent.raw_clip_content_type,
+                        parent.annotation_status,
+                        parent.annotation_count,
+                        parent.matched_objects,
+                        parent.unknown_objects,
+                        parent.visual_evidence_status,
+                        parent.frontend_overlay_required,
+                        COALESCE(parent.summary, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'coverage_relation', linked.relation,
+                                'covered_by_event_id', linked.bundle_event_id::text,
+                                'coverage_reason', linked.reason,
+                                'coverage_metadata', linked.link_metadata
+                            ),
+                        COALESCE(parent.materialization, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'coverage_relation', linked.relation,
+                                'covered_by_event_id', linked.bundle_event_id::text,
+                                'coverage_reason', linked.reason
+                            )
+                    FROM linked, parent
+                    ON CONFLICT (event_id) DO UPDATE SET
+                        source_event_id = EXCLUDED.source_event_id,
+                        camera_id = EXCLUDED.camera_id,
+                        source_id = EXCLUDED.source_id,
+                        camera_name = EXCLUDED.camera_name,
+                        event_type = EXCLUDED.event_type,
+                        event_created_at = EXCLUDED.event_created_at,
+                        alarm_machine_time = EXCLUDED.alarm_machine_time,
+                        media_status = EXCLUDED.media_status,
+                        evidence_state = EXCLUDED.evidence_state,
+                        evidence_reason = EXCLUDED.evidence_reason,
+                        raw_clip_uri = EXCLUDED.raw_clip_uri,
+                        raw_clip_size_bytes = EXCLUDED.raw_clip_size_bytes,
+                        raw_clip_duration_seconds = EXCLUDED.raw_clip_duration_seconds,
+                        raw_clip_sha256 = EXCLUDED.raw_clip_sha256,
+                        raw_clip_content_type = EXCLUDED.raw_clip_content_type,
+                        annotation_status = EXCLUDED.annotation_status,
+                        annotation_count = EXCLUDED.annotation_count,
+                        matched_objects = EXCLUDED.matched_objects,
+                        unknown_objects = EXCLUDED.unknown_objects,
+                        visual_evidence_status = EXCLUDED.visual_evidence_status,
+                        frontend_overlay_required = EXCLUDED.frontend_overlay_required,
+                        summary = EXCLUDED.summary,
+                        materialization = EXCLUDED.materialization,
+                        updated_at = now()
+                    RETURNING event_id
+                )
+                SELECT COUNT(*)::int FROM inserted
+                """,
+                {"bundle_event_id": bundle_event_id},
+            )
+            row = cur.fetchone()
+            alias_count = int(row[0] or 0) if row else 0
+            if alias_count <= 0:
+                return 0
+            cur.execute(
+                """
+                INSERT INTO evidence_artifacts (
+                    event_id, artifact_type, uri, storage_backend, content_type,
+                    compression, size_bytes, sha256, status, metadata
+                )
+                SELECT
+                    l.event_id, ea.artifact_type, ea.uri, ea.storage_backend,
+                    ea.content_type, ea.compression, ea.size_bytes, ea.sha256,
+                    ea.status,
+                    COALESCE(ea.metadata, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'coverage_relation', l.relation,
+                            'covered_by_event_id', l.bundle_event_id::text
+                        )
+                FROM evidence_event_links l
+                JOIN evidence_artifacts ea
+                  ON ea.event_id = l.bundle_event_id
+                WHERE l.bundle_event_id = %(bundle_event_id)s::uuid
+                  AND l.relation = 'covered_by'
+                ON CONFLICT (event_id, artifact_type) DO UPDATE SET
+                    uri = EXCLUDED.uri,
+                    storage_backend = EXCLUDED.storage_backend,
+                    content_type = EXCLUDED.content_type,
+                    compression = EXCLUDED.compression,
+                    size_bytes = EXCLUDED.size_bytes,
+                    sha256 = EXCLUDED.sha256,
+                    status = EXCLUDED.status,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                """,
+                {"bundle_event_id": bundle_event_id},
+            )
+            cur.execute(
+                """
+                INSERT INTO evidence_frame_timeline (
+                    event_id, clip_frame_index, frame_uuid, frame_pts, frame_dts,
+                    duration_ns, timestamp_ms, width, height, source_id,
+                    camera_id, stream_session_id, keyframe_uuid, metadata
+                )
+                SELECT
+                    l.event_id, eft.clip_frame_index, eft.frame_uuid,
+                    eft.frame_pts, eft.frame_dts, eft.duration_ns,
+                    eft.timestamp_ms, eft.width, eft.height, eft.source_id,
+                    eft.camera_id, eft.stream_session_id, eft.keyframe_uuid,
+                    COALESCE(eft.metadata, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'coverage_relation', l.relation,
+                            'covered_by_event_id', l.bundle_event_id::text
+                        )
+                FROM evidence_event_links l
+                JOIN evidence_frame_timeline eft
+                  ON eft.event_id = l.bundle_event_id
+                WHERE l.bundle_event_id = %(bundle_event_id)s::uuid
+                  AND l.relation = 'covered_by'
+                ON CONFLICT (event_id, clip_frame_index) DO UPDATE SET
+                    frame_uuid = EXCLUDED.frame_uuid,
+                    frame_pts = EXCLUDED.frame_pts,
+                    frame_dts = EXCLUDED.frame_dts,
+                    duration_ns = EXCLUDED.duration_ns,
+                    timestamp_ms = EXCLUDED.timestamp_ms,
+                    width = EXCLUDED.width,
+                    height = EXCLUDED.height,
+                    source_id = EXCLUDED.source_id,
+                    camera_id = EXCLUDED.camera_id,
+                    stream_session_id = EXCLUDED.stream_session_id,
+                    keyframe_uuid = EXCLUDED.keyframe_uuid,
+                    metadata = EXCLUDED.metadata
+                """,
+                {"bundle_event_id": bundle_event_id},
+            )
+            cur.execute(
+                """
+                INSERT INTO evidence_overlay_segments (
+                    event_id, clip_frame_index, frame_uuid, frame_pts, t_ms,
+                    object_count, objects, record
+                )
+                SELECT
+                    l.event_id, eos.clip_frame_index, eos.frame_uuid,
+                    eos.frame_pts, eos.t_ms, eos.object_count, eos.objects,
+                    COALESCE(eos.record, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'coverage_relation', l.relation,
+                            'covered_by_event_id', l.bundle_event_id::text
+                        )
+                FROM evidence_event_links l
+                JOIN evidence_overlay_segments eos
+                  ON eos.event_id = l.bundle_event_id
+                WHERE l.bundle_event_id = %(bundle_event_id)s::uuid
+                  AND l.relation = 'covered_by'
+                ON CONFLICT (event_id, clip_frame_index) DO UPDATE SET
+                    frame_uuid = EXCLUDED.frame_uuid,
+                    frame_pts = EXCLUDED.frame_pts,
+                    t_ms = EXCLUDED.t_ms,
+                    object_count = EXCLUDED.object_count,
+                    objects = EXCLUDED.objects,
+                    record = EXCLUDED.record
+                """,
+                {"bundle_event_id": bundle_event_id},
+            )
+            cur.execute(
+                """
+                UPDATE events e
+                SET media_status = 'materialized',
+                    payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'evidence_state', 'materialized',
+                                'evidence_reason',
+                                    'covered_by_event:' || l.bundle_event_id::text,
+                                'materialization_status', 'materialized',
+                                'materialization_reason',
+                                    'covered_by_event:' || l.bundle_event_id::text,
+                                'covered_by_event_id', l.bundle_event_id::text,
+                                'coverage_relation', l.relation,
+                                'coverage_reason', l.reason,
+                                'evidence_state_updated_at', now()
+                            ))
+                        ),
+                    updated_at = now()
+                FROM evidence_event_links l
+                WHERE e.id = l.event_id
+                  AND l.bundle_event_id = %(bundle_event_id)s::uuid
+                  AND l.relation = 'covered_by'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM evidence_tasks et
+                      WHERE et.event_id = e.id
+                        AND COALESCE(et.materialization_failure_reason, '') = %(superseded_reason)s
+                  )
+                """,
+                {
+                    "bundle_event_id": bundle_event_id,
+                    "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
+                },
+            )
+            cur.execute(
+                """
+                UPDATE evidence_tasks et
+                SET status = 'materialized',
+                    materialization_status = 'materialized',
+                    last_materialization_at = now(),
+                    materialization_defer_reason = NULL,
+                    error_message = NULL,
+                    materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'coverage',
+                            jsonb_build_object(
+                                'status', 'materialized_alias',
+                                'covered_by_event_id', l.bundle_event_id::text,
+                                'relation', l.relation,
+                                'updated_at', now()
+                            )
+                        ),
+                    updated_at = now()
+                FROM evidence_event_links l
+                WHERE et.event_id = l.event_id
+                  AND l.bundle_event_id = %(bundle_event_id)s::uuid
+                  AND l.relation = 'covered_by'
+                  AND COALESCE(et.materialization_failure_reason, '') <> %(superseded_reason)s
+                """,
+                {
+                    "bundle_event_id": bundle_event_id,
+                    "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
+                },
+            )
+            logger.info(
+                "evidence_event_aliases_upserted bundle_event_id=%s count=%s",
+                bundle_event_id,
+                alias_count,
+            )
+            return alias_count
+    except Exception:
+        logger.exception(
+            "failed to upsert covered evidence aliases bundle_event_id=%s",
+            bundle_event_id,
+        )
+        return 0
+
+
+def _reconcile_covered_event_aliases(
+    pg_conn: psycopg.Connection,
+    *,
+    limit: int = 100,
+) -> int:
+    """Publish aliases for covered events linked after their parent was finalized."""
+
+    if not _evidence_event_links_table_exists(pg_conn):
+        return 0
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT l.bundle_event_id::text
+                FROM evidence_event_links l
+                JOIN evidence_bundles eb ON eb.event_id = l.bundle_event_id
+                LEFT JOIN evidence_tasks child_task ON child_task.event_id = l.event_id
+                LEFT JOIN evidence_bundles child_bundle ON child_bundle.event_id = l.event_id
+                WHERE l.relation = 'covered_by'
+                  AND child_bundle.event_id IS NULL
+                  AND COALESCE(child_task.materialization_status, '') <> 'materialized'
+                ORDER BY l.bundle_event_id::text
+                LIMIT %(limit)s
+                """,
+                {"limit": max(1, int(limit))},
+            )
+            bundle_event_ids = [str(row[0]) for row in cur.fetchall()]
+    except Exception:
+        logger.exception("failed to list covered evidence aliases for reconcile")
+        return 0
+
+    updated = 0
+    for bundle_event_id in bundle_event_ids:
+        updated += _upsert_covered_event_aliases(
+            pg_conn,
+            bundle_event_id=bundle_event_id,
+        )
+    return updated
+
+
 def _prune_success_evidence_sidecars(bundle_dir: str | Path) -> dict[str, int | list[str]]:
     return _prune_evidence_files(bundle_dir, SUCCESS_EVIDENCE_FILES_TO_PRUNE)
 
 
 def _prune_db_backed_evidence_sidecars(bundle_dir: str | Path) -> dict[str, int | list[str]]:
     return _prune_evidence_files(bundle_dir, DB_BACKED_EVIDENCE_SIDECARS_TO_PRUNE)
+
+
+def _evidence_db_index_expanded_rows_enabled() -> bool:
+    return os.getenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _prune_evidence_files(
@@ -1318,7 +1737,7 @@ def _claim_media_finalization(
             )
             row = cur.fetchone()
             status = str(row[0]) if row else "missing"
-            return {"status": status, "claimed": status in {"claimed", "missing"}}
+            return {"status": status, "claimed": status == "claimed"}
     except Exception as exc:
         logger.exception("media_finalization_claim_failed event_id=%s", event_id)
         return {
@@ -1596,6 +2015,40 @@ def _merge_runtime_epoch_guard(summary: dict, epoch_guard: dict) -> dict:
     return summary
 
 
+def _relax_rolling_cache_epoch_guard(epoch_guard: dict) -> dict:
+    """Rolling-cache materialization has no per-event Replay labels to verify."""
+
+    fields = epoch_guard.get("runtime_epoch_fields")
+    if not isinstance(fields, dict):
+        return epoch_guard
+    required_missing = set(epoch_guard.get("runtime_epoch_required_missing_fields") or [])
+    replay_only_missing = {
+        "record_request_runtime_epoch_id",
+        "replay_labels_runtime_epoch_id",
+    }
+    if not required_missing or not required_missing.issubset(replay_only_missing):
+        return epoch_guard
+    mismatched = list(epoch_guard.get("runtime_epoch_mismatched_fields") or [])
+    if mismatched:
+        return epoch_guard
+    available_keys = (
+        "event_payload_runtime_epoch_id",
+        "sink_path_runtime_epoch_id",
+        "sink_metadata_runtime_epoch_id",
+        "current_runtime_epoch_id",
+    )
+    values = {str(fields.get(key) or "") for key in available_keys if fields.get(key)}
+    if len(values) != 1:
+        return epoch_guard
+    return {
+        **epoch_guard,
+        "epoch_guard_status": "relaxed",
+        "epoch_guard_failed": False,
+        "epoch_guard_reason": "rolling_cache_no_replay_labels",
+        "runtime_epoch_required_missing_fields": sorted(required_missing),
+    }
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -1693,6 +2146,310 @@ def _elapsed_ms_between(start: datetime | None, end: datetime | None) -> int | N
     return int(max(0.0, (end - start).total_seconds()) * 1000)
 
 
+def _datetime_to_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _datetime_from_iso(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _elapsed_ms_between_iso(start: object, end: object) -> int | None:
+    return _elapsed_ms_between(_datetime_from_iso(start), _datetime_from_iso(end))
+
+
+def _phase_elapsed_ms(start: object, end: object) -> int | None:
+    try:
+        if start is None or end is None:
+            return None
+        return int(max(0.0, float(end) - float(start)) * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mark_sink_phase(meta_dir: str, event_id: str, phase: str) -> dict[str, object]:
+    if not meta_dir:
+        return {}
+    now = datetime.now(timezone.utc)
+    monotonic_now = time.monotonic()
+    with _SINK_PHASES_LOCK:
+        entry = _SINK_PHASES.setdefault(meta_dir, {})
+        entry.setdefault("event_id", event_id)
+        entry.setdefault(f"{phase}_at", now.isoformat())
+        entry.setdefault(f"{phase}_monotonic", monotonic_now)
+        return dict(entry)
+
+
+def _sink_phase_snapshot(meta_dir: str) -> dict[str, object]:
+    if not meta_dir:
+        return {}
+    with _SINK_PHASES_LOCK:
+        return dict(_SINK_PHASES.get(meta_dir) or {})
+
+
+def _clear_sink_phase(meta_dir: str) -> None:
+    if not meta_dir:
+        return
+    with _SINK_PHASES_LOCK:
+        _SINK_PHASES.pop(meta_dir, None)
+
+
+def _release_replay_slot_for_sink_stable(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    phase_diagnostics: dict[str, object],
+) -> bool:
+    """Release completion-aware Replay admission once sink video is stable."""
+    if not event_id:
+        return False
+    sink_video_to_stable_ms = _elapsed_ms_between_iso(
+        phase_diagnostics.get("sink_video_first_seen_at"),
+        phase_diagnostics.get("sink_video_stable_at"),
+    )
+    cursor_factory = getattr(pg_conn, "cursor", None)
+    if not callable(cursor_factory):
+        return False
+    try:
+        with cursor_factory() as cur:
+            cur.execute(
+                """
+                WITH released AS (
+                    UPDATE evidence_tasks
+                    SET replay_slot_status = 'released',
+                        replay_slot_released_at = now(),
+                        replay_slot_release_reason = 'sink_video_stable',
+                        replay_slot_active_age_s = EXTRACT(
+                            EPOCH FROM (now() - replay_slot_acquired_at)
+                        ),
+                        sink_video_to_stable_ms = COALESCE(
+                            %(sink_video_to_stable_ms)s::int,
+                            sink_video_to_stable_ms
+                        ),
+                        materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'replay_slot',
+                                jsonb_strip_nulls(jsonb_build_object(
+                                    'status', 'released',
+                                    'release_reason', 'sink_video_stable',
+                                    'released_at', now(),
+                                    'active_age_s', EXTRACT(
+                                        EPOCH FROM (now() - replay_slot_acquired_at)
+                                    ),
+                                    'sink_video_to_stable_ms',
+                                        %(sink_video_to_stable_ms)s::int,
+                                    'replay_job_id', replay_job_id,
+                                    'resulting_stream_id', replay_resulting_stream_id
+                                ))
+                            ),
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                      AND replay_slot_status = 'active'
+                    RETURNING event_id,
+                              replay_job_id,
+                              replay_resulting_stream_id,
+                              replay_slot_active_age_s
+                )
+                UPDATE events e
+                SET payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'replay_slot_status', 'released',
+                                'replay_slot_released_at', now(),
+                                'replay_slot_release_reason', 'sink_video_stable',
+                                'replay_slot_active_age_s',
+                                    released.replay_slot_active_age_s,
+                                'sink_video_to_stable_ms',
+                                    %(sink_video_to_stable_ms)s::int,
+                                'replay_job_id', released.replay_job_id,
+                                'resulting_stream_id',
+                                    released.replay_resulting_stream_id
+                            ))
+                        ),
+                    updated_at = now()
+                FROM released
+                WHERE e.id = released.event_id
+                """,
+                {
+                    "event_id": event_id,
+                    "sink_video_to_stable_ms": sink_video_to_stable_ms,
+                },
+            )
+            released = bool(getattr(cur, "rowcount", 0) or 0)
+            if released:
+                logger.info(
+                    "replay_slot_released event_id=%s release_reason=sink_video_stable "
+                    "sink_video_to_stable_ms=%s",
+                    event_id,
+                    sink_video_to_stable_ms,
+                )
+            else:
+                logger.info(
+                    "replay_slot_release_transition event_id=%s "
+                    "release_reason=sink_video_stable result=noop "
+                    "sink_video_to_stable_ms=%s",
+                    event_id,
+                    sink_video_to_stable_ms,
+                )
+            return released
+    except Exception:
+        logger.exception("release_replay_slot_for_sink_stable failed event_id=%s", event_id)
+        return False
+
+
+def _record_replay_slot_finalization_duration(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    finalization_duration_ms: int,
+) -> bool:
+    if not event_id:
+        return False
+    cursor_factory = getattr(pg_conn, "cursor", None)
+    if not callable(cursor_factory):
+        return False
+    try:
+        with cursor_factory() as cur:
+            cur.execute(
+                """
+                UPDATE evidence_tasks
+                SET finalization_duration_ms = %(finalization_duration_ms)s::int,
+                    materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'replay_slot_finalization',
+                            jsonb_build_object(
+                                'finalization_duration_ms',
+                                    %(finalization_duration_ms)s::int,
+                                'recorded_at', now()
+                            )
+                        ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                  AND replay_slot_status IN ('active', 'released', 'timeout')
+                """,
+                {
+                    "event_id": event_id,
+                    "finalization_duration_ms": int(finalization_duration_ms),
+                },
+            )
+            task_updated = bool(getattr(cur, "rowcount", 0) or 0)
+            cur.execute(
+                """
+                UPDATE events
+                SET payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'finalization_duration_ms',
+                                    %(finalization_duration_ms)s::int
+                            )
+                        ),
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "finalization_duration_ms": int(finalization_duration_ms),
+                },
+            )
+            return task_updated or bool(getattr(cur, "rowcount", 0) or 0)
+    except Exception:
+        logger.exception(
+            "record_replay_slot_finalization_duration failed event_id=%s",
+            event_id,
+        )
+        return False
+
+
+def _event_evidence_diagnostics(event_context: dict) -> dict:
+    payload = event_context.get("payload", {})
+    media = payload.get("media", {}) if isinstance(payload, dict) else {}
+    if not isinstance(media, dict):
+        return {}
+    diagnostics = media.get("evidence_diagnostics")
+    return diagnostics if isinstance(diagnostics, dict) else {}
+
+
+def _post_savant_phase_latency_metrics(
+    *,
+    event_context: dict,
+    phase_diagnostics: dict | None,
+    started_at: datetime,
+) -> dict[str, object]:
+    diagnostics = _event_evidence_diagnostics(event_context)
+    phase = phase_diagnostics if isinstance(phase_diagnostics, dict) else {}
+    started_iso = started_at.astimezone(timezone.utc).isoformat()
+    replay_job_created_at = diagnostics.get("replay_job_created_at")
+    sink_metadata_first_seen_at = phase.get("sink_metadata_first_seen_at")
+    sink_video_first_seen_at = phase.get("sink_video_first_seen_at")
+    sink_video_stable_at = phase.get("sink_video_stable_at")
+    sink_ffprobe_ready_at = phase.get("sink_ffprobe_ready_at")
+    finalizer_submitted_at = phase.get("finalizer_submitted_at")
+    finalizer_started_at = phase.get("finalizer_started_at") or started_iso
+    return {
+        "proof_wait_ms": diagnostics.get("proof_wait_ms"),
+        "record_request_pending_ms": diagnostics.get("record_request_pending_ms"),
+        "replay_job_create_ms": diagnostics.get("replay_job_create_ms"),
+        "replay_slot_hold_ms": diagnostics.get("replay_slot_hold_ms"),
+        "replay_active_global_count_before_create": diagnostics.get(
+            "replay_active_global_count_before_create"
+        ),
+        "replay_active_shard_count_before_create": diagnostics.get(
+            "replay_active_shard_count_before_create"
+        ),
+        "replay_active_source_count_before_create": diagnostics.get(
+            "replay_active_source_count_before_create"
+        ),
+        "replay_job_created_at": replay_job_created_at,
+        "sink_metadata_first_seen_at": sink_metadata_first_seen_at,
+        "sink_video_first_seen_at": sink_video_first_seen_at,
+        "sink_video_stable_at": sink_video_stable_at,
+        "sink_ffprobe_ready_at": sink_ffprobe_ready_at,
+        "finalizer_submitted_at": finalizer_submitted_at,
+        "finalizer_started_at": finalizer_started_at,
+        "replay_to_sink_metadata_ms": _elapsed_ms_between_iso(
+            replay_job_created_at,
+            sink_metadata_first_seen_at,
+        ),
+        "sink_metadata_to_video_ms": _elapsed_ms_between_iso(
+            sink_metadata_first_seen_at,
+            sink_video_first_seen_at,
+        ),
+        "sink_video_to_stable_ms": _elapsed_ms_between_iso(
+            sink_video_first_seen_at,
+            sink_video_stable_at,
+        ),
+        "sink_stable_to_ffprobe_ready_ms": _elapsed_ms_between_iso(
+            sink_video_stable_at,
+            sink_ffprobe_ready_at,
+        ),
+        "sink_ffprobe_ready_to_finalizer_start_ms": _elapsed_ms_between_iso(
+            sink_ffprobe_ready_at,
+            finalizer_started_at,
+        ),
+        "finalizer_pool_wait_ms": _phase_elapsed_ms(
+            phase.get("finalizer_submitted_monotonic"),
+            phase.get("finalizer_started_monotonic"),
+        ),
+    }
+
+
 def _post_savant_materialization_metrics(
     *,
     summary: dict,
@@ -1702,6 +2459,7 @@ def _post_savant_materialization_metrics(
     finalization_duration_ms: int,
     finalization_process_cpu_seconds: float | None = None,
     materialization_guardrails: dict | None = None,
+    phase_diagnostics: dict | None = None,
 ) -> dict:
     video_crop = summary.get("video_crop") if isinstance(summary, dict) else {}
     video_crop = video_crop if isinstance(video_crop, dict) else {}
@@ -1710,6 +2468,11 @@ def _post_savant_materialization_metrics(
     finished_at = finished_at.astimezone(timezone.utc)
     queue_wait_ms = _elapsed_ms_between(event_created_at, started_at)
     lifecycle_elapsed_ms = _elapsed_ms_between(event_created_at, finished_at)
+    phase_latency_ms = _post_savant_phase_latency_metrics(
+        event_context=event_context,
+        phase_diagnostics=phase_diagnostics,
+        started_at=started_at,
+    )
     return {
         "measurement_schema_version": "phase0-materialization-v1",
         "materialization_mode": (
@@ -1727,6 +2490,12 @@ def _post_savant_materialization_metrics(
         "finalization_elapsed_ms": int(finalization_duration_ms),
         "queue_wait_ms": queue_wait_ms,
         "lifecycle_elapsed_ms": lifecycle_elapsed_ms,
+        "phase_latency_ms": phase_latency_ms,
+        **{
+            key: value
+            for key, value in phase_latency_ms.items()
+            if key.endswith("_ms") or key.startswith("replay_active_")
+        },
         "input_bytes": video_crop.get("input_bytes"),
         "input_duration_seconds": video_crop.get("input_duration_seconds"),
         "output_bytes": video_crop.get("output_bytes"),
@@ -1991,11 +2760,14 @@ def _duration_guard(
         if slack_seconds is None
         else max(0.0, float(slack_seconds))
     )
-    max_allowed = float(expected or 0.0) + slack if expected > 0 else None
+    expected = float(expected or 0.0)
+    min_allowed = max(0.0, expected - slack) if expected > 0 else None
+    max_allowed = expected + slack if expected > 0 else None
     if actual is None or actual <= 0:
         return {
             "duration_guard_status": "unavailable",
             "duration_guard_failed": False,
+            "min_allowed_duration_seconds": min_allowed,
             "max_allowed_duration_seconds": max_allowed,
             "duration_guard_reason": "raw_clip_duration_unavailable",
             "duration_guard_slack_seconds": slack,
@@ -2004,17 +2776,25 @@ def _duration_guard(
         return {
             "duration_guard_status": "not_applicable",
             "duration_guard_failed": False,
+            "min_allowed_duration_seconds": min_allowed,
             "max_allowed_duration_seconds": max_allowed,
             "duration_guard_reason": "expected_duration_unavailable",
             "duration_guard_slack_seconds": slack,
         }
-    failed = actual > max_allowed
+    too_short = actual < (min_allowed or 0.0)
+    too_long = actual > max_allowed
+    failed = too_short or too_long
     return {
         "duration_guard_status": "failed" if failed else "passed",
         "duration_guard_failed": failed,
+        "min_allowed_duration_seconds": round(min_allowed or 0.0, 3),
         "max_allowed_duration_seconds": round(max_allowed, 3),
         "duration_guard_reason": (
-            "raw_clip_duration_exceeds_expected_plus_slack" if failed else ""
+            "raw_clip_duration_below_expected_minus_slack"
+            if too_short
+            else "raw_clip_duration_exceeds_expected_plus_slack"
+            if too_long
+            else ""
         ),
         "duration_guard_slack_seconds": slack,
     }
@@ -2059,6 +2839,10 @@ def _post_savant_finalizer_enabled() -> bool:
     )
 
 
+def _post_savant_fast_raw_clip_enabled() -> bool:
+    return _env_bool("POST_SAVANT_FAST_RAW_CLIP_ENABLED", default=False)
+
+
 def _post_savant_fps_gating_applied() -> bool | None:
     value = os.getenv("POST_SAVANT_FPS_GATING_APPLIED")
     if value is None:
@@ -2093,7 +2877,13 @@ def _summary_clip_status(summary: dict) -> str:
     if summary.get("production_ready") is True:
         return "ready"
     status = str(summary.get("annotation_status") or "")
-    if status in {"complete", "partial", "missing_frame_metadata"}:
+    if status in {
+        "complete",
+        "partial",
+        "missing_frame_metadata",
+        "no_post_savant_objects",
+        "timeline_reconciliation_unverified",
+    }:
         return "generated_unverified"
     return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
 
@@ -2106,16 +2896,16 @@ def _path_for_metadata(value: object) -> str:
 
 def _requested_duration_from_time_window(time_window: dict | None) -> float | None:
     time_window = time_window or {}
+    requested_start_pts = _to_int(time_window.get("requested_start_pts"))
+    requested_end_pts = _to_int(time_window.get("requested_end_pts"))
+    if requested_start_pts is not None and requested_end_pts is not None:
+        if requested_end_pts <= requested_start_pts:
+            return None
+        return (requested_end_pts - requested_start_pts) / 1_000_000_000.0
     requested = _to_float(time_window.get("requested_duration_s"))
     if requested is not None and requested > 0:
         return requested
-    requested_start_pts = _to_int(time_window.get("requested_start_pts"))
-    requested_end_pts = _to_int(time_window.get("requested_end_pts"))
-    if requested_start_pts is None or requested_end_pts is None:
-        return None
-    if requested_end_pts <= requested_start_pts:
-        return None
-    return (requested_end_pts - requested_start_pts) / 1_000_000_000.0
+    return None
 
 
 def _post_savant_duration_guard(
@@ -2276,12 +3066,74 @@ def _merge_post_savant_duration_guard(summary: dict, duration_guard: dict) -> di
             "duration_guard_slack_seconds": duration_guard.get(
                 "duration_guard_slack_seconds"
             ),
+            "min_allowed_duration_seconds": duration_guard.get(
+                "min_allowed_duration_seconds"
+            ),
             "max_allowed_duration_seconds": duration_guard.get(
                 "max_allowed_duration_seconds"
             ),
         }
     )
     return summary
+
+
+def _relax_post_savant_fast_raw_clip_guards(
+    *,
+    summary: dict,
+    duration_guard: dict,
+    sink_window_guard: dict,
+) -> tuple[dict, dict]:
+    """Keep fast-copied evidence playable even when it is not an exact time crop."""
+    limitations = list(summary.get("limitations") or [])
+    failures = list(summary.get("production_ready_failures") or [])
+    for limitation in (
+        "fast_raw_clip_time_precision_relaxed",
+        "fast_raw_clip_not_canonical_time_crop",
+    ):
+        if limitation not in limitations:
+            limitations.append(limitation)
+    summary.update(
+        {
+            "fast_raw_clip_enabled": True,
+            "raw_clip_time_precision": "replay_or_gop_window",
+            "production_ready": False,
+            "canonical_clip": False,
+            "visual_binding_status": "unverified",
+            "visual_binding_reason": "fast_raw_clip_time_precision_relaxed",
+            "visual_evidence_status": "unverified",
+            "evidence_visual_status": "unverified",
+            "production_ready_failures": failures,
+            "limitations": limitations,
+        }
+    )
+    video_crop = summary.get("video_crop")
+    if isinstance(video_crop, dict):
+        video_crop.setdefault("method", "copy")
+        video_crop["materialization_mode"] = "fast_raw_copy"
+        video_crop["fast_raw_clip_enabled"] = True
+        video_crop["crop_video_to_time_window"] = False
+    time_window = summary.get("time_window")
+    if isinstance(time_window, dict):
+        time_window["fast_raw_clip_enabled"] = True
+        time_window["time_domain_crop_applied"] = False
+        time_window["time_precision"] = "replay_or_gop_window"
+    if duration_guard.get("duration_guard_failed") is True:
+        duration_guard = {
+            **duration_guard,
+            "duration_guard_status": "relaxed",
+            "duration_guard_failed": False,
+            "duration_guard_reason": "fast_raw_clip_duration_relaxed",
+        }
+        _merge_post_savant_duration_guard(summary, duration_guard)
+    if sink_window_guard.get("sink_window_guard_failed") is True:
+        sink_window_guard = {
+            **sink_window_guard,
+            "sink_window_guard_status": "relaxed",
+            "sink_window_guard_failed": False,
+            "sink_window_guard_reason": "fast_raw_clip_window_relaxed",
+        }
+        _merge_sink_window_guard(summary, sink_window_guard)
+    return duration_guard, sink_window_guard
 
 
 def _apply_post_savant_failure_status(
@@ -2980,6 +3832,7 @@ def _finalize_post_savant_evidence_bundle(
     evidence_output_dir: str,
     materialization_timeout_s: float = 0.0,
     materialization_guardrails: dict | None = None,
+    phase_diagnostics: dict | None = None,
 ) -> dict:
     """Package post-Savant sink output as a production evidence bundle."""
     finalize_started = time.monotonic()
@@ -2994,6 +3847,11 @@ def _finalize_post_savant_evidence_bundle(
     if not isinstance(media, dict):
         media = {}
     sink_metadata = _load_sink_metadata_file(metadata_file)
+    rolling_cache_info = (
+        sink_metadata.get("rolling_cache")
+        if isinstance(sink_metadata.get("rolling_cache"), dict)
+        else {}
+    )
     replay_job_id = (
         media.get("replay_job_id")
         or sink_metadata.get("job_id")
@@ -3033,10 +3891,103 @@ def _finalize_post_savant_evidence_bundle(
         "replay_labels": replay_labels,
         "replay_job_request": replay_job_request,
     }
+    fast_raw_clip_enabled = _post_savant_fast_raw_clip_enabled()
+    if fast_raw_clip_enabled:
+        frame_cache_time_window.update(
+            {
+                "fast_raw_clip_enabled": True,
+                "time_precision": "replay_or_gop_window",
+            }
+        )
+    if rolling_cache_info.get("time_domain_crop_applied") is True:
+        rc_requested_start_pts = _to_int(rolling_cache_info.get("requested_start_pts"))
+        rc_requested_end_pts = _to_int(rolling_cache_info.get("requested_end_pts"))
+        rc_actual_start_pts = _to_int(rolling_cache_info.get("actual_start_pts"))
+        rc_actual_end_pts = _to_int(rolling_cache_info.get("actual_end_pts"))
+        rc_event_frame_pts = _to_int(frame_cache_time_window.get("event_frame_pts"))
+        rc_requested_duration_s = _to_float(
+            rolling_cache_info.get("requested_duration_s")
+        )
+        if (
+            rc_requested_duration_s is None
+            and rc_requested_start_pts is not None
+            and rc_requested_end_pts is not None
+            and rc_requested_end_pts > rc_requested_start_pts
+        ):
+            rc_requested_duration_s = (
+                rc_requested_end_pts - rc_requested_start_pts
+            ) / 1_000_000_000.0
+        rc_actual_duration_s = None
+        if (
+            rc_actual_start_pts is not None
+            and rc_actual_end_pts is not None
+            and rc_actual_end_pts > rc_actual_start_pts
+        ):
+            rc_actual_duration_s = (
+                rc_actual_end_pts - rc_actual_start_pts
+            ) / 1_000_000_000.0
+        frame_cache_time_window.update(
+            {
+                "time_domain_crop_applied": True,
+                "effective_start_pts": rc_actual_start_pts,
+                "actual_start_pts": rc_actual_start_pts,
+                "actual_end_pts": rc_actual_end_pts,
+                "requested_start_pts": rc_requested_start_pts,
+                "requested_end_pts": rc_requested_end_pts,
+                "requested_duration_s": (
+                    round(float(rc_requested_duration_s), 9)
+                    if rc_requested_duration_s is not None
+                    else None
+                ),
+                "actual_duration_s": (
+                    round(float(rc_actual_duration_s), 9)
+                    if rc_actual_duration_s is not None
+                    else None
+                ),
+                "pre_window_truncated": bool(
+                    rolling_cache_info.get("pre_window_truncated")
+                ),
+                "post_window_truncated": bool(
+                    rolling_cache_info.get("post_window_truncated")
+                ),
+            }
+        )
+        if rc_event_frame_pts is not None:
+            if rc_requested_start_pts is not None:
+                frame_cache_time_window["expected_event_t_s"] = round(
+                    (rc_event_frame_pts - rc_requested_start_pts)
+                    / 1_000_000_000.0,
+                    9,
+                )
+                frame_cache_time_window["pre_seconds"] = round(
+                    max(0.0, (rc_event_frame_pts - rc_requested_start_pts) / 1_000_000_000.0),
+                    9,
+                )
+            if rc_requested_end_pts is not None:
+                frame_cache_time_window["post_seconds"] = round(
+                    max(0.0, (rc_requested_end_pts - rc_event_frame_pts) / 1_000_000_000.0),
+                    9,
+                )
+    rolling_cache_selected_frame_count = _to_int(
+        rolling_cache_info.get("selected_frame_count")
+    )
+    rolling_cache_output_duration_s = _to_float(
+        rolling_cache_info.get("output_duration_s")
+    )
+    raw_clip_duration = None
     frame_cache_video_crop: dict = {
         "method": "copy",
         "crop_video_to_time_window": False,
         "source_video_path": source_video,
+        "materialization_mode": (
+            "rolling_cache_copy"
+            if rolling_cache_info
+            else "fast_raw_copy"
+            if fast_raw_clip_enabled
+            else "copy"
+        ),
+        "fast_raw_clip_enabled": fast_raw_clip_enabled,
+        "rolling_cache_enabled": bool(rolling_cache_info),
     }
     raw_clip_available = True
     metadata_has_objects = any(
@@ -3046,6 +3997,7 @@ def _finalize_post_savant_evidence_bundle(
     )
     if (
         metadata_has_objects
+        and not fast_raw_clip_enabled
         and _env_bool("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
         and frame_cache_window.get("requested_start_pts") is not None
         and frame_cache_window.get("requested_end_pts") is not None
@@ -3057,7 +4009,8 @@ def _finalize_post_savant_evidence_bundle(
             "replay_job_request": replay_job_request,
         }
     elif (
-        _env_bool("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
+        not fast_raw_clip_enabled
+        and _env_bool("FRAME_CACHE_TIME_DOMAIN_CROP_ENABLED", default=True)
         and frame_cache_window.get("requested_start_pts") is not None
         and frame_cache_window.get("requested_end_pts") is not None
     ):
@@ -3109,11 +4062,29 @@ def _finalize_post_savant_evidence_bundle(
                 "error": f"{type(exc).__name__}:{exc}",
                 "published_raw_clip": False,
             }
+            sink_metadata_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(metadata_file, sink_metadata_path)
             sink_metadata_rows_for_guard = source_metadata_rows
     else:
         if not raw_clip_path.exists():
-            shutil.copy2(source_video, raw_clip_path)
+            frame_cache_video_crop = _copy_or_crop_video(
+                source_video_path=Path(source_video),
+                output_video_path=raw_clip_path,
+                source_frames=source_metadata_rows,
+                time_window=frame_cache_time_window,
+                copy_video=True,
+                crop_video_to_time_window=False,
+                materialization_timeout_s=materialization_timeout_s,
+            )
+            if fast_raw_clip_enabled:
+                frame_cache_video_crop["materialization_mode"] = (
+                    "rolling_cache_copy" if rolling_cache_info else "fast_raw_copy"
+                )
+                frame_cache_video_crop["fast_raw_clip_enabled"] = True
+            if rolling_cache_info:
+                frame_cache_video_crop["materialization_mode"] = "rolling_cache_copy"
+                frame_cache_video_crop["rolling_cache_enabled"] = True
+        sink_metadata_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(metadata_file, sink_metadata_path)
         sink_metadata_rows_for_guard = source_metadata_rows
     sink_metadata_rows = (
@@ -3141,14 +4112,24 @@ def _finalize_post_savant_evidence_bundle(
                 time_window=frame_cache_time_window,
             ),
             "replay_source_kind": replay_labels.get("replay_source_kind"),
-            "requested_start_pts": replay_labels.get("requested_start_pts"),
-            "original_requested_start_pts": replay_labels.get(
+            "requested_start_pts": frame_cache_time_window.get(
+                "requested_start_pts"
+            ),
+            "original_requested_start_pts": frame_cache_time_window.get(
                 "original_requested_start_pts"
             ),
-            "effective_start_pts": replay_labels.get("effective_start_pts"),
-            "requested_end_pts": replay_labels.get("requested_end_pts"),
-            "event_frame_pts": replay_labels.get("event_frame_pts"),
-            "pre_window_truncated": replay_labels.get("pre_window_truncated"),
+            "effective_start_pts": frame_cache_time_window.get("effective_start_pts"),
+            "requested_end_pts": frame_cache_time_window.get("requested_end_pts"),
+            "requested_duration_s": frame_cache_time_window.get(
+                "requested_duration_s"
+            ),
+            "actual_start_pts": frame_cache_time_window.get("actual_start_pts"),
+            "actual_end_pts": frame_cache_time_window.get("actual_end_pts"),
+            "actual_duration_s": frame_cache_time_window.get("actual_duration_s"),
+            "event_frame_pts": frame_cache_time_window.get("event_frame_pts"),
+            "pre_window_truncated": frame_cache_time_window.get(
+                "pre_window_truncated"
+            ),
             "pre_window_policy": replay_labels.get("pre_window_policy"),
             "requested_pre_window_seconds": replay_labels.get(
                 "requested_pre_window_seconds"
@@ -3202,12 +4183,22 @@ def _finalize_post_savant_evidence_bundle(
             time_domain_crop_applied=bool(
                 frame_cache_time_window.get("time_domain_crop_applied")
             ),
-            crop_video_to_time_window=bool(
-                frame_cache_time_window.get("time_domain_crop_applied")
-            ),
+            crop_video_to_time_window=False
+            if fast_raw_clip_enabled
+            else bool(frame_cache_time_window.get("time_domain_crop_applied")),
             event_metadata=builder_event_metadata,
             video_integrity_required=False,
             materialization_timeout_s=materialization_timeout_s,
+            decoded_frame_count_reader=(
+                (lambda _path: int(rolling_cache_selected_frame_count or len(source_metadata_rows)))
+                if rolling_cache_info
+                else None
+            ),
+            decoded_video_duration_s=(
+                rolling_cache_output_duration_s
+                if rolling_cache_info and rolling_cache_output_duration_s
+                else None
+            ),
         )
     else:
         sidecar_config = load_frame_cache_sidecar_config()
@@ -3225,11 +4216,12 @@ def _finalize_post_savant_evidence_bundle(
             event_context,
             post_seconds=float(sidecar_config.get("post_seconds") or 5.0),
         )
-        raw_clip_duration = (
-            _probe_video_duration_seconds(str(raw_clip_path))
-            if raw_clip_available
-            else None
-        )
+        if raw_clip_duration is None:
+            raw_clip_duration = (
+                _probe_video_duration_seconds(str(raw_clip_path))
+                if raw_clip_available
+                else None
+            )
         sidecar_summary, sidecar_result = write_frame_cache_identity_sidecar(
             event=_event_for_frame_cache_sidecar(event_context),
             evidence_dir=str(output_dir),
@@ -3275,8 +4267,6 @@ def _finalize_post_savant_evidence_bundle(
             summary_path=summary_path,
             summary=summary,
         )
-    if metadata_has_objects:
-        raw_clip_duration = None
     duration_guard = _post_savant_duration_guard(
         getattr(result, "raw_clip_path", None),
         result.summary.get("time_window") if isinstance(result.summary, dict) else None,
@@ -3292,13 +4282,39 @@ def _finalize_post_savant_evidence_bundle(
         sink_window_rows,
         result.summary.get("time_window") if isinstance(result.summary, dict) else None,
     )
+    if rolling_cache_info:
+        result.summary.update(
+            {
+                "materialization_mode": "rolling_cache_copy",
+                "rolling_cache_enabled": True,
+                "rolling_cache": rolling_cache_info,
+                "canonical_clip": bool(rolling_cache_info.get("canonical_clip")),
+                "requested_start_pts": rolling_cache_info.get("requested_start_pts"),
+                "requested_end_pts": rolling_cache_info.get("requested_end_pts"),
+                "actual_start_pts": rolling_cache_info.get("actual_start_pts"),
+                "actual_end_pts": rolling_cache_info.get("actual_end_pts"),
+                "segment_ids": rolling_cache_info.get("segment_ids") or [],
+            }
+        )
+        video_crop = result.summary.get("video_crop")
+        if isinstance(video_crop, dict):
+            video_crop["materialization_mode"] = "rolling_cache_copy"
+            video_crop["rolling_cache_enabled"] = True
     _merge_sink_window_guard(result.summary, sink_window_guard)
+    if fast_raw_clip_enabled and not rolling_cache_info:
+        duration_guard, sink_window_guard = _relax_post_savant_fast_raw_clip_guards(
+            summary=result.summary,
+            duration_guard=duration_guard,
+            sink_window_guard=sink_window_guard,
+        )
     epoch_guard = _runtime_epoch_guard(
         event_context=event_context,
         replay_labels=replay_labels,
         sink_metadata=sink_metadata,
         meta_dir=meta_dir,
     )
+    if rolling_cache_info:
+        epoch_guard = _relax_rolling_cache_epoch_guard(epoch_guard)
     _merge_runtime_epoch_guard(result.summary, epoch_guard)
     if frame_cache_time_window.get("time_domain_crop_failed") is True:
         _apply_post_savant_failure_status(
@@ -3337,6 +4353,7 @@ def _finalize_post_savant_evidence_bundle(
             or "sink_metadata_window_guard_failed"
         )
         result = _without_published_raw_clip(result)
+    result.summary["clip_status"] = _summary_clip_status(result.summary)
     materialization_finished_at = datetime.now(timezone.utc)
     finalization_duration_ms = int((time.monotonic() - finalize_started) * 1000)
     finalization_process_cpu_seconds = round(
@@ -3351,6 +4368,7 @@ def _finalize_post_savant_evidence_bundle(
         finalization_duration_ms=finalization_duration_ms,
         finalization_process_cpu_seconds=finalization_process_cpu_seconds,
         materialization_guardrails=materialization_guardrails,
+        phase_diagnostics=phase_diagnostics,
     )
     result.summary["media_worker_perf"] = {
         "finalization_duration_ms": finalization_duration_ms,
@@ -3436,10 +4454,13 @@ def _process_sink_output(
     cleanup_replay_sink_output_enabled: bool = False,
     cleanup_replay_sink_output_statuses: tuple[str, ...] = DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES,
     materialization_finalizer_workers: int = DEFAULT_MATERIALIZATION_FINALIZER_WORKERS,
+    materialization_finalizer_max_per_source_per_poll: int = 1,
+    materialization_finalizer_source_serial: bool = True,
     materialization_database_url: str | None = None,
     finalizer_worker_id: str = "main",
     metadata_files_override: list[dict] | None = None,
     scan_stats_override: dict | None = None,
+    finalizer_phase: dict[str, object] | None = None,
 ) -> int:
     """Process new sink outputs and update events table. Returns count of updates."""
     updated = 0
@@ -3473,7 +4494,6 @@ def _process_sink_output(
         metadata_files = _sort_metadata_for_materialization(metadata_files, schedule_rows)
     if (
         post_savant_finalizer_enabled
-        and metadata_files_override is None
         and materialization_finalizer_workers > 1
         and materialization_database_url
     ):
@@ -3508,6 +4528,12 @@ def _process_sink_output(
                 else 0.0
             ),
             materialization_finalizer_workers=materialization_finalizer_workers,
+            materialization_finalizer_max_per_source_per_poll=(
+                materialization_finalizer_max_per_source_per_poll
+            ),
+            materialization_finalizer_source_serial=(
+                materialization_finalizer_source_serial
+            ),
             materialization_database_url=materialization_database_url,
             evidence_final_root_max_bytes=evidence_final_root_max_bytes,
             evidence_incoming_root_max_bytes=evidence_incoming_root_max_bytes,
@@ -3539,11 +4565,17 @@ def _process_sink_output(
                 meta.get("resulting_stream_id", ""),
             )
             continue
+        phase_diagnostics = (
+            dict(finalizer_phase)
+            if isinstance(finalizer_phase, dict)
+            else _mark_sink_phase(str(meta_dir), event_id, "sink_metadata_first_seen")
+        )
 
         # Idempotency: skip if already marked ready
         if _is_already_ready(pg_conn, event_id):
             if meta_dir:
                 processed_dirs.add(meta_dir)
+                _clear_sink_phase(str(meta_dir))
             logger.debug("media_skip: event already ready event_id=%s", event_id)
             continue
 
@@ -3552,11 +4584,38 @@ def _process_sink_output(
         video_file = _find_video_file(meta_dir)
         if not video_file:
             continue  # not ready yet
+        if finalizer_phase is None:
+            phase_diagnostics = _mark_sink_phase(
+                str(meta_dir),
+                event_id,
+                "sink_video_first_seen",
+            )
 
         metadata_file = str(Path(meta_dir) / "metadata.json")
 
         stable_count = 0
-        if finalizer_enabled and candidate_dirs is not None:
+        ready = False
+        reason = "finalizer_disabled"
+        if finalizer_enabled:
+            ready, reason = _sink_output_ready_for_finalizer(
+                video_file=video_file,
+                metadata_file=metadata_file,
+                known_duration_s=_known_sink_output_duration_seconds(meta),
+            )
+
+        if ready:
+            if finalizer_phase is None:
+                phase_diagnostics = _mark_sink_phase(
+                    str(meta_dir),
+                    event_id,
+                    "sink_video_stable",
+                )
+                _release_replay_slot_for_sink_stable(
+                    pg_conn,
+                    event_id=event_id,
+                    phase_diagnostics=phase_diagnostics,
+                )
+        elif finalizer_enabled and candidate_dirs is not None:
             try:
                 current_size = Path(video_file).stat().st_size
             except OSError:
@@ -3576,12 +4635,35 @@ def _process_sink_output(
                     midterm_sink_stability_checks,
                 )
                 continue
-
-        if finalizer_enabled:
+            if finalizer_phase is None:
+                phase_diagnostics = _mark_sink_phase(
+                    str(meta_dir),
+                    event_id,
+                    "sink_video_stable",
+                )
+                _release_replay_slot_for_sink_stable(
+                    pg_conn,
+                    event_id=event_id,
+                    phase_diagnostics=phase_diagnostics,
+                )
             ready, reason = _sink_output_ready_for_finalizer(
                 video_file=video_file,
                 metadata_file=metadata_file,
+                known_duration_s=_known_sink_output_duration_seconds(meta),
             )
+        elif finalizer_phase is None:
+            phase_diagnostics = _mark_sink_phase(
+                str(meta_dir),
+                event_id,
+                "sink_video_stable",
+            )
+            _release_replay_slot_for_sink_stable(
+                pg_conn,
+                event_id=event_id,
+                phase_diagnostics=phase_diagnostics,
+            )
+
+        if finalizer_enabled:
             if not ready:
                 invalid_attempts = 0
                 if (
@@ -3627,6 +4709,12 @@ def _process_sink_output(
                     invalid_attempts,
                 )
                 continue
+            if finalizer_phase is None:
+                phase_diagnostics = _mark_sink_phase(
+                    str(meta_dir),
+                    event_id,
+                    "sink_ffprobe_ready",
+                )
 
         if (
             post_savant_finalizer_enabled
@@ -3770,6 +4858,19 @@ def _process_sink_output(
         )
         if post_savant_finalizer_enabled and materialization_pacer is not None:
             materialization_pacer.record_start()
+        if post_savant_finalizer_enabled:
+            if finalizer_phase is None:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                now_monotonic = time.monotonic()
+                phase_diagnostics = {
+                    **_sink_phase_snapshot(str(meta_dir)),
+                    "finalizer_submitted_at": now_iso,
+                    "finalizer_started_at": now_iso,
+                    "finalizer_submitted_monotonic": now_monotonic,
+                    "finalizer_started_monotonic": now_monotonic,
+                }
+            else:
+                phase_diagnostics = dict(finalizer_phase)
         schedule_row = schedule_rows.get(event_id, {}) if schedule_rows else {}
         source_id = _metadata_source_id(meta, schedule_row)
         replay_shard_id = _metadata_replay_shard_id(meta, schedule_row)
@@ -3788,6 +4889,7 @@ def _process_sink_output(
             if claim_status in {"terminal"}:
                 if meta_dir:
                     processed_dirs.add(meta_dir)
+                    _clear_sink_phase(str(meta_dir))
                 logger.info(
                     "media_finalization_claim_terminal event_id=%s meta_dir=%s "
                     "worker_id=%s source_id=%s replay_shard_id=%s claim_wait_ms=%s",
@@ -3797,6 +4899,29 @@ def _process_sink_output(
                     source_id,
                     replay_shard_id,
                     claim_wait_ms,
+                )
+                continue
+            if claim_status == "missing":
+                cleanup_result = _cleanup_orphan_sink_output(
+                    meta_dir=meta_dir,
+                    sink_root=sink_dir,
+                    event_id=event_id,
+                )
+                if meta_dir:
+                    processed_dirs.add(meta_dir)
+                    _clear_sink_phase(str(meta_dir))
+                logger.info(
+                    "media_finalization_orphan_sink_output event_id=%s meta_dir=%s "
+                    "worker_id=%s source_id=%s replay_shard_id=%s "
+                    "claim_wait_ms=%s cleanup_status=%s deleted_bytes=%s",
+                    event_id,
+                    meta_dir,
+                    finalizer_worker_id,
+                    source_id,
+                    replay_shard_id,
+                    claim_wait_ms,
+                    cleanup_result.get("status"),
+                    cleanup_result.get("deleted_bytes"),
                 )
                 continue
             if claim_status in {"busy", "claim_error"}:
@@ -3828,6 +4953,7 @@ def _process_sink_output(
                         evidence_output_dir=evidence_output_dir,
                         materialization_timeout_s=materialization_timeout_s,
                         materialization_guardrails=guardrails,
+                        phase_diagnostics=phase_diagnostics,
                     )
                 except Exception as exc:
                     error_message = f"{type(exc).__name__}:{exc}"
@@ -3858,6 +4984,7 @@ def _process_sink_output(
                         )
                     if meta_dir:
                         processed_dirs.add(meta_dir)
+                        _clear_sink_phase(str(meta_dir))
                     continue
                 clip_path = bundle["raw_clip"]
                 clip_status = bundle.get("clip_status", "generated_unverified")
@@ -3872,6 +4999,11 @@ def _process_sink_output(
             ):
                 materialization_guard.release()
         finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
+        _record_replay_slot_finalization_duration(
+            pg_conn,
+            event_id=event_id,
+            finalization_duration_ms=finalize_duration_ms,
+        )
         throttle_decision: dict | None = None
         if post_savant_finalizer_enabled and materialization_pacer is not None:
             deadline_at = (schedule_rows.get(event_id) or {}).get(
@@ -3895,6 +5027,12 @@ def _process_sink_output(
             "finalization_duration_ms=%s scan_duration_ms=%s "
             "queue_wait_ms=%s lifecycle_elapsed_ms=%s "
             "post_savant_finalization_elapsed_ms=%s "
+            "proof_wait_ms=%s replay_job_create_ms=%s "
+            "replay_to_sink_metadata_ms=%s sink_metadata_to_video_ms=%s "
+            "sink_video_to_stable_ms=%s "
+            "sink_stable_to_ffprobe_ready_ms=%s "
+            "sink_ffprobe_ready_to_finalizer_start_ms=%s "
+            "finalizer_pool_wait_ms=%s "
             "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
             "metadata_files_visited=%s ffprobe_invocations=%s "
             "ffprobe_duration_ms=%s ffmpeg_invocations=%s ffmpeg_duration_ms=%s "
@@ -3911,6 +5049,14 @@ def _process_sink_output(
             materialization_metrics.get("queue_wait_ms"),
             materialization_metrics.get("lifecycle_elapsed_ms"),
             materialization_metrics.get("finalization_elapsed_ms"),
+            materialization_metrics.get("proof_wait_ms"),
+            materialization_metrics.get("replay_job_create_ms"),
+            materialization_metrics.get("replay_to_sink_metadata_ms"),
+            materialization_metrics.get("sink_metadata_to_video_ms"),
+            materialization_metrics.get("sink_video_to_stable_ms"),
+            materialization_metrics.get("sink_stable_to_ffprobe_ready_ms"),
+            materialization_metrics.get("sink_ffprobe_ready_to_finalizer_start_ms"),
+            materialization_metrics.get("finalizer_pool_wait_ms"),
             (throttle_decision or {}).get("sleep_s"),
             (throttle_decision or {}).get("reason"),
             (throttle_decision or {}).get("deadline_slack_s"),
@@ -4009,6 +5155,12 @@ def _process_sink_output(
                                         'raw_clip_path', %(raw_clip_path)s::text,
                                         'materialization_metrics',
                                             %(materialization_metrics)s::jsonb,
+                                        'evidence_diagnostics',
+                                            COALESCE(
+                                                payload->'media'->'evidence_diagnostics',
+                                                '{}'::jsonb
+                                            )
+                                            || %(evidence_diagnostics)s::jsonb,
                                         'evidence_topology',
                                             %(evidence_topology)s::text,
                                         'annotation_source',
@@ -4073,6 +5225,14 @@ def _process_sink_output(
                             "materialization_metrics": json.dumps(
                                 bundle.get("materialization_metrics") or {}
                             ),
+                            "evidence_diagnostics": json.dumps(
+                                (
+                                    bundle.get("materialization_metrics")
+                                    if isinstance(bundle, dict)
+                                    else {}
+                                )
+                                or {}
+                            ),
                             "evidence_topology": bundle.get("evidence_topology", ""),
                             "annotation_source": bundle.get("annotation_source", ""),
                             "production_ready": bool(
@@ -4134,7 +5294,9 @@ def _process_sink_output(
                     )
                 if cur.rowcount and cur.rowcount > 0:
                     evidence_state = _evidence_state_for_clip_status(clip_status)
-                    evidence_reason = "" if evidence_state == "ready" else clip_status
+                    evidence_reason = (
+                        "" if evidence_state == "materialized" else clip_status
+                    )
                     cur.execute(
                         """
                         UPDATE events
@@ -4156,11 +5318,18 @@ def _process_sink_output(
                                 ),
                             updated_at = now()
                         WHERE id = %(event_id)s::uuid
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM evidence_tasks et
+                              WHERE et.event_id = %(event_id)s::uuid
+                                AND COALESCE(et.materialization_failure_reason, '') = %(superseded_reason)s
+                          )
                         """,
                         {
                             "event_id": event_id,
                             "evidence_state": evidence_state,
                             "evidence_reason": evidence_reason,
+                            "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
                         },
                     )
                     cur.execute(
@@ -4181,13 +5350,26 @@ def _process_sink_output(
                                     THEN %(evidence_reason)s::text
                                 ELSE materialization_failure_reason
                             END,
+                            materialization_defer_reason = CASE
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN NULL
+                                ELSE materialization_defer_reason
+                            END,
+                            materialization_expired_reason = CASE
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN NULL
+                                ELSE materialization_expired_reason
+                            END,
                             error_message = CASE
                                 WHEN %(evidence_reason)s::text != ''
                                     THEN %(evidence_reason)s::text
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN NULL
                                 ELSE error_message
                             END,
                             updated_at = now()
                         WHERE event_id = %(event_id)s::uuid
+                          AND COALESCE(materialization_failure_reason, '') <> %(superseded_reason)s
                         """,
                         {
                             "event_id": event_id,
@@ -4198,6 +5380,7 @@ def _process_sink_output(
                             ),
                             "output_root": bundle.get("evidence_dir") if bundle else None,
                             "evidence_reason": evidence_reason,
+                            "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
                         },
                     )
                     if (
@@ -4207,32 +5390,64 @@ def _process_sink_output(
                         in {"1", "true", "yes", "on"}
                     ):
                         try:
+                            db_index_started = time.monotonic()
+                            expanded_rows_enabled = (
+                                _evidence_db_index_expanded_rows_enabled()
+                            )
                             index_result = upsert_evidence_bundle_index(
                                 pg_conn,
                                 event_id=event_id,
                                 bundle_dir=bundle["evidence_dir"],
                                 compute_sha256=False,
-                                include_timeline=True,
-                                include_overlays=True,
+                                include_timeline=expanded_rows_enabled,
+                                include_overlays=expanded_rows_enabled,
+                            )
+                            db_index_duration_ms = int(
+                                (time.monotonic() - db_index_started) * 1000
                             )
                             logger.info(
-                                "evidence_db_index_upserted event_id=%s result=%s",
+                                "evidence_db_index_upserted event_id=%s "
+                                "expanded_rows_enabled=%s duration_ms=%s result=%s",
                                 event_id,
+                                expanded_rows_enabled,
+                                db_index_duration_ms,
                                 index_result,
                             )
-                            if evidence_state == "materialized":
+                            alias_count = _upsert_covered_event_aliases(
+                                pg_conn,
+                                bundle_event_id=event_id,
+                            )
+                            if alias_count:
+                                logger.info(
+                                    "evidence_covered_aliases_ready event_id=%s "
+                                    "alias_count=%s",
+                                    event_id,
+                                    alias_count,
+                                )
+                            if (
+                                expanded_rows_enabled
+                                and evidence_state == "materialized"
+                            ):
+                                prune_started = time.monotonic()
                                 prune_result = _prune_success_evidence_sidecars(
                                     bundle["evidence_dir"]
                                 )
-                            else:
-                                prune_result = _prune_db_backed_evidence_sidecars(
-                                    bundle["evidence_dir"]
+                                logger.info(
+                                    "evidence_sidecars_pruned event_id=%s "
+                                    "duration_ms=%s result=%s",
+                                    event_id,
+                                    int((time.monotonic() - prune_started) * 1000),
+                                    prune_result,
                                 )
-                            logger.info(
-                                "evidence_sidecars_pruned event_id=%s result=%s",
-                                event_id,
-                                prune_result,
-                            )
+                            else:
+                                logger.info(
+                                    "evidence_sidecars_retained event_id=%s "
+                                    "reason=%s",
+                                    event_id,
+                                    "expanded_db_rows_disabled"
+                                    if not expanded_rows_enabled
+                                    else "non_materialized_diagnostics",
+                                )
                             _set_event_db_index_status(
                                 pg_conn,
                                 event_id,
@@ -4306,6 +5521,7 @@ def _process_sink_output(
                     updated += 1
                 if meta_dir:
                     processed_dirs.add(meta_dir)
+                    _clear_sink_phase(str(meta_dir))
                 if (
                     post_savant_finalizer_enabled
                     and materialization_pacer is not None
@@ -4328,6 +5544,7 @@ class _FinalizerJob:
     source_id: str
     replay_shard_id: str
     worker_id: str
+    phase_diagnostics: dict[str, object]
 
 
 def _process_sink_output_with_finalizer_pool(
@@ -4350,6 +5567,8 @@ def _process_sink_output_with_finalizer_pool(
     materialization_throttle_sleep_s: float,
     materialization_throttle_deadline_guard_s: float,
     materialization_finalizer_workers: int,
+    materialization_finalizer_max_per_source_per_poll: int = 1,
+    materialization_finalizer_source_serial: bool = True,
     materialization_database_url: str,
     evidence_final_root_max_bytes: int,
     evidence_incoming_root_max_bytes: int,
@@ -4365,7 +5584,7 @@ def _process_sink_output_with_finalizer_pool(
     max_jobs = max(0, int(materialization_max_per_poll or 0))
     jobs: list[_FinalizerJob] = []
     skipped_same_source = 0
-    scheduled_sources: set[str] = set()
+    scheduled_source_counts: dict[str, int] = {}
     scheduled_shards: set[str] = set()
 
     for meta in metadata_files:
@@ -4387,6 +5606,21 @@ def _process_sink_output_with_finalizer_pool(
                 meta.get("resulting_stream_id", ""),
             )
             continue
+        finalizer_phase_override = meta.get("_finalizer_phase")
+        finalizer_phase = (
+            dict(finalizer_phase_override)
+            if isinstance(finalizer_phase_override, dict)
+            else None
+        )
+        phase_diagnostics = (
+            dict(finalizer_phase)
+            if finalizer_phase is not None
+            else _mark_sink_phase(
+                meta_dir,
+                event_id,
+                "sink_metadata_first_seen",
+            )
+        )
 
         if _is_already_ready(pg_conn, event_id):
             if meta_dir:
@@ -4397,10 +5631,33 @@ def _process_sink_output_with_finalizer_pool(
         video_file = _find_video_file(meta_dir)
         if not video_file:
             continue
+        if finalizer_phase is None:
+            phase_diagnostics = _mark_sink_phase(
+                meta_dir,
+                event_id,
+                "sink_video_first_seen",
+            )
 
         metadata_file = str(Path(meta_dir) / "metadata.json")
         stable_count = 0
-        if candidate_dirs is not None:
+        ready, reason = _sink_output_ready_for_finalizer(
+            video_file=video_file,
+            metadata_file=metadata_file,
+            known_duration_s=_known_sink_output_duration_seconds(meta),
+        )
+        if ready:
+            if finalizer_phase is None:
+                phase_diagnostics = _mark_sink_phase(
+                    meta_dir,
+                    event_id,
+                    "sink_video_stable",
+                )
+                _release_replay_slot_for_sink_stable(
+                    pg_conn,
+                    event_id=event_id,
+                    phase_diagnostics=phase_diagnostics,
+                )
+        elif candidate_dirs is not None:
             try:
                 current_size = Path(video_file).stat().st_size
             except OSError:
@@ -4420,11 +5677,35 @@ def _process_sink_output_with_finalizer_pool(
                     midterm_sink_stability_checks,
                 )
                 continue
+            if finalizer_phase is None:
+                phase_diagnostics = _mark_sink_phase(
+                    meta_dir,
+                    event_id,
+                    "sink_video_stable",
+                )
+                _release_replay_slot_for_sink_stable(
+                    pg_conn,
+                    event_id=event_id,
+                    phase_diagnostics=phase_diagnostics,
+                )
+            ready, reason = _sink_output_ready_for_finalizer(
+                video_file=video_file,
+                metadata_file=metadata_file,
+                known_duration_s=_known_sink_output_duration_seconds(meta),
+            )
+        else:
+            if finalizer_phase is None:
+                phase_diagnostics = _mark_sink_phase(
+                    meta_dir,
+                    event_id,
+                    "sink_video_stable",
+                )
+                _release_replay_slot_for_sink_stable(
+                    pg_conn,
+                    event_id=event_id,
+                    phase_diagnostics=phase_diagnostics,
+                )
 
-        ready, reason = _sink_output_ready_for_finalizer(
-            video_file=video_file,
-            metadata_file=metadata_file,
-        )
         if not ready:
             if (
                 reason in PERMANENT_INVALID_SINK_OUTPUT_REASONS
@@ -4441,11 +5722,21 @@ def _process_sink_output_with_finalizer_pool(
                 reason,
             )
             continue
+        if finalizer_phase is None:
+            phase_diagnostics = _mark_sink_phase(
+                meta_dir,
+                event_id,
+                "sink_ffprobe_ready",
+            )
 
         schedule_row = schedule_rows.get(event_id, {}) if schedule_rows else {}
         source_id = _metadata_source_id(meta, schedule_row)
         replay_shard_id = _metadata_replay_shard_id(meta, schedule_row)
-        if source_id in scheduled_sources:
+        source_scheduled = scheduled_source_counts.get(source_id, 0)
+        if (
+            materialization_finalizer_max_per_source_per_poll > 0
+            and source_scheduled >= materialization_finalizer_max_per_source_per_poll
+        ):
             skipped_same_source += 1
             continue
         if max_jobs > 0 and len(jobs) >= max_jobs:
@@ -4461,6 +5752,13 @@ def _process_sink_output_with_finalizer_pool(
                 break
 
         worker_id = f"finalizer-{(len(jobs) % workers) + 1}"
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        submitted_monotonic = time.monotonic()
+        phase_diagnostics = {
+            **phase_diagnostics,
+            "finalizer_submitted_at": submitted_at,
+            "finalizer_submitted_monotonic": submitted_monotonic,
+        }
         jobs.append(
             _FinalizerJob(
                 meta=meta,
@@ -4469,9 +5767,10 @@ def _process_sink_output_with_finalizer_pool(
                 source_id=source_id,
                 replay_shard_id=replay_shard_id,
                 worker_id=worker_id,
+                phase_diagnostics=phase_diagnostics,
             )
         )
-        scheduled_sources.add(source_id)
+        scheduled_source_counts[source_id] = source_scheduled + 1
         scheduled_shards.add(replay_shard_id)
 
     if not jobs:
@@ -4487,15 +5786,20 @@ def _process_sink_output_with_finalizer_pool(
 
     logger.info(
         "media_finalizer_pool_started workers=%s jobs=%s source_count=%s "
-        "shard_count=%s skipped_same_source=%s",
+        "shard_count=%s skipped_same_source=%s max_per_source_per_poll=%s "
+        "source_serial=%s",
         workers,
         len(jobs),
-        len(scheduled_sources),
+        len(scheduled_source_counts),
         len(scheduled_shards),
         skipped_same_source,
+        materialization_finalizer_max_per_source_per_poll,
+        materialization_finalizer_source_serial,
     )
     updated = 0
-    source_locks: dict[str, Lock] = {source_id: Lock() for source_id in scheduled_sources}
+    source_locks: dict[str, Lock] = {
+        source_id: Lock() for source_id in scheduled_source_counts
+    }
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="media-finalizer") as executor:
         futures = {
             executor.submit(
@@ -4504,7 +5808,11 @@ def _process_sink_output_with_finalizer_pool(
                 sink_dir=sink_dir,
                 database_url=materialization_database_url,
                 scan_stats=scan_stats,
-                source_lock=source_locks[job.source_id],
+                source_lock=(
+                    source_locks[job.source_id]
+                    if materialization_finalizer_source_serial
+                    else Lock()
+                ),
                 evidence_output_dir=evidence_output_dir,
                 sink_scan_max_metadata_files=sink_scan_max_metadata_files,
                 materialization_timeout_s=materialization_timeout_s,
@@ -4548,6 +5856,7 @@ def _process_sink_output_with_finalizer_pool(
             if processed:
                 if job.meta_dir:
                     processed_dirs.add(job.meta_dir)
+                    _clear_sink_phase(job.meta_dir)
 
     logger.info(
         "media_finalizer_pool_finished workers=%s jobs=%s updated=%s",
@@ -4582,6 +5891,13 @@ def _process_single_finalizer_job(
     cleanup_replay_sink_output_enabled: bool,
     cleanup_replay_sink_output_statuses: tuple[str, ...],
 ) -> dict[str, object]:
+    finalizer_started_at = datetime.now(timezone.utc).isoformat()
+    finalizer_started_monotonic = time.monotonic()
+    phase_diagnostics = {
+        **(job.phase_diagnostics or {}),
+        "finalizer_started_at": finalizer_started_at,
+        "finalizer_started_monotonic": finalizer_started_monotonic,
+    }
     with source_lock:
         conn = psycopg.connect(database_url, autocommit=True)
         local_processed_dirs: set[str] = set()
@@ -4613,10 +5929,13 @@ def _process_single_finalizer_job(
                 cleanup_replay_sink_output_enabled=cleanup_replay_sink_output_enabled,
                 cleanup_replay_sink_output_statuses=cleanup_replay_sink_output_statuses,
                 materialization_finalizer_workers=1,
+                materialization_finalizer_max_per_source_per_poll=1,
+                materialization_finalizer_source_serial=True,
                 materialization_database_url=None,
                 finalizer_worker_id=job.worker_id,
                 metadata_files_override=[job.meta],
                 scan_stats_override=scan_stats,
+                finalizer_phase=phase_diagnostics,
             )
             return {
                 "updated": int(updated or 0),
@@ -4677,6 +5996,1626 @@ def _mark_media_finalize_failed(
         logger.exception("failed to mark media finalizer failure event_id=%s", event_id)
 
 
+ROLLING_CACHE_TASK_STATUSES = (
+    "manifest_ready",
+    "materialization_pending",
+    "materialization_deferred",
+    "pending",
+)
+
+
+def _process_rolling_cache_tasks(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    runner: "_RollingCacheMaterializationRunner | None" = None,
+) -> int:
+    if not (cfg.rolling_cache_enabled and cfg.rolling_cache_materialization_enabled):
+        return 0
+
+    updated = _expire_overdue_rolling_cache_tasks(pg_conn, cfg)
+    updated += _process_rolling_cache_image_tasks(pg_conn, cfg)
+    if runner is not None:
+        return updated + runner.process(pg_conn, cfg)
+
+    rows = _rolling_cache_candidate_tasks(pg_conn, cfg)
+    metadata_overrides: list[dict] = []
+    finalizer_chunk_size = max(1, int(cfg.materialization_finalizer_workers or 1) * 2)
+    jobs: list[dict[str, object]] = []
+    segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
+    for row in rows:
+        event_id = str(row.get("event_id") or "")
+        source_id = str(row.get("source_id") or row.get("replay_source_id") or "")
+        if not event_id or not source_id:
+            continue
+        if cfg.rolling_cache_sources and source_id not in cfg.rolling_cache_sources:
+            continue
+        if _is_already_ready(pg_conn, event_id):
+            continue
+        if not _claim_rolling_cache_task(
+            pg_conn,
+            event_id=event_id,
+            ready_at=row.get("rolling_cache_ready_at"),
+            processing_deadline_s=(
+                cfg.rolling_cache_materialization_processing_deadline_seconds
+            ),
+        ):
+            continue
+        try:
+            event_context = _load_event_context(pg_conn, event_id)
+            window = _rolling_cache_window(row, event_context)
+            if window is None:
+                _defer_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason="rolling_cache_missing_event_frame_pts",
+                )
+                continue
+            requested_start_pts, requested_end_pts, event_frame_pts = window
+            runtime_epoch_id = (
+                _runtime_epoch_from_event_context(event_context)
+                or _current_runtime_epoch_id(cfg.sink_output_dir)
+            )
+            labels = _rolling_cache_labels(
+                row=row,
+                event_context=event_context,
+                runtime_epoch_id=runtime_epoch_id,
+                requested_start_pts=requested_start_pts,
+                requested_end_pts=requested_end_pts,
+                event_frame_pts=event_frame_pts,
+            )
+            cache_key = (source_id, runtime_epoch_id)
+            segments = segment_cache.get(cache_key)
+            if segments is None:
+                segments = find_segments(
+                    cfg.rolling_cache_root,
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
+                )
+                segment_cache[cache_key] = segments
+            jobs.append(
+                {
+                    "event_id": event_id,
+                    "source_id": source_id,
+                    "requested_start_pts": requested_start_pts,
+                    "requested_end_pts": requested_end_pts,
+                    "runtime_epoch_id": runtime_epoch_id,
+                    "labels": labels,
+                    "segments": segments,
+                }
+            )
+        except RollingCacheCoverageMiss as exc:
+            _defer_rolling_cache_task(
+                pg_conn,
+                event_id=event_id,
+                reason=str(exc) or "rolling_cache_coverage_miss",
+                retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+            )
+        except Exception as exc:
+            logger.exception("rolling_cache_materialization_failed event_id=%s", event_id)
+            _fail_rolling_cache_task(
+                pg_conn,
+                event_id=event_id,
+                reason=_rolling_cache_failure_reason(exc),
+            )
+    workers = max(1, int(getattr(cfg, "rolling_cache_materialization_workers", 1)))
+    if workers <= 1 or len(jobs) <= 1:
+        for job in jobs:
+            event_id = str(job.get("event_id") or "")
+            try:
+                metadata = _materialize_rolling_cache_job(
+                    root=cfg.rolling_cache_root,
+                    output_root=cfg.rolling_cache_materialized_root,
+                    job=job,
+                )
+                metadata_overrides.append(metadata)
+            except RollingCacheCoverageMiss as exc:
+                _defer_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=str(exc) or "rolling_cache_coverage_miss",
+                    retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "rolling_cache_materialization_failed event_id=%s",
+                    event_id,
+                )
+                _fail_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=_rolling_cache_failure_reason(exc),
+                )
+            if len(metadata_overrides) >= finalizer_chunk_size:
+                updated += _flush_rolling_cache_finalizer_batch_or_defer(
+                    pg_conn,
+                    cfg,
+                    metadata_overrides,
+                )
+                metadata_overrides.clear()
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(jobs))) as executor:
+            futures = {
+                executor.submit(
+                    _materialize_rolling_cache_job,
+                    root=cfg.rolling_cache_root,
+                    output_root=cfg.rolling_cache_materialized_root,
+                    job=job,
+                ): str(job.get("event_id") or "")
+                for job in jobs
+            }
+            for future in as_completed(futures):
+                event_id = futures[future]
+                try:
+                    metadata_overrides.append(future.result())
+                except RollingCacheCoverageMiss as exc:
+                    _defer_rolling_cache_task(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=str(exc) or "rolling_cache_coverage_miss",
+                        retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "rolling_cache_materialization_failed event_id=%s",
+                        event_id,
+                    )
+                    _fail_rolling_cache_task(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=_rolling_cache_failure_reason(exc),
+                    )
+                if len(metadata_overrides) >= finalizer_chunk_size:
+                    updated += _flush_rolling_cache_finalizer_batch_or_defer(
+                        pg_conn,
+                        cfg,
+                        metadata_overrides,
+                    )
+                    metadata_overrides.clear()
+    if not metadata_overrides:
+        return updated
+
+    updated += _flush_rolling_cache_finalizer_batch_or_defer(
+        pg_conn,
+        cfg,
+        metadata_overrides,
+    )
+    metadata_overrides.clear()
+    return updated
+
+
+def _process_rolling_cache_image_tasks(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+) -> int:
+    rows = _rolling_cache_image_candidate_tasks(pg_conn, cfg)
+    updated = 0
+    segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
+    for row in rows:
+        event_id = str(row.get("event_id") or "")
+        source_id = str(row.get("source_id") or row.get("replay_source_id") or "")
+        if not event_id or not source_id:
+            continue
+        if cfg.rolling_cache_sources and source_id not in cfg.rolling_cache_sources:
+            continue
+        if not _claim_rolling_cache_task(
+            pg_conn,
+            event_id=event_id,
+            ready_at=row.get("rolling_cache_ready_at"),
+            processing_deadline_s=(
+                cfg.rolling_cache_materialization_processing_deadline_seconds
+            ),
+        ):
+            continue
+        try:
+            event_context = _load_event_context(pg_conn, event_id)
+            runtime_epoch_id = (
+                _runtime_epoch_from_event_context(event_context)
+                or _current_runtime_epoch_id(cfg.sink_output_dir)
+            )
+            cache_key = (source_id, runtime_epoch_id)
+            segments = segment_cache.get(cache_key)
+            if segments is None:
+                segments = find_segments(
+                    cfg.rolling_cache_root,
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
+                )
+                segment_cache[cache_key] = segments
+            result = _materialize_face_image_from_rolling_cache(
+                cfg=cfg,
+                row=row,
+                event_context=event_context,
+                segments=segments,
+                runtime_epoch_id=runtime_epoch_id,
+            )
+            _mark_image_evidence_materialized(
+                pg_conn,
+                event_id=event_id,
+                event_context=event_context,
+                result=result,
+            )
+            updated += 1
+        except RollingCacheCoverageMiss as exc:
+            _mark_image_evidence_failed(
+                pg_conn,
+                event_id=event_id,
+                reason=str(exc) or "face_image_frame_not_found",
+            )
+        except Exception as exc:
+            logger.exception("rolling_cache_image_materialization_failed event_id=%s", event_id)
+            _mark_image_evidence_failed(
+                pg_conn,
+                event_id=event_id,
+                reason=_image_materialization_failure_reason(exc),
+            )
+    return updated
+
+
+def _rolling_cache_image_candidate_tasks(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    with pg_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            WITH candidates AS (
+                SELECT
+                    et.event_id, et.source_id, et.replay_source_id,
+                    et.camera_id, et.event_type, et.event_ts_ms,
+                    et.pre_seconds, et.post_seconds, et.replay_window,
+                    et.priority, e.payload, e.frame_uuid, e.created_at,
+                    COALESCE(
+                        et.materialization_ready_at,
+                        (
+                            CASE
+                                WHEN et.event_ts_ms BETWEEN 946684800000 AND 4102444800000
+                                    THEN to_timestamp(et.event_ts_ms / 1000.0)
+                                ELSE e.created_at
+                            END
+                            + %(segment_ready_delay_s)s::double precision * interval '1 second'
+                        )
+                    ) AS rolling_cache_ready_at
+                FROM evidence_tasks et
+                JOIN events e ON e.id = et.event_id
+                WHERE et.materialization_status = ANY(%(statuses)s)
+                  AND COALESCE(et.task_type, '') = 'image_only'
+                  AND COALESCE(et.clip_required, false) = false
+                  AND (
+                      %(sources_empty)s
+                      OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
+                  )
+                  AND (
+                      et.materialization_ready_at IS NULL
+                      OR et.materialization_ready_at <= now()
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM evidence_artifacts ea
+                      WHERE ea.event_id = et.event_id
+                        AND ea.artifact_type IN ('face_crop', 'full_frame', 'annotated_frame')
+                        AND COALESCE(ea.uri, '') <> ''
+                  )
+            )
+            SELECT
+                *,
+                GREATEST(
+                    0,
+                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
+                )::bigint AS rolling_cache_ready_lag_ms
+            FROM candidates
+            WHERE rolling_cache_ready_at <= now()
+            ORDER BY priority DESC, rolling_cache_ready_at ASC, created_at ASC
+            LIMIT %(limit)s
+            """,
+            {
+                "statuses": list(ROLLING_CACHE_TASK_STATUSES),
+                "sources": list(cfg.rolling_cache_sources),
+                "sources_empty": not bool(cfg.rolling_cache_sources),
+                "limit": (
+                    max(1, int(limit))
+                    if limit is not None
+                    else cfg.rolling_cache_materialization_max_per_poll
+                ),
+                "segment_ready_delay_s": (
+                    float(getattr(cfg, "rolling_cache_segment_seconds", 4))
+                    + float(
+                        getattr(
+                            cfg,
+                            "rolling_cache_materialization_ready_segment_grace_seconds",
+                            1.0,
+                        )
+                    )
+                ),
+            },
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def _materialize_face_image_from_rolling_cache(
+    *,
+    cfg: Config,
+    row: dict[str, object],
+    event_context: dict,
+    segments: list[RollingSegment],
+    runtime_epoch_id: str,
+) -> dict[str, object]:
+    event_id = str(event_context.get("event_id") or row.get("event_id") or "")
+    if not event_id:
+        raise ValueError("face_image_missing_event_id")
+    frame = _rolling_cache_frame_for_image_event(event_context, segments)
+    segment = frame["segment"]
+    frame_pts = int(frame["pts"])
+    output_dir = Path(cfg.evidence_output_dir) / event_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    full_frame_path = output_dir / "full_frame.jpg"
+    face_crop_path = output_dir / "face_crop.jpg"
+    annotated_frame_path = output_dir / "annotated_frame.jpg"
+    offset_s = max(0.0, (frame_pts - int(segment.first_pts)) / 1_000_000_000)
+    _extract_full_frame_image(
+        segment.video_path,
+        full_frame_path,
+        offset_s=offset_s,
+    )
+    bbox = _face_bbox_from_event(event_context)
+    crop_status = "skipped_missing_bbox"
+    annotated_status = "skipped_missing_bbox"
+    crop_box = None
+    annotation_box = None
+    if bbox:
+        annotation_box = _normalize_face_bbox(
+            bbox,
+            image_path=full_frame_path,
+            padding_ratio=0.0,
+        )
+        crop_box = _normalize_face_bbox(
+            bbox,
+            image_path=full_frame_path,
+            padding_ratio=0.20,
+        )
+        if crop_box is not None:
+            crop_status = _write_face_crop(full_frame_path, face_crop_path, crop_box)
+        if annotation_box is not None:
+            annotated_status = _write_annotated_face_frame(
+                full_frame_path,
+                annotated_frame_path,
+                annotation_box,
+                event_context=event_context,
+            )
+    return {
+        "event_id": event_id,
+        "runtime_epoch_id": runtime_epoch_id,
+        "source_observation_id": _source_observation_id_from_event_context(event_context),
+        "source_id": event_context.get("source_id") or row.get("source_id") or "",
+        "camera_id": event_context.get("camera_id") or row.get("camera_id") or "",
+        "event_type": event_context.get("event_type") or row.get("event_type") or "",
+        "frame_pts": frame_pts,
+        "frame_uuid": frame.get("frame_uuid") or event_context.get("frame_uuid") or "",
+        "segment_id": segment.segment_id,
+        "segment_path": str(segment.video_path),
+        "full_frame_path": str(full_frame_path),
+        "face_crop_path": str(face_crop_path) if face_crop_path.is_file() else "",
+        "annotated_frame_path": (
+            str(annotated_frame_path) if annotated_frame_path.is_file() else ""
+        ),
+        "face_bbox": bbox,
+        "crop_box": crop_box,
+        "annotation_box": annotation_box,
+        "crop_status": crop_status,
+        "annotated_status": annotated_status,
+        "materialization_mode": "rolling_cache_image_extract",
+    }
+
+
+def _rolling_cache_frame_for_image_event(
+    event_context: dict,
+    segments: list[RollingSegment],
+) -> dict[str, object]:
+    if not segments:
+        raise RollingCacheCoverageMiss("face_image_no_rolling_cache_segments")
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    frame_uuid = str(
+        event_context.get("frame_uuid")
+        or media.get("frame_uuid")
+        or ""
+    )
+    frame_pts = _to_int(media.get("frame_pts") or event_context.get("frame_pts"))
+    if frame_uuid:
+        for segment in segments:
+            for record in _safe_load_native_metadata(segment.metadata_path):
+                record_uuid = str(record.get("uuid") or record.get("frame_uuid") or "")
+                if record_uuid == frame_uuid:
+                    pts = _to_int(record.get("pts") or record.get("frame_pts"))
+                    if pts is not None:
+                        return {
+                            "segment": segment,
+                            "pts": pts,
+                            "frame_uuid": frame_uuid,
+                        }
+    if frame_pts is None:
+        raise RollingCacheCoverageMiss("face_image_missing_frame_pts")
+    for segment in segments:
+        if segment.first_pts <= frame_pts <= segment.last_pts:
+            return {
+                "segment": segment,
+                "pts": frame_pts,
+                "frame_uuid": frame_uuid,
+            }
+    nearest: dict[str, object] | None = None
+    nearest_delta: int | None = None
+    for segment in segments:
+        for record in _safe_load_native_metadata(segment.metadata_path):
+            pts = _to_int(record.get("pts") or record.get("frame_pts"))
+            if pts is None:
+                continue
+            delta = abs(pts - frame_pts)
+            if (
+                delta <= IMAGE_EVIDENCE_NEAREST_FRAME_TOLERANCE_NS
+                and (nearest_delta is None or delta < nearest_delta)
+            ):
+                nearest_delta = delta
+                nearest = {
+                    "segment": segment,
+                    "pts": pts,
+                    "frame_uuid": str(
+                        record.get("uuid")
+                        or record.get("frame_uuid")
+                        or frame_uuid
+                    ),
+                    "frame_pts_delta_ns": delta,
+                    "frame_selection": "nearest_metadata",
+                }
+    if nearest is not None:
+        return nearest
+    raise RollingCacheCoverageMiss("face_image_frame_not_found")
+
+
+def _safe_load_native_metadata(path: Path) -> list[dict]:
+    try:
+        return load_native_metadata(path)
+    except Exception:
+        logger.exception("failed to load rolling-cache metadata path=%s", path)
+        return []
+
+
+def _extract_full_frame_image(
+    video_path: Path,
+    output_path: Path,
+    *,
+    offset_s: float,
+) -> None:
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+    command = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-y",
+        "-i",
+        str(video_path),
+        "-ss",
+        f"{max(0.0, offset_s):.6f}",
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(output_path),
+    ]
+    started = time.monotonic()
+    proc = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=_media_probe_timeout_s(),
+        check=False,
+    )
+    _record_probe_metric("ffmpeg", time.monotonic() - started)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "face_image_ffmpeg_failed:"
+            + " ".join((proc.stderr or proc.stdout or "").split())[-500:]
+        )
+    if not output_path.is_file() or output_path.stat().st_size <= 0:
+        raise RuntimeError("face_image_full_frame_missing")
+
+
+def _face_bbox_from_event(event_context: dict) -> dict | None:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    overlay = payload.get("overlay")
+    overlay = overlay if isinstance(overlay, dict) else {}
+    observation = payload.get("observation")
+    observation = observation if isinstance(observation, dict) else {}
+    for value in (
+        overlay.get("face_bbox"),
+        observation.get("face_bbox"),
+        payload.get("face_bbox"),
+    ):
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _normalize_face_bbox(
+    bbox: dict,
+    *,
+    image_path: Path,
+    padding_ratio: float = 0.0,
+) -> tuple[int, int, int, int] | None:
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        width, height = image.size
+    values = bbox.get("values")
+    fmt = str(bbox.get("format") or "").lower()
+    if isinstance(values, (list, tuple)) and len(values) >= 4:
+        a, b, c, d = [float(v) for v in values[:4]]
+        if fmt == "cxcywh":
+            x1 = a - c / 2
+            y1 = b - d / 2
+            x2 = a + c / 2
+            y2 = b + d / 2
+        elif fmt in {"xyxy", "x1y1x2y2"}:
+            x1, y1, x2, y2 = a, b, c, d
+        else:
+            x1, y1, x2, y2 = a, b, a + c, b + d
+    else:
+        x = _to_float(bbox.get("x"))
+        y = _to_float(bbox.get("y"))
+        w = _to_float(bbox.get("width") or bbox.get("w"))
+        h = _to_float(bbox.get("height") or bbox.get("h"))
+        if x is None or y is None or w is None or h is None:
+            return None
+        x1, y1, x2, y2 = x, y, x + w, y + h
+    if x2 <= x1 or y2 <= y1:
+        return None
+    pad_x = (x2 - x1) * max(0.0, padding_ratio)
+    pad_y = (y2 - y1) * max(0.0, padding_ratio)
+    x1 = max(0, int(round(x1 - pad_x)))
+    y1 = max(0, int(round(y1 - pad_y)))
+    x2 = min(width, int(round(x2 + pad_x)))
+    y2 = min(height, int(round(y2 + pad_y)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _write_face_crop(
+    full_frame_path: Path,
+    face_crop_path: Path,
+    crop_box: tuple[int, int, int, int],
+) -> str:
+    from PIL import Image
+
+    with Image.open(full_frame_path).convert("RGB") as image:
+        image.crop(crop_box).save(face_crop_path, "JPEG", quality=92)
+    return "ready" if face_crop_path.is_file() else "failed"
+
+
+def _write_annotated_face_frame(
+    full_frame_path: Path,
+    annotated_frame_path: Path,
+    crop_box: tuple[int, int, int, int],
+    *,
+    event_context: dict,
+) -> str:
+    from PIL import Image, ImageDraw
+
+    with Image.open(full_frame_path).convert("RGB") as image:
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(crop_box, outline=(220, 30, 30), width=4)
+        label = str(
+            (
+                (event_context.get("payload") or {}).get("matched_person", {})
+                if isinstance(event_context.get("payload"), dict)
+                else {}
+            ).get("name")
+            or event_context.get("event_type")
+            or "watchlist_hit"
+        )
+        x1, y1, _x2, _y2 = crop_box
+        draw.text((x1, max(0, y1 - 18)), label, fill=(255, 255, 255))
+        image.save(annotated_frame_path, "JPEG", quality=92)
+    return "ready" if annotated_frame_path.is_file() else "failed"
+
+
+def _source_observation_id_from_event_context(event_context: dict) -> str:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    match = payload.get("match")
+    match = match if isinstance(match, dict) else {}
+    return str(match.get("source_observation_id") or payload.get("source_observation_id") or "")
+
+
+def _image_materialization_summary(
+    event_context: dict,
+    result: dict[str, object],
+) -> dict[str, object]:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    return {
+        "schema_version": "face-image-evidence-v1",
+        "playback_kind": "image",
+        "evidence_mode": "image_only",
+        "clip_required": False,
+        "clip_status": "not_required",
+        "image_status": "image_ready",
+        "image_available": True,
+        "source_observation_id": result.get("source_observation_id") or "",
+        "person_id": event_context.get("person_id") or payload.get("person_id"),
+        "matched_person": payload.get("matched_person") if isinstance(payload.get("matched_person"), dict) else {},
+        "match": payload.get("match") if isinstance(payload.get("match"), dict) else {},
+        "similarity": (
+            (payload.get("match") or {}).get("similarity")
+            if isinstance(payload.get("match"), dict)
+            else event_context.get("confidence")
+        ),
+        "observation": payload.get("observation") if isinstance(payload.get("observation"), dict) else {},
+        "face_bbox": result.get("face_bbox"),
+        "crop_box": result.get("crop_box"),
+        "face_crop_uri": result.get("face_crop_path") or "",
+        "full_frame_uri": result.get("full_frame_path") or "",
+        "annotated_frame_uri": result.get("annotated_frame_path") or "",
+        "materialization_mode": "rolling_cache_image_extract",
+        "runtime_epoch_id": result.get("runtime_epoch_id") or "",
+        "frame_pts": result.get("frame_pts"),
+        "frame_uuid": result.get("frame_uuid") or "",
+        "segment_id": result.get("segment_id") or "",
+        "crop_status": result.get("crop_status") or "",
+        "annotated_status": result.get("annotated_status") or "",
+    }
+
+
+def _image_materialization_doc(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": "image-only-v1",
+        "created_by": "media-worker",
+        "materialization_status": "materialized",
+        "materialization_mode": "rolling_cache_image_extract",
+        "runtime_epoch_id": result.get("runtime_epoch_id") or "",
+        "frame_pts": result.get("frame_pts"),
+        "frame_uuid": result.get("frame_uuid") or "",
+        "segment_id": result.get("segment_id") or "",
+        "segment_path": result.get("segment_path") or "",
+        "full_frame_path": result.get("full_frame_path") or "",
+        "face_crop_path": result.get("face_crop_path") or "",
+        "annotated_frame_path": result.get("annotated_frame_path") or "",
+        "crop_status": result.get("crop_status") or "",
+        "annotated_status": result.get("annotated_status") or "",
+        "materialized_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _mark_image_evidence_materialized(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    event_context: dict,
+    result: dict[str, object],
+) -> None:
+    summary = _image_materialization_summary(event_context, result)
+    materialization = _image_materialization_doc(result)
+    full_frame_path = str(result.get("full_frame_path") or "")
+    face_crop_path = str(result.get("face_crop_path") or "")
+    annotated_frame_path = str(result.get("annotated_frame_path") or "")
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'materialized',
+                materialization_status = 'materialized',
+                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                    || %(materialization)s::jsonb,
+                error_message = '',
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND COALESCE(task_type, '') = 'image_only'
+            """,
+            {
+                "event_id": event_id,
+                "materialization": json.dumps(
+                    {"image_only": materialization},
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        cur.execute(
+            """
+            INSERT INTO evidence_bundles (
+                event_id, source_event_id, camera_id, source_id, camera_name,
+                event_type, event_created_at, alarm_machine_time,
+                media_status, evidence_state, evidence_reason, raw_clip_uri,
+                annotation_status, annotation_count, matched_objects,
+                unknown_objects, visual_evidence_status,
+                frontend_overlay_required, summary, materialization
+            )
+            SELECT
+                e.id, e.source_event_id, e.camera_id, e.source_id,
+                COALESCE(c.name, e.payload->>'camera_name', e.payload->'camera'->>'name'),
+                e.event_type, e.created_at, e.created_at,
+                'image_ready', 'image_ready', '', NULL,
+                'not_required', 0, 1, 0, 'verified',
+                false, %(summary)s::jsonb, %(materialization)s::jsonb
+            FROM events e
+            LEFT JOIN cameras c
+              ON c.id::text = e.camera_id
+              OR c.source_id = e.source_id
+            WHERE e.id = %(event_id)s::uuid
+            ON CONFLICT (event_id) DO UPDATE SET
+                media_status = 'image_ready',
+                evidence_state = 'image_ready',
+                evidence_reason = '',
+                raw_clip_uri = NULL,
+                annotation_status = 'not_required',
+                matched_objects = 1,
+                visual_evidence_status = 'verified',
+                frontend_overlay_required = false,
+                summary = EXCLUDED.summary,
+                materialization = EXCLUDED.materialization,
+                updated_at = now()
+            """,
+            {
+                "event_id": event_id,
+                "summary": json.dumps(summary, ensure_ascii=False),
+                "materialization": json.dumps(materialization, ensure_ascii=False),
+            },
+        )
+        for artifact_type, path in (
+            ("full_frame", full_frame_path),
+            ("face_crop", face_crop_path),
+            ("annotated_frame", annotated_frame_path),
+        ):
+            if not path:
+                continue
+            cur.execute(
+                """
+                INSERT INTO evidence_artifacts (
+                    event_id, artifact_type, uri, storage_backend, content_type,
+                    size_bytes, status, metadata, updated_at
+                )
+                VALUES (
+                    %(event_id)s::uuid, %(artifact_type)s, %(uri)s,
+                    'filesystem', 'image/jpeg', %(size_bytes)s, 'ready',
+                    %(metadata)s::jsonb, now()
+                )
+                ON CONFLICT (event_id, artifact_type) DO UPDATE SET
+                    uri = EXCLUDED.uri,
+                    storage_backend = EXCLUDED.storage_backend,
+                    content_type = EXCLUDED.content_type,
+                    size_bytes = EXCLUDED.size_bytes,
+                    status = 'ready',
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                """,
+                {
+                    "event_id": event_id,
+                    "artifact_type": artifact_type,
+                    "uri": path,
+                    "size_bytes": _file_size_or_none(path),
+                    "metadata": json.dumps(
+                        {
+                            "source_observation_id": result.get("source_observation_id") or "",
+                            "storage_semantics": "image_only_face_evidence",
+                            "materialization_mode": "rolling_cache_image_extract",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            )
+        cur.execute(
+            """
+            UPDATE events
+            SET snapshot_path = %(full_frame_path)s,
+                clip_required = false,
+                media_status = 'image_ready',
+                payload = COALESCE(payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'media',
+                        COALESCE(payload->'media', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media_status', 'image_ready',
+                            'snapshot_status', 'image_ready',
+                            'clip_status', 'not_required',
+                            'metadata_status', 'image_ready',
+                            'evidence_state', 'image_ready',
+                            'evidence_reason', '',
+                            'materialization_status', 'materialized',
+                            'playback_kind', 'image',
+                            'evidence_mode', 'image_only',
+                            'clip_required', false,
+                            'snapshot_path', %(full_frame_path)s::text,
+                            'crop_path', NULLIF(%(face_crop_path)s::text, ''),
+                            'annotated_frame_path', NULLIF(%(annotated_frame_path)s::text, '')
+                        )
+                    ),
+                updated_at = now()
+            WHERE id = %(event_id)s::uuid
+            """,
+            {
+                "event_id": event_id,
+                "full_frame_path": full_frame_path,
+                "face_crop_path": face_crop_path,
+                "annotated_frame_path": annotated_frame_path,
+            },
+        )
+        source_observation_id = str(result.get("source_observation_id") or "")
+        if source_observation_id:
+            cur.execute(
+                """
+                UPDATE face_observations
+                SET snapshot_path = COALESCE(NULLIF(%(full_frame_path)s::text, ''), snapshot_path),
+                    crop_path = COALESCE(NULLIF(%(face_crop_path)s::text, ''), crop_path),
+                    payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'snapshot_path', %(full_frame_path)s::text,
+                                'crop_path', NULLIF(%(face_crop_path)s::text, ''),
+                                'annotated_frame_path', NULLIF(%(annotated_frame_path)s::text, '')
+                            )
+                        )
+                WHERE source_observation_id = %(source_observation_id)s
+                """,
+                {
+                    "source_observation_id": source_observation_id,
+                    "full_frame_path": full_frame_path,
+                    "face_crop_path": face_crop_path,
+                    "annotated_frame_path": annotated_frame_path,
+                },
+            )
+
+
+def _mark_image_evidence_failed(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    reason: str,
+) -> None:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'materialization_failed',
+                materialization_status = 'materialization_failed',
+                materialization_failure_reason = %(reason)s,
+                error_message = %(reason)s,
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND COALESCE(task_type, '') = 'image_only'
+            """,
+            {"event_id": event_id, "reason": reason},
+        )
+        cur.execute(
+            """
+            UPDATE evidence_bundles
+            SET media_status = 'image_missing',
+                evidence_state = 'image_missing',
+                evidence_reason = %(reason)s,
+                visual_evidence_status = 'missing',
+                summary = jsonb_set(
+                    jsonb_set(
+                        jsonb_set(COALESCE(summary, '{}'::jsonb), '{image_status}', '"image_missing"'::jsonb, true),
+                        '{image_available}', 'false'::jsonb, true
+                    ),
+                    '{image_missing_reason}', to_jsonb(%(reason)s::text), true
+                ),
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+            """,
+            {"event_id": event_id, "reason": reason},
+        )
+        cur.execute(
+            """
+            UPDATE events
+            SET media_status = 'image_missing',
+                payload = COALESCE(payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'media',
+                        COALESCE(payload->'media', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media_status', 'image_missing',
+                            'snapshot_status', 'image_missing',
+                            'metadata_status', 'image_missing',
+                            'evidence_state', 'image_missing',
+                            'evidence_reason', %(reason)s::text,
+                            'materialization_status', 'materialization_failed'
+                        )
+                    ),
+                updated_at = now()
+            WHERE id = %(event_id)s::uuid
+            """,
+            {"event_id": event_id, "reason": reason},
+        )
+
+
+def _file_size_or_none(path: str) -> int | None:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return None
+
+
+def _image_materialization_failure_reason(exc: Exception, *, max_chars: int = 900) -> str:
+    text = " ".join(str(exc or "").split())
+    prefix = f"face_image_extract_failed:{type(exc).__name__}"
+    if not text:
+        return prefix
+    reason = f"{prefix}:{text}"
+    return reason if len(reason) <= max_chars else reason[:max_chars]
+
+
+class _RollingCacheMaterializationRunner:
+    """Keep rolling-cache materialization workers hot without blocking polling.
+
+    The old path claimed a full DB batch, ran every remux, and finalized the whole
+    batch before the media-worker loop could scan for newly-ready tasks again.
+    Under 60-stream pressure that turned a 1s poll interval into a 60-100s
+    effective interval. This runner keeps the expensive copy/remux work in a
+    persistent pool and lets the main loop keep claiming ready work as capacity
+    opens.
+    """
+
+    def __init__(self, *, max_workers: int) -> None:
+        self.max_workers = max(1, int(max_workers or 1))
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        self._futures: dict[object, str] = {}
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def process(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
+        updated = _expire_overdue_rolling_cache_tasks(pg_conn, cfg)
+        updated += self._drain_completed(pg_conn, cfg)
+
+        available = self.max_workers - len(self._futures)
+        if available > 0:
+            claim_limit = min(
+                max(1, int(getattr(cfg, "rolling_cache_materialization_max_per_poll", 1))),
+                available,
+            )
+            rows = _rolling_cache_candidate_tasks(pg_conn, cfg, limit=claim_limit)
+            segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
+            for row in rows:
+                if len(self._futures) >= self.max_workers:
+                    break
+                job = _prepare_rolling_cache_job(
+                    pg_conn,
+                    cfg,
+                    row,
+                    segment_cache=segment_cache,
+                )
+                if job is None:
+                    continue
+                future = self._executor.submit(
+                    _materialize_rolling_cache_job,
+                    root=cfg.rolling_cache_root,
+                    output_root=cfg.rolling_cache_materialized_root,
+                    job=job,
+                )
+                self._futures[future] = str(job.get("event_id") or "")
+
+        return updated + self._drain_completed(pg_conn, cfg)
+
+    def _drain_completed(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
+        if not self._futures:
+            return 0
+
+        metadata_overrides: list[dict] = []
+        for future, event_id in list(self._futures.items()):
+            if not future.done():
+                continue
+            self._futures.pop(future, None)
+            try:
+                metadata_overrides.append(future.result())
+            except RollingCacheCoverageMiss as exc:
+                _defer_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=str(exc) or "rolling_cache_coverage_miss",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "rolling_cache_materialization_failed event_id=%s",
+                    event_id,
+                )
+                _fail_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=_rolling_cache_failure_reason(exc),
+                )
+
+        if not metadata_overrides:
+            return 0
+        return _flush_rolling_cache_finalizer_batch_or_defer(
+            pg_conn,
+            cfg,
+            metadata_overrides,
+        )
+
+
+def _prepare_rolling_cache_job(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    row: dict[str, object],
+    *,
+    segment_cache: dict[tuple[str, str], list[RollingSegment]],
+) -> dict[str, object] | None:
+    event_id = str(row.get("event_id") or "")
+    source_id = str(row.get("source_id") or row.get("replay_source_id") or "")
+    if not event_id or not source_id:
+        return None
+    if cfg.rolling_cache_sources and source_id not in cfg.rolling_cache_sources:
+        return None
+    if _is_already_ready(pg_conn, event_id):
+        return None
+    if not _claim_rolling_cache_task(
+        pg_conn,
+        event_id=event_id,
+        ready_at=row.get("rolling_cache_ready_at"),
+        processing_deadline_s=(
+            cfg.rolling_cache_materialization_processing_deadline_seconds
+        ),
+    ):
+        return None
+    try:
+        event_context = _load_event_context(pg_conn, event_id)
+        window = _rolling_cache_window(row, event_context)
+        if window is None:
+            _defer_rolling_cache_task(
+                pg_conn,
+                event_id=event_id,
+                reason="rolling_cache_missing_event_frame_pts",
+            )
+            return None
+        requested_start_pts, requested_end_pts, event_frame_pts = window
+        runtime_epoch_id = (
+            _runtime_epoch_from_event_context(event_context)
+            or _current_runtime_epoch_id(cfg.sink_output_dir)
+        )
+        labels = _rolling_cache_labels(
+            row=row,
+            event_context=event_context,
+            runtime_epoch_id=runtime_epoch_id,
+            requested_start_pts=requested_start_pts,
+            requested_end_pts=requested_end_pts,
+            event_frame_pts=event_frame_pts,
+        )
+        cache_key = (source_id, runtime_epoch_id)
+        segments = segment_cache.get(cache_key)
+        if segments is None:
+            segments = find_segments(
+                cfg.rolling_cache_root,
+                source_id=source_id,
+                runtime_epoch_id=runtime_epoch_id,
+            )
+            segment_cache[cache_key] = segments
+        return {
+            "event_id": event_id,
+            "source_id": source_id,
+            "requested_start_pts": requested_start_pts,
+            "requested_end_pts": requested_end_pts,
+            "runtime_epoch_id": runtime_epoch_id,
+            "labels": labels,
+            "segments": segments,
+        }
+    except RollingCacheCoverageMiss as exc:
+        _defer_rolling_cache_task(
+            pg_conn,
+            event_id=event_id,
+            reason=str(exc) or "rolling_cache_coverage_miss",
+        )
+    except Exception as exc:
+        logger.exception("rolling_cache_materialization_failed event_id=%s", event_id)
+        _fail_rolling_cache_task(
+            pg_conn,
+            event_id=event_id,
+            reason=_rolling_cache_failure_reason(exc),
+        )
+    return None
+
+
+def _materialize_rolling_cache_job(
+    *,
+    root: str,
+    output_root: str,
+    job: dict[str, object],
+) -> dict:
+    event_id = str(job.get("event_id") or "")
+    materialized = materialize_window(
+        root=root,
+        output_root=output_root,
+        event_id=event_id,
+        source_id=str(job.get("source_id") or ""),
+        requested_start_pts=int(job.get("requested_start_pts") or 0),
+        requested_end_pts=int(job.get("requested_end_pts") or 0),
+        runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
+        labels=job.get("labels") if isinstance(job.get("labels"), dict) else {},
+        segments=(
+            job.get("segments")
+            if isinstance(job.get("segments"), list)
+            else None
+        ),
+    )
+    metadata = _load_scan_metadata_payload(materialized.metadata_path)
+    if metadata is None:
+        raise RuntimeError("rolling_cache_materialized_metadata_unreadable")
+    observed_at = datetime.now(timezone.utc).isoformat()
+    return {
+        **metadata,
+        "_meta_dir": str(materialized.sink_dir),
+        "_finalizer_phase": {
+            "sink_metadata_first_seen_at": observed_at,
+            "sink_video_first_seen_at": observed_at,
+            "sink_video_stable_at": observed_at,
+            "sink_ffprobe_ready_at": observed_at,
+            "rolling_cache_materialization_ms": materialized.materialization_ms,
+            "rolling_cache_segment_ids": list(materialized.segment_ids),
+        },
+    }
+
+
+def _expire_overdue_rolling_cache_tasks(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+) -> int:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH failed AS (
+                UPDATE evidence_tasks
+                SET status = 'materialization_failed',
+                    materialization_status = 'materialization_failed',
+                    materialization_defer_reason = COALESCE(
+                        NULLIF(materialization_defer_reason, ''),
+                        'rolling_cache_materialization_deadline_missed'
+                    ),
+                    materialization_failure_reason = COALESCE(
+                        NULLIF(materialization_defer_reason, ''),
+                        'rolling_cache_materialization_deadline_missed'
+                    ),
+                    materialization_expired_reason = NULL,
+                    materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'rolling_cache',
+                            jsonb_build_object(
+                                'status', 'failed',
+                                'reason', 'rolling_cache_materialization_deadline_missed',
+                                'observed_at', now()
+                            )
+                        ),
+                    updated_at = now()
+                WHERE materialization_status = 'materializing'
+                  AND materialization_deadline_at IS NOT NULL
+                  AND materialization_deadline_at < now()
+                  AND (
+                      %(sources_empty)s
+                      OR COALESCE(source_id, replay_source_id, '') = ANY(%(sources)s)
+                  )
+                RETURNING event_id, materialization_failure_reason
+            )
+            UPDATE events e
+            SET media_status = 'materialization_failed',
+                payload = COALESCE(e.payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'media',
+                        COALESCE(e.payload->'media', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'clip_status', 'materialization_failed',
+                            'evidence_state', 'materialization_failed',
+                            'evidence_reason', failed.materialization_failure_reason,
+                            'materialization_status', 'materialization_failed',
+                            'materialization_reason', failed.materialization_failure_reason,
+                            'evidence_state_updated_at', now()
+                        )
+                    ),
+                updated_at = now()
+            FROM failed
+            WHERE e.id = failed.event_id
+            """,
+            {
+                "sources": list(cfg.rolling_cache_sources),
+                "sources_empty": not bool(cfg.rolling_cache_sources),
+            },
+        )
+        return int(cur.rowcount or 0)
+
+
+def _flush_rolling_cache_finalizer_batch_or_defer(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    metadata_overrides: list[dict],
+) -> int:
+    try:
+        return _flush_rolling_cache_finalizer_batch(pg_conn, cfg, metadata_overrides)
+    except Exception as exc:
+        logger.exception(
+            "rolling_cache_finalizer_batch_failed count=%s",
+            len(metadata_overrides),
+        )
+        for event_id in _metadata_override_event_ids(metadata_overrides):
+            _fail_rolling_cache_task(
+                pg_conn,
+                event_id=event_id,
+                reason=f"rolling_cache_finalizer_error:{type(exc).__name__}",
+            )
+        return 0
+
+
+def _metadata_override_event_ids(metadata_overrides: list[dict]) -> list[str]:
+    event_ids: list[str] = []
+    for metadata in metadata_overrides:
+        labels = metadata.get("labels")
+        labels = labels if isinstance(labels, dict) else {}
+        event_id = str(metadata.get("event_id") or labels.get("event_id") or "")
+        if event_id:
+            event_ids.append(event_id)
+    return event_ids
+
+
+def _flush_rolling_cache_finalizer_batch(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    metadata_overrides: list[dict],
+) -> int:
+    if not metadata_overrides:
+        return 0
+
+    local_processed: set[str] = set()
+    return int(
+        _process_sink_output(
+            pg_conn,
+            str(Path(cfg.rolling_cache_materialized_root) / "midterm"),
+            local_processed,
+            evidence_output_dir=cfg.evidence_output_dir,
+            candidate_dirs=None,
+            invalid_output_failures=None,
+            midterm_sink_stability_checks=1,
+            processed_state_path=None,
+            sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
+            materialization_guard=None,
+            materialization_pacer=None,
+            materialization_timeout_s=cfg.materialization_timeout_s,
+            materialization_max_backlog=0,
+            evidence_final_root_max_bytes=cfg.evidence_final_root_max_bytes,
+            evidence_incoming_root_max_bytes=cfg.evidence_incoming_root_max_bytes,
+            replay_sink_output_max_bytes=0,
+            evidence_storage_warning_ratio=cfg.evidence_storage_warning_ratio,
+            evidence_storage_critical_ratio=cfg.evidence_storage_critical_ratio,
+            evidence_storage_hard_ratio=cfg.evidence_storage_hard_ratio,
+            cleanup_replay_sink_output_enabled=True,
+            cleanup_replay_sink_output_statuses=cfg.cleanup_replay_sink_output_statuses,
+            materialization_finalizer_workers=cfg.materialization_finalizer_workers,
+            materialization_finalizer_max_per_source_per_poll=0,
+            materialization_finalizer_source_serial=(
+                cfg.materialization_finalizer_source_serial
+            ),
+            materialization_database_url=cfg.database_url,
+            finalizer_worker_id="rolling-cache",
+            metadata_files_override=metadata_overrides,
+            scan_stats_override={
+                "scan_duration_ms": 0,
+                "metadata_files_visited": len(metadata_overrides),
+                "metadata_files_parsed": len(metadata_overrides),
+                "scan_mode": "rolling_cache",
+            },
+        )
+        or 0
+    )
+
+
+def _rolling_cache_candidate_tasks(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    with pg_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            WITH candidates AS (
+                SELECT
+                    et.event_id, et.source_id, et.replay_source_id,
+                    et.camera_id, et.event_type, et.event_ts_ms,
+                    et.pre_seconds, et.post_seconds, et.replay_window,
+                    et.priority, e.payload, e.frame_uuid, e.created_at,
+                    COALESCE(
+                        et.materialization_ready_at,
+                        (
+                            CASE
+                                WHEN et.event_ts_ms BETWEEN 946684800000 AND 4102444800000
+                                    THEN to_timestamp(et.event_ts_ms / 1000.0)
+                                ELSE e.created_at
+                            END
+                            + (
+                                COALESCE(et.post_seconds, 5)::double precision
+                                + %(segment_ready_delay_s)s::double precision
+                            ) * interval '1 second'
+                        )
+                    ) AS rolling_cache_ready_at
+                FROM evidence_tasks et
+                JOIN events e ON e.id = et.event_id
+                LEFT JOIN evidence_bundles eb ON eb.event_id = et.event_id
+                WHERE et.materialization_status = ANY(%(statuses)s)
+                  AND COALESCE(et.task_type, '') <> 'image_only'
+                  AND COALESCE(et.clip_required, false) = true
+                  AND (
+                      %(sources_empty)s
+                      OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
+                  )
+                  AND (
+                      et.materialization_ready_at IS NULL
+                      OR et.materialization_ready_at <= now()
+                  )
+                  AND COALESCE(et.replay_slot_status, '') <> 'active'
+                  AND eb.event_id IS NULL
+            )
+            SELECT
+                *,
+                GREATEST(
+                    0,
+                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
+                )::bigint AS rolling_cache_ready_lag_ms
+            FROM candidates
+            WHERE rolling_cache_ready_at <= now()
+            ORDER BY priority DESC, rolling_cache_ready_at ASC, created_at ASC
+            LIMIT %(limit)s
+            """,
+            {
+                "statuses": list(ROLLING_CACHE_TASK_STATUSES),
+                "sources": list(cfg.rolling_cache_sources),
+                "sources_empty": not bool(cfg.rolling_cache_sources),
+                "limit": (
+                    max(1, int(limit))
+                    if limit is not None
+                    else cfg.rolling_cache_materialization_max_per_poll
+                ),
+                "segment_ready_delay_s": (
+                    float(getattr(cfg, "rolling_cache_segment_seconds", 4))
+                    + float(
+                        getattr(
+                            cfg,
+                            "rolling_cache_materialization_ready_segment_grace_seconds",
+                            1.0,
+                        )
+                    )
+                ),
+            },
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def _claim_rolling_cache_task(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    ready_at: object | None = None,
+    processing_deadline_s: float = 120.0,
+) -> bool:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'materializing',
+                materialization_status = 'materializing',
+                materialization_ready_at = COALESCE(
+                    materialization_ready_at,
+                    %(ready_at)s::timestamptz
+                ),
+                materialization_deadline_at = COALESCE(
+                    materialization_deadline_at,
+                    now() + %(processing_deadline_s)s::double precision * interval '1 second'
+                ),
+                materialization_attempt_count = materialization_attempt_count + 1,
+                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'rolling_cache',
+                        jsonb_build_object(
+                            'status', 'materializing',
+                            'claimed_at', now(),
+                            'ready_at', %(ready_at)s::timestamptz,
+                            'ready_lag_ms',
+                                GREATEST(
+                                    0,
+                                    floor(extract(epoch FROM (now() - %(ready_at)s::timestamptz)) * 1000)
+                                )::bigint,
+                            'processing_deadline_s', %(processing_deadline_s)s::double precision
+                        )
+                    ),
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND materialization_status = ANY(%(statuses)s)
+              AND (
+                  %(ready_at)s::timestamptz IS NULL
+                  OR %(ready_at)s::timestamptz <= now()
+              )
+            """,
+            {
+                "event_id": event_id,
+                "statuses": list(ROLLING_CACHE_TASK_STATUSES),
+                "ready_at": ready_at,
+                "processing_deadline_s": max(1.0, float(processing_deadline_s)),
+            },
+        )
+        return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def _rolling_cache_coverage_retry_after_s(exc: BaseException) -> float:
+    message = str(exc)
+    gaps_ns: list[int] = []
+    for key in ("pre_gap_ns=", "post_gap_ns="):
+        start = message.find(key)
+        if start < 0:
+            continue
+        index = start + len(key)
+        digits: list[str] = []
+        while index < len(message) and message[index].isdigit():
+            digits.append(message[index])
+            index += 1
+        if digits:
+            gaps_ns.append(int("".join(digits)))
+    if not gaps_ns:
+        return 2.0
+    return min(10.0, max(1.0, max(gaps_ns) / 1_000_000_000.0 + 1.0))
+
+
+def _defer_rolling_cache_task(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    reason: str,
+    retry_after_s: float = 2.0,
+) -> None:
+    retry_after_s = max(0.5, float(retry_after_s or 0.0))
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'materialization_deferred',
+                materialization_status = 'materialization_deferred',
+                materialization_defer_reason = %(reason)s,
+                materialization_ready_at =
+                    now() + %(retry_after_s)s::double precision * interval '1 second',
+                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'rolling_cache',
+                        jsonb_build_object(
+                            'status', 'miss',
+                            'reason', %(reason)s::text,
+                            'retry_after_s', %(retry_after_s)s::double precision,
+                            'observed_at', now()
+                        )
+                    ),
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND materialization_status NOT IN (
+                  'materialized',
+                  'materialization_skipped',
+                  'materialization_expired',
+                  'materialization_failed'
+              )
+            """,
+            {"event_id": event_id, "reason": reason, "retry_after_s": retry_after_s},
+        )
+
+
+def _rolling_cache_failure_reason(exc: Exception, *, max_chars: int = 900) -> str:
+    detail = " ".join(str(exc or "").split())
+    prefix = f"rolling_cache_error:{type(exc).__name__}"
+    if not detail:
+        return prefix
+    reason = f"{prefix}:{detail}"
+    if len(reason) <= max_chars:
+        return reason
+    return f"{prefix}:...{reason[-max_chars + len(prefix) + 4:]}"
+
+
+def _fail_rolling_cache_task(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    reason: str,
+) -> None:
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'materialization_failed',
+                materialization_status = 'materialization_failed',
+                materialization_defer_reason = %(reason)s,
+                materialization_failure_reason = %(reason)s,
+                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'rolling_cache',
+                        jsonb_build_object(
+                            'status', 'failed',
+                            'reason', %(reason)s::text,
+                            'observed_at', now()
+                        )
+                    ),
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND materialization_status NOT IN (
+                  'materialized',
+                  'materialization_skipped',
+                  'materialization_expired',
+                  'materialization_failed'
+              )
+            """,
+            {"event_id": event_id, "reason": reason},
+        )
+
+
+def _rolling_cache_window(
+    task_row: dict[str, object],
+    event_context: dict,
+) -> tuple[int, int, int] | None:
+    payload = event_context.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    media = payload.get("media")
+    media = media if isinstance(media, dict) else {}
+    replay_window = task_row.get("replay_window")
+    replay_window = replay_window if isinstance(replay_window, dict) else {}
+    event_frame_pts = _to_int(
+        media.get("event_frame_pts")
+        or media.get("frame_pts")
+        or replay_window.get("event_frame_pts")
+        or replay_window.get("frame_pts")
+    )
+    if event_frame_pts is None:
+        return None
+    pre_seconds = (
+        _to_float(task_row.get("pre_seconds"))
+        or _to_float(replay_window.get("pre_seconds"))
+        or float(os.getenv("DEFAULT_PRE_SECONDS", "5"))
+    )
+    post_seconds = (
+        _to_float(task_row.get("post_seconds"))
+        or _to_float(replay_window.get("post_seconds"))
+        or float(os.getenv("DEFAULT_POST_SECONDS", "5"))
+    )
+    requested_start_pts = max(0, int(event_frame_pts - pre_seconds * 1_000_000_000))
+    requested_end_pts = int(event_frame_pts + post_seconds * 1_000_000_000)
+    return requested_start_pts, requested_end_pts, event_frame_pts
+
+
+def _rolling_cache_labels(
+    *,
+    row: dict[str, object],
+    event_context: dict,
+    runtime_epoch_id: str,
+    requested_start_pts: int,
+    requested_end_pts: int,
+    event_frame_pts: int,
+) -> dict[str, object]:
+    return {
+        "event_id": event_context.get("event_id", ""),
+        "source_event_id": event_context.get("source_event_id", ""),
+        "event_type": event_context.get("event_type", ""),
+        "source_id": event_context.get("source_id") or row.get("source_id") or "",
+        "camera_id": event_context.get("camera_id", ""),
+        "frame_uuid": event_context.get("frame_uuid", ""),
+        "event_frame_uuid": event_context.get("frame_uuid", ""),
+        "event_frame_pts": event_frame_pts,
+        "frame_pts": event_frame_pts,
+        "requested_start_pts": requested_start_pts,
+        "original_requested_start_pts": requested_start_pts,
+        "effective_start_pts": requested_start_pts,
+        "requested_end_pts": requested_end_pts,
+        "requested_pre_window_seconds": row.get("pre_seconds"),
+        "effective_pre_window_seconds": row.get("pre_seconds"),
+        "runtime_epoch_id": runtime_epoch_id,
+        "replay_source_kind": "rolling_cache",
+        "evidence_topology": "replay_raw_rolling_cache",
+        "annotation_source_policy": "frame_cache",
+        "replay_stop_strategy": "rolling_cache_segment_copy",
+        "materialization_mode": "rolling_cache_copy",
+    }
+
+
 def _promote_generated_clips_to_ready(pg_conn: psycopg.Connection) -> int:
     """Promote historical clean generated clips to the current ready status."""
     try:
@@ -4714,7 +7653,12 @@ def _promote_generated_clips_to_ready(pg_conn: psycopg.Connection) -> int:
                     WHERE t.event_id = e.id
                       AND e.payload -> 'media' ->> 'evidence_state' = 'ready'
                       AND t.status <> 'ready'
+                      AND COALESCE(t.materialization_failure_reason, '') <> %(superseded_reason)s
                     """
+                    ,
+                    {
+                        "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
+                    }
                 )
             return updated
     except Exception:
@@ -5172,6 +8116,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     cpu_thread_limit = _apply_materialization_cpu_thread_limit(
         cfg.materialization_cpu_thread_limit
     )
+    rolling_cache_poll_interval_s = float(
+        getattr(cfg, "rolling_cache_materialization_poll_interval_s", 1.0) or 1.0
+    )
     logger.info(
         "media-worker started sink_dir=%s snap_dir=%s ann_dir=%s evidence_dir=%s "
         "sink_stability_checks=%d poll_interval=%ds "
@@ -5181,10 +8128,13 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "materialization_max_active=%d materialization_timeout_s=%.1f "
         "materialization_max_backlog=%d materialization_max_per_poll=%d "
         "materialization_finalizer_workers=%d "
+        "materialization_finalizer_max_per_source_per_poll=%d "
+        "materialization_finalizer_source_serial=%s "
         "materialization_throttle_sleep_s=%.1f "
         "materialization_throttle_deadline_guard_s=%.1f "
         "materialization_cpu_thread_limit=%d cpu_thread_limit_result=%s "
-        "cleanup_replay_sink_output=%s cleanup_statuses=%s",
+        "cleanup_replay_sink_output=%s cleanup_statuses=%s "
+        "rolling_cache_poll_interval_s=%.1f",
         cfg.sink_output_dir,
         cfg.snapshot_output_dir,
         cfg.annotated_output_dir,
@@ -5202,12 +8152,15 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.materialization_max_backlog,
         cfg.materialization_max_per_poll,
         cfg.materialization_finalizer_workers,
+        cfg.materialization_finalizer_max_per_source_per_poll,
+        cfg.materialization_finalizer_source_serial,
         cfg.materialization_throttle_sleep_s,
         cfg.materialization_throttle_deadline_guard_s,
         cfg.materialization_cpu_thread_limit,
         cpu_thread_limit,
         cfg.cleanup_replay_sink_output_enabled,
         ",".join(cfg.cleanup_replay_sink_output_statuses),
+        rolling_cache_poll_interval_s,
     )
 
     processed_state_path = _media_worker_state_path(
@@ -5223,58 +8176,121 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         throttle_sleep_s=cfg.materialization_throttle_sleep_s,
         deadline_guard_s=cfg.materialization_throttle_deadline_guard_s,
     )
+    rolling_cache_runner = (
+        _RollingCacheMaterializationRunner(
+            max_workers=cfg.rolling_cache_materialization_workers
+        )
+        if cfg.rolling_cache_enabled and cfg.rolling_cache_materialization_enabled
+        else None
+    )
 
-    while not shutdown_requested:
-        try:
-            active_sink_output_dir = _active_epoch_sink_output_dir(cfg.sink_output_dir)
-            clip_updates = _process_sink_output(
-                pg_conn,
-                active_sink_output_dir,
-                processed_dirs,
-                evidence_output_dir=cfg.evidence_output_dir,
-                candidate_dirs=candidate_dirs,
-                invalid_output_failures=invalid_output_failures,
-                midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
-                processed_state_path=processed_state_path,
-                sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
-                materialization_guard=materialization_guard,
-                materialization_pacer=materialization_pacer,
-                materialization_timeout_s=cfg.materialization_timeout_s,
-                materialization_max_backlog=cfg.materialization_max_backlog,
-                materialization_finalizer_workers=cfg.materialization_finalizer_workers,
-                materialization_database_url=cfg.database_url,
-                evidence_final_root_max_bytes=cfg.evidence_final_root_max_bytes,
-                evidence_incoming_root_max_bytes=cfg.evidence_incoming_root_max_bytes,
-                replay_sink_output_max_bytes=cfg.replay_sink_output_max_bytes,
-                evidence_storage_warning_ratio=cfg.evidence_storage_warning_ratio,
-                evidence_storage_critical_ratio=cfg.evidence_storage_critical_ratio,
-                evidence_storage_hard_ratio=cfg.evidence_storage_hard_ratio,
-                cleanup_replay_sink_output_enabled=(
-                    cfg.cleanup_replay_sink_output_enabled
-                ),
-                cleanup_replay_sink_output_statuses=(
-                    cfg.cleanup_replay_sink_output_statuses
-                ),
+    next_rolling_cache_poll_at = 0.0
+    next_general_poll_at = 0.0
+    try:
+        while not shutdown_requested:
+            now_monotonic = time.monotonic()
+            rolling_cache_due = (
+                cfg.rolling_cache_enabled
+                and cfg.rolling_cache_materialization_enabled
+                and now_monotonic >= next_rolling_cache_poll_at
             )
-            if clip_updates:
-                logger.info("media_worker: clip updated %d events", clip_updates)
+            general_due = now_monotonic >= next_general_poll_at
+            try:
+                if rolling_cache_due:
+                    next_rolling_cache_poll_at = (
+                        now_monotonic + rolling_cache_poll_interval_s
+                    )
+                    rolling_updates = _process_rolling_cache_tasks(
+                        pg_conn,
+                        cfg,
+                        runner=rolling_cache_runner,
+                    )
+                    if rolling_updates:
+                        logger.info(
+                            "media_worker: rolling-cache materialized %d events",
+                            rolling_updates,
+                        )
 
-            snap_updates = _process_pending_snapshots(
-                pg_conn,
-                cfg.snapshot_output_dir,
-                cfg.default_pre_seconds,
-            )
-            if snap_updates:
-                logger.info("media_worker: snapshot updated %d events", snap_updates)
+                if general_due:
+                    next_general_poll_at = now_monotonic + max(0.1, cfg.poll_interval_s)
+                    active_sink_output_dir = _active_epoch_sink_output_dir(
+                        cfg.sink_output_dir
+                    )
+                    clip_updates = _process_sink_output(
+                        pg_conn,
+                        active_sink_output_dir,
+                        processed_dirs,
+                        evidence_output_dir=cfg.evidence_output_dir,
+                        candidate_dirs=candidate_dirs,
+                        invalid_output_failures=invalid_output_failures,
+                        midterm_sink_stability_checks=cfg.midterm_sink_stability_checks,
+                        processed_state_path=processed_state_path,
+                        sink_scan_max_metadata_files=cfg.sink_scan_max_metadata_files,
+                        materialization_guard=materialization_guard,
+                        materialization_pacer=materialization_pacer,
+                        materialization_timeout_s=cfg.materialization_timeout_s,
+                        materialization_max_backlog=cfg.materialization_max_backlog,
+                        materialization_finalizer_workers=(
+                            cfg.materialization_finalizer_workers
+                        ),
+                        materialization_finalizer_max_per_source_per_poll=(
+                            cfg.materialization_finalizer_max_per_source_per_poll
+                        ),
+                        materialization_finalizer_source_serial=(
+                            cfg.materialization_finalizer_source_serial
+                        ),
+                        materialization_database_url=cfg.database_url,
+                        evidence_final_root_max_bytes=cfg.evidence_final_root_max_bytes,
+                        evidence_incoming_root_max_bytes=cfg.evidence_incoming_root_max_bytes,
+                        replay_sink_output_max_bytes=cfg.replay_sink_output_max_bytes,
+                        evidence_storage_warning_ratio=cfg.evidence_storage_warning_ratio,
+                        evidence_storage_critical_ratio=cfg.evidence_storage_critical_ratio,
+                        evidence_storage_hard_ratio=cfg.evidence_storage_hard_ratio,
+                        cleanup_replay_sink_output_enabled=(
+                            cfg.cleanup_replay_sink_output_enabled
+                        ),
+                        cleanup_replay_sink_output_statuses=(
+                            cfg.cleanup_replay_sink_output_statuses
+                        ),
+                    )
+                    if clip_updates:
+                        logger.info("media_worker: clip updated %d events", clip_updates)
 
-            ann_updates = _process_pending_annotations(
-                pg_conn, cfg.annotated_output_dir,
-            )
-            if ann_updates:
-                logger.info("media_worker: annotation updated %d events", ann_updates)
-        except Exception:
-            logger.exception("media worker loop error")
+                    alias_updates = _reconcile_covered_event_aliases(pg_conn)
+                    if alias_updates:
+                        logger.info(
+                            "media_worker: covered evidence aliases updated %d events",
+                            alias_updates,
+                        )
 
-        time.sleep(cfg.poll_interval_s)
+                    snap_updates = _process_pending_snapshots(
+                        pg_conn,
+                        cfg.snapshot_output_dir,
+                        cfg.default_pre_seconds,
+                    )
+                    if snap_updates:
+                        logger.info(
+                            "media_worker: snapshot updated %d events", snap_updates
+                        )
+
+                    ann_updates = _process_pending_annotations(
+                        pg_conn, cfg.annotated_output_dir,
+                    )
+                    if ann_updates:
+                        logger.info(
+                            "media_worker: annotation updated %d events", ann_updates
+                        )
+            except Exception:
+                logger.exception("media worker loop error")
+
+            now_monotonic = time.monotonic()
+            next_due_at = next_general_poll_at
+            if cfg.rolling_cache_enabled and cfg.rolling_cache_materialization_enabled:
+                next_due_at = min(next_due_at, next_rolling_cache_poll_at)
+            sleep_s = max(0.1, min(1.0, next_due_at - now_monotonic))
+            time.sleep(sleep_s)
+    finally:
+        if rolling_cache_runner is not None:
+            rolling_cache_runner.close()
 
     logger.info("media-worker stopped (processed %d dirs)", len(processed_dirs))

@@ -19,6 +19,7 @@ class Config:
     database_url: str
     consumer_group: str
     consumer_name: str
+    consumer_count: int
     poll_timeout_ms: int
     default_pre_seconds: int
     default_post_seconds: int
@@ -42,6 +43,13 @@ class Config:
     post_savant_frame_proof_retry_sleep_s: float
     post_savant_frame_proof_wait_budget_s: float
     post_savant_frame_proof_poll_interval_s: float
+    post_savant_frame_proof_fast_path_batch_size: int
+    post_savant_frame_proof_fast_path_lag: int
+    post_savant_frame_proof_fast_path_pending: int
+    frame_annotation_lookup_concurrency: int
+    frame_annotation_range_cache_ttl_s: float
+    frame_annotation_range_cache_bucket_ms: int
+    frame_annotation_range_cache_max_entries: int
     post_savant_allow_cross_session_post_window_proof: bool
     post_savant_allow_truncated_pre_window_proof: bool
     frame_annotation_stream: str
@@ -58,6 +66,12 @@ class Config:
     evidence_materialization_max_concurrency: int
     evidence_materialization_max_concurrency_per_shard: int
     evidence_materialization_max_concurrency_per_source: int
+    evidence_replay_active_slot_extra_seconds: float
+    media_poll_interval_s: float
+    midterm_sink_stability_checks: int
+    evidence_replay_sink_stability_budget_s: float
+    evidence_replay_finalizer_budget_s: float
+    evidence_replay_slot_grace_s: float
     evidence_materialization_event_type_quotas: dict[str, int]
     evidence_materialization_pressure_level: str
 
@@ -128,6 +142,7 @@ def load_config() -> Config:
         ),
         consumer_group=os.getenv("CONSUMER_GROUP", "clip-workers"),
         consumer_name=os.getenv("CONSUMER_NAME", "clip-worker-1"),
+        consumer_count=max(1, int(os.getenv("CLIP_WORKER_CONSUMER_COUNT", "8"))),
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
         default_pre_seconds=int(os.getenv("DEFAULT_PRE_SECONDS", "5")),
         default_post_seconds=int(os.getenv("DEFAULT_POST_SECONDS", "5")),
@@ -189,6 +204,34 @@ def load_config() -> Config:
                 ),
             )
         ),
+        post_savant_frame_proof_fast_path_batch_size=max(
+            0,
+            int(os.getenv("POST_SAVANT_FRAME_PROOF_FAST_PATH_BATCH_SIZE", "0")),
+        ),
+        post_savant_frame_proof_fast_path_lag=max(
+            0,
+            int(os.getenv("POST_SAVANT_FRAME_PROOF_FAST_PATH_LAG", "0")),
+        ),
+        post_savant_frame_proof_fast_path_pending=max(
+            0,
+            int(os.getenv("POST_SAVANT_FRAME_PROOF_FAST_PATH_PENDING", "0")),
+        ),
+        frame_annotation_lookup_concurrency=max(
+            1,
+            int(os.getenv("CLIP_WORKER_FRAME_ANNOTATION_LOOKUP_CONCURRENCY", "8")),
+        ),
+        frame_annotation_range_cache_ttl_s=max(
+            0.0,
+            float(os.getenv("CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_TTL_S", "0.75")),
+        ),
+        frame_annotation_range_cache_bucket_ms=max(
+            0,
+            int(os.getenv("CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_BUCKET_MS", "1000")),
+        ),
+        frame_annotation_range_cache_max_entries=max(
+            1,
+            int(os.getenv("CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_MAX_ENTRIES", "64")),
+        ),
         post_savant_allow_cross_session_post_window_proof=os.getenv(
             "POST_SAVANT_ALLOW_CROSS_SESSION_POST_WINDOW_PROOF", "true"
         )
@@ -246,6 +289,35 @@ def load_config() -> Config:
         ),
         evidence_materialization_max_concurrency_per_source=int(
             os.getenv("EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE", "1")
+        ),
+        evidence_replay_active_slot_extra_seconds=max(
+            0.0,
+            float(os.getenv("EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS", "5")),
+        ),
+        media_poll_interval_s=max(
+            0.0,
+            float(os.getenv("MEDIA_POLL_INTERVAL_S", "5")),
+        ),
+        midterm_sink_stability_checks=max(
+            0,
+            int(os.getenv("MIDTERM_SINK_STABILITY_CHECKS", "2")),
+        ),
+        evidence_replay_sink_stability_budget_s=max(
+            0.0,
+            float(os.getenv("EVIDENCE_REPLAY_SLOT_SINK_STABILITY_BUDGET_S", "60")),
+        ),
+        evidence_replay_finalizer_budget_s=max(
+            0.0,
+            float(os.getenv("EVIDENCE_REPLAY_SLOT_FINALIZER_BUDGET_S", "0")),
+        ),
+        evidence_replay_slot_grace_s=max(
+            0.0,
+            float(
+                os.getenv(
+                    "EVIDENCE_REPLAY_SLOT_GRACE_S",
+                    os.getenv("EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS", "5"),
+                )
+            ),
         ),
         evidence_materialization_event_type_quotas=_event_type_quotas_env(
             "EVIDENCE_MATERIALIZATION_EVENT_TYPE_QUOTAS"

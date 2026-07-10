@@ -83,6 +83,48 @@ def test_event_window_preserves_existing_behavior_without_event_wall_clock() -> 
     assert summary["wall_clock_filter_enabled"] is False
 
 
+def test_event_window_falls_back_when_wall_clock_filter_drops_exact_anchor() -> None:
+    event_ts_ms = 1_780_918_000_000
+    messages = [
+        _message(
+            frame_uuid="before-event",
+            frame_pts=9_958_333_334,
+            created_at=event_ts_ms,
+        ),
+        _message(
+            frame_uuid="event-frame",
+            frame_pts=10_000_000_000,
+            # Redis/write wall clock can lag the frame timestamp under pressure.
+            # The exact frame anchor must win over the coarse wall-clock filter.
+            created_at=event_ts_ms + 30_000,
+        ),
+        _message(
+            frame_uuid="after-event",
+            frame_pts=10_041_666_666,
+            created_at=event_ts_ms,
+        ),
+    ]
+
+    window, summary = select_frame_annotation_event_window(
+        messages,
+        source_id="primary_rtsp",
+        camera_id="primary_rtsp",
+        anchor_frame_pts=10_000_000_000,
+        anchor_frame_uuid="event-frame",
+        anchor_source_observation_id=None,
+        anchor_event_ts_ms=event_ts_ms,
+        pre_seconds=5,
+        post_seconds=5,
+        max_frames=30,
+    )
+
+    assert "event-frame" in [row["frame_uuid"] for row in window]
+    assert summary["anchor_found"] is True
+    assert summary["anchor_found_by"] == "frame_uuid_wall_clock_fallback"
+    assert summary["wall_clock_anchor_fallback_used"] is True
+    assert summary["wall_clock_filter_rejected_messages"] == 1
+
+
 def test_identity_event_anchor_prefers_source_observation_id_over_shared_person_track() -> None:
     event_ts_ms = 1_780_918_000_000
     messages = [

@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from typing import List, Optional
 
+from custom.services.time_utils import normalize_pts_to_ms
 from custom.models.pose import (
     AdapterResult,
     BBox,
@@ -19,8 +20,18 @@ from custom.models.pose import (
     parse_keypoints,
 )
 
+_MIN_EPOCH_MS = 946684800000  # 2000-01-01T00:00:00Z
+
 
 def _get_timestamp_ms(frame_meta) -> int:
+    for attr_name in ("pts", "buf_pts"):
+        try:
+            pts = getattr(frame_meta, attr_name, None)
+            normalized = normalize_pts_to_ms(pts)
+            if normalized >= _MIN_EPOCH_MS:
+                return int(normalized)
+        except Exception:
+            pass
     try:
         ntp = getattr(frame_meta, "ntp_timestamp", None)
         if ntp is not None:

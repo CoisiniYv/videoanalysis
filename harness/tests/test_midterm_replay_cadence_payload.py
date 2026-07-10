@@ -50,6 +50,26 @@ def test_non_cadence_payload_omits_forced_frame_duration(monkeypatch) -> None:
     assert payload["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
 
 
+def test_replay_evidence_payload_defaults_to_fast_export(monkeypatch) -> None:
+    replay_client = _activate_replay_client()
+    monkeypatch.delenv("REPLAY_TS_SYNC", raising=False)
+
+    payload = _payload(replay_client)
+
+    assert payload["configuration"]["ts_sync"] is False
+
+
+def test_replay_evidence_payload_can_opt_into_realtime_ts_sync(monkeypatch) -> None:
+    replay_client = _activate_replay_client()
+    monkeypatch.setenv("REPLAY_TS_SYNC", "true")
+
+    env_payload = _payload(replay_client)
+    override_payload = _payload(replay_client, ts_sync=False)
+
+    assert env_payload["configuration"]["ts_sync"] is True
+    assert override_payload["configuration"]["ts_sync"] is False
+
+
 def test_constant_cadence_payload_is_available_for_fallback(monkeypatch) -> None:
     replay_client = _activate_replay_client()
     monkeypatch.setenv("REPLAY_FORCE_CONSTANT_CADENCE", "false")
@@ -66,6 +86,7 @@ def test_constant_cadence_payload_is_available_for_fallback(monkeypatch) -> None
 def test_replay_retries_constant_cadence_before_frame_count(monkeypatch) -> None:
     replay_client = _activate_replay_client()
     monkeypatch.setenv("REPLAY_FORCE_CONSTANT_CADENCE", "false")
+    monkeypatch.delenv("REPLAY_TS_SYNC", raising=False)
     client = replay_client.ReplayClient("http://replay-service:8080")
     submitted: list[dict[str, Any]] = []
 
@@ -103,8 +124,11 @@ def test_replay_retries_constant_cadence_before_frame_count(monkeypatch) -> None
     assert job_id == "job-3"
     assert len(submitted) == 3
     assert "min_duration" not in submitted[0]["configuration"]
+    assert submitted[0]["configuration"]["ts_sync"] is False
     assert submitted[1]["fallback_reason"] == "replay_api_rejected_without_constant_cadence"
     assert "min_duration" in submitted[1]["configuration"]
+    assert submitted[1]["configuration"]["ts_sync"] is False
     assert submitted[1]["stop_condition"] == {"ts_delta_sec": {"max_delta_sec": 10.0}}
     assert submitted[2]["fallback_reason"] == "replay_api_rejected_ts_delta_sec_constant_cadence"
     assert submitted[2]["stop_condition"] == {"frame_count": 240}
+    assert submitted[2]["configuration"]["ts_sync"] is False

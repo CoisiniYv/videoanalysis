@@ -63,6 +63,7 @@ router = APIRouter(prefix="/api/v1/people", tags=["people"])
 
 SUPPORTED_UPLOAD_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 DEFAULT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_PERSON_LOOKUP_MIN_SIMILARITY = 0.6
 
 
 def _request_id(request: Request) -> str:
@@ -166,6 +167,35 @@ def _safe_stem(filename: str) -> str:
     return safe[:80] or "face"
 
 
+def _media_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("/media/"):
+        return text
+    media_root = os.getenv("MEDIA_ROOT", "/data/video-analytics/media").rstrip("/")
+    if media_root and text.startswith(media_root + "/"):
+        return "/media/" + text[len(media_root) + 1 :].lstrip("/")
+    marker = "/media/"
+    if marker in text:
+        return marker + text.split(marker, 1)[1].lstrip("/")
+    return text
+
+
+def _location_from_row(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    payload = dict(row)
+    payload["face_crop_url"] = _media_url(payload.get("face_crop_uri"))
+    payload["full_frame_url"] = _media_url(payload.get("full_frame_uri"))
+    payload["annotated_frame_url"] = _media_url(payload.get("annotated_frame_uri"))
+    payload["playback_kind"] = "image"
+    payload["result_mode"] = "latest_camera_hit"
+    return payload
+
+
 def _save_upload(upload: UploadFile, request_id: str) -> str:
     original = upload.filename or ""
     suffix = Path(original).suffix.lower()
@@ -240,6 +270,122 @@ def people_get(
         gallery=[GalleryEmbeddingResponse.from_db_row(row) for row in gallery],
     )
     return _ok(payload.model_dump(), request_id)
+
+
+@router.get("/{person_id}/latest-location")
+def people_latest_location(
+    person_id: int,
+    min_similarity: float = Query(DEFAULT_PERSON_LOOKUP_MIN_SIMILARITY, ge=0.0, le=1.0),
+    camera_id: str | None = Query(None),
+    source_id: str | None = Query(None),
+    start_ts_ms: int | None = Query(None, ge=0),
+    end_ts_ms: int | None = Query(None, ge=0),
+    include_unregistered_sources: bool = Query(False),
+    repo: PeopleRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    person = repo.get_person(person_id)
+    if person is None:
+        return _err_response(404, f"person not found: {person_id}", request_id)
+    row = repo.latest_location(
+        person_id,
+        min_similarity=min_similarity,
+        camera_id=camera_id,
+        source_id=source_id,
+        start_ts_ms=start_ts_ms,
+        end_ts_ms=end_ts_ms,
+        include_unregistered_sources=include_unregistered_sources,
+    )
+    return _ok({"person": person, "latest_location": _location_from_row(row)}, request_id)
+
+
+@router.get("/{person_id}/trajectory")
+def people_trajectory(
+    person_id: int,
+    min_similarity: float = Query(DEFAULT_PERSON_LOOKUP_MIN_SIMILARITY, ge=0.0, le=1.0),
+    camera_id: str | None = Query(None),
+    source_id: str | None = Query(None),
+    start_ts_ms: int | None = Query(None, ge=0),
+    end_ts_ms: int | None = Query(None, ge=0),
+    include_unregistered_sources: bool = Query(False),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    repo: PeopleRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    person = repo.get_person(person_id)
+    if person is None:
+        return _err_response(404, f"person not found: {person_id}", request_id)
+    rows = repo.trajectory(
+        person_id,
+        min_similarity=min_similarity,
+        camera_id=camera_id,
+        source_id=source_id,
+        start_ts_ms=start_ts_ms,
+        end_ts_ms=end_ts_ms,
+        include_unregistered_sources=include_unregistered_sources,
+        limit=limit,
+        offset=offset,
+    )
+    return _ok(
+        {
+            "person": person,
+            "trajectory": [_location_from_row(row) for row in rows],
+            "limit": limit,
+            "offset": offset,
+        },
+        request_id,
+    )
+
+
+@router.get("/{person_id}/find")
+def people_find(
+    person_id: int,
+    min_similarity: float = Query(DEFAULT_PERSON_LOOKUP_MIN_SIMILARITY, ge=0.0, le=1.0),
+    camera_id: str | None = Query(None),
+    source_id: str | None = Query(None),
+    start_ts_ms: int | None = Query(None, ge=0),
+    end_ts_ms: int | None = Query(None, ge=0),
+    include_unregistered_sources: bool = Query(False),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    repo: PeopleRepository = Depends(_repo),
+    request_id: str = Depends(_request_id),
+) -> dict:
+    person = repo.get_person(person_id)
+    if person is None:
+        return _err_response(404, f"person not found: {person_id}", request_id)
+    rows = repo.trajectory(
+        person_id,
+        min_similarity=min_similarity,
+        camera_id=camera_id,
+        source_id=source_id,
+        start_ts_ms=start_ts_ms,
+        end_ts_ms=end_ts_ms,
+        include_unregistered_sources=include_unregistered_sources,
+        limit=limit,
+        offset=offset,
+    )
+    results = [_location_from_row(row) for row in rows]
+    return _ok(
+        {
+            "person": person,
+            "latest_location": results[0] if results else None,
+            "results": results,
+            "query": {
+                "camera_id": camera_id,
+                "source_id": source_id,
+                "start_ts_ms": start_ts_ms,
+                "end_ts_ms": end_ts_ms,
+                "include_unregistered_sources": include_unregistered_sources,
+                "min_similarity": min_similarity,
+                "limit": limit,
+                "offset": offset,
+            },
+            "mode": "person_lookup",
+        },
+        request_id,
+    )
 
 
 @router.post("/register-face")

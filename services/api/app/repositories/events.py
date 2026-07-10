@@ -11,6 +11,14 @@ from psycopg.rows import dict_row
 
 EVENT_CATEGORY_TYPES = {
     "identity": ("watchlist_hit", "live_search_hit"),
+    "evidence": (
+        "intrusion",
+        "wall_climb_suspicious",
+        "loitering",
+        "running",
+        "fall",
+        "crowd_gathering",
+    ),
     "perimeter": ("intrusion", "wall_climb_suspicious"),
     "behavior": ("loitering", "running", "fall"),
     "crowd": ("crowd_gathering",),
@@ -141,7 +149,20 @@ class EventRepository:
             """
             (
                 COALESCE(eb.media_status, '') NOT IN ('media_deleted', 'media_expired')
-                AND COALESCE(eb.raw_clip_uri, '') <> ''
+                AND (
+                    COALESCE(eb.raw_clip_uri, '') <> ''
+                    OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+                    OR COALESCE(eb.media_status, '') = 'image_ready'
+                    OR EXISTS (
+                        SELECT 1
+                        FROM evidence_artifacts image_artifact
+                        WHERE image_artifact.event_id = eb.event_id
+                          AND image_artifact.artifact_type IN (
+                              'face_crop', 'full_frame', 'annotated_frame'
+                          )
+                          AND COALESCE(image_artifact.uri, '') <> ''
+                    )
+                )
             )
             """
         ]
@@ -154,7 +175,7 @@ class EventRepository:
             where_clauses.append("eb.event_type = %(event_type)s")
             params["event_type"] = event_type
 
-        if event_category and event_category != "all":
+        if event_category and event_category != "all" and not event_type:
             event_types = EVENT_CATEGORY_TYPES.get(event_category, ())
             if event_types:
                 where_clauses.append("eb.event_type = ANY(%(event_category_types)s)")
@@ -215,18 +236,7 @@ class EventRepository:
             params["clip_status_like"] = f"%{clip_status}%"
 
         where_sql = " AND ".join(f"({clause})" for clause in where_clauses)
-        from_sql = f"""
-            FROM evidence_bundles eb
-            LEFT JOIN cameras c
-              ON c.id::text = eb.camera_id
-              OR c.source_id = eb.source_id
-            LEFT JOIN LATERAL (
-                SELECT uri
-                FROM evidence_artifacts ea
-                WHERE ea.event_id = eb.event_id
-                  AND ea.artifact_type = 'overlay_annotations'
-                LIMIT 1
-            ) overlay_artifact ON true
+        latest_task_join_sql = """
             LEFT JOIN LATERAL (
                 SELECT
                     et.task_id,
@@ -242,6 +252,49 @@ class EventRepository:
                 ORDER BY et.updated_at DESC, et.created_at DESC, et.task_id DESC
                 LIMIT 1
             ) latest_task ON true
+        """
+        count_from_sql = f"""
+            FROM evidence_bundles eb
+            LEFT JOIN cameras c
+              ON c.id::text = eb.camera_id
+              OR c.source_id = eb.source_id
+            {latest_task_join_sql if clip_status else ""}
+            WHERE {where_sql}
+        """
+        data_from_sql = f"""
+            FROM evidence_bundles eb
+            LEFT JOIN cameras c
+              ON c.id::text = eb.camera_id
+              OR c.source_id = eb.source_id
+            LEFT JOIN LATERAL (
+                SELECT uri
+                FROM evidence_artifacts ea
+                WHERE ea.event_id = eb.event_id
+                  AND ea.artifact_type = 'overlay_annotations'
+                LIMIT 1
+            ) overlay_artifact ON true
+            LEFT JOIN LATERAL (
+                SELECT uri
+                FROM evidence_artifacts ea
+                WHERE ea.event_id = eb.event_id
+                  AND ea.artifact_type = 'face_crop'
+                LIMIT 1
+            ) face_crop_artifact ON true
+            LEFT JOIN LATERAL (
+                SELECT uri
+                FROM evidence_artifacts ea
+                WHERE ea.event_id = eb.event_id
+                  AND ea.artifact_type = 'full_frame'
+                LIMIT 1
+            ) full_frame_artifact ON true
+            LEFT JOIN LATERAL (
+                SELECT uri
+                FROM evidence_artifacts ea
+                WHERE ea.event_id = eb.event_id
+                  AND ea.artifact_type = 'annotated_frame'
+                LIMIT 1
+            ) annotated_frame_artifact ON true
+            {latest_task_join_sql}
             LEFT JOIN LATERAL (
                 SELECT COUNT(*)::int AS task_count
                 FROM evidence_tasks et
@@ -250,7 +303,7 @@ class EventRepository:
             ) task_counts ON true
             WHERE {where_sql}
         """
-        count_query = f"SELECT COUNT(*) AS total {from_sql}"
+        count_query = f"SELECT COUNT(*) AS total {count_from_sql}"
         data_query = f"""
             SELECT
                 eb.event_id::text AS event_id,
@@ -277,6 +330,11 @@ class EventRepository:
                             'annotation_lines', eb.annotation_count,
                             'visual_evidence_status', eb.visual_evidence_status,
                             'frontend_overlay_required', eb.frontend_overlay_required,
+                            'playback_kind', eb.summary->>'playback_kind',
+                            'image_status', eb.summary->>'image_status',
+                            'face_crop_uri', COALESCE(face_crop_artifact.uri, eb.summary->>'face_crop_uri'),
+                            'full_frame_uri', COALESCE(full_frame_artifact.uri, eb.summary->>'full_frame_uri'),
+                            'annotated_frame_uri', COALESCE(annotated_frame_artifact.uri, eb.summary->>'annotated_frame_uri'),
                             'matched_objects', eb.matched_objects,
                             'unknown_objects', eb.unknown_objects,
                             'summary', eb.summary,
@@ -296,11 +354,14 @@ class EventRepository:
                 eb.summary->>'evidence_dir' AS evidence_dir,
                 eb.summary->>'summary_json_path' AS summary_json_path,
                 COALESCE(overlay_artifact.uri, eb.summary->>'annotations_jsonl_path') AS annotations_jsonl_path,
+                COALESCE(face_crop_artifact.uri, eb.summary->>'face_crop_uri') AS face_crop_uri,
+                COALESCE(full_frame_artifact.uri, eb.summary->>'full_frame_uri') AS full_frame_uri,
+                COALESCE(annotated_frame_artifact.uri, eb.summary->>'annotated_frame_uri') AS annotated_frame_uri,
                 COALESCE(task_counts.task_count, 0) AS evidence_task_count,
                 latest_task.status AS latest_task_status,
                 latest_task.materialization_status AS latest_materialization_status,
                 latest_task.materialization_deadline_at AS latest_materialization_deadline_at
-            {from_sql}
+            {data_from_sql}
             ORDER BY eb.event_created_at DESC, eb.event_id DESC
             LIMIT %(limit)s OFFSET %(offset)s
         """
@@ -329,7 +390,10 @@ class EventRepository:
                 c.name AS camera_table_name,
                 raw_artifact.uri AS raw_clip_artifact_uri,
                 overlay_artifact.uri AS overlay_artifact_uri,
-                timeline_artifact.uri AS timeline_artifact_uri
+                timeline_artifact.uri AS timeline_artifact_uri,
+                face_crop_artifact.uri AS face_crop_uri,
+                full_frame_artifact.uri AS full_frame_uri,
+                annotated_frame_artifact.uri AS annotated_frame_uri
             FROM evidence_bundles eb
             LEFT JOIN cameras c
               ON c.id::text = eb.camera_id
@@ -343,6 +407,15 @@ class EventRepository:
             LEFT JOIN evidence_artifacts timeline_artifact
               ON timeline_artifact.event_id = eb.event_id
              AND timeline_artifact.artifact_type = 'sink_timeline'
+            LEFT JOIN evidence_artifacts face_crop_artifact
+              ON face_crop_artifact.event_id = eb.event_id
+             AND face_crop_artifact.artifact_type = 'face_crop'
+            LEFT JOIN evidence_artifacts full_frame_artifact
+              ON full_frame_artifact.event_id = eb.event_id
+             AND full_frame_artifact.artifact_type = 'full_frame'
+            LEFT JOIN evidence_artifacts annotated_frame_artifact
+              ON annotated_frame_artifact.event_id = eb.event_id
+             AND annotated_frame_artifact.artifact_type = 'annotated_frame'
             WHERE eb.event_id::text = %(event_id)s
                OR eb.source_event_id = %(event_id)s
             LIMIT 1

@@ -9,6 +9,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 EVENT_WORKER_DIR = str(ROOT / "services" / "event-worker")
+REPOSITORY_SOURCE = (
+    ROOT / "services" / "event-worker" / "app" / "repository.py"
+).read_text(encoding="utf-8")
 if EVENT_WORKER_DIR in sys.path:
     sys.path.remove(EVENT_WORKER_DIR)
 sys.path.insert(0, EVENT_WORKER_DIR)
@@ -131,6 +134,43 @@ def test_recording_window_preserves_rule_policy_over_env_defaults() -> None:
     assert event["payload"]["media"]["post_seconds"] == 7
 
 
+def test_record_request_preserves_replay_shard_manifest_fields() -> None:
+    record = build_record_request(
+        {
+            "event_type": "intrusion",
+            "source_event_id": "lab:intrusion:1",
+            "camera_id": "cam_lab",
+            "source_id": "source_lab",
+            "event_ts_ms": 1_765_000_000_000,
+            "clip_required": True,
+            "payload": {
+                "media": {
+                    "source_id": "source_lab",
+                    "record_request_shard_id": "replay-a",
+                    "shard_mapping_version": "phase2-v1",
+                },
+            },
+        },
+        "00000000-0000-4000-8000-000000000001",
+    )
+
+    assert record is not None
+    assert record["record_request_shard_id"] == "replay-a"
+    assert record["shard_mapping_version"] == "phase2-v1"
+
+
+def test_event_repository_persists_runtime_epoch_on_evidence_tasks() -> None:
+    assert "_runtime_epoch_id_for_task" in REPOSITORY_SOURCE
+    assert "runtime_epoch_id" in REPOSITORY_SOURCE
+    assert "NULLIF(%(runtime_epoch_id)s::text, '')" in REPOSITORY_SOURCE
+
+
+def test_event_repository_persists_materialization_ready_at() -> None:
+    assert "_materialization_ready_at" in REPOSITORY_SOURCE
+    assert "materialization_ready_at" in REPOSITORY_SOURCE
+    assert "%(materialization_ready_at)s::timestamptz" in REPOSITORY_SOURCE
+
+
 def test_blank_recording_source_id_allows_8090_added_camera_source() -> None:
     event = {
         "event_type": "intrusion",
@@ -236,6 +276,56 @@ def test_duplicate_record_request_marks_new_retry_task_skipped_without_publish()
             "reason": "recording_policy_skipped:duplicate_record_request",
         }
     ]
+
+
+def test_rolling_cache_suppression_keeps_task_pending_without_replay_request() -> None:
+    event = {
+        "event_type": "intrusion",
+        "source_event_id": "lab:intrusion:rolling",
+        "camera_id": "cam_lab",
+        "source_id": "source_lab",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 10,
+        },
+        "payload": {
+            "media": {
+                "clip_required": True,
+                "source_id": "source_lab",
+            }
+        },
+    }
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+    state = RecordingPolicyState()
+
+    inserted, event_id = _handle_event(
+        event,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("intrusion",),
+        recording_source_id="",
+        recording_cooldown_seconds=0,
+        rolling_cache_suppress_record_requests=True,
+    )
+
+    assert inserted is True
+    assert event_id == "event-1"
+    assert consumer.acked == ["1-0"]
+    assert publisher.records == []
+    assert state.published_requests == 0
+    assert repo.clip_status == ""
+    assert repo.task_status == "pending"
+    assert repo.skipped_materializations == []
 
 
 def test_current_runtime_epoch_overrides_stale_event_epoch() -> None:
@@ -451,6 +541,65 @@ def test_recording_cooldown_does_not_cross_event_types() -> None:
     assert state.published_requests == 2
     assert repo.skipped_materializations == []
     assert repo.task_status == "pending"
+
+
+def test_recording_source_cooldown_suppresses_cross_event_types() -> None:
+    repo = _Repo()
+    consumer = _Consumer()
+    publisher = _Publisher()
+    state = RecordingPolicyState()
+    watchlist = {
+        "event_type": "watchlist_hit",
+        "source_event_id": "watchlist:primary:1",
+        "camera_id": "cam_primary",
+        "source_id": "primary_rtsp",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {
+            "snapshot_required": True,
+            "clip_required": True,
+            "pre_seconds": 5,
+            "post_seconds": 5,
+        },
+        "payload": {"media": {"clip_required": True, "source_id": "primary_rtsp"}},
+    }
+    intrusion = {
+        **watchlist,
+        "event_type": "intrusion",
+        "source_event_id": "intrusion:primary:1",
+        "event_ts_ms": 1_765_000_010_000,
+    }
+
+    _handle_event(
+        watchlist,
+        "1-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_cooldown_seconds=30,
+        recording_cooldown_scope="source",
+    )
+    inserted, event_id = _handle_event(
+        intrusion,
+        "2-0",
+        repo,
+        consumer,
+        record_publisher=publisher,
+        recording_state=state,
+        recording_event_types=("watchlist_hit", "intrusion"),
+        recording_cooldown_seconds=30,
+        recording_cooldown_scope="source",
+    )
+
+    assert inserted is True
+    assert event_id == "event-2"
+    assert len(publisher.records) == 1
+    assert repo.skipped_materializations[-1]["reason"] == (
+        "recording_policy_skipped:cooldown"
+    )
 
 
 def test_recording_cooldown_grace_allows_near_boundary_event() -> None:

@@ -33,6 +33,10 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
         include_landmarks: str = "compact",
         include_embedding: bool = False,
         redis_maxlen: int = 10000,
+        source_stream_enabled: bool = False,
+        source_stream_pattern: str = "security.frame_annotations.{source_id}",
+        stream_mode: str = "global",
+        source_redis_maxlen: int = 5000,
         write_timeout_ms: int = 50,
         log_every_n_frames: int = 300,
         min_interval_ms: int | None = None,
@@ -56,6 +60,12 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             include_landmarks=str(include_landmarks or "compact"),
             include_embedding=False,
             redis_maxlen=int(redis_maxlen),
+            source_stream_enabled=_as_bool(source_stream_enabled),
+            source_stream_pattern=str(
+                source_stream_pattern or "security.frame_annotations.{source_id}"
+            ),
+            stream_mode=str(stream_mode or "global"),
+            source_redis_maxlen=int(source_redis_maxlen),
             write_timeout_ms=int(write_timeout_ms),
             log_every_n=int(log_every_n_frames),
             min_interval_ms=int(min_interval_ms),
@@ -73,6 +83,9 @@ class FrameAnnotationExporterPyFunc(NvDsPyFuncPlugin):
             f"ttl_seconds={config.ttl_seconds} "
             f"max_objects_per_frame={config.max_objects_per_frame} "
             f"redis_maxlen={config.redis_maxlen} "
+            f"source_stream_enabled={config.source_stream_enabled} "
+            f"stream_mode={config.stream_mode} "
+            f"source_redis_maxlen={config.source_redis_maxlen} "
             f"min_interval_ms={config.min_interval_ms} "
             f"include_keypoints={config.include_keypoints} "
             f"include_landmarks={config.include_landmarks} "

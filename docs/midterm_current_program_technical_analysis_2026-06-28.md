@@ -143,15 +143,18 @@ API 服务的 8000 端口只在 compose 网络内暴露，8090 通过 `/api/v1/*
 | `ANALYSIS_FPS` | `8/1` | forwarder 默认采样上限 |
 | `MAX_FPS` | `8/1` | Savant PTS gate 默认上限 |
 | `MIN_FPS` | `2/1` | Savant PTS gate 最小目标 |
-| `BATCH_SIZE` | `1` | 默认 Savant pipeline batch |
-| `MAX_PARALLEL_STREAMS` | `4` | 默认 Savant 并行流上限 |
-| `FACE_INFER_INTERVAL` | `2` | 人脸检测 interval |
-| `FACE_EMBEDDING_INFER_INTERVAL` | `2` | AdaFace embedding interval |
+| `BATCH_SIZE` | `4` | 60 路 8 FPS Savant pipeline batch 档 |
+| `POSE_BATCH_SIZE` | `4` | YOLO26-pose detector batch |
+| `FACE_DETECTOR_BATCH_SIZE` | `4` | YOLOv8-Face detector batch |
+| `FACE_EMBEDDING_BATCH_SIZE` | `16` | AdaFace embedding batch |
+| `MAX_PARALLEL_STREAMS` | `64` | 60 路 8 FPS Savant 并行流上限 |
+| `FACE_INFER_INTERVAL` | `7` | 人脸检测 interval，8 FPS ingress 下约 1 FPS |
+| `FACE_EMBEDDING_INFER_INTERVAL` | `7` | AdaFace embedding interval，跟随人脸检测 |
 | `FACE_REID_MIN_INTERVAL_MS` | `1000` | 同 track ReID/export 节流 |
 | `FRAME_ANNOTATION_REDIS_MAXLEN` | `200000` | frame annotation stream 近似保留上限 |
 | `FRAME_ANNOTATION_TTL_SECONDS` | `600` | annotation 消息语义 TTL，不是 Redis EXPIRE |
 | `EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL` | `240` | evidence admission 全局活跃预算 |
-| `EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE` | `2` | evidence admission 单 source 活跃预算 |
+| `EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE` | `1` | evidence admission 单 source 活跃预算 |
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY` | `8` | clip-worker 物化并发预算 |
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD` | `4` | 单 Replay shard 并发预算 |
 | `EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SOURCE` | `1` | 单 source 并发预算 |

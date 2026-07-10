@@ -130,6 +130,9 @@ def test_midterm_one_click_startup_scripts_are_the_customer_entrypoint() -> None
     assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in start
     assert 'docker compose "${COMPOSE_ARGS[@]}" build face-worker' in start
     assert "check_model_assets" in start
+    assert "POSE_MODEL_FILE" in start
+    assert "FACE_DETECTOR_MODEL_FILE" in start
+    assert "build_yolo_dynamic_batch_engines.sh" in start
     assert "ensure_yolov8_face_symlinks" in start
     assert "http://127.0.0.1:8090/operator" in start
     assert "http://127.0.0.1:8000" not in start
@@ -204,6 +207,12 @@ def test_active_deploy_surface_has_only_midterm_compose_and_env_files() -> None:
         "config.midterm.json",
         "config.midterm.replay-a.json",
         "config.midterm.replay-b.json",
+        "config.midterm.replay-c.json",
+        "config.midterm.replay-d.json",
+        "config.midterm.replay-e.json",
+        "config.midterm.replay-f.json",
+        "config.midterm.replay-g.json",
+        "config.midterm.replay-h.json",
     ]
     assert camera_configs == ["cameras.midterm.yml"]
 
@@ -226,6 +235,8 @@ def test_runtime_doctor_is_midterm_named() -> None:
     assert runtime_scripts == [
         "doctor_midterm.sh",
         "prepare_dual_4090_savant_b_model_cache.sh",
+        "rolling_cache_sink_entrypoint.sh",
+        "run_pressure60_dual1gpu_profile.sh",
         "video_file_sink_entrypoint.sh",
     ]
     text = _text(RUNTIME_DOCTOR)
@@ -255,6 +266,7 @@ def test_midterm_compose_uses_midterm_config_files() -> None:
     for service_name in ("savant-security", "event-worker", "media-worker"):
         assert services[service_name]["env_file"] == expected_env
     assert "env_file" not in services["source-adapter"]
+    assert services["source-adapter"]["profiles"] == ["legacy-primary-rtsp"]
 
     assert (
         "../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro"
@@ -317,6 +329,7 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["source-adapter"]["environment"]["ZMQ_ENDPOINT"] == (
         "dealer+connect:tcp://replay-service:5555"
     )
+    assert services["source-adapter"]["profiles"] == ["legacy-primary-rtsp"]
     assert services["replay-a"]["profiles"] == [
         "dual-replay-shards",
         "dual-4090-two-source",
@@ -338,14 +351,27 @@ def test_replay_first_topology_is_preserved() -> None:
         "/data/video-analytics/replay-midterm-b:/opt/rocksdb:rw"
     )
     assert replay["in_stream"]["url"] == "router+bind:tcp://0.0.0.0:5555"
-    assert replay["out_stream"]["url"] == "dealer+connect:tcp://analysis-forwarder:5557"
+    assert replay["out_stream"]["url"] == "dealer+connect:tcp://replay-raw-fanout:5557"
     assert replay["out_stream"]["options"]["send_timeout"] == {"secs": 1, "nanos": 0}
     assert replay["out_stream"]["options"]["send_retries"] == 2
+    assert services["replay-raw-fanout"]["environment"]["FORWARDER_IN_ENDPOINT"] == (
+        "router+bind:tcp://0.0.0.0:5557"
+    )
+    assert services["replay-raw-fanout"]["environment"]["FORWARDER_OUT_ENDPOINT"] == (
+        "dealer+connect:tcp://analysis-forwarder:5557"
+    )
+    assert services["replay-raw-fanout"]["environment"]["FORWARDER_RAW_OUT_ENDPOINT"] == (
+        "pub+bind:tcp://0.0.0.0:5560"
+    )
+    assert services["replay-raw-fanout"]["environment"]["FORWARDER_SAMPLER_ENABLED"] == "false"
     assert services["analysis-forwarder"]["environment"]["FORWARDER_IN_ENDPOINT"] == (
         "router+bind:tcp://0.0.0.0:5557"
     )
     assert services["analysis-forwarder"]["environment"]["FORWARDER_OUT_ENDPOINT"] == (
         "${FORWARDER_OUT_ENDPOINT:-dealer+connect:tcp://savant-security:5557}"
+    )
+    assert services["analysis-forwarder"]["environment"]["FORWARDER_RAW_OUT_ENDPOINT"] == (
+        "${FORWARDER_RAW_OUT_ENDPOINT:-null://}"
     )
     assert services["analysis-forwarder"]["environment"]["FORWARDER_QUEUE_MAX_SIZE"] == (
         "${FORWARDER_QUEUE_MAX_SIZE:-2048}"
@@ -442,11 +468,17 @@ def test_replay_first_topology_is_preserved() -> None:
         "MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"
     ] == "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
     assert services["media-worker"]["environment"]["MEDIA_WORKER_FINALIZER_WORKERS"] == (
-        "${MEDIA_WORKER_FINALIZER_WORKERS:-4}"
+        "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
     )
     assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"
+    ] == "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"
+    ] == "${MEDIA_WORKER_FINALIZER_SOURCE_SERIAL:-false}"
+    assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"
-    ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
+    ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0}"
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"
     ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S:-90}"
@@ -458,7 +490,7 @@ def test_replay_first_topology_is_preserved() -> None:
     )
     assert services["clip-worker"]["environment"][
         "EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"
-    ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-4}"
+    ] == "${EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD:-9}"
     assert services["clip-worker"]["environment"][
         "EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"
     ] == "${EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED:-true}"
@@ -487,6 +519,9 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"]["RAW_CLIP_SANITIZE_MODE"] == (
         "${RAW_CLIP_SANITIZE_MODE:-auto}"
     )
+    assert services["media-worker"]["environment"][
+        "POST_SAVANT_FAST_RAW_CLIP_ENABLED"
+    ] == "${POST_SAVANT_FAST_RAW_CLIP_ENABLED:-true}"
 
 
 def test_midterm_savant_source_reset_patch_is_wired() -> None:
@@ -569,19 +604,15 @@ def test_midterm_savant_supervisor_is_owned_by_api() -> None:
 def test_midterm_source_id_and_camera_config_are_neutral() -> None:
     compose = _compose()
     camera_config = yaml.safe_load(_text(CAMERA_CONFIG))
-    primary_cameras = [
-        camera
-        for camera in camera_config["cameras"].values()
-        if camera.get("source_id") == "primary_rtsp"
-    ]
+    configured_cameras = list(camera_config["cameras"].values())
 
     assert "SOURCE_ID" not in compose["services"]["savant-security"]["environment"]
     max_parallel_streams = compose["services"]["savant-security"]["environment"][
         "MAX_PARALLEL_STREAMS"
     ]
-    assert max_parallel_streams == "${MAX_PARALLEL_STREAMS:-4}"
+    assert max_parallel_streams == "${MAX_PARALLEL_STREAMS:-64}"
     assert compose["services"]["savant-security"]["environment"]["BATCH_SIZE"] == (
-        "${BATCH_SIZE:-1}"
+        "${BATCH_SIZE:-4}"
     )
     assert _compose_env_default_int(max_parallel_streams, "MAX_PARALLEL_STREAMS") >= max(
         2,
@@ -589,13 +620,15 @@ def test_midterm_source_id_and_camera_config_are_neutral() -> None:
     )
     assert compose["services"]["source-adapter"]["environment"]["SOURCE_ID"] == "primary_rtsp"
     assert compose["services"]["source-adapter"]["environment"]["SYNC_OUTPUT"] == "false"
+    assert compose["services"]["source-adapter"]["profiles"] == ["legacy-primary-rtsp"]
     assert "env_file" not in compose["services"]["source-adapter"]
     assert compose["services"]["event-worker"]["environment"]["RECORDING_SOURCE_ID"] == "${RECORDING_SOURCE_ID:-}"
     assert compose["services"]["event-worker"]["environment"]["DEFAULT_REPLAY_SOURCE_ID"] == "primary_rtsp"
-    assert len(primary_cameras) == 1
-    camera = primary_cameras[0]
-    assert camera["source_id"] == "primary_rtsp"
-    assert camera["name"] == "Primary RTSP Camera"
+    assert configured_cameras
+    source_ids = [camera.get("source_id") for camera in configured_cameras]
+    assert all(source_ids)
+    assert len(source_ids) == len(set(source_ids))
+    assert all(camera.get("name") for camera in configured_cameras)
 
 
 def test_midterm_runtime_calibration_is_explicit() -> None:
@@ -614,23 +647,28 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
     assert env_file["INGRESS_FPS_GATE_ENABLED"] == "true"
     assert env_file["MAX_FPS"] == "8/1"
     assert env_file["MIN_FPS"] == "2/1"
-    assert env_file["BATCH_SIZE"] == "1"
-    assert env_file["POSE_BATCH_SIZE"] == "1"
-    assert env_file["FACE_DETECTOR_BATCH_SIZE"] == "1"
+    assert env_file["BATCH_SIZE"] == "4"
+    assert env_file["POSE_BATCH_SIZE"] == "4"
+    assert env_file["FACE_DETECTOR_BATCH_SIZE"] == "4"
     assert env_file["FACE_EMBEDDING_BATCH_SIZE"] == "16"
-    assert env_file["MAX_PARALLEL_STREAMS"] == "4"
+    assert env_file["POSE_MODEL_FILE"] == "/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx"
+    assert env_file["POSE_DECODER_LAYOUT"] == "decoded_56"
+    assert env_file["FACE_DETECTOR_MODEL_FILE"] == (
+        "/models/yolov8_face/yolov8n-face.dynamic.onnx"
+    )
+    assert env_file["MAX_PARALLEL_STREAMS"] == "64"
     assert env_file["BATCHED_PUSH_TIMEOUT"] == "40000"
     assert env_file["STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS"] == "5000000000"
     assert env_file["POSE_INFER_INTERVAL"] == "1"
-    assert env_file["POSE_CONFIDENCE_THRESHOLD"] == "0.50"
+    assert env_file["POSE_CONFIDENCE_THRESHOLD"] == "0.60"
     assert env_file["POSE_KEYPOINT_THRESHOLD"] == "0.35"
-    assert env_file["POSE_SELECTOR_CONFIDENCE_THRESHOLD"] == "0.50"
+    assert env_file["POSE_SELECTOR_CONFIDENCE_THRESHOLD"] == "0.60"
     assert env_file["POSE_SELECTOR_NMS_IOU_THRESHOLD"] == "0.50"
     assert env_file["POSE_MIN_WIDTH"] == "60"
     assert env_file["POSE_MIN_HEIGHT"] == "100"
     assert env_file["FACE_CONFIDENCE_THRESHOLD"] == "0.50"
-    assert env_file["FACE_INFER_INTERVAL"] == "2"
-    assert env_file["FACE_EMBEDDING_INFER_INTERVAL"] == "2"
+    assert env_file["FACE_INFER_INTERVAL"] == "7"
+    assert env_file["FACE_EMBEDDING_INFER_INTERVAL"] == "7"
     assert env_file["WATCHLIST_THRESHOLD"] == "0.60"
     assert savant_env["MAX_FPS_CONTROL"] == "${MAX_FPS_CONTROL:-false}"
     assert savant_env["INGRESS_FPS_GATE_ENABLED"] == "${INGRESS_FPS_GATE_ENABLED:-true}"
@@ -638,14 +676,21 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
         "${STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS:-5000000000}"
     )
     assert savant_env["POSE_INFER_INTERVAL"] == "${POSE_INFER_INTERVAL:-1}"
-    assert savant_env["FACE_INFER_INTERVAL"] == "${FACE_INFER_INTERVAL:-2}"
+    assert savant_env["FACE_INFER_INTERVAL"] == "${FACE_INFER_INTERVAL:-7}"
     assert savant_env["FACE_EMBEDDING_INFER_INTERVAL"] == (
-        "${FACE_EMBEDDING_INFER_INTERVAL:-2}"
+        "${FACE_EMBEDDING_INFER_INTERVAL:-7}"
     )
-    assert savant_env["BATCH_SIZE"] == "${BATCH_SIZE:-1}"
-    assert savant_env["POSE_BATCH_SIZE"] == "${POSE_BATCH_SIZE:-1}"
-    assert savant_env["FACE_DETECTOR_BATCH_SIZE"] == "${FACE_DETECTOR_BATCH_SIZE:-1}"
+    assert savant_env["BATCH_SIZE"] == "${BATCH_SIZE:-4}"
+    assert savant_env["POSE_BATCH_SIZE"] == "${POSE_BATCH_SIZE:-4}"
+    assert savant_env["FACE_DETECTOR_BATCH_SIZE"] == "${FACE_DETECTOR_BATCH_SIZE:-4}"
     assert savant_env["FACE_EMBEDDING_BATCH_SIZE"] == "${FACE_EMBEDDING_BATCH_SIZE:-16}"
+    assert savant_env["POSE_MODEL_FILE"] == (
+        "${POSE_MODEL_FILE:-/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx}"
+    )
+    assert savant_env["POSE_DECODER_LAYOUT"] == "${POSE_DECODER_LAYOUT:-decoded_56}"
+    assert savant_env["FACE_DETECTOR_MODEL_FILE"] == (
+        "${FACE_DETECTOR_MODEL_FILE:-/models/yolov8_face/yolov8n-face.dynamic.onnx}"
+    )
     assert savant_env["BATCHED_PUSH_TIMEOUT"] == "${BATCHED_PUSH_TIMEOUT:-40000}"
     assert module["parameters"]["face_infer_interval"] == (
         "${oc.decode:${oc.env:FACE_INFER_INTERVAL, 0}}"
@@ -666,7 +711,13 @@ def test_midterm_runtime_calibration_is_explicit() -> None:
         "${parameters.face_infer_interval}"
     )
     assert elements["yolov8_face"]["model"]["model_file"] == (
-        "/models/yolov8_face/yolov8n-face.onnx"
+        "${oc.env:FACE_DETECTOR_MODEL_FILE,/models/yolov8_face/yolov8n-face.dynamic.onnx}"
+    )
+    assert elements["yolo26_pose"]["model"]["model_file"] == (
+        "${oc.env:POSE_MODEL_FILE,/models/yolo26_pose/yolo26_pose.dynamic.raw56.onnx}"
+    )
+    assert elements["yolo26_pose"]["model"]["output"]["converter"]["kwargs"]["decoder_layout"] == (
+        "${oc.env:POSE_DECODER_LAYOUT,decoded_56}"
     )
     assert elements["adaface"]["model"]["interval"] == (
         "${parameters.face_embedding_infer_interval}"
@@ -743,6 +794,9 @@ def test_midterm_savant_performance_observability_is_wired() -> None:
     assert env_file["METRICS_TIME_PERIOD"] == "5"
     assert env_file["METRICS_HISTORY"] == "100"
     assert env_file["METRICS_EXTRA_LABELS"] == '{"service":"savant-security","profile":"midterm"}'
+    assert env_file["SAVANT_PERF_METRICS_ENABLED"] == "true"
+    assert env_file["SAVANT_PERF_METRICS_STAGE_RATES_ENABLED"] == "true"
+    assert env_file["SAVANT_PERF_METRICS_FPS_WINDOW_S"] == "10"
     assert telemetry["frame_period"] == "${oc.decode:${oc.env:METRICS_FRAME_PERIOD, 1000}}"
     assert telemetry["time_period"] == "${oc.decode:${oc.env:METRICS_TIME_PERIOD, 5}}"
     assert telemetry["history"] == "${oc.decode:${oc.env:METRICS_HISTORY, 100}}"
@@ -777,7 +831,9 @@ def test_midterm_replay_uses_constant_cadence_by_default() -> None:
     assert clip_env["REPLAY_FORCE_CONSTANT_CADENCE"] == (
         "${REPLAY_FORCE_CONSTANT_CADENCE:-true}"
     )
+    assert clip_env["REPLAY_TS_SYNC"] == "${REPLAY_TS_SYNC:-false}"
     assert env_file["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
+    assert env_file["REPLAY_TS_SYNC"] == "false"
 
 
 def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
@@ -800,6 +856,9 @@ def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
     assert clip_env["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == (
         "${CLIP_WORKER_MAX_CONCURRENT_JOBS:-8}"
     )
+    assert clip_env["CLIP_WORKER_CONSUMER_COUNT"] == (
+        "${CLIP_WORKER_CONSUMER_COUNT:-8}"
+    )
     assert clip_env["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == (
         "${POST_SAVANT_FRAME_PROOF_ATTEMPTS:-1}"
     )
@@ -809,17 +868,49 @@ def test_midterm_clip_worker_queue_safety_defaults_are_explicit() -> None:
     assert clip_env["POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S"] == (
         "${POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S:-0.5}"
     )
+    assert clip_env["POST_SAVANT_FRAME_PROOF_FAST_PATH_BATCH_SIZE"] == (
+        "${POST_SAVANT_FRAME_PROOF_FAST_PATH_BATCH_SIZE:-0}"
+    )
+    assert clip_env["POST_SAVANT_FRAME_PROOF_FAST_PATH_LAG"] == (
+        "${POST_SAVANT_FRAME_PROOF_FAST_PATH_LAG:-0}"
+    )
+    assert clip_env["POST_SAVANT_FRAME_PROOF_FAST_PATH_PENDING"] == (
+        "${POST_SAVANT_FRAME_PROOF_FAST_PATH_PENDING:-0}"
+    )
+    assert clip_env["CLIP_WORKER_FRAME_ANNOTATION_LOOKUP_CONCURRENCY"] == (
+        "${CLIP_WORKER_FRAME_ANNOTATION_LOOKUP_CONCURRENCY:-8}"
+    )
+    assert clip_env["CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_TTL_S"] == (
+        "${CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_TTL_S:-0.75}"
+    )
+    assert clip_env["CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_BUCKET_MS"] == (
+        "${CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_BUCKET_MS:-1000}"
+    )
+    assert clip_env["CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_MAX_ENTRIES"] == (
+        "${CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_MAX_ENTRIES:-64}"
+    )
     assert clip_env["FRAME_ANNOTATION_ANCHOR_PAGE_COUNT"] == (
         "${FRAME_ANNOTATION_ANCHOR_PAGE_COUNT:-2000}"
+    )
+    assert clip_env["EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS"] == (
+        "${EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS:-0}"
     )
     assert env_file["CLIP_WORKER_PENDING_CLAIM_MIN_IDLE_MS"] == "5000"
     assert env_file["CLIP_WORKER_PENDING_CLAIM_COUNT"] == "10"
     assert env_file["CLIP_WORKER_PENDING_CLAIM_INTERVAL_S"] == "5"
     assert env_file["CLIP_WORKER_DEFERRED_RETRY_MAX_ATTEMPTS"] == "12"
     assert env_file["CLIP_WORKER_MAX_CONCURRENT_JOBS"] == "8"
+    assert env_file["CLIP_WORKER_CONSUMER_COUNT"] == "8"
     assert env_file["POST_SAVANT_FRAME_PROOF_ATTEMPTS"] == "1"
     assert env_file["POST_SAVANT_FRAME_PROOF_WAIT_BUDGET_S"] == "3"
     assert env_file["POST_SAVANT_FRAME_PROOF_POLL_INTERVAL_S"] == "0.5"
+    assert env_file["POST_SAVANT_FRAME_PROOF_FAST_PATH_BATCH_SIZE"] == "0"
+    assert env_file["POST_SAVANT_FRAME_PROOF_FAST_PATH_LAG"] == "0"
+    assert env_file["POST_SAVANT_FRAME_PROOF_FAST_PATH_PENDING"] == "0"
+    assert env_file["CLIP_WORKER_FRAME_ANNOTATION_LOOKUP_CONCURRENCY"] == "8"
+    assert env_file["CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_TTL_S"] == "0.75"
+    assert env_file["CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_BUCKET_MS"] == "1000"
+    assert env_file["CLIP_WORKER_FRAME_ANNOTATION_RANGE_CACHE_MAX_ENTRIES"] == "64"
     assert env_file["FRAME_ANNOTATION_ANCHOR_LOOKBACK_COUNT"] == "20000"
     assert env_file["FRAME_ANNOTATION_ANCHOR_PAGE_COUNT"] == "2000"
 
@@ -833,8 +924,10 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
-    assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "4"
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0.5"
+    assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
+    assert env_file["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == "4"
+    assert env_file["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == "false"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
     assert env_file["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
@@ -851,10 +944,16 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
         "${MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL:-0}"
     )
     assert media_env["MEDIA_WORKER_FINALIZER_WORKERS"] == (
-        "${MEDIA_WORKER_FINALIZER_WORKERS:-4}"
+        "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
+    )
+    assert media_env["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == (
+        "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
+    )
+    assert media_env["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == (
+        "${MEDIA_WORKER_FINALIZER_SOURCE_SERIAL:-false}"
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == (
-        "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0.5}"
+        "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0}"
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == (
         "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S:-90}"
@@ -865,6 +964,61 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert media_env["MEDIA_WORKER_FFMPEG_X264_PRESET"] == (
         "${MEDIA_WORKER_FFMPEG_X264_PRESET:-ultrafast}"
     )
+
+
+def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> None:
+    compose = _compose()
+    env_file = _env()
+    services = compose["services"]
+    event_env = compose["services"]["event-worker"]["environment"]
+    media_env = compose["services"]["media-worker"]["environment"]
+
+    assert env_file["ROLLING_CACHE_ENABLED"] == "false"
+    assert env_file["ROLLING_CACHE_MATERIALIZATION_ENABLED"] == "false"
+    assert env_file["ROLLING_CACHE_RETENTION_SECONDS"] == "300"
+    assert env_file["ROLLING_CACHE_SEGMENT_SECONDS"] == "4"
+    assert env_file["ROLLING_CACHE_FPS"] == "24"
+    assert env_file["ROLLING_CACHE_SEGMENT_FRAMES"] == ""
+    assert env_file["ROLLING_CACHE_FALLBACK_TO_REPLAY"] == "true"
+    assert env_file["ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS"] == "false"
+    assert env_file["EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED"] == "false"
+    assert env_file["EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS"] == "60"
+    assert env_file["EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS"] == "60"
+
+    assert event_env["ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS"] == (
+        "${ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS:-false}"
+    )
+    assert event_env["EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED"] == (
+        "${EVIDENCE_EVENT_COVERAGE_MERGE_ENABLED:-false}"
+    )
+    assert event_env["EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS"] == (
+        "${EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS:-30}"
+    )
+    assert event_env["EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS"] == (
+        "${EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS:-60}"
+    )
+    assert media_env["ROLLING_CACHE_ENABLED"] == "${ROLLING_CACHE_ENABLED:-false}"
+    assert media_env["ROLLING_CACHE_MATERIALIZATION_ENABLED"] == (
+        "${ROLLING_CACHE_MATERIALIZATION_ENABLED:-false}"
+    )
+    assert media_env["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == (
+        "${ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL:-16}"
+    )
+    assert services["rolling-cache-sink"]["environment"]["ZMQ_ENDPOINT"] == (
+        "sub+connect:tcp://replay-raw-fanout:5560"
+    )
+    assert services["rolling-cache-sink-a"]["environment"]["ZMQ_ENDPOINT"] == (
+        "sub+connect:tcp://replay-raw-fanout-a:5560"
+    )
+    assert services["rolling-cache-sink-b"]["environment"]["ZMQ_ENDPOINT"] == (
+        "sub+connect:tcp://replay-raw-fanout-b:5560"
+    )
+    entrypoint = _text(ROOT / "scripts" / "runtime" / "rolling_cache_sink_entrypoint.sh")
+    assert "ROLLING_CACHE_SEGMENT_FRAMES" in entrypoint
+    assert "ROLLING_CACHE_FPS" in entrypoint
+    assert "ROLLING_CACHE_RETENTION_SECONDS" in entrypoint
+    assert "[rolling-cache-cleanup]" in entrypoint
+    assert 'export CHUNK_SIZE="${SEGMENT_FRAMES}"' in entrypoint
 
 
 def test_midterm_evidence_version_is_project_named() -> None:
@@ -910,8 +1064,10 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_TIMEOUT_S"] == "180"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
-    assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "4"
-    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0.5"
+    assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
+    assert env_file["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == "4"
+    assert env_file["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == "false"
+    assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
     assert env_file["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
@@ -920,11 +1076,15 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     assert env_file["EVIDENCE_REPLAY_TTL_SECONDS"] == "300"
     assert env_file["EVIDENCE_FRAME_ANNOTATION_TTL_SECONDS"] == "600"
     assert env_file["EVIDENCE_UNKNOWN_SOURCE_FAIL_CLOSED"] == "true"
-    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY"] == "8"
-    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"] == "4"
+    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY"] == "36"
+    assert env_file["EVIDENCE_MATERIALIZATION_MAX_CONCURRENCY_PER_SHARD"] == "9"
+    assert env_file["EVIDENCE_REPLAY_ACTIVE_SLOT_EXTRA_SECONDS"] == "0"
+    assert env_file["MEDIA_POLL_INTERVAL_S"] == "2"
+    assert env_file["MIDTERM_SINK_STABILITY_CHECKS"] == "2"
     assert env_file["EVIDENCE_FINAL_ROOT_MAX_BYTES"] == "0"
     assert env_file["REPLAY_SINK_OUTPUT_MAX_BYTES"] == "0"
     assert env_file["RAW_CLIP_SANITIZE_MODE"] == "auto"
+    assert env_file["POST_SAVANT_FAST_RAW_CLIP_ENABLED"] == "true"
     assert env_file["MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES"] == (
         "ready,generated,generated_unverified,generated_annotation_failed,"
         "duration_guard_failed,generated_corrupt,failed"

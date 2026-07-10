@@ -52,6 +52,10 @@ class FrameAnnotationExporterConfig:
     include_landmarks: str = "compact"
     include_embedding: bool = False
     redis_maxlen: int = DEFAULT_REDIS_MAXLEN
+    source_stream_enabled: bool = False
+    source_stream_pattern: str = "security.frame_annotations.{source_id}"
+    stream_mode: str = "global"
+    source_redis_maxlen: int = 5000
     write_timeout_ms: int = DEFAULT_WRITE_TIMEOUT_MS
     log_every_n: int = DEFAULT_LOG_EVERY_N
     min_interval_ms: int = 0
@@ -124,6 +128,10 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
         redis_url: str | None = None,
         stream: str = DEFAULT_STREAM,
         maxlen: int = DEFAULT_REDIS_MAXLEN,
+        source_stream_enabled: bool = False,
+        source_stream_pattern: str = "security.frame_annotations.{source_id}",
+        stream_mode: str = "global",
+        source_maxlen: int = 5000,
         write_timeout_ms: int = DEFAULT_WRITE_TIMEOUT_MS,
     ) -> None:
         try:
@@ -140,6 +148,10 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
         )
         self._stream = stream or DEFAULT_STREAM
         self._maxlen = int(maxlen)
+        self._source_stream_enabled = bool(source_stream_enabled)
+        self._source_stream_pattern = source_stream_pattern or "security.frame_annotations.{source_id}"
+        self._stream_mode = _stream_mode(stream_mode)
+        self._source_maxlen = max(int(source_maxlen), 1)
         self._writer = AsyncRedisStreamWriter(
             redis_url=self._redis_url,
             stream=self._stream,
@@ -162,6 +174,9 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             f"redis_url={self._redis_url} "
             f"stream={self._stream} "
             f"maxlen={self._maxlen} "
+            f"source_stream_enabled={self._source_stream_enabled} "
+            f"stream_mode={self._stream_mode} "
+            f"source_maxlen={self._source_maxlen} "
             f"write_timeout_ms={int(write_timeout_ms)}",
             flush=True,
         )
@@ -198,7 +213,22 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             "face_count": str(counts["face"]),
             "data": payload_json,
         }
-        if self._writer.enqueue(fields):
+        source_stream = self._source_stream_name(message)
+        write_global = self._stream_mode in {"global", "dual"} or not source_stream
+        write_source = self._source_stream_enabled and self._stream_mode in {
+            "source_only",
+            "dual",
+        } and bool(source_stream)
+        ok = True
+        if write_global:
+            ok = self._writer.enqueue(fields) and ok
+        if write_source:
+            ok = self._writer.enqueue(
+                fields,
+                stream=source_stream,
+                maxlen=self._source_maxlen,
+            ) and ok
+        if ok:
             return True
         print(
             "component=savant_security_frame_annotation_redis_drop "
@@ -208,6 +238,19 @@ class RedisStreamFrameAnnotationExporter(FrameAnnotationExporter):
             flush=True,
         )
         return False
+
+    def _source_stream_name(self, message: dict[str, Any]) -> str:
+        if not self._source_stream_enabled:
+            return ""
+        source_id = _safe_stream_token(message.get("source_id"))
+        if not source_id:
+            return ""
+        try:
+            if "{source_id}" not in self._source_stream_pattern and "__source_id__" in self._source_stream_pattern:
+                return self._source_stream_pattern.replace("__source_id__", source_id)
+            return self._source_stream_pattern.format(source_id=source_id)
+        except Exception:
+            return f"security.frame_annotations.{source_id}"
 
 
 class FrameAnnotationExportRuntime:
@@ -405,6 +448,10 @@ def create_frame_annotation_exporter(
         return RedisStreamFrameAnnotationExporter(
             stream=config.stream,
             maxlen=config.redis_maxlen,
+            source_stream_enabled=config.source_stream_enabled,
+            source_stream_pattern=config.source_stream_pattern,
+            stream_mode=config.stream_mode,
+            source_maxlen=config.source_redis_maxlen,
             write_timeout_ms=config.write_timeout_ms,
         )
     except Exception as exc:
@@ -465,6 +512,31 @@ def _text_or_none(value: Any) -> str | None:
 
 def _stream_text(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+def _stream_mode(value: Any) -> str:
+    mode = str(value or "global").strip().lower()
+    if mode in {"source_only", "source-only", "source"}:
+        return "source_only"
+    if mode in {
+        "dual",
+        "both",
+        "global_and_source",
+        "global-and-source",
+        "global+source",
+        "source_and_global",
+        "source-and-global",
+    }:
+        return "dual"
+    return "global"
+
+
+def _safe_stream_token(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = text.strip()
+    if not text:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in "._:-" else "_" for ch in text)
 
 
 def _safe_log_value(value: Any) -> str:
