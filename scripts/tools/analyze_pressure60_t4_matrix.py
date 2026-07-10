@@ -132,7 +132,9 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     nvinfer_names = {"yolo26_pose", "yolov8_face", "adaface"}
     measured_total_ms = 0.0
-    nvinfer_total_ms = 0.0
+    nvinfer_non_postproc_ms = 0.0
+    nvinfer_compute_ms = 0.0
+    nvinfer_compute_samples = 0
     nvinfer_postproc_ms = 0.0
     if bottleneck_row:
         stage_metrics = bottleneck_row.get("stage_metrics") or {}
@@ -149,10 +151,14 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
                     or 0.0
                 )
                 nvinfer_postproc_ms += postproc_ms
-                nvinfer_total_ms += max(0.0, duration_ms - postproc_ms)
+                nvinfer_non_postproc_ms += max(0.0, duration_ms - postproc_ms)
+                compute_ms = (metrics or {}).get("inference_compute_mean_ms")
+                if compute_ms is not None:
+                    nvinfer_compute_ms += float(compute_ms)
+                    nvinfer_compute_samples += 1
     nvinfer_share = (
-        round(nvinfer_total_ms / measured_total_ms, 4)
-        if measured_total_ms > 0
+        round(nvinfer_compute_ms / measured_total_ms, 4)
+        if measured_total_ms > 0 and nvinfer_compute_samples > 0
         else None
     )
     nvinfer_dominant = bool(
@@ -168,7 +174,9 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "first_material_ablation_drop": first_material_drop,
         "bottleneck_run_id": bottleneck_row.get("run_id") if bottleneck_row else None,
         "nvinfer_measured_share": nvinfer_share,
-        "nvinfer_estimated_inference_ms": round(nvinfer_total_ms, 3),
+        "nvinfer_compute_metrics_available": nvinfer_compute_samples > 0,
+        "nvinfer_compute_mean_ms_sum": round(nvinfer_compute_ms, 3),
+        "nvinfer_non_postproc_element_ms": round(nvinfer_non_postproc_ms, 3),
         "nvinfer_postproc_ms": round(nvinfer_postproc_ms, 3),
         "nvinfer_dominant_proven": nvinfer_dominant,
         "int8_or_batch8_recommendation": (

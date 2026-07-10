@@ -57,6 +57,7 @@ def write_artifact(
                 "final_savant_stage_metrics": {
                     "yolo26_pose": {
                         "duration_mean_ms": 7.5,
+                        "inference_compute_mean_ms": 7.0,
                         "duration_p95_upper_ms": 10.0,
                         "batch_occupancy": {"4": 9},
                         "batch_full_ratio": 0.98,
@@ -151,7 +152,7 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
         "ratio_delta": -0.13,
     }
     assert result["nvinfer_dominant_proven"] is True
-    assert result["nvinfer_measured_share"] == 1.0
+    assert result["nvinfer_measured_share"] == 0.9333
     assert result["int8_or_batch8_recommendation"] == "eligible_for_controlled_experiment"
 
 
@@ -192,9 +193,11 @@ def test_diagnosis_subtracts_nvinfer_postprocessing_time() -> None:
 
     result = module.diagnosis(rows)
 
-    assert result["nvinfer_estimated_inference_ms"] == 1.0
+    assert result["nvinfer_compute_metrics_available"] is False
+    assert result["nvinfer_compute_mean_ms_sum"] == 0.0
+    assert result["nvinfer_non_postproc_element_ms"] == 1.0
     assert result["nvinfer_postproc_ms"] == 9.0
-    assert result["nvinfer_measured_share"] == 0.0909
+    assert result["nvinfer_measured_share"] is None
     assert result["nvinfer_dominant_proven"] is False
 
 
