@@ -1525,6 +1525,7 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
         savant_ablation_stage="full-exporter",
         savant_output_mode="metadata-only",
         adaface_roi_redis=True,
+        adaface_roi_batch_timeout_ms=40,
     )
 
     override = yaml.safe_load(
@@ -1552,6 +1553,7 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
         assert env["FACE_ROI_STREAM"] == "security.face_rois.roi_test_run"
     worker = override["services"]["adaface-roi-worker"]
     assert worker["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
+    assert worker["environment"]["FACE_ROI_BATCH_TIMEOUT_MS"] == "40"
     assert worker["environment"]["FACE_ROI_STREAM"] == (
         "security.face_rois.roi_test_run"
     )

@@ -393,6 +393,7 @@ class PressureConfig:
     max_adaface_forwarder_send_failure_ratio: float = 0.005
     adaface_decoupled_sharded: bool = False
     adaface_roi_redis: bool = False
+    adaface_roi_batch_timeout_ms: int = 10
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -589,6 +590,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "face crops to a bounded Redis Stream consumed by the batch16 "
             "adaface-roi-worker. Requires --dual-shard-same-gpu."
         ),
+    )
+    parser.add_argument(
+        "--adaface-roi-batch-timeout-ms",
+        type=int,
+        default=10,
+        help="Maximum ROI aggregation wait for the batch16 AdaFace worker.",
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
     parser.add_argument("--run-id")
@@ -968,6 +975,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         adaface_decoupled_sharded=bool(args.adaface_decoupled_sharded),
         adaface_roi_redis=bool(args.adaface_roi_redis),
+        adaface_roi_batch_timeout_ms=max(
+            1, int(args.adaface_roi_batch_timeout_ms)
+        ),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -2196,7 +2206,9 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 "FACE_ROI_CONSUMER_GROUP": f"adaface-roi-{safe_run_token(cfg.run_id)}",
                 "FACE_ROI_CONSUMER_NAME": "adaface-roi-worker-1",
                 "FACE_ROI_TTL_MS": "5000",
-                "FACE_ROI_BATCH_TIMEOUT_MS": "10",
+                "FACE_ROI_BATCH_TIMEOUT_MS": str(
+                    cfg.adaface_roi_batch_timeout_ms
+                ),
                 "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
             },
             "restart": "no",

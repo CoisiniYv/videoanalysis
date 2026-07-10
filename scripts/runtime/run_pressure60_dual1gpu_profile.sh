@@ -34,6 +34,8 @@ Environment overrides:
   ADAFACE_DECOUPLED=0   Set to 1 for central AdaFace off the dual-YOLO path.
   ADAFACE_SHARDED=0     Set to 1 for one decoupled AdaFace sidecar per shard.
   ADAFACE_ROI_REDIS=0   Set to 1 for aligned 112x112 Redis ROI AdaFace worker.
+  ROI_BATCH_TIMEOUT_MS=10
+                      AdaFace ROI batch16 aggregation wait in milliseconds.
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -80,6 +82,7 @@ adaface_pre_gate="${ADAFACE_PRE_GATE:-0}"
 adaface_decoupled="${ADAFACE_DECOUPLED:-0}"
 adaface_sharded="${ADAFACE_SHARDED:-0}"
 adaface_roi_redis="${ADAFACE_ROI_REDIS:-0}"
+roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-10}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -152,7 +155,7 @@ if [[ "${adaface_sharded}" == "1" ]]; then
   cmd+=(--adaface-decoupled-sharded)
 fi
 if [[ "${adaface_roi_redis}" == "1" ]]; then
-  cmd+=(--adaface-roi-redis)
+  cmd+=(--adaface-roi-redis --adaface-roi-batch-timeout-ms "${roi_batch_timeout_ms}")
 fi
 
 if [[ -n "${RTSP_URI:-}" ]]; then
@@ -178,6 +181,7 @@ printf 'adaface_pre_gate=%s\n' "${adaface_pre_gate}"
 printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
 printf 'adaface_decoupled_sharded=%s\n' "${adaface_sharded}"
 printf 'adaface_roi_redis=%s\n' "${adaface_roi_redis}"
+printf 'adaface_roi_batch_timeout_ms=%s\n' "${roi_batch_timeout_ms}"
 printf 'dual_shard_same_gpu=true\n'
 printf 'dual_shard_gpu=%s\n' "${gpu_id}"
 printf 'evidence_policy_groups=5:5,10:10,15:15\n'
