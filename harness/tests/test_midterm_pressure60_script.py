@@ -2521,6 +2521,45 @@ def test_roi_adaface_watchlist_gate_accepts_warmup_log_evidence() -> None:
     assert "adaface_roi_watchlist_events_zero" in reasons
 
 
+def test_rolling_cache_host_path_prefers_specific_fast_disk_bind(monkeypatch) -> None:
+    module = _load_module()
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(
+            [
+                {
+                    "Type": "bind",
+                    "Source": "/data/video-analytics/media",
+                    "Destination": "/media",
+                },
+                {
+                    "Type": "bind",
+                    "Source": "/home/user/video-analytics-fast/rolling-cache",
+                    "Destination": "/media/rolling-cache",
+                },
+            ]
+        )
+
+    monkeypatch.delenv("PRESSURE_ROLLING_CACHE_ROOT_HOST", raising=False)
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: Result())
+
+    assert module.pressure_rolling_cache_root_host() == Path(
+        "/home/user/video-analytics-fast/rolling-cache"
+    )
+
+
+def test_rolling_cache_host_path_env_override_wins(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv(
+        "PRESSURE_ROLLING_CACHE_ROOT_HOST", "/custom/rolling-cache"
+    )
+
+    assert module.pressure_rolling_cache_root_host() == Path(
+        "/custom/rolling-cache"
+    )
+
+
 def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> None:
     module = _load_module()
     cfg = _config(

@@ -7486,21 +7486,70 @@ def cleanup_pressure_runtime_only(
 
 
 def pressure_rolling_cache_root_host() -> Path:
-    return Path(
-        os.environ.get(
-            "PRESSURE_ROLLING_CACHE_ROOT_HOST",
-            "/data/video-analytics/media/rolling-cache",
-        )
+    override = os.environ.get("PRESSURE_ROLLING_CACHE_ROOT_HOST")
+    if override:
+        return Path(override)
+    resolved = resolve_container_bind_source(
+        (
+            "video-analytics-midterm-rolling-cache-sink-a",
+            "video-analytics-midterm-rolling-cache-sink-b",
+            "video-analytics-midterm-rolling-cache-sink",
+        ),
+        "/media/rolling-cache",
     )
+    return resolved or Path("/data/video-analytics/media/rolling-cache")
 
 
 def pressure_rolling_cache_materialized_root_host() -> Path:
-    return Path(
-        os.environ.get(
-            "PRESSURE_ROLLING_CACHE_MATERIALIZED_ROOT_HOST",
-            "/data/video-analytics/media/rolling-cache-materialized",
-        )
+    override = os.environ.get("PRESSURE_ROLLING_CACHE_MATERIALIZED_ROOT_HOST")
+    if override:
+        return Path(override)
+    resolved = resolve_container_bind_source(
+        ("video-analytics-midterm-media-worker",),
+        "/media/rolling-cache-materialized",
     )
+    return resolved or Path("/data/video-analytics/media/rolling-cache-materialized")
+
+
+def resolve_container_bind_source(
+    container_names: tuple[str, ...], destination: str
+) -> Path | None:
+    """Resolve a container path to its host bind source.
+
+    Prefer the most-specific mount so production's fast-disk nested bind wins
+    over the broad ``/data/.../media:/media`` evidence mount.
+    """
+    target = Path(destination)
+    for container_name in container_names:
+        completed = subprocess.run(
+            ["docker", "inspect", container_name, "--format", "{{json .Mounts}}"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            continue
+        try:
+            mounts = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            continue
+        candidates: list[tuple[int, Path]] = []
+        for mount in mounts if isinstance(mounts, list) else []:
+            mount_destination = Path(str(mount.get("Destination") or ""))
+            source = str(mount.get("Source") or "")
+            if not source:
+                continue
+            try:
+                relative = target.relative_to(mount_destination)
+            except ValueError:
+                continue
+            candidates.append(
+                (len(mount_destination.parts), Path(source).joinpath(relative))
+            )
+        if candidates:
+            return max(candidates, key=lambda item: item[0])[1]
+    return None
 
 
 def clear_existing_evidence_state(conn) -> dict[str, Any]:
