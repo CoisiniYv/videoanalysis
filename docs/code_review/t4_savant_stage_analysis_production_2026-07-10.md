@@ -127,3 +127,50 @@ The next controlled implementation should preserve single-GPU dual branches and 
 ## Restored state
 
 At handoff the production host had one healthy daily Savant branch, no pressure source containers or pressure processes, zero epoch-blocking evidence tasks, empty worker cpusets, and the saved defaults `FACE_EMBEDDING_BATCH_SIZE=16`, `FACE_INFER_INTERVAL=3`, `FACE_EMBEDDING_INFER_INTERVAL=3`, `BATCHED_PUSH_TIMEOUT=40000`, and `MAX_PARALLEL_STREAMS=64`.
+
+## 2026-07-11 decoupled AdaFace follow-up
+
+Latest deployed diagnostic code: `e8efc72` under
+`/data/video-analytics/deployments/e8efc72_20260710T190735Z`.
+
+AdaFace was removed from the synchronous dual-YOLO critical path and tested in
+bounded sidecars. One central sidecar preserved main inference throughput but
+could not absorb content-dependent bursts: measured forwarder loss ranged from
+about 0.25% to 10.95%. Metadata/PTS filtering on the copied H.264 stream was
+rejected because dropping reference frames damaged GOP decode continuity.
+All-intra NVENC output was also rejected because it reduced main throughput and
+filled the primary forwarder queue.
+
+One decoupled AdaFace sidecar per 30-source YOLO shard passed the 60-second
+full-exporter gate:
+
+- artifact: `pressure60_t4_adaface_sharded_e8efc72_20260710T190758Z`;
+- steady effective FPS: 4.215;
+- primary queue/send failures: 0/0;
+- AdaFace forwarder sends: 16,887/16,887, loss 0;
+- eligible/central source coverage: 60/60;
+- AdaFace embeddings: 4,746.
+
+The corresponding 180-second full-evidence run did not pass sustained T4
+throughput:
+
+- artifact: `pressure60_t4_full_evidence_sharded_e8efc72_20260710T191549Z`;
+- steady effective FPS: 2.9018;
+- 239/239 tasks materialized and playable, with zero active/expired tasks;
+- all 179 videos passed 5:5, 10:10, or 15:15 duration validation;
+- timeline passed 179/179, while annotation passed 58/179 because primary
+  frame metadata was lost under forwarder saturation;
+- AdaFace itself remained lossless and covered 60/60 sources.
+
+AdaFace batch 8 shortened measured sidecar stage mean from about 99.8 ms to
+40.2 ms. It passed a 60-second exporter canary, but the 180-second evidence run
+still reached only 3.3197 FPS and produced no `watchlist_hit` events. Batch 8 is
+therefore rejected as the production operating point. The in-process
+`classifier-async-mode=1` plus propagated track ID combination was also
+rejected at 2.46 FPS.
+
+The remaining production optimization boundary is architectural: export only
+cadence-eligible face ROI/crop data from the main Savant processes and batch
+AdaFace over those independent crops. A sidecar that re-decodes copied full
+H.264 frames cannot satisfy sustained 60-source, 4 FPS full-evidence operation
+on this 70 W T4 without either overload or unacceptable frame loss.
