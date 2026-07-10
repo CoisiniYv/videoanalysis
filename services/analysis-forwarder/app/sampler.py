@@ -70,16 +70,25 @@ class MetadataObjectFilter:
         object_label: str = "",
         attribute_namespace: str = "",
         attribute_name: str = "",
+        min_confidence: float = 0.0,
+        min_width: float = 0.0,
+        min_height: float = 0.0,
     ) -> None:
         self.object_namespace = str(object_namespace or "")
         self.object_label = str(object_label or "")
         self.attribute_namespace = str(attribute_namespace or "")
         self.attribute_name = str(attribute_name or "")
+        self.min_confidence = max(float(min_confidence or 0.0), 0.0)
+        self.min_width = max(float(min_width or 0.0), 0.0)
+        self.min_height = max(float(min_height or 0.0), 0.0)
         self.enabled = bool(
             self.object_namespace
             or self.object_label
             or self.attribute_namespace
             or self.attribute_name
+            or self.min_confidence
+            or self.min_width
+            or self.min_height
         )
 
     def admit(self, video_frame: Any) -> bool:
@@ -112,6 +121,13 @@ class MetadataObjectFilter:
                     attribute = None
                 if attribute is None:
                     continue
+            if float(getattr(obj, "confidence", 0.0) or 0.0) < self.min_confidence:
+                continue
+            bbox = getattr(obj, "bbox", None)
+            if float(getattr(bbox, "width", 0.0) or 0.0) < self.min_width:
+                continue
+            if float(getattr(bbox, "height", 0.0) or 0.0) < self.min_height:
+                continue
             return True
         return False
 
