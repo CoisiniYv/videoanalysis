@@ -2463,6 +2463,64 @@ def test_pressure_gate_rejects_steady_fps_below_minimum() -> None:
     assert "steady_effective_fps_below_minimum" in reasons
 
 
+def test_roi_adaface_watchlist_gate_accepts_warmup_log_evidence() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=1,
+        keep_evidence=0,
+        savant_ablation_stage="full-exporter",
+        adaface_roi_redis=True,
+    )
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 1,
+            "max_savant_sources": 1,
+            "max_savant_send_failures_delta": 0,
+            "queue_full_samples": 0,
+            "steady_effective_fps_sample_count": 2,
+            "steady_effective_fps_meets_minimum": True,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "adaface_roi_worker": {
+            "reachable": True,
+            "metrics": {
+                'va_adaface_roi_messages_total{outcome="published"}': 10,
+                "va_adaface_roi_pending": 0,
+            },
+        },
+        "log_summary": {
+            "savant": {
+                "validate_seq_iq": 0,
+                "face_roi_enqueued_max": 10,
+                "face_roi_queue_dropped_max": 0,
+            },
+            "face_worker": {"face_worker_watchlist_emitted_max": 7},
+        },
+    }
+    db_summary = {
+        "adaface_roi": {"observations": 10, "source_count": 1},
+        "event_types": [{"event_type": "intrusion", "count": 1}],
+    }
+
+    reasons = module.pressure_failure_reasons(
+        cfg, [], diagnostics, db_before_cleanup=db_summary
+    )
+    assert "adaface_roi_watchlist_events_zero" not in reasons
+
+    diagnostics["log_summary"]["face_worker"][
+        "face_worker_watchlist_emitted_max"
+    ] = 0
+    reasons = module.pressure_failure_reasons(
+        cfg, [], diagnostics, db_before_cleanup=db_summary
+    )
+    assert "adaface_roi_watchlist_events_zero" in reasons
+
+
 def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> None:
     module = _load_module()
     cfg = _config(

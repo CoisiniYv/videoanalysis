@@ -6553,6 +6553,9 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         )
         face_roi_enqueued = _extract_metric_ints(text, "enqueued")
         face_roi_queue_dropped = _extract_metric_ints(text, "queue_dropped")
+        face_worker_watchlist_emitted = _extract_metric_ints(
+            text, "total_watchlist_emitted"
+        )
         media_finalizer_metrics = (
             _media_finalizer_line_metrics(text)
             if key == "media_worker"
@@ -6568,6 +6571,9 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "frame_annotation_redis_timeout": text.count("TimeoutError:timed out"),
             "face_roi_enqueued_max": max(face_roi_enqueued, default=0),
             "face_roi_queue_dropped_max": max(face_roi_queue_dropped, default=0),
+            "face_worker_watchlist_emitted_max": max(
+                face_worker_watchlist_emitted, default=0
+            ),
             "negative_pts_overflow": len(re.findall(r"OverflowError: -\\d+", text)),
             "ffprobe_missing": text.count("ffprobe not found"),
             "imageio_ffmpeg_fallback": _metric_sum(
@@ -6856,7 +6862,16 @@ def pressure_failure_reasons(
             str(item.get("event_type") or ""): int(item.get("count") or 0)
             for item in ((db_before_cleanup or {}).get("event_types") or [])
         }
-        if event_types.get("watchlist_hit", 0) <= 0:
+        watchlist_emitted_in_logs = int(
+            (log_summary.get("face_worker") or {}).get(
+                "face_worker_watchlist_emitted_max"
+            )
+            or 0
+        )
+        if (
+            event_types.get("watchlist_hit", 0) <= 0
+            and watchlist_emitted_in_logs <= 0
+        ):
             reasons.append("adaface_roi_watchlist_events_zero")
         enqueued = int(savant_logs.get("face_roi_enqueued_max") or 0)
         dropped = int(savant_logs.get("face_roi_queue_dropped_max") or 0)
@@ -8963,11 +8978,32 @@ def collect_adaface_roi_worker_metrics(cfg: PressureConfig) -> dict[str, Any]:
         except ValueError:
             continue
         metrics[name_and_labels] = value
+    batch_count = _prometheus_labeled_total(
+        metrics, "va_adaface_roi_batch_size_count"
+    )
+    batch_sum = _prometheus_labeled_total(
+        metrics, "va_adaface_roi_batch_size_sum"
+    )
+    full_batches = _prometheus_labeled_total(
+        metrics,
+        "va_adaface_roi_batches_total",
+        f'size="{cfg.face_embedding_batch_size}"',
+    )
     return {
         "enabled": True,
         "reachable": True,
         "url": ADAFACE_ROI_METRICS_URL,
         "metrics": metrics,
+        "batch_occupancy": {
+            "max_batch_size": cfg.face_embedding_batch_size,
+            "batch_count": int(batch_count),
+            "sample_count": int(batch_sum),
+            "mean": round(batch_sum / batch_count, 4) if batch_count else 0.0,
+            "full_batches": int(full_batches),
+            "full_ratio": round(full_batches / batch_count, 6)
+            if batch_count
+            else 0.0,
+        },
     }
 
 
