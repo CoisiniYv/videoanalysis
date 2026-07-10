@@ -152,18 +152,6 @@ def test_sampler_admits_keyframes_and_limits_by_pts() -> None:
     assert sampler.admit(_Frame("cam", pts=600_000_000, keyframe=True)) is True
 
 
-def test_sampler_can_rate_limit_independent_keyframes() -> None:
-    sampler = sampler_mod.AnalysisFrameSampler(
-        enabled=True,
-        max_fps="1/1",
-        admit_keyframes_unconditionally=False,
-    )
-
-    assert sampler.admit(_Frame("cam", pts=0, keyframe=True)) is True
-    assert sampler.admit(_Frame("cam", pts=250_000_000, keyframe=True)) is False
-    assert sampler.admit(_Frame("cam", pts=1_000_000_000, keyframe=True)) is True
-
-
 def test_sampler_tracks_sources_independently() -> None:
     sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="1/1")
 

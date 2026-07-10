@@ -85,7 +85,6 @@ def _config(module, **overrides):
         "adaface_crop_resize": False,
         "adaface_pre_gate": False,
         "adaface_decoupled": False,
-        "adaface_decoupled_all_intra": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1478,39 +1477,6 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
     assert central_service["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
     assert central_service["environment"]["OUTPUT_FRAME"] == "null"
     assert module.dual_shard_services(cfg)[-3:] == module.ADAFACE_DECOUPLED_SERVICES
-
-
-def test_decoupled_adaface_all_intra_enables_safe_one_fps_sampling(
-    tmp_path,
-) -> None:
-    module = _load_module()
-    cfg = _config(
-        module,
-        artifact_dir=tmp_path,
-        dual_shard_same_gpu=True,
-        savant_ablation_stage="full-exporter",
-        savant_output_mode="metadata-only",
-        adaface_decoupled=True,
-        adaface_decoupled_all_intra=True,
-        batched_push_timeout=10000,
-    )
-
-    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
-    services = yaml.safe_load(override_path.read_text(encoding="utf-8"))[
-        "services"
-    ]
-    expected_output = (
-        '{"codec":"h264","encoder":"nvenc",'
-        '"encoder_params":{"iframeinterval":1}}'
-    )
-    for shard in ("a", "b"):
-        assert services[f"savant-{shard}"]["environment"]["OUTPUT_FRAME"] == (
-            expected_output
-        )
-        env = services[f"adaface-forwarder-{shard}"]["environment"]
-        assert env["FORWARDER_SAMPLER_ENABLED"] == "true"
-        assert env["ANALYSIS_FPS"] == "1/1"
-        assert env["FORWARDER_ADMIT_KEYFRAMES_UNCONDITIONALLY"] == "false"
 
 
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:
