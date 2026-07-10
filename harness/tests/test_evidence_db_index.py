@@ -99,10 +99,12 @@ def test_upsert_overlays_merges_duplicate_clip_frame_indexes(tmp_path: Path) -> 
     )
 
     assert count == 2
-    assert conn.cursor_obj.executions == []
-    query, params = conn.cursor_obj.executemany_calls[0]
+    assert conn.cursor_obj.executemany_calls == []
+    query, query_params = conn.cursor_obj.executions[0]
+    params = query_params["rows"].obj
+    assert "jsonb_to_recordset" in query
     assert "ON CONFLICT (event_id, clip_frame_index)" in query
-    assert params[0]["event_id"] == "11111111-1111-4111-8111-111111111111"
+    assert query_params["event_id"] == "11111111-1111-4111-8111-111111111111"
     assert [row["clip_frame_index"] for row in params] == [7, 8]
     assert params[0]["object_count"] == 2
     assert params[0]["frame_uuid"] == "frame-a-later"

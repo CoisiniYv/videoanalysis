@@ -297,27 +297,44 @@ def _upsert_timeline(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
                 "camera_id": _text(record.get("camera_id")),
                 "stream_session_id": _text(record.get("stream_session_id")),
                 "keyframe_uuid": _text(record.get("keyframe_uuid")),
-                "metadata": Jsonb(record),
+                "metadata": record,
             }
         )
     if not params:
         return 0
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.executemany(
+            cur.execute(
                 """
+                WITH input_rows AS (
+                    SELECT *
+                    FROM jsonb_to_recordset(%(rows)s::jsonb) AS row_data (
+                        clip_frame_index integer,
+                        frame_uuid text,
+                        frame_pts bigint,
+                        frame_dts bigint,
+                        duration_ns bigint,
+                        timestamp_ms bigint,
+                        width integer,
+                        height integer,
+                        source_id text,
+                        camera_id text,
+                        stream_session_id text,
+                        keyframe_uuid text,
+                        metadata jsonb
+                    )
+                )
                 INSERT INTO evidence_frame_timeline (
                     event_id, clip_frame_index, frame_uuid, frame_pts, frame_dts,
                     duration_ns, timestamp_ms, width, height, source_id, camera_id,
                     stream_session_id, keyframe_uuid, metadata
                 )
-                VALUES (
-                    %(event_id)s::uuid, %(clip_frame_index)s, %(frame_uuid)s,
-                    %(frame_pts)s, %(frame_dts)s, %(duration_ns)s,
-                    %(timestamp_ms)s, %(width)s, %(height)s, %(source_id)s,
-                    %(camera_id)s, %(stream_session_id)s, %(keyframe_uuid)s,
-                    %(metadata)s
-                )
+                SELECT
+                    %(event_id)s::uuid, clip_frame_index, frame_uuid,
+                    frame_pts, frame_dts, duration_ns, timestamp_ms, width,
+                    height, source_id, camera_id, stream_session_id,
+                    keyframe_uuid, metadata
+                FROM input_rows
                 ON CONFLICT (event_id, clip_frame_index) DO UPDATE SET
                     frame_uuid = EXCLUDED.frame_uuid,
                     frame_pts = EXCLUDED.frame_pts,
@@ -332,7 +349,7 @@ def _upsert_timeline(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
                     keyframe_uuid = EXCLUDED.keyframe_uuid,
                     metadata = EXCLUDED.metadata
                 """,
-                params,
+                {"event_id": event_id, "rows": Jsonb(params)},
             )
     return len(params)
 
@@ -373,17 +390,28 @@ def _upsert_overlays(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
         return 0
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.executemany(
+            cur.execute(
                 """
+                WITH input_rows AS (
+                    SELECT *
+                    FROM jsonb_to_recordset(%(rows)s::jsonb) AS row_data (
+                        clip_frame_index integer,
+                        frame_uuid text,
+                        frame_pts bigint,
+                        t_ms bigint,
+                        object_count integer,
+                        objects jsonb,
+                        record jsonb
+                    )
+                )
                 INSERT INTO evidence_overlay_segments (
                     event_id, clip_frame_index, frame_uuid, frame_pts, t_ms,
                     object_count, objects, record
                 )
-                VALUES (
-                    %(event_id)s::uuid, %(clip_frame_index)s, %(frame_uuid)s,
-                    %(frame_pts)s, %(t_ms)s, %(object_count)s, %(objects)s,
-                    %(record)s
-                )
+                SELECT
+                    %(event_id)s::uuid, clip_frame_index, frame_uuid,
+                    frame_pts, t_ms, object_count, objects, record
+                FROM input_rows
                 ON CONFLICT (event_id, clip_frame_index) DO UPDATE SET
                     frame_uuid = EXCLUDED.frame_uuid,
                     frame_pts = EXCLUDED.frame_pts,
@@ -392,15 +420,10 @@ def _upsert_overlays(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
                     objects = EXCLUDED.objects,
                     record = EXCLUDED.record
                 """,
-                [
-                    {
-                        **record,
-                        "event_id": event_id,
-                        "objects": Jsonb(record["objects"]),
-                        "record": Jsonb(record["record"]),
-                    }
-                    for record in records
-                ],
+                {
+                    "event_id": event_id,
+                    "rows": Jsonb(records),
+                },
             )
     return len(records)
 
