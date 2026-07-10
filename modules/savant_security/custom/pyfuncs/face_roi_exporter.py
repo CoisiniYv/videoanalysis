@@ -8,6 +8,8 @@ only the resulting 112x112 crop; it never serializes a full frame or video.
 from __future__ import annotations
 
 import os
+import queue
+import threading
 from typing import Any
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
@@ -22,6 +24,9 @@ from custom.services.frame_anchor_metadata import extract_frame_anchor_metadata
 from custom.services.redis_stream_writer import AsyncRedisStreamWriter, env_int
 from custom.services.stream_session import stream_session_id_for_frame
 from custom.services.time_utils import normalize_pts_to_ms
+
+
+_STOP = object()
 
 
 class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
@@ -50,6 +55,8 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
         self._writer = None
         self._aligner = None
         self._cuda_stream = None
+        self._crop_queue = None
+        self._crop_thread = None
         self._counters = {
             "candidates": 0,
             "eligible": 0,
@@ -59,6 +66,8 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             "crop_batches": 0,
             "gpu_syncs": 0,
             "max_eligible_per_frame": 0,
+            "crop_queue_depth": 0,
+            "crop_queue_dropped": 0,
             "encode_errors": 0,
             "enqueued": 0,
             "queue_dropped": 0,
@@ -97,6 +106,15 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             socket_timeout_ms=env_int("FACE_ROI_REDIS_WRITE_TIMEOUT_MS", 500),
             connect_timeout_ms=env_int("FACE_ROI_REDIS_CONNECT_TIMEOUT_MS", 500),
         )
+        self._crop_queue = queue.Queue(
+            maxsize=max(env_int("FACE_ROI_CROP_QUEUE_MAXSIZE", 256), 1)
+        )
+        self._crop_thread = threading.Thread(
+            target=self._crop_worker,
+            name="face-roi-download-encoder",
+            daemon=True,
+        )
+        self._crop_thread.start()
 
     def process_frame(self, buffer: Any, frame_meta: Any) -> None:
         self._frame_count += 1
@@ -145,6 +163,7 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             )
 
         if self._frame_count % self._log_every == 1:
+            self._counters["crop_queue_depth"] = self._crop_queue.qsize()
             print(
                 "stage=face_roi_exporter "
                 + " ".join(f"{key}={value}" for key, value in self._counters.items()),
@@ -158,12 +177,13 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
         eligible: list[tuple[int, Any, ReIDGateInput, Any]],
         **context: Any,
     ) -> None:
-        import cv2
         from savant.deepstream.opencv_utils import nvds_to_gpu_mat
         from savant.utils.image import GPUImage
 
-        quality = env_int("FACE_ROI_JPEG_QUALITY", 95)
         ttl_ms = max(env_int("FACE_ROI_TTL_MS", 5000), 1)
+        if self._crop_queue.full():
+            self._drop_crop_batch(eligible)
+            return
         with nvds_to_gpu_mat(buffer, frame_meta.frame_meta) as frame_mat:
             frame_image = GPUImage(frame_mat, cuda_stream=self._cuda_stream)
             aligned_faces = []
@@ -193,42 +213,84 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
                 self._counters["max_eligible_per_frame"], len(aligned_faces)
             )
 
+            created_at_ms = epoch_ms()
+            transport_faces = []
             for face_index, obj, inp, verdict, aligned in aligned_faces:
-                try:
-                    image = aligned.to_cpu().np_array
-                except Exception as exc:
-                    self._counters["crop_errors"] += 1
-                    self._log_error("crop_download", exc)
-                    continue
-                try:
-                    if image.ndim == 3 and image.shape[2] == 4:
-                        image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-                    ok, encoded = cv2.imencode(
-                        ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality]
-                    )
-                    if not ok:
-                        raise RuntimeError("jpeg_encode_returned_false")
-                except Exception as exc:
-                    self._counters["encode_errors"] += 1
-                    self._log_error("encode", exc)
-                    continue
-
-                now_ms = epoch_ms()
                 envelope = self._envelope(
                     face_index,
                     obj,
                     inp,
                     verdict,
-                    created_at_ms=now_ms,
-                    expires_at_ms=now_ms + ttl_ms,
+                    created_at_ms=created_at_ms,
+                    expires_at_ms=created_at_ms + ttl_ms,
                     **context,
                 )
-                if self._writer.enqueue(envelope.redis_fields(encoded.tobytes())):
-                    self._throttle.record(verdict.throttle_key, inp.timestamp_ms)
-                    self._counters["eligible"] += 1
-                    self._counters["enqueued"] += 1
-                else:
-                    self._counters["queue_dropped"] += 1
+                transport_faces.append((aligned, envelope))
+
+            try:
+                self._crop_queue.put_nowait(transport_faces)
+            except queue.Full:
+                self._drop_crop_batch(eligible)
+                return
+            for _, _, inp, verdict, _ in aligned_faces:
+                self._throttle.record(verdict.throttle_key, inp.timestamp_ms)
+            self._counters["crop_queue_depth"] = self._crop_queue.qsize()
+
+    def _crop_worker(self) -> None:
+        import cv2
+
+        quality = env_int("FACE_ROI_JPEG_QUALITY", 95)
+        while True:
+            job = self._crop_queue.get()
+            try:
+                if job is _STOP:
+                    return
+                for aligned, envelope in job:
+                    try:
+                        image = aligned.to_cpu().np_array
+                    except Exception as exc:
+                        self._counters["crop_errors"] += 1
+                        self._log_error("crop_download", exc)
+                        continue
+                    try:
+                        if image.ndim == 3 and image.shape[2] == 4:
+                            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+                        ok, encoded = cv2.imencode(
+                            ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality]
+                        )
+                        if not ok:
+                            raise RuntimeError("jpeg_encode_returned_false")
+                    except Exception as exc:
+                        self._counters["encode_errors"] += 1
+                        self._log_error("encode", exc)
+                        continue
+                    if self._writer.enqueue(envelope.redis_fields(encoded.tobytes())):
+                        self._counters["eligible"] += 1
+                        self._counters["enqueued"] += 1
+                    else:
+                        self._counters["queue_dropped"] += 1
+            except Exception as exc:
+                self._counters["queue_dropped"] += len(job)
+                self._log_error("crop_worker", exc)
+            finally:
+                self._crop_queue.task_done()
+                self._counters["crop_queue_depth"] = self._crop_queue.qsize()
+
+    def _drop_crop_batch(self, eligible) -> None:
+        dropped = len(eligible)
+        self._counters["queue_dropped"] += dropped
+        self._counters["crop_queue_dropped"] += dropped
+        for _, _, inp, verdict in eligible:
+            self._throttle.record(verdict.throttle_key, inp.timestamp_ms)
+
+    def on_stop(self) -> None:
+        if self._crop_queue is not None and self._crop_thread is not None:
+            self._crop_queue.join()
+            self._crop_queue.put(_STOP)
+            self._crop_thread.join(timeout=2.0)
+        if self._writer is not None:
+            self._writer.flush(timeout_s=5.0)
+            self._writer.close(timeout_s=1.0)
 
     def _candidate_input(
         self, obj: Any, source_id: str, camera_id: str, timestamp_ms: int

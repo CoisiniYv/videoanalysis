@@ -128,6 +128,9 @@ def test_roi_exporter_batches_gpu_sync_once_per_frame() -> None:
     )
     assert '"gpu_syncs": 0' in source
     assert '"max_eligible_per_frame": 0' in source
+    assert "queue.Queue(" in source
+    assert 'name="face-roi-download-encoder"' in source
+    assert source.index("def _crop_worker") < source.index("aligned.to_cpu()")
 
 
 def test_roi_worker_overrides_inherited_savant_healthcheck() -> None:
