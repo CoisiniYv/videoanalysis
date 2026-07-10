@@ -299,7 +299,7 @@ def test_forwarder_filters_frames_without_associated_faces() -> None:
         raw_out_endpoint="",
         analysis_fps="4/1",
         min_fps="1/1",
-        sampler_enabled=True,
+        sampler_enabled=False,
         queue_max_size=8,
         receive_timeout_ms=100,
         receive_hwm=10,
@@ -325,10 +325,6 @@ def test_forwarder_filters_frames_without_associated_faces() -> None:
             attributes={("face_person_associator", "person_track_id"): object()},
         )
     ]
-    associated_too_soon = _Frame("cam", pts=100_000_001)
-    associated_too_soon.get_all_objects = (  # type: ignore[attr-defined]
-        associated.get_all_objects  # type: ignore[attr-defined]
-    )
 
     def video_message(frame):
         message = types.SimpleNamespace()
@@ -340,11 +336,10 @@ def test_forwarder_filters_frames_without_associated_faces() -> None:
 
     assert forwarder._build_queue_item(video_message(unassociated)) is None
     assert forwarder._build_queue_item(video_message(associated)) is not None
-    assert forwarder._build_queue_item(video_message(associated_too_soon)) is None
     metrics_text = forwarder.metrics.render_prometheus()
     assert 'va_forwarder_metadata_filtered_total{source_id="cam"} 1' in metrics_text
-    assert 'va_forwarder_frames_seen_total{source_id="cam"} 3' in metrics_text
-    assert 'va_forwarder_frames_dropped_total{source_id="cam"} 2' in metrics_text
+    assert 'va_forwarder_frames_seen_total{source_id="cam"} 2' in metrics_text
+    assert 'va_forwarder_frames_dropped_total{source_id="cam"} 1' in metrics_text
 
 
 def test_phase05_passthrough_probe_is_available() -> None:

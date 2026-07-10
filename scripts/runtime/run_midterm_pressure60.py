@@ -2095,12 +2095,7 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                         "dealer+connect:tcp://savant-adaface-central:5557"
                     ),
                     "FORWARDER_RAW_OUT_ENDPOINT": "null://",
-                    # Filter first, then cap eligible face/person frames. This
-                    # avoids the old blind-PTS phase problem where a 1 FPS
-                    # sample could land on frames without an association.
-                    "FORWARDER_SAMPLER_ENABLED": "true",
-                    "ANALYSIS_FPS": "1/1",
-                    "ANALYSIS_MIN_FPS": "1/1",
+                    "FORWARDER_SAMPLER_ENABLED": "false",
                     "FORWARDER_REQUIRE_OBJECT_NAMESPACE": "yolov8_face",
                     "FORWARDER_REQUIRE_OBJECT_LABEL": "face",
                     "FORWARDER_REQUIRE_ATTRIBUTE_NAMESPACE": (
