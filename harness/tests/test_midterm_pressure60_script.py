@@ -81,6 +81,7 @@ def _config(module, **overrides):
         "cuda_mps": False,
         "adaface_classifier_async": False,
         "face_secondary_track_id": False,
+        "adaface_input_queue": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1234,6 +1235,31 @@ def test_adaface_classifier_async_uses_generated_nvinfer_config(tmp_path) -> Non
     )
     assert adaface["model"]["local_path"] == str(tmp_path)
     assert adaface["model"]["config_file"] == config_path.name
+
+
+def test_adaface_input_queue_is_bounded_and_non_leaky(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        savant_ablation_stage="full-exporter",
+        adaface_input_queue=True,
+    )
+
+    generated_path = module.write_savant_ablation_module(cfg)
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    elements = generated["pipeline"]["elements"]
+    names = [element.get("name") for element in elements]
+    queue = elements[names.index("adaface_input_queue")]
+
+    assert names.index("adaface_input_queue") + 1 == names.index("adaface")
+    assert queue["element"] == "queue"
+    assert queue["properties"] == {
+        "max-size-buffers": 32,
+        "max-size-bytes": 0,
+        "max-size-time": 0,
+        "leaky": 0,
+    }
 
 
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:
