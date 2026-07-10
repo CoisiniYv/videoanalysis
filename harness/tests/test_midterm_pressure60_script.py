@@ -80,6 +80,7 @@ def _config(module, **overrides):
         "cleanup": True,
         "cuda_mps": False,
         "adaface_classifier_async": False,
+        "face_secondary_track_id": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1091,6 +1092,24 @@ def test_dual_shard_pressure_enables_stage_metrics(tmp_path) -> None:
     for service in ("savant-a", "savant-b"):
         assert override["services"][service]["environment"][
             "SAVANT_STAGE_METRICS_ENABLED"
+        ] == "true"
+
+
+def test_dual_shard_pressure_can_propagate_face_secondary_track_ids(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        face_secondary_track_id=True,
+    )
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+
+    for service in ("savant-a", "savant-b"):
+        assert override["services"][service]["environment"][
+            "FACE_SECONDARY_TRACK_ID_ENABLED"
         ] == "true"
 
 

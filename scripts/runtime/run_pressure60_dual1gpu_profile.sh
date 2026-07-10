@@ -27,6 +27,7 @@ Environment overrides:
   CPU_PROFILE=none    none|local-24cpu|t4-16cpu temporary cpuset layout.
   CUDA_MPS=0          Set to 1 for a temporary same-GPU CUDA MPS experiment.
   ADAFACE_ASYNC=0      Set to 1 for DeepStream classifier async mode canary.
+  FACE_TRACK_ID=0      Set to 1 to propagate person IDs to face objects.
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -66,6 +67,7 @@ batch_timeout_us="${BATCH_TIMEOUT_US:-40000}"
 cpu_profile="${CPU_PROFILE:-none}"
 cuda_mps="${CUDA_MPS:-0}"
 adaface_async="${ADAFACE_ASYNC:-0}"
+face_track_id="${FACE_TRACK_ID:-0}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -119,6 +121,9 @@ fi
 if [[ "${adaface_async}" == "1" ]]; then
   cmd+=(--adaface-classifier-async)
 fi
+if [[ "${face_track_id}" == "1" ]]; then
+  cmd+=(--face-secondary-track-id)
+fi
 
 if [[ -n "${RTSP_URI:-}" ]]; then
   cmd+=(--rtsp-uri "${RTSP_URI}")
@@ -136,6 +141,7 @@ printf 'batched_push_timeout_us=%s\n' "${batch_timeout_us}"
 printf 'cpu_isolation_profile=%s\n' "${cpu_profile}"
 printf 'cuda_mps=%s\n' "${cuda_mps}"
 printf 'adaface_classifier_async=%s\n' "${adaface_async}"
+printf 'face_secondary_track_id=%s\n' "${face_track_id}"
 printf 'dual_shard_same_gpu=true\n'
 printf 'dual_shard_gpu=%s\n' "${gpu_id}"
 printf 'evidence_policy_groups=5:5,10:10,15:15\n'

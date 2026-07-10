@@ -22,17 +22,24 @@ from custom.services.face_person_association import (
     FaceInput,
     PersonInput,
     associate_faces_to_persons,
+    propagate_person_track_id,
 )
 
 
 class FacePersonAssociatorPyFunc(NvDsPyFuncPlugin):
     """Associate YOLOv8-Face detections with YOLO26-pose person tracks."""
 
-    def __init__(self, log_every_n_frames: int = 30, **kwargs):
+    def __init__(
+        self,
+        log_every_n_frames: int = 30,
+        propagate_track_id: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._log_interval = max(int(log_every_n_frames), 1)
         self._frame_count = 0
         self._config = AssociationConfig()
+        self._propagate_track_id = bool(propagate_track_id)
 
     def process_frame(self, buffer: Any, frame_meta: Any):
         self._frame_count += 1
@@ -120,6 +127,12 @@ class FacePersonAssociatorPyFunc(NvDsPyFuncPlugin):
 
     def _attach_association(self, face_obj, assoc):
         """Attach association metadata to face object via add_attr_meta."""
+        track_id_propagated = False
+        if self._propagate_track_id:
+            track_id_propagated = propagate_person_track_id(
+                face_obj,
+                assoc.person_track_id,
+            )
         try:
             face_obj.add_attr_meta(
                 "face_person_associator", "person_track_id", assoc.person_track_id
@@ -129,6 +142,11 @@ class FacePersonAssociatorPyFunc(NvDsPyFuncPlugin):
             )
             face_obj.add_attr_meta(
                 "face_person_associator", "association_method", assoc.method
+            )
+            face_obj.add_attr_meta(
+                "face_person_associator",
+                "secondary_track_id_propagated",
+                track_id_propagated,
             )
         except Exception:
             # If attribute write fails, association is still logged
@@ -180,6 +198,7 @@ class FacePersonAssociatorPyFunc(NvDsPyFuncPlugin):
 
             lines.append(
                 f"  face[{assoc.face_index}] person_track_id={assoc.person_track_id} "
+                f"face_track_id={getattr(face_objs[assoc.face_index], 'track_id', None)} "
                 f"score={assoc.score:.2f} face_bbox={face_bbox_str} "
                 f"person_bbox={person_bbox_str}{lm_str} method={assoc.method}"
             )

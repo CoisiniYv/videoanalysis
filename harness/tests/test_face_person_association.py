@@ -15,7 +15,22 @@ from modules.savant_security.custom.services.face_person_association import (
     FacePersonAssociation,
     PersonInput,
     associate_faces_to_persons,
+    propagate_person_track_id,
 )
+
+
+class _TrackableFace:
+    def __init__(self):
+        self.track_id = 0
+
+
+def test_propagate_person_track_id_sets_secondary_object_identity() -> None:
+    face = _TrackableFace()
+
+    assert propagate_person_track_id(face, 42) is True
+    assert face.track_id == 42
+    assert propagate_person_track_id(face, 0) is False
+    assert face.track_id == 42
 
 
 def _face(xc=500, yc=200, w=80, h=100, conf=0.8, idx=0):

@@ -360,6 +360,7 @@ class PressureConfig:
     cpu_isolation_profile: str = "none"
     cuda_mps: bool = False
     adaface_classifier_async: bool = False
+    face_secondary_track_id: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -498,6 +499,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Enable DeepStream secondary classifier async mode for the AdaFace "
             "pressure module. Diagnostic-only until embedding integrity passes."
+        ),
+    )
+    parser.add_argument(
+        "--face-secondary-track-id",
+        action="store_true",
+        help=(
+            "Propagate associated person track IDs onto face objects so "
+            "DeepStream secondary reinference caching can identify them."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -837,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         cpu_isolation_profile=args.cpu_isolation_profile,
         cuda_mps=bool(args.cuda_mps),
         adaface_classifier_async=bool(args.adaface_classifier_async),
+        face_secondary_track_id=bool(args.face_secondary_track_id),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -1945,6 +1955,9 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
                     "FRAME_ANNOTATION_STREAM_MODE": "dual",
                     "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
+                    "FACE_SECONDARY_TRACK_ID_ENABLED": (
+                        "true" if cfg.face_secondary_track_id else "false"
+                    ),
                 },
                 "deploy": {
                     "resources": {
@@ -1978,6 +1991,9 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
                     "FRAME_ANNOTATION_STREAM_MODE": "dual",
                     "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
+                    "FACE_SECONDARY_TRACK_ID_ENABLED": (
+                        "true" if cfg.face_secondary_track_id else "false"
+                    ),
                 },
                 "deploy": {
                     "resources": {
@@ -2331,6 +2347,7 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         "generated_module": str(output_path),
         "output_mode": cfg.savant_output_mode,
         "adaface_classifier_async": cfg.adaface_classifier_async,
+        "face_secondary_track_id": cfg.face_secondary_track_id,
         "adaface_classifier_async_config": (
             str(adaface_async_config_path) if adaface_async_config_path else ""
         ),

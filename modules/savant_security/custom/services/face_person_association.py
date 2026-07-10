@@ -77,6 +77,27 @@ class FacePersonAssociation:
     person_bbox: BBox
 
 
+def propagate_person_track_id(face_obj: object, person_track_id: int) -> bool:
+    """Assign the associated person ID as a stable face object identity.
+
+    DeepStream secondary reinference caching keys off ``object_id``/``track_id``.
+    Face detections occur after nvtracker here, so they otherwise look new on
+    every detector result even when they belong to the same person track.
+    """
+
+    try:
+        track_id = int(person_track_id)
+    except (TypeError, ValueError):
+        return False
+    if track_id <= 0:
+        return False
+    try:
+        setattr(face_obj, "track_id", track_id)
+        return int(getattr(face_obj, "track_id")) == track_id
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+
+
 @dataclass
 class AssociationConfig:
     """Tunable parameters for face-person association."""
