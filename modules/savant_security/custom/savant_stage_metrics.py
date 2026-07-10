@@ -17,13 +17,16 @@ except Exception:  # pragma: no cover - available in the Savant runtime image.
 DEFAULT_STAGE_NAMES = frozenset(
     {
         "yolo26_pose",
+        "yolo26_pose_preproc",
         "yolo26_pose_postproc",
         "tracker",
         "behavior_rules",
         "yolov8_face",
+        "yolov8_face_preproc",
         "yolov8_face_postproc",
         "face_person_associator",
         "adaface",
+        "adaface_preproc",
         "adaface_postproc",
         "face_reid_gate",
         "face_observation_exporter",

@@ -291,7 +291,15 @@ class NvDsPipeline(GstPipeline):
                 self._video_pipeline,
             )
             if nvinfer.preproc is not None:
-                add_buffer_probe(gst_element.get_static_pad('sink'), nvinfer.preproc)
+                preproc_stage_name = f'{element.name}_preproc'
+                if self._stage_metrics.measures(preproc_stage_name):
+                    add_buffer_probe(
+                        gst_element.get_static_pad('sink'),
+                        lambda buffer, name=preproc_stage_name, callback=nvinfer.preproc:
+                            self._run_timed_stage_callback(name, callback, buffer),
+                    )
+                else:
+                    add_buffer_probe(gst_element.get_static_pad('sink'), nvinfer.preproc)
             if nvinfer.postproc is not None:
                 postproc_stage_name = f'{element.name}_postproc'
                 if self._stage_metrics.measures(postproc_stage_name):
