@@ -2105,7 +2105,7 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "FORWARDER_QUEUE_MAX_SIZE": "512",
                     "FORWARDER_RECEIVE_TIMEOUT_MS": "250",
                     "FORWARDER_RECEIVE_HWM": "2000",
-                    "FORWARDER_SEND_TIMEOUT_MS": "50",
+                    "FORWARDER_SEND_TIMEOUT_MS": "250",
                     "FORWARDER_SEND_RETRIES": "0",
                     "FORWARDER_SEND_HWM": "1000",
                     "FORWARDER_METRICS_PORT": "8081",

@@ -1466,7 +1466,7 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
         assert forwarder["FORWARDER_SAMPLER_ENABLED"] == "false"
         assert forwarder["FORWARDER_REQUIRE_OBJECT_NAMESPACE"] == "yolov8_face"
         assert forwarder["FORWARDER_REQUIRE_ATTRIBUTE_NAME"] == "person_track_id"
-        assert forwarder["FORWARDER_SEND_TIMEOUT_MS"] == "50"
+        assert forwarder["FORWARDER_SEND_TIMEOUT_MS"] == "250"
         assert forwarder["FORWARDER_SEND_RETRIES"] == "0"
         assert forwarder["FORWARDER_OUT_ENDPOINT"].endswith(
             "savant-adaface-central:5557"
