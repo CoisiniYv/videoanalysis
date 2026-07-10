@@ -4745,6 +4745,18 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "savant_stage_metrics": savant_stage_metrics,
             }
         )
+    steady_effective_fps_values = [
+        float(row["avg_effective_fps_10s"])
+        for row in rows[1:]
+        if row.get("avg_effective_fps_10s") is not None
+    ]
+    steady_effective_fps_mean = (
+        sum(steady_effective_fps_values) / len(steady_effective_fps_values)
+        if steady_effective_fps_values
+        else None
+    )
+    minimum_effective_fps = _fps_to_float(cfg.min_fps)
+    target_effective_fps = _fps_to_float(cfg.fps)
     summary = {
         "sample_count": len(rows),
         "max_queue_depth": max_queue_depth,
@@ -4764,6 +4776,23 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "final_savant_person_observations_exported_total": int(final_savant_person_observations),
         "final_savant_face_observations_exported_total": int(final_savant_face_observations),
         "final_savant_stage_metrics": final_savant_stage_metrics,
+        "steady_effective_fps_sample_count": len(steady_effective_fps_values),
+        "steady_effective_fps_mean": (
+            round(steady_effective_fps_mean, 4)
+            if steady_effective_fps_mean is not None
+            else None
+        ),
+        "minimum_effective_fps": minimum_effective_fps,
+        "steady_effective_fps_meets_minimum": (
+            steady_effective_fps_mean >= minimum_effective_fps
+            if steady_effective_fps_mean is not None and minimum_effective_fps > 0
+            else False
+        ),
+        "steady_effective_fps_target_ratio": (
+            round(steady_effective_fps_mean / target_effective_fps, 4)
+            if steady_effective_fps_mean is not None and target_effective_fps > 0
+            else None
+        ),
         "final_forwarder_forwarded_seen_ratio": (
             round(final_forwarder_forwarded / final_forwarder_seen, 4)
             if final_forwarder_seen > 0
@@ -5589,6 +5618,10 @@ def pressure_failure_reasons(
             reasons.append("rtsp_republishers_connection_errors")
     if _sample_savant_send_failures_for_gate(sample_summary) > cfg.max_send_failures:
         reasons.append("savant_send_failures")
+    if int(sample_summary.get("steady_effective_fps_sample_count") or 0) <= 0:
+        reasons.append("steady_effective_fps_unmeasured")
+    elif not bool(sample_summary.get("steady_effective_fps_meets_minimum")):
+        reasons.append("steady_effective_fps_below_minimum")
     if (
         cfg.keep_evidence > 0
         and not cfg.forwarder_null_sink

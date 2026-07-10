@@ -1915,6 +1915,84 @@ def test_runtime_sample_summary_dedupes_duplicate_source_rows(tmp_path: Path) ->
     assert summary["final_savant_pose_objects_total"] == 3
 
 
+def test_runtime_sample_summary_enforces_configured_steady_fps(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        stream_count=1,
+        duration_s=60,
+        fps="4/1",
+        min_fps="99/25",
+    )
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    for index, fps in enumerate((1.0, 3.95, 3.97)):
+        (samples / f"runtime_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "metrics": {
+                        "sources": [
+                            {
+                                "source_id": "pressure60_test_00",
+                                "frames_seen_total": (index + 1) * 10,
+                                "windows": {"10s": {"va_savant_effective_fps": fps}},
+                            }
+                        ]
+                    },
+                    "forwarder": {
+                        "global": {"queue_depth": 0},
+                        "sources": [
+                            {
+                                "source_id": "pressure60_test_00",
+                                "frames_seen_total": (index + 1) * 10,
+                                "frames_forwarded_total": (index + 1) * 10,
+                                "frames_dropped_total": 0,
+                                "savant_send_failures_total": 0,
+                            }
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (samples / f"docker_stats_{index:03d}.json").write_text("{}", encoding="utf-8")
+
+    summary = module.summarize_runtime_samples(cfg)
+
+    assert summary["steady_effective_fps_sample_count"] == 2
+    assert summary["steady_effective_fps_mean"] == 3.96
+    assert summary["minimum_effective_fps"] == 3.96
+    assert summary["steady_effective_fps_meets_minimum"] is True
+    assert summary["steady_effective_fps_target_ratio"] == 0.99
+
+
+def test_pressure_gate_rejects_steady_fps_below_minimum() -> None:
+    module = _load_module()
+    cfg = _config(module, stream_count=1, keep_evidence=0, fps="4/1", min_fps="99/25")
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 1,
+            "max_savant_sources": 1,
+            "max_savant_send_failures_delta": 0,
+            "queue_full_samples": 0,
+            "steady_effective_fps_sample_count": 2,
+            "steady_effective_fps_mean": 3.95,
+            "steady_effective_fps_meets_minimum": False,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "steady_effective_fps_below_minimum" in reasons
+
+
 def test_runtime_sample_summary_gates_send_failure_delta(tmp_path: Path) -> None:
     module = _load_module()
     cfg = _config(module, artifact_dir=tmp_path, stream_count=1, duration_s=10, fps="1/1")

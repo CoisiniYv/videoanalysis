@@ -20,7 +20,13 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
     sys.modules.pop(_mod, None)
 
 from app.record_request import build_record_request
-from app.worker import RecordingPolicyState, _apply_recording_window, _handle_event
+from app.worker import (
+    RecordingPolicyState,
+    _apply_default_evidence_policy,
+    _apply_recording_window,
+    _handle_event,
+    _requires_evidence,
+)
 
 
 class _Repo:
@@ -100,6 +106,42 @@ class _Publisher:
             (str(record["source_event_id"]), str(record["strategy"]))
         )
         return "1-0"
+
+
+def test_explicit_false_evidence_policy_disables_legacy_intrusion_default() -> None:
+    event = {
+        "event_type": "intrusion",
+        "snapshot_required": False,
+        "clip_required": False,
+        "evidence_policy": {
+            "snapshot_required": False,
+            "clip_required": False,
+            "pre_seconds": 0,
+            "post_seconds": 0,
+        },
+        "payload": {
+            "media": {
+                "snapshot_required": False,
+                "clip_required": False,
+            }
+        },
+    }
+
+    _apply_default_evidence_policy(event)
+
+    assert _requires_evidence(event) is False
+    assert event["snapshot_required"] is False
+    assert event["clip_required"] is False
+
+
+def test_missing_intrusion_evidence_policy_still_uses_legacy_default() -> None:
+    event = {"event_type": "intrusion", "payload": {}}
+
+    _apply_default_evidence_policy(event)
+
+    assert _requires_evidence(event) is True
+    assert event["snapshot_required"] is True
+    assert event["clip_required"] is True
 
 
 def test_recording_window_preserves_rule_policy_over_env_defaults() -> None:

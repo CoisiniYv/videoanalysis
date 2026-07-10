@@ -533,6 +533,23 @@ def _apply_default_evidence_policy(event: dict) -> None:
     if event_type not in MIDTERM_BEHAVIOR_EVIDENCE_EVENT_TYPES:
         return
 
+    # An explicit false/false policy is an opt-out, not a missing legacy
+    # policy. This is used by inference-only pressure cameras and by operators
+    # that intentionally disable evidence for a behavior rule.
+    policy = event.get("evidence_policy")
+    media = (event.get("payload") or {}).get("media")
+    explicit_policy = any(key in event for key in ("snapshot_required", "clip_required"))
+    if isinstance(policy, dict):
+        explicit_policy = explicit_policy or any(
+            key in policy for key in ("snapshot_required", "clip_required")
+        )
+    if isinstance(media, dict):
+        explicit_policy = explicit_policy or any(
+            key in media for key in ("snapshot_required", "clip_required")
+        )
+    if explicit_policy:
+        return
+
     if _requires_evidence(event):
         return
 

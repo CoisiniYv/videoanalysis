@@ -33,10 +33,12 @@ profile="${1:-8fps-stress}"
 case "${profile}" in
   8fps-stress)
     fps="8/1"
+    min_fps="198/25"
     run_prefix="pressure60_8p1_dual1gpu_cd60"
     ;;
   4fps-t4)
     fps="4/1"
+    min_fps="99/25"
     run_prefix="pressure60_4p1_dual1gpu_cd60"
     ;;
   -h|--help|help)
@@ -66,7 +68,7 @@ cmd=(
   --run-id "${run_id}"
   --streams "${streams}"
   --fps "${fps}"
-  --min-fps 1/1
+  --min-fps "${min_fps}"
   --duration-s "${duration_s}"
   --sample-interval-s 30
   --drain-s "${drain_s}"
@@ -114,6 +116,7 @@ fi
 printf 'pressure_profile=%s\n' "${profile}"
 printf 'run_id=%s\n' "${run_id}"
 printf 'fps=%s\n' "${fps}"
+printf 'min_fps=%s\n' "${min_fps}"
 printf 'streams=%s\n' "${streams}"
 printf 'duration_s=%s\n' "${duration_s}"
 printf 'savant_ablation_stage=%s\n' "${ablation_stage}"
