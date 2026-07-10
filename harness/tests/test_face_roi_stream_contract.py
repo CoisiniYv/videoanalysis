@@ -114,3 +114,26 @@ def test_adaface_preprocessing_matches_savant_bgr_contract() -> None:
     assert np.isclose(batch[0, 1, 0, 0], -1.0)
     assert np.isclose(batch[0, 2, 0, 0], -1.0)
     assert batch.flags.c_contiguous
+
+
+def test_roi_exporter_batches_gpu_sync_once_per_frame() -> None:
+    source = (
+        ROOT
+        / "modules/savant_security/custom/pyfuncs/face_roi_exporter.py"
+    ).read_text(encoding="utf-8")
+
+    assert source.count("self._cuda_stream.waitForCompletion()") == 1
+    assert source.index("self._cuda_stream.waitForCompletion()") < source.index(
+        "for face_index, obj, inp, verdict, aligned in aligned_faces:"
+    )
+    assert '"gpu_syncs": 0' in source
+    assert '"max_eligible_per_frame": 0' in source
+
+
+def test_roi_worker_overrides_inherited_savant_healthcheck() -> None:
+    dockerfile = (
+        ROOT / "services/adaface-roi-worker/Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert "HEALTHCHECK" in dockerfile
+    assert "http://127.0.0.1:8080/metrics" in dockerfile

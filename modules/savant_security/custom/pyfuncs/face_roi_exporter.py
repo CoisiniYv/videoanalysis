@@ -56,6 +56,9 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             "throttled": 0,
             "gate_rejected": 0,
             "crop_errors": 0,
+            "crop_batches": 0,
+            "gpu_syncs": 0,
+            "max_eligible_per_frame": 0,
             "encode_errors": 0,
             "enqueued": 0,
             "queue_dropped": 0,
@@ -159,21 +162,47 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
         from savant.deepstream.opencv_utils import nvds_to_gpu_mat
         from savant.utils.image import GPUImage
 
+        quality = env_int("FACE_ROI_JPEG_QUALITY", 95)
+        ttl_ms = max(env_int("FACE_ROI_TTL_MS", 5000), 1)
         with nvds_to_gpu_mat(buffer, frame_meta.frame_meta) as frame_mat:
             frame_image = GPUImage(frame_mat, cuda_stream=self._cuda_stream)
+            aligned_faces = []
             for face_index, obj, inp, verdict in eligible:
                 try:
                     aligned = self._aligner(obj, frame_image, self._cuda_stream)
-                    self._cuda_stream.waitForCompletion()
-                    image = aligned.to_cpu().np_array
                 except Exception as exc:
                     self._counters["crop_errors"] += 1
                     self._log_error("crop", exc)
                     continue
+                aligned_faces.append((face_index, obj, inp, verdict, aligned))
+
+            if not aligned_faces:
+                return
+            try:
+                # All warps use one CUDA stream. Synchronize once per frame,
+                # rather than once per face, before downloading only the
+                # aligned 112x112 results.
+                self._cuda_stream.waitForCompletion()
+            except Exception as exc:
+                self._counters["crop_errors"] += len(aligned_faces)
+                self._log_error("crop_sync", exc)
+                return
+            self._counters["crop_batches"] += 1
+            self._counters["gpu_syncs"] += 1
+            self._counters["max_eligible_per_frame"] = max(
+                self._counters["max_eligible_per_frame"], len(aligned_faces)
+            )
+
+            for face_index, obj, inp, verdict, aligned in aligned_faces:
+                try:
+                    image = aligned.to_cpu().np_array
+                except Exception as exc:
+                    self._counters["crop_errors"] += 1
+                    self._log_error("crop_download", exc)
+                    continue
                 try:
                     if image.ndim == 3 and image.shape[2] == 4:
                         image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-                    quality = env_int("FACE_ROI_JPEG_QUALITY", 95)
                     ok, encoded = cv2.imencode(
                         ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality]
                     )
@@ -185,7 +214,6 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
                     continue
 
                 now_ms = epoch_ms()
-                ttl_ms = max(env_int("FACE_ROI_TTL_MS", 5000), 1)
                 envelope = self._envelope(
                     face_index,
                     obj,
