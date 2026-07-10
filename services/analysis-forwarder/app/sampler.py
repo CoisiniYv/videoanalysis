@@ -123,7 +123,11 @@ class MetadataObjectFilter:
                     continue
             if float(getattr(obj, "confidence", 0.0) or 0.0) < self.min_confidence:
                 continue
-            bbox = getattr(obj, "bbox", None)
+            # savant-rs VideoObject exposes ``detection_box``; ``bbox`` is
+            # retained only for lightweight test/compatibility objects.
+            bbox = getattr(obj, "detection_box", None)
+            if bbox is None:
+                bbox = getattr(obj, "bbox", None)
             if float(getattr(bbox, "width", 0.0) or 0.0) < self.min_width:
                 continue
             if float(getattr(bbox, "height", 0.0) or 0.0) < self.min_height:

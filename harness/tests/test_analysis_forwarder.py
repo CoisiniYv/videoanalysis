@@ -131,7 +131,7 @@ class _Object:
     label: str
     attributes: dict[tuple[str, str], object] = field(default_factory=dict)
     confidence: float = 1.0
-    bbox: object = field(
+    detection_box: object = field(
         default_factory=lambda: types.SimpleNamespace(width=100.0, height=100.0)
     )
 

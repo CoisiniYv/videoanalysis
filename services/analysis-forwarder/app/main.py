@@ -73,16 +73,13 @@ class ForwarderConfig:
                 "FORWARDER_REQUIRE_ATTRIBUTE_NAME", ""
             ),
             min_object_confidence=_float_env(
-                "FORWARDER_MIN_OBJECT_CONFIDENCE",
-                _float_env("FACE_REID_MIN_CONFIDENCE", 0.0),
+                "FORWARDER_MIN_OBJECT_CONFIDENCE", 0.0
             ),
             min_object_width=_float_env(
-                "FORWARDER_MIN_OBJECT_WIDTH",
-                _float_env("FACE_REID_MIN_FACE_SIZE", 0.0),
+                "FORWARDER_MIN_OBJECT_WIDTH", 0.0
             ),
             min_object_height=_float_env(
-                "FORWARDER_MIN_OBJECT_HEIGHT",
-                _float_env("FACE_REID_MIN_FACE_SIZE", 0.0),
+                "FORWARDER_MIN_OBJECT_HEIGHT", 0.0
             ),
         )
 

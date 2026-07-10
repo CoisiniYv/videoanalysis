@@ -1466,9 +1466,10 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
         assert forwarder["FORWARDER_SAMPLER_ENABLED"] == "false"
         assert forwarder["FORWARDER_REQUIRE_OBJECT_NAMESPACE"] == "yolov8_face"
         assert forwarder["FORWARDER_REQUIRE_ATTRIBUTE_NAME"] == "person_track_id"
-        assert forwarder_service["env_file"] == [
-            str(Path(cfg.env_file).resolve())
-        ]
+        assert "env_file" not in forwarder_service
+        assert forwarder["FORWARDER_MIN_OBJECT_CONFIDENCE"] == "0.45"
+        assert forwarder["FORWARDER_MIN_OBJECT_WIDTH"] == "40"
+        assert forwarder["FORWARDER_MIN_OBJECT_HEIGHT"] == "40"
         assert forwarder["FORWARDER_SEND_TIMEOUT_MS"] == "50"
         assert forwarder["FORWARDER_SEND_RETRIES"] == "0"
         assert forwarder["FORWARDER_OUT_ENDPOINT"].endswith(
