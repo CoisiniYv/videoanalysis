@@ -104,6 +104,10 @@ DUAL_SHARD_SAVANT_METRICS = {
     "replay-b": "http://127.0.0.1:18181/metrics",
 }
 ADAFACE_CENTRAL_METRICS_URL = "http://127.0.0.1:18187/metrics"
+ADAFACE_FORWARDER_METRICS = {
+    "replay-a": "http://127.0.0.1:18188/metrics",
+    "replay-b": "http://127.0.0.1:18189/metrics",
+}
 ADAFACE_DECOUPLED_SERVICES = [
     "adaface-forwarder-a",
     "adaface-forwarder-b",
@@ -2079,6 +2083,10 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 "image": forwarder_image,
                 "container_name": f"video-analytics-midterm-{service}",
                 "profiles": [DUAL_SHARD_PROFILE],
+                "volumes": [
+                    f"{Path('services/analysis-forwarder/app').resolve()}:/app/app:ro"
+                ],
+                "ports": [f"{18188 if shard == 'a' else 18189}:8081"],
                 "environment": {
                     "FORWARDER_IN_ENDPOINT": (
                         f"sub+connect:tcp://savant-{shard}:5558"
@@ -2088,6 +2096,12 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     ),
                     "FORWARDER_RAW_OUT_ENDPOINT": "null://",
                     "FORWARDER_SAMPLER_ENABLED": "false",
+                    "FORWARDER_REQUIRE_OBJECT_NAMESPACE": "yolov8_face",
+                    "FORWARDER_REQUIRE_OBJECT_LABEL": "face",
+                    "FORWARDER_REQUIRE_ATTRIBUTE_NAMESPACE": (
+                        "face_person_associator"
+                    ),
+                    "FORWARDER_REQUIRE_ATTRIBUTE_NAME": "person_track_id",
                     "FORWARDER_QUEUE_MAX_SIZE": "512",
                     "FORWARDER_RECEIVE_TIMEOUT_MS": "250",
                     "FORWARDER_RECEIVE_HWM": "2000",
@@ -5281,6 +5295,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     max_savant_cpu_percent = 0.0
     max_adaface_central_cpu_percent = 0.0
     max_adaface_central_sources = 0
+    max_adaface_forwarder_sources = 0
+    max_adaface_forwarder_queue_depth = 0.0
     max_source_adapter_cpu_percent = 0.0
     max_worker_cpu_percent: dict[str, float] = {
         key: 0.0 for key in WORKER_CONTAINER_NAMES
@@ -5289,6 +5305,10 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     final_forwarder_seen = 0.0
     final_forwarder_forwarded = 0.0
     final_forwarder_dropped = 0.0
+    final_adaface_forwarder_seen = 0.0
+    final_adaface_forwarder_forwarded = 0.0
+    final_adaface_forwarder_filtered = 0.0
+    final_adaface_forwarder_send_failures = 0.0
     final_savant_pose_objects = 0.0
     final_savant_face_objects = 0.0
     final_savant_adaface_embeddings = 0.0
@@ -5306,6 +5326,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             continue
         metrics = payload.get("metrics") or {}
         adaface_central = payload.get("adaface_central") or {}
+        adaface_forwarder = payload.get("adaface_forwarder") or {}
         forwarder = payload.get("forwarder") or {}
         savant_stage_metrics = aggregate_savant_stage_metrics(metrics)
         if cfg.adaface_decoupled:
@@ -5342,6 +5363,15 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "face_observations_exported_total",
             ),
         )
+        adaface_forwarder_sources = _dedupe_sources_by_id(
+            adaface_forwarder.get("sources") or [],
+            score_keys=(
+                "frames_seen_total",
+                "frames_forwarded_total",
+                "metadata_filtered_total",
+                "savant_send_failures_total",
+            ),
+        )
         sample_index = path.stem.rsplit("_", 1)[-1]
         stats = _read_docker_stats_sample(samples_dir / f"docker_stats_{sample_index}.json")
         effective_fps = []
@@ -5368,6 +5398,16 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         max_adaface_central_sources = max(
             max_adaface_central_sources, len(central_sources)
         )
+        max_adaface_forwarder_sources = max(
+            max_adaface_forwarder_sources, len(adaface_forwarder_sources)
+        )
+        adaface_forwarder_queue_depth = float(
+            (adaface_forwarder.get("global") or {}).get("queue_depth") or 0.0
+        )
+        max_adaface_forwarder_queue_depth = max(
+            max_adaface_forwarder_queue_depth,
+            adaface_forwarder_queue_depth,
+        )
         forwarder_seen = sum(float(source.get("frames_seen_total") or 0.0) for source in forwarder_sources)
         forwarder_forwarded = sum(
             float(source.get("frames_forwarded_total") or 0.0) for source in forwarder_sources
@@ -5376,6 +5416,26 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         final_forwarder_seen = forwarder_seen
         final_forwarder_forwarded = forwarder_forwarded
         final_forwarder_dropped = forwarder_dropped
+        adaface_forwarder_seen = sum(
+            float(source.get("frames_seen_total") or 0.0)
+            for source in adaface_forwarder_sources
+        )
+        adaface_forwarder_forwarded = sum(
+            float(source.get("frames_forwarded_total") or 0.0)
+            for source in adaface_forwarder_sources
+        )
+        adaface_forwarder_filtered = sum(
+            float(source.get("metadata_filtered_total") or 0.0)
+            for source in adaface_forwarder_sources
+        )
+        adaface_forwarder_send_failures = sum(
+            float(source.get("savant_send_failures_total") or 0.0)
+            for source in adaface_forwarder_sources
+        )
+        final_adaface_forwarder_seen = adaface_forwarder_seen
+        final_adaface_forwarder_forwarded = adaface_forwarder_forwarded
+        final_adaface_forwarder_filtered = adaface_forwarder_filtered
+        final_adaface_forwarder_send_failures = adaface_forwarder_send_failures
         savant_pose_objects = sum(float(source.get("pose_objects_total") or 0.0) for source in savant_sources)
         savant_face_objects = sum(float(source.get("face_objects_total") or 0.0) for source in savant_sources)
         savant_adaface_embeddings = sum(
@@ -5458,6 +5518,20 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "observed_at": payload.get("_pressure_sample_observed_at"),
                 "savant_sources": len(savant_sources),
                 "adaface_central_sources": len(central_sources),
+                "adaface_forwarder_sources": len(adaface_forwarder_sources),
+                "adaface_forwarder_queue_depth": adaface_forwarder_queue_depth,
+                "adaface_forwarder_frames_seen_total": int(
+                    adaface_forwarder_seen
+                ),
+                "adaface_forwarder_frames_forwarded_total": int(
+                    adaface_forwarder_forwarded
+                ),
+                "adaface_forwarder_metadata_filtered_total": int(
+                    adaface_forwarder_filtered
+                ),
+                "adaface_forwarder_send_failures_total": int(
+                    adaface_forwarder_send_failures
+                ),
                 "forwarder_sources": len(forwarder_sources),
                 "queue_depth": queue_depth,
                 "savant_send_failures_total": send_failures,
@@ -5513,9 +5587,23 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "max_forwarder_sources": max_forwarder_sources,
         "max_savant_sources": max_savant_sources,
         "max_adaface_central_sources": max_adaface_central_sources,
+        "max_adaface_forwarder_sources": max_adaface_forwarder_sources,
+        "max_adaface_forwarder_queue_depth": max_adaface_forwarder_queue_depth,
         "final_forwarder_frames_seen_total": int(final_forwarder_seen),
         "final_forwarder_frames_forwarded_total": int(final_forwarder_forwarded),
         "final_forwarder_frames_dropped_total": int(final_forwarder_dropped),
+        "final_adaface_forwarder_frames_seen_total": int(
+            final_adaface_forwarder_seen
+        ),
+        "final_adaface_forwarder_frames_forwarded_total": int(
+            final_adaface_forwarder_forwarded
+        ),
+        "final_adaface_forwarder_metadata_filtered_total": int(
+            final_adaface_forwarder_filtered
+        ),
+        "final_adaface_forwarder_send_failures_total": int(
+            final_adaface_forwarder_send_failures
+        ),
         "final_savant_pose_objects_total": int(final_savant_pose_objects),
         "final_savant_face_objects_total": int(final_savant_face_objects),
         "final_savant_adaface_embeddings_total": int(final_savant_adaface_embeddings),
@@ -8457,7 +8545,50 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
         savant_shards.append({"shard_id": shard_id, "url": url, **parsed})
 
     adaface_central: dict[str, Any] = {"enabled": False}
+    adaface_forwarder: dict[str, Any] = {"enabled": False}
     if cfg.adaface_decoupled:
+        adaface_forwarder_shards: list[dict[str, Any]] = []
+        adaface_forwarder_sources: list[dict[str, Any]] = []
+        adaface_forwarder_queue_depth = 0.0
+        adaface_forwarder_running = 0.0
+        for shard_id, url in ADAFACE_FORWARDER_METRICS.items():
+            try:
+                parsed = parse_forwarder_metrics_text(
+                    fetch_text_url(url, timeout_s=5)
+                )
+            except Exception as exc:
+                parsed = {
+                    "available": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "global": {},
+                    "sources": [],
+                }
+            for source in parsed.get("sources") or []:
+                source["replay_shard_id"] = shard_id
+            adaface_forwarder_sources.extend(parsed.get("sources") or [])
+            shard_global = parsed.get("global") or {}
+            adaface_forwarder_queue_depth += float(
+                shard_global.get("queue_depth") or 0.0
+            )
+            adaface_forwarder_running += float(
+                shard_global.get("running") or 0.0
+            )
+            adaface_forwarder_shards.append(
+                {"shard_id": shard_id, "url": url, **parsed}
+            )
+        adaface_forwarder = {
+            "enabled": True,
+            "available": any(
+                bool(item.get("available"))
+                for item in adaface_forwarder_shards
+            ),
+            "global": {
+                "queue_depth": adaface_forwarder_queue_depth,
+                "running": adaface_forwarder_running,
+            },
+            "sources": adaface_forwarder_sources,
+            "shards": adaface_forwarder_shards,
+        }
         try:
             central_metrics = parse_savant_metrics_text(
                 fetch_text_url(ADAFACE_CENTRAL_METRICS_URL, timeout_s=5)
@@ -8496,6 +8627,7 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
             "sources": forwarder_sources,
             "shards": forwarder_shards,
         },
+        "adaface_forwarder": adaface_forwarder,
         "adaface_central": adaface_central,
     }
 
@@ -8518,6 +8650,9 @@ def parse_forwarder_metrics_text(text: str) -> dict[str, Any]:
             "frames_seen_total": values.get("va_forwarder_frames_seen_total"),
             "frames_forwarded_total": values.get("va_forwarder_frames_forwarded_total"),
             "frames_dropped_total": values.get("va_forwarder_frames_dropped_total"),
+            "metadata_filtered_total": values.get(
+                "va_forwarder_metadata_filtered_total"
+            ),
             "savant_send_failures_total": values.get(
                 "va_forwarder_savant_send_failures_total"
             ),

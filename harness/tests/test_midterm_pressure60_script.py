@@ -1365,8 +1365,18 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
         assert services[f"savant-{shard}"]["environment"]["OUTPUT_FRAME"] == (
             '{"codec":"copy"}'
         )
-        forwarder = services[f"adaface-forwarder-{shard}"]["environment"]
+        forwarder_service = services[f"adaface-forwarder-{shard}"]
+        assert forwarder_service["volumes"] == [
+            f"{(Path.cwd() / 'services/analysis-forwarder/app').resolve()}:/app/app:ro"
+        ]
+        assert forwarder_service["ports"] == [
+            f"{18188 if shard == 'a' else 18189}:8081"
+        ]
+        forwarder = forwarder_service["environment"]
         assert forwarder["FORWARDER_QUEUE_MAX_SIZE"] == "512"
+        assert forwarder["FORWARDER_SAMPLER_ENABLED"] == "false"
+        assert forwarder["FORWARDER_REQUIRE_OBJECT_NAMESPACE"] == "yolov8_face"
+        assert forwarder["FORWARDER_REQUIRE_ATTRIBUTE_NAME"] == "person_track_id"
         assert forwarder["FORWARDER_SEND_TIMEOUT_MS"] == "50"
         assert forwarder["FORWARDER_SEND_RETRIES"] == "0"
         assert forwarder["FORWARDER_OUT_ENDPOINT"].endswith(
@@ -2567,7 +2577,11 @@ def test_write_dual_shard_pressure_sources_supports_single_shard_probe(
 
 def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) -> None:
     module = _load_module()
-    cfg = _config(module, dual_shard_same_gpu=True)
+    cfg = _config(
+        module,
+        dual_shard_same_gpu=True,
+        adaface_decoupled=True,
+    )
 
     def fake_fetch(url: str, *, timeout_s: float):
         if "18182" in url:
@@ -2592,6 +2606,30 @@ def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) ->
                     'va_forwarder_savant_send_failures_total{source_id="pressure60_test_01"} 0',
                 ]
             )
+        if "18188" in url:
+            return "\n".join(
+                [
+                    "va_forwarder_queue_depth 0",
+                    "va_forwarder_running 1",
+                    'va_forwarder_frames_seen_total{source_id="pressure60_test_00"} 4',
+                    'va_forwarder_frames_forwarded_total{source_id="pressure60_test_00"} 1',
+                    'va_forwarder_frames_dropped_total{source_id="pressure60_test_00"} 3',
+                    'va_forwarder_metadata_filtered_total{source_id="pressure60_test_00"} 3',
+                    'va_forwarder_savant_send_failures_total{source_id="pressure60_test_00"} 0',
+                ]
+            )
+        if "18189" in url:
+            return "\n".join(
+                [
+                    "va_forwarder_queue_depth 0",
+                    "va_forwarder_running 1",
+                    'va_forwarder_frames_seen_total{source_id="pressure60_test_01"} 8',
+                    'va_forwarder_frames_forwarded_total{source_id="pressure60_test_01"} 2',
+                    'va_forwarder_frames_dropped_total{source_id="pressure60_test_01"} 6',
+                    'va_forwarder_metadata_filtered_total{source_id="pressure60_test_01"} 6',
+                    'va_forwarder_savant_send_failures_total{source_id="pressure60_test_01"} 0',
+                ]
+            )
         if "18180" in url:
             return "\n".join(
                 [
@@ -2608,6 +2646,14 @@ def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) ->
                     'va_savant_effective_fps{source_id="pressure60_test_01",window="10s"} 8.0',
                 ]
             )
+        if "18187" in url:
+            return "\n".join(
+                [
+                    'va_savant_sources_active{service="savant-adaface-central"} 2',
+                    'va_savant_frames_seen_total{source_id="pressure60_test_00"} 1',
+                    'va_savant_frames_seen_total{source_id="pressure60_test_01"} 2',
+                ]
+            )
         raise AssertionError(url)
 
     monkeypatch.setattr(module, "fetch_text_url", fake_fetch)
@@ -2618,6 +2664,15 @@ def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) ->
     assert len(overview["forwarder"]["sources"]) == 2
     assert overview["metrics"]["sources_active"] == 2
     assert len(overview["metrics"]["sources"]) == 2
+    assert overview["adaface_forwarder"]["global"]["queue_depth"] == 0
+    assert len(overview["adaface_forwarder"]["sources"]) == 2
+    assert (
+        overview["adaface_forwarder"]["sources"][0][
+            "metadata_filtered_total"
+        ]
+        == 3
+    )
+    assert len(overview["adaface_central"]["sources"]) == 2
 
 
 def test_evidence_policy_groups_parse_pre_post_pairs() -> None:

@@ -16,7 +16,7 @@ from savant_rs.py.utils.zeromq import ZeroMQSource
 from savant_rs.zmq import BlockingWriter, WriterConfigBuilder
 
 from .queueing import BoundedDropQueue, ForwarderMessage
-from .sampler import AnalysisFrameSampler
+from .sampler import AnalysisFrameSampler, MetadataObjectFilter
 
 
 LOGGER = logging.getLogger("analysis_forwarder")
@@ -38,6 +38,10 @@ class ForwarderConfig:
     send_retries: int
     send_hwm: int
     metrics_port: int
+    require_object_namespace: str = ""
+    require_object_label: str = ""
+    require_attribute_namespace: str = ""
+    require_attribute_name: str = ""
 
     @classmethod
     def from_env(cls) -> "ForwarderConfig":
@@ -55,6 +59,16 @@ class ForwarderConfig:
             send_retries=_int_env("FORWARDER_SEND_RETRIES", 3),
             send_hwm=_int_env("FORWARDER_SEND_HWM", 1000),
             metrics_port=_int_env("FORWARDER_METRICS_PORT", 8081),
+            require_object_namespace=os.getenv(
+                "FORWARDER_REQUIRE_OBJECT_NAMESPACE", ""
+            ),
+            require_object_label=os.getenv("FORWARDER_REQUIRE_OBJECT_LABEL", ""),
+            require_attribute_namespace=os.getenv(
+                "FORWARDER_REQUIRE_ATTRIBUTE_NAMESPACE", ""
+            ),
+            require_attribute_name=os.getenv(
+                "FORWARDER_REQUIRE_ATTRIBUTE_NAME", ""
+            ),
         )
 
 
@@ -94,6 +108,7 @@ class ForwarderMetrics:
                 "send_failures": "va_forwarder_savant_send_failures_total",
                 "raw_forwarded": "va_forwarder_raw_frames_forwarded_total",
                 "raw_send_failures": "va_forwarder_raw_send_failures_total",
+                "metadata_filtered": "va_forwarder_metadata_filtered_total",
             }
             for key, prom_name in metric_names.items():
                 lines.append(f"# TYPE {prom_name} counter")
@@ -139,6 +154,12 @@ class AnalysisForwarder:
             enabled=config.sampler_enabled,
             max_fps=config.analysis_fps,
             min_fps=config.min_fps,
+        )
+        self.metadata_filter = MetadataObjectFilter(
+            object_namespace=config.require_object_namespace,
+            object_label=config.require_object_label,
+            attribute_namespace=config.require_attribute_namespace,
+            attribute_name=config.require_attribute_name,
         )
         self.stop_event = threading.Event()
         self.reader = ZeroMQSource(
@@ -204,6 +225,10 @@ class AnalysisForwarder:
             source_id = str(video_frame.source_id or "")
             self.metrics.inc(source_id, "seen")
             self._fanout_raw(source_id, message, zmq_message.content or b"")
+            if not self.metadata_filter.admit(video_frame):
+                self.metrics.inc(source_id, "metadata_filtered")
+                self.metrics.inc(source_id, "dropped")
+                return None
             if not self.sampler.admit(video_frame):
                 self.metrics.inc(source_id, "dropped")
                 return None

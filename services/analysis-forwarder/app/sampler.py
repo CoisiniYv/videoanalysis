@@ -60,6 +60,62 @@ class AnalysisFrameSampler:
             self._last_accepted_pts_ns_by_source[source_key] = int(pts_ns)
 
 
+class MetadataObjectFilter:
+    """Admit frames carrying the object/attribute needed by a side pipeline."""
+
+    def __init__(
+        self,
+        *,
+        object_namespace: str = "",
+        object_label: str = "",
+        attribute_namespace: str = "",
+        attribute_name: str = "",
+    ) -> None:
+        self.object_namespace = str(object_namespace or "")
+        self.object_label = str(object_label or "")
+        self.attribute_namespace = str(attribute_namespace or "")
+        self.attribute_name = str(attribute_name or "")
+        self.enabled = bool(
+            self.object_namespace
+            or self.object_label
+            or self.attribute_namespace
+            or self.attribute_name
+        )
+
+    def admit(self, video_frame: Any) -> bool:
+        if not self.enabled:
+            return True
+        try:
+            objects = list(video_frame.get_all_objects())
+        except Exception:
+            return False
+        for obj in objects:
+            if (
+                self.object_namespace
+                and str(getattr(obj, "namespace", "")) != self.object_namespace
+            ):
+                continue
+            if (
+                self.object_label
+                and str(getattr(obj, "label", "")) != self.object_label
+            ):
+                continue
+            if self.attribute_namespace or self.attribute_name:
+                if not self.attribute_namespace or not self.attribute_name:
+                    continue
+                try:
+                    attribute = obj.get_attribute(
+                        self.attribute_namespace,
+                        self.attribute_name,
+                    )
+                except Exception:
+                    attribute = None
+                if attribute is None:
+                    continue
+            return True
+        return False
+
+
 def _source_key(video_frame: Any) -> str:
     source_id = str(getattr(video_frame, "source_id", "") or "")
     return source_id or "_unknown_source"

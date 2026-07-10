@@ -125,6 +125,24 @@ class _Frame:
     content: _Content = field(default_factory=_Content)
 
 
+@dataclass
+class _Object:
+    namespace: str
+    label: str
+    attributes: dict[tuple[str, str], object] = field(default_factory=dict)
+
+    def get_attribute(self, namespace: str, name: str):
+        return self.attributes.get((namespace, name))
+
+
+@dataclass
+class _MetadataFrame:
+    objects: list[_Object]
+
+    def get_all_objects(self) -> list[_Object]:
+        return self.objects
+
+
 def test_sampler_admits_keyframes_and_limits_by_pts() -> None:
     sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="2/1")
 
@@ -146,6 +164,37 @@ def test_sampler_drops_empty_content() -> None:
     sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="8/1")
 
     assert sampler.admit(_Frame("cam", pts=0, content=_Content(none=True))) is False
+
+
+def test_metadata_filter_requires_matching_face_person_association() -> None:
+    metadata_filter = sampler_mod.MetadataObjectFilter(
+        object_namespace="yolov8_face",
+        object_label="face",
+        attribute_namespace="face_person_associator",
+        attribute_name="person_track_id",
+    )
+    associated_face = _Object(
+        namespace="yolov8_face",
+        label="face",
+        attributes={("face_person_associator", "person_track_id"): object()},
+    )
+    unassociated_face = _Object(namespace="yolov8_face", label="face")
+    associated_person = _Object(
+        namespace="yolo26_pose",
+        label="person",
+        attributes={("face_person_associator", "person_track_id"): object()},
+    )
+
+    assert metadata_filter.admit(_MetadataFrame([associated_face])) is True
+    assert metadata_filter.admit(_MetadataFrame([unassociated_face])) is False
+    assert metadata_filter.admit(_MetadataFrame([associated_person])) is False
+    assert metadata_filter.admit(_MetadataFrame([])) is False
+
+
+def test_metadata_filter_is_passthrough_when_unconfigured() -> None:
+    metadata_filter = sampler_mod.MetadataObjectFilter()
+
+    assert metadata_filter.admit(object()) is True
 
 
 def test_bounded_queue_drops_non_keyframes_and_preserves_keyframes() -> None:
@@ -240,6 +289,57 @@ def test_raw_branch_fanout_happens_before_sampling_drop() -> None:
     raw_writer = forwarder.raw_writer
     assert raw_writer.config["endpoint"] == "pub+bind:tcp://0.0.0.0:5560"
     assert len(raw_writer.sent) == 2
+
+
+def test_forwarder_filters_frames_without_associated_faces() -> None:
+    main_mod = _load_main_module()
+    config = main_mod.ForwarderConfig(
+        in_endpoint="router+bind:tcp://0.0.0.0:5557",
+        out_endpoint="null://diagnostic",
+        raw_out_endpoint="",
+        analysis_fps="4/1",
+        min_fps="1/1",
+        sampler_enabled=False,
+        queue_max_size=8,
+        receive_timeout_ms=100,
+        receive_hwm=10,
+        send_timeout_ms=100,
+        send_retries=0,
+        send_hwm=10,
+        metrics_port=8081,
+        require_object_namespace="yolov8_face",
+        require_object_label="face",
+        require_attribute_namespace="face_person_associator",
+        require_attribute_name="person_track_id",
+    )
+    forwarder = main_mod.AnalysisForwarder(config)
+    unassociated = _Frame("cam", pts=0)
+    unassociated.get_all_objects = lambda: [  # type: ignore[attr-defined]
+        _Object(namespace="yolov8_face", label="face")
+    ]
+    associated = _Frame("cam", pts=1)
+    associated.get_all_objects = lambda: [  # type: ignore[attr-defined]
+        _Object(
+            namespace="yolov8_face",
+            label="face",
+            attributes={("face_person_associator", "person_track_id"): object()},
+        )
+    ]
+
+    def video_message(frame):
+        message = types.SimpleNamespace()
+        message.is_video_frame = lambda: True
+        message.as_video_frame = lambda: frame
+        message.is_end_of_stream = lambda: False
+        message.is_shutdown = lambda: False
+        return types.SimpleNamespace(message=message, content=b"x")
+
+    assert forwarder._build_queue_item(video_message(unassociated)) is None
+    assert forwarder._build_queue_item(video_message(associated)) is not None
+    metrics_text = forwarder.metrics.render_prometheus()
+    assert 'va_forwarder_metadata_filtered_total{source_id="cam"} 1' in metrics_text
+    assert 'va_forwarder_frames_seen_total{source_id="cam"} 2' in metrics_text
+    assert 'va_forwarder_frames_dropped_total{source_id="cam"} 1' in metrics_text
 
 
 def test_phase05_passthrough_probe_is_available() -> None:
