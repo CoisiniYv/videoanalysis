@@ -2135,13 +2135,18 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 "METRICS_FRAME_PERIOD": "1000",
                 "METRICS_TIME_PERIOD": "5",
                 "METRICS_HISTORY": "100",
-                "BATCH_SIZE": str(cfg.batch_size),
+                # The central module contains only AdaFace. Reusing the dual
+                # YOLO mux batch (4) capped every measured central batch at 4
+                # even though the embedding engine is built for batch 16.
+                "BATCH_SIZE": str(cfg.face_embedding_batch_size),
                 "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
                 "MAX_FPS_CONTROL": "false",
                 "INGRESS_FPS_GATE_ENABLED": "false",
                 "MAX_FPS": cfg.fps,
                 "MIN_FPS": cfg.min_fps,
-                "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
+                "BATCHED_PUSH_TIMEOUT": str(
+                    max(cfg.batched_push_timeout, 40000)
+                ),
                 "FACE_EMBEDDING_INFER_INTERVAL": "0",
                 "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
                 "SAVANT_STAGE_METRICS_ENABLED": "true",

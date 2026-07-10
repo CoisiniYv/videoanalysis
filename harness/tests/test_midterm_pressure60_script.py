@@ -1383,6 +1383,8 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
             "savant-adaface-central:5557"
         )
     central_service = services["savant-adaface-central"]
+    assert central_service["environment"]["BATCH_SIZE"] == "16"
+    assert central_service["environment"]["BATCHED_PUSH_TIMEOUT"] == "40000"
     assert central_service["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
     assert central_service["environment"]["OUTPUT_FRAME"] == "null"
     assert module.dual_shard_services(cfg)[-3:] == module.ADAFACE_DECOUPLED_SERVICES
