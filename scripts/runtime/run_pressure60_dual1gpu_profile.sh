@@ -24,7 +24,7 @@ Environment overrides:
   OUTPUT_MODE=copy    copy|metadata-only Savant output experiment.
   BATCH_TIMEOUT_US=40000
                       nvstreammux batched-push-timeout in microseconds.
-  CPU_PROFILE=none    none|local-24cpu|t4-16cpu|t4-16cpu-evidence temporary cpuset layout.
+  CPU_PROFILE=none    none|local-24cpu|t4-16cpu temporary cpuset layout.
   CUDA_MPS=0          Set to 1 for a temporary same-GPU CUDA MPS experiment.
   ADAFACE_ASYNC=0      Set to 1 for DeepStream classifier async mode canary.
   FACE_TRACK_ID=0      Set to 1 to propagate person IDs to face objects.
@@ -34,8 +34,8 @@ Environment overrides:
   ADAFACE_DECOUPLED=0   Set to 1 for central AdaFace off the dual-YOLO path.
   ADAFACE_SHARDED=0     Set to 1 for one decoupled AdaFace sidecar per shard.
   ADAFACE_ROI_REDIS=0   Set to 1 for aligned 112x112 Redis ROI AdaFace worker.
-  ROI_BATCH_TIMEOUT_MS=10
-                      AdaFace ROI batch16 aggregation wait in milliseconds.
+  ROI_BATCH_TIMEOUT_MS=<profile default>
+                      AdaFace ROI batch16 aggregation wait (T4: 100ms).
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -46,11 +46,13 @@ case "${profile}" in
     fps="8/1"
     min_fps="198/25"
     run_prefix="pressure60_8p1_dual1gpu_cd60"
+    roi_batch_timeout_default_ms="40"
     ;;
   4fps-t4)
     fps="4/1"
     min_fps="99/25"
     run_prefix="pressure60_4p1_dual1gpu_cd60"
+    roi_batch_timeout_default_ms="100"
     ;;
   -h|--help|help)
     usage
@@ -82,7 +84,7 @@ adaface_pre_gate="${ADAFACE_PRE_GATE:-0}"
 adaface_decoupled="${ADAFACE_DECOUPLED:-0}"
 adaface_sharded="${ADAFACE_SHARDED:-0}"
 adaface_roi_redis="${ADAFACE_ROI_REDIS:-0}"
-roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-10}"
+roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
