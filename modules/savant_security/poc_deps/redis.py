@@ -60,8 +60,8 @@ class Redis:
             parts.append(self._encode_str(str(int(maxlen))))
         parts.append(b"*")
         for key, value in fields.items():
-            parts.append(self._encode_str(str(key)))
-            parts.append(self._encode_str(self._stringify(value)))
+            parts.append(self._encode_value(key))
+            parts.append(self._encode_value(value))
         return self._request(parts)
 
     def _request(self, parts: Iterable[bytes]) -> str | bytes | list[Any] | None:
@@ -174,9 +174,17 @@ class Redis:
     def _encode_str(self, value: str) -> bytes:
         return value.encode("utf-8")
 
-    def _stringify(self, value: Any) -> str:
+    def _encode_value(self, value: Any) -> bytes:
+        """Preserve binary Stream fields such as bounded JPEG face crops."""
         if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
+            return value
+        if isinstance(value, bytearray):
+            return bytes(value)
+        if isinstance(value, memoryview):
+            return value.tobytes()
+        return self._encode_str(self._stringify(value))
+
+    def _stringify(self, value: Any) -> str:
         if isinstance(value, bool):
             return "1" if value else "0"
         return str(value)

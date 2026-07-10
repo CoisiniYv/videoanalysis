@@ -180,3 +180,20 @@ def test_poc_redis_shim_accepts_persistent_connection_kwargs() -> None:
     assert client.socket_keepalive is True
     assert client.single_connection_client is True
     client.close()
+
+
+def test_poc_redis_shim_preserves_binary_stream_fields(monkeypatch) -> None:
+    client = redis_shim.Redis.from_url("redis://redis:6379/0")
+    captured = []
+    jpeg = b"\xff\xd8\xff\xe0\x00binary\xff\xd9"
+
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda parts: captured.extend(parts) or b"1-0",
+    )
+
+    client.xadd("security.face_rois", {"image": jpeg, "kind": "jpeg"})
+
+    assert jpeg in captured
+    assert b"\xef\xbf\xbd" not in captured
