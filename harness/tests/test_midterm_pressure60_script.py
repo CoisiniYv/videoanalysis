@@ -1515,6 +1515,49 @@ def test_decoupled_adaface_can_use_one_sidecar_per_yolo_shard(tmp_path) -> None:
     ]
 
 
+def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        run_id="roi/test run",
+        dual_shard_same_gpu=True,
+        savant_ablation_stage="full-exporter",
+        savant_output_mode="metadata-only",
+        adaface_roi_redis=True,
+    )
+
+    override = yaml.safe_load(
+        module.write_dual_shard_same_gpu_compose_override(cfg).read_text(
+            encoding="utf-8"
+        )
+    )
+    primary = yaml.safe_load((tmp_path / "module.pressure.yml").read_text())
+    names = [item["name"] for item in primary["pipeline"]["elements"]]
+
+    assert "yolov8_face" in names
+    assert "face_roi_exporter" in names
+    assert "frame_annotation_exporter" in names
+    assert "adaface" not in names
+    assert "face_reid_gate" not in names
+    assert "face_observation_exporter" not in names
+    assert "adaface-forwarder-a" not in override["services"]
+    assert "savant-adaface-central" not in override["services"]
+    for shard in ("a", "b"):
+        env = override["services"][f"savant-{shard}"]["environment"]
+        assert env["OUTPUT_FRAME"] == "null"
+        assert env["FACE_ROI_EXPORT_ENABLED"] == "true"
+        assert env["ADAFACE_INPUT_OBJECT"] == "disabled.face"
+        assert env["FACE_OBSERVATION_EXPORT_ENABLED"] == "false"
+        assert env["FACE_ROI_STREAM"] == "security.face_rois.roi_test_run"
+    worker = override["services"]["adaface-roi-worker"]
+    assert worker["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
+    assert worker["environment"]["FACE_ROI_STREAM"] == (
+        "security.face_rois.roi_test_run"
+    )
+    assert module.dual_shard_services(cfg)[-1] == "adaface-roi-worker"
+
+
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 

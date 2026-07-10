@@ -118,6 +118,9 @@ ADAFACE_DECOUPLED_SERVICES = [
     "adaface-forwarder-b",
     "savant-adaface-central",
 ]
+ADAFACE_ROI_WORKER_SERVICE = "adaface-roi-worker"
+ADAFACE_ROI_WORKER_CONTAINER = "video-analytics-midterm-adaface-roi-worker"
+ADAFACE_ROI_METRICS_URL = "http://127.0.0.1:18187/metrics"
 PROM_SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+"
     r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$"
@@ -284,7 +287,7 @@ SAVANT_ABLATION_ELEMENTS = {
     },
     "full-exporter": {
         "yolo26_pose", "tracker", "behavior_rules", "yolov8_face",
-        "face_person_associator", "adaface", "face_reid_gate",
+        "face_person_associator", "face_roi_exporter", "adaface", "face_reid_gate",
         "face_observation_exporter", "frame_annotation_exporter",
         "savant_perf_metrics",
     },
@@ -382,6 +385,7 @@ class PressureConfig:
     adaface_decoupled: bool = False
     max_adaface_forwarder_send_failure_ratio: float = 0.005
     adaface_decoupled_sharded: bool = False
+    adaface_roi_redis: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -568,6 +572,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Run one decoupled AdaFace sidecar per 30-source YOLO shard. "
             "Diagnostic until T4 throughput and bounded-loss gates pass."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-roi-redis",
+        action="store_true",
+        help=(
+            "Disable inline/full-H264 AdaFace and export only aligned 112x112 "
+            "face crops to a bounded Redis Stream consumed by the batch16 "
+            "adaface-roi-worker. Requires --dual-shard-same-gpu."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -803,6 +816,19 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--adaface-decoupled-sharded requires --adaface-decoupled"
         )
+    if args.adaface_roi_redis and not args.dual_shard_same_gpu:
+        raise SystemExit("--adaface-roi-redis requires --dual-shard-same-gpu")
+    if args.adaface_roi_redis and args.adaface_decoupled:
+        raise SystemExit(
+            "--adaface-roi-redis cannot be combined with --adaface-decoupled"
+        )
+    if args.adaface_roi_redis and args.savant_ablation_stage not in {
+        "full-exporter",
+        "full-evidence",
+    }:
+        raise SystemExit(
+            "--adaface-roi-redis requires full-exporter or full-evidence stage"
+        )
     if not 0.0 <= args.max_adaface_forwarder_send_failure_ratio <= 1.0:
         raise SystemExit(
             "--max-adaface-forwarder-send-failure-ratio must be between 0 and 1"
@@ -934,6 +960,7 @@ def main(argv: list[str] | None = None) -> int:
             args.max_adaface_forwarder_send_failure_ratio
         ),
         adaface_decoupled_sharded=bool(args.adaface_decoupled_sharded),
+        adaface_roi_redis=bool(args.adaface_roi_redis),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -1224,6 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         report["pressure_sampling_cutoff"] = pressure_event_sampling_cutoff(conn, cfg)
         report["rolling_cache_postfill"] = rolling_cache_postfill_after_sampling(cfg)
+        if cfg.adaface_roi_redis:
+            report["adaface_roi_worker"] = collect_adaface_roi_worker_metrics(cfg)
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
@@ -1632,6 +1661,16 @@ def _default_run_id(
     return f"{prefix}_{fps_label}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
 
 
+def safe_run_token(run_id: str) -> str:
+    """Return a Redis/container-safe bounded token for a pressure run."""
+    token = re.sub(r"[^A-Za-z0-9_-]+", "_", str(run_id or "pressure"))
+    return token[:120] or "pressure"
+
+
+def adaface_roi_stream_name(cfg: PressureConfig) -> str:
+    return f"security.face_rois.{safe_run_token(cfg.run_id)}"
+
+
 def _jsonable_config(cfg: PressureConfig) -> dict[str, Any]:
     data = cfg.__dict__.copy()
     for key, value in list(data.items()):
@@ -1984,6 +2023,8 @@ def dual_shard_services(cfg: PressureConfig) -> list[str]:
     if cfg.adaface_decoupled:
         services.extend(["adaface-forwarder-a", "adaface-forwarder-b"])
         services.extend(adaface_central_service_names(cfg))
+    if cfg.adaface_roi_redis:
+        services.append(ADAFACE_ROI_WORKER_SERVICE)
     return services
 
 
@@ -2124,6 +2165,33 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             },
         }
     }
+    if cfg.adaface_roi_redis:
+        roi_stream = adaface_roi_stream_name(cfg)
+        for service in ("savant-a", "savant-b"):
+            doc["services"][service]["environment"].update(
+                {
+                    "FACE_ROI_EXPORT_ENABLED": "true",
+                    "FACE_ROI_STREAM": roi_stream,
+                    "FACE_ROI_STREAM_MAXLEN": "20000",
+                    "FACE_ROI_QUEUE_MAXSIZE": "4096",
+                    "FACE_ROI_TTL_MS": "5000",
+                    "FACE_ROI_JPEG_QUALITY": "95",
+                    "ADAFACE_INPUT_OBJECT": "disabled.face",
+                    "FACE_OBSERVATION_EXPORT_ENABLED": "false",
+                }
+            )
+        doc["services"][ADAFACE_ROI_WORKER_SERVICE] = {
+            "profiles": [DUAL_SHARD_PROFILE],
+            "environment": {
+                "FACE_ROI_STREAM": roi_stream,
+                "FACE_ROI_CONSUMER_GROUP": f"adaface-roi-{safe_run_token(cfg.run_id)}",
+                "FACE_ROI_CONSUMER_NAME": "adaface-roi-worker-1",
+                "FACE_ROI_TTL_MS": "5000",
+                "FACE_ROI_BATCH_TIMEOUT_MS": "10",
+                "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+            },
+            "restart": "no",
+        }
     if cfg.adaface_decoupled:
         central_module = str(write_central_adaface_module(cfg))
         forwarder_image = "video-analytics-midterm-analysis-forwarder:latest"
@@ -2598,7 +2666,7 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         }
     if cfg.adaface_pre_gate:
         apply_adaface_pre_gate(selected)
-    if cfg.adaface_decoupled:
+    if cfg.adaface_decoupled or cfg.adaface_roi_redis:
         selected[:] = [
             element
             for element in selected
@@ -2639,6 +2707,7 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         "adaface_crop_resize": cfg.adaface_crop_resize,
         "adaface_pre_gate": cfg.adaface_pre_gate,
         "adaface_decoupled": cfg.adaface_decoupled,
+        "adaface_roi_redis": cfg.adaface_roi_redis,
         "adaface_classifier_async_config": (
             str(adaface_async_config_path) if adaface_async_config_path else ""
         ),
@@ -2757,6 +2826,8 @@ def wait_for_dual_shard_metrics(cfg: PressureConfig) -> None:
     if cfg.adaface_decoupled:
         for shard_id, url in adaface_central_metrics_urls(cfg).items():
             urls[f"adaface-{shard_id}-metrics"] = url
+    if cfg.adaface_roi_redis:
+        urls["adaface-roi-worker-metrics"] = ADAFACE_ROI_METRICS_URL
     deadline = time.time() + 300
     pending = dict(urls)
     observations: list[dict[str, Any]] = []
@@ -4702,7 +4773,9 @@ def rolling_cache_postfill_after_sampling(cfg: PressureConfig) -> dict[str, Any]
     rolling_cache_postfill_s = (
         cfg.rolling_cache_postfill_s if cfg.rolling_cache_evidence else 0
     )
-    adaface_visibility_grace_s = 5 if cfg.adaface_decoupled else 0
+    adaface_visibility_grace_s = (
+        5 if (cfg.adaface_decoupled or cfg.adaface_roi_redis) else 0
+    )
     postfill_s = max(rolling_cache_postfill_s, adaface_visibility_grace_s)
     summary = {
         "status": "skipped",
@@ -4717,6 +4790,8 @@ def rolling_cache_postfill_after_sampling(cfg: PressureConfig) -> dict[str, Any]
         time.sleep(postfill_s)
     if cfg.adaface_decoupled:
         summary["adaface_visibility"] = pressure_source_visibility_snapshot(cfg)
+    if cfg.adaface_roi_redis:
+        summary["adaface_roi_metrics"] = collect_adaface_roi_worker_metrics(cfg)
     summary["ended_at"] = datetime.now(timezone.utc).isoformat()
     write_json(cfg.artifact_dir / "rolling_cache_postfill_summary.json", summary)
     return summary
@@ -4812,6 +4887,12 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
                 ],
                 cfg.artifact_dir / "adaface_central_logs_since_start.txt",
                 since=since,
+            )
+        if cfg.adaface_roi_redis:
+            run(
+                ["docker", "logs", "--since", since, ADAFACE_ROI_WORKER_CONTAINER],
+                cfg.artifact_dir / "adaface_roi_worker_logs_since_start.txt",
+                check=False,
             )
             write_combined_docker_logs(
                 [
@@ -5421,6 +5502,7 @@ def collect_pressure_diagnostics(cfg: PressureConfig) -> dict[str, Any]:
         "rtsp_republishers": inspect_rtsp_republishers(cfg),
         "log_summary": summarize_logs(cfg),
         "cuda_mps": cuda_mps_status(cfg) if cfg.cuda_mps else {"enabled": False},
+        "adaface_roi_worker": collect_adaface_roi_worker_metrics(cfg),
     }
     write_json(cfg.artifact_dir / "pressure_diagnostics.json", diagnostics)
     return diagnostics
@@ -6385,6 +6467,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         "face_worker": cfg.artifact_dir / "face_worker_logs_since_start.txt",
         "adaface_central": cfg.artifact_dir / "adaface_central_logs_since_start.txt",
         "adaface_forwarder": cfg.artifact_dir / "adaface_forwarder_logs_since_start.txt",
+        "adaface_roi_worker": cfg.artifact_dir / "adaface_roi_worker_logs_since_start.txt",
     }
     summary: dict[str, Any] = {}
     for key, path in paths.items():
@@ -6468,6 +6551,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             text,
             "qdrant_shadow_mismatch",
         )
+        face_roi_enqueued = _extract_metric_ints(text, "enqueued")
+        face_roi_queue_dropped = _extract_metric_ints(text, "queue_dropped")
         media_finalizer_metrics = (
             _media_finalizer_line_metrics(text)
             if key == "media_worker"
@@ -6481,6 +6566,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "frame_annotation_redis_writer action=write_error"
             ),
             "frame_annotation_redis_timeout": text.count("TimeoutError:timed out"),
+            "face_roi_enqueued_max": max(face_roi_enqueued, default=0),
+            "face_roi_queue_dropped_max": max(face_roi_queue_dropped, default=0),
             "negative_pts_overflow": len(re.findall(r"OverflowError: -\\d+", text)),
             "ffprobe_missing": text.count("ffprobe not found"),
             "imageio_ffmpeg_fallback": _metric_sum(
@@ -6650,6 +6737,7 @@ def pressure_failure_reasons(
     log_summary = diagnostics.get("log_summary") or {}
     savant_logs = log_summary.get("savant") or {}
     mps_summary = diagnostics.get("cuda_mps") or {}
+    roi_worker = diagnostics.get("adaface_roi_worker") or {}
     if not cfg.forwarder_null_sink and cfg.keep_evidence >= 0 and len(kept) < cfg.keep_evidence:
         reasons.append("insufficient_playable_evidence")
     if not cfg.forwarder_null_sink and cfg.keep_evidence < 0 and db_before_cleanup:
@@ -6706,6 +6794,7 @@ def pressure_failure_reasons(
     if (
         cfg.savant_ablation_stage
         in {"pose-face-adaface", "full-exporter", "full-evidence"}
+        and not cfg.adaface_roi_redis
         and int(sample_summary.get("max_savant_sources") or 0) >= cfg.stream_count
         and int(sample_summary.get("final_savant_adaface_embeddings_total") or 0) <= 0
     ):
@@ -6737,6 +6826,42 @@ def pressure_failure_reasons(
             cfg.max_adaface_forwarder_send_failure_ratio
         ):
             reasons.append("adaface_forwarder_send_failures")
+    if cfg.adaface_roi_redis:
+        roi_db = (db_before_cleanup or {}).get("adaface_roi") or {}
+        if not bool(roi_worker.get("reachable")):
+            reasons.append("adaface_roi_worker_unreachable")
+        metrics = roi_worker.get("metrics") or {}
+        published = _prometheus_labeled_total(
+            metrics, "va_adaface_roi_messages_total", 'outcome="published"'
+        )
+        invalid = _prometheus_labeled_total(
+            metrics, "va_adaface_roi_messages_total", 'outcome="invalid"'
+        )
+        expired = _prometheus_labeled_total(
+            metrics, "va_adaface_roi_messages_total", 'outcome="expired"'
+        )
+        if published <= 0:
+            reasons.append("adaface_roi_embeddings_zero")
+        total_outcomes = published + invalid + expired
+        if total_outcomes > 0 and (invalid + expired) / total_outcomes > 0.005:
+            reasons.append("adaface_roi_stream_loss_exceeded")
+        pending = _prometheus_labeled_total(
+            metrics, "va_adaface_roi_pending"
+        )
+        if pending > 0:
+            reasons.append("adaface_roi_pending_present")
+        if int(roi_db.get("source_count") or 0) < cfg.stream_count:
+            reasons.append("adaface_roi_did_not_cover_all_sources")
+        event_types = {
+            str(item.get("event_type") or ""): int(item.get("count") or 0)
+            for item in ((db_before_cleanup or {}).get("event_types") or [])
+        }
+        if event_types.get("watchlist_hit", 0) <= 0:
+            reasons.append("adaface_roi_watchlist_events_zero")
+        enqueued = int(savant_logs.get("face_roi_enqueued_max") or 0)
+        dropped = int(savant_logs.get("face_roi_queue_dropped_max") or 0)
+        if enqueued + dropped > 0 and dropped / (enqueued + dropped) > 0.005:
+            reasons.append("adaface_roi_producer_loss_exceeded")
     if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:
@@ -6758,6 +6883,23 @@ def pressure_failure_reasons(
     if not cfg.forwarder_null_sink and _validate_seq_iq_is_failure(cfg, diagnostics, reasons):
         reasons.append("validate_seq_iq_exceeded")
     return reasons
+
+
+def _prometheus_labeled_total(
+    metrics: dict[str, Any], metric_name: str, label_fragment: str = ""
+) -> float:
+    total = 0.0
+    for key, value in metrics.items():
+        text = str(key)
+        if not (text == metric_name or text.startswith(metric_name + "{")):
+            continue
+        if label_fragment and label_fragment not in text:
+            continue
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def rolling_cache_full_rate_gate(
@@ -7772,6 +7914,20 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
     data = _row_json(row)
     data["task_statuses"] = [_row_json(item) for item in statuses]
     data["event_types"] = [_row_json(item) for item in event_types]
+    roi_row = conn.execute(
+        """
+        SELECT
+          count(*) AS observations,
+          count(DISTINCT source_id) AS source_count,
+          min(embedding_norm) AS embedding_norm_min,
+          max(embedding_norm) AS embedding_norm_max
+        FROM face_observations
+        WHERE source_id LIKE %(prefix)s
+          AND payload ? 'roi_transport'
+        """,
+        {"prefix": prefix},
+    ).fetchone()
+    data["adaface_roi"] = _row_json(roi_row)
     return data
 
 
@@ -8643,6 +8799,13 @@ def cleanup_redis_streams(redis_client: Redis, run_id: str) -> dict[str, int]:
         deleted["security.frame_annotations.source_stream_entries_deleted"] = (
             deleted_source_stream_entries
         )
+    roi_stream = f"security.face_rois.{safe_run_token(run_id)}"
+    try:
+        roi_len = int(redis_client.xlen(roi_stream) or 0)
+        redis_client.delete(roi_stream)
+        deleted[roi_stream] = roi_len
+    except Exception:
+        deleted[roi_stream] = -1
     return deleted
 
 
@@ -8765,6 +8928,47 @@ def api_text(api_base: str, path: str, *, timeout_s: float = 60) -> str:
 def fetch_text_url(url: str, *, timeout_s: float = 10) -> str:
     with urlopen(url, timeout=timeout_s) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def collect_adaface_roi_worker_metrics(cfg: PressureConfig) -> dict[str, Any]:
+    if not cfg.adaface_roi_redis:
+        return {"enabled": False}
+    try:
+        body = fetch_text_url(ADAFACE_ROI_METRICS_URL, timeout_s=5)
+    except Exception as exc:
+        return {"enabled": True, "reachable": False, "error": repr(exc)}
+    metrics: dict[str, float] = {}
+    wanted = {
+        "va_adaface_roi_messages_total",
+        "va_adaface_roi_batches_total",
+        "va_adaface_roi_batch_size_count",
+        "va_adaface_roi_batch_size_sum",
+        "va_adaface_roi_inference_seconds_count",
+        "va_adaface_roi_inference_seconds_sum",
+        "va_adaface_roi_pending",
+        "va_adaface_roi_last_success_unixtime",
+    }
+    for line in body.splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        name_and_labels, separator, value_text = text.rpartition(" ")
+        if not separator:
+            continue
+        metric_name = name_and_labels.split("{", 1)[0]
+        if metric_name not in wanted:
+            continue
+        try:
+            value = float(value_text)
+        except ValueError:
+            continue
+        metrics[name_and_labels] = value
+    return {
+        "enabled": True,
+        "reachable": True,
+        "url": ADAFACE_ROI_METRICS_URL,
+        "metrics": metrics,
+    }
 
 
 def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
