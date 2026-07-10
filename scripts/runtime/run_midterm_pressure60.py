@@ -376,6 +376,7 @@ class PressureConfig:
     adaface_pre_gate: bool = False
     adaface_decoupled: bool = False
     max_adaface_forwarder_send_failure_ratio: float = 0.005
+    adaface_decoupled_all_intra: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -554,6 +555,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Keep AdaFace off the dual-YOLO critical path and feed one central "
             "AdaFace Savant module through bounded drop-capable forwarders."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-decoupled-all-intra",
+        action="store_true",
+        help=(
+            "Encode the decoupled AdaFace side output as all-intra H.264 and "
+            "sample it at 1 FPS before the central module. Diagnostic until "
+            "the T4 throughput and evidence gates pass."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -785,6 +795,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
     if args.cuda_mps and not args.dual_shard_same_gpu:
         raise SystemExit("--cuda-mps requires --dual-shard-same-gpu")
+    if args.adaface_decoupled_all_intra and not args.adaface_decoupled:
+        raise SystemExit(
+            "--adaface-decoupled-all-intra requires --adaface-decoupled"
+        )
     if not 0.0 <= args.max_adaface_forwarder_send_failure_ratio <= 1.0:
         raise SystemExit(
             "--max-adaface-forwarder-send-failure-ratio must be between 0 and 1"
@@ -915,6 +929,7 @@ def main(argv: list[str] | None = None) -> int:
         max_adaface_forwarder_send_failure_ratio=float(
             args.max_adaface_forwarder_send_failure_ratio
         ),
+        adaface_decoupled_all_intra=bool(args.adaface_decoupled_all_intra),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -2012,11 +2027,17 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
     # Docker creates the nested target in the repo-backed parent mount, which
     # leaves a root-owned module.pressure.yml in the working tree.
     module_path_in_container = str(ablation_module_path)
-    output_frame = (
-        '{"codec":"copy"}'
-        if cfg.savant_output_mode == "copy" or cfg.adaface_decoupled
-        else "null"
-    )
+    if cfg.adaface_decoupled_all_intra:
+        output_frame = (
+            '{"codec":"h264","encoder":"nvenc",'
+            '"encoder_params":{"iframeinterval":1}}'
+        )
+    else:
+        output_frame = (
+            '{"codec":"copy"}'
+            if cfg.savant_output_mode == "copy" or cfg.adaface_decoupled
+            else "null"
+        )
     doc = {
         "services": {
             "savant-a": {
@@ -2113,7 +2134,14 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                         "dealer+connect:tcp://savant-adaface-central:5557"
                     ),
                     "FORWARDER_RAW_OUT_ENDPOINT": "null://",
-                    "FORWARDER_SAMPLER_ENABLED": "false",
+                    "FORWARDER_SAMPLER_ENABLED": (
+                        "true" if cfg.adaface_decoupled_all_intra else "false"
+                    ),
+                    "ANALYSIS_FPS": "1/1",
+                    "ANALYSIS_MIN_FPS": "1/1",
+                    "FORWARDER_ADMIT_KEYFRAMES_UNCONDITIONALLY": (
+                        "false" if cfg.adaface_decoupled_all_intra else "true"
+                    ),
                     "FORWARDER_REQUIRE_OBJECT_NAMESPACE": "yolov8_face",
                     "FORWARDER_REQUIRE_OBJECT_LABEL": "face",
                     "FORWARDER_REQUIRE_ATTRIBUTE_NAMESPACE": (

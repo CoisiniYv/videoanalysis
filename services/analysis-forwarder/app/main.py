@@ -38,6 +38,7 @@ class ForwarderConfig:
     send_retries: int
     send_hwm: int
     metrics_port: int
+    admit_keyframes_unconditionally: bool = True
     require_object_namespace: str = ""
     require_object_label: str = ""
     require_attribute_namespace: str = ""
@@ -59,6 +60,9 @@ class ForwarderConfig:
             send_retries=_int_env("FORWARDER_SEND_RETRIES", 3),
             send_hwm=_int_env("FORWARDER_SEND_HWM", 1000),
             metrics_port=_int_env("FORWARDER_METRICS_PORT", 8081),
+            admit_keyframes_unconditionally=_bool_env(
+                "FORWARDER_ADMIT_KEYFRAMES_UNCONDITIONALLY", True
+            ),
             require_object_namespace=os.getenv(
                 "FORWARDER_REQUIRE_OBJECT_NAMESPACE", ""
             ),
@@ -154,6 +158,9 @@ class AnalysisForwarder:
             enabled=config.sampler_enabled,
             max_fps=config.analysis_fps,
             min_fps=config.min_fps,
+            admit_keyframes_unconditionally=(
+                config.admit_keyframes_unconditionally
+            ),
         )
         self.metadata_filter = MetadataObjectFilter(
             object_namespace=config.require_object_namespace,

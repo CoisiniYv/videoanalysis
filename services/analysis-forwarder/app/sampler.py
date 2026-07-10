@@ -18,10 +18,14 @@ class AnalysisFrameSampler:
         enabled: bool = True,
         max_fps: str | float | int = "8/1",
         min_fps: str | float | int | None = "2/1",
+        admit_keyframes_unconditionally: bool = True,
     ) -> None:
         self.enabled = _boolish(enabled)
         self.max_fps = _parse_fps(max_fps, default=8.0)
         self.min_fps = _parse_fps(min_fps, default=2.0)
+        self.admit_keyframes_unconditionally = _boolish(
+            admit_keyframes_unconditionally
+        )
         self.min_interval_ns = (
             int(round(NANOS_PER_SECOND / self.max_fps))
             if self.enabled and self.max_fps > 0
@@ -42,7 +46,7 @@ class AnalysisFrameSampler:
         if pts_ns is None:
             self._accept(source_key, None)
             return True
-        if _is_keyframe(video_frame):
+        if self.admit_keyframes_unconditionally and _is_keyframe(video_frame):
             self._accept(source_key, pts_ns)
             return True
 
