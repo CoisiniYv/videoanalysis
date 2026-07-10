@@ -5571,6 +5571,34 @@ def collect_pressure_diagnostics(cfg: PressureConfig) -> dict[str, Any]:
     return diagnostics
 
 
+def _savant_counter_delta_fps(
+    rows: list[dict[str, Any]],
+    *,
+    stream_count: int,
+) -> float | None:
+    if len(rows) < 2 or stream_count <= 0:
+        return None
+    first = rows[0]
+    last = rows[-1]
+    if (
+        int(first.get("savant_sources") or 0) < stream_count
+        or int(last.get("savant_sources") or 0) < stream_count
+    ):
+        return None
+    try:
+        started_at = datetime.fromisoformat(str(first["observed_at"]))
+        ended_at = datetime.fromisoformat(str(last["observed_at"]))
+        elapsed_s = (ended_at - started_at).total_seconds()
+        frame_delta = int(last["savant_frames_seen_total"]) - int(
+            first["savant_frames_seen_total"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if elapsed_s <= 0 or frame_delta < 0:
+        return None
+    return frame_delta / elapsed_s / stream_count
+
+
 def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     samples_dir = cfg.artifact_dir / "samples"
     rows: list[dict[str, Any]] = []
@@ -5749,6 +5777,10 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         final_adaface_forwarder_filtered = adaface_forwarder_filtered
         final_adaface_forwarder_send_failures = adaface_forwarder_send_failures
         savant_pose_objects = sum(float(source.get("pose_objects_total") or 0.0) for source in savant_sources)
+        savant_frames_seen = sum(
+            float(source.get("frames_seen_total") or 0.0)
+            for source in savant_sources
+        )
         savant_face_objects = sum(float(source.get("face_objects_total") or 0.0) for source in savant_sources)
         savant_adaface_embeddings = sum(
             float(source.get("adaface_embeddings_total") or 0.0) for source in savant_sources
@@ -5861,6 +5893,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "forwarder_frames_forwarded_total": int(forwarder_forwarded),
                 "forwarder_frames_dropped_total": int(forwarder_dropped),
                 "savant_pose_objects_total": int(savant_pose_objects),
+                "savant_frames_seen_total": int(savant_frames_seen),
                 "savant_face_objects_total": int(savant_face_objects),
                 "savant_adaface_embeddings_total": int(savant_adaface_embeddings),
                 "savant_person_observations_exported_total": int(savant_person_observations),
@@ -5890,10 +5923,19 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         for row in rows[1:]
         if row.get("avg_effective_fps_10s") is not None
     ]
-    steady_effective_fps_mean = (
+    steady_window_effective_fps_mean = (
         sum(steady_effective_fps_values) / len(steady_effective_fps_values)
         if steady_effective_fps_values
         else None
+    )
+    steady_counter_effective_fps = _savant_counter_delta_fps(
+        rows,
+        stream_count=cfg.stream_count,
+    )
+    steady_effective_fps_mean = (
+        steady_counter_effective_fps
+        if steady_counter_effective_fps is not None
+        else steady_window_effective_fps_mean
     )
     minimum_effective_fps = _fps_to_float(cfg.min_fps)
     target_effective_fps = _fps_to_float(cfg.fps)
@@ -5981,6 +6023,21 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "final_savant_face_observations_exported_total": int(final_savant_face_observations),
         "final_savant_stage_metrics": final_savant_stage_metrics,
         "steady_effective_fps_sample_count": len(steady_effective_fps_values),
+        "steady_effective_fps_method": (
+            "savant_frames_seen_counter_delta"
+            if steady_counter_effective_fps is not None
+            else "mean_10s_window_gauge"
+        ),
+        "steady_window_effective_fps_mean": (
+            round(steady_window_effective_fps_mean, 4)
+            if steady_window_effective_fps_mean is not None
+            else None
+        ),
+        "steady_counter_effective_fps": (
+            round(steady_counter_effective_fps, 4)
+            if steady_counter_effective_fps is not None
+            else None
+        ),
         "steady_effective_fps_mean": (
             round(steady_effective_fps_mean, 4)
             if steady_effective_fps_mean is not None

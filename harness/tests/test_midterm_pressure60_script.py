@@ -1639,6 +1639,24 @@ def test_gpu_samples_include_t4_clock_power_and_throttle_state() -> None:
     assert "clocks_throttle_reasons.active" in query
 
 
+def test_savant_counter_delta_fps_measures_processed_throughput() -> None:
+    module = _load_module()
+    rows = [
+        {
+            "observed_at": "2026-07-10T00:00:00+00:00",
+            "savant_sources": 60,
+            "savant_frames_seen_total": 10_000,
+        },
+        {
+            "observed_at": "2026-07-10T00:03:00+00:00",
+            "savant_sources": 60,
+            "savant_frames_seen_total": 53_200,
+        },
+    ]
+
+    assert module._savant_counter_delta_fps(rows, stream_count=60) == 4.0
+
+
 def test_dual_shard_override_uses_artifact_module_and_metadata_output(tmp_path) -> None:
     module = _load_module()
     cfg = _config(
