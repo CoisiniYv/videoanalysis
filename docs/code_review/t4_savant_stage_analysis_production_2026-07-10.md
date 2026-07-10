@@ -4,7 +4,8 @@ Date: 2026-07-10
 
 Production host: `192.168.1.100`, Tesla T4 16 GB, 16 logical CPUs
 
-Deployed code: `62faf68` (incremental manifests under `/data/video-analytics/deployments`)
+Latest diagnostic deployment: `536bb2f` (incremental manifests under
+`/data/video-analytics/deployments`)
 
 ## Deployment boundary
 
@@ -86,6 +87,31 @@ Preprocessing artifact: `/data/video-analytics/artifacts/pressure60_t4_preproc_p
 - Face nvinfer pad wall time rose from about 449 ms to 1.11 s.
 - AlignFace is measurable but does not account for the full stall.
 - Element wall time includes asynchronous queue and scheduling waits. It is not a true TensorRT kernel-time metric.
+
+### Bbox crop+resize canary
+
+Artifact: `/data/video-analytics/artifacts/pressure60_t4_adaface_crop_536bb2f_20260710T140206Z`
+
+The diagnostic replaced landmark alignment with GPU bbox crop+resize while
+keeping 60 sources at 4 FPS, dual Savant branches on the same T4, both YOLO
+models at batch 4, AdaFace at batch 16, 10 ms batch timeout, full exporter,
+and metadata-only output. Evidence task creation remained disabled.
+
+- Effective FPS samples were 3.970, 4.070, and 2.912; the two-sample steady
+  mean was 3.491 FPS versus the required 3.960 FPS.
+- AdaFace produced 10,770 embeddings. Evidence tasks, forwarder queue depth,
+  and Savant send-failure delta were all zero.
+- AdaFace preprocessing mean wall time fell from the comparable baseline's
+  24.025 ms to 18.986 ms, but the complete AdaFace element mean rose from
+  361.924 ms to 404.548 ms.
+- Batch-4 occupancy remained 98.93%, so the result is not explained by
+  underfilled batches.
+
+This rejects landmark alignment and its per-face affine warp as the dominant
+4 FPS blocker. The remaining wall time is dominated by scheduling and waiting
+inside the synchronous secondary-inference chain. Do not promote bbox
+crop+resize as a face-quality optimization; move AdaFace embedding outside the
+dual-YOLO critical path instead.
 
 ## Decision
 
