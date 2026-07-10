@@ -24,7 +24,7 @@ Environment overrides:
   OUTPUT_MODE=copy    copy|metadata-only Savant output experiment.
   BATCH_TIMEOUT_US=40000
                       nvstreammux batched-push-timeout in microseconds.
-  CPU_PROFILE=none    none|local-24cpu|t4-16cpu temporary cpuset layout.
+  CPU_PROFILE=none    none|local-24cpu|t4-16cpu|t4-16cpu-evidence temporary cpuset layout.
   CUDA_MPS=0          Set to 1 for a temporary same-GPU CUDA MPS experiment.
   ADAFACE_ASYNC=0      Set to 1 for DeepStream classifier async mode canary.
   FACE_TRACK_ID=0      Set to 1 to propagate person IDs to face objects.

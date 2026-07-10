@@ -302,6 +302,13 @@ CPU_ISOLATION_PROFILES = {
         "analysis-forwarder-b": "6,14",
         "workers": "7,15",
     },
+    "t4-16cpu-evidence": {
+        "savant-a": "0-2,8-10",
+        "savant-b": "3-5,11-13",
+        "analysis-forwarder-a": "6,14",
+        "analysis-forwarder-b": "6,14",
+        "workers": "6-7,14-15",
+    },
     "local-24cpu": {
         "savant-a": "0,2,4,6,8,10",
         "savant-b": "12-17",

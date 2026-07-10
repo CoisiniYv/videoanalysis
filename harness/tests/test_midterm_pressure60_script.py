@@ -1653,6 +1653,17 @@ def test_dual_shard_override_uses_artifact_module_and_metadata_output(tmp_path) 
     assert override["services"]["analysis-forwarder-b"]["cpuset"] == "6,14"
 
 
+def test_t4_evidence_cpu_profile_isolates_savant_and_bounds_workers() -> None:
+    module = _load_module()
+    profile = module.CPU_ISOLATION_PROFILES["t4-16cpu-evidence"]
+
+    assert profile["savant-a"] == "0-2,8-10"
+    assert profile["savant-b"] == "3-5,11-13"
+    assert profile["analysis-forwarder-a"] == "6,14"
+    assert profile["analysis-forwarder-b"] == "6,14"
+    assert profile["workers"] == "6-7,14-15"
+
+
 def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
     tmp_path, monkeypatch
 ) -> None:
