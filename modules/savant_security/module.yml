@@ -60,16 +60,6 @@ pipeline:
 
   elements:
     # ------------------------------------------------------------------
-    # ReplaySavantFrameDumpPyFunc — debug-only Replay->Savant pixel proof.
-    # Disabled by default. When explicitly targeted by UUID/PTS, writes the
-    # pre-inference Savant runtime frame for comparison against Replay media.
-    # ------------------------------------------------------------------
-    - element: pyfunc
-      name: replay_savant_frame_dump
-      module: custom.pyfuncs.replay_savant_frame_dump
-      class_name: ReplaySavantFrameDumpPyFunc
-
-    # ------------------------------------------------------------------
     # YOLO26-pose — person detection with 17 COCO keypoints.
     # ------------------------------------------------------------------
     - element: nvinfer@complex_model

@@ -553,6 +553,7 @@ def test_midterm_production_savant_hot_path_excludes_debug_and_unused_encoding()
         "face_embedding_debug",
         "same_frame_detection_debug",
         "face_debug",
+        "replay_savant_frame_dump",
     }
     element_names = {
         element.get("name")
