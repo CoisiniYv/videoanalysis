@@ -10,6 +10,7 @@ keeping a bounded set of playable evidence bundles for operator review.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -104,6 +105,10 @@ DUAL_SHARD_SAVANT_METRICS = {
     "replay-b": "http://127.0.0.1:18181/metrics",
 }
 ADAFACE_CENTRAL_METRICS_URL = "http://127.0.0.1:18187/metrics"
+ADAFACE_SHARDED_CENTRAL_METRICS = {
+    "replay-a": "http://127.0.0.1:18187/metrics",
+    "replay-b": "http://127.0.0.1:18190/metrics",
+}
 ADAFACE_FORWARDER_METRICS = {
     "replay-a": "http://127.0.0.1:18188/metrics",
     "replay-b": "http://127.0.0.1:18189/metrics",
@@ -376,6 +381,7 @@ class PressureConfig:
     adaface_pre_gate: bool = False
     adaface_decoupled: bool = False
     max_adaface_forwarder_send_failure_ratio: float = 0.005
+    adaface_decoupled_sharded: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -554,6 +560,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Keep AdaFace off the dual-YOLO critical path and feed one central "
             "AdaFace Savant module through bounded drop-capable forwarders."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-decoupled-sharded",
+        action="store_true",
+        help=(
+            "Run one decoupled AdaFace sidecar per 30-source YOLO shard. "
+            "Diagnostic until T4 throughput and bounded-loss gates pass."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -785,6 +799,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
     if args.cuda_mps and not args.dual_shard_same_gpu:
         raise SystemExit("--cuda-mps requires --dual-shard-same-gpu")
+    if args.adaface_decoupled_sharded and not args.adaface_decoupled:
+        raise SystemExit(
+            "--adaface-decoupled-sharded requires --adaface-decoupled"
+        )
     if not 0.0 <= args.max_adaface_forwarder_send_failure_ratio <= 1.0:
         raise SystemExit(
             "--max-adaface-forwarder-send-failure-ratio must be between 0 and 1"
@@ -915,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
         max_adaface_forwarder_send_failure_ratio=float(
             args.max_adaface_forwarder_send_failure_ratio
         ),
+        adaface_decoupled_sharded=bool(args.adaface_decoupled_sharded),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -1963,8 +1982,21 @@ def stop_dual_shard_runtime(cfg: PressureConfig) -> None:
 def dual_shard_services(cfg: PressureConfig) -> list[str]:
     services = list(DUAL_SHARD_SERVICES)
     if cfg.adaface_decoupled:
-        services.extend(ADAFACE_DECOUPLED_SERVICES)
+        services.extend(["adaface-forwarder-a", "adaface-forwarder-b"])
+        services.extend(adaface_central_service_names(cfg))
     return services
+
+
+def adaface_central_service_names(cfg: PressureConfig) -> list[str]:
+    if cfg.adaface_decoupled_sharded:
+        return ["savant-adaface-a", "savant-adaface-b"]
+    return ["savant-adaface-central"]
+
+
+def adaface_central_metrics_urls(cfg: PressureConfig) -> dict[str, str]:
+    if cfg.adaface_decoupled_sharded:
+        return dict(ADAFACE_SHARDED_CENTRAL_METRICS)
+    return {"central": ADAFACE_CENTRAL_METRICS_URL}
 
 
 def recreate_dual_video_sinks_for_current_epoch(cfg: PressureConfig) -> None:
@@ -2097,6 +2129,11 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
         forwarder_image = "video-analytics-midterm-analysis-forwarder:latest"
         for shard in ("a", "b"):
             service = f"adaface-forwarder-{shard}"
+            central_service = (
+                f"savant-adaface-{shard}"
+                if cfg.adaface_decoupled_sharded
+                else "savant-adaface-central"
+            )
             doc["services"][service] = {
                 "image": forwarder_image,
                 "container_name": f"video-analytics-midterm-{service}",
@@ -2110,7 +2147,7 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                         f"sub+connect:tcp://savant-{shard}:5558"
                     ),
                     "FORWARDER_OUT_ENDPOINT": (
-                        "dealer+connect:tcp://savant-adaface-central:5557"
+                        f"dealer+connect:tcp://{central_service}:5557"
                     ),
                     "FORWARDER_RAW_OUT_ENDPOINT": "null://",
                     "FORWARDER_SAMPLER_ENABLED": "false",
@@ -2130,9 +2167,8 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 },
                 "restart": "no",
             }
-        doc["services"]["savant-adaface-central"] = {
+        central_template = {
             "image": CUDA_MPS_IMAGE_DEFAULT,
-            "container_name": "video-analytics-midterm-savant-adaface-central",
             "profiles": [DUAL_SHARD_PROFILE],
             "entrypoint": [
                 "bash",
@@ -2157,7 +2193,9 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 # YOLO mux batch (4) capped every measured central batch at 4
                 # even though the embedding engine is built for batch 16.
                 "BATCH_SIZE": str(cfg.face_embedding_batch_size),
-                "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+                "MAX_PARALLEL_STREAMS": str(
+                    32 if cfg.adaface_decoupled_sharded else cfg.max_parallel_streams
+                ),
                 "MAX_FPS_CONTROL": "false",
                 "INGRESS_FPS_GATE_ENABLED": "false",
                 "MAX_FPS": cfg.fps,
@@ -2182,7 +2220,6 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 "/data/video-analytics/artifacts:/data/video-analytics/artifacts:rw",
                 "/data/video-analytics/media:/data/video-analytics/media:rw",
             ],
-            "ports": ["18187:8080"],
             "deploy": {
                 "resources": {
                     "reservations": {
@@ -2198,6 +2235,16 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             },
             "restart": "no",
         }
+        central_specs = (
+            [("savant-adaface-a", 18187), ("savant-adaface-b", 18190)]
+            if cfg.adaface_decoupled_sharded
+            else [("savant-adaface-central", 18187)]
+        )
+        for service, metrics_port in central_specs:
+            service_doc = copy.deepcopy(central_template)
+            service_doc["container_name"] = f"video-analytics-midterm-{service}"
+            service_doc["ports"] = [f"{metrics_port}:8080"]
+            doc["services"][service] = service_doc
     if cfg.cuda_mps:
         mps_root, pipe_dir, log_dir = cuda_mps_paths(cfg)
         for service in ("savant-a", "savant-b"):
@@ -2708,7 +2755,8 @@ def wait_for_dual_shard_metrics(cfg: PressureConfig) -> None:
         },
     }
     if cfg.adaface_decoupled:
-        urls["adaface-central-metrics"] = ADAFACE_CENTRAL_METRICS_URL
+        for shard_id, url in adaface_central_metrics_urls(cfg).items():
+            urls[f"adaface-{shard_id}-metrics"] = url
     deadline = time.time() + 300
     pending = dict(urls)
     observations: list[dict[str, Any]] = []
@@ -4757,16 +4805,13 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
             since=since,
         )
         if cfg.adaface_decoupled:
-            run(
+            write_combined_docker_logs(
                 [
-                    "docker",
-                    "logs",
-                    "--since",
-                    since,
-                    "video-analytics-midterm-savant-adaface-central",
+                    f"video-analytics-midterm-{service}"
+                    for service in adaface_central_service_names(cfg)
                 ],
                 cfg.artifact_dir / "adaface_central_logs_since_start.txt",
-                check=False,
+                since=since,
             )
             write_combined_docker_logs(
                 [
@@ -5600,9 +5645,12 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                     "video-analytics-midterm-savant-b",
                 ],
             )
-            adaface_central_cpu = _stats_cpu_percent(
+            adaface_central_cpu = _stats_cpu_percent_sum(
                 stats,
-                "video-analytics-midterm-savant-adaface-central",
+                [
+                    f"video-analytics-midterm-{service}"
+                    for service in adaface_central_service_names(cfg)
+                ],
             )
         else:
             forwarder_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-analysis-forwarder")
@@ -8806,21 +8854,33 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
             "sources": adaface_forwarder_sources,
             "shards": adaface_forwarder_shards,
         }
-        try:
-            central_metrics = parse_savant_metrics_text(
-                fetch_text_url(ADAFACE_CENTRAL_METRICS_URL, timeout_s=5)
-            )
-        except Exception as exc:
-            central_metrics = {
-                "available": False,
-                "error": f"{type(exc).__name__}: {exc}",
-                "global": {},
-                "sources": [],
-            }
+        central_shards: list[dict[str, Any]] = []
+        central_sources: list[dict[str, Any]] = []
+        central_sources_active = 0.0
+        for shard_id, url in adaface_central_metrics_urls(cfg).items():
+            try:
+                parsed = parse_savant_metrics_text(
+                    fetch_text_url(url, timeout_s=5)
+                )
+            except Exception as exc:
+                parsed = {
+                    "available": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "global": {},
+                    "sources": [],
+                }
+            for source in parsed.get("sources") or []:
+                source["replay_shard_id"] = shard_id
+            central_sources.extend(parsed.get("sources") or [])
+            central_sources_active += float(parsed.get("sources_active") or 0.0)
+            central_shards.append({"shard_id": shard_id, "url": url, **parsed})
         adaface_central = {
             "enabled": True,
-            "url": ADAFACE_CENTRAL_METRICS_URL,
-            **central_metrics,
+            "available": any(bool(item.get("available")) for item in central_shards),
+            "sources_active": central_sources_active,
+            "global": {"va_savant_sources_active": central_sources_active},
+            "sources": central_sources,
+            "shards": central_shards,
         }
 
     return {

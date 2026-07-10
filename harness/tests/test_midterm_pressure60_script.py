@@ -85,6 +85,7 @@ def _config(module, **overrides):
         "adaface_crop_resize": False,
         "adaface_pre_gate": False,
         "adaface_decoupled": False,
+        "adaface_decoupled_sharded": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1477,6 +1478,41 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
     assert central_service["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
     assert central_service["environment"]["OUTPUT_FRAME"] == "null"
     assert module.dual_shard_services(cfg)[-3:] == module.ADAFACE_DECOUPLED_SERVICES
+
+
+def test_decoupled_adaface_can_use_one_sidecar_per_yolo_shard(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        savant_ablation_stage="full-exporter",
+        adaface_decoupled=True,
+        adaface_decoupled_sharded=True,
+        batched_push_timeout=10000,
+    )
+
+    override = yaml.safe_load(
+        module.write_dual_shard_same_gpu_compose_override(cfg).read_text(
+            encoding="utf-8"
+        )
+    )
+    services = override["services"]
+    assert services["adaface-forwarder-a"]["environment"][
+        "FORWARDER_OUT_ENDPOINT"
+    ].endswith("savant-adaface-a:5557")
+    assert services["adaface-forwarder-b"]["environment"][
+        "FORWARDER_OUT_ENDPOINT"
+    ].endswith("savant-adaface-b:5557")
+    assert services["savant-adaface-a"]["ports"] == ["18187:8080"]
+    assert services["savant-adaface-b"]["ports"] == ["18190:8080"]
+    assert services["savant-adaface-a"]["environment"][
+        "MAX_PARALLEL_STREAMS"
+    ] == "32"
+    assert module.adaface_central_service_names(cfg) == [
+        "savant-adaface-a",
+        "savant-adaface-b",
+    ]
 
 
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:

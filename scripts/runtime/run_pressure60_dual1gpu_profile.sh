@@ -32,6 +32,7 @@ Environment overrides:
   ADAFACE_CROP=0        Set to 1 for the diagnostic bbox crop+resize path.
   ADAFACE_PRE_GATE=0    Set to 1 to throttle face candidates before AdaFace.
   ADAFACE_DECOUPLED=0   Set to 1 for central AdaFace off the dual-YOLO path.
+  ADAFACE_SHARDED=0     Set to 1 for one decoupled AdaFace sidecar per shard.
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -76,6 +77,7 @@ adaface_queue="${ADAFACE_QUEUE:-0}"
 adaface_crop="${ADAFACE_CROP:-0}"
 adaface_pre_gate="${ADAFACE_PRE_GATE:-0}"
 adaface_decoupled="${ADAFACE_DECOUPLED:-0}"
+adaface_sharded="${ADAFACE_SHARDED:-0}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -144,6 +146,9 @@ fi
 if [[ "${adaface_decoupled}" == "1" ]]; then
   cmd+=(--adaface-decoupled)
 fi
+if [[ "${adaface_sharded}" == "1" ]]; then
+  cmd+=(--adaface-decoupled-sharded)
+fi
 
 if [[ -n "${RTSP_URI:-}" ]]; then
   cmd+=(--rtsp-uri "${RTSP_URI}")
@@ -166,6 +171,7 @@ printf 'adaface_input_queue=%s\n' "${adaface_queue}"
 printf 'adaface_crop_resize=%s\n' "${adaface_crop}"
 printf 'adaface_pre_gate=%s\n' "${adaface_pre_gate}"
 printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
+printf 'adaface_decoupled_sharded=%s\n' "${adaface_sharded}"
 printf 'dual_shard_same_gpu=true\n'
 printf 'dual_shard_gpu=%s\n' "${gpu_id}"
 printf 'evidence_policy_groups=5:5,10:10,15:15\n'
