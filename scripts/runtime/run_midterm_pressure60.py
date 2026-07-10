@@ -2144,9 +2144,7 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                 "INGRESS_FPS_GATE_ENABLED": "false",
                 "MAX_FPS": cfg.fps,
                 "MIN_FPS": cfg.min_fps,
-                "BATCHED_PUSH_TIMEOUT": str(
-                    max(cfg.batched_push_timeout, 40000)
-                ),
+                "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
                 "FACE_EMBEDDING_INFER_INTERVAL": "0",
                 "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
                 "SAVANT_STAGE_METRICS_ENABLED": "true",

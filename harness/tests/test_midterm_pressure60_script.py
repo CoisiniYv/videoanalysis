@@ -1337,6 +1337,7 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
         savant_ablation_stage="full-exporter",
         savant_output_mode="metadata-only",
         adaface_decoupled=True,
+        batched_push_timeout=10000,
     )
 
     override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
@@ -1384,7 +1385,7 @@ def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
         )
     central_service = services["savant-adaface-central"]
     assert central_service["environment"]["BATCH_SIZE"] == "16"
-    assert central_service["environment"]["BATCHED_PUSH_TIMEOUT"] == "40000"
+    assert central_service["environment"]["BATCHED_PUSH_TIMEOUT"] == "10000"
     assert central_service["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
     assert central_service["environment"]["OUTPUT_FRAME"] == "null"
     assert module.dual_shard_services(cfg)[-3:] == module.ADAFACE_DECOUPLED_SERVICES
