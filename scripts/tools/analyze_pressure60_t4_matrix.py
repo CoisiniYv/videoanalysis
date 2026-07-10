@@ -79,14 +79,38 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     best_timeout = None
     timeout_rows = [row for row in rows if "bt0" in row["run_id"]]
+    timeout_selection = "no_timeout_rows"
     if timeout_rows:
-        best_timeout = max(
-            timeout_rows,
-            key=lambda row: (
-                throughput_ratio(row),
-                -int(row.get("queue_full_samples") or 0),
-            ),
-        )["batch_timeout_us"]
+        eligible_timeout_rows = []
+        for row in timeout_rows:
+            nvinfer_full_ratios = [
+                float((metrics or {}).get("batch_full_ratio") or 0.0)
+                for stage, metrics in (row.get("stage_metrics") or {}).items()
+                if stage in {"yolo26_pose", "yolov8_face", "adaface"}
+            ]
+            if (
+                throughput_ratio(row) >= 0.99
+                and int(row.get("queue_full_samples") or 0) == 0
+                and int(row.get("send_failures_delta") or 0) == 0
+                and nvinfer_full_ratios
+                and min(nvinfer_full_ratios) >= 0.95
+            ):
+                eligible_timeout_rows.append(row)
+        if eligible_timeout_rows:
+            best_timeout = min(
+                eligible_timeout_rows,
+                key=lambda row: int(row.get("batch_timeout_us") or 0),
+            )["batch_timeout_us"]
+            timeout_selection = "lowest_timeout_meeting_throughput_and_batch_fullness"
+        else:
+            best_timeout = max(
+                timeout_rows,
+                key=lambda row: (
+                    throughput_ratio(row),
+                    -int(row.get("queue_full_samples") or 0),
+                ),
+            )["batch_timeout_us"]
+            timeout_selection = "fallback_highest_throughput"
 
     ablation_rows = [row for row in rows if "_ab0" in row["run_id"]]
     first_material_drop = None
@@ -109,12 +133,23 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     nvinfer_names = {"yolo26_pose", "yolov8_face", "adaface"}
     measured_total_ms = 0.0
     nvinfer_total_ms = 0.0
+    nvinfer_postproc_ms = 0.0
     if bottleneck_row:
-        for stage, metrics in (bottleneck_row.get("stage_metrics") or {}).items():
+        stage_metrics = bottleneck_row.get("stage_metrics") or {}
+        for stage, metrics in stage_metrics.items():
+            if stage.endswith("_postproc"):
+                continue
             duration_ms = float((metrics or {}).get("duration_mean_ms") or 0.0)
             measured_total_ms += duration_ms
             if stage in nvinfer_names:
-                nvinfer_total_ms += duration_ms
+                postproc_ms = float(
+                    (stage_metrics.get(f"{stage}_postproc") or {}).get(
+                        "duration_mean_ms"
+                    )
+                    or 0.0
+                )
+                nvinfer_postproc_ms += postproc_ms
+                nvinfer_total_ms += max(0.0, duration_ms - postproc_ms)
     nvinfer_share = (
         round(nvinfer_total_ms / measured_total_ms, 4)
         if measured_total_ms > 0
@@ -129,9 +164,12 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "best_batch_timeout_us": best_timeout,
+        "batch_timeout_selection": timeout_selection,
         "first_material_ablation_drop": first_material_drop,
         "bottleneck_run_id": bottleneck_row.get("run_id") if bottleneck_row else None,
         "nvinfer_measured_share": nvinfer_share,
+        "nvinfer_estimated_inference_ms": round(nvinfer_total_ms, 3),
+        "nvinfer_postproc_ms": round(nvinfer_postproc_ms, 3),
         "nvinfer_dominant_proven": nvinfer_dominant,
         "int8_or_batch8_recommendation": (
             "eligible_for_controlled_experiment"

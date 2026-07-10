@@ -293,7 +293,15 @@ class NvDsPipeline(GstPipeline):
             if nvinfer.preproc is not None:
                 add_buffer_probe(gst_element.get_static_pad('sink'), nvinfer.preproc)
             if nvinfer.postproc is not None:
-                add_buffer_probe(gst_element.get_static_pad('src'), nvinfer.postproc)
+                postproc_stage_name = f'{element.name}_postproc'
+                if self._stage_metrics.measures(postproc_stage_name):
+                    add_buffer_probe(
+                        gst_element.get_static_pad('src'),
+                        lambda buffer, name=postproc_stage_name, callback=nvinfer.postproc:
+                            self._run_timed_stage_callback(name, callback, buffer),
+                    )
+                else:
+                    add_buffer_probe(gst_element.get_static_pad('src'), nvinfer.postproc)
 
         stage_name = str(getattr(element, 'name', '') or '')
         if self._stage_metrics.measures(stage_name):
@@ -332,6 +340,18 @@ class NvDsPipeline(GstPipeline):
         except Exception:  # pylint: disable=broad-except
             batch_size = 0
         self._stage_metrics.observe_batch(stage_name, batch_size)
+
+    def _run_timed_stage_callback(
+        self,
+        stage_name: str,
+        callback,
+        buffer: Gst.Buffer,
+    ):
+        self._begin_stage_timing(stage_name, buffer)
+        try:
+            return callback(buffer)
+        finally:
+            self._stage_metrics.end(stage_name, buffer)
 
     def before_shutdown(self):
         super().before_shutdown()

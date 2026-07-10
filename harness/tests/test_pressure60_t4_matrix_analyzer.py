@@ -51,7 +51,7 @@ def write_artifact(
                 "final_forwarded_target_ratio": ratio,
                 "max_queue_depth": 12,
                 "queue_full_samples": queue_full_samples,
-                "max_savant_send_failures_delta": 2,
+                "max_savant_send_failures_delta": 0,
                 "max_savant_cpu_percent": 444.0,
                 "max_worker_cpu_percent": {"media_worker": 120.0},
                 "final_savant_stage_metrics": {
@@ -59,7 +59,7 @@ def write_artifact(
                         "duration_mean_ms": 7.5,
                         "duration_p95_upper_ms": 10.0,
                         "batch_occupancy": {"4": 9},
-                        "batch_full_ratio": 0.9,
+                        "batch_full_ratio": 0.98,
                     }
                 },
             }
@@ -89,7 +89,7 @@ def test_summarize_artifact_reads_pressure_report_contract(tmp_path: Path) -> No
     assert row["steady_effective_fps_mean"] == 3.9
     assert row["steady_target_ratio"] == 0.975
     assert row["forwarded_target_ratio"] == 0.97
-    assert row["stage_metrics"]["yolo26_pose"]["batch_full_ratio"] == 0.9
+    assert row["stage_metrics"]["yolo26_pose"]["batch_full_ratio"] == 0.98
     assert row["events"] == 10
     assert row["playable_bundles"] == 7
 
@@ -121,9 +121,9 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
                     tmp_path,
                     "pressure60_matrix_bt01_10ms",
                     stage="full-exporter",
-                    ratio=0.91,
+                    ratio=1.01,
                     timeout_us=10000,
-                    steady_fps=0.91 * 4,
+                    steady_fps=1.01 * 4,
                 )
             ),
             module.summarize_artifact(
@@ -131,10 +131,9 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
                     tmp_path,
                     "pressure60_matrix_bt02_20ms",
                     stage="full-exporter",
-                    ratio=0.96,
+                    ratio=1.02,
                     timeout_us=20000,
-                    queue_full_samples=1,
-                    steady_fps=0.96 * 4,
+                    steady_fps=1.02 * 4,
                 )
             ),
         ]
@@ -142,7 +141,10 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
 
     result = module.diagnosis(rows)
 
-    assert result["best_batch_timeout_us"] == 20000
+    assert result["best_batch_timeout_us"] == 10000
+    assert result["batch_timeout_selection"] == (
+        "lowest_timeout_meeting_throughput_and_batch_fullness"
+    )
     assert result["first_material_ablation_drop"] == {
         "from_stage": "pose-tracker-rules",
         "to_stage": "pose-face",
@@ -171,6 +173,29 @@ def test_diagnosis_does_not_claim_nvinfer_without_stage_timing() -> None:
     assert result["int8_or_batch8_recommendation"] == (
         "pending_non_nvinfer_or_insufficient_stage_proof"
     )
+
+
+def test_diagnosis_subtracts_nvinfer_postprocessing_time() -> None:
+    module = load_module()
+    rows = [
+        {
+            "run_id": "pressure60_matrix_ab01_pose",
+            "stage": "pose-only",
+            "steady_target_ratio": 0.8,
+            "stage_metrics": {
+                "yolo26_pose": {"duration_mean_ms": 10.0},
+                "yolo26_pose_postproc": {"duration_mean_ms": 9.0},
+                "behavior_rules": {"duration_mean_ms": 1.0},
+            },
+        }
+    ]
+
+    result = module.diagnosis(rows)
+
+    assert result["nvinfer_estimated_inference_ms"] == 1.0
+    assert result["nvinfer_postproc_ms"] == 9.0
+    assert result["nvinfer_measured_share"] == 0.0909
+    assert result["nvinfer_dominant_proven"] is False
 
 
 def test_markdown_contains_run_and_diagnosis() -> None:
