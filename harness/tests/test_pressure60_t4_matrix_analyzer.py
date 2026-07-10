@@ -25,6 +25,7 @@ def write_artifact(
     ratio: float,
     timeout_us: int = 40000,
     queue_full_samples: int = 0,
+    steady_fps: float = 3.9,
 ) -> Path:
     artifact = root / run_id
     artifact.mkdir()
@@ -44,8 +45,8 @@ def write_artifact(
             "sample_summary": {
                 "samples": [
                     {"avg_effective_fps_10s": 1.0},
-                    {"avg_effective_fps_10s": 3.8},
-                    {"avg_effective_fps_10s": 4.0},
+                    {"avg_effective_fps_10s": steady_fps},
+                    {"avg_effective_fps_10s": steady_fps},
                 ],
                 "final_forwarded_target_ratio": ratio,
                 "max_queue_depth": 12,
@@ -86,6 +87,7 @@ def test_summarize_artifact_reads_pressure_report_contract(tmp_path: Path) -> No
     row = module.summarize_artifact(artifact)
 
     assert row["steady_effective_fps_mean"] == 3.9
+    assert row["steady_target_ratio"] == 0.975
     assert row["forwarded_target_ratio"] == 0.97
     assert row["stage_metrics"]["yolo26_pose"]["batch_full_ratio"] == 0.9
     assert row["events"] == 10
@@ -107,6 +109,7 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
                 f"pressure60_matrix_{case_id}",
                 stage=stage,
                 ratio=ratio,
+                steady_fps=ratio * 4,
             )
         )
         for case_id, stage, ratio in stages
@@ -120,6 +123,7 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
                     stage="full-exporter",
                     ratio=0.91,
                     timeout_us=10000,
+                    steady_fps=0.91 * 4,
                 )
             ),
             module.summarize_artifact(
@@ -130,6 +134,7 @@ def test_diagnosis_finds_ablation_drop_and_best_timeout(tmp_path: Path) -> None:
                     ratio=0.96,
                     timeout_us=20000,
                     queue_full_samples=1,
+                    steady_fps=0.96 * 4,
                 )
             ),
         ]
@@ -179,7 +184,7 @@ def test_markdown_contains_run_and_diagnosis() -> None:
                 "cpu_profile": "none",
                 "batch_timeout_us": 40000,
                 "steady_effective_fps_mean": 3.9,
-                "forwarded_target_ratio": 0.97,
+                "steady_target_ratio": 0.975,
                 "queue_full_samples": 0,
                 "send_failures_delta": 0,
                 "playable_bundles": 0,

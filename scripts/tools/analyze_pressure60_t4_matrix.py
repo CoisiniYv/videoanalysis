@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from fractions import Fraction
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -30,6 +31,11 @@ def summarize_artifact(path: Path) -> dict[str, Any]:
         for row in rows[1:]
         if row.get("avg_effective_fps_10s") is not None
     ]
+    steady_fps = round(mean(fps_values), 4) if fps_values else None
+    try:
+        target_fps = float(Fraction(str(config.get("fps") or "0")))
+    except (ValueError, ZeroDivisionError):
+        target_fps = 0.0
     return {
         "run_id": report.get("run_id") or path.name,
         "artifact_dir": str(path),
@@ -41,7 +47,12 @@ def summarize_artifact(path: Path) -> dict[str, Any]:
         "batch_timeout_us": int(config.get("batched_push_timeout") or 0),
         "stream_count": int(config.get("stream_count") or 0),
         "fps": config.get("fps"),
-        "steady_effective_fps_mean": round(mean(fps_values), 4) if fps_values else None,
+        "steady_effective_fps_mean": steady_fps,
+        "steady_target_ratio": (
+            round(steady_fps / target_fps, 4)
+            if steady_fps is not None and target_fps > 0
+            else None
+        ),
         "last_effective_fps": (
             rows[-1].get("avg_effective_fps_10s") if rows else None
         ),
@@ -60,13 +71,19 @@ def summarize_artifact(path: Path) -> dict[str, Any]:
 
 
 def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def throughput_ratio(row: dict[str, Any]) -> float:
+        value = row.get("steady_target_ratio")
+        if value is None:
+            value = row.get("forwarded_target_ratio")
+        return float(value or 0)
+
     best_timeout = None
     timeout_rows = [row for row in rows if "bt0" in row["run_id"]]
     if timeout_rows:
         best_timeout = max(
             timeout_rows,
             key=lambda row: (
-                float(row.get("forwarded_target_ratio") or 0),
+                throughput_ratio(row),
                 -int(row.get("queue_full_samples") or 0),
             ),
         )["batch_timeout_us"]
@@ -76,7 +93,7 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     bottleneck_row = None
     previous = None
     for row in ablation_rows:
-        ratio = float(row.get("forwarded_target_ratio") or 0)
+        ratio = throughput_ratio(row)
         if bottleneck_row is None and ratio < 0.95:
             bottleneck_row = row
         if previous is not None and previous[1] - ratio >= 0.05:
@@ -105,7 +122,7 @@ def diagnosis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     )
     nvinfer_dominant = bool(
         bottleneck_row
-        and float(bottleneck_row.get("forwarded_target_ratio") or 0) < 0.95
+        and throughput_ratio(bottleneck_row) < 0.95
         and nvinfer_share is not None
         and nvinfer_share >= 0.5
     )
@@ -128,13 +145,13 @@ def markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# Pressure60 T4 analysis matrix",
         "",
-        "| run | stage | output | cpu | timeout us | effective fps | target ratio | queue full | send failures | bundles |",
+        "| run | stage | output | cpu | timeout us | effective fps | steady/target | queue full | send failures | bundles |",
         "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in summary["runs"]:
         lines.append(
             "| {run_id} | {stage} | {output_mode} | {cpu_profile} | {batch_timeout_us} | "
-            "{steady_effective_fps_mean} | {forwarded_target_ratio} | {queue_full_samples} | "
+            "{steady_effective_fps_mean} | {steady_target_ratio} | {queue_full_samples} | "
             "{send_failures_delta} | {playable_bundles} |".format(**row)
         )
     lines.extend(
