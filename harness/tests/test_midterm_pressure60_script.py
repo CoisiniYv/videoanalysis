@@ -83,6 +83,7 @@ def _config(module, **overrides):
         "face_secondary_track_id": False,
         "adaface_input_queue": False,
         "adaface_crop_resize": False,
+        "adaface_pre_gate": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1284,6 +1285,44 @@ def test_adaface_crop_resize_canary_replaces_landmark_preprocessor(tmp_path) -> 
         "module": "custom.preprocessors.face_crop_resize",
         "class_name": "FaceCropResizePreprocessingObjectImageGPU",
     }
+
+
+def test_adaface_pre_gate_throttles_candidates_before_embedding(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        savant_ablation_stage="full-exporter",
+        adaface_pre_gate=True,
+    )
+
+    generated_path = module.write_savant_ablation_module(cfg)
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    elements = generated["pipeline"]["elements"]
+    names = [element.get("name") for element in elements]
+    by_name = {element.get("name"): element for element in elements}
+
+    assert names.index("face_reid_candidate_gate") + 1 == names.index("adaface")
+    assert names.index("face_observation_exporter") + 1 == names.index(
+        "savant_perf_metrics"
+    )
+    assert names.index("savant_perf_metrics") + 1 == names.index(
+        "face_reid_candidate_cleanup"
+    )
+    assert names.index("face_reid_candidate_cleanup") < names.index(
+        "frame_annotation_exporter"
+    )
+    assert by_name["adaface"]["model"]["input"]["object"] == (
+        "face_reid_candidate.face"
+    )
+    assert by_name["face_reid_gate"]["kwargs"]["face_element_name"] == (
+        "face_reid_candidate"
+    )
+    assert by_name["face_observation_exporter"]["kwargs"][
+        "face_element_name"
+    ] == "face_reid_candidate"
+    manifest = json.loads((tmp_path / "savant_ablation_manifest.json").read_text())
+    assert manifest["adaface_pre_gate"] is True
 
 
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:

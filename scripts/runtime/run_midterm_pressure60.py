@@ -363,6 +363,7 @@ class PressureConfig:
     face_secondary_track_id: bool = False
     adaface_input_queue: bool = False
     adaface_crop_resize: bool = False
+    adaface_pre_gate: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -525,6 +526,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Replace landmark alignment with bbox crop+resize for a diagnostic "
             "canary. Do not use as the production face-quality default."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-pre-gate",
+        action="store_true",
+        help=(
+            "Create cadence-throttled face candidate clones before AdaFace so "
+            "only downstream-export-eligible faces consume embedding inference."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -867,6 +876,7 @@ def main(argv: list[str] | None = None) -> int:
         face_secondary_track_id=bool(args.face_secondary_track_id),
         adaface_input_queue=bool(args.adaface_input_queue),
         adaface_crop_resize=bool(args.adaface_crop_resize),
+        adaface_pre_gate=bool(args.adaface_pre_gate),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -2377,6 +2387,68 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
             "module": "custom.preprocessors.face_crop_resize",
             "class_name": "FaceCropResizePreprocessingObjectImageGPU",
         }
+    if cfg.adaface_pre_gate:
+        by_name = {
+            str(element.get("name") or ""): element for element in selected
+        }
+        required = {
+            "adaface",
+            "face_reid_gate",
+            "face_observation_exporter",
+            "frame_annotation_exporter",
+            "savant_perf_metrics",
+        }
+        missing = sorted(required - set(by_name))
+        if missing:
+            raise ValueError(
+                "--adaface-pre-gate requires full exporter elements: "
+                + ",".join(missing)
+            )
+        candidate_name = "face_reid_candidate"
+        adaface = by_name["adaface"]
+        adaface["model"]["input"]["object"] = f"{candidate_name}.face"
+        by_name["face_reid_gate"].setdefault("kwargs", {})[
+            "face_element_name"
+        ] = candidate_name
+        by_name["face_observation_exporter"].setdefault("kwargs", {})[
+            "face_element_name"
+        ] = candidate_name
+        adaface_index = selected.index(adaface)
+        selected.insert(
+            adaface_index,
+            {
+                "element": "pyfunc",
+                "name": "face_reid_candidate_gate",
+                "module": "custom.pyfuncs.face_reid_candidate_gate",
+                "class_name": "FaceReidCandidateGatePyFunc",
+                "kwargs": {
+                    "candidate_element_name": candidate_name,
+                    "cameras_config_path": "${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}",
+                    "face_reid_min_confidence": "${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}",
+                    "face_reid_min_face_size": "${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}",
+                    "face_reid_min_interval_ms": "${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}",
+                    "log_every_n_frames": 30,
+                },
+            },
+        )
+        perf_metrics = by_name["savant_perf_metrics"]
+        selected.remove(perf_metrics)
+        exporter_index = next(
+            index
+            for index, element in enumerate(selected)
+            if element.get("name") == "face_observation_exporter"
+        )
+        selected.insert(exporter_index + 1, perf_metrics)
+        selected.insert(
+            exporter_index + 2,
+            {
+                "element": "pyfunc",
+                "name": "face_reid_candidate_cleanup",
+                "module": "custom.pyfuncs.face_reid_candidate_cleanup",
+                "class_name": "FaceReidCandidateCleanupPyFunc",
+                "kwargs": {"candidate_element_name": candidate_name},
+            },
+        )
     adaface_async_config_path: Path | None = None
     if cfg.adaface_classifier_async:
         adaface = next(
@@ -2409,6 +2481,7 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         "face_secondary_track_id": cfg.face_secondary_track_id,
         "adaface_input_queue": cfg.adaface_input_queue,
         "adaface_crop_resize": cfg.adaface_crop_resize,
+        "adaface_pre_gate": cfg.adaface_pre_gate,
         "adaface_classifier_async_config": (
             str(adaface_async_config_path) if adaface_async_config_path else ""
         ),

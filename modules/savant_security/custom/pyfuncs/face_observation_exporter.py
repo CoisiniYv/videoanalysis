@@ -45,6 +45,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         log_every_n_frames: int = 30,
         producer: str = "savant-security",
         export_min_interval_ms: int = _DEFAULT_EXPORT_MIN_INTERVAL_MS,
+        face_element_name: str = "",
         cameras_config_path: str = "",
         **kwargs,
     ):
@@ -52,6 +53,7 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         self._log_interval = max(int(log_every_n_frames), 1)
         self._frame_count = 0
         self._producer = producer
+        self._face_element_name = str(face_element_name or "")
         self._exporter: FaceObservationExporter = create_face_observation_exporter()
         self._export_count = 0
         self._skip_count = 0
@@ -96,7 +98,15 @@ class FaceObservationExporterPyFunc(NvDsPyFuncPlugin):
         )
 
         objects = list(frame_meta.objects)
-        face_objects = [o for o in objects if getattr(o, "label", "") == "face"]
+        face_objects = [
+            obj
+            for obj in objects
+            if getattr(obj, "label", "") == "face"
+            and (
+                not self._face_element_name
+                or getattr(obj, "element_name", "") == self._face_element_name
+            )
+        ]
 
         exported = 0
         skipped = 0

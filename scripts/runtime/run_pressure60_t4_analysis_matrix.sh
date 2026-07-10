@@ -3,9 +3,9 @@ set -uo pipefail
 
 phase="${1:-all}"
 case "${phase}" in
-  ablation|output|cpu|timeout|mps|async|track|queue|crop|all) ;;
+  ablation|output|cpu|timeout|mps|async|track|queue|crop|pregate|all) ;;
   *)
-    echo "usage: $0 [ablation|output|cpu|timeout|mps|async|track|queue|crop|all]" >&2
+    echo "usage: $0 [ablation|output|cpu|timeout|mps|async|track|queue|crop|pregate|all]" >&2
     exit 2
     ;;
 esac
@@ -30,6 +30,7 @@ run_case() {
   local face_track_id="${8:-0}"
   local adaface_queue="${9:-0}"
   local adaface_crop="${10:-0}"
+  local adaface_pre_gate="${11:-0}"
   local run_id="pressure60_${matrix_id}_${case_id}"
 
   echo "MATRIX_CASE_START case=${case_id} run_id=${run_id} stage=${stage} output=${output_mode} timeout_us=${timeout_us} cpu=${cpu_profile}"
@@ -47,6 +48,7 @@ run_case() {
   FACE_TRACK_ID="${face_track_id}" \
   ADAFACE_QUEUE="${adaface_queue}" \
   ADAFACE_CROP="${adaface_crop}" \
+  ADAFACE_PRE_GATE="${adaface_pre_gate}" \
     bash "${runner}" "${profile}"
   local rc=$?
   echo "MATRIX_CASE_END case=${case_id} run_id=${run_id} rc=${rc}"
@@ -103,6 +105,11 @@ run_crop() {
   run_case crop02_bbox full-exporter metadata-only 10000 none 0 0 0 0 1
 }
 
+run_pregate() {
+  run_case pregate01_after full-exporter metadata-only 10000 none 0 0 0 0 0 0
+  run_case pregate02_before full-exporter metadata-only 10000 none 0 0 0 0 0 1
+}
+
 case "${phase}" in
   ablation) run_ablation ;;
   output) run_output ;;
@@ -113,6 +120,7 @@ case "${phase}" in
   track) run_track ;;
   queue) run_queue ;;
   crop) run_crop ;;
+  pregate) run_pregate ;;
   all)
     run_ablation
     run_output
@@ -123,6 +131,7 @@ case "${phase}" in
     run_track
     run_queue
     run_crop
+    run_pregate
     ;;
 esac
 

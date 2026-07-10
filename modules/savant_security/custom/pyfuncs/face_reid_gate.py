@@ -36,12 +36,14 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         face_reid_min_face_size: float = 40.0,
         face_reid_min_interval_ms: int = 1000,
         face_reid_norm_tolerance: float = 0.10,
+        face_element_name: str = "",
         cameras_config_path: str = "",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._log_interval = max(int(log_every_n_frames), 1)
         self._frame_count = 0
+        self._face_element_name = str(face_element_name or "")
         self._face_detector_confidence_threshold = float(
             face_detector_confidence_threshold,
         )
@@ -94,7 +96,15 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         source_id = str(getattr(frame_meta, "source_id", "")) or "?"
         camera_id, _camera_resolved = self._resolve_camera_id(source_id)
         objects = list(frame_meta.objects)
-        face_objects = [o for o in objects if getattr(o, "label", "") == "face"]
+        face_objects = [
+            obj
+            for obj in objects
+            if getattr(obj, "label", "") == "face"
+            and (
+                not self._face_element_name
+                or getattr(obj, "element_name", "") == self._face_element_name
+            )
+        ]
 
         allowed_count = 0
         skipped_count = 0

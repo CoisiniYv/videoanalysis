@@ -77,71 +77,26 @@ def evaluate_reid_gate(
         ReIDGateResult with allowed/skip verdict.
     """
     cfg = config or {}
-    min_conf = cfg.get("face_reid_min_confidence", _DEFAULT_MIN_CONFIDENCE)
-    min_size = cfg.get("face_reid_min_face_size", _DEFAULT_MIN_FACE_SIZE)
+    candidate = evaluate_reid_candidate(inp, cfg)
+    if not candidate.allowed:
+        return candidate
+
     norm_tol = cfg.get("face_reid_norm_tolerance", _DEFAULT_NORM_TOLERANCE)
-
-    throttle_key = f"{inp.camera_id}:{inp.source_id}:{inp.person_track_id}"
-
-    # Rule 1: person_track_id required
-    if not inp.has_track_id or inp.person_track_id <= 0:
-        return ReIDGateResult(
-            allowed=False,
-            quality_score=0.0,
-            skip_reason="no_track_id",
-            throttle_key=throttle_key,
-        )
-
-    # Rule 2: confidence
-    if inp.face_confidence < min_conf:
-        return ReIDGateResult(
-            allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
-            skip_reason="low_confidence",
-            throttle_key=throttle_key,
-        )
-
-    # Rule 3: face size
-    if inp.face_width < min_size or inp.face_height < min_size:
-        return ReIDGateResult(
-            allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
-            skip_reason="face_too_small",
-            throttle_key=throttle_key,
-        )
-
-    # Rule 4: landmarks (expect 5 points = 10 floats, or list of 5 pairs)
-    lm = inp.landmarks
-    if lm is None:
-        return ReIDGateResult(
-            allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
-            skip_reason="no_landmarks",
-            throttle_key=throttle_key,
-        )
-    lm_count = len(lm)
-    # Accept 10 floats (5 points x 2 coords) or 5 items (list of pairs)
-    if lm_count not in (5, 10, 15):
-        return ReIDGateResult(
-            allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
-            skip_reason="bad_landmarks",
-            throttle_key=throttle_key,
-        )
+    throttle_key = candidate.throttle_key
 
     # Rule 5: feature dim
     feat = inp.feature
     if feat is None or len(feat) == 0:
         return ReIDGateResult(
             allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
+            quality_score=candidate.quality_score,
             skip_reason="no_feature",
             throttle_key=throttle_key,
         )
     if len(feat) != _EXPECTED_FEATURE_DIM:
         return ReIDGateResult(
             allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
+            quality_score=candidate.quality_score,
             skip_reason=f"wrong_feature_dim_{len(feat)}",
             throttle_key=throttle_key,
         )
@@ -151,7 +106,7 @@ def evaluate_reid_gate(
     if norm < (1.0 - norm_tol) or norm > (1.0 + norm_tol):
         return ReIDGateResult(
             allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
+            quality_score=candidate.quality_score,
             skip_reason=f"bad_norm_{norm:.3f}",
             throttle_key=throttle_key,
         )
@@ -160,8 +115,71 @@ def evaluate_reid_gate(
     if any(math.isnan(x) for x in feat):
         return ReIDGateResult(
             allowed=False,
-            quality_score=_quality_score(inp, min_conf, min_size),
+            quality_score=candidate.quality_score,
             skip_reason="nan_feature",
+            throttle_key=throttle_key,
+        )
+
+    return ReIDGateResult(
+        allowed=True,
+        quality_score=candidate.quality_score,
+        skip_reason=None,
+        throttle_key=throttle_key,
+    )
+
+
+def evaluate_reid_candidate(
+    inp: ReIDGateInput,
+    config: Optional[Dict[str, Any]] = None,
+) -> ReIDGateResult:
+    """Evaluate embedding-independent rules before AdaFace inference.
+
+    This is the safe pre-inference subset of :func:`evaluate_reid_gate`:
+    association, detector confidence, face size, and landmarks. Embedding
+    shape/norm/finite checks remain mandatory in the post-inference gate.
+    """
+    cfg = config or {}
+    min_conf = cfg.get("face_reid_min_confidence", _DEFAULT_MIN_CONFIDENCE)
+    min_size = cfg.get("face_reid_min_face_size", _DEFAULT_MIN_FACE_SIZE)
+    throttle_key = f"{inp.camera_id}:{inp.source_id}:{inp.person_track_id}"
+
+    if not inp.has_track_id or inp.person_track_id <= 0:
+        return ReIDGateResult(
+            allowed=False,
+            quality_score=0.0,
+            skip_reason="no_track_id",
+            throttle_key=throttle_key,
+        )
+
+    if inp.face_confidence < min_conf:
+        return ReIDGateResult(
+            allowed=False,
+            quality_score=_quality_score(inp, min_conf, min_size),
+            skip_reason="low_confidence",
+            throttle_key=throttle_key,
+        )
+
+    if inp.face_width < min_size or inp.face_height < min_size:
+        return ReIDGateResult(
+            allowed=False,
+            quality_score=_quality_score(inp, min_conf, min_size),
+            skip_reason="face_too_small",
+            throttle_key=throttle_key,
+        )
+
+    landmarks = inp.landmarks
+    if landmarks is None:
+        return ReIDGateResult(
+            allowed=False,
+            quality_score=_quality_score(inp, min_conf, min_size),
+            skip_reason="no_landmarks",
+            throttle_key=throttle_key,
+        )
+    if len(landmarks) not in (5, 10, 15):
+        return ReIDGateResult(
+            allowed=False,
+            quality_score=_quality_score(inp, min_conf, min_size),
+            skip_reason="bad_landmarks",
             throttle_key=throttle_key,
         )
 

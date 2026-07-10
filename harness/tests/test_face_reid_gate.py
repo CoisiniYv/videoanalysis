@@ -14,6 +14,7 @@ from modules.savant_security.custom.services.face_reid_gate import (
     ReIDGateInput,
     ReIDGateResult,
     ReIDThrottleMap,
+    evaluate_reid_candidate,
     evaluate_reid_gate,
 )
 
@@ -64,6 +65,37 @@ class TestValidFaceAllowed:
         )
         result = evaluate_reid_gate(inp)
         assert result.throttle_key == "cam_001:primary_rtsp:391"
+
+
+class TestPreInferenceCandidateGate:
+    def test_candidate_does_not_require_embedding(self):
+        inp = _make_input(feature=None, feature_dim=0, embedding_norm=0.0)
+
+        result = evaluate_reid_candidate(inp)
+
+        assert result.allowed is True
+        assert result.skip_reason is None
+
+    def test_candidate_keeps_embedding_independent_quality_rules(self):
+        inp = _make_input(
+            feature=None,
+            feature_dim=0,
+            embedding_norm=0.0,
+            landmarks=None,
+        )
+
+        result = evaluate_reid_candidate(inp)
+
+        assert result.allowed is False
+        assert result.skip_reason == "no_landmarks"
+
+    def test_full_gate_still_requires_embedding(self):
+        inp = _make_input(feature=None, feature_dim=0, embedding_norm=0.0)
+
+        result = evaluate_reid_gate(inp)
+
+        assert result.allowed is False
+        assert result.skip_reason == "no_feature"
 
 
 class TestMissingTrackId:
