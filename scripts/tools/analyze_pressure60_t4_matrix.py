@@ -45,6 +45,7 @@ def summarize_artifact(path: Path) -> dict[str, Any]:
         "output_mode": config.get("savant_output_mode") or "unknown",
         "cpu_profile": config.get("cpu_isolation_profile") or "none",
         "cuda_mps": bool(config.get("cuda_mps")),
+        "adaface_classifier_async": bool(config.get("adaface_classifier_async")),
         "batch_timeout_us": int(config.get("batched_push_timeout") or 0),
         "stream_count": int(config.get("stream_count") or 0),
         "fps": config.get("fps"),
@@ -192,12 +193,12 @@ def markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# Pressure60 T4 analysis matrix",
         "",
-        "| run | stage | output | cpu | MPS | timeout us | effective fps | steady/target | queue full | send failures | bundles |",
-        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| run | stage | output | cpu | MPS | AdaFace async | timeout us | effective fps | steady/target | queue full | send failures | bundles |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in summary["runs"]:
         lines.append(
-            "| {run_id} | {stage} | {output_mode} | {cpu_profile} | {cuda_mps} | {batch_timeout_us} | "
+            "| {run_id} | {stage} | {output_mode} | {cpu_profile} | {cuda_mps} | {adaface_classifier_async} | {batch_timeout_us} | "
             "{steady_effective_fps_mean} | {steady_target_ratio} | {queue_full_samples} | "
             "{send_failures_delta} | {playable_bundles} |".format(**row)
         )

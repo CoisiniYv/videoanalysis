@@ -29,6 +29,7 @@ class Config:
     recording_post_seconds: int
     record_request_dedupe_ttl_seconds: int
     rolling_cache_suppress_record_requests: bool
+    evidence_task_creation_enabled: bool
     person_observation_stream: str
     person_observation_consumer_group: str
     person_observation_consumer_name: str
@@ -90,6 +91,10 @@ def load_config() -> Config:
         )
         .strip()
         .lower()
+        in ("true", "1", "yes", "on"),
+        evidence_task_creation_enabled=os.getenv(
+            "EVIDENCE_TASK_CREATION_ENABLED", "true"
+        ).strip().lower()
         in ("true", "1", "yes", "on"),
         person_observation_stream=os.getenv(
             "PERSON_OBSERVATION_STREAM", "security.person_observations"

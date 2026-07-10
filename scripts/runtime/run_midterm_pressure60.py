@@ -359,6 +359,7 @@ class PressureConfig:
     savant_output_mode: str = "copy"
     cpu_isolation_profile: str = "none"
     cuda_mps: bool = False
+    adaface_classifier_async: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -489,6 +490,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Run both same-GPU Savant branches through a temporary CUDA MPS "
             "control/server container. The helper is removed during restore."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-classifier-async",
+        action="store_true",
+        help=(
+            "Enable DeepStream secondary classifier async mode for the AdaFace "
+            "pressure module. Diagnostic-only until embedding integrity passes."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -827,6 +836,7 @@ def main(argv: list[str] | None = None) -> int:
         savant_output_mode=args.savant_output_mode,
         cpu_isolation_profile=args.cpu_isolation_profile,
         cuda_mps=bool(args.cuda_mps),
+        adaface_classifier_async=bool(args.adaface_classifier_async),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -2292,6 +2302,26 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
     else:
         selected = [element for element in elements if element.get("name") in keep]
     module_doc["pipeline"]["elements"] = selected
+    adaface_async_config_path: Path | None = None
+    if cfg.adaface_classifier_async:
+        adaface = next(
+            (element for element in selected if element.get("name") == "adaface"),
+            None,
+        )
+        if adaface is None:
+            raise ValueError(
+                "--adaface-classifier-async requires an ablation stage with AdaFace"
+            )
+        adaface_async_config_path = (
+            cfg.artifact_dir / "adaface_nvinfer_classifier_async.txt"
+        ).resolve()
+        write_text(
+            adaface_async_config_path,
+            "[property]\nclassifier-async-mode=1\n",
+        )
+        adaface_model = adaface.setdefault("model", {})
+        adaface_model["local_path"] = str(adaface_async_config_path.parent)
+        adaface_model["config_file"] = adaface_async_config_path.name
     output_path = (cfg.artifact_dir / "module.pressure.yml").resolve()
     write_text(output_path, yaml.safe_dump(module_doc, sort_keys=False))
     selected_names = [str(element.get("name") or "") for element in selected]
@@ -2300,6 +2330,10 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         "source_module": str(source_path),
         "generated_module": str(output_path),
         "output_mode": cfg.savant_output_mode,
+        "adaface_classifier_async": cfg.adaface_classifier_async,
+        "adaface_classifier_async_config": (
+            str(adaface_async_config_path) if adaface_async_config_path else ""
+        ),
         "selected_elements": selected_names,
         "removed_elements": [
             str(element.get("name") or "")
@@ -2694,8 +2728,13 @@ def event_worker_evidence_env_snapshot() -> dict[str, str]:
         "EVIDENCE_EVENT_COVERAGE_WINDOW_SECONDS",
         "EVIDENCE_EVENT_COVERAGE_EVENT_TYPES",
         "EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS",
+        "EVIDENCE_TASK_CREATION_ENABLED",
     )
-    return {key: env.get(key, "") for key in keys}
+    result = {key: env.get(key, "") for key in keys}
+    result["EVIDENCE_TASK_CREATION_ENABLED"] = env.get(
+        "EVIDENCE_TASK_CREATION_ENABLED", "true"
+    )
+    return result
 
 
 def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
@@ -3093,6 +3132,16 @@ def configure_event_worker_evidence_admission(
 ) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(values)
+    override_path = cfg.artifact_dir / artifact_name.replace(
+        ".log", ".override.yml"
+    )
+    write_text(
+        override_path,
+        yaml.safe_dump(
+            {"services": {"event-worker": {"environment": values}}},
+            sort_keys=False,
+        ),
+    )
     run(
         [
             "docker",
@@ -3101,6 +3150,8 @@ def configure_event_worker_evidence_admission(
             cfg.env_file,
             "-f",
             cfg.compose_file,
+            "-f",
+            str(override_path),
             "up",
             "-d",
             "--no-deps",
@@ -3124,16 +3175,23 @@ def configure_event_worker_evidence_admission(
 
 
 def configure_event_worker_for_pressure(cfg: PressureConfig) -> dict[str, Any] | None:
-    if not cfg.pressure_disable_evidence_admission:
+    values: dict[str, str] = {}
+    if cfg.savant_ablation_stage != "full-evidence":
+        values["EVIDENCE_TASK_CREATION_ENABLED"] = "false"
+    if cfg.pressure_disable_evidence_admission:
+        values.update(
+            {
+                "EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL": "0",
+                "EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE": "0",
+                "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE": "0",
+                "RECORDING_COOLDOWN_SECONDS": "0",
+            }
+        )
+    if not values:
         return None
     return configure_event_worker_evidence_admission(
         cfg,
-        values={
-            "EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL": "0",
-            "EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE": "0",
-            "EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE": "0",
-            "RECORDING_COOLDOWN_SECONDS": "0",
-        },
+        values=values,
         artifact_name="compose_recreate_event_worker_pressure_admission.log",
     )
 
@@ -5949,6 +6007,13 @@ def pressure_failure_reasons(
             reasons.append("savant_person_observations_zero")
         if int(sample_summary.get("final_savant_face_observations_exported_total") or 0) <= 0:
             reasons.append("savant_face_observations_zero")
+    if (
+        cfg.savant_ablation_stage
+        in {"pose-face-adaface", "full-exporter", "full-evidence"}
+        and int(sample_summary.get("max_savant_sources") or 0) >= cfg.stream_count
+        and int(sample_summary.get("final_savant_adaface_embeddings_total") or 0) <= 0
+    ):
+        reasons.append("savant_adaface_embeddings_zero")
     if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:

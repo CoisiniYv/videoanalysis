@@ -79,6 +79,7 @@ def _config(module, **overrides):
         "rolling_cache_enable_coverage_merge": False,
         "cleanup": True,
         "cuda_mps": False,
+        "adaface_classifier_async": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1191,11 +1192,70 @@ def test_savant_ablation_module_is_cumulative_and_artifact_scoped(tmp_path) -> N
     assert "adaface" in manifest["removed_elements"]
 
 
+def test_adaface_classifier_async_uses_generated_nvinfer_config(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        savant_ablation_stage="full-exporter",
+        adaface_classifier_async=True,
+    )
+
+    generated_path = module.write_savant_ablation_module(cfg)
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    adaface = next(
+        element
+        for element in generated["pipeline"]["elements"]
+        if element["name"] == "adaface"
+    )
+    config_path = tmp_path / "adaface_nvinfer_classifier_async.txt"
+
+    assert config_path.read_text(encoding="utf-8") == (
+        "[property]\nclassifier-async-mode=1\n"
+    )
+    assert adaface["model"]["local_path"] == str(tmp_path)
+    assert adaface["model"]["config_file"] == config_path.name
+
+
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert 'cfg.savant_ablation_stage == "full-evidence"' in source
     assert '"reason": "non_evidence_savant_ablation"' in source
+
+
+def test_non_evidence_ablation_disables_evidence_tasks_via_compose_override(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        savant_ablation_stage="full-exporter",
+    )
+    captured: dict[str, object] = {}
+
+    original_run = module.run
+    original_snapshot = module.event_worker_evidence_env_snapshot
+    module.run = lambda cmd, path, **kwargs: captured.update(
+        {"cmd": cmd, "path": path, "kwargs": kwargs}
+    )
+    module.event_worker_evidence_env_snapshot = lambda: {
+        "EVIDENCE_TASK_CREATION_ENABLED": "false"
+    }
+    try:
+        result = module.configure_event_worker_for_pressure(cfg)
+    finally:
+        module.run = original_run
+        module.event_worker_evidence_env_snapshot = original_snapshot
+
+    assert result is not None
+    override_path = tmp_path / "compose_recreate_event_worker_pressure_admission.override.yml"
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+    assert override["services"]["event-worker"]["environment"] == {
+        "EVIDENCE_TASK_CREATION_ENABLED": "false"
+    }
+    assert str(override_path) in captured["cmd"]
 
 
 def test_gpu_samples_include_t4_clock_power_and_throttle_state() -> None:

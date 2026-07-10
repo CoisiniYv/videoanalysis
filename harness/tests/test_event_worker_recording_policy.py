@@ -38,6 +38,7 @@ class _Repo:
         self.source_event_ids_by_event_id: dict[str, str] = {}
         self.clip_status_by_source_event_id: dict[str, str] = {}
         self.skipped_materializations: list[dict[str, str]] = []
+        self.evidence_task_creations = 0
 
     def insert_event(self, event: dict[str, Any]) -> str:
         event_id = f"event-{len(self.inserted_events) + 1}"
@@ -48,6 +49,7 @@ class _Repo:
         return event_id
 
     def create_evidence_task(self, event: dict[str, Any], event_id: str) -> None:
+        self.evidence_task_creations += 1
         self.task_status = "pending"
 
     def get_evidence_task_status(self, event_id: str) -> str:
@@ -142,6 +144,33 @@ def test_missing_intrusion_evidence_policy_still_uses_legacy_default() -> None:
     assert _requires_evidence(event) is True
     assert event["snapshot_required"] is True
     assert event["clip_required"] is True
+
+
+def test_event_worker_can_persist_event_without_creating_evidence_task() -> None:
+    event = {
+        "event_type": "intrusion",
+        "source_event_id": "pressure:intrusion:1",
+        "camera_id": "pressure-camera",
+        "source_id": "pressure-source",
+        "event_ts_ms": 1_765_000_000_000,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {"snapshot_required": True, "clip_required": True},
+    }
+    repo = _Repo()
+    consumer = _Consumer()
+
+    inserted, _ = _handle_event(
+        event,
+        "1-0",
+        repo,
+        consumer,
+        evidence_task_creation_enabled=False,
+    )
+
+    assert inserted is True
+    assert repo.evidence_task_creations == 0
+    assert consumer.acked == ["1-0"]
 
 
 def test_recording_window_preserves_rule_policy_over_env_defaults() -> None:

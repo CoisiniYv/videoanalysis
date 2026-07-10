@@ -290,6 +290,7 @@ def _handle_event(
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
     runtime_epoch_id: str = "",
     rolling_cache_suppress_record_requests: bool = False,
+    evidence_task_creation_enabled: bool = True,
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -352,6 +353,7 @@ def _handle_event(
         and not alert_policy_decision.suppressed
         and event_id
         and _requires_evidence(event)
+        and evidence_task_creation_enabled
     ):
         if hasattr(repo, "create_evidence_task"):
             try:
@@ -666,6 +668,7 @@ def _process_batch(
     recording_post_seconds: int = MIDTERM_DEFAULT_EVIDENCE_POLICY["post_seconds"],
     runtime_epoch_id: str = "",
     rolling_cache_suppress_record_requests: bool = False,
+    evidence_task_creation_enabled: bool = True,
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -696,6 +699,7 @@ def _process_batch(
             rolling_cache_suppress_record_requests=(
                 rolling_cache_suppress_record_requests
             ),
+            evidence_task_creation_enabled=evidence_task_creation_enabled,
         )
         if new:
             inserted += 1
@@ -917,6 +921,7 @@ def run_worker(
                     rolling_cache_suppress_record_requests=(
                         cfg.rolling_cache_suppress_record_requests
                     ),
+                    evidence_task_creation_enabled=cfg.evidence_task_creation_enabled,
                 )
                 total_inserted += ins
                 total_duplicates += dup
@@ -951,6 +956,7 @@ def run_worker(
                     rolling_cache_suppress_record_requests=(
                         cfg.rolling_cache_suppress_record_requests
                     ),
+                    evidence_task_creation_enabled=cfg.evidence_task_creation_enabled,
                 )
                 total_inserted += ins
                 total_duplicates += dup

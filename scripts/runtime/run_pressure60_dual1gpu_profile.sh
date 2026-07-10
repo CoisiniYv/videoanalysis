@@ -26,6 +26,7 @@ Environment overrides:
                       nvstreammux batched-push-timeout in microseconds.
   CPU_PROFILE=none    none|local-24cpu|t4-16cpu temporary cpuset layout.
   CUDA_MPS=0          Set to 1 for a temporary same-GPU CUDA MPS experiment.
+  ADAFACE_ASYNC=0      Set to 1 for DeepStream classifier async mode canary.
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -64,6 +65,7 @@ output_mode="${OUTPUT_MODE:-copy}"
 batch_timeout_us="${BATCH_TIMEOUT_US:-40000}"
 cpu_profile="${CPU_PROFILE:-none}"
 cuda_mps="${CUDA_MPS:-0}"
+adaface_async="${ADAFACE_ASYNC:-0}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -114,6 +116,9 @@ fi
 if [[ "${cuda_mps}" == "1" ]]; then
   cmd+=(--cuda-mps)
 fi
+if [[ "${adaface_async}" == "1" ]]; then
+  cmd+=(--adaface-classifier-async)
+fi
 
 if [[ -n "${RTSP_URI:-}" ]]; then
   cmd+=(--rtsp-uri "${RTSP_URI}")
@@ -130,6 +135,7 @@ printf 'savant_output_mode=%s\n' "${output_mode}"
 printf 'batched_push_timeout_us=%s\n' "${batch_timeout_us}"
 printf 'cpu_isolation_profile=%s\n' "${cpu_profile}"
 printf 'cuda_mps=%s\n' "${cuda_mps}"
+printf 'adaface_classifier_async=%s\n' "${adaface_async}"
 printf 'dual_shard_same_gpu=true\n'
 printf 'dual_shard_gpu=%s\n' "${gpu_id}"
 printf 'evidence_policy_groups=5:5,10:10,15:15\n'
