@@ -7909,7 +7909,25 @@ def write_combined_docker_logs(containers: list[str], path: Path, *, since: str)
 
 
 def nvidia_smi_csv() -> str:
-    query = "timestamp,index,name,utilization.gpu,utilization.decoder,memory.used,memory.total"
+    query = ",".join(
+        (
+            "timestamp",
+            "index",
+            "name",
+            "utilization.gpu",
+            "utilization.decoder",
+            "memory.used",
+            "memory.total",
+            "pstate",
+            "temperature.gpu",
+            "power.draw",
+            "power.limit",
+            "clocks.current.sm",
+            "clocks.current.memory",
+            "clocks.max.sm",
+            "clocks_throttle_reasons.active",
+        )
+    )
     try:
         return subprocess.run(
             ["nvidia-smi", f"--query-gpu={query}", "--format=csv"],

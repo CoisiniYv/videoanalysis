@@ -1172,6 +1172,32 @@ def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:
     assert '"reason": "non_evidence_savant_ablation"' in source
 
 
+def test_gpu_samples_include_t4_clock_power_and_throttle_state() -> None:
+    module = _load_module()
+
+    class Completed:
+        stdout = "gpu-sample\n"
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return Completed()
+
+    original_run = module.subprocess.run
+    module.subprocess.run = fake_run
+    try:
+        assert module.nvidia_smi_csv() == "gpu-sample\n"
+    finally:
+        module.subprocess.run = original_run
+
+    query = calls[0][1]
+    assert "pstate" in query
+    assert "power.draw" in query
+    assert "clocks.current.sm" in query
+    assert "clocks_throttle_reasons.active" in query
+
+
 def test_dual_shard_override_uses_artifact_module_and_metadata_output(tmp_path) -> None:
     module = _load_module()
     cfg = _config(
