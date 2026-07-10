@@ -1664,6 +1664,40 @@ def test_t4_evidence_cpu_profile_isolates_savant_and_bounds_workers() -> None:
     assert profile["workers"] == "6-7,14-15"
 
 
+def test_worker_cpu_isolation_is_reapplied_after_recreate(
+    tmp_path, monkeypatch
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        cpu_isolation_profile="t4-16cpu-evidence",
+    )
+    calls = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "docker_container_cpuset",
+        lambda _container: "6-7,14-15",
+    )
+
+    result = module.reapply_worker_cpu_isolation(cfg)
+
+    assert len(calls) == len(module.WORKER_CONTAINER_NAMES)
+    assert all(call[0:3] == ["docker", "update", "--cpuset-cpus"] for call in calls)
+    assert all(row["ok"] for row in result["containers"].values())
+    assert (tmp_path / "cpu_isolation_reapply.json").exists()
+
+
 def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
     tmp_path, monkeypatch
 ) -> None:

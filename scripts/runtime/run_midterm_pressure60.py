@@ -1242,6 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
             write_json(cfg.artifact_dir / "runtime_restart_pressure.json", restart)
             report["steps"].append({"name": "runtime_started", "runtime_epoch_root": runtime_epoch_root})
 
+        if original_worker_cpu_isolation is not None:
+            report["cpu_isolation_reapply"] = reapply_worker_cpu_isolation(cfg)
         report["pressure_source_visibility"] = wait_for_pressure_source_visibility(
             cfg,
             sources_path=pressure_sources_path,
@@ -3034,6 +3036,43 @@ def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
                 )
     write_json(cfg.artifact_dir / "cpu_isolation_apply.json", snapshot)
     return snapshot
+
+
+def reapply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
+    """Reapply worker cpusets after pressure-specific container recreates."""
+    target_cpuset = str(
+        CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile].get("workers") or ""
+    )
+    result: dict[str, Any] = {
+        "profile": cfg.cpu_isolation_profile,
+        "target_cpuset": target_cpuset,
+        "containers": {},
+    }
+    if not target_cpuset:
+        return result
+    for container in sorted(set(WORKER_CONTAINER_NAMES.values())):
+        completed = subprocess.run(
+            ["docker", "update", "--cpuset-cpus", target_cpuset, container],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        observed = docker_container_cpuset(container)
+        ok = completed.returncode == 0 and observed == target_cpuset
+        result["containers"][container] = {
+            "observed_cpuset": observed,
+            "ok": ok,
+            "error": "" if ok else completed.stdout.strip(),
+        }
+        if not ok:
+            write_json(cfg.artifact_dir / "cpu_isolation_reapply.json", result)
+            raise RuntimeError(
+                f"failed to reapply worker cpuset container={container} "
+                f"observed={observed!r} output={completed.stdout.strip()!r}"
+            )
+    write_json(cfg.artifact_dir / "cpu_isolation_reapply.json", result)
+    return result
 
 
 def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) -> dict[str, Any]:
