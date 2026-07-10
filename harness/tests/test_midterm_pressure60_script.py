@@ -2431,6 +2431,48 @@ def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> N
     assert "adaface_central_missed_eligible_sources" in reasons
 
 
+def test_decoupled_adaface_gate_uses_bounded_send_failure_ratio() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=60,
+        keep_evidence=0,
+        adaface_decoupled=True,
+        max_adaface_forwarder_send_failure_ratio=0.005,
+    )
+    sample_summary = {
+        "max_forwarder_sources": 60,
+        "max_savant_sources": 60,
+        "max_adaface_forwarder_sources": 60,
+        "final_adaface_central_missing_eligible_source_ids": [],
+        "max_adaface_forwarder_queue_depth": 0,
+        "final_adaface_forwarder_frames_forwarded_total": 997,
+        "final_adaface_forwarder_send_failures_total": 3,
+        "max_savant_send_failures_delta": 0,
+        "queue_full_samples": 0,
+        "steady_effective_fps_sample_count": 2,
+        "steady_effective_fps_meets_minimum": True,
+        "final_savant_adaface_embeddings_total": 300,
+    }
+    diagnostics = {
+        "sample_summary": sample_summary,
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+    assert "adaface_forwarder_send_failures" not in reasons
+
+    sample_summary["final_adaface_forwarder_frames_forwarded_total"] = 994
+    sample_summary["final_adaface_forwarder_send_failures_total"] = 6
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+    assert "adaface_forwarder_send_failures" in reasons
+
+
 def test_pressure_gate_requires_live_mps_client_when_enabled() -> None:
     module = _load_module()
     cfg = _config(

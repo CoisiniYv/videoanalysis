@@ -375,6 +375,7 @@ class PressureConfig:
     adaface_crop_resize: bool = False
     adaface_pre_gate: bool = False
     adaface_decoupled: bool = False
+    max_adaface_forwarder_send_failure_ratio: float = 0.005
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -689,6 +690,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Maximum allowed analysis-forwarder Savant send failures.",
     )
     parser.add_argument(
+        "--max-adaface-forwarder-send-failure-ratio",
+        type=float,
+        default=0.005,
+        help=(
+            "Maximum failed/attempted send ratio for the bounded, asynchronous "
+            "central AdaFace forwarders. The primary forwarder remains governed "
+            "by --max-send-failures."
+        ),
+    )
+    parser.add_argument(
         "--max-exited-sources",
         type=int,
         default=0,
@@ -774,6 +785,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
     if args.cuda_mps and not args.dual_shard_same_gpu:
         raise SystemExit("--cuda-mps requires --dual-shard-same-gpu")
+    if not 0.0 <= args.max_adaface_forwarder_send_failure_ratio <= 1.0:
+        raise SystemExit(
+            "--max-adaface-forwarder-send-failure-ratio must be between 0 and 1"
+        )
     if args.dual_shard_same_gpu and args.keep_evidence > 0 and not args.dual_shard_api:
         raise SystemExit(
             "--dual-shard-same-gpu with evidence retention requires "
@@ -897,6 +912,9 @@ def main(argv: list[str] | None = None) -> int:
         adaface_crop_resize=bool(args.adaface_crop_resize),
         adaface_pre_gate=bool(args.adaface_pre_gate),
         adaface_decoupled=bool(args.adaface_decoupled),
+        max_adaface_forwarder_send_failure_ratio=float(
+            args.max_adaface_forwarder_send_failure_ratio
+        ),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -5736,6 +5754,29 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "final_adaface_forwarder_send_failures_total": int(
             final_adaface_forwarder_send_failures
         ),
+        "final_adaface_forwarder_send_attempts_total": int(
+            final_adaface_forwarder_forwarded
+            + final_adaface_forwarder_send_failures
+        ),
+        "final_adaface_forwarder_send_failure_ratio": (
+            round(
+                final_adaface_forwarder_send_failures
+                / (
+                    final_adaface_forwarder_forwarded
+                    + final_adaface_forwarder_send_failures
+                ),
+                6,
+            )
+            if (
+                final_adaface_forwarder_forwarded
+                + final_adaface_forwarder_send_failures
+            )
+            > 0
+            else 0.0
+        ),
+        "max_adaface_forwarder_send_failure_ratio": (
+            cfg.max_adaface_forwarder_send_failure_ratio
+        ),
         "final_adaface_central_missing_eligible_source_ids": (
             final_adaface_central_missing_eligible_source_ids
         ),
@@ -6644,14 +6685,8 @@ def pressure_failure_reasons(
             >= 512
         ):
             reasons.append("adaface_forwarder_queue_full")
-        if (
-            int(
-                sample_summary.get(
-                    "final_adaface_forwarder_send_failures_total"
-                )
-                or 0
-            )
-            > 0
+        if _adaface_forwarder_send_failure_ratio(sample_summary) > (
+            cfg.max_adaface_forwarder_send_failure_ratio
         ):
             reasons.append("adaface_forwarder_send_failures")
     if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
@@ -6950,6 +6985,25 @@ def _sample_savant_send_failures_for_gate(sample_summary: dict[str, Any]) -> int
     if "max_savant_send_failures_delta" in sample_summary:
         return int(sample_summary.get("max_savant_send_failures_delta") or 0)
     return int(sample_summary.get("max_savant_send_failures_total") or 0)
+
+
+def _adaface_forwarder_send_failure_ratio(
+    sample_summary: dict[str, Any],
+) -> float:
+    if "final_adaface_forwarder_send_failure_ratio" in sample_summary:
+        return float(
+            sample_summary.get("final_adaface_forwarder_send_failure_ratio")
+            or 0.0
+        )
+    forwarded = int(
+        sample_summary.get("final_adaface_forwarder_frames_forwarded_total")
+        or 0
+    )
+    failures = int(
+        sample_summary.get("final_adaface_forwarder_send_failures_total") or 0
+    )
+    attempted = forwarded + failures
+    return failures / attempted if attempted > 0 else 0.0
 
 
 def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
