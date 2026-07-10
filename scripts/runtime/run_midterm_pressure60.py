@@ -5296,6 +5296,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     max_adaface_central_cpu_percent = 0.0
     max_adaface_central_sources = 0
     max_adaface_forwarder_sources = 0
+    max_adaface_forwarder_eligible_sources = 0
+    max_adaface_central_missing_eligible_sources = 0
     max_adaface_forwarder_queue_depth = 0.0
     max_source_adapter_cpu_percent = 0.0
     max_worker_cpu_percent: dict[str, float] = {
@@ -5309,6 +5311,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     final_adaface_forwarder_forwarded = 0.0
     final_adaface_forwarder_filtered = 0.0
     final_adaface_forwarder_send_failures = 0.0
+    final_adaface_central_missing_eligible_source_ids: list[str] = []
     final_savant_pose_objects = 0.0
     final_savant_face_objects = 0.0
     final_savant_adaface_embeddings = 0.0
@@ -5400,6 +5403,28 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         )
         max_adaface_forwarder_sources = max(
             max_adaface_forwarder_sources, len(adaface_forwarder_sources)
+        )
+        adaface_forwarder_eligible_source_ids = {
+            str(source.get("source_id") or "")
+            for source in adaface_forwarder_sources
+            if float(source.get("frames_forwarded_total") or 0.0) > 0
+        }
+        adaface_central_source_ids = {
+            str(source.get("source_id") or "") for source in central_sources
+        }
+        adaface_central_missing_eligible_source_ids = sorted(
+            adaface_forwarder_eligible_source_ids - adaface_central_source_ids
+        )
+        max_adaface_forwarder_eligible_sources = max(
+            max_adaface_forwarder_eligible_sources,
+            len(adaface_forwarder_eligible_source_ids),
+        )
+        max_adaface_central_missing_eligible_sources = max(
+            max_adaface_central_missing_eligible_sources,
+            len(adaface_central_missing_eligible_source_ids),
+        )
+        final_adaface_central_missing_eligible_source_ids = (
+            adaface_central_missing_eligible_source_ids
         )
         adaface_forwarder_queue_depth = float(
             (adaface_forwarder.get("global") or {}).get("queue_depth") or 0.0
@@ -5519,6 +5544,12 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "savant_sources": len(savant_sources),
                 "adaface_central_sources": len(central_sources),
                 "adaface_forwarder_sources": len(adaface_forwarder_sources),
+                "adaface_forwarder_eligible_sources": len(
+                    adaface_forwarder_eligible_source_ids
+                ),
+                "adaface_central_missing_eligible_source_ids": (
+                    adaface_central_missing_eligible_source_ids
+                ),
                 "adaface_forwarder_queue_depth": adaface_forwarder_queue_depth,
                 "adaface_forwarder_frames_seen_total": int(
                     adaface_forwarder_seen
@@ -5588,6 +5619,12 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "max_savant_sources": max_savant_sources,
         "max_adaface_central_sources": max_adaface_central_sources,
         "max_adaface_forwarder_sources": max_adaface_forwarder_sources,
+        "max_adaface_forwarder_eligible_sources": (
+            max_adaface_forwarder_eligible_sources
+        ),
+        "max_adaface_central_missing_eligible_sources": (
+            max_adaface_central_missing_eligible_sources
+        ),
         "max_adaface_forwarder_queue_depth": max_adaface_forwarder_queue_depth,
         "final_forwarder_frames_seen_total": int(final_forwarder_seen),
         "final_forwarder_frames_forwarded_total": int(final_forwarder_forwarded),
@@ -5603,6 +5640,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         ),
         "final_adaface_forwarder_send_failures_total": int(
             final_adaface_forwarder_send_failures
+        ),
+        "final_adaface_central_missing_eligible_source_ids": (
+            final_adaface_central_missing_eligible_source_ids
         ),
         "final_savant_pose_objects_total": int(final_savant_pose_objects),
         "final_savant_face_objects_total": int(final_savant_face_objects),
@@ -6485,12 +6525,39 @@ def pressure_failure_reasons(
         and int(sample_summary.get("final_savant_adaface_embeddings_total") or 0) <= 0
     ):
         reasons.append("savant_adaface_embeddings_zero")
-    if (
-        cfg.adaface_decoupled
-        and int(sample_summary.get("max_adaface_central_sources") or 0)
-        < cfg.stream_count
-    ):
-        reasons.append("adaface_central_did_not_see_all_sources")
+    if cfg.adaface_decoupled:
+        if (
+            int(sample_summary.get("max_adaface_forwarder_sources") or 0)
+            < cfg.stream_count
+        ):
+            reasons.append("adaface_forwarder_did_not_see_all_sources")
+        if (
+            int(
+                sample_summary.get(
+                    "max_adaface_central_missing_eligible_sources"
+                )
+                or 0
+            )
+            > 0
+        ):
+            reasons.append("adaface_central_missed_eligible_sources")
+        if (
+            float(
+                sample_summary.get("max_adaface_forwarder_queue_depth") or 0
+            )
+            >= 512
+        ):
+            reasons.append("adaface_forwarder_queue_full")
+        if (
+            int(
+                sample_summary.get(
+                    "final_adaface_forwarder_send_failures_total"
+                )
+                or 0
+            )
+            > 0
+        ):
+            reasons.append("adaface_forwarder_send_failures")
     if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:

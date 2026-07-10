@@ -2091,7 +2091,14 @@ def test_pressure_run_fails_when_extra_sources_are_visible() -> None:
 
 def test_runtime_sample_summary_dedupes_duplicate_source_rows(tmp_path: Path) -> None:
     module = _load_module()
-    cfg = _config(module, artifact_dir=tmp_path, stream_count=2, duration_s=10, fps="1/1")
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        stream_count=2,
+        duration_s=10,
+        fps="1/1",
+        adaface_decoupled=True,
+    )
     samples = tmp_path / "samples"
     samples.mkdir()
     (samples / "runtime_000.json").write_text(
@@ -2157,6 +2164,37 @@ def test_runtime_sample_summary_dedupes_duplicate_source_rows(tmp_path: Path) ->
                         },
                     ],
                 },
+                "adaface_forwarder": {
+                    "global": {"queue_depth": 0},
+                    "sources": [
+                        {
+                            "source_id": "pressure60_test_00",
+                            "frames_seen_total": 6,
+                            "frames_forwarded_total": 2,
+                            "frames_dropped_total": 4,
+                            "metadata_filtered_total": 4,
+                            "savant_send_failures_total": 0,
+                        },
+                        {
+                            "source_id": "pressure60_test_01",
+                            "frames_seen_total": 4,
+                            "frames_forwarded_total": 0,
+                            "frames_dropped_total": 4,
+                            "metadata_filtered_total": 4,
+                            "savant_send_failures_total": 0,
+                        },
+                    ],
+                },
+                "adaface_central": {
+                    "sources": [
+                        {
+                            "source_id": "pressure60_test_00",
+                            "frames_seen_total": 2,
+                            "adaface_embeddings_total": 1,
+                            "face_observations_exported_total": 1,
+                        }
+                    ]
+                },
             }
         ),
         encoding="utf-8",
@@ -2170,6 +2208,11 @@ def test_runtime_sample_summary_dedupes_duplicate_source_rows(tmp_path: Path) ->
     assert summary["final_forwarder_frames_seen_total"] == 17
     assert summary["final_forwarder_frames_forwarded_total"] == 10
     assert summary["final_savant_pose_objects_total"] == 3
+    assert summary["max_adaface_forwarder_sources"] == 2
+    assert summary["max_adaface_forwarder_eligible_sources"] == 1
+    assert summary["max_adaface_central_sources"] == 1
+    assert summary["max_adaface_central_missing_eligible_sources"] == 0
+    assert summary["final_adaface_forwarder_metadata_filtered_total"] == 8
 
 
 def test_runtime_sample_summary_enforces_configured_steady_fps(tmp_path: Path) -> None:
@@ -2248,6 +2291,50 @@ def test_pressure_gate_rejects_steady_fps_below_minimum() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "steady_effective_fps_below_minimum" in reasons
+
+
+def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=60,
+        keep_evidence=0,
+        adaface_decoupled=True,
+    )
+    sample_summary = {
+        "max_forwarder_sources": 60,
+        "max_savant_sources": 60,
+        "max_adaface_forwarder_sources": 60,
+        "max_adaface_forwarder_eligible_sources": 55,
+        "max_adaface_central_sources": 55,
+        "max_adaface_central_missing_eligible_sources": 0,
+        "max_adaface_forwarder_queue_depth": 0,
+        "final_adaface_forwarder_send_failures_total": 0,
+        "max_savant_send_failures_delta": 0,
+        "queue_full_samples": 0,
+        "steady_effective_fps_sample_count": 2,
+        "steady_effective_fps_meets_minimum": True,
+        "final_savant_adaface_embeddings_total": 3249,
+    }
+    diagnostics = {
+        "sample_summary": sample_summary,
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {"savant": {"validate_seq_iq": 0}},
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "adaface_central_did_not_see_all_sources" not in reasons
+    assert "adaface_central_missed_eligible_sources" not in reasons
+
+    sample_summary["max_adaface_central_missing_eligible_sources"] = 1
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "adaface_central_missed_eligible_sources" in reasons
 
 
 def test_pressure_gate_requires_live_mps_client_when_enabled() -> None:
