@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import signal
 import threading
 import time
@@ -77,6 +78,7 @@ class ForwarderMetrics:
         self._lock = threading.Lock()
         self._by_source: dict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.queue_depth = 0
+        self.raw_queue_depth = 0
         self.running = 1
         self.null_sink_enabled = 0
 
@@ -88,12 +90,19 @@ class ForwarderMetrics:
         with self._lock:
             self.queue_depth = max(int(value), 0)
 
+    def set_raw_queue_depth(self, value: int) -> None:
+        with self._lock:
+            self.raw_queue_depth = max(int(value), 0)
+
     def render_prometheus(self) -> str:
         with self._lock:
             lines = [
                 "# HELP va_forwarder_queue_depth Current analysis-forwarder queue depth.",
                 "# TYPE va_forwarder_queue_depth gauge",
                 f"va_forwarder_queue_depth {self.queue_depth}",
+                "# HELP va_forwarder_raw_queue_depth Current raw evidence branch queue depth.",
+                "# TYPE va_forwarder_raw_queue_depth gauge",
+                f"va_forwarder_raw_queue_depth {self.raw_queue_depth}",
                 "# HELP va_forwarder_running Whether the analysis-forwarder main process is running.",
                 "# TYPE va_forwarder_running gauge",
                 f"va_forwarder_running {self.running}",
@@ -108,6 +117,7 @@ class ForwarderMetrics:
                 "send_failures": "va_forwarder_savant_send_failures_total",
                 "raw_forwarded": "va_forwarder_raw_frames_forwarded_total",
                 "raw_send_failures": "va_forwarder_raw_send_failures_total",
+                "raw_dropped": "va_forwarder_raw_frames_dropped_total",
                 "metadata_filtered": "va_forwarder_metadata_filtered_total",
             }
             for key, prom_name in metric_names.items():
@@ -169,6 +179,9 @@ class AnalysisForwarder:
         )
         self.raw_writer = self._build_writer(config.raw_out_endpoint)
         self.raw_sink_enabled = not isinstance(self.raw_writer, NullWriter)
+        self.raw_queue: queue.Queue[ForwarderMessage] = queue.Queue(
+            maxsize=config.queue_max_size
+        )
         self.writer = self._build_writer(config.out_endpoint)
         if isinstance(self.writer, NullWriter):
             self.metrics.null_sink_enabled = 1
@@ -196,9 +209,19 @@ class AnalysisForwarder:
         self.raw_writer.start()
         self.writer.start()
         writer_thread = threading.Thread(target=self._write_loop, name="forwarder-writer", daemon=True)
+        raw_writer_thread = None
+        if self.raw_sink_enabled:
+            raw_writer_thread = threading.Thread(
+                target=self._raw_write_loop,
+                name="forwarder-raw-writer",
+                daemon=True,
+            )
+            raw_writer_thread.start()
         writer_thread.start()
         self._read_loop()
         writer_thread.join(timeout=5)
+        if raw_writer_thread is not None:
+            raw_writer_thread.join(timeout=5)
         self._shutdown()
 
     def _read_loop(self) -> None:
@@ -269,20 +292,61 @@ class AnalysisForwarder:
         if not self.raw_sink_enabled:
             return
         try:
-            result = self.raw_writer.send_message(source_id, message, content)
+            self.raw_queue.put_nowait(
+                ForwarderMessage(
+                    topic=source_id,
+                    message=message,
+                    content=content,
+                    source_id=source_id,
+                    keyframe=False,
+                    video_frame=True,
+                )
+            )
+        except queue.Full:
+            self.metrics.inc(source_id or "_unknown_source", "raw_dropped")
+            LOGGER.warning("raw branch queue full source_id=%s", source_id)
+            return
+        self.metrics.set_raw_queue_depth(self.raw_queue.qsize())
+
+    def _raw_write_loop(self) -> None:
+        while not self.stop_event.is_set() or not self.raw_queue.empty():
+            try:
+                item = self.raw_queue.get(timeout=0.2)
+            except queue.Empty:
+                self.metrics.set_raw_queue_depth(self.raw_queue.qsize())
+                continue
+            try:
+                self._send_raw_item(item)
+            finally:
+                self.raw_queue.task_done()
+                self.metrics.set_raw_queue_depth(self.raw_queue.qsize())
+
+    def _send_raw_item(self, item: ForwarderMessage) -> None:
+        try:
+            result = self.raw_writer.send_message(
+                item.topic, item.message, item.content
+            )
         except Exception as exc:
-            LOGGER.warning("failed to send raw branch source_id=%s: %s", source_id, exc)
-            self.metrics.inc(source_id or "_unknown_source", "raw_send_failures")
+            LOGGER.warning(
+                "failed to send raw branch source_id=%s: %s",
+                item.source_id,
+                exc,
+            )
+            self.metrics.inc(
+                item.source_id or "_unknown_source", "raw_send_failures"
+            )
             return
         if type(result).__name__ not in SUCCESS_RESULTS:
             LOGGER.warning(
                 "raw branch send was not successful source_id=%s result=%r",
-                source_id,
+                item.source_id,
                 result,
             )
-            self.metrics.inc(source_id or "_unknown_source", "raw_send_failures")
+            self.metrics.inc(
+                item.source_id or "_unknown_source", "raw_send_failures"
+            )
             return
-        self.metrics.inc(source_id or "_unknown_source", "raw_forwarded")
+        self.metrics.inc(item.source_id or "_unknown_source", "raw_forwarded")
 
     def _write_loop(self) -> None:
         while not self.stop_event.is_set():

@@ -281,6 +281,11 @@ def test_raw_branch_fanout_happens_before_sampling_drop() -> None:
     item0 = forwarder._build_queue_item(video_message(frame0))
     item1 = forwarder._build_queue_item(video_message(frame1))
 
+    while not forwarder.raw_queue.empty():
+        raw_item = forwarder.raw_queue.get_nowait()
+        forwarder._send_raw_item(raw_item)
+        forwarder.raw_queue.task_done()
+
     assert item0 is not None
     assert item1 is None
     metrics_text = forwarder.metrics.render_prometheus()
@@ -289,6 +294,34 @@ def test_raw_branch_fanout_happens_before_sampling_drop() -> None:
     raw_writer = forwarder.raw_writer
     assert raw_writer.config["endpoint"] == "pub+bind:tcp://0.0.0.0:5560"
     assert len(raw_writer.sent) == 2
+
+
+def test_raw_branch_queue_is_bounded_and_reports_loss() -> None:
+    main_mod = _load_main_module()
+    config = main_mod.ForwarderConfig(
+        in_endpoint="router+bind:tcp://0.0.0.0:5557",
+        out_endpoint="null://diagnostic",
+        raw_out_endpoint="pub+bind:tcp://0.0.0.0:5560",
+        analysis_fps="4/1",
+        min_fps="1/1",
+        sampler_enabled=False,
+        queue_max_size=1,
+        receive_timeout_ms=100,
+        receive_hwm=10,
+        send_timeout_ms=100,
+        send_retries=0,
+        send_hwm=10,
+        metrics_port=8081,
+    )
+    forwarder = main_mod.AnalysisForwarder(config)
+
+    forwarder._fanout_raw("cam", object(), b"first")
+    forwarder._fanout_raw("cam", object(), b"second")
+
+    metrics = forwarder.metrics.render_prometheus()
+    assert forwarder.raw_queue.qsize() == 1
+    assert "va_forwarder_raw_queue_depth 1" in metrics
+    assert 'va_forwarder_raw_frames_dropped_total{source_id="cam"} 1' in metrics
 
 
 def test_forwarder_filters_frames_without_associated_faces() -> None:

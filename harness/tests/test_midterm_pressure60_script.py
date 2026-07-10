@@ -3049,6 +3049,20 @@ def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) ->
     )
 
     def fake_fetch(url: str, *, timeout_s: float):
+        if "18185" in url or "18186" in url:
+            source_id = (
+                "pressure60_test_00" if "18185" in url else "pressure60_test_01"
+            )
+            return "\n".join(
+                [
+                    "va_forwarder_queue_depth 0",
+                    "va_forwarder_raw_queue_depth 3",
+                    "va_forwarder_running 1",
+                    f'va_forwarder_raw_frames_forwarded_total{{source_id="{source_id}"}} 100',
+                    f'va_forwarder_raw_frames_dropped_total{{source_id="{source_id}"}} 0',
+                    f'va_forwarder_raw_send_failures_total{{source_id="{source_id}"}} 0',
+                ]
+            )
         if "18182" in url:
             return "\n".join(
                 [
@@ -3138,6 +3152,46 @@ def test_dual_shard_runtime_overview_merges_forwarder_and_savant(monkeypatch) ->
         == 3
     )
     assert len(overview["adaface_central"]["sources"]) == 2
+    assert overview["raw_forwarder"]["global"]["raw_queue_depth"] == 6
+    assert len(overview["raw_forwarder"]["sources"]) == 2
+    assert (
+        overview["raw_forwarder"]["sources"][0][
+            "raw_frames_forwarded_total"
+        ]
+        == 100
+    )
+
+
+def test_rolling_cache_gate_rejects_raw_fanout_loss() -> None:
+    module = _load_module()
+    cfg = _config(module, rolling_cache_evidence=True, keep_evidence=0)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_delta": 0,
+            "steady_effective_fps_sample_count": 1,
+            "steady_effective_fps_meets_minimum": True,
+            "max_raw_forwarder_frames_dropped_total": 1,
+            "max_raw_forwarder_send_failures_total": 0,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {
+            "savant": {"validate_seq_iq": 0},
+            "replay_raw_fanout": {
+                "raw_branch_queue_full": 1,
+                "raw_branch_send_failed": 0,
+            },
+        },
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "rolling_cache_raw_fanout_loss" in reasons
 
 
 def test_evidence_policy_groups_parse_pre_post_pairs() -> None:
@@ -3598,6 +3652,15 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
     commands = [" ".join(item["command"]) for item in runs]
     assert any("video-analytics-midterm-rolling-cache-sink-a" in item for item in commands)
     assert any("video-analytics-midterm-rolling-cache-sink-b" in item for item in commands)
+    assert any(
+        item["containers"]
+        == [
+            "video-analytics-midterm-replay-raw-fanout-a",
+            "video-analytics-midterm-replay-raw-fanout-b",
+        ]
+        and item["path"].name == "replay_raw_fanout_logs_since_start.txt"
+        for item in combined
+    )
 
 
 def test_compose_exposes_runtime_epoch_override_for_rolling_cache_sinks() -> None:

@@ -100,6 +100,10 @@ DUAL_SHARD_FORWARDER_HEALTH = {
     "replay-a": "http://127.0.0.1:18182/healthz",
     "replay-b": "http://127.0.0.1:18183/healthz",
 }
+DUAL_SHARD_RAW_FORWARDER_METRICS = {
+    "replay-a": "http://127.0.0.1:18185/metrics",
+    "replay-b": "http://127.0.0.1:18186/metrics",
+}
 DUAL_SHARD_SAVANT_METRICS = {
     "replay-a": "http://127.0.0.1:18180/metrics",
     "replay-b": "http://127.0.0.1:18181/metrics",
@@ -4973,6 +4977,14 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
             cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt",
             since=since,
         )
+        write_combined_docker_logs(
+            [
+                "video-analytics-midterm-replay-raw-fanout-a",
+                "video-analytics-midterm-replay-raw-fanout-b",
+            ],
+            cfg.artifact_dir / "replay_raw_fanout_logs_since_start.txt",
+            since=since,
+        )
     else:
         run(["docker", "logs", "--since", since, "video-analytics-midterm-savant"], cfg.artifact_dir / "savant_logs_since_start.txt", check=False)
         run(["docker", "logs", "--since", since, "video-analytics-midterm-analysis-forwarder"], cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt", check=False)
@@ -5614,6 +5626,10 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     max_adaface_forwarder_eligible_sources = 0
     max_adaface_central_missing_eligible_sources = 0
     max_adaface_forwarder_queue_depth = 0.0
+    max_raw_forwarder_queue_depth = 0.0
+    max_raw_forwarder_frames_dropped = 0.0
+    max_raw_forwarder_send_failures = 0.0
+    final_raw_forwarder_frames_forwarded = 0.0
     max_source_adapter_cpu_percent = 0.0
     max_worker_cpu_percent: dict[str, float] = {
         key: 0.0 for key in WORKER_CONTAINER_NAMES
@@ -5645,6 +5661,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         metrics = payload.get("metrics") or {}
         adaface_central = payload.get("adaface_central") or {}
         adaface_forwarder = payload.get("adaface_forwarder") or {}
+        raw_forwarder = payload.get("raw_forwarder") or {}
         forwarder = payload.get("forwarder") or {}
         savant_stage_metrics = aggregate_savant_stage_metrics(metrics)
         if cfg.adaface_decoupled:
@@ -5688,6 +5705,14 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "frames_forwarded_total",
                 "metadata_filtered_total",
                 "savant_send_failures_total",
+            ),
+        )
+        raw_forwarder_sources = _dedupe_sources_by_id(
+            raw_forwarder.get("sources") or [],
+            score_keys=(
+                "raw_frames_forwarded_total",
+                "raw_frames_dropped_total",
+                "raw_send_failures_total",
             ),
         )
         sample_index = path.stem.rsplit("_", 1)[-1]
@@ -5748,6 +5773,31 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             max_adaface_forwarder_queue_depth,
             adaface_forwarder_queue_depth,
         )
+        raw_forwarder_queue_depth = float(
+            (raw_forwarder.get("global") or {}).get("raw_queue_depth") or 0.0
+        )
+        raw_forwarder_frames_forwarded = sum(
+            float(source.get("raw_frames_forwarded_total") or 0.0)
+            for source in raw_forwarder_sources
+        )
+        raw_forwarder_frames_dropped = sum(
+            float(source.get("raw_frames_dropped_total") or 0.0)
+            for source in raw_forwarder_sources
+        )
+        raw_forwarder_send_failures = sum(
+            float(source.get("raw_send_failures_total") or 0.0)
+            for source in raw_forwarder_sources
+        )
+        max_raw_forwarder_queue_depth = max(
+            max_raw_forwarder_queue_depth, raw_forwarder_queue_depth
+        )
+        max_raw_forwarder_frames_dropped = max(
+            max_raw_forwarder_frames_dropped, raw_forwarder_frames_dropped
+        )
+        max_raw_forwarder_send_failures = max(
+            max_raw_forwarder_send_failures, raw_forwarder_send_failures
+        )
+        final_raw_forwarder_frames_forwarded = raw_forwarder_frames_forwarded
         forwarder_seen = sum(float(source.get("frames_seen_total") or 0.0) for source in forwarder_sources)
         forwarder_forwarded = sum(
             float(source.get("frames_forwarded_total") or 0.0) for source in forwarder_sources
@@ -5885,6 +5935,16 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "adaface_forwarder_send_failures_total": int(
                     adaface_forwarder_send_failures
                 ),
+                "raw_forwarder_queue_depth": raw_forwarder_queue_depth,
+                "raw_forwarder_frames_forwarded_total": int(
+                    raw_forwarder_frames_forwarded
+                ),
+                "raw_forwarder_frames_dropped_total": int(
+                    raw_forwarder_frames_dropped
+                ),
+                "raw_forwarder_send_failures_total": int(
+                    raw_forwarder_send_failures
+                ),
                 "forwarder_sources": len(forwarder_sources),
                 "queue_depth": queue_depth,
                 "savant_send_failures_total": send_failures,
@@ -5974,6 +6034,16 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             max_adaface_central_missing_eligible_sources
         ),
         "max_adaface_forwarder_queue_depth": max_adaface_forwarder_queue_depth,
+        "max_raw_forwarder_queue_depth": max_raw_forwarder_queue_depth,
+        "max_raw_forwarder_frames_dropped_total": int(
+            max_raw_forwarder_frames_dropped
+        ),
+        "max_raw_forwarder_send_failures_total": int(
+            max_raw_forwarder_send_failures
+        ),
+        "final_raw_forwarder_frames_forwarded_total": int(
+            final_raw_forwarder_frames_forwarded
+        ),
         "final_forwarder_frames_seen_total": int(final_forwarder_seen),
         "final_forwarder_frames_forwarded_total": int(final_forwarder_forwarded),
         "final_forwarder_frames_dropped_total": int(final_forwarder_dropped),
@@ -6588,6 +6658,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         "adaface_central": cfg.artifact_dir / "adaface_central_logs_since_start.txt",
         "adaface_forwarder": cfg.artifact_dir / "adaface_forwarder_logs_since_start.txt",
         "adaface_roi_worker": cfg.artifact_dir / "adaface_roi_worker_logs_since_start.txt",
+        "replay_raw_fanout": cfg.artifact_dir / "replay_raw_fanout_logs_since_start.txt",
     }
     summary: dict[str, Any] = {}
     for key, path in paths.items():
@@ -6685,6 +6756,11 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "line_count": len(text.splitlines()),
             "validate_seq_iq": text.count("validate_seq_iq"),
             "writer_send_timeout": text.count("WriterResultSendTimeout"),
+            "raw_branch_queue_full": text.count("raw branch queue full"),
+            "raw_branch_send_failed": (
+                text.count("failed to send raw branch")
+                + text.count("raw branch send was not successful")
+            ),
             "frame_annotation_redis_write_error": text.count(
                 "frame_annotation_redis_writer action=write_error"
             ),
@@ -6897,6 +6973,17 @@ def pressure_failure_reasons(
             reasons.append("rtsp_republishers_connection_errors")
     if _sample_savant_send_failures_for_gate(sample_summary) > cfg.max_send_failures:
         reasons.append("savant_send_failures")
+    if cfg.rolling_cache_evidence:
+        raw_logs = log_summary.get("replay_raw_fanout") or {}
+        if (
+            int(sample_summary.get("max_raw_forwarder_frames_dropped_total") or 0)
+            > 0
+            or int(sample_summary.get("max_raw_forwarder_send_failures_total") or 0)
+            > 0
+            or int(raw_logs.get("raw_branch_queue_full") or 0) > 0
+            or int(raw_logs.get("raw_branch_send_failed") or 0) > 0
+        ):
+            reasons.append("rolling_cache_raw_fanout_loss")
     if cfg.cuda_mps and (
         not bool(mps_summary.get("ready"))
         or not (mps_summary.get("server_list") or [])
@@ -9218,6 +9305,30 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
         savant_sources_active += float(parsed.get("sources_active") or 0.0)
         savant_shards.append({"shard_id": shard_id, "url": url, **parsed})
 
+    raw_forwarder_shards: list[dict[str, Any]] = []
+    raw_forwarder_sources: list[dict[str, Any]] = []
+    raw_forwarder_queue_depth = 0.0
+    raw_forwarder_running = 0.0
+    for shard_id, url in DUAL_SHARD_RAW_FORWARDER_METRICS.items():
+        try:
+            parsed = parse_forwarder_metrics_text(fetch_text_url(url, timeout_s=5))
+        except Exception as exc:
+            parsed = {
+                "available": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "global": {},
+                "sources": [],
+            }
+        for source in parsed.get("sources") or []:
+            source["replay_shard_id"] = shard_id
+        raw_forwarder_sources.extend(parsed.get("sources") or [])
+        shard_global = parsed.get("global") or {}
+        raw_forwarder_queue_depth += float(
+            shard_global.get("raw_queue_depth") or 0.0
+        )
+        raw_forwarder_running += float(shard_global.get("running") or 0.0)
+        raw_forwarder_shards.append({"shard_id": shard_id, "url": url, **parsed})
+
     adaface_central: dict[str, Any] = {"enabled": False}
     adaface_forwarder: dict[str, Any] = {"enabled": False}
     if cfg.adaface_decoupled:
@@ -9313,6 +9424,17 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
             "sources": forwarder_sources,
             "shards": forwarder_shards,
         },
+        "raw_forwarder": {
+            "available": any(
+                bool(item.get("available")) for item in raw_forwarder_shards
+            ),
+            "global": {
+                "raw_queue_depth": raw_forwarder_queue_depth,
+                "running": raw_forwarder_running,
+            },
+            "sources": raw_forwarder_sources,
+            "shards": raw_forwarder_shards,
+        },
         "adaface_forwarder": adaface_forwarder,
         "adaface_central": adaface_central,
     }
@@ -9342,6 +9464,15 @@ def parse_forwarder_metrics_text(text: str) -> dict[str, Any]:
             "savant_send_failures_total": values.get(
                 "va_forwarder_savant_send_failures_total"
             ),
+            "raw_frames_forwarded_total": values.get(
+                "va_forwarder_raw_frames_forwarded_total"
+            ),
+            "raw_frames_dropped_total": values.get(
+                "va_forwarder_raw_frames_dropped_total"
+            ),
+            "raw_send_failures_total": values.get(
+                "va_forwarder_raw_send_failures_total"
+            ),
         }
         for source_id, values in sorted(by_source.items())
     ]
@@ -9350,6 +9481,9 @@ def parse_forwarder_metrics_text(text: str) -> dict[str, Any]:
         "sample_count": len(samples),
         "global": {
             "queue_depth": global_metrics.get("va_forwarder_queue_depth"),
+            "raw_queue_depth": global_metrics.get(
+                "va_forwarder_raw_queue_depth"
+            ),
             "running": global_metrics.get("va_forwarder_running"),
         },
         "sources": sources,
