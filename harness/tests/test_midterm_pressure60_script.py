@@ -84,6 +84,7 @@ def _config(module, **overrides):
         "adaface_input_queue": False,
         "adaface_crop_resize": False,
         "adaface_pre_gate": False,
+        "adaface_decoupled": False,
         "rolling_cache_postfill_s": 0,
         "pressure_algorithm_cooldown_s": 30,
         "pressure_source_visibility_timeout_s": 180,
@@ -1323,6 +1324,58 @@ def test_adaface_pre_gate_throttles_candidates_before_embedding(tmp_path) -> Non
     ] == "face_reid_candidate"
     manifest = json.loads((tmp_path / "savant_ablation_manifest.json").read_text())
     assert manifest["adaface_pre_gate"] is True
+
+
+def test_decoupled_adaface_keeps_embedding_off_primary_critical_path(
+    tmp_path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        savant_ablation_stage="full-exporter",
+        savant_output_mode="metadata-only",
+        adaface_decoupled=True,
+    )
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+    primary = yaml.safe_load((tmp_path / "module.pressure.yml").read_text())
+    central = yaml.safe_load(
+        (tmp_path / "module.adaface-central.yml").read_text()
+    )
+    primary_names = [item["name"] for item in primary["pipeline"]["elements"]]
+    central_names = [item["name"] for item in central["pipeline"]["elements"]]
+
+    assert "yolov8_face" in primary_names
+    assert "frame_annotation_exporter" in primary_names
+    assert "adaface" not in primary_names
+    assert "face_observation_exporter" not in primary_names
+    assert central_names == [
+        "face_reid_candidate_gate",
+        "adaface",
+        "face_reid_gate",
+        "face_observation_exporter",
+        "savant_perf_metrics",
+        "face_reid_candidate_cleanup",
+    ]
+    services = override["services"]
+    for shard in ("a", "b"):
+        assert services[f"savant-{shard}"]["environment"]["OUTPUT_FRAME"] == (
+            '{"codec":"copy"}'
+        )
+        forwarder = services[f"adaface-forwarder-{shard}"]["environment"]
+        assert forwarder["FORWARDER_QUEUE_MAX_SIZE"] == "512"
+        assert forwarder["FORWARDER_SEND_TIMEOUT_MS"] == "50"
+        assert forwarder["FORWARDER_SEND_RETRIES"] == "0"
+        assert forwarder["FORWARDER_OUT_ENDPOINT"].endswith(
+            "savant-adaface-central:5557"
+        )
+    central_service = services["savant-adaface-central"]
+    assert central_service["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
+    assert central_service["environment"]["OUTPUT_FRAME"] == "null"
+    assert module.dual_shard_services(cfg)[-3:] == module.ADAFACE_DECOUPLED_SERVICES
 
 
 def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:

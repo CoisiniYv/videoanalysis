@@ -50,6 +50,7 @@ def summarize_artifact(path: Path) -> dict[str, Any]:
         "adaface_input_queue": bool(config.get("adaface_input_queue")),
         "adaface_crop_resize": bool(config.get("adaface_crop_resize")),
         "adaface_pre_gate": bool(config.get("adaface_pre_gate")),
+        "adaface_decoupled": bool(config.get("adaface_decoupled")),
         "batch_timeout_us": int(config.get("batched_push_timeout") or 0),
         "stream_count": int(config.get("stream_count") or 0),
         "fps": config.get("fps"),
@@ -197,12 +198,12 @@ def markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# Pressure60 T4 analysis matrix",
         "",
-        "| run | stage | output | cpu | MPS | AdaFace async | face track ID | AdaFace queue | bbox crop | pre-gate | timeout us | effective fps | steady/target | queue full | send failures | bundles |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| run | stage | output | cpu | MPS | AdaFace async | face track ID | AdaFace queue | bbox crop | pre-gate | decoupled | timeout us | effective fps | steady/target | queue full | send failures | bundles |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in summary["runs"]:
         lines.append(
-            "| {run_id} | {stage} | {output_mode} | {cpu_profile} | {cuda_mps} | {adaface_classifier_async} | {face_secondary_track_id} | {adaface_input_queue} | {adaface_crop_resize} | {adaface_pre_gate} | {batch_timeout_us} | "
+            "| {run_id} | {stage} | {output_mode} | {cpu_profile} | {cuda_mps} | {adaface_classifier_async} | {face_secondary_track_id} | {adaface_input_queue} | {adaface_crop_resize} | {adaface_pre_gate} | {adaface_decoupled} | {batch_timeout_us} | "
             "{steady_effective_fps_mean} | {steady_target_ratio} | {queue_full_samples} | "
             "{send_failures_delta} | {playable_bundles} |".format(**row)
         )

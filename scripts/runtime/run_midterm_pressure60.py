@@ -103,6 +103,12 @@ DUAL_SHARD_SAVANT_METRICS = {
     "replay-a": "http://127.0.0.1:18180/metrics",
     "replay-b": "http://127.0.0.1:18181/metrics",
 }
+ADAFACE_CENTRAL_METRICS_URL = "http://127.0.0.1:18187/metrics"
+ADAFACE_DECOUPLED_SERVICES = [
+    "adaface-forwarder-a",
+    "adaface-forwarder-b",
+    "savant-adaface-central",
+]
 PROM_SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+"
     r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$"
@@ -364,6 +370,7 @@ class PressureConfig:
     adaface_input_queue: bool = False
     adaface_crop_resize: bool = False
     adaface_pre_gate: bool = False
+    adaface_decoupled: bool = False
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -534,6 +541,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Create cadence-throttled face candidate clones before AdaFace so "
             "only downstream-export-eligible faces consume embedding inference."
+        ),
+    )
+    parser.add_argument(
+        "--adaface-decoupled",
+        action="store_true",
+        help=(
+            "Keep AdaFace off the dual-YOLO critical path and feed one central "
+            "AdaFace Savant module through bounded drop-capable forwarders."
         ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
@@ -877,6 +892,7 @@ def main(argv: list[str] | None = None) -> int:
         adaface_input_queue=bool(args.adaface_input_queue),
         adaface_crop_resize=bool(args.adaface_crop_resize),
         adaface_pre_gate=bool(args.adaface_pre_gate),
+        adaface_decoupled=bool(args.adaface_decoupled),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -1892,7 +1908,7 @@ def start_dual_shard_runtime(cfg: PressureConfig) -> None:
             "-d",
             "--no-deps",
             "--force-recreate",
-            *DUAL_SHARD_SERVICES,
+            *dual_shard_services(cfg),
         ],
         cfg.artifact_dir / "compose_recreate_dual_shard_same_gpu.log",
         env=env,
@@ -1912,12 +1928,21 @@ def stop_dual_shard_runtime(cfg: PressureConfig) -> None:
     ]
     if override_path.exists():
         compose.extend(["-f", str(override_path)])
-    compose.extend(["--profile", DUAL_SHARD_PROFILE, "stop", *DUAL_SHARD_SERVICES])
+    compose.extend(
+        ["--profile", DUAL_SHARD_PROFILE, "stop", *dual_shard_services(cfg)]
+    )
     run(
         compose,
         cfg.artifact_dir / "compose_stop_dual_shard_same_gpu.log",
         check=False,
     )
+
+
+def dual_shard_services(cfg: PressureConfig) -> list[str]:
+    services = list(DUAL_SHARD_SERVICES)
+    if cfg.adaface_decoupled:
+        services.extend(ADAFACE_DECOUPLED_SERVICES)
+    return services
 
 
 def recreate_dual_video_sinks_for_current_epoch(cfg: PressureConfig) -> None:
@@ -1965,7 +1990,11 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
     # Docker creates the nested target in the repo-backed parent mount, which
     # leaves a root-owned module.pressure.yml in the working tree.
     module_path_in_container = str(ablation_module_path)
-    output_frame = '{"codec":"copy"}' if cfg.savant_output_mode == "copy" else "null"
+    output_frame = (
+        '{"codec":"copy"}'
+        if cfg.savant_output_mode == "copy" or cfg.adaface_decoupled
+        else "null"
+    )
     doc = {
         "services": {
             "savant-a": {
@@ -2041,6 +2070,99 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             },
         }
     }
+    if cfg.adaface_decoupled:
+        central_module = str(write_central_adaface_module(cfg))
+        forwarder_image = "video-analytics-midterm-analysis-forwarder:latest"
+        for shard in ("a", "b"):
+            service = f"adaface-forwarder-{shard}"
+            doc["services"][service] = {
+                "image": forwarder_image,
+                "container_name": f"video-analytics-midterm-{service}",
+                "profiles": [DUAL_SHARD_PROFILE],
+                "environment": {
+                    "FORWARDER_IN_ENDPOINT": (
+                        f"sub+connect:tcp://savant-{shard}:5558"
+                    ),
+                    "FORWARDER_OUT_ENDPOINT": (
+                        "dealer+connect:tcp://savant-adaface-central:5557"
+                    ),
+                    "FORWARDER_RAW_OUT_ENDPOINT": "null://",
+                    "FORWARDER_SAMPLER_ENABLED": "false",
+                    "FORWARDER_QUEUE_MAX_SIZE": "512",
+                    "FORWARDER_RECEIVE_TIMEOUT_MS": "250",
+                    "FORWARDER_RECEIVE_HWM": "2000",
+                    "FORWARDER_SEND_TIMEOUT_MS": "50",
+                    "FORWARDER_SEND_RETRIES": "0",
+                    "FORWARDER_SEND_HWM": "1000",
+                    "FORWARDER_METRICS_PORT": "8081",
+                },
+                "restart": "no",
+            }
+        doc["services"]["savant-adaface-central"] = {
+            "image": CUDA_MPS_IMAGE_DEFAULT,
+            "container_name": "video-analytics-midterm-savant-adaface-central",
+            "profiles": [DUAL_SHARD_PROFILE],
+            "entrypoint": [
+                "bash",
+                "-c",
+                "export PYTHONPATH=/opt/savant/poc_deps$${PYTHONPATH:+:$$PYTHONPATH}; python /opt/savant/src/module/savant_patches/apply_patches.py || exit 1; exec python -m savant.entrypoint $${SAVANT_MODULE_FILE}",
+            ],
+            "working_dir": "/opt/savant/src/module",
+            "env_file": [str((Path(cfg.env_file).resolve()))],
+            "environment": {
+                "LOGLEVEL": os.getenv("LOGLEVEL", "INFO"),
+                "NVIDIA_VISIBLE_DEVICES": device,
+                "CUDA_VISIBLE_DEVICES": "0",
+                "ZMQ_SRC_ENDPOINT": "router+bind:tcp://0.0.0.0:5557",
+                "ZMQ_SINK_ENDPOINT": "pub+bind:tcp://0.0.0.0:5558",
+                "MODEL_PATH": "/models",
+                "DOWNLOAD_PATH": "/downloads",
+                "WEBSERVER_PORT": "8080",
+                "METRICS_FRAME_PERIOD": "1000",
+                "METRICS_TIME_PERIOD": "5",
+                "METRICS_HISTORY": "100",
+                "BATCH_SIZE": str(cfg.batch_size),
+                "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
+                "MAX_FPS_CONTROL": "false",
+                "INGRESS_FPS_GATE_ENABLED": "false",
+                "MAX_FPS": cfg.fps,
+                "MIN_FPS": cfg.min_fps,
+                "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
+                "FACE_EMBEDDING_INFER_INTERVAL": "0",
+                "FACE_EMBEDDING_BATCH_SIZE": str(cfg.face_embedding_batch_size),
+                "SAVANT_STAGE_METRICS_ENABLED": "true",
+                "SAVANT_MODULE_FILE": central_module,
+                "OUTPUT_FRAME": "null",
+                "REDIS_URL": "redis://redis:6379/0",
+                "CAMERAS_CONFIG_PATH": (
+                    "/opt/savant/src/module/config/cameras.midterm.yml"
+                ),
+                "FACE_OBSERVATION_EXPORT_ENABLED": "true",
+            },
+            "volumes": [
+                f"{Path('modules/savant_security').resolve()}:/opt/savant/src/module:rw",
+                f"{Path('modules/savant_security/poc_deps').resolve()}:/opt/savant/poc_deps:ro",
+                "/data/video-analytics/models:/models:rw",
+                "/data/video-analytics/downloads:/downloads:rw",
+                "/data/video-analytics/artifacts:/data/video-analytics/artifacts:rw",
+                "/data/video-analytics/media:/data/video-analytics/media:rw",
+            ],
+            "ports": ["18187:8080"],
+            "deploy": {
+                "resources": {
+                    "reservations": {
+                        "devices": [
+                            {
+                                "driver": "nvidia",
+                                "device_ids": [device],
+                                "capabilities": ["gpu"],
+                            }
+                        ]
+                    }
+                }
+            },
+            "restart": "no",
+        }
     if cfg.cuda_mps:
         mps_root, pipe_dir, log_dir = cuda_mps_paths(cfg)
         for service in ("savant-a", "savant-b"):
@@ -2339,6 +2461,11 @@ def read_cuda_mps_stop_summary(cfg: PressureConfig) -> dict[str, Any]:
 
 
 def write_savant_ablation_module(cfg: PressureConfig) -> Path:
+    if cfg.adaface_decoupled and cfg.adaface_pre_gate:
+        raise ValueError(
+            "--adaface-decoupled already pre-gates in the central module; "
+            "do not combine it with --adaface-pre-gate"
+        )
     source_path = SAVANT_MODULE_PATH.resolve()
     module_doc = yaml.safe_load(source_path.read_text(encoding="utf-8"))
     elements = list(((module_doc.get("pipeline") or {}).get("elements") or []))
@@ -2388,67 +2515,14 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
             "class_name": "FaceCropResizePreprocessingObjectImageGPU",
         }
     if cfg.adaface_pre_gate:
-        by_name = {
-            str(element.get("name") or ""): element for element in selected
-        }
-        required = {
-            "adaface",
-            "face_reid_gate",
-            "face_observation_exporter",
-            "frame_annotation_exporter",
-            "savant_perf_metrics",
-        }
-        missing = sorted(required - set(by_name))
-        if missing:
-            raise ValueError(
-                "--adaface-pre-gate requires full exporter elements: "
-                + ",".join(missing)
-            )
-        candidate_name = "face_reid_candidate"
-        adaface = by_name["adaface"]
-        adaface["model"]["input"]["object"] = f"{candidate_name}.face"
-        by_name["face_reid_gate"].setdefault("kwargs", {})[
-            "face_element_name"
-        ] = candidate_name
-        by_name["face_observation_exporter"].setdefault("kwargs", {})[
-            "face_element_name"
-        ] = candidate_name
-        adaface_index = selected.index(adaface)
-        selected.insert(
-            adaface_index,
-            {
-                "element": "pyfunc",
-                "name": "face_reid_candidate_gate",
-                "module": "custom.pyfuncs.face_reid_candidate_gate",
-                "class_name": "FaceReidCandidateGatePyFunc",
-                "kwargs": {
-                    "candidate_element_name": candidate_name,
-                    "cameras_config_path": "${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}",
-                    "face_reid_min_confidence": "${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}",
-                    "face_reid_min_face_size": "${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}",
-                    "face_reid_min_interval_ms": "${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}",
-                    "log_every_n_frames": 30,
-                },
-            },
-        )
-        perf_metrics = by_name["savant_perf_metrics"]
-        selected.remove(perf_metrics)
-        exporter_index = next(
-            index
-            for index, element in enumerate(selected)
-            if element.get("name") == "face_observation_exporter"
-        )
-        selected.insert(exporter_index + 1, perf_metrics)
-        selected.insert(
-            exporter_index + 2,
-            {
-                "element": "pyfunc",
-                "name": "face_reid_candidate_cleanup",
-                "module": "custom.pyfuncs.face_reid_candidate_cleanup",
-                "class_name": "FaceReidCandidateCleanupPyFunc",
-                "kwargs": {"candidate_element_name": candidate_name},
-            },
-        )
+        apply_adaface_pre_gate(selected)
+    if cfg.adaface_decoupled:
+        selected[:] = [
+            element
+            for element in selected
+            if element.get("name")
+            not in {"adaface", "face_reid_gate", "face_observation_exporter"}
+        ]
     adaface_async_config_path: Path | None = None
     if cfg.adaface_classifier_async:
         adaface = next(
@@ -2482,6 +2556,7 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
         "adaface_input_queue": cfg.adaface_input_queue,
         "adaface_crop_resize": cfg.adaface_crop_resize,
         "adaface_pre_gate": cfg.adaface_pre_gate,
+        "adaface_decoupled": cfg.adaface_decoupled,
         "adaface_classifier_async_config": (
             str(adaface_async_config_path) if adaface_async_config_path else ""
         ),
@@ -2496,6 +2571,96 @@ def write_savant_ablation_module(cfg: PressureConfig) -> Path:
     return output_path
 
 
+def apply_adaface_pre_gate(selected: list[dict[str, Any]]) -> None:
+    """Insert the candidate gate and keep temporary objects out of output."""
+    by_name = {str(element.get("name") or ""): element for element in selected}
+    required = {
+        "adaface",
+        "face_reid_gate",
+        "face_observation_exporter",
+        "savant_perf_metrics",
+    }
+    missing = sorted(required - set(by_name))
+    if missing:
+        raise ValueError(
+            "AdaFace pre-gate requires full exporter elements: " + ",".join(missing)
+        )
+    candidate_name = "face_reid_candidate"
+    adaface = by_name["adaface"]
+    adaface["model"]["input"]["object"] = f"{candidate_name}.face"
+    by_name["face_reid_gate"].setdefault("kwargs", {})[
+        "face_element_name"
+    ] = candidate_name
+    by_name["face_observation_exporter"].setdefault("kwargs", {})[
+        "face_element_name"
+    ] = candidate_name
+    selected.insert(
+        selected.index(adaface),
+        {
+            "element": "pyfunc",
+            "name": "face_reid_candidate_gate",
+            "module": "custom.pyfuncs.face_reid_candidate_gate",
+            "class_name": "FaceReidCandidateGatePyFunc",
+            "kwargs": {
+                "candidate_element_name": candidate_name,
+                "cameras_config_path": "${oc.env:CAMERAS_CONFIG_PATH, /opt/savant/src/module/config/cameras.midterm.yml}",
+                "face_reid_min_confidence": "${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}",
+                "face_reid_min_face_size": "${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}",
+                "face_reid_min_interval_ms": "${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}",
+                "log_every_n_frames": 30,
+            },
+        },
+    )
+    perf_metrics = by_name["savant_perf_metrics"]
+    selected.remove(perf_metrics)
+    exporter_index = next(
+        index
+        for index, element in enumerate(selected)
+        if element.get("name") == "face_observation_exporter"
+    )
+    selected.insert(exporter_index + 1, perf_metrics)
+    selected.insert(
+        exporter_index + 2,
+        {
+            "element": "pyfunc",
+            "name": "face_reid_candidate_cleanup",
+            "module": "custom.pyfuncs.face_reid_candidate_cleanup",
+            "class_name": "FaceReidCandidateCleanupPyFunc",
+            "kwargs": {"candidate_element_name": candidate_name},
+        },
+    )
+
+
+def write_central_adaface_module(cfg: PressureConfig) -> Path:
+    """Write an AdaFace-only Savant module fed by dual-YOLO output metadata."""
+    source_path = SAVANT_MODULE_PATH.resolve()
+    module_doc = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    elements = list(((module_doc.get("pipeline") or {}).get("elements") or []))
+    keep = {
+        "adaface",
+        "face_reid_gate",
+        "face_observation_exporter",
+        "savant_perf_metrics",
+    }
+    selected = [element for element in elements if element.get("name") in keep]
+    apply_adaface_pre_gate(selected)
+    module_doc["pipeline"]["elements"] = selected
+    output_path = (cfg.artifact_dir / "module.adaface-central.yml").resolve()
+    write_text(output_path, yaml.safe_dump(module_doc, sort_keys=False))
+    write_json(
+        cfg.artifact_dir / "savant_adaface_central_manifest.json",
+        {
+            "source_module": str(source_path),
+            "generated_module": str(output_path),
+            "selected_elements": [str(item.get("name") or "") for item in selected],
+            "input": "dual_savant_output_copy",
+            "output": "metadata_only",
+            "bounded_forwarders": ["adaface-forwarder-a", "adaface-forwarder-b"],
+        },
+    )
+    return output_path
+
+
 def wait_for_dual_shard_metrics(cfg: PressureConfig) -> None:
     urls = {
         **{
@@ -2507,6 +2672,8 @@ def wait_for_dual_shard_metrics(cfg: PressureConfig) -> None:
             for shard_id, url in DUAL_SHARD_SAVANT_METRICS.items()
         },
     }
+    if cfg.adaface_decoupled:
+        urls["adaface-central-metrics"] = ADAFACE_CENTRAL_METRICS_URL
     deadline = time.time() + 300
     pending = dict(urls)
     observations: list[dict[str, Any]] = []
@@ -4478,6 +4645,26 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
             cfg.artifact_dir / "savant_logs_since_start.txt",
             since=since,
         )
+        if cfg.adaface_decoupled:
+            run(
+                [
+                    "docker",
+                    "logs",
+                    "--since",
+                    since,
+                    "video-analytics-midterm-savant-adaface-central",
+                ],
+                cfg.artifact_dir / "adaface_central_logs_since_start.txt",
+                check=False,
+            )
+            write_combined_docker_logs(
+                [
+                    "video-analytics-midterm-adaface-forwarder-a",
+                    "video-analytics-midterm-adaface-forwarder-b",
+                ],
+                cfg.artifact_dir / "adaface_forwarder_logs_since_start.txt",
+                since=since,
+            )
         write_combined_docker_logs(
             [
                 "video-analytics-midterm-analysis-forwarder-a",
@@ -5092,6 +5279,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     max_savant_sources = 0
     max_forwarder_cpu_percent = 0.0
     max_savant_cpu_percent = 0.0
+    max_adaface_central_cpu_percent = 0.0
+    max_adaface_central_sources = 0
     max_source_adapter_cpu_percent = 0.0
     max_worker_cpu_percent: dict[str, float] = {
         key: 0.0 for key in WORKER_CONTAINER_NAMES
@@ -5116,8 +5305,14 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             rows.append({"sample": path.name, "error": repr(exc)})
             continue
         metrics = payload.get("metrics") or {}
+        adaface_central = payload.get("adaface_central") or {}
         forwarder = payload.get("forwarder") or {}
         savant_stage_metrics = aggregate_savant_stage_metrics(metrics)
+        if cfg.adaface_decoupled:
+            central_stages = aggregate_savant_stage_metrics(adaface_central)
+            savant_stage_metrics.update(
+                {f"central_{name}": row for name, row in central_stages.items()}
+            )
         final_savant_stage_metrics = savant_stage_metrics
         savant_sources = _dedupe_sources_by_id(
             metrics.get("sources") or [],
@@ -5136,6 +5331,15 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "frames_forwarded_total",
                 "frames_dropped_total",
                 "savant_send_failures_total",
+            ),
+        )
+        central_sources = _dedupe_sources_by_id(
+            adaface_central.get("sources") or [],
+            score_keys=(
+                "frames_seen_total",
+                "face_objects_total",
+                "adaface_embeddings_total",
+                "face_observations_exported_total",
             ),
         )
         sample_index = path.stem.rsplit("_", 1)[-1]
@@ -5161,6 +5365,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         max_send_failures_delta = max(max_send_failures_delta, send_failures_delta)
         max_forwarder_sources = max(max_forwarder_sources, len(forwarder_sources))
         max_savant_sources = max(max_savant_sources, len(savant_sources))
+        max_adaface_central_sources = max(
+            max_adaface_central_sources, len(central_sources)
+        )
         forwarder_seen = sum(float(source.get("frames_seen_total") or 0.0) for source in forwarder_sources)
         forwarder_forwarded = sum(
             float(source.get("frames_forwarded_total") or 0.0) for source in forwarder_sources
@@ -5182,6 +5389,15 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             float(source.get("face_observations_exported_total") or 0.0)
             for source in savant_sources
         )
+        if cfg.adaface_decoupled:
+            savant_adaface_embeddings = sum(
+                float(source.get("adaface_embeddings_total") or 0.0)
+                for source in central_sources
+            )
+            savant_face_observations = sum(
+                float(source.get("face_observations_exported_total") or 0.0)
+                for source in central_sources
+            )
         final_savant_pose_objects = savant_pose_objects
         final_savant_face_objects = savant_face_objects
         final_savant_adaface_embeddings = savant_adaface_embeddings
@@ -5202,9 +5418,14 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                     "video-analytics-midterm-savant-b",
                 ],
             )
+            adaface_central_cpu = _stats_cpu_percent(
+                stats,
+                "video-analytics-midterm-savant-adaface-central",
+            )
         else:
             forwarder_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-analysis-forwarder")
             savant_cpu = _stats_cpu_percent(stats, "video-analytics-midterm-savant")
+            adaface_central_cpu = 0.0
         source_cpu = max(
             (
                 _parse_percent(str(item.get("CPUPerc") or "0"))
@@ -5215,6 +5436,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         )
         max_forwarder_cpu_percent = max(max_forwarder_cpu_percent, forwarder_cpu)
         max_savant_cpu_percent = max(max_savant_cpu_percent, savant_cpu)
+        max_adaface_central_cpu_percent = max(
+            max_adaface_central_cpu_percent, adaface_central_cpu
+        )
         max_source_adapter_cpu_percent = max(max_source_adapter_cpu_percent, source_cpu)
         worker_cpu = {
             key: _stats_cpu_percent(stats, container)
@@ -5233,6 +5457,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 "sample": path.name,
                 "observed_at": payload.get("_pressure_sample_observed_at"),
                 "savant_sources": len(savant_sources),
+                "adaface_central_sources": len(central_sources),
                 "forwarder_sources": len(forwarder_sources),
                 "queue_depth": queue_depth,
                 "savant_send_failures_total": send_failures,
@@ -5252,6 +5477,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 ),
                 "forwarder_cpu_percent": forwarder_cpu,
                 "savant_cpu_percent": savant_cpu,
+                "adaface_central_cpu_percent": adaface_central_cpu,
                 "worker_cpu_percent": worker_cpu,
                 "max_source_adapter_cpu_percent": source_cpu,
                 "avg_effective_fps_10s": (
@@ -5286,6 +5512,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "max_savant_send_failures_delta": int(max_send_failures_delta),
         "max_forwarder_sources": max_forwarder_sources,
         "max_savant_sources": max_savant_sources,
+        "max_adaface_central_sources": max_adaface_central_sources,
         "final_forwarder_frames_seen_total": int(final_forwarder_seen),
         "final_forwarder_frames_forwarded_total": int(final_forwarder_forwarded),
         "final_forwarder_frames_dropped_total": int(final_forwarder_dropped),
@@ -5331,6 +5558,9 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         ),
         "max_forwarder_cpu_percent": round(max_forwarder_cpu_percent, 3),
         "max_savant_cpu_percent": round(max_savant_cpu_percent, 3),
+        "max_adaface_central_cpu_percent": round(
+            max_adaface_central_cpu_percent, 3
+        ),
         "max_source_adapter_cpu_percent": round(max_source_adapter_cpu_percent, 3),
         "max_worker_cpu_percent": {
             key: round(value, 3) for key, value in max_worker_cpu_percent.items()
@@ -5840,6 +6070,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         "clip_worker": cfg.artifact_dir / "clip_worker_logs_since_start.txt",
         "event_worker": cfg.artifact_dir / "event_worker_logs_since_start.txt",
         "face_worker": cfg.artifact_dir / "face_worker_logs_since_start.txt",
+        "adaface_central": cfg.artifact_dir / "adaface_central_logs_since_start.txt",
+        "adaface_forwarder": cfg.artifact_dir / "adaface_forwarder_logs_since_start.txt",
     }
     summary: dict[str, Any] = {}
     for key, path in paths.items():
@@ -6165,6 +6397,12 @@ def pressure_failure_reasons(
         and int(sample_summary.get("final_savant_adaface_embeddings_total") or 0) <= 0
     ):
         reasons.append("savant_adaface_embeddings_zero")
+    if (
+        cfg.adaface_decoupled
+        and int(sample_summary.get("max_adaface_central_sources") or 0)
+        < cfg.stream_count
+    ):
+        reasons.append("adaface_central_did_not_see_all_sources")
     if int(savant_logs.get("frame_annotation_redis_write_error") or 0) > 0:
         reasons.append("frame_annotation_redis_write_errors")
     if int(sample_summary.get("max_forwarder_sources") or 0) < cfg.stream_count:
@@ -8218,6 +8456,25 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
         savant_sources_active += float(parsed.get("sources_active") or 0.0)
         savant_shards.append({"shard_id": shard_id, "url": url, **parsed})
 
+    adaface_central: dict[str, Any] = {"enabled": False}
+    if cfg.adaface_decoupled:
+        try:
+            central_metrics = parse_savant_metrics_text(
+                fetch_text_url(ADAFACE_CENTRAL_METRICS_URL, timeout_s=5)
+            )
+        except Exception as exc:
+            central_metrics = {
+                "available": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "global": {},
+                "sources": [],
+            }
+        adaface_central = {
+            "enabled": True,
+            "url": ADAFACE_CENTRAL_METRICS_URL,
+            **central_metrics,
+        }
+
     return {
         "dual_shard_same_gpu": True,
         "dual_shard_gpu": cfg.dual_shard_gpu,
@@ -8239,6 +8496,7 @@ def dual_shard_runtime_overview(cfg: PressureConfig) -> dict[str, Any]:
             "sources": forwarder_sources,
             "shards": forwarder_shards,
         },
+        "adaface_central": adaface_central,
     }
 
 
