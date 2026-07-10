@@ -4283,6 +4283,23 @@ def pressure_source_visibility_snapshot(cfg: PressureConfig) -> dict[str, Any]:
             "face_observations_exported_total",
         ),
     )
+    adaface_forwarder_sources = _dedupe_sources_by_id(
+        ((overview.get("adaface_forwarder") or {}).get("sources") or []),
+        score_keys=(
+            "frames_seen_total",
+            "frames_forwarded_total",
+            "metadata_filtered_total",
+            "savant_send_failures_total",
+        ),
+    )
+    adaface_central_sources = _dedupe_sources_by_id(
+        ((overview.get("adaface_central") or {}).get("sources") or []),
+        score_keys=(
+            "frames_seen_total",
+            "adaface_embeddings_total",
+            "face_observations_exported_total",
+        ),
+    )
     forwarder_visible = _metric_visible_source_ids(
         forwarder_sources,
         expected,
@@ -4298,7 +4315,51 @@ def pressure_source_visibility_snapshot(cfg: PressureConfig) -> dict[str, Any]:
         )
     missing_forwarder = sorted(expected - forwarder_visible)
     missing_savant = sorted(expected - savant_visible)
-    status = "all_visible" if not missing_forwarder and not missing_savant else "waiting"
+    adaface_forwarder_visible = (
+        _metric_visible_source_ids(
+            adaface_forwarder_sources,
+            expected,
+            "frames_seen_total",
+        )
+        if cfg.adaface_decoupled
+        else set()
+    )
+    adaface_eligible = (
+        _metric_visible_source_ids(
+            adaface_forwarder_sources,
+            expected,
+            "frames_forwarded_total",
+        )
+        if cfg.adaface_decoupled
+        else set()
+    )
+    adaface_central_visible = (
+        _metric_visible_source_ids(
+            adaface_central_sources,
+            expected,
+            "frames_seen_total",
+        )
+        if cfg.adaface_decoupled
+        else set()
+    )
+    missing_adaface_forwarder = (
+        sorted(expected - adaface_forwarder_visible)
+        if cfg.adaface_decoupled
+        else []
+    )
+    missing_adaface_central_eligible = (
+        sorted(adaface_eligible - adaface_central_visible)
+        if cfg.adaface_decoupled
+        else []
+    )
+    status = (
+        "all_visible"
+        if not missing_forwarder
+        and not missing_savant
+        and not missing_adaface_forwarder
+        and not missing_adaface_central_eligible
+        else "waiting"
+    )
     return {
         "status": status,
         "expected_count": len(expected),
@@ -4306,6 +4367,13 @@ def pressure_source_visibility_snapshot(cfg: PressureConfig) -> dict[str, Any]:
         "savant_visible_count": len(savant_visible),
         "missing_forwarder_sources": missing_forwarder,
         "missing_savant_sources": missing_savant,
+        "adaface_forwarder_visible_count": len(adaface_forwarder_visible),
+        "adaface_eligible_count": len(adaface_eligible),
+        "adaface_central_visible_count": len(adaface_central_visible),
+        "missing_adaface_forwarder_sources": missing_adaface_forwarder,
+        "missing_adaface_central_eligible_sources": (
+            missing_adaface_central_eligible
+        ),
         "forwarder_visible_sources": sorted(forwarder_visible),
         "savant_visible_sources": sorted(savant_visible),
         "forwarder_total_sources": len(forwarder_sources),

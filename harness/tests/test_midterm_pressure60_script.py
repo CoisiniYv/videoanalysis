@@ -415,6 +415,64 @@ def test_pressure_source_visibility_barrier_waits_for_all_sources(
     assert snapshots[0]["missing_forwarder_sources"] == ["pressure60_test_01"]
 
 
+def test_pressure_visibility_waits_for_decoupled_eligible_sources(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=2,
+        adaface_decoupled=True,
+    )
+    overview = {
+        "forwarder": {
+            "global": {"queue_depth": 0},
+            "sources": [
+                {"source_id": "pressure60_test_00", "frames_seen_total": 8},
+                {"source_id": "pressure60_test_01", "frames_seen_total": 8},
+            ],
+        },
+        "metrics": {
+            "sources": [
+                {"source_id": "pressure60_test_00", "frames_seen_total": 8},
+                {"source_id": "pressure60_test_01", "frames_seen_total": 8},
+            ],
+        },
+        "adaface_forwarder": {
+            "sources": [
+                {
+                    "source_id": "pressure60_test_00",
+                    "frames_seen_total": 4,
+                    "frames_forwarded_total": 2,
+                },
+                {
+                    "source_id": "pressure60_test_01",
+                    "frames_seen_total": 4,
+                    "frames_forwarded_total": 0,
+                },
+            ],
+        },
+        "adaface_central": {"sources": []},
+    }
+    monkeypatch.setattr(module, "pressure_runtime_overview", lambda _cfg: overview)
+
+    waiting = module.pressure_source_visibility_snapshot(cfg)
+
+    assert waiting["status"] == "waiting"
+    assert waiting["missing_adaface_central_eligible_sources"] == [
+        "pressure60_test_00"
+    ]
+
+    overview["adaface_central"]["sources"] = [
+        {"source_id": "pressure60_test_00", "frames_seen_total": 1}
+    ]
+    ready = module.pressure_source_visibility_snapshot(cfg)
+
+    assert ready["status"] == "all_visible"
+    assert ready["adaface_eligible_count"] == 1
+    assert ready["adaface_central_visible_count"] == 1
+
+
 def test_prepare_pressure_sampling_window_clears_visibility_warmup_rows(
     monkeypatch,
     tmp_path: Path,
