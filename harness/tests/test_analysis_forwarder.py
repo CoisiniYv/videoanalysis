@@ -130,10 +130,6 @@ class _Object:
     namespace: str
     label: str
     attributes: dict[tuple[str, str], object] = field(default_factory=dict)
-    confidence: float = 1.0
-    detection_box: object = field(
-        default_factory=lambda: types.SimpleNamespace(width=100.0, height=100.0)
-    )
 
     def get_attribute(self, namespace: str, name: str):
         return self.attributes.get((namespace, name))
@@ -199,43 +195,6 @@ def test_metadata_filter_is_passthrough_when_unconfigured() -> None:
     metadata_filter = sampler_mod.MetadataObjectFilter()
 
     assert metadata_filter.admit(object()) is True
-
-
-def test_metadata_filter_rejects_faces_below_embedding_quality_floor() -> None:
-    metadata_filter = sampler_mod.MetadataObjectFilter(
-        object_namespace="yolov8_face",
-        object_label="face",
-        attribute_namespace="face_person_associator",
-        attribute_name="person_track_id",
-        min_confidence=0.45,
-        min_width=40,
-        min_height=40,
-    )
-    attributes = {("face_person_associator", "person_track_id"): object()}
-
-    assert metadata_filter.admit(
-        _MetadataFrame(
-            [_Object("yolov8_face", "face", attributes, 0.45)]
-        )
-    ) is True
-    assert metadata_filter.admit(
-        _MetadataFrame(
-            [_Object("yolov8_face", "face", attributes, 0.44)]
-        )
-    ) is False
-    assert metadata_filter.admit(
-        _MetadataFrame(
-            [
-                _Object(
-                    "yolov8_face",
-                    "face",
-                    attributes,
-                    0.9,
-                    types.SimpleNamespace(width=39.0, height=80.0),
-                )
-            ]
-        )
-    ) is False
 
 
 def test_bounded_queue_drops_non_keyframes_and_preserves_keyframes() -> None:

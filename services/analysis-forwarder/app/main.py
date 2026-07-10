@@ -42,9 +42,6 @@ class ForwarderConfig:
     require_object_label: str = ""
     require_attribute_namespace: str = ""
     require_attribute_name: str = ""
-    min_object_confidence: float = 0.0
-    min_object_width: float = 0.0
-    min_object_height: float = 0.0
 
     @classmethod
     def from_env(cls) -> "ForwarderConfig":
@@ -71,15 +68,6 @@ class ForwarderConfig:
             ),
             require_attribute_name=os.getenv(
                 "FORWARDER_REQUIRE_ATTRIBUTE_NAME", ""
-            ),
-            min_object_confidence=_float_env(
-                "FORWARDER_MIN_OBJECT_CONFIDENCE", 0.0
-            ),
-            min_object_width=_float_env(
-                "FORWARDER_MIN_OBJECT_WIDTH", 0.0
-            ),
-            min_object_height=_float_env(
-                "FORWARDER_MIN_OBJECT_HEIGHT", 0.0
             ),
         )
 
@@ -172,9 +160,6 @@ class AnalysisForwarder:
             object_label=config.require_object_label,
             attribute_namespace=config.require_attribute_namespace,
             attribute_name=config.require_attribute_name,
-            min_confidence=config.min_object_confidence,
-            min_width=config.min_object_width,
-            min_height=config.min_object_height,
         )
         self.stop_event = threading.Event()
         self.reader = ZeroMQSource(
@@ -380,13 +365,6 @@ def main() -> None:
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
     except Exception:
         return default
 

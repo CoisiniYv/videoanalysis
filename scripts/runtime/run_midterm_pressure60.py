@@ -2077,12 +2077,6 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
     if cfg.adaface_decoupled:
         central_module = str(write_central_adaface_module(cfg))
         forwarder_image = "video-analytics-midterm-analysis-forwarder:latest"
-        face_reid_min_confidence = read_env_file_setting(
-            Path(cfg.env_file), "FACE_REID_MIN_CONFIDENCE", "0.45"
-        )
-        face_reid_min_face_size = read_env_file_setting(
-            Path(cfg.env_file), "FACE_REID_MIN_FACE_SIZE", "40"
-        )
         for shard in ("a", "b"):
             service = f"adaface-forwarder-{shard}"
             doc["services"][service] = {
@@ -2108,11 +2102,6 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                         "face_person_associator"
                     ),
                     "FORWARDER_REQUIRE_ATTRIBUTE_NAME": "person_track_id",
-                    # These are explicit so the generic daily forwarder never
-                    # inherits face-only filtering from the shared env file.
-                    "FORWARDER_MIN_OBJECT_CONFIDENCE": face_reid_min_confidence,
-                    "FORWARDER_MIN_OBJECT_WIDTH": face_reid_min_face_size,
-                    "FORWARDER_MIN_OBJECT_HEIGHT": face_reid_min_face_size,
                     "FORWARDER_QUEUE_MAX_SIZE": "512",
                     "FORWARDER_RECEIVE_TIMEOUT_MS": "250",
                     "FORWARDER_RECEIVE_HWM": "2000",
@@ -2217,26 +2206,6 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             doc["services"].setdefault(service, {})["cpuset"] = cpuset
     write_text(path, yaml.safe_dump(doc, sort_keys=False))
     return path
-
-
-def read_env_file_setting(path: Path, key: str, default: str) -> str:
-    """Read one non-secret scalar from a compose env file."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return default
-    prefix = f"{key}="
-    for raw_line in lines:
-        line = raw_line.strip()
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if not line.startswith(prefix):
-            continue
-        value = line[len(prefix) :].strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        return value or default
-    return default
 
 
 def cuda_mps_paths(cfg: PressureConfig) -> tuple[Path, Path, Path]:
