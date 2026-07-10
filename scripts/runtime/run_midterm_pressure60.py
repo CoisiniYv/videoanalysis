@@ -65,6 +65,7 @@ SOURCE_CONTROLLER = Path("scripts/runtime/camera_source_controller.py")
 DUAL_SHARD_PROFILE = "dual-4090-two-source"
 CUDA_MPS_CONTAINER = "video-analytics-midterm-cuda-mps-pressure"
 CUDA_MPS_IMAGE_DEFAULT = "ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1"
+CUDA_MPS_RUNTIME_ROOT = Path("/tmp/video-analytics-mps-pressure")
 DUAL_SHARD_SERVICES = [
     "savant-a",
     "savant-b",
@@ -2013,8 +2014,55 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
 
 
 def cuda_mps_paths(cfg: PressureConfig) -> tuple[Path, Path, Path]:
-    root = (cfg.artifact_dir / "cuda-mps").resolve()
+    # CUDA MPS uses Unix-domain sockets whose path is limited to roughly 108
+    # bytes. Artifact/run-id paths can exceed that on production, so runtime
+    # IPC must stay at a fixed short path; logs are copied into the artifact.
+    root = CUDA_MPS_RUNTIME_ROOT
     return root, root / "pipe", root / "log"
+
+
+def _cleanup_cuda_mps_runtime_root() -> None:
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--pull=never",
+            "-v",
+            "/tmp:/host-tmp",
+            "--entrypoint",
+            "rm",
+            _cuda_mps_image(),
+            "-rf",
+            f"/host-tmp/{CUDA_MPS_RUNTIME_ROOT.name}",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def _capture_cuda_mps_daemon_logs(cfg: PressureConfig) -> None:
+    for source_name, artifact_name in (
+        ("control.log", "cuda_mps_control.log"),
+        ("server.log", "cuda_mps_server.log"),
+    ):
+        completed = subprocess.run(
+            [
+                "docker",
+                "exec",
+                CUDA_MPS_CONTAINER,
+                "bash",
+                "-lc",
+                f'test ! -f "$CUDA_MPS_LOG_DIRECTORY/{source_name}" || '
+                f'cat "$CUDA_MPS_LOG_DIRECTORY/{source_name}"',
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        write_text(cfg.artifact_dir / artifact_name, completed.stdout)
 
 
 def _cuda_mps_image() -> str:
@@ -2100,8 +2148,8 @@ def start_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
     if not cfg.dual_shard_same_gpu:
         raise RuntimeError("CUDA MPS requires dual_shard_same_gpu")
     root, pipe_dir, log_dir = cuda_mps_paths(cfg)
-    pipe_dir.mkdir(parents=True, exist_ok=True)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if len(str(pipe_dir / "control").encode("utf-8")) >= 100:
+        raise RuntimeError(f"CUDA MPS pipe path is too long: {pipe_dir}")
     if _cuda_mps_container_exists():
         existing = cuda_mps_status(cfg)
         if cfg.run_id not in str(existing.get("inspect") or ""):
@@ -2114,6 +2162,9 @@ def start_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+    _cleanup_cuda_mps_runtime_root()
+    pipe_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     command = (
         "set -eu; "
         "nvidia-cuda-mps-control -d; "
@@ -2177,6 +2228,7 @@ def stop_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
             previous = {}
         if previous.get("stopped"):
             return previous
+        _cleanup_cuda_mps_runtime_root()
         summary = {
             "before": cuda_mps_status(cfg),
             "stop_rc": 0,
@@ -2187,6 +2239,7 @@ def stop_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
         write_json(previous_path, summary)
         return summary
     before = cuda_mps_status(cfg)
+    _capture_cuda_mps_daemon_logs(cfg)
     logs = subprocess.run(
         ["docker", "logs", CUDA_MPS_CONTAINER],
         check=False,
@@ -2216,6 +2269,7 @@ def stop_cuda_mps(cfg: PressureConfig) -> dict[str, Any]:
         "container_exists_after": _cuda_mps_container_exists(),
         "stopped": not _cuda_mps_container_exists(),
     }
+    _cleanup_cuda_mps_runtime_root()
     write_json(cfg.artifact_dir / "cuda_mps_stop.json", summary)
     return summary
 

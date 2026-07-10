@@ -1107,6 +1107,9 @@ def test_dual_shard_mps_override_shares_pipe_and_host_ipc(tmp_path) -> None:
     override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
     mps_root, pipe_dir, log_dir = module.cuda_mps_paths(cfg)
 
+    assert str(mps_root) == "/tmp/video-analytics-mps-pressure"
+    assert len(str(pipe_dir / "control").encode("utf-8")) < 100
+
     for service in ("savant-a", "savant-b"):
         service_doc = override["services"][service]
         assert service_doc["ipc"] == "host"
