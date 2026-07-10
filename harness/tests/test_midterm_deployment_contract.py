@@ -237,6 +237,7 @@ def test_runtime_doctor_is_midterm_named() -> None:
         "prepare_dual_4090_savant_b_model_cache.sh",
         "rolling_cache_sink_entrypoint.sh",
         "run_pressure60_dual1gpu_profile.sh",
+        "run_pressure60_t4_analysis_matrix.sh",
         "video_file_sink_entrypoint.sh",
     ]
     text = _text(RUNTIME_DOCTOR)
@@ -542,7 +543,7 @@ def test_midterm_savant_source_reset_patch_is_wired() -> None:
     assert (patch_root / "README.md").is_file()
     assert _md5(patch_root / "buffer_processor.py") == "556af89b356401efa1dc9d5c2c4d3c68"
     assert _md5(patch_root / "nvinfer_processor.py") == "9615f7cd134f623a3950b65e5ad71fb1"
-    assert _md5(patch_root / "pipeline.py") == "7c5eabbe84697e591a0a31a1c3977f2c"
+    assert _md5(patch_root / "pipeline.py") == "2c52ffc83caa10e07bac0bbff94850c0"
 
 
 def test_midterm_production_savant_hot_path_excludes_debug_and_unused_encoding() -> None:

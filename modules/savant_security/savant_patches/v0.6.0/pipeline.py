@@ -66,6 +66,8 @@ from savant.utils.source_info import (
     SourceShape,
 )
 
+from custom.savant_stage_metrics import SavantStageMetrics
+
 from .buffer_processor import NvDsBufferProcessor, create_buffer_processor
 from .element_factory import NvDsElementFactory
 from .metadata import (
@@ -191,6 +193,7 @@ class NvDsPipeline(GstPipeline):
             video_pipeline=self._video_pipeline,
             queue_properties=self._egress_queue_properties,
         )
+        self._stage_metrics = SavantStageMetrics()
 
         # noqa: E501
         # nvjpegdec decoder is selected in decodebin according to the rank, but
@@ -292,6 +295,17 @@ class NvDsPipeline(GstPipeline):
             if nvinfer.postproc is not None:
                 add_buffer_probe(gst_element.get_static_pad('src'), nvinfer.postproc)
 
+        stage_name = str(getattr(element, 'name', '') or '')
+        if self._stage_metrics.measures(stage_name):
+            add_buffer_probe(
+                gst_element.get_static_pad('sink'),
+                lambda buffer, name=stage_name: self._begin_stage_timing(name, buffer),
+            )
+            add_buffer_probe(
+                gst_element.get_static_pad('src'),
+                lambda buffer, name=stage_name: self._stage_metrics.end(name, buffer),
+            )
+
         if element_idx is not None:
             if isinstance(element, PyFuncElement):
                 gst_element.set_property('pipeline', self._video_pipeline)
@@ -309,6 +323,15 @@ class NvDsPipeline(GstPipeline):
             )
 
         return gst_element
+
+    def _begin_stage_timing(self, stage_name: str, buffer: Gst.Buffer) -> None:
+        self._stage_metrics.begin(stage_name, buffer)
+        try:
+            batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buffer))
+            batch_size = int(getattr(batch_meta, 'num_frames_in_batch', 0) or 0)
+        except Exception:  # pylint: disable=broad-except
+            batch_size = 0
+        self._stage_metrics.observe_batch(stage_name, batch_size)
 
     def before_shutdown(self):
         super().before_shutdown()

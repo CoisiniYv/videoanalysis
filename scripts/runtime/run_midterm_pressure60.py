@@ -56,6 +56,7 @@ DEFAULT_ARTIFACT_ROOT = Path("/data/video-analytics/artifacts")
 DEFAULT_EVIDENCE_ROOT = Path("/data/video-analytics/media/evidence")
 DEFAULT_REPLAY_EPOCH_ROOT = Path("/data/video-analytics/media/replay-sink-output/midterm/epochs")
 DEFAULT_MODULE_CONFIG_PATH = Path("modules/savant_security/config/cameras.midterm.yml")
+SAVANT_MODULE_PATH = Path("modules/savant_security/module.yml")
 DEFAULT_PRESSURE_FPS = "8/1"
 DEFAULT_PRESSURE_DURATION_S = 600
 DEFAULT_PRESSURE_DRAIN_S = 120
@@ -173,6 +174,12 @@ WORKER_CONTAINER_NAMES = {
     "media_worker": "video-analytics-midterm-media-worker",
     "clip_worker": "video-analytics-midterm-clip-worker",
 }
+WORKER_COMPOSE_SERVICES = {
+    "video-analytics-midterm-event-worker": "event-worker",
+    "video-analytics-midterm-face-worker": "face-worker",
+    "video-analytics-midterm-media-worker": "media-worker",
+    "video-analytics-midterm-clip-worker": "clip-worker",
+}
 
 
 def remove_prefix(value: str, prefix: str) -> str:
@@ -234,6 +241,53 @@ EVIDENCE_SHARD_BRANCH = {
     "replay-f": "b",
     "replay-g": "a",
     "replay-h": "b",
+}
+SAVANT_ABLATION_STAGES = (
+    "pose-only",
+    "pose-tracker-rules",
+    "pose-face",
+    "pose-face-adaface",
+    "full-exporter",
+    "full-evidence",
+)
+SAVANT_ABLATION_ELEMENTS = {
+    "pose-only": {"yolo26_pose", "savant_perf_metrics"},
+    "pose-tracker-rules": {
+        "yolo26_pose", "tracker", "behavior_rules", "savant_perf_metrics",
+    },
+    "pose-face": {
+        "yolo26_pose", "tracker", "behavior_rules", "yolov8_face",
+        "face_person_associator", "savant_perf_metrics",
+    },
+    "pose-face-adaface": {
+        "yolo26_pose", "tracker", "behavior_rules", "yolov8_face",
+        "face_person_associator", "adaface", "face_reid_gate",
+        "savant_perf_metrics",
+    },
+    "full-exporter": {
+        "yolo26_pose", "tracker", "behavior_rules", "yolov8_face",
+        "face_person_associator", "adaface", "face_reid_gate",
+        "face_observation_exporter", "frame_annotation_exporter",
+        "savant_perf_metrics",
+    },
+    "full-evidence": None,
+}
+CPU_ISOLATION_PROFILES = {
+    "none": {},
+    "t4-16cpu": {
+        "savant-a": "0-2,8-10",
+        "savant-b": "3-5,11-13",
+        "analysis-forwarder-a": "6,14",
+        "analysis-forwarder-b": "6,14",
+        "workers": "7,15",
+    },
+    "local-24cpu": {
+        "savant-a": "0,2,4,6,8,10",
+        "savant-b": "12-17",
+        "analysis-forwarder-a": "18-19",
+        "analysis-forwarder-b": "18-19",
+        "workers": "20-23",
+    },
 }
 
 
@@ -298,6 +352,9 @@ class PressureConfig:
     pressure_source_visibility_restart_attempts: int = 1
     pressure_source_ffmpeg_timeout_ms: int = 60000
     pressure_source_start_stagger_s: float = 0.5
+    savant_ablation_stage: str = "full-evidence"
+    savant_output_mode: str = "copy"
+    cpu_isolation_profile: str = "none"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -404,6 +461,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--max-parallel-streams", type=int, default=64)
     parser.add_argument("--batched-push-timeout", type=int, default=40000)
+    parser.add_argument(
+        "--savant-ablation-stage",
+        choices=SAVANT_ABLATION_STAGES,
+        default="full-evidence",
+        help="Cumulative Savant pipeline stage used for bottleneck isolation.",
+    )
+    parser.add_argument(
+        "--savant-output-mode",
+        choices=("copy", "metadata-only"),
+        default="copy",
+        help="Emit pass-through frame content or metadata only from Savant.",
+    )
+    parser.add_argument(
+        "--cpu-isolation-profile",
+        choices=tuple(CPU_ISOLATION_PROFILES),
+        default="none",
+        help="Temporary cpuset layout for inference and downstream worker isolation.",
+    )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
     parser.add_argument("--run-id")
     parser.add_argument("--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT)
@@ -734,6 +809,9 @@ def main(argv: list[str] | None = None) -> int:
             0.0,
             float(args.pressure_source_start_stagger_s or 0.0),
         ),
+        savant_ablation_stage=args.savant_ablation_stage,
+        savant_output_mode=args.savant_output_mode,
+        cpu_isolation_profile=args.cpu_isolation_profile,
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -751,6 +829,13 @@ def main(argv: list[str] | None = None) -> int:
     original_event_worker_evidence_env: dict[str, str] | None = None
     original_media_worker_rolling_env: dict[str, str] | None = None
     original_rolling_cache_sink_states: dict[str, dict[str, Any]] | None = None
+    original_worker_cpu_isolation: dict[str, Any] | None = None
+    original_module_config_exists = DEFAULT_MODULE_CONFIG_PATH.exists()
+    original_module_config_text = (
+        DEFAULT_MODULE_CONFIG_PATH.read_text(encoding="utf-8")
+        if original_module_config_exists
+        else None
+    )
     original_cameras: list[dict[str, Any]] = []
     runtime_epoch_root: str | None = None
     rtsp_republishers: list[subprocess.Popen] = []
@@ -768,6 +853,9 @@ def main(argv: list[str] | None = None) -> int:
         original_event_worker_evidence_env = event_worker_evidence_env_snapshot()
         original_media_worker_rolling_env = media_worker_rolling_cache_env_snapshot()
         original_rolling_cache_sink_states = rolling_cache_sink_state_snapshot()
+        if cfg.cpu_isolation_profile != "none":
+            original_worker_cpu_isolation = apply_worker_cpu_isolation(cfg)
+            report["cpu_isolation_apply"] = original_worker_cpu_isolation
         original_cameras = fetch_cameras(conn)
         write_json(cfg.artifact_dir / "cameras_before.json", original_cameras)
         write_json(cfg.artifact_dir / "performance_before.json", original_perf)
@@ -1205,6 +1293,12 @@ def main(argv: list[str] | None = None) -> int:
         report["source_container_cleanup_stable"] = (
             remove_pressure_source_containers_until_stable(cfg.run_id)
         )
+        if original_worker_cpu_isolation is not None:
+            report["cpu_isolation_restore"] = restore_worker_cpu_isolation(
+                cfg,
+                original_worker_cpu_isolation,
+            )
+            original_worker_cpu_isolation = None
         report["db_summary_after_cleanup"] = db_summary(conn, cfg.run_id)
         report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
         report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
@@ -1363,6 +1457,21 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             return 1
     finally:
+        if original_worker_cpu_isolation is not None:
+            try:
+                restore_worker_cpu_isolation(cfg, original_worker_cpu_isolation)
+            except Exception:
+                pass
+        try:
+            if original_module_config_exists:
+                _atomic_write_text(
+                    DEFAULT_MODULE_CONFIG_PATH,
+                    original_module_config_text or "",
+                )
+            else:
+                DEFAULT_MODULE_CONFIG_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
         conn.close()
 
 
@@ -1769,6 +1878,13 @@ def recreate_dual_video_sinks_for_current_epoch(cfg: PressureConfig) -> None:
 def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
     path = cfg.artifact_dir / "compose.dual-shard-same-gpu.override.yml"
     device = str(cfg.dual_shard_gpu)
+    ablation_module_path = write_savant_ablation_module(cfg)
+    # The artifact root is already bind-mounted at the same absolute path in
+    # both Savant services. Avoid a nested file mount under /opt/savant/src/module:
+    # Docker creates the nested target in the repo-backed parent mount, which
+    # leaves a root-owned module.pressure.yml in the working tree.
+    module_path_in_container = str(ablation_module_path)
+    output_frame = '{"codec":"copy"}' if cfg.savant_output_mode == "copy" else "null"
     doc = {
         "services": {
             "savant-a": {
@@ -1782,6 +1898,9 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
                     "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
                     "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
+                    "SAVANT_STAGE_METRICS_ENABLED": "true",
+                    "SAVANT_MODULE_FILE": module_path_in_container,
+                    "OUTPUT_FRAME": output_frame,
                     "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
                     "FRAME_ANNOTATION_STREAM_MODE": "dual",
                     "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
@@ -1812,6 +1931,9 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "FACE_EMBEDDING_INFER_INTERVAL": str(cfg.face_embedding_infer_interval),
                     "MAX_PARALLEL_STREAMS": str(cfg.max_parallel_streams),
                     "BATCHED_PUSH_TIMEOUT": str(cfg.batched_push_timeout),
+                    "SAVANT_STAGE_METRICS_ENABLED": "true",
+                    "SAVANT_MODULE_FILE": module_path_in_container,
+                    "OUTPUT_FRAME": output_frame,
                     "FRAME_ANNOTATION_SOURCE_STREAM_ENABLED": "true",
                     "FRAME_ANNOTATION_STREAM_MODE": "dual",
                     "FRAME_ANNOTATION_SOURCE_REDIS_MAXLEN": "10000",
@@ -1832,8 +1954,47 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
             },
         }
     }
+    cpu_profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
+    for service in (
+        "savant-a",
+        "savant-b",
+        "analysis-forwarder-a",
+        "analysis-forwarder-b",
+    ):
+        cpuset = cpu_profile.get(service)
+        if cpuset:
+            doc["services"].setdefault(service, {})["cpuset"] = cpuset
     write_text(path, yaml.safe_dump(doc, sort_keys=False))
     return path
+
+
+def write_savant_ablation_module(cfg: PressureConfig) -> Path:
+    source_path = SAVANT_MODULE_PATH.resolve()
+    module_doc = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    elements = list(((module_doc.get("pipeline") or {}).get("elements") or []))
+    keep = SAVANT_ABLATION_ELEMENTS[cfg.savant_ablation_stage]
+    if keep is None:
+        selected = elements
+    else:
+        selected = [element for element in elements if element.get("name") in keep]
+    module_doc["pipeline"]["elements"] = selected
+    output_path = (cfg.artifact_dir / "module.pressure.yml").resolve()
+    write_text(output_path, yaml.safe_dump(module_doc, sort_keys=False))
+    selected_names = [str(element.get("name") or "") for element in selected]
+    manifest = {
+        "stage": cfg.savant_ablation_stage,
+        "source_module": str(source_path),
+        "generated_module": str(output_path),
+        "output_mode": cfg.savant_output_mode,
+        "selected_elements": selected_names,
+        "removed_elements": [
+            str(element.get("name") or "")
+            for element in elements
+            if str(element.get("name") or "") not in selected_names
+        ],
+    }
+    write_json(cfg.artifact_dir / "savant_ablation_manifest.json", manifest)
+    return output_path
 
 
 def wait_for_dual_shard_metrics(cfg: PressureConfig) -> None:
@@ -1997,6 +2158,145 @@ def docker_container_env(name: str) -> dict[str, str]:
         if sep:
             result[key] = value
     return result
+
+
+def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
+    profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
+    target_cpuset = str(profile.get("workers") or "")
+    available_cpus = int(os.cpu_count() or 1)
+    requested_cpus = {
+        cpu
+        for value in profile.values()
+        for cpu in _expand_cpuset(str(value))
+    }
+    if requested_cpus and max(requested_cpus) >= available_cpus:
+        raise RuntimeError(
+            f"cpu isolation profile {cfg.cpu_isolation_profile} requires CPU "
+            f"{max(requested_cpus)} but host exposes {available_cpus} CPUs"
+        )
+    containers = sorted(set(WORKER_CONTAINER_NAMES.values()))
+    snapshot: dict[str, Any] = {
+        "profile": cfg.cpu_isolation_profile,
+        "target_cpuset": target_cpuset,
+        "containers": {},
+    }
+    for container in containers:
+        original = docker_container_cpuset(container)
+        row = {"original_cpuset": original, "applied": False, "error": ""}
+        snapshot["containers"][container] = row
+        if target_cpuset:
+            completed = subprocess.run(
+                ["docker", "update", "--cpuset-cpus", target_cpuset, container],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            observed = docker_container_cpuset(container)
+            row["observed_cpuset"] = observed
+            row["applied"] = completed.returncode == 0 and observed == target_cpuset
+            if not row["applied"]:
+                row["error"] = (
+                    completed.stdout.strip()
+                    if completed.returncode != 0
+                    else f"observed cpuset {observed!r}"
+                )
+                restore_worker_cpu_isolation(cfg, snapshot)
+                raise RuntimeError(
+                    f"failed to apply worker cpuset container={container}: {row['error']}"
+                )
+    write_json(cfg.artifact_dir / "cpu_isolation_apply.json", snapshot)
+    return snapshot
+
+
+def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"profile": snapshot.get("profile"), "containers": {}}
+    recreate: list[tuple[str, str]] = []
+    for container, original in (snapshot.get("containers") or {}).items():
+        cpuset = str((original or {}).get("original_cpuset") or "")
+        if not cpuset:
+            service = WORKER_COMPOSE_SERVICES.get(container)
+            if service:
+                recreate.append((container, service))
+                continue
+        completed = subprocess.run(
+            ["docker", "update", "--cpuset-cpus", cpuset, container],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        observed = docker_container_cpuset(container)
+        result["containers"][container] = {
+            "restored_cpuset": cpuset,
+            "observed_cpuset": observed,
+            "method": "docker_update",
+            "ok": completed.returncode == 0 and observed == cpuset,
+            "error": (
+                completed.stdout.strip()
+                if completed.returncode != 0
+                else ("" if observed == cpuset else f"observed cpuset {observed!r}")
+            ),
+        }
+    if recreate:
+        compose = [
+            "docker",
+            "compose",
+            "--env-file",
+            cfg.env_file,
+            "-f",
+            cfg.compose_file,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            *[service for _container, service in recreate],
+        ]
+        completed = run(
+            compose,
+            cfg.artifact_dir / "compose_restore_worker_cpu_isolation.log",
+            check=False,
+        )
+        for container, _service in recreate:
+            observed = docker_container_cpuset(container)
+            result["containers"][container] = {
+                "restored_cpuset": "",
+                "observed_cpuset": observed,
+                "method": "compose_recreate",
+                "ok": completed.returncode == 0 and observed == "",
+                "error": (
+                    f"compose recreate rc={completed.returncode}"
+                    if completed.returncode != 0
+                    else ("" if observed == "" else f"observed cpuset {observed!r}")
+                ),
+            }
+    write_json(cfg.artifact_dir / "cpu_isolation_restore.json", result)
+    return result
+
+
+def docker_container_cpuset(name: str) -> str:
+    completed = subprocess.run(
+        ["docker", "inspect", name, "--format", "{{.HostConfig.CpusetCpus}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _expand_cpuset(value: str) -> set[int]:
+    cpus: set[int] = set()
+    for token in str(value or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start, end = token.split("-", 1)
+            cpus.update(range(int(start), int(end) + 1))
+        else:
+            cpus.add(int(token))
+    return cpus
 
 
 def docker_container_state(name: str) -> dict[str, Any]:
@@ -2806,6 +3106,15 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
             rtsp_uri = pressure_rtsp_uri(cfg, index=index, source_id=source_id)
             evidence_policy = evidence_policy_for_index(cfg, index)
             watchlist_evidence_policy = face_image_evidence_policy()
+            evidence_enabled = cfg.savant_ablation_stage == "full-evidence"
+            if not evidence_enabled:
+                evidence_policy = {
+                    "snapshot_required": False,
+                    "clip_required": False,
+                    "pre_seconds": 0,
+                    "post_seconds": 0,
+                }
+                watchlist_evidence_policy = dict(evidence_policy)
             alert_policy = {
                 "global_alert_cooldown_s": cfg.pressure_algorithm_cooldown_s,
                 "cooldown_scope": "algorithm",
@@ -2849,7 +3158,7 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                 "min_person_width": 20,
                 "min_person_height": 40,
                 "snapshot_required": False,
-                "clip_required": True,
+                "clip_required": evidence_enabled,
                 "max_bbox_area_ratio": 0.9,
                 "min_person_confidence": 0.25,
                 "min_visible_keypoints": 0,
@@ -4270,6 +4579,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     final_savant_adaface_embeddings = 0.0
     final_savant_person_observations = 0.0
     final_savant_face_observations = 0.0
+    final_savant_stage_metrics: dict[str, Any] = {}
     baseline_send_failures: float | None = None
     max_send_failures_delta = 0.0
     stable_samples = 0
@@ -4281,6 +4591,8 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             continue
         metrics = payload.get("metrics") or {}
         forwarder = payload.get("forwarder") or {}
+        savant_stage_metrics = aggregate_savant_stage_metrics(metrics)
+        final_savant_stage_metrics = savant_stage_metrics
         savant_sources = _dedupe_sources_by_id(
             metrics.get("sources") or [],
             score_keys=(
@@ -4423,6 +4735,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
                 ),
                 "min_effective_fps_10s": min(effective_fps) if effective_fps else None,
                 "max_effective_fps_10s": max(effective_fps) if effective_fps else None,
+                "savant_stage_metrics": savant_stage_metrics,
             }
         )
     summary = {
@@ -4443,6 +4756,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "final_savant_adaface_embeddings_total": int(final_savant_adaface_embeddings),
         "final_savant_person_observations_exported_total": int(final_savant_person_observations),
         "final_savant_face_observations_exported_total": int(final_savant_face_observations),
+        "final_savant_stage_metrics": final_savant_stage_metrics,
         "final_forwarder_forwarded_seen_ratio": (
             round(final_forwarder_forwarded / final_forwarder_seen, 4)
             if final_forwarder_seen > 0
@@ -4471,6 +4785,45 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     }
     write_json(cfg.artifact_dir / "sample_summary.json", summary)
     return summary
+
+
+def aggregate_savant_stage_metrics(metrics: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    shard_metrics = [
+        shard.get("stage_metrics") or {}
+        for shard in metrics.get("shards") or []
+        if isinstance(shard, dict)
+    ]
+    if not shard_metrics:
+        shard_metrics = [metrics.get("stage_metrics") or {}]
+    merged: dict[str, dict[str, Any]] = {}
+    for stages in shard_metrics:
+        for stage, row in stages.items():
+            if not isinstance(row, dict):
+                continue
+            target = merged.setdefault(
+                stage,
+                {
+                    "duration_count": 0.0,
+                    "duration_sum_s": 0.0,
+                    "duration_last_s": None,
+                    "duration_buckets": {},
+                    "batch_occupancy": {},
+                },
+            )
+            target["duration_count"] += float(row.get("duration_count") or 0.0)
+            target["duration_sum_s"] += float(row.get("duration_sum_s") or 0.0)
+            last = row.get("duration_last_s")
+            if last is not None:
+                target["duration_last_s"] = max(
+                    float(target.get("duration_last_s") or 0.0), float(last)
+                )
+            for upper, value in (row.get("duration_buckets") or {}).items():
+                buckets = target["duration_buckets"]
+                buckets[str(upper)] = float(buckets.get(str(upper)) or 0.0) + float(value)
+            for size, value in (row.get("batch_occupancy") or {}).items():
+                occupancy = target["batch_occupancy"]
+                occupancy[str(size)] = float(occupancy.get(str(size)) or 0.0) + float(value)
+    return _finalize_stage_metrics(merged)
 
 
 def _dedupe_sources_by_id(
@@ -7354,11 +7707,35 @@ def parse_savant_metrics_text(text: str) -> dict[str, Any]:
     samples = _parse_prometheus_samples(text, prefix="va_savant_")
     by_source: dict[str, dict[str, Any]] = {}
     global_metrics: dict[str, float] = {}
+    stage_metrics: dict[str, dict[str, Any]] = {}
     required_seen: set[str] = set()
     for sample in samples:
         name = str(sample["name"])
         value = float(sample["value"])
         labels = sample["labels"]
+        stage = str(labels.get("stage") or "")
+        if stage:
+            stage_row = stage_metrics.setdefault(
+                stage,
+                {
+                    "duration_count": 0.0,
+                    "duration_sum_s": 0.0,
+                    "duration_last_s": None,
+                    "duration_buckets": {},
+                    "batch_occupancy": {},
+                },
+            )
+            if name == "va_savant_stage_duration_seconds_count":
+                stage_row["duration_count"] = value
+            elif name == "va_savant_stage_duration_seconds_sum":
+                stage_row["duration_sum_s"] = value
+            elif name == "va_savant_stage_duration_seconds_last":
+                stage_row["duration_last_s"] = value
+            elif name == "va_savant_stage_duration_seconds_bucket":
+                stage_row["duration_buckets"][str(labels.get("le") or "")] = value
+            elif name == "va_savant_batch_occupancy_total":
+                stage_row["batch_occupancy"][str(labels.get("batch_size") or "0")] = value
+            continue
         source_id = str(labels.get("source_id") or "")
         if source_id:
             row = by_source.setdefault(
@@ -7417,7 +7794,64 @@ def parse_savant_metrics_text(text: str) -> dict[str, Any]:
         "sources_active": global_metrics.get("va_savant_sources_active"),
         "global": global_metrics,
         "sources": sources,
+        "stage_metrics": _finalize_stage_metrics(stage_metrics),
     }
+
+
+def _finalize_stage_metrics(stage_metrics: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    finalized: dict[str, dict[str, Any]] = {}
+    for stage, row in sorted(stage_metrics.items()):
+        count = float(row.get("duration_count") or 0.0)
+        duration_sum = float(row.get("duration_sum_s") or 0.0)
+        occupancy = {
+            str(size): int(value)
+            for size, value in sorted(
+                (row.get("batch_occupancy") or {}).items(),
+                key=lambda item: int(item[0]),
+            )
+        }
+        occupancy_total = sum(occupancy.values())
+        finalized[stage] = {
+            **row,
+            "duration_count": int(count),
+            "duration_mean_ms": round(duration_sum * 1000.0 / count, 3) if count else None,
+            "duration_p50_upper_ms": _histogram_quantile_upper_ms(
+                row.get("duration_buckets") or {}, count, 0.50
+            ),
+            "duration_p95_upper_ms": _histogram_quantile_upper_ms(
+                row.get("duration_buckets") or {}, count, 0.95
+            ),
+            "batch_occupancy": occupancy,
+            "batch_occupancy_total": occupancy_total,
+            "batch_full_ratio": (
+                round(occupancy.get("4", 0) / occupancy_total, 4)
+                if occupancy_total
+                else None
+            ),
+        }
+    return finalized
+
+
+def _histogram_quantile_upper_ms(
+    buckets: dict[str, Any],
+    count: float,
+    quantile: float,
+) -> float | None:
+    if count <= 0:
+        return None
+    target = count * quantile
+    finite: list[tuple[float, float]] = []
+    for upper, value in buckets.items():
+        if upper == "+Inf":
+            continue
+        try:
+            finite.append((float(upper), float(value)))
+        except (TypeError, ValueError):
+            continue
+    for upper, value in sorted(finite):
+        if value >= target:
+            return round(upper * 1000.0, 3)
+    return None
 
 
 def _parse_prometheus_samples(text: str, *, prefix: str) -> list[dict[str, Any]]:

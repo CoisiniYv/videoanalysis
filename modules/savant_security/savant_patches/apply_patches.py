@@ -43,7 +43,7 @@ PATCHES = (
         "deepstream/pipeline.py",
         "pipeline.py",
         "5c418afd69e9d478a43cc1a123513837",
-        "7c5eabbe84697e591a0a31a1c3977f2c",
+        "2c52ffc83caa10e07bac0bbff94850c0",
     ),
 )
 

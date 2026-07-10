@@ -9,6 +9,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT.parent / "scripts" / "runtime" / "run_midterm_pressure60.py"
@@ -1070,6 +1072,184 @@ def test_pressure_face_interval_defaults_to_one_fps_from_input_fps() -> None:
     assert module.infer_interval_for_target_fps("4/1", target_fps=module.Fraction(1, 1)) == 3
     assert module.infer_interval_for_target_fps("8/1", target_fps=module.Fraction(1, 1)) == 7
     assert module.infer_interval_for_target_fps("1/1", target_fps=module.Fraction(1, 1)) == 0
+
+
+def test_dual_shard_pressure_enables_stage_metrics(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        dual_shard_api=True,
+    )
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+
+    for service in ("savant-a", "savant-b"):
+        assert override["services"][service]["environment"][
+            "SAVANT_STAGE_METRICS_ENABLED"
+        ] == "true"
+
+
+def test_parse_savant_stage_latency_and_batch_occupancy() -> None:
+    module = _load_module()
+    parsed = module.parse_savant_metrics_text(
+        """
+va_savant_stage_duration_seconds_count{stage="yolo26_pose"} 10
+va_savant_stage_duration_seconds_sum{stage="yolo26_pose"} 0.08
+va_savant_stage_duration_seconds_last{stage="yolo26_pose"} 0.009
+va_savant_stage_duration_seconds_bucket{stage="yolo26_pose",le="0.005"} 4
+va_savant_stage_duration_seconds_bucket{stage="yolo26_pose",le="0.01"} 8
+va_savant_stage_duration_seconds_bucket{stage="yolo26_pose",le="0.025"} 10
+va_savant_stage_duration_seconds_bucket{stage="yolo26_pose",le="+Inf"} 10
+va_savant_batch_occupancy_total{stage="yolo26_pose",batch_size="3"} 3
+va_savant_batch_occupancy_total{stage="yolo26_pose",batch_size="4"} 7
+"""
+    )
+
+    pose = parsed["stage_metrics"]["yolo26_pose"]
+    assert pose["duration_count"] == 10
+    assert pose["duration_mean_ms"] == 8.0
+    assert pose["duration_p50_upper_ms"] == 10.0
+    assert pose["duration_p95_upper_ms"] == 25.0
+    assert pose["batch_occupancy"] == {"3": 3, "4": 7}
+    assert pose["batch_full_ratio"] == 0.7
+
+
+def test_aggregate_savant_stage_metrics_sums_dual_branches() -> None:
+    module = _load_module()
+    row = {
+        "duration_count": 5,
+        "duration_sum_s": 0.04,
+        "duration_last_s": 0.009,
+        "duration_buckets": {"0.01": 4, "0.025": 5, "+Inf": 5},
+        "batch_occupancy": {"4": 5},
+    }
+    merged = module.aggregate_savant_stage_metrics(
+        {"shards": [{"stage_metrics": {"yolo26_pose": row}}, {"stage_metrics": {"yolo26_pose": row}}]}
+    )
+
+    pose = merged["yolo26_pose"]
+    assert pose["duration_count"] == 10
+    assert pose["duration_mean_ms"] == 8.0
+    assert pose["batch_occupancy"] == {"4": 10}
+    assert pose["batch_full_ratio"] == 1.0
+
+
+def test_savant_ablation_module_is_cumulative_and_artifact_scoped(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        savant_ablation_stage="pose-face",
+        savant_output_mode="metadata-only",
+    )
+
+    generated_path = module.write_savant_ablation_module(cfg)
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    names = [element["name"] for element in generated["pipeline"]["elements"]]
+
+    assert generated_path.parent == tmp_path
+    assert names == [
+        "yolo26_pose",
+        "tracker",
+        "behavior_rules",
+        "yolov8_face",
+        "face_person_associator",
+        "savant_perf_metrics",
+    ]
+    manifest = json.loads((tmp_path / "savant_ablation_manifest.json").read_text())
+    assert manifest["stage"] == "pose-face"
+    assert manifest["output_mode"] == "metadata-only"
+    assert "adaface" in manifest["removed_elements"]
+
+
+def test_dual_shard_override_uses_artifact_module_and_metadata_output(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        dual_shard_api=True,
+        savant_ablation_stage="pose-only",
+        savant_output_mode="metadata-only",
+        cpu_isolation_profile="t4-16cpu",
+    )
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+
+    for service in ("savant-a", "savant-b"):
+        service_doc = override["services"][service]
+        assert service_doc["environment"]["SAVANT_MODULE_FILE"] == str(
+            tmp_path.resolve() / "module.pressure.yml"
+        )
+        assert service_doc["environment"]["OUTPUT_FRAME"] == "null"
+        assert "volumes" not in service_doc
+    assert override["services"]["savant-a"]["cpuset"] == "0-2,8-10"
+    assert override["services"]["savant-b"]["cpuset"] == "3-5,11-13"
+    assert override["services"]["analysis-forwarder-a"]["cpuset"] == "6,14"
+    assert override["services"]["analysis-forwarder-b"]["cpuset"] == "6,14"
+
+
+def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
+    tmp_path, monkeypatch
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    subprocess_calls: list[list[str]] = []
+    compose_calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+
+    def fake_subprocess_run(cmd, **_kwargs):
+        subprocess_calls.append(cmd)
+        return Completed()
+
+    def fake_run(cmd, _log_path, check=True):
+        compose_calls.append(cmd)
+        return Completed()
+
+    observed = {
+        "video-analytics-midterm-event-worker": "1-2",
+        "video-analytics-midterm-face-worker": "",
+    }
+    monkeypatch.setattr(module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module, "docker_container_cpuset", observed.__getitem__)
+
+    result = module.restore_worker_cpu_isolation(
+        cfg,
+        {
+            "profile": "test",
+            "containers": {
+                "video-analytics-midterm-event-worker": {"original_cpuset": "1-2"},
+                "video-analytics-midterm-face-worker": {"original_cpuset": ""},
+            },
+        },
+    )
+
+    assert subprocess_calls == [
+        [
+            "docker",
+            "update",
+            "--cpuset-cpus",
+            "1-2",
+            "video-analytics-midterm-event-worker",
+        ]
+    ]
+    assert compose_calls[0][-1] == "face-worker"
+    assert result["containers"]["video-analytics-midterm-event-worker"]["ok"] is True
+    assert result["containers"]["video-analytics-midterm-face-worker"] == {
+        "restored_cpuset": "",
+        "observed_cpuset": "",
+        "method": "compose_recreate",
+        "ok": True,
+        "error": "",
+    }
 
 
 def test_pressure_materialization_quota_auto_keeps_retained_headroom() -> None:
