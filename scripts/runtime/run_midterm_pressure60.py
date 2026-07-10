@@ -4633,16 +4633,24 @@ def pressure_event_sampling_cutoff(conn, cfg: PressureConfig) -> dict[str, Any]:
 
 
 def rolling_cache_postfill_after_sampling(cfg: PressureConfig) -> dict[str, Any]:
+    rolling_cache_postfill_s = (
+        cfg.rolling_cache_postfill_s if cfg.rolling_cache_evidence else 0
+    )
+    adaface_visibility_grace_s = 5 if cfg.adaface_decoupled else 0
+    postfill_s = max(rolling_cache_postfill_s, adaface_visibility_grace_s)
     summary = {
         "status": "skipped",
-        "postfill_s": 0,
+        "postfill_s": postfill_s,
+        "rolling_cache_postfill_s": rolling_cache_postfill_s,
+        "adaface_visibility_grace_s": adaface_visibility_grace_s,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "ended_at": None,
     }
-    if cfg.rolling_cache_evidence and cfg.rolling_cache_postfill_s > 0:
+    if postfill_s > 0:
         summary["status"] = "completed"
-        summary["postfill_s"] = cfg.rolling_cache_postfill_s
-        time.sleep(cfg.rolling_cache_postfill_s)
+        time.sleep(postfill_s)
+    if cfg.adaface_decoupled:
+        summary["adaface_visibility"] = pressure_source_visibility_snapshot(cfg)
     summary["ended_at"] = datetime.now(timezone.utc).isoformat()
     write_json(cfg.artifact_dir / "rolling_cache_postfill_summary.json", summary)
     return summary
@@ -5678,6 +5686,22 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
     )
     minimum_effective_fps = _fps_to_float(cfg.min_fps)
     target_effective_fps = _fps_to_float(cfg.fps)
+    postfill_adaface_visibility: dict[str, Any] = {}
+    postfill_path = cfg.artifact_dir / "rolling_cache_postfill_summary.json"
+    try:
+        postfill_payload = json.loads(postfill_path.read_text(encoding="utf-8"))
+        candidate = postfill_payload.get("adaface_visibility") or {}
+        if isinstance(candidate, dict):
+            postfill_adaface_visibility = candidate
+    except (OSError, json.JSONDecodeError):
+        pass
+    if postfill_adaface_visibility:
+        final_adaface_central_missing_eligible_source_ids = list(
+            postfill_adaface_visibility.get(
+                "missing_adaface_central_eligible_sources"
+            )
+            or []
+        )
     summary = {
         "sample_count": len(rows),
         "max_queue_depth": max_queue_depth,
@@ -5715,6 +5739,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
         "final_adaface_central_missing_eligible_source_ids": (
             final_adaface_central_missing_eligible_source_ids
         ),
+        "postfill_adaface_visibility": postfill_adaface_visibility,
         "final_savant_pose_objects_total": int(final_savant_pose_objects),
         "final_savant_face_objects_total": int(final_savant_face_objects),
         "final_savant_adaface_embeddings_total": int(final_savant_adaface_embeddings),
@@ -6603,11 +6628,11 @@ def pressure_failure_reasons(
         ):
             reasons.append("adaface_forwarder_did_not_see_all_sources")
         if (
-            int(
+            len(
                 sample_summary.get(
-                    "max_adaface_central_missing_eligible_sources"
+                    "final_adaface_central_missing_eligible_source_ids"
                 )
-                or 0
+                or []
             )
             > 0
         ):

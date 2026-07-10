@@ -501,6 +501,36 @@ def test_prepare_pressure_sampling_window_clears_visibility_warmup_rows(
     assert summary["cleanup"]["event_rows_deleted"] == 3
 
 
+def test_decoupled_adaface_postfill_keeps_sources_alive_for_visibility(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        adaface_decoupled=True,
+        rolling_cache_evidence=False,
+        rolling_cache_postfill_s=0,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        module,
+        "pressure_source_visibility_snapshot",
+        lambda _cfg: {
+            "status": "all_visible",
+            "missing_adaface_central_eligible_sources": [],
+        },
+    )
+
+    summary = module.rolling_cache_postfill_after_sampling(cfg)
+
+    assert sleeps == [5]
+    assert summary["postfill_s"] == 5
+    assert summary["adaface_visibility"]["status"] == "all_visible"
+
+
 def test_rolling_cache_segment_visibility_summary_uses_metadata_mtime(
     tmp_path: Path,
 ) -> None:
@@ -2369,6 +2399,7 @@ def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> N
         "max_adaface_forwarder_eligible_sources": 55,
         "max_adaface_central_sources": 55,
         "max_adaface_central_missing_eligible_sources": 0,
+        "final_adaface_central_missing_eligible_source_ids": [],
         "max_adaface_forwarder_queue_depth": 0,
         "final_adaface_forwarder_send_failures_total": 0,
         "max_savant_send_failures_delta": 0,
@@ -2392,7 +2423,9 @@ def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> N
     assert "adaface_central_did_not_see_all_sources" not in reasons
     assert "adaface_central_missed_eligible_sources" not in reasons
 
-    sample_summary["max_adaface_central_missing_eligible_sources"] = 1
+    sample_summary["final_adaface_central_missing_eligible_source_ids"] = [
+        "pressure60_test_59"
+    ]
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "adaface_central_missed_eligible_sources" in reasons
