@@ -1165,6 +1165,13 @@ def test_savant_ablation_module_is_cumulative_and_artifact_scoped(tmp_path) -> N
     assert "adaface" in manifest["removed_elements"]
 
 
+def test_non_evidence_ablation_skips_strict_event_quiescence() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'cfg.savant_ablation_stage == "full-evidence"' in source
+    assert '"reason": "non_evidence_savant_ablation"' in source
+
+
 def test_dual_shard_override_uses_artifact_module_and_metadata_output(tmp_path) -> None:
     module = _load_module()
     cfg = _config(

@@ -1103,10 +1103,17 @@ def main(argv: list[str] | None = None) -> int:
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
-        report["pressure_event_quiescence"] = wait_for_pressure_event_quiescence(
-            cfg,
-            redis_client,
-        )
+        if cfg.savant_ablation_stage == "full-evidence":
+            report["pressure_event_quiescence"] = wait_for_pressure_event_quiescence(
+                cfg,
+                redis_client,
+            )
+        else:
+            report["pressure_event_quiescence"] = {
+                "skipped": True,
+                "reason": "non_evidence_savant_ablation",
+                "stage": cfg.savant_ablation_stage,
+            }
         report["pressure_post_sample_cleanup"] = clear_pressure_post_sample_rows(
             conn,
             cfg,
