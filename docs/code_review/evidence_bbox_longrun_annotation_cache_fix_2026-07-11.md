@@ -60,15 +60,60 @@ Regression coverage lives in
 ## Live production proof
 
 After deploying the retry fixes and exact-PTS DB recovery during the same
-two-hour run, the port-8090 DB-backed API reported:
+two-hour run, an intermediate port-8090 audit reached 411/411 video bundles
+with DB overlay rows. Newly finalized post-fix bundles produced 9 and 10
+overlay frames directly, proving that the result was not limited to the
+one-time historical backfill.
 
-- 411 video bundles and 411 available raw clips;
-- 411/411 bundles with non-zero annotation lines;
-- 411/411 bundles with DB overlay rows;
-- sampled annotation details with `index_source=database` and non-zero objects;
-- newly finalized post-fix bundles produced 9 and 10 overlay frames directly,
-  proving that the result was not limited to the one-time historical backfill.
+The final artifact is:
 
-The same run separately accumulated materialization expiry/failure under its
-sustained event rate. That is an evidence-throughput gate failure and must not
-be confused with the bbox completeness fix.
+`/data/video-analytics/artifacts/pressure60_4p1_dual1gpu_retain2h_20260711T034003Z`
+
+Its final DB-backed 8090 audit reported:
+
+- 3,559 playable retained bundles: 553 intrusion videos and 3,006 watchlist
+  images;
+- 553/553 videos with a DB timeline and 553/553 with displayable DB
+  annotations;
+- `annotation_bbox_missing_count=0` and
+  `annotation_person_context_missing_count=0`;
+- `annotation_fallback_count=0`, `timeline_missing_count=0`, and
+  `timeline_fallback_count=0`;
+- zero retained intrusion videos without a non-empty
+  `evidence_overlay_segments` row;
+- 553/553 video windows and durations passed: 252 at 5:5, 189 at 10:10, and
+  112 at 15:15, with no duration mismatch or unexpected policy;
+- a retained video sampled through port 8090 returned HTTP 200 and was readable
+  by `ffprobe`.
+
+Trajectory retention was verified independently of evidence overlays. The run
+retained 283,855 face observations across 60/60 sources, including 3,898 rows
+with a persisted trajectory face-crop path. Sample trajectory JPEGs served by
+port 8090 returned HTTP 200. Cleanup disabled the 60 temporary cameras but
+deleted zero cameras, events, face observations, person bbox observations,
+rules, zones, or evidence paths. The normal single-Savant runtime was restored
+healthy and no pressure source or dual-shard container remained.
+
+## Two-hour pressure result
+
+The bbox and visual-retention acceptance gates passed, but the overall
+two-hour pressure gate did not pass. The final run contained 24,149 events
+(19,587 intrusion and 4,562 watchlist hits), 9,016 unsuppressed evidence tasks,
+3,252 materialized tasks, 5,260 expired tasks, and 504 failed tasks. The report
+status was `failed_pressure_gates` with these reasons:
+
+- `materialization_expired_present`;
+- `savant_send_failures`;
+- `steady_effective_fps_below_minimum`;
+- `forwarder_queue_full` and `forwarder_queue_nonzero`;
+- `pressure_observed_window_exceeded`;
+- `validate_seq_iq_exceeded`;
+- `rolling_cache_missing_source_segments`;
+- `rolling_cache_segment_fps_below_full_rate`;
+- `rolling_cache_segments_unmeasured`.
+
+The event and trajectory counts continued growing after video materialization
+had saturated at 553 playable intrusion clips. This separates the fixed bbox
+completeness defect from the remaining sustained evidence-throughput and
+forwarder/FPS capacity failures. A run must not be called pressure-gate-passed
+solely because all materialized videos have correct bbox overlays.
