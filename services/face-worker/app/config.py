@@ -46,6 +46,8 @@ class Config:
     qdrant_sync_poll_interval_seconds: float = 2.0
     qdrant_sync_processing_timeout_seconds: int = 300
     watchlist_event_cooldown_s: float = 60.0
+    trajectory_thumbnail_root: str = "/data/video-analytics/media/face_trajectories"
+    trajectory_thumbnail_max_bytes: int = 256 * 1024
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -94,6 +96,14 @@ def load_config() -> Config:
         ),
         watchlist_event_cooldown_s=max(
             float(os.getenv("WATCHLIST_EVENT_COOLDOWN_S", "60")), 0.0
+        ),
+        trajectory_thumbnail_root=os.getenv(
+            "FACE_TRAJECTORY_THUMBNAIL_ROOT",
+            "/data/video-analytics/media/face_trajectories",
+        ),
+        trajectory_thumbnail_max_bytes=max(
+            int(os.getenv("FACE_TRAJECTORY_THUMBNAIL_MAX_BYTES", str(256 * 1024))),
+            1024,
         ),
         face_vector_backend=os.getenv("FACE_VECTOR_BACKEND", "pgvector").strip().lower(),
         face_vector_small_target_threshold=int(

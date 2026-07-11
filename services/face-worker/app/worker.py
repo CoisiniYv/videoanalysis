@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import os
 import signal
 import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 
 import psycopg
@@ -286,6 +290,7 @@ class WatchlistMatchEmitter:
                         rule.cooldown_s,
                     )
                     continue
+                self._attach_trajectory_thumbnail(obs)
                 event = build_watchlist_hit_event(
                     observation=obs,
                     gallery_match=gallery_match,
@@ -322,6 +327,85 @@ class WatchlistMatchEmitter:
                     rule.threshold,
                 )
         return emitted
+
+    def _attach_trajectory_thumbnail(self, obs: dict) -> str | None:
+        """Persist one emitted hit's aligned ROI without retaining unknown faces."""
+        if obs.get("crop_path"):
+            return str(obs["crop_path"])
+        payload = obs.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        transport = payload.get("roi_transport")
+        if not isinstance(transport, dict):
+            return None
+        redis_key = str(transport.get("thumbnail_redis_key") or "")
+        if not redis_key:
+            return None
+        try:
+            jpeg = self._redis.get(redis_key)
+            if not jpeg:
+                logger.warning(
+                    "watchlist_thumbnail_missing source_observation_id=%s key=%s",
+                    obs.get("source_observation_id"),
+                    redis_key,
+                )
+                return None
+            jpeg = bytes(jpeg)
+            if (
+                len(jpeg) > self._cfg.trajectory_thumbnail_max_bytes
+                or not jpeg.startswith(b"\xff\xd8")
+                or not jpeg.endswith(b"\xff\xd9")
+            ):
+                logger.warning(
+                    "watchlist_thumbnail_invalid source_observation_id=%s bytes=%d",
+                    obs.get("source_observation_id"),
+                    len(jpeg),
+                )
+                return None
+            source_observation_id = str(obs["source_observation_id"])
+            digest = hashlib.sha256(source_observation_id.encode("utf-8")).hexdigest()
+            day = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+            output_dir = Path(self._cfg.trajectory_thumbnail_root) / day
+            output_dir.mkdir(parents=True, exist_ok=True)
+            target = output_dir / f"{digest}.jpg"
+            temporary = output_dir / f".{digest}.{os.getpid()}.tmp"
+            temporary.write_bytes(jpeg)
+            temporary.replace(target)
+            crop_path = str(target)
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE face_observations
+                    SET crop_path = %(crop_path)s,
+                        payload = jsonb_set(
+                            COALESCE(payload, '{}'::jsonb)
+                                #- '{roi_transport,thumbnail_redis_key}',
+                            '{roi_transport,thumbnail_persisted}',
+                            'true'::jsonb,
+                            true
+                        )
+                    WHERE source_observation_id = %(source_observation_id)s
+                    """,
+                    {
+                        "crop_path": crop_path,
+                        "source_observation_id": source_observation_id,
+                    },
+                )
+            obs["crop_path"] = crop_path
+            self._redis.delete(redis_key)
+            logger.info(
+                "watchlist_thumbnail_persisted source_observation_id=%s path=%s bytes=%d",
+                source_observation_id,
+                crop_path,
+                len(jpeg),
+            )
+            return crop_path
+        except Exception:
+            logger.exception(
+                "watchlist_thumbnail_persist_failed source_observation_id=%s",
+                obs.get("source_observation_id"),
+            )
+            return None
 
     def _normalize_observation_camera_id(self, obs: dict) -> dict:
         camera_id = str(obs.get("camera_id") or "")

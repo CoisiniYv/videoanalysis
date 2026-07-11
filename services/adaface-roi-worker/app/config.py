@@ -21,6 +21,7 @@ class Config:
     poll_timeout_ms: int
     pending_idle_ms: int
     roi_ttl_ms: int
+    thumbnail_ttl_ms: int
     engine_path: str
     metrics_port: int
 
@@ -47,6 +48,9 @@ def load_config() -> Config:
         poll_timeout_ms=max(int(os.getenv("FACE_ROI_POLL_TIMEOUT_MS", "100")), 1),
         pending_idle_ms=max(int(os.getenv("FACE_ROI_PENDING_IDLE_MS", "5000")), 1),
         roi_ttl_ms=max(int(os.getenv("FACE_ROI_TTL_MS", "5000")), 1),
+        thumbnail_ttl_ms=max(
+            int(os.getenv("FACE_ROI_THUMBNAIL_TTL_MS", "30000")), 1000
+        ),
         engine_path=os.getenv(
             "ADAFACE_ENGINE_PATH",
             "/models/adaface/adaface_ir50_webface4m.onnx_b16_gpu0_fp16.engine",

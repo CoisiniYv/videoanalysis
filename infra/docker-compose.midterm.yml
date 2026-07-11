@@ -976,6 +976,8 @@ services:
       WATCHLIST_TARGET_EXTERNAL_PERSON_IDS: "${WATCHLIST_TARGET_EXTERNAL_PERSON_IDS:-demo:midterm:reese,demo:midterm:finch}"
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
       WATCHLIST_TARGET_REFRESH_SECONDS: "30"
+      FACE_TRAJECTORY_THUMBNAIL_ROOT: "/data/video-analytics/media/face_trajectories"
+      FACE_TRAJECTORY_THUMBNAIL_MAX_BYTES: "262144"
       FACE_VECTOR_BACKEND: "${FACE_VECTOR_BACKEND:-pgvector}"
       FACE_VECTOR_SMALL_TARGET_THRESHOLD: "${FACE_VECTOR_SMALL_TARGET_THRESHOLD:-5}"
       QDRANT_URL: "${QDRANT_URL:-http://qdrant:6333}"
@@ -1000,7 +1002,7 @@ services:
       POLL_TIMEOUT_MS: "2000"
     volumes:
       - ../services/face-worker:/app:rw
-      - /data/video-analytics/media:/data/video-analytics/media:ro
+      - /data/video-analytics/media:/data/video-analytics/media:rw
       - /data/video-analytics/models:/data/video-analytics/models:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -1024,6 +1026,7 @@ services:
       FACE_ROI_CONSUMER_NAME: "${FACE_ROI_CONSUMER_NAME:-adaface-roi-worker-1}"
       FACE_ROI_STREAM_MAXLEN: "${FACE_ROI_STREAM_MAXLEN:-20000}"
       FACE_ROI_TTL_MS: "${FACE_ROI_TTL_MS:-5000}"
+      FACE_ROI_THUMBNAIL_TTL_MS: "${FACE_ROI_THUMBNAIL_TTL_MS:-30000}"
       FACE_ROI_PENDING_IDLE_MS: "${FACE_ROI_PENDING_IDLE_MS:-5000}"
       FACE_ROI_POLL_TIMEOUT_MS: "${FACE_ROI_POLL_TIMEOUT_MS:-100}"
       FACE_ROI_BATCH_TIMEOUT_MS: "${FACE_ROI_BATCH_TIMEOUT_MS:-10}"

@@ -151,3 +151,14 @@ def test_roi_worker_deletes_ephemeral_jpeg_after_acknowledgement() -> None:
     assert source.index("redis.xack(") < source.index("redis.xdel(")
     assert source.count("acknowledge_and_delete(redis, cfg,") == 3
     assert "va_adaface_roi_stream_cleanup_total" in source
+
+
+def test_roi_worker_stages_thumbnail_with_short_redis_ttl() -> None:
+    source = (
+        ROOT / "services/adaface-roi-worker/app/worker.py"
+    ).read_text(encoding="utf-8")
+
+    assert "security:face_roi_thumbnail:" in source
+    assert "px=cfg.thumbnail_ttl_ms" in source
+    assert 'metadata["thumbnail_redis_key"] = thumbnail_key' in source
+    assert "message.jpeg_bytes" in source

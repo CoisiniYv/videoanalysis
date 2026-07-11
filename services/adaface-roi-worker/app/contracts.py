@@ -67,6 +67,7 @@ def build_face_observation(metadata: dict[str, Any], embedding: list[float]) -> 
                 "schema_version": metadata.get("schema_version"),
                 "alignment": metadata.get("alignment"),
                 "created_at_ms": metadata.get("created_at_ms"),
+                "thumbnail_redis_key": metadata.get("thumbnail_redis_key"),
             },
             "media": media,
         },

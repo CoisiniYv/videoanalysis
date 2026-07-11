@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import signal
@@ -37,6 +38,9 @@ INFERENCE_SECONDS = Histogram(
     buckets=(0.005, 0.01, 0.02, 0.04, 0.08, 0.12, 0.2, 0.4, 1.0),
 )
 PENDING = Gauge("va_adaface_roi_pending", "Redis consumer group pending entries")
+THUMBNAILS = Counter(
+    "va_adaface_roi_thumbnails_total", "Transient ROI thumbnail outcomes", ["outcome"]
+)
 LAST_SUCCESS_UNIX = Gauge(
     "va_adaface_roi_last_success_unixtime", "Last successful observation publish time"
 )
@@ -47,6 +51,7 @@ class RoiMessage:
     message_id: str
     metadata: dict[str, Any]
     image: np.ndarray
+    jpeg_bytes: bytes
 
 
 def ensure_group(redis: Redis, cfg: Config) -> None:
@@ -69,7 +74,12 @@ def decode_message(message_id: bytes | str, fields: dict[bytes, bytes]) -> RoiMe
     if image is None or image.shape != (112, 112, 3):
         raise ValueError(f"invalid_jpeg_shape:{getattr(image, 'shape', None)}")
     msg_id = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
-    return RoiMessage(msg_id, metadata, image)
+    return RoiMessage(msg_id, metadata, image, bytes(raw_image))
+
+
+def thumbnail_redis_key(source_observation_id: str) -> str:
+    digest = hashlib.sha256(source_observation_id.encode("utf-8")).hexdigest()
+    return f"security:face_roi_thumbnail:{digest}"
 
 
 def expired(metadata: dict[str, Any], now_ms: int) -> bool:
@@ -167,7 +177,14 @@ def process_entries(redis: Redis, cfg: Config, runner, entries) -> None:
     BATCHES.labels(str(len(decoded))).inc()
     for message, feature in zip(decoded, features, strict=True):
         embedding = [float(value) for value in feature.tolist()]
-        observation = build_face_observation(message.metadata, embedding)
+        thumbnail_key = thumbnail_redis_key(
+            str(message.metadata["source_observation_id"])
+        )
+        redis.set(thumbnail_key, message.jpeg_bytes, px=cfg.thumbnail_ttl_ms)
+        THUMBNAILS.labels("staged").inc()
+        metadata = dict(message.metadata)
+        metadata["thumbnail_redis_key"] = thumbnail_key
+        observation = build_face_observation(metadata, embedding)
         redis.xadd(
             cfg.observation_stream,
             observation_redis_fields(observation),

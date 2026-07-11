@@ -186,6 +186,10 @@ class _FakeWatchlistCursor:
     def execute(self, query, params=None):
         params = params or {}
         self.row = None
+        if "UPDATE face_observations" in query:
+            self.conn.observation_updates.append(dict(params))
+            self.rows = []
+            return
         if "FROM camera_rules" in query:
             self.rows = self.conn.rules_by_camera.get(params.get("camera_id"), [])
             return
@@ -223,6 +227,7 @@ class _FakeWatchlistConn:
         self.rules_by_camera = rules_by_camera
         self.person_rows = person_rows
         self.cameras_by_source = cameras_by_source or {}
+        self.observation_updates = []
 
     def cursor(self, *_, **__):
         return _FakeWatchlistCursor(self)
@@ -257,10 +262,17 @@ class _FakeGalleryStore:
 class _FakeRedis:
     def __init__(self):
         self.events = []
+        self.values = {}
 
     def xadd(self, stream, fields, maxlen=None, approximate=True):
         self.events.append({"stream": stream, "fields": fields})
         return b"1-0"
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def delete(self, key):
+        return int(self.values.pop(key, None) is not None)
 
 
 def _make_watchlist_cfg(**overrides):
@@ -405,6 +417,52 @@ class TestObservationParsing:
 
 
 class TestWatchlistCameraRules:
+    def test_emitted_hit_persists_transient_roi_thumbnail(self, tmp_path):
+        conn = _FakeWatchlistConn(
+            rules_by_camera={
+                "cam-a": [
+                    {
+                        "rule_id": "rule_watchlist_a",
+                        "config": {"threshold": 0.81, "target_person_ids": [7]},
+                        "evidence_policy": {},
+                    }
+                ]
+            },
+            person_rows=[
+                {
+                    "id": 7,
+                    "name": "Person 7",
+                    "external_person_id": "p7",
+                    "is_active": True,
+                }
+            ],
+        )
+        redis = _FakeRedis()
+        key = "security:face_roi_thumbnail:test"
+        redis.values[key] = b"\xff\xd8aligned-112x112\xff\xd9"
+        emitter = _make_watchlist_emitter(
+            _make_watchlist_cfg(trajectory_thumbnail_root=str(tmp_path)),
+            conn,
+            _FakeGalleryStore(),
+            redis,
+        )
+        obs = _make_obs_dict(
+            camera_id="cam-a",
+            payload={
+                "camera_config_resolved": True,
+                "roi_transport": {"thumbnail_redis_key": key},
+            },
+        )
+
+        assert emitter.emit_for_observation(obs) == 1
+        assert key not in redis.values
+        assert len(conn.observation_updates) == 1
+        crop_path = Path(conn.observation_updates[0]["crop_path"])
+        assert crop_path.is_file()
+        assert crop_path.read_bytes() == b"\xff\xd8aligned-112x112\xff\xd9"
+        event = json.loads(redis.events[0]["fields"]["data"])
+        assert event["payload"]["media"]["crop_path"] == str(crop_path)
+
     def test_emitter_cooldown_is_per_camera_rule_and_person(self):
         conn = _FakeWatchlistConn(
             rules_by_camera={
