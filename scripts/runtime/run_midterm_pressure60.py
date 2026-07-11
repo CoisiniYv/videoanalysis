@@ -311,8 +311,10 @@ CPU_ISOLATION_PROFILES = {
         "savant-b": "3-5,11-13",
         "analysis-forwarder-a": "6,14",
         "analysis-forwarder-b": "6,14",
-        "workers": "7,15",
-        "worker-face-worker": "6-7,14-15",
+        "workers": "15",
+        "worker-media-worker": "7",
+        "worker-face-worker": "6,14",
+        "drain-workers": "6-7,14-15",
     },
     "local-24cpu": {
         "savant-a": "0,2,4,6,8,10",
@@ -1280,6 +1282,10 @@ def main(argv: list[str] | None = None) -> int:
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
+        if original_worker_cpu_isolation is not None:
+            report["cpu_isolation_drain"] = apply_worker_cpu_isolation_for_drain(
+                cfg
+            )
         if cfg.savant_ablation_stage == "full-evidence":
             report["pressure_event_quiescence"] = wait_for_pressure_event_quiescence(
                 cfg,
@@ -3122,6 +3128,43 @@ def reapply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
                 f"observed={observed!r} output={completed.stdout.strip()!r}"
             )
     write_json(cfg.artifact_dir / "cpu_isolation_reapply.json", result)
+    return result
+
+
+def apply_worker_cpu_isolation_for_drain(cfg: PressureConfig) -> dict[str, Any]:
+    """Expand evidence workers only after measured sources have stopped."""
+    profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
+    drain_cpuset = str(profile.get("drain-workers") or "")
+    result: dict[str, Any] = {
+        "profile": cfg.cpu_isolation_profile,
+        "target_cpuset": drain_cpuset,
+        "containers": {},
+    }
+    if not drain_cpuset:
+        return result
+    for container in sorted(set(WORKER_CONTAINER_NAMES.values())):
+        completed = subprocess.run(
+            ["docker", "update", "--cpuset-cpus", drain_cpuset, container],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        observed = docker_container_cpuset(container)
+        ok = completed.returncode == 0 and observed == drain_cpuset
+        result["containers"][container] = {
+            "target_cpuset": drain_cpuset,
+            "observed_cpuset": observed,
+            "ok": ok,
+            "error": "" if ok else completed.stdout.strip(),
+        }
+        if not ok:
+            write_json(cfg.artifact_dir / "cpu_isolation_drain.json", result)
+            raise RuntimeError(
+                f"failed to expand drain worker cpuset container={container} "
+                f"observed={observed!r} output={completed.stdout.strip()!r}"
+            )
+    write_json(cfg.artifact_dir / "cpu_isolation_drain.json", result)
     return result
 
 

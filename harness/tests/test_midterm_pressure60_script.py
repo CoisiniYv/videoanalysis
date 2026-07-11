@@ -1719,6 +1719,50 @@ def test_worker_cpu_isolation_is_reapplied_after_recreate(
     assert (tmp_path / "cpu_isolation_reapply.json").exists()
 
 
+def test_t4_evidence_worker_cpu_overrides_and_drain_expansion(
+    tmp_path, monkeypatch
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        cpu_isolation_profile="t4-16cpu-evidence",
+    )
+    observed: dict[str, str] = {}
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(cmd, **_kwargs):
+        observed[str(cmd[-1])] = str(cmd[-2])
+        return Completed()
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "docker_container_cpuset",
+        lambda container: observed.get(container, ""),
+    )
+
+    reapplied = module.reapply_worker_cpu_isolation(cfg)
+
+    assert reapplied["containers"]["video-analytics-midterm-media-worker"][
+        "target_cpuset"
+    ] == "7"
+    assert reapplied["containers"]["video-analytics-midterm-face-worker"][
+        "target_cpuset"
+    ] == "6,14"
+
+    drain = module.apply_worker_cpu_isolation_for_drain(cfg)
+
+    assert all(
+        row["target_cpuset"] == "6-7,14-15" and row["ok"]
+        for row in drain["containers"].values()
+    )
+    assert (tmp_path / "cpu_isolation_drain.json").exists()
+
+
 def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
     tmp_path, monkeypatch
 ) -> None:
@@ -3003,19 +3047,21 @@ def test_t4_evidence_cpu_profile_preserves_savant_and_worker_capacity() -> None:
 
     assert profile["savant-a"] == "0-2,8-10"
     assert profile["savant-b"] == "3-5,11-13"
-    assert profile["workers"] == "7,15"
-    assert profile["worker-face-worker"] == "6-7,14-15"
+    assert profile["workers"] == "15"
+    assert profile["worker-media-worker"] == "7"
+    assert profile["worker-face-worker"] == "6,14"
+    assert profile["drain-workers"] == "6-7,14-15"
     assert (
         module._worker_target_cpuset(
             profile, "video-analytics-midterm-face-worker"
         )
-        == "6-7,14-15"
+        == "6,14"
     )
     assert (
         module._worker_target_cpuset(
             profile, "video-analytics-midterm-media-worker"
         )
-        == "7,15"
+        == "7"
     )
 
 
