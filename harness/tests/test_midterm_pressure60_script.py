@@ -1835,18 +1835,11 @@ def test_t4_evidence_worker_cpu_overrides_and_drain_expansion(
     assert (tmp_path / "cpu_isolation_drain.json").exists()
 
 
-def test_rolling_materialization_is_deferred_until_sources_stop() -> None:
+def test_rolling_materialization_stays_enabled_during_sampling() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
-    assert '"ROLLING_CACHE_MATERIALIZATION_ENABLED": "false"' in source
-    stop_index = source.index("stop_pressure_sources(conn, cfg)")
-    enable_index = source.index(
-        "enable_rolling_cache_materialization_after_sampling(cfg)", stop_index
-    )
-    drain_cpu_index = source.index(
-        "apply_worker_cpu_isolation_for_drain(", enable_index
-    )
-    assert stop_index < enable_index < drain_cpu_index
+    assert '"ROLLING_CACHE_MATERIALIZATION_ENABLED": "true"' in source
+    assert "enable_rolling_cache_materialization_after_sampling" not in source
 
 
 def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
