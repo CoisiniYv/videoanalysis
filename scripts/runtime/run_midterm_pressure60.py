@@ -9312,6 +9312,7 @@ def collect_adaface_roi_worker_metrics(cfg: PressureConfig) -> dict[str, Any]:
         "va_adaface_roi_batch_size_sum",
         "va_adaface_roi_inference_seconds_count",
         "va_adaface_roi_inference_seconds_sum",
+        "va_adaface_roi_stream_cleanup_total",
         "va_adaface_roi_pending",
         "va_adaface_roi_last_success_unixtime",
     }

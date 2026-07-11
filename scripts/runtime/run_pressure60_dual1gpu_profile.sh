@@ -24,8 +24,10 @@ Environment overrides:
   OUTPUT_MODE=copy    copy|metadata-only Savant output experiment.
   BATCH_TIMEOUT_US=40000
                       nvstreammux batched-push-timeout in microseconds.
-  CPU_PROFILE=none    none|local-24cpu|t4-16cpu|t4-16cpu-evidence temporary cpuset layout.
-  CUDA_MPS=0          Set to 1 for a temporary same-GPU CUDA MPS experiment.
+  CPU_PROFILE=<profile default>
+                      T4 uses staged t4-16cpu-evidence isolation.
+  CUDA_MPS=<profile default>
+                      T4 enables same-GPU CUDA MPS.
   ADAFACE_ASYNC=0      Set to 1 for DeepStream classifier async mode canary.
   FACE_TRACK_ID=0      Set to 1 to propagate person IDs to face objects.
   ADAFACE_QUEUE=0       Set to 1 to insert a bounded queue before AdaFace.
@@ -35,7 +37,7 @@ Environment overrides:
   ADAFACE_SHARDED=0     Set to 1 for one decoupled AdaFace sidecar per shard.
   ADAFACE_ROI_REDIS=0   Set to 1 for aligned 112x112 Redis ROI AdaFace worker.
   ROI_BATCH_TIMEOUT_MS=<profile default>
-                      AdaFace ROI batch16 aggregation wait (T4: 100ms).
+                      AdaFace ROI batch16 aggregation wait (T4: 200ms).
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -47,12 +49,22 @@ case "${profile}" in
     min_fps="198/25"
     run_prefix="pressure60_8p1_dual1gpu_cd60"
     roi_batch_timeout_default_ms="40"
+    batch_timeout_default_us="40000"
+    cpu_profile_default="none"
+    cuda_mps_default="0"
+    adaface_roi_redis_default="0"
+    output_mode_default="copy"
     ;;
   4fps-t4)
     fps="4/1"
     min_fps="99/25"
     run_prefix="pressure60_4p1_dual1gpu_cd60"
-    roi_batch_timeout_default_ms="100"
+    roi_batch_timeout_default_ms="200"
+    batch_timeout_default_us="10000"
+    cpu_profile_default="t4-16cpu-evidence"
+    cuda_mps_default="1"
+    adaface_roi_redis_default="1"
+    output_mode_default="metadata-only"
     ;;
   -h|--help|help)
     usage
@@ -72,10 +84,10 @@ streams="${STREAMS:-60}"
 duration_s="${DURATION_S:-400}"
 drain_s="${DRAIN_S:-120}"
 ablation_stage="${ABLATION_STAGE:-full-evidence}"
-output_mode="${OUTPUT_MODE:-copy}"
-batch_timeout_us="${BATCH_TIMEOUT_US:-40000}"
-cpu_profile="${CPU_PROFILE:-none}"
-cuda_mps="${CUDA_MPS:-0}"
+output_mode="${OUTPUT_MODE:-${output_mode_default}}"
+batch_timeout_us="${BATCH_TIMEOUT_US:-${batch_timeout_default_us}}"
+cpu_profile="${CPU_PROFILE:-${cpu_profile_default}}"
+cuda_mps="${CUDA_MPS:-${cuda_mps_default}}"
 adaface_async="${ADAFACE_ASYNC:-0}"
 face_track_id="${FACE_TRACK_ID:-0}"
 adaface_queue="${ADAFACE_QUEUE:-0}"
@@ -83,7 +95,7 @@ adaface_crop="${ADAFACE_CROP:-0}"
 adaface_pre_gate="${ADAFACE_PRE_GATE:-0}"
 adaface_decoupled="${ADAFACE_DECOUPLED:-0}"
 adaface_sharded="${ADAFACE_SHARDED:-0}"
-adaface_roi_redis="${ADAFACE_ROI_REDIS:-0}"
+adaface_roi_redis="${ADAFACE_ROI_REDIS:-${adaface_roi_redis_default}}"
 roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
 
 cmd=(

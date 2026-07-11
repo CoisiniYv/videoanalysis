@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT.parent / "scripts" / "runtime" / "run_midterm_pressure60.py"
 COMPOSE = ROOT.parent / "infra" / "docker-compose.midterm.yml"
+PROFILE_SCRIPT = ROOT.parent / "scripts" / "runtime" / "run_pressure60_dual1gpu_profile.sh"
 
 
 def _load_module():
@@ -97,6 +99,28 @@ def _config(module, **overrides):
     }
     values.update(overrides)
     return module.PressureConfig(**values)
+
+
+def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "4fps-t4"],
+        cwd=ROOT.parent,
+        env={**os.environ, "DRY_RUN": "1", "RUN_ID": "dry-run"},
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    output = completed.stdout
+    assert "savant_output_mode=metadata-only" in output
+    assert "batched_push_timeout_us=10000" in output
+    assert "cpu_isolation_profile=t4-16cpu-evidence" in output
+    assert "cuda_mps=1" in output
+    assert "adaface_roi_redis=1" in output
+    assert "adaface_roi_batch_timeout_ms=200" in output
+    assert "--pose-batch-size 4" in output
+    assert "--face-detector-batch-size 4" in output
+    assert "--face-embedding-batch-size 16" in output
 
 
 def test_pressure_rtsp_uri_uses_source_id_when_republish_base_has_no_placeholder() -> None:
@@ -2671,6 +2695,32 @@ def test_roi_adaface_watchlist_gate_accepts_warmup_log_evidence() -> None:
         cfg, [], diagnostics, db_before_cleanup=db_summary
     )
     assert "adaface_roi_watchlist_events_zero" in reasons
+
+
+def test_roi_worker_metrics_collect_stream_cleanup_outcomes(monkeypatch) -> None:
+    module = _load_module()
+    cfg = _config(module, adaface_roi_redis=True)
+    monkeypatch.setattr(
+        module,
+        "fetch_text_url",
+        lambda *_args, **_kwargs: "\n".join(
+            [
+                'va_adaface_roi_messages_total{outcome="published"} 16',
+                'va_adaface_roi_stream_cleanup_total{outcome="deleted"} 16',
+                'va_adaface_roi_stream_cleanup_total{outcome="delete_error"} 0',
+                "va_adaface_roi_pending 0",
+            ]
+        ),
+    )
+
+    summary = module.collect_adaface_roi_worker_metrics(cfg)
+
+    assert (
+        summary["metrics"][
+            'va_adaface_roi_stream_cleanup_total{outcome="deleted"}'
+        ]
+        == 16
+    )
 
 
 def test_roi_adaface_full_evidence_gate_requires_retained_watchlist_event() -> None:
