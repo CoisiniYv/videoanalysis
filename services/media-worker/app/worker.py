@@ -74,7 +74,7 @@ DEFAULT_MATERIALIZATION_FINALIZER_WORKERS = 1
 DEFAULT_MATERIALIZATION_THROTTLE_SLEEP_S = 0.0
 DEFAULT_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S = 0.0
 DEFAULT_MATERIALIZATION_CPU_THREAD_LIMIT = 0
-DEFAULT_FRAME_CACHE_ANCHOR_WAIT_MAX_S = 30.0
+DEFAULT_FRAME_CACHE_ANCHOR_WAIT_MAX_S = 120.0
 DEFAULT_FRAME_CACHE_ANCHOR_WAIT_FACTOR = 1.5
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
@@ -166,8 +166,10 @@ def _write_frame_cache_sidecar_after_anchor(
     attempts = 0
     waited_s = 0.0
     initial_lag_s = None
+    cache_bypassed_for_retry = False
+    writer_kwargs = dict(kwargs)
     while True:
-        summary, result = write_frame_cache_identity_sidecar(**kwargs)
+        summary, result = write_frame_cache_identity_sidecar(**writer_kwargs)
         lag_s = _frame_cache_anchor_lag_seconds(summary)
         if initial_lag_s is None:
             initial_lag_s = lag_s
@@ -185,6 +187,12 @@ def _write_frame_cache_sidecar_after_anchor(
             sleep_s,
             attempts + 1,
         )
+        if not cache_bypassed_for_retry:
+            retry_config = dict(writer_kwargs.get("config") or {})
+            retry_config["range_cache_ttl_s"] = 0.0
+            retry_config["range_cache_max_entries"] = 0
+            writer_kwargs["config"] = retry_config
+            cache_bypassed_for_retry = True
         time.sleep(sleep_s)
         waited_s += sleep_s
         attempts += 1
@@ -201,6 +209,7 @@ def _write_frame_cache_sidecar_after_anchor(
             else None
         ),
         "status": str(summary.get("annotation_status") or ""),
+        "range_cache_bypassed_for_retry": cache_bypassed_for_retry,
     }
     return summary, result
 

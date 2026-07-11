@@ -1066,7 +1066,8 @@ def test_frame_cache_sidecar_retries_when_exporter_is_behind(
     monkeypatch.setattr(worker.time, "sleep", sleeps.append)
     monkeypatch.setenv("FRAME_CACHE_ANCHOR_WAIT_MAX_S", "30")
     summary, _ = worker._write_frame_cache_sidecar_after_anchor(
-        event={"event_id": EVENT_ID, "source_id": "source-1"}
+        event={"event_id": EVENT_ID, "source_id": "source-1"},
+        config={"range_cache_ttl_s": 900.0, "range_cache_max_entries": 64},
     )
 
     assert len(calls) == 2
@@ -1074,6 +1075,10 @@ def test_frame_cache_sidecar_retries_when_exporter_is_behind(
     assert summary["annotation_status"] == "complete"
     assert summary["annotation_anchor_wait"]["attempts"] == 1
     assert summary["annotation_anchor_wait"]["initial_lag_s"] == 8.0
+    assert summary["annotation_anchor_wait"]["range_cache_bypassed_for_retry"] is True
+    assert calls[0]["config"]["range_cache_ttl_s"] == 900.0
+    assert calls[1]["config"]["range_cache_ttl_s"] == 0.0
+    assert calls[1]["config"]["range_cache_max_entries"] == 0
 
 
 def test_timeline_reconciliation_unverified_keeps_playable_clip_degraded() -> None:
