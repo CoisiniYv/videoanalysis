@@ -56,3 +56,19 @@ For every retained video evidence bundle:
 
 Regression coverage lives in
 `harness/tests/test_media_worker_perf_safety.py::test_frame_cache_sidecar_retries_when_exporter_is_behind`.
+
+## Live production proof
+
+After deploying the retry fixes and exact-PTS DB recovery during the same
+two-hour run, the port-8090 DB-backed API reported:
+
+- 411 video bundles and 411 available raw clips;
+- 411/411 bundles with non-zero annotation lines;
+- 411/411 bundles with DB overlay rows;
+- sampled annotation details with `index_source=database` and non-zero objects;
+- newly finalized post-fix bundles produced 9 and 10 overlay frames directly,
+  proving that the result was not limited to the one-time historical backfill.
+
+The same run separately accumulated materialization expiry/failure under its
+sustained event rate. That is an evidence-throughput gate failure and must not
+be confused with the bbox completeness fix.
