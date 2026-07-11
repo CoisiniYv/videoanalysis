@@ -311,7 +311,8 @@ CPU_ISOLATION_PROFILES = {
         "savant-b": "3-5,11-13",
         "analysis-forwarder-a": "6,14",
         "analysis-forwarder-b": "6,14",
-        "workers": "6-7,14-15",
+        "workers": "7,15",
+        "worker-face-worker": "6-7,14-15",
     },
     "local-24cpu": {
         "savant-a": "0,2,4,6,8,10",
@@ -3038,12 +3039,24 @@ def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
         "containers": {},
     }
     for container in containers:
+        container_target_cpuset = _worker_target_cpuset(profile, container)
         original = docker_container_cpuset(container)
-        row = {"original_cpuset": original, "applied": False, "error": ""}
+        row = {
+            "original_cpuset": original,
+            "target_cpuset": container_target_cpuset,
+            "applied": False,
+            "error": "",
+        }
         snapshot["containers"][container] = row
-        if target_cpuset:
+        if container_target_cpuset:
             completed = subprocess.run(
-                ["docker", "update", "--cpuset-cpus", target_cpuset, container],
+                [
+                    "docker",
+                    "update",
+                    "--cpuset-cpus",
+                    container_target_cpuset,
+                    container,
+                ],
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -3051,7 +3064,9 @@ def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
             )
             observed = docker_container_cpuset(container)
             row["observed_cpuset"] = observed
-            row["applied"] = completed.returncode == 0 and observed == target_cpuset
+            row["applied"] = (
+                completed.returncode == 0 and observed == container_target_cpuset
+            )
             if not row["applied"]:
                 row["error"] = (
                     completed.stdout.strip()
@@ -3068,9 +3083,8 @@ def apply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
 
 def reapply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
     """Reapply worker cpusets after pressure-specific container recreates."""
-    target_cpuset = str(
-        CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile].get("workers") or ""
-    )
+    profile = CPU_ISOLATION_PROFILES[cfg.cpu_isolation_profile]
+    target_cpuset = str(profile.get("workers") or "")
     result: dict[str, Any] = {
         "profile": cfg.cpu_isolation_profile,
         "target_cpuset": target_cpuset,
@@ -3079,16 +3093,24 @@ def reapply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
     if not target_cpuset:
         return result
     for container in sorted(set(WORKER_CONTAINER_NAMES.values())):
+        container_target_cpuset = _worker_target_cpuset(profile, container)
         completed = subprocess.run(
-            ["docker", "update", "--cpuset-cpus", target_cpuset, container],
+            [
+                "docker",
+                "update",
+                "--cpuset-cpus",
+                container_target_cpuset,
+                container,
+            ],
             check=False,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
         observed = docker_container_cpuset(container)
-        ok = completed.returncode == 0 and observed == target_cpuset
+        ok = completed.returncode == 0 and observed == container_target_cpuset
         result["containers"][container] = {
+            "target_cpuset": container_target_cpuset,
             "observed_cpuset": observed,
             "ok": ok,
             "error": "" if ok else completed.stdout.strip(),
@@ -3101,6 +3123,12 @@ def reapply_worker_cpu_isolation(cfg: PressureConfig) -> dict[str, Any]:
             )
     write_json(cfg.artifact_dir / "cpu_isolation_reapply.json", result)
     return result
+
+
+def _worker_target_cpuset(profile: dict[str, str], container: str) -> str:
+    service = WORKER_COMPOSE_SERVICES.get(container, "")
+    override = profile.get(f"worker-{service}") if service else None
+    return str(override or profile.get("workers") or "")
 
 
 def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) -> dict[str, Any]:

@@ -3003,7 +3003,20 @@ def test_t4_evidence_cpu_profile_preserves_savant_and_worker_capacity() -> None:
 
     assert profile["savant-a"] == "0-2,8-10"
     assert profile["savant-b"] == "3-5,11-13"
-    assert profile["workers"] == "6-7,14-15"
+    assert profile["workers"] == "7,15"
+    assert profile["worker-face-worker"] == "6-7,14-15"
+    assert (
+        module._worker_target_cpuset(
+            profile, "video-analytics-midterm-face-worker"
+        )
+        == "6-7,14-15"
+    )
+    assert (
+        module._worker_target_cpuset(
+            profile, "video-analytics-midterm-media-worker"
+        )
+        == "7,15"
+    )
 
 
 def test_write_dual_shard_pressure_sources_splits_eight_evidence_shards(
