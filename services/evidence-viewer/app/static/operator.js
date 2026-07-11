@@ -2757,7 +2757,10 @@ function renderPersonLatestLocation(location) {
 
 function renderPersonTrajectory(rows) {
   if (!personTrajectoryEl) return;
-  const trajectory = Array.isArray(rows) ? rows : [];
+  const trajectory = Array.isArray(rows)
+    ? [...rows].sort((left, right) =>
+        Number(Boolean(locationImageUrl(right))) - Number(Boolean(locationImageUrl(left))))
+    : [];
   if (!selectedPersonId) {
     personTrajectoryEl.textContent = "选择人员后可查看最近轨迹";
     return;
