@@ -306,6 +306,13 @@ CPU_ISOLATION_PROFILES = {
         "analysis-forwarder-b": "6,14",
         "workers": "7,15",
     },
+    "t4-16cpu-evidence": {
+        "savant-a": "0-2,8-10",
+        "savant-b": "3-5,11-13",
+        "analysis-forwarder-a": "6,14",
+        "analysis-forwarder-b": "6,14",
+        "workers": "6-7,14-15",
+    },
     "local-24cpu": {
         "savant-a": "0,2,4,6,8,10",
         "savant-b": "12-17",
@@ -7075,9 +7082,9 @@ def pressure_failure_reasons(
             )
             or 0
         )
-        if (
-            event_types.get("watchlist_hit", 0) <= 0
-            and watchlist_emitted_in_logs <= 0
+        if event_types.get("watchlist_hit", 0) <= 0 and (
+            cfg.savant_ablation_stage == "full-evidence"
+            or watchlist_emitted_in_logs <= 0
         ):
             reasons.append("adaface_roi_watchlist_events_zero")
         enqueued = int(savant_logs.get("face_roi_enqueued_max") or 0)

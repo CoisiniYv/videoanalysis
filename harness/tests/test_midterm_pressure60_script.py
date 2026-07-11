@@ -2587,6 +2587,57 @@ def test_roi_adaface_watchlist_gate_accepts_warmup_log_evidence() -> None:
     assert "adaface_roi_watchlist_events_zero" in reasons
 
 
+def test_roi_adaface_full_evidence_gate_requires_retained_watchlist_event() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=1,
+        keep_evidence=-1,
+        savant_ablation_stage="full-evidence",
+        adaface_roi_redis=True,
+        rolling_cache_evidence=True,
+    )
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 1,
+            "max_savant_sources": 1,
+            "max_savant_send_failures_delta": 0,
+            "steady_effective_fps_sample_count": 1,
+            "steady_effective_fps_meets_minimum": True,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "adaface_roi_worker": {
+            "reachable": True,
+            "metrics": {
+                'va_adaface_roi_messages_total{outcome="published"}': 10,
+                "va_adaface_roi_pending": 0,
+            },
+        },
+        "log_summary": {
+            "savant": {"validate_seq_iq": 0},
+            "face_worker": {"face_worker_watchlist_emitted_max": 7},
+            "replay_raw_fanout": {},
+        },
+    }
+    db_summary = {
+        "events": 1,
+        "distinct_events_with_playable_evidence": 1,
+        "blocking_materialization_tasks": 0,
+        "adaface_roi": {"observations": 10, "source_count": 1},
+        "event_types": [{"event_type": "intrusion", "count": 1}],
+    }
+
+    reasons = module.pressure_failure_reasons(
+        cfg, [], diagnostics, db_before_cleanup=db_summary
+    )
+
+    assert "adaface_roi_watchlist_events_zero" in reasons
+
+
 def test_rolling_cache_host_path_prefers_specific_fast_disk_bind(monkeypatch) -> None:
     module = _load_module()
 
@@ -2943,6 +2994,16 @@ def test_four_evidence_shards_raise_global_materialization_limit(monkeypatch) ->
     assert module._evidence_materialization_global_limit(4) == "36"
     assert module._evidence_materialization_global_limit(2) == "18"
     assert module._evidence_materialization_global_limit(8) == "72"
+
+
+def test_t4_evidence_cpu_profile_preserves_savant_and_worker_capacity() -> None:
+    module = _load_module()
+
+    profile = module.CPU_ISOLATION_PROFILES["t4-16cpu-evidence"]
+
+    assert profile["savant-a"] == "0-2,8-10"
+    assert profile["savant-b"] == "3-5,11-13"
+    assert profile["workers"] == "6-7,14-15"
 
 
 def test_write_dual_shard_pressure_sources_splits_eight_evidence_shards(
