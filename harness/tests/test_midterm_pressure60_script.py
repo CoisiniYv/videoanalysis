@@ -182,6 +182,50 @@ def test_pressure_cleanup_syncs_runtime_sources_after_camera_deletes() -> None:
     assert "runtime_sources_apply_after_pressure_runtime_cleanup.json" in source
 
 
+def test_runtime_cleanup_disables_pressure_cameras_without_deleting_visual_results(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    cfg = _config(module)
+
+    class FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Result:
+        rowcount = 2
+
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def transaction(self):
+            return FakeTx()
+
+        def execute(self, query, params):
+            self.calls.append((query, params))
+            return Result()
+
+    conn = FakeConn()
+    monkeypatch.setattr(module, "apply_sources_only", lambda *_args: {"status": "ok"})
+    monkeypatch.setattr(module, "cleanup_redis_streams", lambda *_args: 0)
+    monkeypatch.setattr(module, "remove_pressure_source_containers", lambda *_args: [])
+    monkeypatch.setattr(module, "remove_pressure_rolling_cache_artifacts", lambda *_args, **_kwargs: {})
+
+    summary = module.cleanup_pressure_runtime_only(conn, object(), cfg)
+
+    assert len(conn.calls) == 1
+    assert "UPDATE cameras SET enabled=false" in conn.calls[0][0]
+    assert summary["visual_results_retained"] is True
+    assert summary["deleted_events"] == 0
+    assert summary["deleted_face_observations"] == 0
+    assert summary["deleted_person_bbox_observations"] == 0
+    assert summary["removed_evidence_paths"] == 0
+
+
 def test_pressure_rtsp_uri_supports_republish_placeholders() -> None:
     module = _load_module()
     cfg = _config(
@@ -279,6 +323,8 @@ def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
     assert parsed.duration_s == 600
     assert parsed.drain_s == 120
     assert parsed.keep_evidence == -1
+    assert parsed.clear_existing_evidence is False
+    assert parsed.discard_pressure_results is False
 
 
 def test_pressure_source_ids_match_inserted_camera_ids() -> None:
@@ -500,7 +546,7 @@ def test_pressure_visibility_waits_for_decoupled_eligible_sources(
     assert ready["adaface_central_visible_count"] == 1
 
 
-def test_prepare_pressure_sampling_window_clears_visibility_warmup_rows(
+def test_prepare_pressure_sampling_window_preserves_visibility_warmup_rows(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -515,17 +561,36 @@ def test_prepare_pressure_sampling_window_clears_visibility_warmup_rows(
 
     monkeypatch.setattr(
         module,
-        "clear_pressure_warmup_rows",
-        lambda _conn, _cfg: calls.append("cleared") or {"event_rows_deleted": 3},
+        "preserve_pressure_warmup_rows",
+        lambda _conn, _cfg: calls.append("preserved") or {"event_rows_preserved": 3},
     )
     monkeypatch.setattr(module.time, "time", lambda: 1234.0)
 
     started = module.prepare_pressure_sampling_window(object(), cfg, pressure_started_monotonic=99.0)
 
     assert started == 1234.0
-    assert calls == ["cleared"]
+    assert calls == ["preserved"]
     summary = json.loads((tmp_path / "rolling_cache_prefill_summary.json").read_text())
-    assert summary["cleanup"]["event_rows_deleted"] == 3
+    assert summary["cleanup"]["event_rows_preserved"] == 3
+
+
+def test_prepare_pressure_sampling_window_only_discards_warmup_when_explicit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, discard_pressure_results=True)
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "clear_pressure_warmup_rows",
+        lambda _conn, _cfg: calls.append("discarded") or {"event_rows_deleted": 3},
+    )
+    monkeypatch.setattr(module.time, "time", lambda: 1234.0)
+
+    module.prepare_pressure_sampling_window(object(), cfg)
+
+    assert calls == ["discarded"]
 
 
 def test_decoupled_adaface_postfill_keeps_sources_alive_for_visibility(

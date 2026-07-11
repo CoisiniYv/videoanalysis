@@ -214,6 +214,7 @@ printf 'adaface_roi_redis=%s\n' "${adaface_roi_redis}"
 printf 'adaface_roi_batch_timeout_ms=%s\n' "${roi_batch_timeout_ms}"
 printf 'dual_shard_same_gpu=true\n'
 printf 'dual_shard_gpu=%s\n' "${gpu_id}"
+printf 'visual_results_retained=true\n'
 printf 'evidence_policy_groups=5:5,10:10,15:15\n'
 if [[ "${ablation_stage}" == "full-evidence" ]]; then
   printf 'rolling_cache_prefill_s=25\n'

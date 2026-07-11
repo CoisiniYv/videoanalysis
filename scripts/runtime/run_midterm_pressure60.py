@@ -379,6 +379,8 @@ class PressureConfig:
     rolling_cache_evidence: bool
     rolling_cache_enable_coverage_merge: bool
     cleanup: bool
+    clear_existing_evidence: bool = False
+    discard_pressure_results: bool = False
     rolling_cache_prefill_s: int = 0
     rolling_cache_postfill_s: int = 0
     pressure_source_visibility_timeout_s: int = 180
@@ -694,7 +696,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Seconds to keep pressure sources running after the measured window "
             "so tail events can accumulate post-roll rolling-cache coverage. "
-            "Events created after the measured cutoff are pruned before drain."
+            "Postfill events are retained by default for operator review."
+        ),
+    )
+    parser.add_argument(
+        "--clear-existing-evidence",
+        action="store_true",
+        help=(
+            "Destructive isolation option: delete all existing evidence, events, "
+            "face trajectories, and person observations before the run. Disabled "
+            "by default so operator-visible history survives pressure runs."
+        ),
+    )
+    parser.add_argument(
+        "--discard-pressure-results",
+        action="store_true",
+        help=(
+            "Destructive isolation option: delete this run's non-retained events, "
+            "observations, and evidence during cleanup. Disabled by default; normal "
+            "cleanup only stops temporary runtime sources and preserves all visual results."
         ),
     )
     parser.add_argument(
@@ -963,6 +983,8 @@ def main(argv: list[str] | None = None) -> int:
             args.rolling_cache_enable_coverage_merge
         ),
         cleanup=not args.no_cleanup,
+        clear_existing_evidence=bool(args.clear_existing_evidence),
+        discard_pressure_results=bool(args.discard_pressure_results),
         pressure_source_visibility_timeout_s=max(
             0,
             int(args.pressure_source_visibility_timeout_s or 0),
@@ -1060,7 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
         write_json(cfg.artifact_dir / "performance_before.json", original_perf)
         write_json(cfg.artifact_dir / "topology_before.json", original_topology)
 
-        if cfg.cleanup:
+        if cfg.clear_existing_evidence:
             report["initial_evidence_cleanup"] = clear_existing_evidence_state(conn)
             write_json(
                 cfg.artifact_dir / "initial_evidence_cleanup.json",
@@ -1323,11 +1345,18 @@ def main(argv: list[str] | None = None) -> int:
                 "reason": "non_evidence_savant_ablation",
                 "stage": cfg.savant_ablation_stage,
             }
-        report["pressure_post_sample_cleanup"] = clear_pressure_post_sample_rows(
-            conn,
-            cfg,
-            report["pressure_sampling_cutoff"],
-        )
+        if cfg.discard_pressure_results:
+            report["pressure_post_sample_cleanup"] = clear_pressure_post_sample_rows(
+                conn,
+                cfg,
+                report["pressure_sampling_cutoff"],
+            )
+        else:
+            report["pressure_post_sample_cleanup"] = preserve_pressure_post_sample_rows(
+                conn,
+                cfg,
+                report["pressure_sampling_cutoff"],
+            )
         diagnostics = collect_pressure_diagnostics(cfg)
         report["diagnostics"] = diagnostics
         kept: list[dict[str, Any]] = []
@@ -1417,7 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
 
         keep_event_ids = {str(row["event_id"]) for row in kept}
         keep_event_ids.update(select_covered_event_ids_for_bundles(conn, cfg, keep_event_ids))
-        if cfg.cleanup:
+        if cfg.cleanup and cfg.discard_pressure_results:
             cleanup = cleanup_pressure_data(
                 conn,
                 redis_client,
@@ -1426,6 +1455,8 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_epoch_root=runtime_epoch_root,
             )
             report["cleanup"] = cleanup
+        elif cfg.cleanup:
+            report["cleanup"] = cleanup_pressure_runtime_only(conn, redis_client, cfg)
         restore_cameras(conn, original_cameras)
         restore_runtime(cfg, original_perf)
         if cfg.cuda_mps:
@@ -1494,7 +1525,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
         if original_topology is not None:
             api_json(cfg.api_base, "PUT", "/runtime/topology-config", original_topology)
-        if cfg.cleanup:
+        if cfg.cleanup and cfg.discard_pressure_results:
             report["cleanup_after_restore"] = cleanup_pressure_data(
                 conn,
                 redis_client,
@@ -1502,7 +1533,7 @@ def main(argv: list[str] | None = None) -> int:
                 keep_event_ids=keep_event_ids,
                 runtime_epoch_root=runtime_epoch_root,
             )
-        else:
+        elif cfg.cleanup:
             report["pressure_runtime_cleanup_after_restore"] = cleanup_pressure_runtime_only(
                 conn,
                 redis_client,
@@ -4850,7 +4881,11 @@ def prepare_pressure_sampling_window(
     started_at = datetime.now(timezone.utc)
     if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
         time.sleep(cfg.rolling_cache_prefill_s)
-    cleanup = clear_pressure_warmup_rows(conn, cfg)
+    cleanup = (
+        clear_pressure_warmup_rows(conn, cfg)
+        if cfg.discard_pressure_results
+        else preserve_pressure_warmup_rows(conn, cfg)
+    )
     sampling_started_monotonic = time.time()
     summary = {
         "status": "completed",
@@ -4917,6 +4952,33 @@ def clear_pressure_warmup_rows(conn, cfg: PressureConfig) -> dict[str, Any]:
         "evidence_dirs_removed": removed_dirs,
         "evidence_dir_remove_failures": len(remove_failures),
         "evidence_dir_remove_failure_samples": remove_failures[:20],
+    }
+
+
+def preserve_pressure_warmup_rows(conn, cfg: PressureConfig) -> dict[str, Any]:
+    """Record warmup output without deleting operator-visible history."""
+    source_ids = pressure_source_ids(cfg)
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM events WHERE source_id = ANY(%(source_ids)s)) AS events,
+          (SELECT count(*) FROM face_observations WHERE source_id = ANY(%(source_ids)s))
+            AS face_observations,
+          (SELECT count(*) FROM person_bbox_observations WHERE source_id = ANY(%(source_ids)s))
+            AS person_observations
+        """,
+        {"source_ids": source_ids},
+    ).fetchone() or {}
+    return {
+        "status": "preserved",
+        "reason": "visual_results_retained",
+        "event_rows_preserved": int(row.get("events") or 0),
+        "face_observation_rows_preserved": int(row.get("face_observations") or 0),
+        "person_observation_rows_preserved": int(row.get("person_observations") or 0),
+        "event_rows_deleted": 0,
+        "face_observation_rows_deleted": 0,
+        "person_observation_rows_deleted": 0,
+        "evidence_dirs_removed": 0,
     }
 
 
@@ -5045,6 +5107,53 @@ def clear_pressure_post_sample_rows(
         "evidence_dir_remove_failures": len(remove_failures),
         "evidence_dir_remove_failure_samples": remove_failures[:20],
         "post_cleanup_db_ingest": post_cleanup_db_ingest,
+    }
+    write_json(cfg.artifact_dir / "pressure_post_sample_cleanup.json", summary)
+    return summary
+
+
+def preserve_pressure_post_sample_rows(
+    conn,
+    cfg: PressureConfig,
+    cutoff: dict[str, Any],
+) -> dict[str, Any]:
+    """Retain postfill events, trajectories, images, and evidence for 8090 review."""
+    cutoff_raw = str(cutoff.get("created_at_cutoff") or "")
+    source_ids = pressure_source_ids(cfg)
+    counts: dict[str, Any] = {}
+    if cutoff_raw:
+        cutoff_created_at = datetime.fromisoformat(cutoff_raw.replace("Z", "+00:00"))
+        counts = conn.execute(
+            """
+            SELECT
+              (SELECT count(*) FROM events
+                 WHERE source_id = ANY(%(source_ids)s) AND created_at > %(cutoff)s)
+                AS events,
+              (SELECT count(*) FROM face_observations
+                 WHERE source_id = ANY(%(source_ids)s) AND created_at > %(cutoff)s)
+                AS face_observations,
+              (SELECT count(*) FROM person_bbox_observations
+                 WHERE source_id = ANY(%(source_ids)s) AND created_at > %(cutoff)s)
+                AS person_observations
+            """,
+            {"source_ids": source_ids, "cutoff": cutoff_created_at},
+        ).fetchone() or {}
+    summary = {
+        "status": "preserved",
+        "reason": "visual_results_retained",
+        "created_at_cutoff": cutoff_raw or None,
+        "event_rows_preserved": int(counts.get("events") or 0),
+        "face_observation_rows_preserved": int(counts.get("face_observations") or 0),
+        "person_observation_rows_preserved": int(counts.get("person_observations") or 0),
+        "event_rows_deleted": 0,
+        "face_observation_rows_deleted": 0,
+        "person_observation_rows_deleted": 0,
+        "evidence_dirs_removed": 0,
+        "post_cleanup_db_ingest": db_pressure_event_ingest_summary(
+            conn,
+            cfg.run_id,
+            cooldown_s=cfg.pressure_algorithm_cooldown_s,
+        ),
     }
     write_json(cfg.artifact_dir / "pressure_post_sample_cleanup.json", summary)
     return summary
@@ -7803,17 +7912,22 @@ def cleanup_pressure_runtime_only(
     prefix = f"{cfg.run_id}_%"
     cleanup: dict[str, Any] = {}
     with conn.transaction():
-        cleanup["deleted_rules"] = conn.execute(
-            "DELETE FROM camera_rules WHERE camera_id IN (SELECT id FROM cameras WHERE source_id LIKE %s)",
+        cleanup["disabled_cameras"] = conn.execute(
+            "UPDATE cameras SET enabled=false, updated_at=now() WHERE source_id LIKE %s",
             (prefix,),
         ).rowcount
-        cleanup["deleted_zones"] = conn.execute(
-            "DELETE FROM camera_zones WHERE camera_id IN (SELECT id FROM cameras WHERE source_id LIKE %s)",
-            (prefix,),
-        ).rowcount
-        cleanup["deleted_cameras"] = conn.execute(
-            "DELETE FROM cameras WHERE source_id LIKE %s", (prefix,)
-        ).rowcount
+    cleanup.update(
+        {
+            "deleted_rules": 0,
+            "deleted_zones": 0,
+            "deleted_cameras": 0,
+            "deleted_events": 0,
+            "deleted_face_observations": 0,
+            "deleted_person_bbox_observations": 0,
+            "removed_evidence_paths": 0,
+            "visual_results_retained": True,
+        }
+    )
     cleanup["runtime_sources_apply_after_camera_cleanup"] = apply_sources_only(
         cfg,
         "runtime_sources_apply_after_pressure_runtime_cleanup.json",
@@ -8052,13 +8166,20 @@ def cleanup_after_aborted_run(
         write_json(cfg.artifact_dir / "report.json", report)
         return
     try:
-        report["cleanup_after_abort"] = cleanup_pressure_data(
-            conn,
-            redis_client,
-            cfg,
-            keep_event_ids=set(),
-            runtime_epoch_root=runtime_epoch_root,
-        )
+        if cfg.discard_pressure_results:
+            report["cleanup_after_abort"] = cleanup_pressure_data(
+                conn,
+                redis_client,
+                cfg,
+                keep_event_ids=set(),
+                runtime_epoch_root=runtime_epoch_root,
+            )
+        else:
+            report["cleanup_after_abort"] = cleanup_pressure_runtime_only(
+                conn,
+                redis_client,
+                cfg,
+            )
     except Exception as exc:
         report["cleanup_after_abort_error"] = repr(exc)
     write_json(cfg.artifact_dir / "report.json", report)
