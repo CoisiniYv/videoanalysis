@@ -140,3 +140,14 @@ def test_roi_worker_overrides_inherited_savant_healthcheck() -> None:
 
     assert "HEALTHCHECK" in dockerfile
     assert "http://127.0.0.1:8080/metrics" in dockerfile
+
+
+def test_roi_worker_deletes_ephemeral_jpeg_after_acknowledgement() -> None:
+    source = (
+        ROOT / "services/adaface-roi-worker/app/worker.py"
+    ).read_text(encoding="utf-8")
+
+    assert "def acknowledge_and_delete(" in source
+    assert source.index("redis.xack(") < source.index("redis.xdel(")
+    assert source.count("acknowledge_and_delete(redis, cfg,") == 3
+    assert "va_adaface_roi_stream_cleanup_total" in source

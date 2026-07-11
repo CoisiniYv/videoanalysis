@@ -22,6 +22,11 @@ LOGGER = logging.getLogger("adaface_roi_worker")
 STOP_REQUESTED = False
 
 MESSAGES = Counter("va_adaface_roi_messages_total", "ROI message outcomes", ["outcome"])
+STREAM_CLEANUP = Counter(
+    "va_adaface_roi_stream_cleanup_total",
+    "Acknowledged ROI stream entry cleanup outcomes",
+    ["outcome"],
+)
 BATCHES = Counter("va_adaface_roi_batches_total", "AdaFace batches", ["size"])
 BATCH_SIZE = Histogram(
     "va_adaface_roi_batch_size", "AdaFace batch occupancy", buckets=tuple(range(1, 18))
@@ -118,6 +123,23 @@ def reclaim_stale(redis: Redis, cfg: Config) -> list[tuple[bytes, dict[bytes, by
     return list(result[1] if result and len(result) > 1 else [])
 
 
+def acknowledge_and_delete(redis: Redis, cfg: Config, message_id: str) -> None:
+    """Acknowledge first, then remove the short-lived JPEG from Redis."""
+    try:
+        redis.xack(cfg.roi_stream, cfg.roi_consumer_group, message_id)
+    except Exception:
+        STREAM_CLEANUP.labels("ack_error").inc()
+        LOGGER.exception("ROI stream acknowledge failed id=%s", message_id)
+        raise
+    try:
+        deleted = int(redis.xdel(cfg.roi_stream, message_id) or 0)
+    except Exception:
+        STREAM_CLEANUP.labels("delete_error").inc()
+        LOGGER.exception("ROI stream delete failed id=%s", message_id)
+        return
+    STREAM_CLEANUP.labels("deleted" if deleted > 0 else "missing").inc()
+
+
 def process_entries(redis: Redis, cfg: Config, runner, entries) -> None:
     now_ms = int(time.time() * 1000)
     decoded: list[RoiMessage] = []
@@ -127,11 +149,11 @@ def process_entries(redis: Redis, cfg: Config, runner, entries) -> None:
             message = decode_message(message_id, fields)
         except Exception:
             LOGGER.exception("invalid ROI message id=%s", msg_id)
-            redis.xack(cfg.roi_stream, cfg.roi_consumer_group, msg_id)
+            acknowledge_and_delete(redis, cfg, msg_id)
             MESSAGES.labels("invalid").inc()
             continue
         if expired(message.metadata, now_ms):
-            redis.xack(cfg.roi_stream, cfg.roi_consumer_group, msg_id)
+            acknowledge_and_delete(redis, cfg, msg_id)
             MESSAGES.labels("expired").inc()
             continue
         decoded.append(message)
@@ -152,7 +174,7 @@ def process_entries(redis: Redis, cfg: Config, runner, entries) -> None:
             maxlen=cfg.observation_stream_maxlen,
             approximate=True,
         )
-        redis.xack(cfg.roi_stream, cfg.roi_consumer_group, message.message_id)
+        acknowledge_and_delete(redis, cfg, message.message_id)
         MESSAGES.labels("published").inc()
         LAST_SUCCESS_UNIX.set(time.time())
 

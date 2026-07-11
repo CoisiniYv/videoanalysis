@@ -7141,6 +7141,17 @@ def pressure_failure_reasons(
         )
         if pending > 0:
             reasons.append("adaface_roi_pending_present")
+        cleanup_errors = _prometheus_labeled_total(
+            metrics,
+            "va_adaface_roi_stream_cleanup_total",
+            'outcome="ack_error"',
+        ) + _prometheus_labeled_total(
+            metrics,
+            "va_adaface_roi_stream_cleanup_total",
+            'outcome="delete_error"',
+        )
+        if cleanup_errors > 0:
+            reasons.append("adaface_roi_stream_cleanup_errors")
         if int(roi_db.get("source_count") or 0) < cfg.stream_count:
             reasons.append("adaface_roi_did_not_cover_all_sources")
         event_types = {
