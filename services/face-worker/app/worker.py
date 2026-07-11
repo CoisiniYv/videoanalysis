@@ -47,6 +47,7 @@ class WatchlistRuleConfig:
     target_external_person_ids: tuple[str, ...]
     target_names: tuple[str, ...]
     evidence_policy: dict[str, Any]
+    cooldown_s: float = 60.0
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
@@ -184,6 +185,7 @@ class WatchlistMatchEmitter:
         self._camera_id_by_source_cache: dict[str, tuple[float, str | None]] = {}
         self._env_target_person_ids: list[int] | None = None
         self._last_env_target_refresh = 0.0
+        self._event_cooldowns: dict[tuple[str, str, int], float] = {}
         logger.info(
             "watchlist gallery search backend initialized backend=%s "
             "qdrant_collection=%s exact_rerank=%s fallback_to_pgvector=%s",
@@ -268,6 +270,22 @@ class WatchlistMatchEmitter:
                 if event_key in emitted_keys:
                     continue
                 emitted_keys.add(event_key)
+                cooldown_key = (
+                    str(obs.get("camera_id") or obs.get("source_id") or ""),
+                    rule.rule_id,
+                    person_id,
+                )
+                now_monotonic = time.monotonic()
+                if self._event_cooldowns.get(cooldown_key, 0.0) > now_monotonic:
+                    logger.info(
+                        "watchlist_hit_suppressed_cooldown camera_id=%s "
+                        "rule_id=%s person_id=%s cooldown_s=%.3f",
+                        cooldown_key[0],
+                        rule.rule_id,
+                        person_id,
+                        rule.cooldown_s,
+                    )
+                    continue
                 event = build_watchlist_hit_event(
                     observation=obs,
                     gallery_match=gallery_match,
@@ -285,6 +303,9 @@ class WatchlistMatchEmitter:
                     self._redis,
                     event,
                     stream=self._cfg.watchlist_event_stream,
+                )
+                self._event_cooldowns[cooldown_key] = (
+                    now_monotonic + max(rule.cooldown_s, 0.0)
                 )
                 emitted += 1
                 logger.info(
@@ -439,6 +460,13 @@ class WatchlistMatchEmitter:
             target_external_person_ids=target_external_ids,
             target_names=target_names,
             evidence_policy=evidence_policy,
+            cooldown_s=max(
+                0.0,
+                _float_config(
+                    config.get("cooldown_s"),
+                    self._cfg.watchlist_event_cooldown_s,
+                ),
+            ),
         )
 
     def _target_filters_configured(self) -> bool:
@@ -462,6 +490,7 @@ class WatchlistMatchEmitter:
                 target_external_person_ids=self._cfg.watchlist_target_external_person_ids,
                 target_names=self._cfg.watchlist_target_names,
                 evidence_policy={},
+                cooldown_s=self._cfg.watchlist_event_cooldown_s,
             )
         ]
 
@@ -493,6 +522,7 @@ class WatchlistMatchEmitter:
             target_external_person_ids=self._cfg.watchlist_target_external_person_ids,
             target_names=self._cfg.watchlist_target_names,
             evidence_policy={},
+            cooldown_s=self._cfg.watchlist_event_cooldown_s,
         )
         self._env_target_person_ids = self._resolve_rule_target_person_ids(rule)
         self._last_env_target_refresh = now

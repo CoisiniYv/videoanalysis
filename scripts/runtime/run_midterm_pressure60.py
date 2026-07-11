@@ -6873,6 +6873,9 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "record_request_dedupe_reserve_failed"
             ),
             "watchlist_hit_emitted": text.count("watchlist_hit_emitted"),
+            "watchlist_hit_suppressed_cooldown": text.count(
+                "watchlist_hit_suppressed_cooldown"
+            ),
             "watchlist_emit_failed": text.count("watchlist emit failed"),
             "watchlist_gallery_query_completed": text.count(
                 "watchlist_gallery_query_completed"

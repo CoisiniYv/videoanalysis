@@ -45,6 +45,7 @@ class Config:
     qdrant_batch_query_enabled: bool = False
     qdrant_sync_poll_interval_seconds: float = 2.0
     qdrant_sync_processing_timeout_seconds: int = 300
+    watchlist_event_cooldown_s: float = 60.0
 
 
 def _bool_env(name: str, default: str = "false") -> bool:
@@ -90,6 +91,9 @@ def load_config() -> Config:
         watchlist_target_names=_csv_env("WATCHLIST_TARGET_NAMES"),
         watchlist_target_refresh_seconds=int(
             os.getenv("WATCHLIST_TARGET_REFRESH_SECONDS", "30")
+        ),
+        watchlist_event_cooldown_s=max(
+            float(os.getenv("WATCHLIST_EVENT_COOLDOWN_S", "60")), 0.0
         ),
         face_vector_backend=os.getenv("FACE_VECTOR_BACKEND", "pgvector").strip().lower(),
         face_vector_small_target_threshold=int(

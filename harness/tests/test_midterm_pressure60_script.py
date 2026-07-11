@@ -4009,6 +4009,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "target_count=2 top_k=5 threshold=0.6000 result_count=0 "
                 "gallery_query_duration_ms=34",
                 "watchlist_hit_emitted source_observation_id=obs-1 camera_id=cam",
+                "watchlist_hit_suppressed_cooldown camera_id=cam "
+                "rule_id=rule person_id=1 cooldown_s=60.000",
             ]
         ),
         encoding="utf-8",
@@ -4106,6 +4108,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["event_worker"]["record_request_dedupe_reserved"] == 1
     assert summary["event_worker"]["record_request_dedupe_duplicate"] == 1
     assert summary["face_worker"]["watchlist_hit_emitted"] == 1
+    assert summary["face_worker"]["watchlist_hit_suppressed_cooldown"] == 1
     assert summary["face_worker"]["watchlist_gallery_query_completed"] == 2
     assert summary["face_worker"]["face_gallery_query_latency_ms"]["count"] == 2
     assert summary["face_worker"]["face_gallery_query_latency_ms"]["max"] == 34.0

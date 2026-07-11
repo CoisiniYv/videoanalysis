@@ -314,6 +314,7 @@ def _make_watchlist_emitter(cfg, conn, store, redis):
     emitter._camera_id_by_source_cache = {}
     emitter._env_target_person_ids = None
     emitter._last_env_target_refresh = 0.0
+    emitter._event_cooldowns = {}
     return emitter
 
 
@@ -404,6 +405,45 @@ class TestObservationParsing:
 
 
 class TestWatchlistCameraRules:
+    def test_emitter_cooldown_is_per_camera_rule_and_person(self):
+        conn = _FakeWatchlistConn(
+            rules_by_camera={
+                "cam-a": [
+                    {
+                        "rule_id": "rule_watchlist_a",
+                        "config": {
+                            "threshold": 0.81,
+                            "target_person_ids": [7],
+                            "cooldown_s": 60,
+                        },
+                        "evidence_policy": {},
+                    }
+                ]
+            },
+            person_rows=[
+                {
+                    "id": 7,
+                    "name": "Person 7",
+                    "external_person_id": "p7",
+                    "is_active": True,
+                }
+            ],
+        )
+        redis = _FakeRedis()
+        emitter = _make_watchlist_emitter(
+            _make_watchlist_cfg(), conn, _FakeGalleryStore(), redis
+        )
+
+        first = _make_obs_dict(camera_id="cam-a")
+        second = {
+            **first,
+            "source_observation_id": "face:primary_rtsp:42:2000",
+        }
+
+        assert emitter.emit_for_observation(first) == 1
+        assert emitter.emit_for_observation(second) == 0
+        assert len(redis.events) == 1
+
     def test_emitter_uses_camera_specific_watchlist_targets(self):
         conn = _FakeWatchlistConn(
             rules_by_camera={
