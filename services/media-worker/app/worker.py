@@ -215,6 +215,152 @@ def _write_frame_cache_sidecar_after_anchor(
     return summary, result
 
 
+def _build_person_bbox_db_annotation_rows(
+    sink_metadata_rows: list[dict],
+    observations: list[dict],
+) -> list[dict]:
+    """Build displayable person-context rows from exact DB frame-PTS matches."""
+    timeline_by_pts: dict[int, tuple[int, dict]] = {}
+    first_pts: int | None = None
+    for index, metadata in enumerate(sink_metadata_rows):
+        frame_pts = _to_int(metadata.get("frame_pts") or metadata.get("pts"))
+        if frame_pts is None:
+            continue
+        timeline_by_pts[frame_pts] = (index, metadata)
+        first_pts = frame_pts if first_pts is None else min(first_pts, frame_pts)
+    if first_pts is None:
+        return []
+
+    rows_by_frame: dict[int, dict] = {}
+    for observation in observations:
+        frame_pts = _to_int(observation.get("frame_pts"))
+        timeline = timeline_by_pts.get(frame_pts) if frame_pts is not None else None
+        bbox = observation.get("person_bbox")
+        if timeline is None or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        clip_frame_index, metadata = timeline
+        confidence = _to_float(observation.get("person_confidence"))
+        obj = {
+            "object_type": "person",
+            "annotation_role": "person_context",
+            "track_id": str(observation.get("track_id") or ""),
+            "frame_num": _to_int(observation.get("frame_num")),
+            "source_frame_num": _to_int(observation.get("frame_num")),
+            "source_message_id": str(
+                observation.get("source_observation_id") or ""
+            ),
+            "match_type": "frame_pts_exact",
+            "label": {"kind": "person"},
+            "style": {"reason": "person_detection"},
+            "quality": {
+                "quality_status": "ok",
+                "person_confidence": confidence,
+            },
+            "bbox": {
+                "xyxy": [float(value) for value in bbox],
+                "format": "xyxy",
+                "coordinate_space": "pixel",
+                "confidence": confidence,
+            },
+        }
+        row = rows_by_frame.setdefault(
+            clip_frame_index,
+            {
+                "schema_version": "1.0",
+                "source": "person_bbox_observations_db",
+                "displayable": True,
+                "clip_frame_index": clip_frame_index,
+                "frame_uuid": str(
+                    metadata.get("frame_uuid") or metadata.get("uuid") or ""
+                ),
+                "frame_pts": frame_pts,
+                "t_ms": int(round((frame_pts - first_pts) / 1_000_000.0)),
+                "objects": [],
+            },
+        )
+        row["objects"].append(obj)
+    return [rows_by_frame[index] for index in sorted(rows_by_frame)]
+
+
+def _write_person_bbox_db_sidecar_fallback(
+    pg_conn: psycopg.Connection,
+    *,
+    event_context: dict,
+    output_dir: Path,
+    sink_metadata_rows: list[dict],
+) -> tuple[dict, dict] | None:
+    """Recover from retained YOLO observations when the Redis window is gone."""
+    frame_pts_values = [
+        value
+        for row in sink_metadata_rows
+        if (value := _to_int(row.get("frame_pts") or row.get("pts"))) is not None
+    ]
+    source_id = str(event_context.get("source_id") or "")
+    if not source_id or not frame_pts_values:
+        return None
+    with pg_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT source_observation_id, track_id, frame_pts, frame_num,
+                   person_bbox, person_confidence
+            FROM person_bbox_observations
+            WHERE source_id = %s
+              AND gate_status = 'accepted'
+              AND frame_pts BETWEEN %s AND %s
+            ORDER BY frame_pts, track_id
+            """,
+            (source_id, min(frame_pts_values), max(frame_pts_values)),
+        )
+        observations = [dict(row) for row in cur.fetchall()]
+    annotations = _build_person_bbox_db_annotation_rows(
+        sink_metadata_rows,
+        observations,
+    )
+    if not annotations:
+        return None
+    annotations_path = output_dir / SIDECAR_ANNOTATIONS_FILE
+    summary_path = output_dir / SIDECAR_SUMMARY_FILE
+    person_count = sum(len(row.get("objects") or []) for row in annotations)
+    summary = {
+        "annotation_source": "person_bbox_observations_db",
+        "annotation_status": "complete",
+        "annotations_written": len(annotations),
+        "rows_written": len(annotations),
+        "rows_total_input": len(annotations),
+        "person_context_rows": person_count,
+        "person_objects_count": person_count,
+        "face_objects_count": 0,
+        "known_face_count": 0,
+        "unknown_face_count": 0,
+        "embedding_vectors_in_output": 0,
+        "image_bytes_in_output": 0,
+        "production_ready": True,
+        "production_ready_failures": [],
+        "frontend_overlay_required": True,
+        "fallback_used": False,
+        "db_person_context_recovery": {
+            "match": "frame_pts_exact",
+            "observation_rows": len(observations),
+            "annotation_frames": len(annotations),
+        },
+    }
+    _write_metadata_jsonl(annotations_path, annotations)
+    _atomic_write_json(summary_path, summary)
+    logger.warning(
+        "frame_cache_db_person_context_recovered source_id=%s event_id=%s "
+        "annotation_frames=%d person_objects=%d",
+        source_id,
+        event_context.get("event_id", ""),
+        len(annotations),
+        person_count,
+    )
+    return summary, {
+        "written": True,
+        "annotations_path": str(annotations_path),
+        "summary_path": str(summary_path),
+    }
+
+
 def request_shutdown(signum: int, _frame: object) -> None:
     global shutdown_requested
     logger.info("shutdown requested by signal=%s", signum)
@@ -3643,7 +3789,9 @@ def _build_frame_cache_summary(
         "evidence_topology": POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
         "sidecar_type": "production",
         "timeline_domain": PRODUCTION_TIMELINE_DOMAIN,
-        "annotation_source": "frame_annotation_cache",
+        "annotation_source": str(
+            sidecar_summary.get("annotation_source") or "frame_annotation_cache"
+        ),
         "annotation_status": "complete" if production_ready else sidecar_summary.get("annotation_status", "partial"),
         "production_ready": production_ready,
         "canonical_clip": production_ready,
@@ -4375,6 +4523,19 @@ def _finalize_post_savant_evidence_bundle(
                 "event_position_ratio": None,
             },
         )
+        if (
+            str(sidecar_summary.get("annotation_status") or "")
+            == "missing_frame_metadata"
+            and int(sidecar_summary.get("annotations_written") or 0) <= 0
+        ):
+            db_recovery = _write_person_bbox_db_sidecar_fallback(
+                pg_conn,
+                event_context=event_context,
+                output_dir=output_dir,
+                sink_metadata_rows=sink_metadata_rows,
+            )
+            if db_recovery is not None:
+                sidecar_summary, sidecar_result = db_recovery
         summary = _build_frame_cache_summary(
             sidecar_summary=sidecar_summary,
             sink_metadata_rows=sink_metadata_rows,

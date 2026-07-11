@@ -35,6 +35,11 @@ database itself had zero overlay rows for the affected video bundles.
   annotation TTL and the evidence annotation deadline.
 - Retry cache bypass is recorded in `annotation_anchor_wait` as
   `range_cache_bypassed_for_retry=true` for audit.
+- If the bounded 120-second Redis retry still cannot recover the anchor,
+  media-worker may construct person-context overlay rows from retained
+  `person_bbox_observations`, but only when observation `frame_pts` exactly
+  matches a canonical evidence timeline frame. This remains a DB-backed YOLO
+  observation path, not a frontend-generated or synthetic bbox fallback.
 - Video, timeline, overlay rows, trajectory records, trajectory JPEGs, events,
   and evidence bundles remain retained after the pressure run.
 

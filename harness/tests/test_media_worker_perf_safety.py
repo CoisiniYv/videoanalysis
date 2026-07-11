@@ -1094,6 +1094,42 @@ def test_late_annotation_retry_uses_unbounded_stream_id_lookback() -> None:
     assert mode == "late_annotation_retry_lookback"
 
 
+def test_person_bbox_db_recovery_uses_exact_timeline_pts() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    rows = worker._build_person_bbox_db_annotation_rows(
+        [
+            {"frame_uuid": "frame-1", "pts": 10_000_000_000},
+            {"frame_uuid": "frame-2", "pts": 10_250_000_000},
+        ],
+        [
+            {
+                "source_observation_id": "person-1",
+                "track_id": "7",
+                "frame_pts": 10_250_000_000,
+                "frame_num": 42,
+                "person_bbox": [10, 20, 30, 40],
+                "person_confidence": 0.9,
+            },
+            {
+                "source_observation_id": "wrong-pts",
+                "track_id": "8",
+                "frame_pts": 10_260_000_000,
+                "frame_num": 43,
+                "person_bbox": [1, 2, 3, 4],
+                "person_confidence": 0.8,
+            },
+        ],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["clip_frame_index"] == 1
+    assert rows[0]["frame_uuid"] == "frame-2"
+    assert rows[0]["t_ms"] == 250
+    assert rows[0]["objects"][0]["annotation_role"] == "person_context"
+    assert rows[0]["objects"][0]["bbox"]["xyxy"] == [10.0, 20.0, 30.0, 40.0]
+
+
 def test_timeline_reconciliation_unverified_keeps_playable_clip_degraded() -> None:
     worker = _activate("media-worker", "app.worker")
 
