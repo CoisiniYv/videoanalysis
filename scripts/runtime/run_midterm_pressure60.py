@@ -314,7 +314,7 @@ CPU_ISOLATION_PROFILES = {
         "workers": "15",
         "worker-media-worker": "7",
         "worker-face-worker": "6,14",
-        "drain-workers": "6-7,14-15",
+        "drain-workers": "0-15",
     },
     "local-24cpu": {
         "savant-a": "0,2,4,6,8,10",
@@ -1282,6 +1282,10 @@ def main(argv: list[str] | None = None) -> int:
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
+        if cfg.rolling_cache_evidence:
+            report["media_worker_materialization_enable_after_sampling"] = (
+                enable_rolling_cache_materialization_after_sampling(cfg)
+            )
         if original_worker_cpu_isolation is not None:
             report["cpu_isolation_drain"] = apply_worker_cpu_isolation_for_drain(
                 cfg
@@ -3442,6 +3446,18 @@ def configure_media_worker_rolling_cache(
     return summary
 
 
+def enable_rolling_cache_materialization_after_sampling(
+    cfg: PressureConfig,
+) -> dict[str, Any]:
+    values = media_worker_rolling_cache_env_snapshot()
+    values["ROLLING_CACHE_MATERIALIZATION_ENABLED"] = "true"
+    return configure_media_worker_rolling_cache(
+        cfg,
+        values=values,
+        artifact_name="compose_enable_media_worker_materialization_after_sampling.log",
+    )
+
+
 def start_rolling_cache_sinks_for_pressure(
     cfg: PressureConfig,
     *,
@@ -3684,7 +3700,7 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
     media_values = {
         "EVIDENCE_DENSITY_PROFILE": "high_density",
         "ROLLING_CACHE_ENABLED": "true",
-        "ROLLING_CACHE_MATERIALIZATION_ENABLED": "true",
+        "ROLLING_CACHE_MATERIALIZATION_ENABLED": "false",
         "ROLLING_CACHE_SOURCES": ",".join(pressure_source_ids(cfg)),
         "ROLLING_CACHE_ROOT": "/media/rolling-cache",
         "ROLLING_CACHE_MATERIALIZED_ROOT": "/media/rolling-cache-materialized",
