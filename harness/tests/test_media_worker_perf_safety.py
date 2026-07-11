@@ -1017,6 +1017,65 @@ def test_missing_frame_metadata_keeps_playable_clip_degraded_not_failed() -> Non
     assert worker._evidence_state_for_clip_status(clip_status) == "materialized"
 
 
+def test_frame_cache_anchor_lag_is_measured_from_latest_exported_pts() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    lag = worker._frame_cache_anchor_lag_seconds(
+        {
+            "annotation_status": "missing_frame_metadata",
+            "trigger_face_row_frame_pts": 20_000_000_000,
+            "frame_cache_reader_summary": {"latest_frame_pts": 12_500_000_000},
+        }
+    )
+
+    assert lag == 7.5
+
+
+def test_frame_cache_sidecar_retries_when_exporter_is_behind(
+    monkeypatch: Any,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    calls = []
+    sleeps = []
+
+    def fake_writer(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return (
+                {
+                    "annotation_status": "missing_frame_metadata",
+                    "trigger_face_row_frame_pts": 20_000_000_000,
+                    "frame_cache_reader_summary": {
+                        "latest_frame_pts": 12_000_000_000
+                    },
+                },
+                {"annotations_path": "annotations.jsonl"},
+            )
+        return (
+            {
+                "annotation_status": "complete",
+                "trigger_face_row_frame_pts": 20_000_000_000,
+                "frame_cache_reader_summary": {
+                    "latest_frame_pts": 20_000_000_000
+                },
+            },
+            {"annotations_path": "annotations.jsonl"},
+        )
+
+    monkeypatch.setattr(worker, "write_frame_cache_identity_sidecar", fake_writer)
+    monkeypatch.setattr(worker.time, "sleep", sleeps.append)
+    monkeypatch.setenv("FRAME_CACHE_ANCHOR_WAIT_MAX_S", "30")
+    summary, _ = worker._write_frame_cache_sidecar_after_anchor(
+        event={"event_id": EVENT_ID, "source_id": "source-1"}
+    )
+
+    assert len(calls) == 2
+    assert sleeps == [12.0]
+    assert summary["annotation_status"] == "complete"
+    assert summary["annotation_anchor_wait"]["attempts"] == 1
+    assert summary["annotation_anchor_wait"]["initial_lag_s"] == 8.0
+
+
 def test_timeline_reconciliation_unverified_keeps_playable_clip_degraded() -> None:
     worker = _activate("media-worker", "app.worker")
 

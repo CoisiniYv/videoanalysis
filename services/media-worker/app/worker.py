@@ -74,6 +74,8 @@ DEFAULT_MATERIALIZATION_FINALIZER_WORKERS = 1
 DEFAULT_MATERIALIZATION_THROTTLE_SLEEP_S = 0.0
 DEFAULT_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S = 0.0
 DEFAULT_MATERIALIZATION_CPU_THREAD_LIMIT = 0
+DEFAULT_FRAME_CACHE_ANCHOR_WAIT_MAX_S = 30.0
+DEFAULT_FRAME_CACHE_ANCHOR_WAIT_FACTOR = 1.5
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
 IMAGE_EVIDENCE_NEAREST_FRAME_TOLERANCE_NS = 500_000_000
@@ -121,6 +123,86 @@ _PROBE_METRICS_LOCK = Lock()
 _PROBE_METRICS_LOCAL = local()
 _SINK_PHASES: dict[str, dict[str, object]] = {}
 _SINK_PHASES_LOCK = Lock()
+
+
+def _frame_cache_anchor_lag_seconds(summary: dict) -> float | None:
+    if str(summary.get("annotation_status") or "") != "missing_frame_metadata":
+        return None
+    reader = summary.get("frame_cache_reader_summary")
+    if not isinstance(reader, dict):
+        return None
+    anchor_pts = _to_int(
+        summary.get("trigger_face_row_frame_pts") or summary.get("frame_pts")
+    )
+    latest_pts = _to_int(reader.get("latest_frame_pts"))
+    if anchor_pts is None or latest_pts is None:
+        return None
+    return max(0.0, (anchor_pts - latest_pts) / 1_000_000_000.0)
+
+
+def _write_frame_cache_sidecar_after_anchor(
+    **kwargs,
+) -> tuple[dict, dict]:
+    """Wait only when the annotation stream is measurably behind the event frame."""
+    max_wait_s = max(
+        0.0,
+        float(
+            os.getenv(
+                "FRAME_CACHE_ANCHOR_WAIT_MAX_S",
+                str(DEFAULT_FRAME_CACHE_ANCHOR_WAIT_MAX_S),
+            )
+        ),
+    )
+    wait_factor = max(
+        1.0,
+        float(
+            os.getenv(
+                "FRAME_CACHE_ANCHOR_WAIT_FACTOR",
+                str(DEFAULT_FRAME_CACHE_ANCHOR_WAIT_FACTOR),
+            )
+        ),
+    )
+    started = time.monotonic()
+    attempts = 0
+    waited_s = 0.0
+    initial_lag_s = None
+    while True:
+        summary, result = write_frame_cache_identity_sidecar(**kwargs)
+        lag_s = _frame_cache_anchor_lag_seconds(summary)
+        if initial_lag_s is None:
+            initial_lag_s = lag_s
+        elapsed_s = time.monotonic() - started
+        remaining_s = max_wait_s - elapsed_s
+        if lag_s is None or lag_s <= 0.0 or remaining_s <= 0.0:
+            break
+        sleep_s = min(max(1.0, lag_s * wait_factor), remaining_s)
+        logger.info(
+            "frame_cache_anchor_wait source_id=%s event_id=%s "
+            "lag_s=%.3f sleep_s=%.3f attempt=%d",
+            (kwargs.get("event") or {}).get("source_id", ""),
+            (kwargs.get("event") or {}).get("event_id", ""),
+            lag_s,
+            sleep_s,
+            attempts + 1,
+        )
+        time.sleep(sleep_s)
+        waited_s += sleep_s
+        attempts += 1
+    summary["annotation_anchor_wait"] = {
+        "attempts": attempts,
+        "waited_s": round(waited_s, 3),
+        "max_wait_s": max_wait_s,
+        "initial_lag_s": (
+            round(initial_lag_s, 3) if initial_lag_s is not None else None
+        ),
+        "final_lag_s": (
+            round(_frame_cache_anchor_lag_seconds(summary), 3)
+            if _frame_cache_anchor_lag_seconds(summary) is not None
+            else None
+        ),
+        "status": str(summary.get("annotation_status") or ""),
+    }
+    return summary, result
 
 
 def request_shutdown(signum: int, _frame: object) -> None:
@@ -4262,7 +4344,7 @@ def _finalize_post_savant_evidence_bundle(
                 if raw_clip_available
                 else None
             )
-        sidecar_summary, sidecar_result = write_frame_cache_identity_sidecar(
+        sidecar_summary, sidecar_result = _write_frame_cache_sidecar_after_anchor(
             event=_event_for_frame_cache_sidecar(event_context),
             evidence_dir=str(output_dir),
             raw_clip_path=str(raw_clip_path) if raw_clip_available else None,
