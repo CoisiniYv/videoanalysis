@@ -116,6 +116,8 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "batched_push_timeout_us=10000" in output
     assert "cpu_isolation_profile=t4-16cpu-evidence" in output
     assert "cuda_mps=1" in output
+    assert "mps_savant_active_thread_percentage=45" in output
+    assert "mps_adaface_active_thread_percentage=10" in output
     assert "adaface_roi_redis=1" in output
     assert "adaface_roi_batch_timeout_ms=200" in output
     assert "--pose-batch-size 4" in output
@@ -1593,6 +1595,8 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
         adaface_roi_redis=True,
         adaface_roi_batch_timeout_ms=40,
         cuda_mps=True,
+        mps_savant_active_thread_percentage=45,
+        mps_adaface_active_thread_percentage=10,
     )
 
     override = yaml.safe_load(
@@ -1618,6 +1622,7 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
         assert env["ADAFACE_INPUT_OBJECT"] == "disabled.face"
         assert env["FACE_OBSERVATION_EXPORT_ENABLED"] == "false"
         assert env["FACE_ROI_STREAM"] == "security.face_rois.roi_test_run"
+        assert env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "45"
     worker = override["services"]["adaface-roi-worker"]
     assert worker["environment"]["FACE_EMBEDDING_BATCH_SIZE"] == "16"
     assert worker["environment"]["FACE_ROI_BATCH_TIMEOUT_MS"] == "40"
@@ -1628,6 +1633,7 @@ def test_roi_adaface_uses_aligned_redis_crops_without_video_sidecar(tmp_path) ->
     assert worker["environment"]["CUDA_MPS_LOG_DIRECTORY"] == (
         "/tmp/video-analytics-mps-pressure/log"
     )
+    assert worker["environment"]["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "10"
     assert (
         "/tmp/video-analytics-mps-pressure:/tmp/video-analytics-mps-pressure:rw"
         in worker["volumes"]

@@ -28,6 +28,10 @@ Environment overrides:
                       T4 uses staged t4-16cpu-evidence isolation.
   CUDA_MPS=<profile default>
                       T4 enables same-GPU CUDA MPS.
+  MPS_SAVANT_PERCENT=<profile default>
+                      Per-Savant MPS active-thread share (T4: 45).
+  MPS_ADAFACE_PERCENT=<profile default>
+                      ROI AdaFace MPS active-thread share (T4: 10).
   ADAFACE_ASYNC=0      Set to 1 for DeepStream classifier async mode canary.
   FACE_TRACK_ID=0      Set to 1 to propagate person IDs to face objects.
   ADAFACE_QUEUE=0       Set to 1 to insert a bounded queue before AdaFace.
@@ -52,6 +56,8 @@ case "${profile}" in
     batch_timeout_default_us="40000"
     cpu_profile_default="none"
     cuda_mps_default="0"
+    mps_savant_percent_default="0"
+    mps_adaface_percent_default="0"
     adaface_roi_redis_default="0"
     output_mode_default="copy"
     ;;
@@ -63,6 +69,8 @@ case "${profile}" in
     batch_timeout_default_us="10000"
     cpu_profile_default="t4-16cpu-evidence"
     cuda_mps_default="1"
+    mps_savant_percent_default="45"
+    mps_adaface_percent_default="10"
     adaface_roi_redis_default="1"
     output_mode_default="metadata-only"
     ;;
@@ -88,6 +96,8 @@ output_mode="${OUTPUT_MODE:-${output_mode_default}}"
 batch_timeout_us="${BATCH_TIMEOUT_US:-${batch_timeout_default_us}}"
 cpu_profile="${CPU_PROFILE:-${cpu_profile_default}}"
 cuda_mps="${CUDA_MPS:-${cuda_mps_default}}"
+mps_savant_percent="${MPS_SAVANT_PERCENT:-${mps_savant_percent_default}}"
+mps_adaface_percent="${MPS_ADAFACE_PERCENT:-${mps_adaface_percent_default}}"
 adaface_async="${ADAFACE_ASYNC:-0}"
 face_track_id="${FACE_TRACK_ID:-0}"
 adaface_queue="${ADAFACE_QUEUE:-0}"
@@ -145,7 +155,11 @@ else
 fi
 
 if [[ "${cuda_mps}" == "1" ]]; then
-  cmd+=(--cuda-mps)
+  cmd+=(
+    --cuda-mps
+    --mps-savant-active-thread-percentage "${mps_savant_percent}"
+    --mps-adaface-active-thread-percentage "${mps_adaface_percent}"
+  )
 fi
 if [[ "${adaface_async}" == "1" ]]; then
   cmd+=(--adaface-classifier-async)
@@ -187,6 +201,8 @@ printf 'savant_output_mode=%s\n' "${output_mode}"
 printf 'batched_push_timeout_us=%s\n' "${batch_timeout_us}"
 printf 'cpu_isolation_profile=%s\n' "${cpu_profile}"
 printf 'cuda_mps=%s\n' "${cuda_mps}"
+printf 'mps_savant_active_thread_percentage=%s\n' "${mps_savant_percent}"
+printf 'mps_adaface_active_thread_percentage=%s\n' "${mps_adaface_percent}"
 printf 'adaface_classifier_async=%s\n' "${adaface_async}"
 printf 'face_secondary_track_id=%s\n' "${face_track_id}"
 printf 'adaface_input_queue=%s\n' "${adaface_queue}"

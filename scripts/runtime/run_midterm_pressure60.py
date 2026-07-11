@@ -391,6 +391,8 @@ class PressureConfig:
     savant_output_mode: str = "copy"
     cpu_isolation_profile: str = "none"
     cuda_mps: bool = False
+    mps_savant_active_thread_percentage: int = 0
+    mps_adaface_active_thread_percentage: int = 0
     adaface_classifier_async: bool = False
     face_secondary_track_id: bool = False
     adaface_input_queue: bool = False
@@ -532,6 +534,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Run both same-GPU Savant branches through a temporary CUDA MPS "
             "control/server container. The helper is removed during restore."
         ),
+    )
+    parser.add_argument(
+        "--mps-savant-active-thread-percentage",
+        type=int,
+        default=0,
+        help="CUDA MPS active-thread percentage for each Savant branch (0 disables).",
+    )
+    parser.add_argument(
+        "--mps-adaface-active-thread-percentage",
+        type=int,
+        default=0,
+        help="CUDA MPS active-thread percentage for the ROI AdaFace worker (0 disables).",
     )
     parser.add_argument(
         "--adaface-classifier-async",
@@ -833,6 +847,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dual-shard-api requires --dual-shard-same-gpu")
     if args.cuda_mps and not args.dual_shard_same_gpu:
         raise SystemExit("--cuda-mps requires --dual-shard-same-gpu")
+    for name, value in (
+        ("--mps-savant-active-thread-percentage", args.mps_savant_active_thread_percentage),
+        ("--mps-adaface-active-thread-percentage", args.mps_adaface_active_thread_percentage),
+    ):
+        if not 0 <= int(value) <= 100:
+            raise SystemExit(f"{name} must be between 0 and 100")
     if args.adaface_decoupled_sharded and not args.adaface_decoupled:
         raise SystemExit(
             "--adaface-decoupled-sharded requires --adaface-decoupled"
@@ -971,6 +991,12 @@ def main(argv: list[str] | None = None) -> int:
         savant_output_mode=args.savant_output_mode,
         cpu_isolation_profile=args.cpu_isolation_profile,
         cuda_mps=bool(args.cuda_mps),
+        mps_savant_active_thread_percentage=int(
+            args.mps_savant_active_thread_percentage
+        ),
+        mps_adaface_active_thread_percentage=int(
+            args.mps_adaface_active_thread_percentage
+        ),
         adaface_classifier_async=bool(args.adaface_classifier_async),
         face_secondary_track_id=bool(args.face_secondary_track_id),
         adaface_input_queue=bool(args.adaface_input_queue),
@@ -2360,6 +2386,10 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "CUDA_MPS_LOG_DIRECTORY": str(log_dir),
                 }
             )
+            if cfg.mps_savant_active_thread_percentage > 0:
+                service_doc["environment"][
+                    "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
+                ] = str(cfg.mps_savant_active_thread_percentage)
             service_doc.setdefault("volumes", []).append(
                 f"{mps_root}:{mps_root}:rw"
             )
@@ -2372,6 +2402,10 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "CUDA_MPS_LOG_DIRECTORY": str(log_dir),
                 }
             )
+            if cfg.mps_adaface_active_thread_percentage > 0:
+                roi_service["environment"][
+                    "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
+                ] = str(cfg.mps_adaface_active_thread_percentage)
             roi_service.setdefault("volumes", []).append(
                 f"{mps_root}:{mps_root}:rw"
             )
