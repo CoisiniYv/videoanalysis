@@ -1079,6 +1079,19 @@ def test_frame_cache_sidecar_retries_when_exporter_is_behind(
     assert calls[0]["config"]["range_cache_ttl_s"] == 900.0
     assert calls[1]["config"]["range_cache_ttl_s"] == 0.0
     assert calls[1]["config"]["range_cache_max_entries"] == 0
+    assert calls[1]["config"]["stream_id_range_unbounded"] is True
+
+
+def test_late_annotation_retry_uses_unbounded_stream_id_lookback() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    range_max, range_min, mode = writer._frame_cache_stream_range(
+        {"event_ts_ms": 1_700_000_000_000},
+        {"stream_id_range_unbounded": True},
+    )
+
+    assert (range_max, range_min) == ("+", "-")
+    assert mode == "late_annotation_retry_lookback"
 
 
 def test_timeline_reconciliation_unverified_keeps_playable_clip_degraded() -> None:

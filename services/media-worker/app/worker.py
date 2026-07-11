@@ -191,6 +191,7 @@ def _write_frame_cache_sidecar_after_anchor(
             retry_config = dict(writer_kwargs.get("config") or {})
             retry_config["range_cache_ttl_s"] = 0.0
             retry_config["range_cache_max_entries"] = 0
+            retry_config["stream_id_range_unbounded"] = True
             writer_kwargs["config"] = retry_config
             cache_bypassed_for_retry = True
         time.sleep(sleep_s)

@@ -1027,6 +1027,8 @@ def _frame_cache_stream_range(
     event: dict[str, Any],
     config: dict[str, Any],
 ) -> tuple[str, str, str]:
+    if bool(config.get("stream_id_range_unbounded")):
+        return "+", "-", "late_annotation_retry_lookback"
     event_ms = _event_wall_clock_epoch_ms(event)
     if event_ms is None:
         return "+", "-", "lookback_fallback"
