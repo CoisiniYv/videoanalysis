@@ -610,6 +610,48 @@ def test_rolling_cache_segment_visibility_accepts_jsonl_metadata(
     assert summary["metadata_visible_lag_s"]["p50"] == 0.5
 
 
+def test_rolling_cache_segment_visibility_tolerates_retention_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    cfg = _config(module, run_id="rolling_canary")
+    metadata_path = (
+        tmp_path
+        / "midterm"
+        / "epochs"
+        / "epoch-a"
+        / "rolling_canary_00"
+        / "segments"
+        / "0001"
+        / "metadata.json"
+    )
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "frames": [
+                    {"type": "VideoFrame", "pts": 1_783_329_600_000_000_000},
+                    {"type": "VideoFrame", "pts": 1_783_329_601_000_000_000},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_loader = module._load_segment_metadata_frames
+
+    def load_then_remove(path):
+        frames = original_loader(path)
+        path.unlink()
+        return frames
+
+    monkeypatch.setattr(module, "_load_segment_metadata_frames", load_then_remove)
+
+    summary = module.collect_rolling_cache_segment_visibility(cfg, root=tmp_path)
+
+    assert summary["metadata_files_vanished"] == 1
+    assert summary["metadata_visible_lag_s"]["status"] == "not_enough_data"
+
+
 def test_rolling_cache_full_rate_gate_requires_all_sources_and_fps() -> None:
     module = _load_module()
     cfg = _config(module, stream_count=2, fps="8/1")

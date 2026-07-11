@@ -6535,6 +6535,7 @@ def collect_rolling_cache_segment_visibility(
     sampled_paths: list[str] = []
     skipped_clock_domain = 0
     parse_errors = 0
+    metadata_files_vanished = 0
     metadata_paths = sorted(root.rglob("metadata.json")) if root.exists() else []
     for metadata_path in metadata_paths:
         if "materialized" in metadata_path.parts:
@@ -6567,7 +6568,12 @@ def collect_rolling_cache_segment_visibility(
         # Treat only plausible epoch-ns PTS as comparable with filesystem mtime.
         last_pts_epoch_s = last_pts / 1_000_000_000.0
         if 946684800.0 <= last_pts_epoch_s <= 4102444800.0:
-            visibility_lags_s.append(metadata_path.stat().st_mtime - last_pts_epoch_s)
+            try:
+                metadata_mtime = metadata_path.stat().st_mtime
+            except FileNotFoundError:
+                metadata_files_vanished += 1
+                continue
+            visibility_lags_s.append(metadata_mtime - last_pts_epoch_s)
             if len(sampled_paths) < 20:
                 sampled_paths.append(str(metadata_path))
         else:
@@ -6585,6 +6591,7 @@ def collect_rolling_cache_segment_visibility(
         "metadata_visible_lag_s": _numeric_distribution(visibility_lags_s),
         "skipped_clock_domain": skipped_clock_domain,
         "parse_errors": parse_errors,
+        "metadata_files_vanished": metadata_files_vanished,
         "sampled_metadata_paths": sampled_paths,
         "interpretation": (
             "metadata_visible_lag_s approximates segment close/index-visible lag "
