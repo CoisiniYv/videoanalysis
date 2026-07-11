@@ -6,10 +6,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"
+STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 API_BASE="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
 COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+[[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
 
 if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
     IFS=',' read -r -a _profiles <<< "$MIDTERM_COMPOSE_PROFILES"

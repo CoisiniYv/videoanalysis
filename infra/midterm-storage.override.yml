@@ -1,0 +1,4 @@
+services:
+  face-worker:
+    volumes:
+      - ${FACE_TRAJECTORY_HOST_ROOT:-/data/video-analytics/media/face_trajectories}:/data/video-analytics/media/face_trajectories:rw

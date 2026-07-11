@@ -126,8 +126,10 @@ def test_midterm_one_click_startup_scripts_are_the_customer_entrypoint() -> None
         assert os.access(script, os.X_OK)
 
     assert 'COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"' in start
+    assert 'STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"' in start
     assert 'ENV_FILE="$REPO_ROOT/infra/env/midterm.env"' in start
     assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in start
+    assert 'COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")' in start
     assert 'docker compose "${COMPOSE_ARGS[@]}" build face-worker' in start
     assert "check_model_assets" in start
     assert "POSE_MODEL_FILE" in start
@@ -138,10 +140,12 @@ def test_midterm_one_click_startup_scripts_are_the_customer_entrypoint() -> None
     assert "http://127.0.0.1:8000" not in start
 
     assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in stop
+    assert 'COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")' in stop
     assert "local-postgres" in stop
     assert "dual-4090-two-source" in stop
 
     assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in health
+    assert 'COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")' in health
     assert '"savant-security"' in health
     assert '"source-adapter"' in health
     assert '"18080:Savant metrics"' in health

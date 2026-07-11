@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"
+STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 OPERATOR_URL="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
@@ -149,6 +150,7 @@ parse_args() {
 
 build_compose_args() {
     COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+    [[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
     local profile
     for profile in "${COMPOSE_PROFILES[@]}"; do
         COMPOSE_ARGS+=(--profile "$profile")
