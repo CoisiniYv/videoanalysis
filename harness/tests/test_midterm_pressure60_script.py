@@ -2111,9 +2111,7 @@ def test_validate_seq_iq_with_transient_non_full_queue_remains_warning() -> None
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "validate_seq_iq_exceeded" not in reasons
-    assert module.pressure_warnings(cfg, diagnostics, reasons) == [
-        "validate_seq_iq_expected_sampling_gap"
-    ]
+    assert "forwarder_queue_nonzero" in reasons
 
 
 def test_validate_seq_iq_still_fails_when_ingress_is_unhealthy() -> None:

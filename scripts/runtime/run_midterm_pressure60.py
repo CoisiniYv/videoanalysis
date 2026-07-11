@@ -7241,6 +7241,8 @@ def pressure_failure_reasons(
         reasons.append("forwarder_saw_extra_sources")
     if int(sample_summary.get("queue_full_samples") or 0) > 0:
         reasons.append("forwarder_queue_full")
+    if float(sample_summary.get("max_forwarder_queue_depth") or 0.0) > 0.0:
+        reasons.append("forwarder_queue_nonzero")
     if not cfg.forwarder_null_sink and int(sample_summary.get("max_savant_sources") or 0) < cfg.stream_count:
         reasons.append("savant_did_not_see_all_sources")
     if not cfg.forwarder_null_sink and int(sample_summary.get("max_savant_sources") or 0) > cfg.stream_count:
