@@ -154,6 +154,7 @@ class PeopleRepository:
         start_ts_ms: int | None = None,
         end_ts_ms: int | None = None,
         include_unregistered_sources: bool = False,
+        include_observation_search: bool = True,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -189,7 +190,8 @@ class PeopleRepository:
                         2 AS source_rank
                     FROM face_observations fo
                     JOIN person_embeddings pe ON true
-                    WHERE 1 - (fo.embedding <=> pe.embedding) >= %(min_similarity)s
+                    WHERE %(include_observation_search)s::boolean
+                      AND 1 - (fo.embedding <=> pe.embedding) >= %(min_similarity)s
                     ORDER BY fo.source_observation_id,
                              1 - (fo.embedding <=> pe.embedding) DESC,
                              fo.timestamp_ms DESC
@@ -232,7 +234,7 @@ class PeopleRepository:
                         fo.timestamp_ms AS observation_timestamp_ms,
                         fo.face_bbox,
                         fo.person_bbox,
-                        COALESCE(face_crop.uri, fo.crop_path) AS face_crop_uri,
+                        COALESCE(fo.crop_path, face_crop.uri) AS face_crop_uri,
                         COALESCE(full_frame.uri, fo.snapshot_path) AS full_frame_uri,
                         annotated_frame.uri AS annotated_frame_uri,
                         eb.media_status AS evidence_media_status,
@@ -324,6 +326,7 @@ class PeopleRepository:
                     "start_ts_ms": start_ts_ms,
                     "end_ts_ms": end_ts_ms,
                     "include_unregistered_sources": include_unregistered_sources,
+                    "include_observation_search": include_observation_search,
                     "limit": limit,
                     "offset": offset,
                 },

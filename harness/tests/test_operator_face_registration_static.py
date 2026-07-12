@@ -95,11 +95,14 @@ def test_operator_separates_face_trajectory_from_evidence_viewer() -> None:
     assert 'params.set("include_unregistered_sources", "true")' in operator_js
     assert "window.operatorPeople" in operator_js
     assert "openPersonById" in operator_js
-    assert "`${API}/people/${encodeURIComponent(selectedPersonId)}/trajectory" not in operator_js
+    assert "`${API}/people/${encodeURIComponent(personId)}/trajectory" in operator_js
     assert "selectedPersonRequestId" in operator_js
     assert "data-image-preview-url" in operator_js
     assert "bindImagePreviewButtons" in operator_js
-    assert "Number(Boolean(locationImageUrl(right)))" in operator_js
+    assert "Number(Boolean(locationThumbnailUrl(right)))" in operator_js
+    assert "trajectory_thumbnail_url || location?.face_crop_url" in operator_js
+    assert "locationPreviewUrl" in operator_js
+    assert 'decoding="async"' in operator_js
     assert 'params.set("event_category", "evidence")' in evidence_js
     assert 'EVIDENCE_VISIBLE_CATEGORIES = new Set(["all", "perimeter", "behavior", "crowd", "identity"])' in evidence_js
     assert "人脸轨迹命中" in evidence_js
@@ -212,7 +215,7 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=operator-trajectory-images-first-20260711" in html
+    assert "operator.js?v=operator-trajectory-ssd-cache-20260712" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js

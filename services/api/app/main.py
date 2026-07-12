@@ -22,6 +22,18 @@ from app.routers.ws_alerts import router as ws_alerts_router
 from app.services.savant_supervisor import start_savant_supervisor, stop_savant_supervisor
 
 
+class MediaStaticFiles(StaticFiles):
+    """Serve immutable trajectory thumbnails with explicit browser caching."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in {200, 206, 304} and path.startswith(
+            ("face_trajectory_cache/", "face_trajectories/")
+        ):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     start_savant_supervisor()
@@ -45,7 +57,7 @@ app.include_router(ws_alerts_router)
 # Mount /media for serving clip/snapshot files
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", "/media")
 if os.path.isdir(MEDIA_ROOT):
-    app.mount("/media", StaticFiles(directory=MEDIA_ROOT), name="media")
+    app.mount("/media", MediaStaticFiles(directory=MEDIA_ROOT), name="media")
 
 
 # ---------------------------------------------------------------------------

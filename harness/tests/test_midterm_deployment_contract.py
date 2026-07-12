@@ -130,6 +130,10 @@ def test_midterm_one_click_startup_scripts_are_the_customer_entrypoint() -> None
     assert 'ENV_FILE="$REPO_ROOT/infra/env/midterm.env"' in start
     assert 'COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")' in start
     assert 'COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")' in start
+    storage_override = _text(ROOT / "infra" / "midterm-storage.override.yml")
+    assert "FACE_TRAJECTORY_CACHE_HOST_ROOT" in storage_override
+    assert "/home/user/video-analytics-fast/face_trajectory_cache" in storage_override
+    assert 'FACE_TRAJECTORY_CACHE_LIMIT_PER_PERSON: "100"' in storage_override
     assert 'docker compose "${COMPOSE_ARGS[@]}" build face-worker' in start
     assert "check_model_assets" in start
     assert "POSE_MODEL_FILE" in start

@@ -2,3 +2,9 @@ services:
   face-worker:
     volumes:
       - ${FACE_TRAJECTORY_HOST_ROOT:-/data/video-analytics/media/face_trajectories}:/data/video-analytics/media/face_trajectories:rw
+  api:
+    environment:
+      FACE_TRAJECTORY_CACHE_ROOT: /data/video-analytics/media/face_trajectory_cache
+      FACE_TRAJECTORY_CACHE_LIMIT_PER_PERSON: "100"
+    volumes:
+      - ${FACE_TRAJECTORY_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/face_trajectory_cache}:/data/video-analytics/media/face_trajectory_cache:rw

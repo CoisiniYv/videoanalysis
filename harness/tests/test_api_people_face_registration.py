@@ -38,6 +38,8 @@ NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class FakePeopleRepository:
+    trajectory_calls: list[dict[str, Any]] = []
+
     def __init__(self) -> None:
         self.last_trajectory_kwargs: dict[str, Any] = {}
         self.people = {
@@ -123,6 +125,7 @@ class FakePeopleRepository:
 
     def trajectory(self, person_id: int, **kwargs: Any) -> list[dict[str, Any]]:
         self.last_trajectory_kwargs = dict(kwargs)
+        type(self).trajectory_calls.append(dict(kwargs))
         rows = [row for row in self.trajectory_rows if row["person_id"] == person_id]
         min_similarity = float(kwargs.get("min_similarity") or 0.0)
         rows = [row for row in rows if float(row["similarity"] or 0.0) >= min_similarity]
@@ -170,6 +173,11 @@ def registrar() -> CapturingRegistrar:
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registrar: CapturingRegistrar):
     app.dependency_overrides.clear()
+    FakePeopleRepository.trajectory_calls.clear()
+    monkeypatch.setattr(
+        "app.routers.people.cache_trajectory_thumbnails",
+        lambda _person_id, _uris: {},
+    )
     monkeypatch.setenv("FACE_UPLOAD_ROOT", str(tmp_path / "uploads"))
     monkeypatch.setenv("FACE_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024))
 
@@ -210,6 +218,24 @@ def test_people_find_returns_image_trajectory_without_evidence_video(client: Tes
     assert data["latest_location"]["annotated_frame_url"] == "/media/faces/reese-annotated.jpg"
     assert data["results"][0]["trajectory_source"] == "watchlist_event"
     assert data["query"]["limit"] == 10
+    assert (
+        FakePeopleRepository.trajectory_calls[-1]["include_observation_search"] is True
+    )
+
+
+def test_people_trajectory_uses_persisted_hits_without_full_vector_search(
+    client: TestClient,
+) -> None:
+    resp = client.get("/api/v1/people/10/trajectory?limit=20&min_similarity=0.6")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["mode"] == "persisted_trajectory"
+    assert data["trajectory"][0]["trajectory_thumbnail_url"] == (
+        "/media/faces/reese-crop.jpg"
+    )
+    assert (
+        FakePeopleRepository.trajectory_calls[-1]["include_observation_search"] is False
+    )
 
 
 def test_people_find_defaults_to_nonzero_similarity_threshold(client: TestClient) -> None:
@@ -225,6 +251,14 @@ def test_people_find_can_explicitly_include_unregistered_sources(client: TestCli
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["query"]["include_unregistered_sources"] is True
+
+
+def test_people_repository_prefers_small_persisted_trajectory_crop() -> None:
+    source = (Path(API_DIR) / "app" / "repositories" / "people.py").read_text(
+        encoding="utf-8"
+    )
+    assert "COALESCE(fo.crop_path, face_crop.uri) AS face_crop_uri" in source
+    assert "WHERE %(include_observation_search)s::boolean" in source
 
 
 def test_register_face_upload_forces_real_manual_upload_path(

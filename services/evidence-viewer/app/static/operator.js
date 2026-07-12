@@ -2680,8 +2680,12 @@ function renderPersonProfile(person) {
     `<div class="muted">${person.description || "暂无描述"}</div>`;
 }
 
-function locationImageUrl(location) {
-  return location?.annotated_frame_url || location?.full_frame_url || location?.face_crop_url || "";
+function locationThumbnailUrl(location) {
+  return location?.trajectory_thumbnail_url || location?.face_crop_url || location?.annotated_frame_url || location?.full_frame_url || "";
+}
+
+function locationPreviewUrl(location) {
+  return location?.annotated_frame_url || location?.full_frame_url || location?.face_crop_url || location?.trajectory_thumbnail_url || "";
 }
 
 function openImagePreview(imageUrl, title, subtitle) {
@@ -2698,13 +2702,13 @@ function closeImagePreview() {
   if (imagePreviewImgEl) imagePreviewImgEl.removeAttribute("src");
 }
 
-function previewButtonHtml(imageUrl, title, subtitle, className, altText) {
-  if (!imageUrl) return "";
+function previewButtonHtml(thumbnailUrl, previewUrl, title, subtitle, className, altText) {
+  if (!thumbnailUrl) return "";
   return (
-    `<button type="button" class="${className}" data-image-preview-url="${escapeHtml(imageUrl)}" ` +
+    `<button type="button" class="${className}" data-image-preview-url="${escapeHtml(previewUrl || thumbnailUrl)}" ` +
       `data-image-preview-title="${escapeHtml(title || "图像查看")}" ` +
       `data-image-preview-subtitle="${escapeHtml(subtitle || "人脸轨迹图片")}">` +
-      `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(altText || "轨迹图片")}" loading="lazy" />` +
+      `<img src="${escapeHtml(thumbnailUrl)}" alt="${escapeHtml(altText || "轨迹图片")}" loading="lazy" decoding="async" />` +
     `</button>`
   );
 }
@@ -2745,13 +2749,14 @@ function renderPersonLatestLocation(location) {
     return;
   }
   const cameraName = location.camera_name || location.source_id || location.camera_id || "未知摄像头";
-  const imageUrl = locationImageUrl(location);
+  const thumbnailUrl = locationThumbnailUrl(location);
+  const previewUrl = locationPreviewUrl(location);
   const timeText = formatTime(location.event_ts_ms || location.event_created_at || location.observation_timestamp_ms);
   personLatestLocationEl.innerHTML =
     `<strong>最近位置：${escapeHtml(cameraName)}</strong>` +
     `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
     `<div class="muted">相似度：${escapeHtml(formatPercent(location.similarity))}</div>` +
-    previewButtonHtml(imageUrl, `最近位置：${cameraName}`, timeText || "人脸轨迹图片", "image-preview-trigger gallery-preview-trigger", "最近命中图片");
+    previewButtonHtml(thumbnailUrl, previewUrl, `最近位置：${cameraName}`, timeText || "人脸轨迹图片", "image-preview-trigger gallery-preview-trigger", "最近命中图片");
   bindImagePreviewButtons(personLatestLocationEl);
 }
 
@@ -2759,7 +2764,7 @@ function renderPersonTrajectory(rows) {
   if (!personTrajectoryEl) return;
   const trajectory = Array.isArray(rows)
     ? [...rows].sort((left, right) =>
-        Number(Boolean(locationImageUrl(right))) - Number(Boolean(locationImageUrl(left))))
+        Number(Boolean(locationThumbnailUrl(right))) - Number(Boolean(locationThumbnailUrl(left))))
     : [];
   if (!selectedPersonId) {
     personTrajectoryEl.textContent = "选择人员后可查看最近轨迹";
@@ -2774,11 +2779,12 @@ function renderPersonTrajectory(rows) {
   const items = trajectory.slice(0, 12).map((row) => {
     const cameraName = row.camera_name || row.source_id || row.camera_id || "未知摄像头";
     const timeText = formatTime(row.event_ts_ms || row.event_created_at || row.observation_timestamp_ms);
-    const imageUrl = locationImageUrl(row);
+    const thumbnailUrl = locationThumbnailUrl(row);
+    const previewUrl = locationPreviewUrl(row);
     return (
       `<div class="trajectory-row">` +
-        (imageUrl
-          ? previewButtonHtml(imageUrl, cameraName, timeText || "轨迹图片", "image-preview-trigger trajectory-preview-trigger", "轨迹图片")
+        (thumbnailUrl
+          ? previewButtonHtml(thumbnailUrl, previewUrl, cameraName, timeText || "轨迹图片", "image-preview-trigger trajectory-preview-trigger", "轨迹图片")
           : `<div class="trajectory-thumb-empty"></div>`) +
         `<div>` +
           `<strong>${escapeHtml(cameraName)}</strong>` +
@@ -2800,7 +2806,7 @@ async function findSelectedPersonLatestLocation(personId = selectedPersonId, req
   if (findSelectedPersonBtn) findSelectedPersonBtn.disabled = true;
   try {
     const params = personLookupParams({ limit: 20, minSimilarity: 0.6 });
-    const data = await request(`${API}/people/${encodeURIComponent(personId)}/find?${params.toString()}`);
+    const data = await request(`${API}/people/${encodeURIComponent(personId)}/trajectory?${params.toString()}`);
     if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
       return;
     }
@@ -2821,12 +2827,13 @@ function renderFindPersonLatest(location) {
     return;
   }
   const cameraName = location.camera_name || location.source_id || location.camera_id || "未知摄像头";
-  const imageUrl = locationImageUrl(location);
+  const thumbnailUrl = locationThumbnailUrl(location);
+  const previewUrl = locationPreviewUrl(location);
   const timeText = formatTime(location.event_ts_ms || location.event_created_at || location.observation_timestamp_ms);
   findPersonLatestEl.innerHTML =
     `<strong>最新位置：${escapeHtml(cameraName)}</strong>` +
     `<div class="muted">${escapeHtml(timeText || "-")} | 相似度 ${escapeHtml(formatPercent(location.similarity))}</div>` +
-    previewButtonHtml(imageUrl, `最新位置：${cameraName}`, timeText || "一键找人图片", "image-preview-trigger gallery-preview-trigger", "最新位置图片");
+    previewButtonHtml(thumbnailUrl, previewUrl, `最新位置：${cameraName}`, timeText || "一键找人图片", "image-preview-trigger gallery-preview-trigger", "最新位置图片");
   bindImagePreviewButtons(findPersonLatestEl);
 }
 
@@ -2840,11 +2847,12 @@ function renderFindPersonResults(rows) {
   findPersonResultsEl.innerHTML = results.map((row) => {
     const cameraName = row.camera_name || row.source_id || row.camera_id || "未知摄像头";
     const timeText = formatTime(row.event_ts_ms || row.event_created_at || row.observation_timestamp_ms);
-    const imageUrl = locationImageUrl(row);
+    const thumbnailUrl = locationThumbnailUrl(row);
+    const previewUrl = locationPreviewUrl(row);
     return (
       `<article class="find-person-result">` +
-        (imageUrl
-          ? previewButtonHtml(imageUrl, cameraName, timeText || "找人结果图片", "image-preview-trigger find-person-preview-trigger", "找人结果图片")
+        (thumbnailUrl
+          ? previewButtonHtml(thumbnailUrl, previewUrl, cameraName, timeText || "找人结果图片", "image-preview-trigger find-person-preview-trigger", "找人结果图片")
           : `<div class="trajectory-thumb-empty"></div>`) +
         `<div>` +
           `<strong>${escapeHtml(cameraName)}</strong>` +

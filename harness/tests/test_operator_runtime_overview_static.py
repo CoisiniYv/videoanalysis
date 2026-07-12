@@ -90,7 +90,7 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
 def test_operator_runtime_restart_displays_evidence_guard_details() -> None:
     js = _text(STATIC_ROOT / "operator.js")
 
-    assert "error.details = body.error?.details || null" in js
+    assert "error.details = body.error?.details || body.detail || null" in js
     assert "function apiErrorMessage" in js
     assert "仍有 ${count} 个证据任务在生成中" in js
     assert "active_count" in js

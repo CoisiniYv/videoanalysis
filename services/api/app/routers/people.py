@@ -22,6 +22,7 @@ from app.schemas.people import (
     PersonSummaryResponse,
     PersonWithGalleryResponse,
 )
+from app.services.trajectory_thumbnail_cache import cache_trajectory_thumbnails
 
 
 def _find_libs_root(start: Path) -> Path:
@@ -196,6 +197,21 @@ def _location_from_row(row: dict | None) -> dict | None:
     return payload
 
 
+def _locations_from_rows(person_id: int, rows: list[dict]) -> list[dict]:
+    locations = [_location_from_row(row) for row in rows]
+    payloads = [location for location in locations if location is not None]
+    cache_urls = cache_trajectory_thumbnails(
+        person_id,
+        [str(row.get("face_crop_uri") or "") for row in rows[:100]],
+    )
+    for row, payload in zip(rows, payloads, strict=True):
+        canonical_uri = str(row.get("face_crop_uri") or "")
+        payload["trajectory_thumbnail_url"] = cache_urls.get(
+            canonical_uri
+        ) or payload.get("face_crop_url")
+    return payloads
+
+
 def _save_upload(upload: UploadFile, request_id: str) -> str:
     original = upload.filename or ""
     suffix = Path(original).suffix.lower()
@@ -324,15 +340,18 @@ def people_trajectory(
         start_ts_ms=start_ts_ms,
         end_ts_ms=end_ts_ms,
         include_unregistered_sources=include_unregistered_sources,
+        include_observation_search=False,
         limit=limit,
         offset=offset,
     )
+    trajectory = _locations_from_rows(person_id, rows)
     return _ok(
         {
             "person": person,
-            "trajectory": [_location_from_row(row) for row in rows],
+            "trajectory": trajectory,
             "limit": limit,
             "offset": offset,
+            "mode": "persisted_trajectory",
         },
         request_id,
     )
@@ -363,10 +382,11 @@ def people_find(
         start_ts_ms=start_ts_ms,
         end_ts_ms=end_ts_ms,
         include_unregistered_sources=include_unregistered_sources,
+        include_observation_search=True,
         limit=limit,
         offset=offset,
     )
-    results = [_location_from_row(row) for row in rows]
+    results = _locations_from_rows(person_id, rows)
     return _ok(
         {
             "person": person,
