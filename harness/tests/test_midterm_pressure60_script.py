@@ -4046,14 +4046,92 @@ def test_pressure_runner_postfills_rolling_cache_before_stopping_sources() -> No
 
     sample_index = source.index('report["pressure_sampling_window"] = sample_runtime(')
     cutoff_index = source.index("pressure_event_sampling_cutoff(conn, cfg)", sample_index)
+    visibility_index = source.index(
+        "collect_rolling_cache_segment_visibility(cfg)", cutoff_index
+    )
     postfill_index = source.index("rolling_cache_postfill_after_sampling(cfg)", cutoff_index)
     stop_index = source.index("stop_pressure_sources(conn, cfg)", postfill_index)
     quiescence_index = source.index("wait_for_pressure_event_quiescence(", stop_index)
-    post_cleanup_index = source.index("clear_pressure_post_sample_rows(", quiescence_index)
+    post_cleanup_index = source.index(
+        "prune_pressure_post_sample_nonplayable_rows(", quiescence_index
+    )
     wait_index = source.index("wait_for_drain(cfg)", post_cleanup_index)
 
-    assert sample_index < cutoff_index < postfill_index < stop_index
+    assert sample_index < cutoff_index < visibility_index < postfill_index < stop_index
     assert stop_index < quiescence_index < post_cleanup_index < wait_index
+
+
+def test_postfill_prune_keeps_bundles_and_trajectory_observations(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, evidence_root=tmp_path / "evidence")
+    cutoff = {"created_at_cutoff": "2026-07-12T07:03:03+00:00"}
+
+    class FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Result:
+        def __init__(self, *, rows=None, row=None, rowcount=0):
+            self._rows = rows or []
+            self._row = row
+            self.rowcount = rowcount
+
+        def fetchall(self):
+            return self._rows
+
+        def fetchone(self):
+            return self._row
+
+    class FakeConn:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def transaction(self):
+            return FakeTx()
+
+        def execute(self, query, _params):
+            compact = " ".join(query.split())
+            self.queries.append(compact)
+            if compact.startswith("SELECT DISTINCT e.id::text"):
+                return Result(rows=[{"id": "00000000-0000-0000-0000-000000000008"}])
+            if compact.startswith("DELETE FROM events WHERE id"):
+                return Result(rowcount=1)
+            if compact.startswith("SELECT (SELECT count(*) FROM events"):
+                return Result(
+                    row={
+                        "events": 27,
+                        "playable_bundles": 18,
+                        "face_observations": 1337,
+                        "person_observations": 3812,
+                    }
+                )
+            raise AssertionError(compact)
+
+    monkeypatch.setattr(
+        module,
+        "db_pressure_event_ingest_summary",
+        lambda *_args, **_kwargs: {"events": 1323},
+    )
+    conn = FakeConn()
+    summary = module.prune_pressure_post_sample_nonplayable_rows(conn, cfg, cutoff)
+
+    assert summary["nonplayable_event_candidates"] == 1
+    assert summary["event_rows_deleted"] == 1
+    assert summary["playable_bundle_rows_preserved"] == 18
+    assert summary["face_observation_rows_preserved"] == 1337
+    assert summary["person_observation_rows_preserved"] == 3812
+    assert summary["face_observation_rows_deleted"] == 0
+    assert summary["person_observation_rows_deleted"] == 0
+    assert not any("DELETE FROM face_observations" in query for query in conn.queries)
+    assert not any(
+        "DELETE FROM person_bbox_observations" in query for query in conn.queries
+    )
 
 
 def test_pressure_runner_starts_rolling_cache_sinks_after_runtime_epoch_changes() -> None:

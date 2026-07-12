@@ -1327,6 +1327,22 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         report["pressure_sampling_cutoff"] = pressure_event_sampling_cutoff(conn, cfg)
+        if cfg.rolling_cache_evidence:
+            # Rolling-cache source directories can disappear on EOS. Capture
+            # finalized segment coverage while all pressure sources and sinks
+            # are still alive, before postfill eventually stops the sources.
+            report["rolling_cache_segment_visibility"] = (
+                collect_rolling_cache_segment_visibility(cfg)
+            )
+            report["rolling_cache_full_rate_gate"] = rolling_cache_full_rate_gate(
+                cfg,
+                report["rolling_cache_segment_visibility"],
+                report.get("rolling_cache_sinks_pressure"),
+            )
+            write_json(
+                cfg.artifact_dir / "rolling_cache_segment_visibility.json",
+                report["rolling_cache_segment_visibility"],
+            )
         report["rolling_cache_postfill"] = rolling_cache_postfill_after_sampling(cfg)
         if cfg.adaface_roi_redis:
             report["adaface_roi_worker"] = collect_adaface_roi_worker_metrics(cfg)
@@ -1355,10 +1371,12 @@ def main(argv: list[str] | None = None) -> int:
                 report["pressure_sampling_cutoff"],
             )
         else:
-            report["pressure_post_sample_cleanup"] = preserve_pressure_post_sample_rows(
-                conn,
-                cfg,
-                report["pressure_sampling_cutoff"],
+            report["pressure_post_sample_cleanup"] = (
+                prune_pressure_post_sample_nonplayable_rows(
+                    conn,
+                    cfg,
+                    report["pressure_sampling_cutoff"],
+                )
             )
         diagnostics = collect_pressure_diagnostics(cfg)
         report["diagnostics"] = diagnostics
@@ -1386,19 +1404,6 @@ def main(argv: list[str] | None = None) -> int:
             cfg.artifact_dir / "non_materialized_task_details.json",
             report["non_materialized_task_details"],
         )
-        if cfg.rolling_cache_evidence:
-            report["rolling_cache_segment_visibility"] = (
-                collect_rolling_cache_segment_visibility(cfg)
-            )
-            report["rolling_cache_full_rate_gate"] = rolling_cache_full_rate_gate(
-                cfg,
-                report["rolling_cache_segment_visibility"],
-                report.get("rolling_cache_sinks_pressure"),
-            )
-            write_json(
-                cfg.artifact_dir / "rolling_cache_segment_visibility.json",
-                report["rolling_cache_segment_visibility"],
-            )
         report["evidence_window_validation"] = evidence_window_validation_summary(
             cfg,
             kept,
@@ -5123,43 +5128,104 @@ def clear_pressure_post_sample_rows(
     return summary
 
 
-def preserve_pressure_post_sample_rows(
+def prune_pressure_post_sample_nonplayable_rows(
     conn,
     cfg: PressureConfig,
     cutoff: dict[str, Any],
 ) -> dict[str, Any]:
-    """Retain postfill events, trajectories, images, and evidence for 8090 review."""
+    """Prune only postfill tasks that never produced or linked to a bundle."""
     cutoff_raw = str(cutoff.get("created_at_cutoff") or "")
+    if not cutoff_raw:
+        return {"status": "skipped", "reason": "missing_created_at_cutoff"}
+    cutoff_created_at = datetime.fromisoformat(cutoff_raw.replace("Z", "+00:00"))
+    cutoff_event_ts_ms = int(cutoff_created_at.timestamp() * 1000)
     source_ids = pressure_source_ids(cfg)
-    counts: dict[str, Any] = {}
-    if cutoff_raw:
-        cutoff_created_at = datetime.fromisoformat(cutoff_raw.replace("Z", "+00:00"))
-        counts = conn.execute(
-            """
-            SELECT
-              (SELECT count(*) FROM events
-                 WHERE source_id = ANY(%(source_ids)s) AND created_at > %(cutoff)s)
-                AS events,
-              (SELECT count(*) FROM face_observations
-                 WHERE source_id = ANY(%(source_ids)s) AND created_at > %(cutoff)s)
-                AS face_observations,
-              (SELECT count(*) FROM person_bbox_observations
-                 WHERE source_id = ANY(%(source_ids)s) AND created_at > %(cutoff)s)
-                AS person_observations
-            """,
-            {"source_ids": source_ids, "cutoff": cutoff_created_at},
-        ).fetchone() or {}
+    params = {
+        "source_ids": source_ids,
+        "cutoff_created_at": cutoff_created_at,
+        "cutoff_event_ts_ms": cutoff_event_ts_ms,
+    }
+    rows = conn.execute(
+        """
+        SELECT DISTINCT e.id::text
+        FROM events e
+        JOIN evidence_tasks et ON et.event_id = e.id
+        LEFT JOIN evidence_bundles direct_bundle ON direct_bundle.event_id = e.id
+        LEFT JOIN evidence_event_links eel ON eel.event_id = e.id
+        LEFT JOIN evidence_bundles linked_bundle
+          ON linked_bundle.event_id = eel.bundle_event_id
+        WHERE e.source_id = ANY(%(source_ids)s)
+          AND (
+            (e.event_ts_ms > 0 AND e.event_ts_ms > %(cutoff_event_ts_ms)s)
+            OR (e.event_ts_ms <= 0 AND e.created_at > %(cutoff_created_at)s)
+          )
+          AND direct_bundle.event_id IS NULL
+          AND linked_bundle.event_id IS NULL
+          AND COALESCE(et.materialization_status, '') <> 'materialized'
+        ORDER BY e.id::text
+        """,
+        params,
+    ).fetchall()
+    event_ids = [str(row["id"]) for row in rows]
+    removed_dirs = 0
+    remove_failures: list[dict[str, str]] = []
+    for event_id in event_ids:
+        removed, error = remove_tree_best_effort(cfg.evidence_root / event_id)
+        if removed:
+            removed_dirs += 1
+        if error:
+            remove_failures.append({"event_id": event_id, "error": error})
+
+    deleted = 0
+    if event_ids:
+        with conn.transaction():
+            deleted = conn.execute(
+                "DELETE FROM events WHERE id = ANY(%s::uuid[])",
+                (event_ids,),
+            ).rowcount or 0
+
+    counts = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM events
+             WHERE source_id = ANY(%(source_ids)s)
+               AND (
+                 (event_ts_ms > 0 AND event_ts_ms > %(cutoff_event_ts_ms)s)
+                 OR (event_ts_ms <= 0 AND created_at > %(cutoff_created_at)s)
+               )) AS events,
+          (SELECT count(*)
+             FROM evidence_bundles eb
+             JOIN events e ON e.id = eb.event_id
+            WHERE e.source_id = ANY(%(source_ids)s)
+              AND (
+                (e.event_ts_ms > 0 AND e.event_ts_ms > %(cutoff_event_ts_ms)s)
+                OR (e.event_ts_ms <= 0 AND e.created_at > %(cutoff_created_at)s)
+              )) AS playable_bundles,
+          (SELECT count(*) FROM face_observations
+             WHERE source_id = ANY(%(source_ids)s)
+               AND timestamp_ms > %(cutoff_event_ts_ms)s) AS face_observations,
+          (SELECT count(*) FROM person_bbox_observations
+             WHERE source_id = ANY(%(source_ids)s)
+               AND timestamp_ms > %(cutoff_event_ts_ms)s) AS person_observations
+        """,
+        params,
+    ).fetchone() or {}
     summary = {
-        "status": "preserved",
-        "reason": "visual_results_retained",
-        "created_at_cutoff": cutoff_raw or None,
+        "status": "completed",
+        "reason": "postfill_nonplayable_tasks_pruned",
+        "created_at_cutoff": cutoff_raw,
+        "event_ts_ms_cutoff": cutoff_event_ts_ms,
+        "nonplayable_event_candidates": len(event_ids),
+        "event_rows_deleted": deleted,
         "event_rows_preserved": int(counts.get("events") or 0),
+        "playable_bundle_rows_preserved": int(counts.get("playable_bundles") or 0),
         "face_observation_rows_preserved": int(counts.get("face_observations") or 0),
         "person_observation_rows_preserved": int(counts.get("person_observations") or 0),
-        "event_rows_deleted": 0,
         "face_observation_rows_deleted": 0,
         "person_observation_rows_deleted": 0,
-        "evidence_dirs_removed": 0,
+        "evidence_dirs_removed": removed_dirs,
+        "evidence_dir_remove_failures": len(remove_failures),
+        "evidence_dir_remove_failure_samples": remove_failures[:20],
         "post_cleanup_db_ingest": db_pressure_event_ingest_summary(
             conn,
             cfg.run_id,
