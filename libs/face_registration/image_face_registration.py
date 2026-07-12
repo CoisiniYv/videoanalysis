@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -16,6 +16,7 @@ import psycopg
 from pgvector.psycopg import register_vector
 
 from .face_image_preprocess import (
+    StorageResolution,
     resolve_registration_storage,
     save_registered_crop,
     validate_image_path,
@@ -62,11 +63,13 @@ ERROR_EMBEDDING_DIM_INVALID = "EMBEDDING_DIM_INVALID"
 ERROR_EMBEDDING_NORM_INVALID = "EMBEDDING_NORM_INVALID"
 ERROR_DATABASE_URL_MISSING = "DATABASE_URL_MISSING"
 ERROR_DATABASE_CONNECTION_FAILED = "DATABASE_CONNECTION_FAILED"
+ERROR_DATABASE_WRITE_FAILED = "DATABASE_WRITE_FAILED"
 ERROR_PERSON_NOT_FOUND = "PERSON_NOT_FOUND"
 ERROR_EXTERNAL_PERSON_ID_CONFLICT = "EXTERNAL_PERSON_ID_CONFLICT"
 ERROR_PRIMARY_GALLERY_CONSTRAINT_FAILED = "PRIMARY_GALLERY_CONSTRAINT_FAILED"
 
 STATUS_REGISTERED = "REGISTERED"
+STATUS_PARTIAL = "PARTIAL"
 STATUS_FAILED = "FAILED"
 MODE_EXTERNAL_IMAGE = "external_image"
 SOURCE_TYPE_MANUAL_UPLOAD = "manual_upload"
@@ -97,6 +100,52 @@ class RegistrationRequest:
     face_detector_onnx: str | None = None
     adaface_onnx: str | None = None
     onnx_provider: str | None = None
+
+
+@dataclass(frozen=True)
+class BatchRegistrationRequest:
+    """Common identity/settings for a bounded set of external face images.
+
+    The batch intentionally keeps one person identity and produces one gallery
+    embedding per accepted image.  It is a partial-success operation: an image
+    with poor quality must not discard other valid images in the same upload.
+    """
+
+    image_paths: tuple[str, ...]
+    external_person_id: str | None
+    name: str | None
+    person_id: int | None
+    description: str | None
+    source_type: str
+    is_primary: bool
+    quality_threshold: float
+    allow_multiple_faces: bool
+    keep_crop: bool
+    created_by: str | None
+    dev_mock_embedding_fixture: str | None
+    face_detector_onnx: str | None = None
+    adaface_onnx: str | None = None
+    onnx_provider: str | None = None
+    image_names: tuple[str, ...] = ()
+
+    def item_request(self, image_path: str) -> RegistrationRequest:
+        return RegistrationRequest(
+            image_path=image_path,
+            external_person_id=self.external_person_id,
+            name=self.name,
+            person_id=self.person_id,
+            description=self.description,
+            source_type=self.source_type,
+            is_primary=False,
+            quality_threshold=self.quality_threshold,
+            allow_multiple_faces=self.allow_multiple_faces,
+            keep_crop=self.keep_crop,
+            created_by=self.created_by,
+            dev_mock_embedding_fixture=self.dev_mock_embedding_fixture,
+            face_detector_onnx=self.face_detector_onnx,
+            adaface_onnx=self.adaface_onnx,
+            onnx_provider=self.onnx_provider,
+        )
 
 
 @dataclass(frozen=True)
@@ -143,6 +192,54 @@ class RegistrationResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class BatchRegistrationItemResult:
+    """The outcome for one submitted image, retained in client upload order."""
+
+    index: int
+    filename: str
+    result: RegistrationResult
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = self.result.to_dict()
+        payload.update({"index": self.index, "filename": self.filename})
+        return payload
+
+
+@dataclass
+class BatchRegistrationResult:
+    """Serializable partial-success result for a multi-image registration."""
+
+    status: str
+    mode: str = MODE_EXTERNAL_IMAGE
+    person_id: int | None = None
+    person_reused: bool = False
+    external_person_id: str | None = None
+    name: str | None = None
+    registered_count: int = 0
+    failed_count: int = 0
+    items: list[BatchRegistrationItemResult] = field(default_factory=list)
+    error_code: str | None = None
+    error_message: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "mode": self.mode,
+            "person_id": self.person_id,
+            "person_reused": self.person_reused,
+            "external_person_id": self.external_person_id,
+            "name": self.name,
+            "registered_count": self.registered_count,
+            "failed_count": self.failed_count,
+            "items": [item.to_dict() for item in self.items],
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "warnings": list(self.warnings),
+        }
 
 
 class RegistrationError(Exception):
@@ -688,5 +785,408 @@ def register_external_image(
         result.error_code = exc.error_code
         result.error_message = exc.message
         return result
+    finally:
+        conn.close()
+
+
+@dataclass
+class _PreparedBatchRegistration:
+    """Validated/inferred image waiting to be written to the gallery."""
+
+    image_path: str
+    storage: StorageResolution
+    candidate: EmbeddingCandidate
+    item: BatchRegistrationItemResult
+
+
+class _NoBatchImagesRegistered(Exception):
+    """Abort the database transaction when no valid gallery row was written."""
+
+
+def _batch_item_result(
+    request: RegistrationRequest,
+    *,
+    index: int,
+    filename: str,
+    image_path: str,
+    storage: StorageResolution | None = None,
+) -> BatchRegistrationItemResult:
+    return BatchRegistrationItemResult(
+        index=index,
+        filename=filename,
+        result=RegistrationResult(
+            status=STATUS_FAILED,
+            mode=MODE_EXTERNAL_IMAGE,
+            source_image_path=image_path,
+            registered_crop_path=(storage.registered_crop_path if storage else None),
+            source_type=request.source_type,
+            external_person_id=request.external_person_id,
+            name=request.name,
+            storage_fallback_used=(storage.storage_fallback_used if storage else False),
+            storage_fallback_reason=(storage.storage_fallback_reason if storage else None),
+            dev_mock_used=bool(request.dev_mock_embedding_fixture),
+            fallback_used=bool(request.dev_mock_embedding_fixture),
+        ),
+    )
+
+
+def _set_registration_failure(
+    result: RegistrationResult,
+    error: RegistrationError,
+) -> None:
+    result.status = STATUS_FAILED
+    result.error_code = error.error_code
+    result.error_message = error.message
+    result.gallery_embedding_id = None
+    result.is_primary = False
+    result.registered_crop_path = None
+
+
+def _database_registration_error(exc: psycopg.Error) -> RegistrationError:
+    """Expose stable, operator-safe codes for per-image write failures."""
+    message = str(exc)
+    if (
+        "person_gallery_one_primary_idx" in message
+        or "person_gallery_embeddings_one_primary_active" in message
+    ):
+        return RegistrationError(ERROR_PRIMARY_GALLERY_CONSTRAINT_FAILED, message)
+    if "persons_external_person_id" in message:
+        return RegistrationError(ERROR_EXTERNAL_PERSON_ID_CONFLICT, message)
+    return RegistrationError(ERROR_DATABASE_WRITE_FAILED, message)
+
+
+def _prepare_batch_registration(
+    request: RegistrationRequest,
+    *,
+    index: int,
+    filename: str,
+    embedder: RealImageEmbedder,
+) -> tuple[_PreparedBatchRegistration | None, BatchRegistrationItemResult]:
+    """Validate and infer one image without writing a person or gallery row."""
+    image_path = request.image_path
+    try:
+        _validate_image_extension(image_path)
+        image_path = validate_image_path(image_path)
+    except RegistrationError as exc:
+        item = _batch_item_result(
+            request, index=index, filename=filename, image_path=image_path
+        )
+        _set_registration_failure(item.result, exc)
+        return None, item
+    except FileNotFoundError as exc:
+        item = _batch_item_result(
+            request, index=index, filename=filename, image_path=str(exc)
+        )
+        _set_registration_failure(
+            item.result,
+            RegistrationError(ERROR_IMAGE_PATH_NOT_FOUND, str(exc)),
+        )
+        return None, item
+    except (IsADirectoryError, OSError) as exc:
+        item = _batch_item_result(
+            request, index=index, filename=filename, image_path=image_path
+        )
+        _set_registration_failure(
+            item.result,
+            RegistrationError(ERROR_IMAGE_READ_FAILED, str(exc)),
+        )
+        return None, item
+
+    try:
+        storage = resolve_registration_storage(image_path)
+    except OSError as exc:
+        item = _batch_item_result(
+            request, index=index, filename=filename, image_path=image_path
+        )
+        _set_registration_failure(
+            item.result,
+            RegistrationError(ERROR_IMAGE_READ_FAILED, str(exc)),
+        )
+        return None, item
+
+    item = _batch_item_result(
+        request,
+        index=index,
+        filename=filename,
+        image_path=image_path,
+        storage=storage,
+    )
+    try:
+        if isinstance(embedder, OfflineFaceEmbedderAdapter):
+            item.result.detector_providers = embedder.detector_providers
+            item.result.embedder_providers = embedder.embedder_providers
+        candidates = embedder.extract(
+            image_path,
+            allow_multiple_faces=request.allow_multiple_faces,
+            quality_threshold=request.quality_threshold,
+        )
+        candidate = _select_candidate(
+            candidates,
+            allow_multiple_faces=request.allow_multiple_faces,
+            quality_threshold=request.quality_threshold,
+        )
+    except RegistrationError as exc:
+        _set_registration_failure(item.result, exc)
+        return None, item
+    except FileNotFoundError as exc:
+        _set_registration_failure(item.result, _registration_error_from_file_not_found(exc))
+        return None, item
+    except ValueError as exc:
+        _set_registration_failure(item.result, _registration_error_from_value_error(exc))
+        return None, item
+
+    return (
+        _PreparedBatchRegistration(
+            image_path=image_path,
+            storage=storage,
+            candidate=candidate,
+            item=item,
+        ),
+        item,
+    )
+
+
+def _finalize_batch_result(
+    request: BatchRegistrationRequest,
+    items: list[BatchRegistrationItemResult],
+    *,
+    person_id: int | None = None,
+    person_reused: bool = False,
+    external_person_id: str | None = None,
+    name: str | None = None,
+    error: RegistrationError | None = None,
+    warnings: list[str] | None = None,
+) -> BatchRegistrationResult:
+    registered_count = sum(
+        item.result.status == STATUS_REGISTERED for item in items
+    )
+    failed_count = len(items) - registered_count
+    if registered_count == 0:
+        status = STATUS_FAILED
+    elif failed_count:
+        status = STATUS_PARTIAL
+    else:
+        status = STATUS_REGISTERED
+    return BatchRegistrationResult(
+        status=status,
+        person_id=person_id,
+        person_reused=person_reused,
+        external_person_id=external_person_id or request.external_person_id,
+        name=name or request.name,
+        registered_count=registered_count,
+        failed_count=failed_count,
+        items=items,
+        error_code=error.error_code if error else None,
+        error_message=error.message if error else None,
+        warnings=list(warnings or []),
+    )
+
+
+def _unlink_crop_if_present(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("failed to remove unregistered face crop path=%s", path)
+
+
+def register_external_images(
+    request: BatchRegistrationRequest,
+    *,
+    embedder: RealImageEmbedder | None = None,
+) -> BatchRegistrationResult:
+    """Register several images for one person with per-image outcomes.
+
+    Inference is deliberately sequential and reuses one detector/embedder
+    instance.  A failed image is reported independently; valid images are
+    retained.  This makes a batch usable for varied poses without turning one
+    bad crop into a rollback of the whole person gallery.
+    """
+    if not request.image_paths:
+        return BatchRegistrationResult(
+            status=STATUS_FAILED,
+            external_person_id=request.external_person_id,
+            name=request.name,
+            error_code=ERROR_IMAGE_PATH_NOT_FOUND,
+            error_message="At least one image is required.",
+        )
+
+    template = request.item_request(request.image_paths[0])
+    active_embedder: RealImageEmbedder = embedder or (
+        DevMockEmbeddingFixtureEmbedder(request.dev_mock_embedding_fixture)
+        if request.dev_mock_embedding_fixture
+        else _resolve_default_embedder(template)
+    )
+
+    items: list[BatchRegistrationItemResult] = []
+    prepared: list[_PreparedBatchRegistration] = []
+    for index, image_path in enumerate(request.image_paths):
+        filename = (
+            request.image_names[index]
+            if index < len(request.image_names) and request.image_names[index]
+            else Path(image_path).name
+        )
+        item_request = request.item_request(image_path)
+        candidate, item = _prepare_batch_registration(
+            item_request,
+            index=index,
+            filename=filename,
+            embedder=active_embedder,
+        )
+        items.append(item)
+        if candidate is not None:
+            prepared.append(candidate)
+
+    if not prepared:
+        return _finalize_batch_result(request, items)
+
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        error = RegistrationError(
+            ERROR_DATABASE_URL_MISSING,
+            "DATABASE_URL not set",
+        )
+        for pending in prepared:
+            _set_registration_failure(pending.item.result, error)
+        return _finalize_batch_result(request, items, error=error)
+
+    try:
+        conn = _connect(database_url)
+    except RegistrationError as exc:
+        for pending in prepared:
+            _set_registration_failure(pending.item.result, exc)
+        return _finalize_batch_result(request, items, error=exc)
+
+    successful: list[_PreparedBatchRegistration] = []
+    person_id: int | None = None
+    person_reused = False
+    external_person_id: str | None = None
+    person_name: str | None = None
+    try:
+        person_repo = PersonRepository(conn)
+        gallery_repo = GalleryRepository(conn)
+        with conn.transaction():
+            (
+                person_id,
+                external_person_id,
+                person_name,
+                person_reused,
+            ) = _resolve_person(person_repo, template)
+
+            for pending in prepared:
+                result = pending.item.result
+                result.person_id = person_id
+                result.person_reused = person_reused
+                result.external_person_id = external_person_id
+                result.name = person_name
+                crop_path: str | None = None
+                try:
+                    crop_path = save_registered_crop(
+                        pending.image_path,
+                        pending.storage.registered_crop_path,
+                        keep_crop=request.keep_crop,
+                    )
+                    payload = {
+                        "registration_mode": MODE_EXTERNAL_IMAGE,
+                        "real_embedding_used": request.dev_mock_embedding_fixture is None,
+                        "dev_mock_used": bool(request.dev_mock_embedding_fixture),
+                        "storage_fallback_used": pending.storage.storage_fallback_used,
+                        "registered_crop_path": crop_path,
+                        "batch_registration": {
+                            "index": pending.item.index,
+                            "size": len(request.image_paths),
+                        },
+                    }
+                    gallery_id = gallery_repo.add_embedding(
+                        person_id=person_id,
+                        embedding=pending.candidate.embedding,
+                        source_type=request.source_type,
+                        source_image_path=pending.image_path,
+                        embedding_model=pending.candidate.embedding_model,
+                        model_version=pending.candidate.model_version,
+                        quality=pending.candidate.quality,
+                        face_bbox=pending.candidate.face_bbox,
+                        landmarks=pending.candidate.landmarks,
+                        is_primary=False,
+                        payload=payload,
+                    )
+                except ValueError as exc:
+                    _unlink_crop_if_present(crop_path)
+                    _set_registration_failure(
+                        result,
+                        RegistrationError(
+                            ERROR_EMBEDDING_DIM_INVALID
+                            if "length=" in str(exc)
+                            else ERROR_EMBEDDING_NORM_INVALID,
+                            str(exc),
+                        ),
+                    )
+                    continue
+                except OSError as exc:
+                    _unlink_crop_if_present(crop_path)
+                    _set_registration_failure(
+                        result,
+                        RegistrationError(ERROR_IMAGE_READ_FAILED, str(exc)),
+                    )
+                    continue
+
+                result.status = STATUS_REGISTERED
+                result.gallery_embedding_id = gallery_id
+                result.is_primary = False
+                result.face_bbox = pending.candidate.face_bbox
+                result.landmarks = pending.candidate.landmarks
+                result.quality = pending.candidate.quality
+                result.embedding_model = pending.candidate.embedding_model
+                result.model_version = pending.candidate.model_version
+                result.embedding_dim = len(pending.candidate.embedding)
+                result.embedding_norm = _norm(pending.candidate.embedding)
+                result.registered_crop_path = crop_path
+                result.real_embedding_used = request.dev_mock_embedding_fixture is None
+                result.dev_mock_used = bool(request.dev_mock_embedding_fixture)
+                result.fallback_used = bool(request.dev_mock_embedding_fixture)
+                successful.append(pending)
+
+            if not successful:
+                raise _NoBatchImagesRegistered()
+
+            selected_primary = successful[0]
+            has_primary = _has_active_primary_gallery(conn, person_id=person_id)
+            if request.is_primary or not has_primary:
+                _promote_gallery_primary(
+                    conn,
+                    person_id=person_id,
+                    gallery_id=int(selected_primary.item.result.gallery_embedding_id),
+                )
+                selected_primary.item.result.is_primary = True
+    except _NoBatchImagesRegistered:
+        if not person_reused:
+            for pending in prepared:
+                pending.item.result.person_id = None
+        return _finalize_batch_result(request, items)
+    except RegistrationError as exc:
+        for pending in prepared:
+            _set_registration_failure(pending.item.result, exc)
+        return _finalize_batch_result(request, items, error=exc)
+    except psycopg.Error as exc:
+        error = _database_registration_error(exc)
+        for pending in prepared:
+            _unlink_crop_if_present(pending.item.result.registered_crop_path)
+            pending.item.result.gallery_embedding_id = None
+            pending.item.result.is_primary = False
+            pending.item.result.registered_crop_path = None
+            if not person_reused:
+                pending.item.result.person_id = None
+            _set_registration_failure(pending.item.result, error)
+        return _finalize_batch_result(request, items, error=error)
+    else:
+        return _finalize_batch_result(
+            request,
+            items,
+            person_id=person_id,
+            person_reused=person_reused,
+            external_person_id=external_person_id,
+            name=person_name,
+        )
     finally:
         conn.close()

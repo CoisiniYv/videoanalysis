@@ -234,6 +234,36 @@ UI gallery 图片优先：
 registered_crop_url -> source_image_url
 ```
 
+### 4.3 Batch face registration
+
+```ts
+type FaceRegistrationBatchItem = {
+  index: number;
+  filename: string;
+  status: "REGISTERED" | "FAILED";
+  gallery_embedding_id?: number | null;
+  is_primary: boolean;
+  quality?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+type FaceRegistrationBatchResult = {
+  status: "REGISTERED" | "PARTIAL" | "FAILED";
+  person_id?: number | null;
+  person_reused: boolean;
+  external_person_id?: string | null;
+  name?: string | null;
+  registered_count: number;
+  failed_count: number;
+  items: FaceRegistrationBatchItem[];
+  warnings: string[];
+};
+```
+
+`POST /api/v1/people/register-faces` 对部分成功返回 HTTP `207`；前端不能只按 HTTP
+状态判断失败，必须渲染 `items` 中每张图片的结果。
+
 ## 5. Trajectory Contract
 
 ### 5.1 Response

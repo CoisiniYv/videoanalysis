@@ -22,13 +22,20 @@ for _mod in [m for m in list(sys.modules) if m == "app" or m.startswith("app.")]
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.routers.people import _batch_registrar as batch_registrar_dep
 from app.routers.people import _registrar as registrar_dep
 from app.routers.people import _repo as people_repo_dep
 from face_registration.image_face_registration import (
+    BatchRegistrationItemResult,
+    BatchRegistrationRequest,
+    BatchRegistrationResult,
     ERROR_EXTERNAL_PERSON_ID_CONFLICT,
     RegistrationRequest,
     RegistrationResult,
     RegistrationError,
+    STATUS_FAILED,
+    STATUS_PARTIAL,
+    STATUS_REGISTERED,
     _has_active_primary_gallery,
     _resolve_person,
 )
@@ -165,13 +172,78 @@ class CapturingRegistrar:
         )
 
 
+@dataclass
+class CapturingBatchRegistrar:
+    last_request: BatchRegistrationRequest | None = None
+    fail_indexes: set[int] | None = None
+
+    def __call__(self, request: BatchRegistrationRequest) -> BatchRegistrationResult:
+        self.last_request = request
+        failed = set(self.fail_indexes or set())
+        items = []
+        for index, image_path in enumerate(request.image_paths):
+            succeeded = index not in failed
+            item_result = RegistrationResult(
+                status=STATUS_REGISTERED if succeeded else STATUS_FAILED,
+                mode="external_image",
+                person_id=10 if succeeded else None,
+                person_reused=bool(request.person_id),
+                external_person_id=request.external_person_id,
+                name=request.name,
+                gallery_embedding_id=100 + index if succeeded else None,
+                is_primary=succeeded and index == 0,
+                source_image_path=image_path,
+                source_type="manual_upload",
+                error_code=None if succeeded else "QUALITY_TOO_LOW",
+                error_message=None if succeeded else "quality below threshold",
+            )
+            items.append(
+                BatchRegistrationItemResult(
+                    index=index,
+                    filename=(
+                        request.image_names[index]
+                        if index < len(request.image_names)
+                        else Path(image_path).name
+                    ),
+                    result=item_result,
+                )
+            )
+        registered_count = len(items) - len(failed)
+        return BatchRegistrationResult(
+            status=(
+                STATUS_REGISTERED
+                if not failed
+                else STATUS_PARTIAL
+                if registered_count
+                else STATUS_FAILED
+            ),
+            person_id=10 if registered_count else None,
+            person_reused=bool(request.person_id),
+            external_person_id=request.external_person_id,
+            name=request.name,
+            registered_count=registered_count,
+            failed_count=len(failed),
+            items=items,
+        )
+
+
 @pytest.fixture
 def registrar() -> CapturingRegistrar:
     return CapturingRegistrar()
 
 
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registrar: CapturingRegistrar):
+def batch_registrar() -> CapturingBatchRegistrar:
+    return CapturingBatchRegistrar()
+
+
+@pytest.fixture
+def client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registrar: CapturingRegistrar,
+    batch_registrar: CapturingBatchRegistrar,
+):
     app.dependency_overrides.clear()
     FakePeopleRepository.trajectory_calls.clear()
     monkeypatch.setattr(
@@ -186,6 +258,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registrar: Capturing
 
     app.dependency_overrides[people_repo_dep] = _repo_override
     app.dependency_overrides[registrar_dep] = lambda: registrar
+    app.dependency_overrides[batch_registrar_dep] = lambda: batch_registrar
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -327,6 +400,87 @@ def test_register_face_upload_forces_real_manual_upload_path(
     assert request.quality_threshold == 0.72
     assert request.keep_crop is True
     assert Path(request.image_path).exists()
+
+
+def test_register_faces_accepts_multiple_images_for_one_person(
+    client: TestClient,
+    batch_registrar: CapturingBatchRegistrar,
+) -> None:
+    resp = client.post(
+        "/api/v1/people/register-faces",
+        data={
+            "external_person_id": "demo:midterm:reese",
+            "name": "Reese",
+            "person_id": "10",
+            "quality_threshold": "0.72",
+        },
+        files=[
+            ("images", ("front.jpg", b"front-face", "image/jpeg")),
+            ("images", ("profile.png", b"profile-face", "image/png")),
+        ],
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["status"] == STATUS_REGISTERED
+    assert data["registered_count"] == 2
+    assert data["failed_count"] == 0
+    assert [item["filename"] for item in data["items"]] == ["front.jpg", "profile.png"]
+
+    request = batch_registrar.last_request
+    assert request is not None
+    assert request.person_id == 10
+    assert request.quality_threshold == 0.72
+    assert request.image_names == ("front.jpg", "profile.png")
+    assert len(request.image_paths) == 2
+    assert all(Path(path).exists() for path in request.image_paths)
+
+
+def test_register_faces_reports_partial_item_results(
+    client: TestClient,
+    batch_registrar: CapturingBatchRegistrar,
+) -> None:
+    batch_registrar.fail_indexes = {1}
+    resp = client.post(
+        "/api/v1/people/register-faces",
+        data={"external_person_id": "demo:midterm:reese", "name": "Reese"},
+        files=[
+            ("images", ("accepted.jpg", b"accepted-face", "image/jpeg")),
+            ("images", ("rejected.jpg", b"rejected-face", "image/jpeg")),
+        ],
+    )
+
+    assert resp.status_code == 207, resp.text
+    data = resp.json()["data"]
+    assert data["status"] == STATUS_PARTIAL
+    assert data["registered_count"] == 1
+    assert data["failed_count"] == 1
+    assert data["items"][1]["error_code"] == "QUALITY_TOO_LOW"
+
+    request = batch_registrar.last_request
+    assert request is not None
+    assert Path(request.image_paths[0]).exists()
+    assert not Path(request.image_paths[1]).exists()
+
+
+def test_register_faces_rejects_more_than_configured_file_count(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    batch_registrar: CapturingBatchRegistrar,
+) -> None:
+    monkeypatch.setenv("FACE_BATCH_UPLOAD_MAX_FILES", "1")
+    resp = client.post(
+        "/api/v1/people/register-faces",
+        data={"external_person_id": "demo:midterm:reese", "name": "Reese"},
+        files=[
+            ("images", ("one.jpg", b"one", "image/jpeg")),
+            ("images", ("two.jpg", b"two", "image/jpeg")),
+        ],
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message"] == "too_many_images:1"
+    assert batch_registrar.last_request is None
 
 
 def test_register_face_rejects_invalid_quality_threshold(client: TestClient) -> None:

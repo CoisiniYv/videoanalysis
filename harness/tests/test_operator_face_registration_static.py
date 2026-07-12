@@ -37,6 +37,9 @@ def test_operator_adds_people_face_registration_controls() -> None:
     assert "keep_crop" in html
     assert "quality_threshold" in html
     assert 'value="0.65"' in html
+    assert 'name="images"' in html
+    assert "multiple" in html
+    assert "face-registration-file-count" in html
 
 
 def test_operator_page_is_chinese_console_ui() -> None:
@@ -76,9 +79,13 @@ def test_operator_js_uses_real_camera_and_people_apis() -> None:
     assert "/api/v1" in js
     assert "`${API}/cameras`" in js
     assert "`${API}/people" in js
-    assert "`${API}/people/register-face`" in js
+    assert "`${API}/people/register-faces`" in js
     assert "prepareFaceRegistrationFormData" in js
     assert "selectedExternalPersonId" in js
+    assert "registered_count" in js
+    assert "failed_count" in js
+    assert "updateFaceRegistrationFileCount" in js
+    assert "clearFaceRegistrationFiles" in js
     assert "dev_mock" not in js
 
 
@@ -231,7 +238,7 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=operator-trajectory-page-20260712" in html
+    assert "operator.js?v=operator-face-batch-20260712" in html
     assert "trajectory.js?v=trajectory-page-20260712" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js

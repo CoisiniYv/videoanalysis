@@ -313,7 +313,8 @@
             </div>
             <div id="registration-mode-status" class="registration-mode-status">当前将按人员编号注册。</div>
             <form id="face-registration-form">
-              <label>图片<input name="image" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,image/*" required /></label>
+              <label>图片（可多选）<input name="images" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp,image/*" multiple required /></label>
+              <div id="face-registration-file-count" class="muted">尚未选择图片</div>
               <input name="person_id" type="hidden" />
               <label>人员编号<input name="external_person_id" required /></label>
               <label>姓名<input name="name" required /></label>
@@ -880,7 +881,7 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=operator-trajectory-page-20260712"></script>
+    <script src="/static/operator.js?v=operator-face-batch-20260712"></script>
     <script src="/static/trajectory.js?v=trajectory-page-20260712"></script>
     <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712"></script>
     <script src="/static/maintenance.js?v=maintenance-execute-control-20260627"></script>

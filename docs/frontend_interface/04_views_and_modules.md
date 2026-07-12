@@ -152,6 +152,11 @@ faceRegistrationMode
 
 ### 3.4 图片选择
 
+- 注册表单使用 `images` 多文件字段；一次提交始终只关联一个人员身份。
+- 切换新人员/追加人员或重新选择人员时清空已选图片，避免把一组照片追加给错误人员。
+- `new` 模式下，首个通过校验的图片会成为该人员主图；`append` 模式不改变已有主图。
+- 前端调用 `POST /api/v1/people/register-faces`，并按图片展示成功、质量拒绝或检测失败。
+- `PARTIAL` 是正常的批量结果，不应把已成功的图片当作失败回滚。
 - 人员列表：registered crop 优先；
 - gallery：`registered_crop_url` 优先，随后 `source_image_url`；
 - 图片 `<img>` 直接使用 `/media/...` URL；

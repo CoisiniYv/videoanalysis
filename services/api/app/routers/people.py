@@ -38,8 +38,11 @@ if str(_LIBS_ROOT) not in sys.path:
     sys.path.insert(0, str(_LIBS_ROOT))
 
 from face_registration.image_face_registration import (  # noqa: E402
+    BatchRegistrationRequest,
+    BatchRegistrationResult,
     ERROR_DATABASE_CONNECTION_FAILED,
     ERROR_DATABASE_URL_MISSING,
+    ERROR_DATABASE_WRITE_FAILED,
     ERROR_EXTERNAL_PERSON_ID_CONFLICT,
     ERROR_FACE_TOO_SMALL,
     ERROR_IMAGE_FILE_TYPE_UNSUPPORTED,
@@ -53,10 +56,10 @@ from face_registration.image_face_registration import (  # noqa: E402
     ERROR_PRIMARY_GALLERY_CONSTRAINT_FAILED,
     ERROR_QUALITY_TOO_LOW,
     ERROR_REAL_EMBEDDING_UNAVAILABLE,
-    MODE_EXTERNAL_IMAGE,
     RegistrationRequest,
     RegistrationResult,
     register_external_image,
+    register_external_images,
 )
 
 
@@ -64,6 +67,8 @@ router = APIRouter(prefix="/api/v1/people", tags=["people"])
 
 SUPPORTED_UPLOAD_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".webp"})
 DEFAULT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_BATCH_UPLOAD_MAX_FILES = 12
+DEFAULT_BATCH_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
 DEFAULT_PERSON_LOOKUP_MIN_SIMILARITY = 0.6
 
 
@@ -81,6 +86,10 @@ def _repo() -> PeopleRepository:
 
 def _registrar() -> Callable[[RegistrationRequest], RegistrationResult]:
     return register_external_image
+
+
+def _batch_registrar() -> Callable[[BatchRegistrationRequest], BatchRegistrationResult]:
+    return register_external_images
 
 
 def _ok(data: object, request_id: str) -> dict:
@@ -140,6 +149,7 @@ def _registration_status(error_code: str | None) -> int:
     if error_code in {
         ERROR_DATABASE_URL_MISSING,
         ERROR_DATABASE_CONNECTION_FAILED,
+        ERROR_DATABASE_WRITE_FAILED,
         ERROR_REAL_EMBEDDING_UNAVAILABLE,
         ERROR_MODEL_FILE_NOT_FOUND,
     }:
@@ -160,6 +170,26 @@ def _max_upload_bytes() -> int:
         return int(raw)
     except ValueError:
         return DEFAULT_UPLOAD_MAX_BYTES
+
+
+def _max_batch_upload_files() -> int:
+    raw = os.getenv("FACE_BATCH_UPLOAD_MAX_FILES")
+    if not raw:
+        return DEFAULT_BATCH_UPLOAD_MAX_FILES
+    try:
+        return min(max(int(raw), 1), 100)
+    except ValueError:
+        return DEFAULT_BATCH_UPLOAD_MAX_FILES
+
+
+def _max_batch_upload_bytes() -> int:
+    raw = os.getenv("FACE_BATCH_UPLOAD_MAX_BYTES")
+    if not raw:
+        return DEFAULT_BATCH_UPLOAD_MAX_BYTES
+    try:
+        return max(int(raw), 1)
+    except ValueError:
+        return DEFAULT_BATCH_UPLOAD_MAX_BYTES
 
 
 def _safe_stem(filename: str) -> str:
@@ -212,7 +242,12 @@ def _locations_from_rows(person_id: int, rows: list[dict]) -> list[dict]:
     return payloads
 
 
-def _save_upload(upload: UploadFile, request_id: str) -> str:
+def _save_upload_with_size(
+    upload: UploadFile,
+    request_id: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[str, int]:
     original = upload.filename or ""
     suffix = Path(original).suffix.lower()
     if suffix not in SUPPORTED_UPLOAD_EXTENSIONS:
@@ -223,7 +258,7 @@ def _save_upload(upload: UploadFile, request_id: str) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     target = root / f"{stamp}_{_safe_stem(original)}_{uuid.uuid4().hex[:8]}{suffix}"
     tmp = target.with_suffix(target.suffix + ".tmp")
-    max_bytes = _max_upload_bytes()
+    byte_limit = min(_max_upload_bytes(), max_bytes) if max_bytes else _max_upload_bytes()
     written = 0
     try:
         with tmp.open("wb") as fh:
@@ -232,8 +267,8 @@ def _save_upload(upload: UploadFile, request_id: str) -> str:
                 if not chunk:
                     break
                 written += len(chunk)
-                if written > max_bytes:
-                    raise ValueError(f"upload_too_large:{max_bytes}")
+                if written > byte_limit:
+                    raise ValueError(f"upload_too_large:{byte_limit}")
                 fh.write(chunk)
         if written == 0:
             raise ValueError("empty_upload")
@@ -244,7 +279,20 @@ def _save_upload(upload: UploadFile, request_id: str) -> str:
         raise
     finally:
         upload.file.close()
-    return str(target.resolve())
+    return str(target.resolve()), written
+
+
+def _save_upload(upload: UploadFile, request_id: str) -> str:
+    path, _written = _save_upload_with_size(upload, request_id)
+    return path
+
+
+def _remove_uploaded_paths(paths: list[str]) -> None:
+    for value in paths:
+        try:
+            Path(value).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.get("")
@@ -482,3 +530,120 @@ def people_register_face(
             registration_error_code=result.error_code,
         )
     return _ok(payload, request_id)
+
+
+@router.post("/register-faces")
+def people_register_faces(
+    images: list[UploadFile] = File(...),
+    external_person_id: str = Form(...),
+    name: str = Form(...),
+    person_id: int | None = Form(None),
+    description: str | None = Form(None),
+    is_primary: bool = Form(False),
+    quality_threshold: float = Form(0.65),
+    allow_multiple_faces: bool = Form(False),
+    keep_crop: bool = Form(True),
+    operator: str | None = Form(None),
+    registrar: Callable[[BatchRegistrationRequest], BatchRegistrationResult] = Depends(
+        _batch_registrar
+    ),
+    request_id: str = Depends(_request_id),
+):
+    """Register a bounded image set for one person with item-level outcomes."""
+    if not external_person_id.strip():
+        return _err_response(400, "external_person_id is required", request_id)
+    if not name.strip():
+        return _err_response(400, "name is required", request_id)
+    if not 0.0 <= quality_threshold <= 1.0:
+        return _err_response(
+            400,
+            "quality_threshold must be between 0.0 and 1.0",
+            request_id,
+        )
+    if not images:
+        return _err_response(400, "at_least_one_image_required", request_id)
+    if len(images) > _max_batch_upload_files():
+        return _err_response(
+            400,
+            f"too_many_images:{_max_batch_upload_files()}",
+            request_id,
+        )
+
+    unsupported = [
+        upload.filename or "<unnamed>"
+        for upload in images
+        if Path(upload.filename or "").suffix.lower()
+        not in SUPPORTED_UPLOAD_EXTENSIONS
+    ]
+    if unsupported:
+        return _err_response(
+            400,
+            f"unsupported_image_extension:{','.join(unsupported)}",
+            request_id,
+            registration_error_code=ERROR_IMAGE_FILE_TYPE_UNSUPPORTED,
+        )
+
+    saved_paths: list[str] = []
+    total_bytes = 0
+    try:
+        for index, upload in enumerate(images):
+            remaining_bytes = _max_batch_upload_bytes() - total_bytes
+            if remaining_bytes <= 0:
+                raise ValueError(
+                    f"batch_upload_too_large:{_max_batch_upload_bytes()}"
+                )
+            image_path, written = _save_upload_with_size(
+                upload,
+                f"{request_id}_{index}",
+                max_bytes=remaining_bytes,
+            )
+            saved_paths.append(image_path)
+            total_bytes += written
+    except ValueError as exc:
+        _remove_uploaded_paths(saved_paths)
+        return _err_response(400, str(exc), request_id)
+    except OSError as exc:
+        _remove_uploaded_paths(saved_paths)
+        return _err_response(500, str(exc), request_id)
+
+    batch_request = BatchRegistrationRequest(
+        image_paths=tuple(saved_paths),
+        image_names=tuple(upload.filename or "image" for upload in images),
+        external_person_id=external_person_id.strip(),
+        name=name.strip(),
+        person_id=person_id,
+        description=description,
+        source_type="manual_upload",
+        is_primary=is_primary,
+        quality_threshold=quality_threshold,
+        allow_multiple_faces=allow_multiple_faces,
+        keep_crop=keep_crop,
+        created_by=operator or "operator",
+        dev_mock_embedding_fixture=None,
+        face_detector_onnx=os.getenv("YOLOV8_FACE_ONNX"),
+        adaface_onnx=os.getenv("ADAFACE_ONNX"),
+        onnx_provider=os.getenv("FACE_REGISTRATION_ONNX_PROVIDER"),
+    )
+    try:
+        result = registrar(batch_request)
+    except Exception:
+        _remove_uploaded_paths(saved_paths)
+        raise
+    payload = result.to_dict()
+    if result.error_code:
+        _remove_uploaded_paths(saved_paths)
+        return _err_response(
+            _registration_status(result.error_code),
+            result.error_message or result.error_code,
+            request_id,
+            registration_error_code=result.error_code,
+        )
+
+    failed_paths = {
+        str(item.result.source_image_path)
+        for item in result.items
+        if item.result.status != "REGISTERED"
+    }
+    _remove_uploaded_paths([path for path in saved_paths if path in failed_paths])
+    status_code = 200 if result.failed_count == 0 else 207
+    return JSONResponse(status_code=status_code, content=_ok(payload, request_id))

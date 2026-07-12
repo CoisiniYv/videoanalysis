@@ -108,6 +108,7 @@ const roiEditorStatusEl = document.getElementById("roi-editor-status");
 const peopleEl = document.getElementById("people");
 const peopleSearchEl = document.getElementById("people-search");
 const faceRegistrationForm = document.getElementById("face-registration-form");
+const faceRegistrationFileCountEl = document.getElementById("face-registration-file-count");
 const personProfileEl = document.getElementById("person-profile");
 const personDetailEl = document.getElementById("person-detail");
 const galleryEl = document.getElementById("gallery");
@@ -373,8 +374,27 @@ function prepareFaceRegistrationFormData() {
   return fd;
 }
 
+function updateFaceRegistrationFileCount() {
+  if (!faceRegistrationFileCountEl || !faceRegistrationForm) return;
+  const files = Array.from(faceRegistrationForm.elements.images?.files || []);
+  if (!files.length) {
+    faceRegistrationFileCountEl.textContent = "尚未选择图片";
+    return;
+  }
+  const names = files.slice(0, 3).map((file) => file.name).join("、");
+  const remainder = files.length > 3 ? ` 等 ${files.length} 张` : "";
+  faceRegistrationFileCountEl.textContent = `已选择 ${files.length} 张：${names}${remainder}`;
+}
+
+function clearFaceRegistrationFiles() {
+  if (!faceRegistrationForm?.elements.images) return;
+  faceRegistrationForm.elements.images.value = "";
+  updateFaceRegistrationFileCount();
+}
+
 function clearFaceRegistrationIdentityFields() {
   if (!faceRegistrationForm) return;
+  clearFaceRegistrationFiles();
   faceRegistrationForm.elements.person_id.value = "";
   faceRegistrationForm.elements.external_person_id.value = "";
   faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId = "";
@@ -2942,6 +2962,7 @@ function galleryDeleteRequest(row = {}) {
 
 function fillRegistrationForPerson(person) {
   if (!person || !faceRegistrationForm) return;
+  clearFaceRegistrationFiles();
   faceRegistrationForm.elements.person_id.value = person.person_id || "";
   faceRegistrationForm.elements.external_person_id.value = person.external_person_id || "";
   faceRegistrationForm.elements.external_person_id.dataset.selectedExternalPersonId = person.external_person_id || "";
@@ -2996,20 +3017,44 @@ async function submitFaceRegistration() {
   const submit = document.getElementById("submit-face-registration");
   submit.disabled = true;
   try {
+    const selectedFiles = Array.from(faceRegistrationForm.elements.images?.files || []);
+    if (!selectedFiles.length) {
+      throw new Error("请先选择至少一张人脸图片");
+    }
     const fd = prepareFaceRegistrationFormData();
-    const result = await request(`${API}/people/register-face`, {
+    const result = await request(`${API}/people/register-faces`, {
       method: "POST",
       body: fd,
     });
     faceRegistrationResultEl.value = JSON.stringify(result, null, 2);
+    const registeredCount = Number(result.registered_count || 0);
+    const failedCount = Number(result.failed_count || 0);
+    const itemRows = (result.items || []).map((item) => {
+      const succeeded = item.status === "REGISTERED";
+      const detail = succeeded
+        ? `已登记${item.is_primary ? "（主图）" : ""}`
+        : `${item.error_code || "FAILED"}${item.error_message ? `：${item.error_message}` : ""}`;
+      return `<div class="gallery-meta-row"><strong>${escapeHtml(item.filename || "图片")}</strong>：${escapeHtml(detail)}</div>`;
+    }).join("");
     if (faceRegistrationSummaryEl) {
       faceRegistrationSummaryEl.innerHTML =
-        `<strong>人脸已注册</strong>` +
-        `<div class="muted">人员编号：${result.external_person_id || "-"}</div>` +
-        `<div class="muted">姓名：${result.name || "-"}</div>`;
+        `<strong>${registeredCount ? "批量人脸注册完成" : "批量人脸注册未成功"}</strong>` +
+        `<div class="muted">人员编号：${escapeHtml(result.external_person_id || "-")}</div>` +
+        `<div class="muted">姓名：${escapeHtml(result.name || "-")}</div>` +
+        `<div class="muted">成功 ${registeredCount} 张，失败 ${failedCount} 张</div>` +
+        itemRows;
+    }
+    if (!registeredCount) {
+      showError("没有图片通过注册校验，请查看逐张结果");
+      return;
     }
     selectedPersonId = String(result.person_id || "");
-    showSuccess("人脸已注册");
+    showSuccess(
+      failedCount
+        ? `已注册 ${registeredCount} 张，${failedCount} 张未通过`
+        : `已注册 ${registeredCount} 张人脸图片`
+    );
+    clearFaceRegistrationFiles();
     await loadPeople();
     if (result.person_id) {
       await selectPerson(result.person_id);
@@ -3964,6 +4009,7 @@ ruleAlgorithmEl?.addEventListener("change", () => {
 document.getElementById("submit-face-registration").addEventListener("click", () => {
   submitFaceRegistration().catch((e) => showError(e.message));
 });
+faceRegistrationForm?.elements.images?.addEventListener("change", updateFaceRegistrationFileCount);
 registerNewPersonBtn?.addEventListener("click", () => {
   setFaceRegistrationMode("new");
 });

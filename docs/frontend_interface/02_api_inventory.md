@@ -133,6 +133,7 @@ Router：`services/api/app/routers/people.py`
 | 使用 | GET | `/api/v1/people/{person_id}/trajectory` | similarity/camera/source/time, `limit=50`, `offset=0` | persisted 轨迹分页 |
 | 可用 | GET | `/api/v1/people/{person_id}/find` | 同类 filters，`limit=20` | 包含 observation search 的一键找人 |
 | 使用 | POST | `/api/v1/people/register-face` | multipart form | 新人员或追加人脸 |
+| 使用 | POST | `/api/v1/people/register-faces` | multipart form，重复 `images` 字段 | 同一人员多图批量注册 |
 
 轨迹页面当前请求：
 
@@ -146,7 +147,7 @@ start_ts_ms=<optional epoch ms>
 end_ts_ms=<optional epoch ms>
 ```
 
-注册 form fields：
+单图注册 `/register-face` form fields：
 
 ```text
 image                       required file
@@ -161,8 +162,19 @@ keep_crop                   bool, current UI true
 operator                    optional, current UI "operator"
 ```
 
-支持扩展名：`.jpg`、`.jpeg`、`.png`、`.bmp`、`.webp`；默认最大上传 10 MiB，可由
-`FACE_UPLOAD_MAX_BYTES` 改变。
+批量注册 `/register-faces` 复用上述 identity/quality fields，文件字段改为重复的
+`images`。每一张有效图片生成一条 `person_gallery_embeddings`；接口返回每张图片的
+`status`、`gallery_embedding_id` 或 `error_code/error_message`。处理结果可能是：
+
+```text
+REGISTERED   全部成功
+PARTIAL      部分成功，HTTP 207，前端必须展示逐张失败原因
+FAILED       没有图片成功，HTTP 207（身份或数据库全局错误除外）
+```
+
+支持扩展名：`.jpg`、`.jpeg`、`.png`、`.bmp`、`.webp`。默认单图最大上传 10 MiB；
+批量默认最多 12 张、总计最多 50 MiB，可分别由 `FACE_UPLOAD_MAX_BYTES`、
+`FACE_BATCH_UPLOAD_MAX_FILES`、`FACE_BATCH_UPLOAD_MAX_BYTES` 调整。
 
 ## 5. 证据接口
 

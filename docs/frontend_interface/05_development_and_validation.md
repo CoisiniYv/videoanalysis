@@ -183,6 +183,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:8090/api/v1/people?limit=1
 
 - 人员列表和 gallery 显示真实图片；
 - 新人员与追加人脸模式不会混淆 hidden `person_id`；
+- 多选图片只提交给当前人员；`PARTIAL` 时保留成功图片并显示逐张失败原因；
 - 上传失败展示 backend error code/message；
 - 删除入口只打开维护 preview。
 
