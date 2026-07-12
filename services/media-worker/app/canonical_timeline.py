@@ -12,6 +12,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+from app.subprocess_control import run_managed_subprocess
+
 
 NANOS_PER_SECOND = 1_000_000_000
 PTS_TIME_BASE_SECONDS = 1.0 / NANOS_PER_SECOND
@@ -486,7 +488,7 @@ def _ffmpeg_exe() -> str | None:
 
 def _run_ffmpeg(cmd: list[str]) -> tuple[bool, str]:
     try:
-        proc = subprocess.run(
+        proc = run_managed_subprocess(
             cmd,
             capture_output=True,
             text=True,

@@ -309,10 +309,16 @@ def test_success_holds_permit_through_terminal_index_and_cleanup(
 def test_pool_worker_calls_finalize_one_without_recursive_sink_scan() -> None:
     worker = _worker()
     source = inspect.getsource(worker._process_single_finalizer_job)
+    connection_boundary = inspect.getsource(
+        worker._run_single_finalizer_job_with_connection
+    )
 
-    assert "_finalize_one(" in source
+    assert "_run_single_finalizer_job_with_connection(" in source
+    assert "_finalize_one(" in connection_boundary
     assert "_process_sink_output(" not in source
+    assert "_process_sink_output(" not in connection_boundary
     assert "_MaterializationGuard(1)" not in source
+    assert "_MaterializationGuard(1)" not in connection_boundary
 
 
 def test_single_finalizer_boundary_defaults_on_and_has_rollback_flag(
@@ -852,3 +858,282 @@ def test_pool_job_does_not_claim_when_shared_guard_is_disabled(
     assert retries[0]["reason"] == "materialization_concurrency_limit_exceeded"
     assert guard.snapshot()["active"] == 0
     assert conn.closed is True
+
+
+def _run_long_lived_pool_batch(
+    worker: Any,
+    runtime: Any,
+    *,
+    event_id: str,
+    transferred_work_permits: dict[str, Any] | None = None,
+) -> int:
+    return worker._process_sink_output_with_finalizer_pool(
+        object(),
+        "/tmp/sink",
+        set(),
+        metadata_files=[
+            {
+                "_meta_dir": f"/tmp/sink/{event_id}",
+                "event_id": event_id,
+                "source_id": f"source-{event_id[-1]}",
+            }
+        ],
+        schedule_rows={},
+        scan_stats={},
+        evidence_output_dir="/tmp/evidence",
+        candidate_dirs=None,
+        invalid_output_failures=None,
+        midterm_sink_stability_checks=1,
+        processed_state_path=None,
+        sink_scan_max_metadata_files=None,
+        materialization_guard=runtime.work_budget,
+        materialization_timeout_s=30,
+        materialization_max_backlog=0,
+        materialization_max_per_poll=0,
+        materialization_throttle_sleep_s=0,
+        materialization_throttle_deadline_guard_s=0,
+        materialization_finalizer_workers=32,
+        materialization_finalizer_max_per_source_per_poll=0,
+        materialization_finalizer_source_serial=False,
+        materialization_database_url="postgresql://unused",
+        evidence_final_root_max_bytes=0,
+        evidence_incoming_root_max_bytes=0,
+        replay_sink_output_max_bytes=0,
+        evidence_storage_warning_ratio=0.8,
+        evidence_storage_critical_ratio=0.9,
+        evidence_storage_hard_ratio=1.0,
+        cleanup_replay_sink_output_enabled=True,
+        cleanup_replay_sink_output_statuses=("ready",),
+        runtime_resources=runtime,
+        transferred_work_permits=transferred_work_permits,
+    )
+
+
+def test_runtime_reuses_one_long_lived_finalizer_executor_and_shared_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    runtime = worker.MaterializationResources(
+        database_url="postgresql://unused",
+        max_active=2,
+        image_workers=8,
+        remux_workers=8,
+        finalizer_workers=32,
+        finalizer_queue_capacity=2,
+        source_limit=2,
+    )
+    observed_active: list[int] = []
+    monkeypatch.setattr(worker, "_is_already_ready", lambda *_a, **_k: False)
+    monkeypatch.setattr(worker, "_find_video_file", lambda *_a, **_k: "/tmp/video.mov")
+    monkeypatch.setattr(
+        worker,
+        "_sink_output_ready_for_finalizer",
+        lambda **_k: (True, "ready"),
+    )
+    monkeypatch.setattr(worker, "_mark_sink_phase", lambda *_a, **_k: {})
+    monkeypatch.setattr(worker, "_clear_sink_phase", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        worker,
+        "_release_replay_slot_for_sink_stable",
+        lambda *_a, **_k: None,
+    )
+
+    def finalize(*_args: Any, materialization_guard: Any, **_kwargs: Any):
+        observed_active.append(materialization_guard.snapshot()["active"])
+        return {"updated": 1, "processed": True}
+
+    monkeypatch.setattr(worker, "_process_single_finalizer_job", finalize)
+
+    first = "11111111-1111-4111-8111-111111111111"
+    second = "22222222-2222-4222-8222-222222222222"
+    assert _run_long_lived_pool_batch(worker, runtime, event_id=first) == 1
+    assert _run_long_lived_pool_batch(worker, runtime, event_id=second) == 1
+
+    snapshot = runtime.snapshot()
+    assert observed_active == [1, 1]
+    assert snapshot["work_budget"]["active"] == 0
+    assert snapshot["finalizer_lane"]["submitted_total"] == 2
+    assert snapshot["finalizer_lane"]["executor_create_count"] == 1
+    runtime.close(wait=True)
+
+
+def test_max_active_zero_creates_no_pool_executor_and_runs_no_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    runtime = worker.MaterializationResources(
+        database_url="postgresql://unused",
+        max_active=0,
+        image_workers=8,
+        remux_workers=8,
+        finalizer_workers=32,
+        db_pool_enabled=False,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_process_single_finalizer_job",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("disabled runtime submitted a finalizer")
+        ),
+    )
+
+    assert _run_long_lived_pool_batch(worker, runtime, event_id=EVENT_ID) == 0
+    assert runtime.snapshot()["finalizer_lane"] is None
+    assert runtime.snapshot()["db_pool"] is None
+    runtime.close(wait=True)
+
+
+def test_transferred_remux_permit_is_released_when_finalizer_has_no_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    runtime = worker.MaterializationResources(
+        database_url="postgresql://unused",
+        max_active=2,
+    )
+    permit = runtime.work_budget.try_acquire("remux", owner=EVENT_ID)
+    assert permit is not None
+    transferred = {EVENT_ID: permit}
+    monkeypatch.setattr(worker, "_is_already_ready", lambda *_a, **_k: True)
+
+    assert _run_long_lived_pool_batch(
+        worker,
+        runtime,
+        event_id=EVENT_ID,
+        transferred_work_permits=transferred,
+    ) == 0
+    assert transferred == {}
+    assert permit.released is True
+    assert runtime.work_budget.snapshot()["active"] == 0
+    runtime.close(wait=True)
+
+
+def test_max_active_zero_runs_recovery_but_claims_no_rolling_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    runtime = worker.MaterializationResources(
+        database_url="postgresql://unused",
+        max_active=0,
+    )
+    monkeypatch.setattr(worker, "_expire_overdue_rolling_cache_tasks", lambda *_a: 3)
+    monkeypatch.setattr(
+        worker,
+        "_process_rolling_cache_image_tasks",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("disabled runtime entered image admission")
+        ),
+    )
+    cfg = type(
+        "Cfg",
+        (),
+        {
+            "rolling_cache_enabled": True,
+            "rolling_cache_materialization_enabled": True,
+        },
+    )()
+
+    assert worker._process_rolling_cache_tasks(
+        object(),
+        cfg,
+        runtime_resources=runtime,
+    ) == 3
+    runtime.close(wait=True)
+
+
+def test_expired_finalizer_attempt_cannot_publish_or_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    guard, permit = _permit(worker)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="lease-token",
+        generation=2,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    discarded: list[object] = []
+    retried: list[dict[str, Any]] = []
+    unregistered: list[object] = []
+
+    class _ExpiredHandle:
+        healthy = False
+        expired = True
+
+    class _Supervisor:
+        def register(self, *_args: Any, **_kwargs: Any) -> _ExpiredHandle:
+            return _ExpiredHandle()
+
+        def unregister(self, handle: object) -> None:
+            unregistered.append(handle)
+
+    monkeypatch.setattr(
+        worker,
+        "_claim_media_finalization",
+        lambda *_a, **_k: {
+            "status": "claimed",
+            "claimed": True,
+            "lease": lease,
+        },
+    )
+    monkeypatch.setattr(worker, "_set_event_evidence_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_discard_finalizer_attempt", lambda *a, **k: discarded.append((a, k)))
+    monkeypatch.setattr(
+        worker,
+        "_finalize_post_savant_evidence_bundle",
+        lambda *_a, **_k: {
+            "raw_clip": "/tmp/evidence/raw_clip.mov",
+            "metadata": "/tmp/evidence/metadata.json",
+            "evidence_dir": "/tmp/evidence",
+            "clip_status": "ready",
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_publish_finalizer_attempt",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("expired attempt reached publish")
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "complete_finalizer_task",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("expired attempt reached terminal commit")
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "retry_finalizer_handoff",
+        lambda *_a, **kwargs: retried.append(kwargs) or True,
+    )
+
+    result = worker._finalize_one(
+        object(),
+        event_id=EVENT_ID,
+        meta={},
+        meta_dir="/tmp/sink/event",
+        metadata_file="/tmp/sink/event/metadata.json",
+        sink_dir="/tmp/sink",
+        evidence_output_dir="/tmp/evidence",
+        finalizer_worker_id="finalizer-test",
+        source_id="source-1",
+        replay_shard_id="default",
+        phase_diagnostics={},
+        guardrails={},
+        permit=permit,
+        materialization_timeout_s=30,
+        cleanup_replay_sink_output_enabled=True,
+        cleanup_replay_sink_output_statuses=("ready",),
+        schedule_row={},
+        materialization_pacer=None,
+        scan_stats={},
+        lease_heartbeat_supervisor=_Supervisor(),
+    )
+
+    assert result.processed is False
+    assert retried[0]["reason"] == "materialization_max_attempt_age_exceeded"
+    assert discarded
+    assert unregistered
+    assert guard.snapshot()["active"] == 0

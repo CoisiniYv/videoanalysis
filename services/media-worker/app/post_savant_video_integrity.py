@@ -10,6 +10,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_control import run_managed_subprocess
+
 
 INTEGRITY_PASS = "pass"
 INTEGRITY_WARNING = "warning"
@@ -287,7 +289,7 @@ def _ffprobe_packets(video_path: Path) -> dict[str, Any]:
 
 def _run_json_command(command: list[str], video_path: Path) -> dict[str, Any]:
     try:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             command,
             check=True,
             stdout=subprocess.PIPE,
@@ -331,7 +333,7 @@ def _ffmpeg_decode(video_path: Path, decode_log_path: Path | None) -> dict[str, 
         "null",
         "-",
     ]
-    completed = subprocess.run(
+    completed = run_managed_subprocess(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

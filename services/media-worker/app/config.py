@@ -52,6 +52,20 @@ class Config:
     rolling_cache_materialization_poll_interval_s: float
     rolling_cache_materialization_ready_segment_grace_seconds: float
     rolling_cache_materialization_processing_deadline_seconds: float
+    materialization_image_workers: int = 1
+    materialization_image_queue_capacity: int = 0
+    materialization_remux_queue_capacity: int = 0
+    materialization_finalizer_queue_capacity: int = 0
+    materialization_source_limit: int = 1
+    materialization_reserved_non_image: int = 1
+    media_worker_db_pool_enabled: bool = False
+    media_worker_db_pool_timeout_s: float = 5.0
+    media_worker_scheduler_v2_enabled: bool = False
+    media_worker_segment_index_enabled: bool = False
+    media_worker_shutdown_grace_s: float = 45.0
+    media_worker_shutdown_kill_timeout_s: float = 5.0
+    materialization_lease_heartbeat_interval_s: float = 10.0
+    materialization_max_attempt_age_s: float = 300.0
 
 
 def load_config() -> Config:
@@ -235,5 +249,67 @@ def load_config() -> Config:
                     "120.0",
                 )
             ),
+        ),
+        materialization_image_workers=max(
+            1,
+            int(os.getenv("MEDIA_WORKER_IMAGE_WORKERS", "1")),
+        ),
+        materialization_image_queue_capacity=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_IMAGE_QUEUE_CAPACITY", "0")),
+        ),
+        materialization_remux_queue_capacity=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_REMUX_QUEUE_CAPACITY", "0")),
+        ),
+        materialization_finalizer_queue_capacity=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY", "0")),
+        ),
+        materialization_source_limit=max(
+            1,
+            int(os.getenv("MEDIA_WORKER_SOURCE_MAX_ACTIVE", "1")),
+        ),
+        materialization_reserved_non_image=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_RESERVED_NON_IMAGE", "1")),
+        ),
+        media_worker_db_pool_enabled=os.getenv(
+            "MEDIA_WORKER_DB_POOL_ENABLED", "false"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        media_worker_db_pool_timeout_s=max(
+            0.05,
+            float(os.getenv("MEDIA_WORKER_DB_POOL_TIMEOUT_S", "5")),
+        ),
+        media_worker_scheduler_v2_enabled=os.getenv(
+            "MEDIA_WORKER_SCHEDULER_V2_ENABLED", "false"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        media_worker_segment_index_enabled=os.getenv(
+            "MEDIA_WORKER_SEGMENT_INDEX_ENABLED", "false"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes", "on"),
+        media_worker_shutdown_grace_s=max(
+            0.0,
+            float(os.getenv("MEDIA_WORKER_SHUTDOWN_GRACE_S", "45")),
+        ),
+        media_worker_shutdown_kill_timeout_s=max(
+            0.0,
+            float(os.getenv("MEDIA_WORKER_SHUTDOWN_KILL_TIMEOUT_S", "5")),
+        ),
+        materialization_lease_heartbeat_interval_s=max(
+            0.1,
+            float(os.getenv("MEDIA_WORKER_LEASE_HEARTBEAT_INTERVAL_S", "10")),
+        ),
+        materialization_max_attempt_age_s=max(
+            1.0,
+            float(os.getenv("MEDIA_WORKER_MAX_ATTEMPT_AGE_S", "300")),
         ),
     )

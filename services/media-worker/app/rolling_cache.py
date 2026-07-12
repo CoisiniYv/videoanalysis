@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from app.post_savant_metadata_annotation_builder import load_native_metadata
+from app.subprocess_control import run_managed_subprocess
 
 
 PTS_TIME_BASE = 1_000_000_000
@@ -433,7 +434,7 @@ def _concat_transcode_retry_command(
 
 def _probe_video_duration_seconds(path: Path) -> float | None:
     ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
-    completed = subprocess.run(
+    completed = run_managed_subprocess(
         [
             ffprobe_bin,
             "-v",
@@ -623,7 +624,7 @@ def _concat_escape(path: Path) -> str:
 
 def _default_command_runner(command: list[str], log_path: Path) -> None:
     with log_path.open("wb") as log_fh:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             command,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,

@@ -48,9 +48,15 @@ Implementation checkpoint (2026-07-12):
 - the implementation and artifact proof are recorded in
   `docs/code_review/clip_media_phase3c_coordinator_v2_recoverable_2026-07-12.md`
   with token `PASS_CLIP_WORKER_COORDINATOR_V2_RECOVERABLE`;
-- long-lived Media pools/lanes, complete Scheduler V2, segment index, full
-  cross-worker soak, two 60-source closure runs and legacy removal remain
-  unclaimed.
+- Spec 33 Phase 3 now provides the process-lifetime Media `WorkBudget`, bounded
+  image/remux/finalizer lanes and source caps, bounded PostgreSQL pool,
+  heartbeat/max-attempt-age fencing, managed subprocess groups and bounded
+  shutdown. Its proof is recorded in
+  `docs/code_review/clip_media_phase4a_media_long_lived_resources_2026-07-12.md`
+  with token `PASS_MEDIA_WORKER_LONG_LIVED_RESOURCE_BOUNDS`;
+- this is the long-lived-resource substep of Spec 34 Phase 4. Non-blocking
+  Scheduler V2 dispatch, segment index, full cross-worker soak, two 60-source
+  closure runs and legacy removal remain unclaimed.
 
 ## 0. 执行摘要
 
@@ -717,10 +723,14 @@ Acceptance tokens 直接复用 Spec 33 Phase 2-5，不另造同义 token。
 
 Implementation checkpoint (2026-07-12): item 1 and the Phase 2 portion of
 items 2/7 are complete under token
-`PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`. Long-lived WIP transfer,
-executors, PostgreSQL pool, non-blocking lanes, segment index, full shutdown and
-performance gates remain pending; therefore Spec 34 Phase 4 as a whole is not
-complete.
+`PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`. The long-lived-resource portions
+of items 2-4/8 are complete under token
+`PASS_MEDIA_WORKER_LONG_LIVED_RESOURCE_BOUNDS`: WIP transfer, bounded lifetime
+executors/source caps, bounded PostgreSQL pool, heartbeat/attempt-age fencing,
+managed process groups and the shutdown state machine are verified.
+Non-blocking lane dispatch, the segment index, durable submit/restart recovery,
+capacity and performance gates remain pending; therefore Spec 34 Phase 4 as a
+whole is not complete.
 
 ### Phase 5 - Extract Remaining Media Responsibilities
 

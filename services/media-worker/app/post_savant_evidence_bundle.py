@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from app.subprocess_control import run_managed_subprocess
 from app.post_savant_metadata_annotation_builder import (
     ANNOTATION_SOURCE,
     PRODUCTION_TIMELINE_DOMAIN,
@@ -242,9 +243,6 @@ def read_decoded_video_frame_count(video_path: Path) -> int:
     cv2_count = _read_frame_count_cv2(video_path)
     if cv2_count is not None:
         return cv2_count
-    imageio_count = _read_frame_count_imageio_ffmpeg(video_path)
-    if imageio_count is not None:
-        return imageio_count
     ffmpeg_count = _read_frame_count_ffmpeg_decode(video_path)
     if ffmpeg_count is not None:
         return ffmpeg_count
@@ -415,7 +413,7 @@ def _copy_or_crop_video(
     child_cpu_before = _child_cpu_seconds()
     timeout = _positive_timeout_or_none(materialization_timeout_s)
     try:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -724,7 +722,7 @@ def _pts_duration_s(start_pts: int | float, end_pts: int | float) -> float:
 
 def _read_frame_count_ffprobe(video_path: Path) -> int | None:
     try:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             [
                 "ffprobe",
                 "-v",
@@ -794,7 +792,7 @@ def _read_frame_count_ffmpeg_decode(video_path: Path) -> int | None:
     except FileNotFoundError:
         return None
     try:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             [
                 ffmpeg_exe,
                 "-hide_banner",
@@ -1133,7 +1131,7 @@ def _decoded_video_fps_estimate(video_path: Path, decoded_video_frame_count: int
 
 def _read_video_duration_ffprobe(video_path: Path) -> float | None:
     try:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             [
                 "ffprobe",
                 "-v",
@@ -1160,7 +1158,7 @@ def _read_video_duration_ffprobe(video_path: Path) -> float | None:
 
 def _read_avg_frame_rate_ffprobe(video_path: Path) -> float | None:
     try:
-        completed = subprocess.run(
+        completed = run_managed_subprocess(
             [
                 "ffprobe",
                 "-v",

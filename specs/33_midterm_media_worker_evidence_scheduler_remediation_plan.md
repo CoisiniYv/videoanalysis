@@ -2,7 +2,7 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 0-2 已完成，Phase 3-7 尚未执行
+Status: 执行中；Phase 0-3 已完成，Phase 4-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -43,6 +43,21 @@ Implementation checkpoint (2026-07-12):
 - acceptance token: `PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`. This does
   not claim long-lived executors, connection pooling, scheduler V2, segment
   indexing, pressure closure or legacy removal.
+- Phase 3 introduces one process-lifetime `WorkBudget`, bounded image/remux/
+  finalizer lanes, process-lifetime source caps, an optional bounded
+  `psycopg_pool.ConnectionPool`, short-checkout connection proxies, fenced
+  lease heartbeat/max-attempt-age enforcement, managed ffmpeg process groups,
+  and the `running -> quiescing -> draining -> stopping -> stopped` shutdown
+  state machine;
+- reservations precede rolling remux claim and a permit can move from remux to
+  finalization without reopening WIP capacity. `max_active=0` creates no
+  executor/pool and claims no work;
+- the real pool probe, retained `.461` Media/8090 canary, bounded TERM/KILL
+  shutdown and daily-runtime restoration are recorded in
+  `docs/code_review/clip_media_phase4a_media_long_lived_resources_2026-07-12.md`;
+- acceptance token: `PASS_MEDIA_WORKER_LONG_LIVED_RESOURCE_BOUNDS`. This does
+  not claim the Phase 4 non-blocking three-lane scheduler, segment index,
+  capacity/pressure closure or legacy removal.
 
 ## 0. 执行摘要
 
@@ -769,6 +784,13 @@ Acceptance token:
 ```text
 PASS_MEDIA_WORKER_LONG_LIVED_RESOURCE_BOUNDS
 ```
+
+Implementation checkpoint (2026-07-12): complete. The lifetime resource root,
+bounded lanes/source caps, optional bounded PostgreSQL pool, short-checkout
+proxy, heartbeat/max-attempt-age fence, managed process groups and bounded
+shutdown state machine are implemented and verified. The proof is recorded in
+`docs/code_review/clip_media_phase4a_media_long_lived_resources_2026-07-12.md`.
+This checkpoint does not enable or claim Scheduler V2.
 
 ### Phase 4 - Enable Scheduler V2
 

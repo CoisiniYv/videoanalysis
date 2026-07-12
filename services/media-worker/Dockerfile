@@ -12,6 +12,9 @@ RUN apt-get update \
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY requirements.pool.txt ./requirements.pool.txt
+RUN pip install --no-cache-dir -r requirements.pool.txt
+
 COPY app/ ./app/
 COPY main.py ./main.py
 

@@ -21,11 +21,28 @@ def _json(name: str) -> dict[str, Any]:
 
 
 def _load_module(name: str, path: Path):
+    service_root = str(path.parents[1])
+    prior_path = list(sys.path)
+    prior_app_modules = {
+        module_name: module
+        for module_name, module in sys.modules.items()
+        if module_name == "app" or module_name.startswith("app.")
+    }
+    for module_name in prior_app_modules:
+        del sys.modules[module_name]
+    sys.path.insert(0, service_root)
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = prior_path
+        for module_name in list(sys.modules):
+            if module_name == "app" or module_name.startswith("app."):
+                del sys.modules[module_name]
+        sys.modules.update(prior_app_modules)
     return module
 
 

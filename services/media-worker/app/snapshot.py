@@ -8,6 +8,8 @@ import re
 import subprocess
 from typing import Optional
 
+from app.subprocess_control import run_managed_subprocess
+
 logger = logging.getLogger(__name__)
 
 _FFMPEG_EXE = None
@@ -30,7 +32,7 @@ def _ffmpeg_duration(filepath: str) -> Optional[float]:
     """Return duration in seconds using ffmpeg stderr parsing, or None on failure."""
     ffmpeg = _get_ffmpeg()
     try:
-        result = subprocess.run(
+        result = run_managed_subprocess(
             [ffmpeg, *_ffmpeg_thread_args(), "-i", filepath],
             capture_output=True, text=True, timeout=30,
         )
@@ -49,7 +51,7 @@ def _ffmpeg_extract(filepath: str, offset_seconds: float, output_path: str) -> b
     """Extract a single frame at *offset_seconds* using ffmpeg. Returns True on success."""
     ffmpeg = _get_ffmpeg()
     try:
-        result = subprocess.run(
+        result = run_managed_subprocess(
             [
                 ffmpeg, "-y",
                 *_ffmpeg_thread_args(),
