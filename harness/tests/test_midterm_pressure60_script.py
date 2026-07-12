@@ -288,7 +288,8 @@ def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting() 
     assert summary["reused_count"] == 1
     assert not any("INSERT INTO cameras" in query for query in queries)
     assert any("UPDATE cameras SET source_id=%s" in query for query in queries)
-    assert any("ON CONFLICT (camera_id, zone_name)" in query for query in queries)
+    assert any("ON CONFLICT (camera_id, zone_id)" in query for query in queries)
+    assert not any("ON CONFLICT (camera_id, zone_name)" in query for query in queries)
     assert sum("UPDATE camera_rules" in query for query in queries) == 2
 
 

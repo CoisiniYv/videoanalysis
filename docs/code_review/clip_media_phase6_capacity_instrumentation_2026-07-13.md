@@ -108,6 +108,13 @@ fencing, deterministic republish hashing, and retained Compose override output.
 It also executes the pressure runner directly from the repository root, so the
 repository-owned lifecycle contract is importable without an ambient
 `PYTHONPATH`.
+
+The first live preflight exposed a stale pressure-camera upsert target:
+Migration 012 defines the zone identity as unique `(camera_id, zone_id)`, while
+the harness still targeted `(camera_id, zone_name)`. The upsert now uses the
+published unique key and updates the display name as mutable metadata. A live
+PostgreSQL transaction exercised provisioning and was rolled back before the
+capacity run.
 The formal-window DB summary, event/cooldown summary, non-materialized detail,
 kept-evidence, covered-alias, lifecycle, and ready-to-claim SQL were also run
 read-only against the live PostgreSQL schema.

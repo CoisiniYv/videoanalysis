@@ -4436,8 +4436,8 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> dict[str, Any]:
                     coordinate_space, points, enabled, payload
                 )
                 VALUES (%s, %s, %s, 'polygon', 'pixel', %s::jsonb, true, '{}'::jsonb)
-                ON CONFLICT (camera_id, zone_name) DO UPDATE
-                SET zone_id=EXCLUDED.zone_id, zone_type=EXCLUDED.zone_type,
+                ON CONFLICT (camera_id, zone_id) DO UPDATE
+                SET zone_name=EXCLUDED.zone_name, zone_type=EXCLUDED.zone_type,
                     coordinate_space=EXCLUDED.coordinate_space,
                     points=EXCLUDED.points, enabled=true,
                     payload=EXCLUDED.payload, updated_at=now()
