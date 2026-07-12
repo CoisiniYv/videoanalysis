@@ -2,7 +2,7 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 0-4 已完成，Phase 5-7 尚未执行
+Status: 执行中；Phase 0-5 已完成，Phase 6-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -74,6 +74,21 @@ Implementation checkpoint (2026-07-12):
 - acceptance token: `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`.
   This does not claim the Phase 5 segment index, Phase 6 capacity/readiness
   calibration, two 60-source pressure gates or Phase 7 legacy removal.
+- Phase 5 adds one process-lifetime source/epoch `RollingSegmentIndex`, bounded
+  identity-keyed metadata-row caching, incremental refresh plus periodic
+  reconcile, read pins, and one lock-arbitrated retention/byte-quota owner;
+- rolling remux carries an immutable duration probe into finalization and
+  reuses it only while device/inode/size/mtime match. Sidecar generation and DB
+  bundle, artifact, timeline, and overlay indexing expose separate durations;
+- retained `.510/.511/.512` canaries proved same-source catalog reuse without
+  reparsing, symmetric read-pin release, zero fallback scans, zero finalizer
+  ffprobe, DB-backed bbox/person context, playable media and zero global
+  lease/slot/pending residuals;
+- implementation and runtime proof are recorded in
+  `docs/code_review/clip_media_phase5_segment_index_2026-07-13.md`;
+- acceptance token: `PASS_MEDIA_WORKER_INCREMENTAL_SEGMENT_AND_FINALIZER_PATH`.
+  This does not claim Phase 6 capacity/readiness calibration, either required
+  60-source closure, or Phase 7 legacy removal.
 
 ## 0. 执行摘要
 
@@ -873,6 +888,20 @@ Acceptance token:
 PASS_MEDIA_WORKER_INCREMENTAL_SEGMENT_AND_FINALIZER_PATH
 ```
 
+Implementation checkpoint (2026-07-13): complete. The process-lifetime index
+is keyed by source/epoch, performs one bounded initial scan, incrementally
+refreshes changed directories, periodically reconciles, and invalidates on the
+maintenance generation marker. Parsed rows and catalogs are bounded; malformed
+or half-written identities remain pending without per-task reparsing. Both
+rolling lanes use lease-aware read pins. Retention and implemented byte-quota
+cleanup have one filesystem-lock-arbitrated owner in single and dual-sink
+topologies. Remux/finalizer duration reuse is identity-fenced, general sink
+readiness carries one authoritative probe, and DB index subphases are timed
+separately. The retained same-source/video/image canary, 8090 proof, tests, and
+zero-residual audit are recorded in
+`docs/code_review/clip_media_phase5_segment_index_2026-07-13.md`. Phase 6
+capacity/readiness calibration and the two 60-source closure runs remain open.
+
 ### Phase 6 - Tune Capacity, Then Readiness
 
 Use identical workload A/B for `max_active` candidates such as 4, 8, and 12.
@@ -1150,9 +1179,9 @@ fenced lifecycle and durable recovery remain common. Its owner is
 `media-worker`, and it is removed together with the legacy runner in Phase 7.
 
 The isolated Phase 2 finalizer boundary defaults to `true`. At the accepted
-Phase 4 checkpoint Scheduler V2 and its required DB pool default to `true`,
-while the Phase 5 segment index remains `false`. Canary overrides are recorded
-in effective config. Valid combinations for the later three flags are:
+Phase 5 checkpoint Scheduler V2, its required DB pool, and the segment index
+default to `true`. Canary overrides are recorded in effective config. Valid
+combinations for the later three flags are:
 
 | V2 | DB pool | Segment index | Result |
 | --- | --- | --- | --- |
@@ -1260,10 +1289,10 @@ main thread too. The main scheduler tick must never execute ffmpeg/sidecar work
 or wait for a future. Add flag-independent durable finalizer_pending recovery
 and bounded TERM/KILL shutdown before pressure testing.
 
-Implement the source/epoch RollingSegmentIndex and job-local metrics. Tune
-max_active with comparable 4/8/12 candidates; do not assume 4 or 32 is correct.
-Only after the structural gate passes twice may fixed grace be reduced from
-measured segment coverage visibility.
+The source/epoch RollingSegmentIndex and job-local metrics are complete. Next,
+tune max_active with comparable 4/8/12 candidates; do not assume 4 or 32 is
+correct. Only after the structural gate passes twice may fixed grace be reduced
+from measured segment coverage visibility.
 
 At each phase run the specified state, migration, concurrency, pool, index, and
 existing targeted tests. Rebuild media-worker when the psycopg pool dependency

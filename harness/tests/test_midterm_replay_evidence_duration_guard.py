@@ -261,6 +261,7 @@ def test_rolling_cache_finalizer_reuses_materializer_output_duration(
     sink_dir.mkdir(parents=True)
     source_video = sink_dir / "video.mov"
     source_video.write_bytes(b"rolling cache source")
+    source_identity = source_video.stat()
     metadata_file = sink_dir / "metadata.json"
     metadata_file.write_text(
         json.dumps(
@@ -273,6 +274,17 @@ def test_rolling_cache_finalizer_reuses_materializer_output_duration(
                     "actual_start_pts": 95_000_000_000,
                     "actual_end_pts": 105_000_000_000,
                     "output_duration_s": 10.0,
+                    "immutable_probe": {
+                        "schema_version": "rolling-cache-immutable-probe-v1",
+                        "status": "ready",
+                        "duration_s": 10.0,
+                        "identity": {
+                            "device": source_identity.st_dev,
+                            "inode": source_identity.st_ino,
+                            "size": source_identity.st_size,
+                            "mtime_ns": source_identity.st_mtime_ns,
+                        },
+                    },
                 },
                 "frames": _metadata_rows_inside_window(),
             }
@@ -290,7 +302,13 @@ def test_rolling_cache_finalizer_reuses_materializer_output_duration(
     monkeypatch.setattr(worker, "load_native_metadata", lambda _path: _metadata_rows_inside_window())
     monkeypatch.setattr(worker, "read_decoded_video_frame_count", lambda _path: 10)
     monkeypatch.setattr(worker, "_copy_or_crop_video", _write_valid_duration_crop)
-    monkeypatch.setattr(worker, "_probe_video_duration_seconds", lambda _path: 8.75)
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_duration_seconds",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("matching immutable probe must be reused")
+        ),
+    )
     monkeypatch.setattr(
         worker,
         "write_frame_cache_identity_sidecar",

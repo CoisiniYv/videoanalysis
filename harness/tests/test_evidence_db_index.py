@@ -149,7 +149,13 @@ def test_expanded_db_rows_do_not_publish_pruned_sidecar_artifacts(
         encoding="utf-8",
     )
     (bundle / "summary.json").write_text(
-        json.dumps({"clip_status": "ready", "raw_clip_duration": 10.0}),
+        json.dumps(
+            {
+                "clip_status": "ready",
+                "raw_clip_duration": 10.0,
+                "sidecar_build_ms": 7,
+            }
+        ),
         encoding="utf-8",
     )
     (bundle / "summary.frame_cache.identity.json").write_text(
@@ -184,6 +190,17 @@ def test_expanded_db_rows_do_not_publish_pruned_sidecar_artifacts(
     assert result["artifacts"] == golden["artifact_count"]
     assert result["timeline_rows"] == golden["timeline_rows"]
     assert result["overlay_rows"] == golden["overlay_rows"]
+    assert result["sidecar_build_ms"] == 7
+    for field in (
+        "db_bundle_index_ms",
+        "db_artifact_index_ms",
+        "db_timeline_index_ms",
+        "db_overlay_index_ms",
+        "db_index_total_ms",
+    ):
+        assert isinstance(result[field], int)
+        assert result[field] >= 0
+    assert result["db_index_total_ms"] >= result["db_bundle_index_ms"]
     raw_artifact_params = next(
         params
         for query, params in conn.cursor_obj.executions

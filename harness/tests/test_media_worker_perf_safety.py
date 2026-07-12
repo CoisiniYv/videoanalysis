@@ -183,7 +183,9 @@ def test_rolling_cache_finalizer_uses_metadata_frame_count_and_duration(
     event_id = "22222222-2222-4222-8222-222222222222"
     sink_dir = tmp_path / "rolling-cache-materialized" / event_id
     sink_dir.mkdir(parents=True)
-    (sink_dir / "video.mov").write_bytes(b"raw clip bytes")
+    video_path = sink_dir / "video.mov"
+    video_path.write_bytes(b"raw clip bytes")
+    video_stat = video_path.stat()
     metadata_file = sink_dir / "metadata.json"
     metadata_file.write_text(
         json.dumps(
@@ -192,6 +194,17 @@ def test_rolling_cache_finalizer_uses_metadata_frame_count_and_duration(
                 "rolling_cache": {
                     "selected_frame_count": 42,
                     "output_duration_s": 1.75,
+                    "immutable_probe": {
+                        "schema_version": "rolling-cache-immutable-probe-v1",
+                        "status": "ready",
+                        "duration_s": 1.75,
+                        "identity": {
+                            "device": video_stat.st_dev,
+                            "inode": video_stat.st_ino,
+                            "size": video_stat.st_size,
+                            "mtime_ns": video_stat.st_mtime_ns,
+                        },
+                    },
                     "time_domain_crop_applied": True,
                     "actual_start_pts": 1_000_000_000,
                     "actual_end_pts": 2_750_000_000,
@@ -575,15 +588,94 @@ def test_rolling_cache_coverage_retry_waits_for_observed_gap() -> None:
     assert worker._rolling_cache_coverage_retry_after_s(RuntimeError("no_overlapping_segments")) == 2.0
 
 
-def test_known_sink_duration_reads_rolling_cache_metadata() -> None:
+def test_known_sink_duration_requires_matching_immutable_probe(tmp_path: Path) -> None:
     worker = _activate("media-worker", "app.worker")
+    video_path = tmp_path / "video.mov"
+    video_path.write_bytes(b"video")
+    stat = video_path.stat()
+    metadata = {
+        "rolling_cache": {
+            "output_duration_s": "3.25",
+            "immutable_probe": {
+                "status": "ready",
+                "duration_s": "3.25",
+                "identity": {
+                    "device": stat.st_dev,
+                    "inode": stat.st_ino,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                },
+            },
+        }
+    }
 
     assert (
         worker._known_sink_output_duration_seconds(
-            {"rolling_cache": {"output_duration_s": "3.25"}}
+            metadata,
+            video_path,
         )
         == 3.25
     )
+    video_path.write_bytes(b"replacement")
+    assert worker._known_sink_output_duration_seconds(metadata, video_path) is None
+    assert (
+        worker._known_sink_output_duration_seconds(
+            {"rolling_cache": {"output_duration_s": "3.25"}},
+            video_path,
+        )
+        is None
+    )
+
+
+def test_identity_mismatch_reprobes_once_and_reuses_finalizer_probe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    video_path = tmp_path / "video.mov"
+    metadata_path = tmp_path / "metadata.json"
+    video_path.write_bytes(b"video")
+    metadata_path.write_text("{}\n", encoding="utf-8")
+    metadata = {
+        "rolling_cache": {
+            "immutable_probe": {
+                "status": "ready",
+                "duration_s": 2.0,
+                "identity": {"size": 999, "mtime_ns": 1},
+            }
+        }
+    }
+    probes: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_probe_video_duration_seconds",
+        lambda path: probes.append(path) or 2.5,
+    )
+
+    ready, reason = worker._sink_output_ready_for_finalizer(
+        video_file=str(video_path),
+        metadata_file=str(metadata_path),
+        known_duration_s=worker._known_sink_output_duration_seconds(
+            metadata,
+            video_path,
+        ),
+        metadata=metadata,
+    )
+    assert (ready, reason) == (True, "ready")
+    assert probes == [str(video_path)]
+    assert worker._known_sink_output_duration_seconds(metadata, video_path) == 2.5
+
+    ready, reason = worker._sink_output_ready_for_finalizer(
+        video_file=str(video_path),
+        metadata_file=str(metadata_path),
+        known_duration_s=worker._known_sink_output_duration_seconds(
+            metadata,
+            video_path,
+        ),
+        metadata=metadata,
+    )
+    assert (ready, reason) == (True, "ready")
+    assert probes == [str(video_path)]
 
 
 def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> None:
@@ -1133,6 +1225,8 @@ def test_frame_cache_sidecar_retries_when_exporter_is_behind(
     assert summary["annotation_anchor_wait"]["attempts"] == 1
     assert summary["annotation_anchor_wait"]["initial_lag_s"] == 8.0
     assert summary["annotation_anchor_wait"]["range_cache_bypassed_for_retry"] is True
+    assert isinstance(summary["sidecar_build_ms"], int)
+    assert summary["sidecar_build_ms"] >= 0
     assert calls[0]["config"]["range_cache_ttl_s"] == 900.0
     assert calls[1]["config"]["range_cache_ttl_s"] == 0.0
     assert calls[1]["config"]["range_cache_max_entries"] == 0

@@ -58,10 +58,12 @@ class RollingMaterializationResult:
     selected_frame_count: int
     materialization_ms: int
     ffmpeg_command: tuple[str, ...]
+    immutable_probe: dict[str, Any]
 
 
 CommandRunner = Callable[[list[str], Path], None]
 DurationProbe = Callable[[Path], float | None]
+RowLoader = Callable[[RollingSegment], list[dict[str, Any]]]
 
 
 def find_segments(
@@ -118,6 +120,7 @@ def materialize_window(
     ffmpeg: str | None = None,
     command_runner: CommandRunner | None = None,
     duration_probe: DurationProbe | None = None,
+    row_loader: RowLoader | None = None,
     coverage_slack_ns: int = DEFAULT_COVERAGE_SLACK_NS,
     allow_partial: bool = False,
 ) -> RollingMaterializationResult:
@@ -131,11 +134,11 @@ def materialize_window(
         source_id=source_id,
         runtime_epoch_id=runtime_epoch_id,
     )
-    selected = [
-        segment
-        for segment in segments
-        if segment.last_pts >= requested_start_pts and segment.first_pts <= requested_end_pts
-    ]
+    selected = overlapping_segments(
+        segments,
+        requested_start_pts=requested_start_pts,
+        requested_end_pts=requested_end_pts,
+    )
     if not selected:
         raise RollingCacheCoverageMiss("no_overlapping_segments")
     selected.sort(key=lambda segment: (segment.first_pts, segment.last_pts))
@@ -278,8 +281,21 @@ def materialize_window(
                 )
             duration_repair_status = "transcode_retry_duration_ok"
 
-    selected_rows = _select_rows(selected, output_start_pts, output_end_pts)
+    selected_rows = _select_rows(
+        selected,
+        output_start_pts,
+        output_end_pts,
+        row_loader=row_loader,
+    )
     materialization_ms = int((time.monotonic() - started) * 1000)
+    output_identity = _file_identity(video_path)
+    immutable_probe = {
+        "schema_version": "rolling-cache-immutable-probe-v1",
+        "status": "ready" if observed_duration_s is not None else "unavailable",
+        "duration_s": observed_duration_s,
+        "identity": output_identity,
+        "observed_at_epoch_ns": time.time_ns(),
+    }
     label_doc = {
         **{str(k): str(v) for k, v in (labels or {}).items() if v is not None},
         "event_id": event_id,
@@ -338,6 +354,7 @@ def materialize_window(
             "selected_frame_count": len(selected_rows),
             "materialization_ms": materialization_ms,
             "probed_output_duration_s": observed_duration_s,
+            "immutable_probe": immutable_probe,
             "duration_repair_attempted": duration_repair_attempted,
             "duration_repair_status": duration_repair_status,
         },
@@ -356,7 +373,24 @@ def materialize_window(
         selected_frame_count=len(selected_rows),
         materialization_ms=materialization_ms,
         ffmpeg_command=tuple(executed_command),
+        immutable_probe=immutable_probe,
     )
+
+
+def overlapping_segments(
+    segments: Iterable[RollingSegment],
+    *,
+    requested_start_pts: int,
+    requested_end_pts: int,
+) -> list[RollingSegment]:
+    """Return the immutable segment subset intersecting a requested window."""
+
+    return [
+        segment
+        for segment in segments
+        if segment.last_pts >= requested_start_pts
+        and segment.first_pts <= requested_end_pts
+    ]
 
 
 def _concat_copy_retry_command(
@@ -582,14 +616,31 @@ def _select_rows(
     segments: Iterable[RollingSegment],
     start_pts: int,
     end_pts: int,
+    *,
+    row_loader: RowLoader | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for segment in segments:
-        for row in load_native_metadata(segment.metadata_path):
+        segment_rows = (
+            row_loader(segment)
+            if row_loader is not None
+            else load_native_metadata(segment.metadata_path)
+        )
+        for row in segment_rows:
             pts = _row_pts(row)
             if pts is None or start_pts <= pts <= end_pts:
                 rows.append(row)
     return rows
+
+
+def _file_identity(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
 
 
 def _row_pts(row: dict[str, Any]) -> int | None:

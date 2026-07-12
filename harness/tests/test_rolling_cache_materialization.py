@@ -259,6 +259,11 @@ def test_materialize_window_transcodes_when_copy_duration_is_short(
     assert metadata["rolling_cache"]["duration_repair_attempted"] is True
     assert metadata["rolling_cache"]["duration_repair_status"] == "transcode_retry_duration_ok"
     assert metadata["rolling_cache"]["probed_output_duration_s"] == 2.0
+    immutable_probe = metadata["rolling_cache"]["immutable_probe"]
+    assert immutable_probe["status"] == "ready"
+    assert immutable_probe["duration_s"] == 2.0
+    assert immutable_probe["identity"]["size"] == result.video_path.stat().st_size
+    assert result.immutable_probe == immutable_probe
 
 
 def test_materialize_window_reports_initial_and_retry_ffmpeg_failures(

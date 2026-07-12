@@ -1054,7 +1054,29 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
     assert "ROLLING_CACHE_SEGMENT_FRAMES" in entrypoint
     assert "ROLLING_CACHE_FPS" in entrypoint
     assert "ROLLING_CACHE_RETENTION_SECONDS" in entrypoint
-    assert "[rolling-cache-cleanup]" in entrypoint
+    assert "[rolling-cache-maintenance]" in entrypoint
+    assert "/opt/rolling-cache-maintenance.py" in entrypoint
+    assert services["rolling-cache-sink"]["environment"][
+        "ROLLING_CACHE_MAINTENANCE_OWNER"
+    ] == "true"
+    assert services["rolling-cache-sink-a"]["environment"][
+        "ROLLING_CACHE_MAINTENANCE_OWNER"
+    ] == "true"
+    assert services["rolling-cache-sink-b"]["environment"][
+        "ROLLING_CACHE_MAINTENANCE_OWNER"
+    ] == "false"
+    for service_name in (
+        "rolling-cache-sink",
+        "rolling-cache-sink-a",
+        "rolling-cache-sink-b",
+    ):
+        service = services[service_name]
+        assert any(
+            str(volume).endswith(
+                "rolling_cache_maintenance.py:/opt/rolling-cache-maintenance.py:ro"
+            )
+            for volume in service["volumes"]
+        )
     assert 'export CHUNK_SIZE="${SEGMENT_FRAMES}"' in entrypoint
 
 

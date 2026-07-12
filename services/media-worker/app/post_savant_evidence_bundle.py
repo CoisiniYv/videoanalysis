@@ -157,6 +157,7 @@ def build_post_savant_evidence_bundle(
 
     production_sidecar_path = output_dir / SIDECAR_ANNOTATIONS_FILE
     sidecar_summary_path = output_dir / SIDECAR_SUMMARY_FILE
+    sidecar_started = time.monotonic()
     sidecar_result = build_post_savant_annotation_sidecar(
         metadata_path=sink_metadata_path,
         output_jsonl_path=production_sidecar_path,
@@ -164,6 +165,7 @@ def build_post_savant_evidence_bundle(
         max_frames=sidecar_max_frames,
         extra_limitations=extra_limitations,
     )
+    sidecar_build_ms = int((time.monotonic() - sidecar_started) * 1000)
     sidecar_summary = sidecar_result.summary
     video_integrity = (
         inspect_video_integrity(
@@ -209,6 +211,7 @@ def build_post_savant_evidence_bundle(
         workaround_reason=workaround_reason,
         replay_timing_metadata=replay_timing_metadata,
     )
+    summary["sidecar_build_ms"] = sidecar_build_ms
     _validate_bundle_summary(summary)
     _write_json(output_dir / SUMMARY_FILE, summary)
     _write_json(sidecar_summary_path, summary)

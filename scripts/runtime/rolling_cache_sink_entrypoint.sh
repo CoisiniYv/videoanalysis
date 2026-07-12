@@ -28,52 +28,19 @@ mkdir -p "${CACHE_ROOT}/${NAMESPACE}/epochs/${EPOCH_ID}"
 
 ROLLING_CACHE_RETENTION_SECONDS="${ROLLING_CACHE_RETENTION_SECONDS:-300}"
 ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS="${ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS:-30}"
+ROLLING_CACHE_MAX_BYTES="${ROLLING_CACHE_MAX_BYTES:-0}"
+ROLLING_CACHE_READ_PIN_TTL_SECONDS="${ROLLING_CACHE_READ_PIN_TTL_SECONDS:-600}"
+ROLLING_CACHE_MAINTENANCE_OWNER="${ROLLING_CACHE_MAINTENANCE_OWNER:-true}"
 
-python - <<'PY' &
-import os
-import shutil
-import time
-from pathlib import Path
-
-root = Path(os.getenv("ROLLING_CACHE_ROOT", "/media/rolling-cache"))
-try:
-    retention_s = max(0.0, float(os.getenv("ROLLING_CACHE_RETENTION_SECONDS", "300")))
-except ValueError:
-    retention_s = 300.0
-try:
-    interval_s = max(5.0, float(os.getenv("ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS", "30")))
-except ValueError:
-    interval_s = 30.0
-
-if retention_s <= 0:
-    raise SystemExit(0)
-
-def cleanup_once() -> None:
-    now = time.time()
-    cutoff = now - retention_s
-    if not root.exists():
-        return
-    for path in list(root.rglob("*")):
-        try:
-            if path.is_file() and path.stat().st_mtime < cutoff:
-                path.unlink()
-        except FileNotFoundError:
-            continue
-        except Exception as exc:
-            print(f"[rolling-cache-cleanup] file_cleanup_failed path={path} error={exc}", flush=True)
-    dirs = [p for p in root.rglob("*") if p.is_dir()]
-    for path in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
-        if path == root:
-            continue
-        try:
-            path.rmdir()
-        except OSError:
-            pass
-
-while True:
-    cleanup_once()
-    time.sleep(interval_s)
-PY
+case "$(printf '%s' "${ROLLING_CACHE_MAINTENANCE_OWNER}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    echo "[rolling-cache-maintenance] requested_owner=true root=${CACHE_ROOT} retention_s=${ROLLING_CACHE_RETENTION_SECONDS} max_bytes=${ROLLING_CACHE_MAX_BYTES} interval_s=${ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS} read_pin_ttl_s=${ROLLING_CACHE_READ_PIN_TTL_SECONDS}"
+    python /opt/rolling-cache-maintenance.py &
+    ;;
+  *)
+    echo "[rolling-cache-maintenance] requested_owner=false root=${CACHE_ROOT}"
+    ;;
+esac
 
 SEGMENT_FRAMES="${ROLLING_CACHE_SEGMENT_FRAMES:-}"
 if [ -z "${SEGMENT_FRAMES}" ]; then

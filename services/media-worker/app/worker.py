@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, local
 from contextlib import nullcontext
+from typing import Callable
 
 import psycopg
 from psycopg.rows import dict_row
@@ -94,7 +95,9 @@ from app.rolling_cache import (
     RollingSegment,
     find_segments,
     materialize_window,
+    overlapping_segments,
 )
+from app.segment_index import RollingSegmentIndex
 from app.snapshot import generate_snapshot
 from app.subprocess_control import run_managed_subprocess, set_active_process_registry
 
@@ -211,11 +214,14 @@ def _write_frame_cache_sidecar_after_anchor(
     started = time.monotonic()
     attempts = 0
     waited_s = 0.0
+    sidecar_build_s = 0.0
     initial_lag_s = None
     cache_bypassed_for_retry = False
     writer_kwargs = dict(kwargs)
     while True:
+        writer_started = time.monotonic()
         summary, result = write_frame_cache_identity_sidecar(**writer_kwargs)
+        sidecar_build_s += max(0.0, time.monotonic() - writer_started)
         lag_s = _frame_cache_anchor_lag_seconds(summary)
         if initial_lag_s is None:
             initial_lag_s = lag_s
@@ -258,6 +264,7 @@ def _write_frame_cache_sidecar_after_anchor(
         "status": str(summary.get("annotation_status") or ""),
         "range_cache_bypassed_for_retry": cache_bypassed_for_retry,
     }
+    summary["sidecar_build_ms"] = int(sidecar_build_s * 1000)
     return summary, result
 
 
@@ -715,6 +722,7 @@ def _sink_output_ready_for_finalizer(
     video_file: str,
     metadata_file: str,
     known_duration_s: float | None = None,
+    metadata: dict | None = None,
 ) -> tuple[bool, str]:
     """Return whether video-file-sink output is safe to publish as evidence."""
     video_path = Path(video_file)
@@ -733,20 +741,75 @@ def _sink_output_ready_for_finalizer(
     if known_duration_s is not None and known_duration_s > 0:
         return True, "ready"
 
-    if _probe_video_duration_seconds(video_file) is None:
+    observed_duration_s = _probe_video_duration_seconds(video_file)
+    if observed_duration_s is None:
         return False, "video_duration_unavailable"
+    if isinstance(metadata, dict):
+        stat = video_path.stat()
+        metadata["_authoritative_probe"] = {
+            "schema_version": "finalizer-authoritative-probe-v1",
+            "status": "ready",
+            "duration_s": observed_duration_s,
+            "identity": {
+                "device": int(stat.st_dev),
+                "inode": int(stat.st_ino),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            },
+        }
     return True, "ready"
 
 
-def _known_sink_output_duration_seconds(meta: dict | None) -> float | None:
-    """Return a trusted duration already produced by the sink/materializer."""
+def _known_sink_output_duration_seconds(
+    meta: dict | None,
+    video_file: str | Path | None = None,
+) -> float | None:
+    """Return a probe duration only while its immutable file identity matches."""
     if not isinstance(meta, dict):
         return None
+    authoritative_probe = meta.get("_authoritative_probe")
+    if isinstance(authoritative_probe, dict):
+        authoritative_meta = {
+            "rolling_cache": {"immutable_probe": authoritative_probe}
+        }
+        trusted = _known_sink_output_duration_seconds(
+            authoritative_meta,
+            video_file,
+        )
+        if trusted is not None:
+            return trusted
     rolling_cache = meta.get("rolling_cache")
     if isinstance(rolling_cache, dict):
-        duration = _to_float(rolling_cache.get("output_duration_s"))
-        if duration is not None and duration > 0:
-            return duration
+        probe = rolling_cache.get("immutable_probe")
+        probe = probe if isinstance(probe, dict) else {}
+        identity = probe.get("identity")
+        identity = identity if isinstance(identity, dict) else {}
+        duration = _to_float(probe.get("duration_s"))
+        if (
+            video_file is None
+            or probe.get("status") != "ready"
+            or duration is None
+            or duration <= 0
+            or not identity
+        ):
+            return None
+        try:
+            stat = Path(video_file).stat()
+        except OSError:
+            return None
+        expected_size = _to_int(identity.get("size"))
+        expected_mtime_ns = _to_int(identity.get("mtime_ns"))
+        expected_device = _to_int(identity.get("device"))
+        expected_inode = _to_int(identity.get("inode"))
+        if expected_size is None or stat.st_size != expected_size:
+            return None
+        if expected_mtime_ns is None or stat.st_mtime_ns != expected_mtime_ns:
+            return None
+        if expected_device is not None and stat.st_dev != expected_device:
+            return None
+        if expected_inode is not None and stat.st_ino != expected_inode:
+            return None
+        return duration
     duration = _to_float(meta.get("output_duration_s") or meta.get("duration_s"))
     return duration if duration is not None and duration > 0 else None
 
@@ -4585,6 +4648,7 @@ def _finalize_post_savant_evidence_bundle(
     materialization_timeout_s: float = 0.0,
     materialization_guardrails: dict | None = None,
     phase_diagnostics: dict | None = None,
+    authoritative_probe: dict | None = None,
 ) -> dict:
     """Package post-Savant sink output as a production evidence bundle."""
     finalize_started = time.monotonic()
@@ -4602,6 +4666,8 @@ def _finalize_post_savant_evidence_bundle(
     if not isinstance(media, dict):
         media = {}
     sink_metadata = _load_sink_metadata_file(metadata_file)
+    if isinstance(authoritative_probe, dict):
+        sink_metadata["_authoritative_probe"] = dict(authoritative_probe)
     rolling_cache_info = (
         sink_metadata.get("rolling_cache")
         if isinstance(sink_metadata.get("rolling_cache"), dict)
@@ -4730,8 +4796,9 @@ def _finalize_post_savant_evidence_bundle(
     rolling_cache_selected_frame_count = _to_int(
         rolling_cache_info.get("selected_frame_count")
     )
-    rolling_cache_output_duration_s = _to_float(
-        rolling_cache_info.get("output_duration_s")
+    rolling_cache_output_duration_s = _known_sink_output_duration_seconds(
+        sink_metadata,
+        source_video,
     )
     raw_clip_duration = (
         rolling_cache_output_duration_s
@@ -5010,6 +5077,7 @@ def _finalize_post_savant_evidence_bundle(
             == "missing_frame_metadata"
             and int(sidecar_summary.get("annotations_written") or 0) <= 0
         ):
+            fallback_started = time.monotonic()
             db_recovery = _write_person_bbox_db_sidecar_fallback(
                 pg_conn,
                 event_context=event_context,
@@ -5017,7 +5085,14 @@ def _finalize_post_savant_evidence_bundle(
                 sink_metadata_rows=sink_metadata_rows,
             )
             if db_recovery is not None:
+                prior_sidecar_build_ms = int(
+                    sidecar_summary.get("sidecar_build_ms") or 0
+                )
                 sidecar_summary, sidecar_result = db_recovery
+                sidecar_summary["sidecar_build_ms"] = (
+                    prior_sidecar_build_ms
+                    + int((time.monotonic() - fallback_started) * 1000)
+                )
         summary = _build_frame_cache_summary(
             sidecar_summary=sidecar_summary,
             sink_metadata_rows=sink_metadata_rows,
@@ -5158,6 +5233,7 @@ def _finalize_post_savant_evidence_bundle(
     )
     result.summary["media_worker_perf"] = {
         "finalization_duration_ms": finalization_duration_ms,
+        "sidecar_build_ms": int(result.summary.get("sidecar_build_ms") or 0),
         "metadata_rows_loaded": metadata_rows_loaded,
         "sink_metadata_rows_for_guard": len(sink_window_rows),
         "decoded_frame_count_duration_ms": decoded_frame_count_duration_ms,
@@ -5376,10 +5452,17 @@ def _index_finalized_bundle(
         )
         logger.info(
             "evidence_db_index_upserted event_id=%s "
-            "expanded_rows_enabled=%s duration_ms=%s result=%s",
+            "expanded_rows_enabled=%s duration_ms=%s "
+            "sidecar_ms=%s bundle_ms=%s artifact_ms=%s timeline_ms=%s overlay_ms=%s "
+            "result=%s",
             event_id,
             expanded_rows_enabled,
             int((time.monotonic() - db_index_started) * 1000),
+            index_result.get("sidecar_build_ms"),
+            index_result.get("db_bundle_index_ms"),
+            index_result.get("db_artifact_index_ms"),
+            index_result.get("db_timeline_index_ms"),
+            index_result.get("db_overlay_index_ms"),
             index_result,
         )
         alias_count = _upsert_covered_event_aliases(
@@ -6051,6 +6134,11 @@ def _finalize_one(
                 materialization_timeout_s=materialization_timeout_s,
                 materialization_guardrails=guardrails,
                 phase_diagnostics=phase_diagnostics,
+                authoritative_probe=(
+                    meta.get("_authoritative_probe")
+                    if isinstance(meta.get("_authoritative_probe"), dict)
+                    else None
+                ),
             )
         except Exception as exc:
             error_message = f"{type(exc).__name__}:{exc}"
@@ -6468,7 +6556,11 @@ def _process_sink_output(
             ready, reason = _sink_output_ready_for_finalizer(
                 video_file=video_file,
                 metadata_file=metadata_file,
-                known_duration_s=_known_sink_output_duration_seconds(meta),
+                known_duration_s=_known_sink_output_duration_seconds(
+                    meta,
+                    video_file,
+                ),
+                metadata=meta,
             )
 
         if ready:
@@ -6519,7 +6611,11 @@ def _process_sink_output(
             ready, reason = _sink_output_ready_for_finalizer(
                 video_file=video_file,
                 metadata_file=metadata_file,
-                known_duration_s=_known_sink_output_duration_seconds(meta),
+                known_duration_s=_known_sink_output_duration_seconds(
+                    meta,
+                    video_file,
+                ),
+                metadata=meta,
             )
         elif finalizer_phase is None:
             phase_diagnostics = _mark_sink_phase(
@@ -6904,6 +7000,11 @@ def _process_sink_output(
                         materialization_timeout_s=materialization_timeout_s,
                         materialization_guardrails=guardrails,
                         phase_diagnostics=phase_diagnostics,
+                        authoritative_probe=(
+                            meta.get("_authoritative_probe")
+                            if isinstance(meta.get("_authoritative_probe"), dict)
+                            else None
+                        ),
                     )
                 except Exception as exc:
                     error_message = f"{type(exc).__name__}:{exc}"
@@ -7466,10 +7567,17 @@ def _process_sink_output(
                             )
                             logger.info(
                                 "evidence_db_index_upserted event_id=%s "
-                                "expanded_rows_enabled=%s duration_ms=%s result=%s",
+                                "expanded_rows_enabled=%s duration_ms=%s "
+                                "sidecar_ms=%s bundle_ms=%s artifact_ms=%s timeline_ms=%s "
+                                "overlay_ms=%s result=%s",
                                 event_id,
                                 expanded_rows_enabled,
                                 db_index_duration_ms,
+                                index_result.get("sidecar_build_ms"),
+                                index_result.get("db_bundle_index_ms"),
+                                index_result.get("db_artifact_index_ms"),
+                                index_result.get("db_timeline_index_ms"),
+                                index_result.get("db_overlay_index_ms"),
                                 index_result,
                             )
                             alias_count = _upsert_covered_event_aliases(
@@ -7688,7 +7796,11 @@ def _run_finalizer_admission_v2(
         ready, reason = _sink_output_ready_for_finalizer(
             video_file=video_file,
             metadata_file=admission.metadata_file,
-            known_duration_s=_known_sink_output_duration_seconds(admission.meta),
+            known_duration_s=_known_sink_output_duration_seconds(
+                admission.meta,
+                video_file,
+            ),
+            metadata=admission.meta,
         )
         try:
             video_size = Path(video_file).stat().st_size
@@ -8373,7 +8485,11 @@ def _process_sink_output_with_finalizer_pool(
         ready, reason = _sink_output_ready_for_finalizer(
             video_file=video_file,
             metadata_file=metadata_file,
-            known_duration_s=_known_sink_output_duration_seconds(meta),
+            known_duration_s=_known_sink_output_duration_seconds(
+                meta,
+                video_file,
+            ),
+            metadata=meta,
         )
         if ready:
             if finalizer_phase is None:
@@ -8423,7 +8539,11 @@ def _process_sink_output_with_finalizer_pool(
             ready, reason = _sink_output_ready_for_finalizer(
                 video_file=video_file,
                 metadata_file=metadata_file,
-                known_duration_s=_known_sink_output_duration_seconds(meta),
+                known_duration_s=_known_sink_output_duration_seconds(
+                    meta,
+                    video_file,
+                ),
+                metadata=meta,
             )
         else:
             if finalizer_phase is None:
@@ -9113,11 +9233,38 @@ def _mark_media_finalize_failed(
 ROLLING_CACHE_TASK_STATUSES = tuple(sorted(CLAIMABLE_MATERIALIZATION_STATUSES))
 
 
+def _find_rolling_segments(
+    *,
+    cfg: Config,
+    source_id: str,
+    runtime_epoch_id: str,
+    segment_index: RollingSegmentIndex | None,
+    segment_cache: dict[tuple[str, str], list[RollingSegment]] | None = None,
+) -> list[RollingSegment]:
+    if segment_index is not None:
+        return segment_index.find_segments(
+            source_id=source_id,
+            runtime_epoch_id=runtime_epoch_id,
+        )
+    cache_key = (source_id, runtime_epoch_id)
+    if segment_cache is not None and cache_key in segment_cache:
+        return segment_cache[cache_key]
+    segments = find_segments(
+        cfg.rolling_cache_root,
+        source_id=source_id,
+        runtime_epoch_id=runtime_epoch_id,
+    )
+    if segment_cache is not None:
+        segment_cache[cache_key] = segments
+    return segments
+
+
 def _process_rolling_cache_tasks(
     pg_conn: psycopg.Connection,
     cfg: Config,
     runner: "_RollingCacheMaterializationRunner | None" = None,
     runtime_resources: MaterializationResources | None = None,
+    segment_index: RollingSegmentIndex | None = None,
     *,
     recover_lifecycle: bool = True,
 ) -> int:
@@ -9135,6 +9282,7 @@ def _process_rolling_cache_tasks(
         pg_conn,
         cfg,
         runtime_resources=runtime_resources,
+        segment_index=segment_index,
     )
     if runner is not None:
         return updated + runner.process(pg_conn, cfg)
@@ -9188,15 +9336,13 @@ def _process_rolling_cache_tasks(
                 requested_end_pts=requested_end_pts,
                 event_frame_pts=event_frame_pts,
             )
-            cache_key = (source_id, runtime_epoch_id)
-            segments = segment_cache.get(cache_key)
-            if segments is None:
-                segments = find_segments(
-                    cfg.rolling_cache_root,
-                    source_id=source_id,
-                    runtime_epoch_id=runtime_epoch_id,
-                )
-                segment_cache[cache_key] = segments
+            segments = _find_rolling_segments(
+                cfg=cfg,
+                source_id=source_id,
+                runtime_epoch_id=runtime_epoch_id,
+                segment_index=segment_index,
+                segment_cache=segment_cache,
+            )
             jobs.append(
                 {
                     "event_id": event_id,
@@ -9239,6 +9385,7 @@ def _process_rolling_cache_tasks(
                     root=cfg.rolling_cache_root,
                     output_root=cfg.rolling_cache_materialized_root,
                     job=job,
+                    segment_index=segment_index,
                 )
                 if _persist_rolling_cache_handoff_metadata(pg_conn, cfg, metadata):
                     metadata_overrides.append(metadata)
@@ -9276,6 +9423,7 @@ def _process_rolling_cache_tasks(
                     root=cfg.rolling_cache_root,
                     output_root=cfg.rolling_cache_materialized_root,
                     job=job,
+                    segment_index=segment_index,
                 ): (
                     str(job.get("event_id") or ""),
                     job.get("lease")
@@ -9337,6 +9485,7 @@ def _process_rolling_cache_image_tasks(
     cfg: Config,
     *,
     runtime_resources: MaterializationResources | None = None,
+    segment_index: RollingSegmentIndex | None = None,
 ) -> int:
     if runtime_resources is not None and not runtime_resources.admission_open:
         return 0
@@ -9395,22 +9544,31 @@ def _process_rolling_cache_image_tasks(
                 _runtime_epoch_from_event_context(event_context)
                 or _current_runtime_epoch_id(cfg.sink_output_dir)
             )
-            cache_key = (source_id, runtime_epoch_id)
-            segments = segment_cache.get(cache_key)
-            if segments is None:
-                segments = find_segments(
-                    cfg.rolling_cache_root,
-                    source_id=source_id,
-                    runtime_epoch_id=runtime_epoch_id,
-                )
-                segment_cache[cache_key] = segments
-            result = _materialize_face_image_from_rolling_cache(
+            segments = _find_rolling_segments(
                 cfg=cfg,
-                row=row,
-                event_context=event_context,
-                segments=segments,
+                source_id=source_id,
                 runtime_epoch_id=runtime_epoch_id,
+                segment_index=segment_index,
+                segment_cache=segment_cache,
             )
+            pin_context = (
+                segment_index.pin_segments(segments)
+                if segment_index is not None
+                else nullcontext()
+            )
+            with pin_context:
+                result = _materialize_face_image_from_rolling_cache(
+                    cfg=cfg,
+                    row=row,
+                    event_context=event_context,
+                    segments=segments,
+                    runtime_epoch_id=runtime_epoch_id,
+                    row_loader=(
+                        segment_index.rows_for_segment
+                        if segment_index is not None
+                        else None
+                    ),
+                )
             if _mark_image_evidence_materialized(
                 pg_conn,
                 event_id=event_id,
@@ -9486,6 +9644,7 @@ def _run_rolling_image_job_v2(
     work_permit: WorkPermit,
     source_permit: SourcePermit,
     heartbeat_handle: LeaseHeartbeatHandle | None,
+    segment_index: RollingSegmentIndex | None = None,
 ) -> dict[str, object]:
     provider = runtime_resources.db_pool
     if provider is None:
@@ -9499,18 +9658,30 @@ def _run_rolling_image_job_v2(
             _runtime_epoch_from_event_context(event_context)
             or _current_runtime_epoch_id(cfg.sink_output_dir)
         )
-        segments = find_segments(
-            cfg.rolling_cache_root,
+        segments = _find_rolling_segments(
+            cfg=cfg,
             source_id=source_id,
             runtime_epoch_id=runtime_epoch_id,
+            segment_index=segment_index,
         )
-        result = _materialize_face_image_from_rolling_cache(
-            cfg=cfg,
-            row=row,
-            event_context=event_context,
-            segments=segments,
-            runtime_epoch_id=runtime_epoch_id,
+        pin_context = (
+            segment_index.pin_segments(segments)
+            if segment_index is not None
+            else nullcontext()
         )
+        with pin_context:
+            result = _materialize_face_image_from_rolling_cache(
+                cfg=cfg,
+                row=row,
+                event_context=event_context,
+                segments=segments,
+                runtime_epoch_id=runtime_epoch_id,
+                row_loader=(
+                    segment_index.rows_for_segment
+                    if segment_index is not None
+                    else None
+                ),
+            )
         if heartbeat_handle is not None and not heartbeat_handle.healthy:
             reason = (
                 "materialization_max_attempt_age_exceeded"
@@ -9695,11 +9866,18 @@ def _run_annotation_job_v2(
 class _ImageSchedulerV2:
     """Shared non-blocking image lane for rolling images and legacy derivatives."""
 
-    def __init__(self, *, cfg: Config, runtime_resources: MaterializationResources) -> None:
+    def __init__(
+        self,
+        *,
+        cfg: Config,
+        runtime_resources: MaterializationResources,
+        segment_index: RollingSegmentIndex | None = None,
+    ) -> None:
         if runtime_resources.image_lane is None or runtime_resources.db_pool is None:
             raise RuntimeError("Scheduler V2 requires image lane and DB pool")
         self.cfg = cfg
         self.runtime_resources = runtime_resources
+        self.segment_index = segment_index
         self._futures: dict[Future[object], _ImageFlightV2] = {}
         self._active_keys: set[tuple[str, str]] = set()
         self._submitted_total = 0
@@ -9858,6 +10036,7 @@ class _ImageSchedulerV2:
                     work_permit=work_permit,
                     source_permit=source_permit,
                     heartbeat_handle=heartbeat_handle,
+                    segment_index=self.segment_index,
                 )
             except Exception as exc:
                 if self.runtime_resources.lease_heartbeats is not None:
@@ -10107,11 +10286,16 @@ def _materialize_face_image_from_rolling_cache(
     event_context: dict,
     segments: list[RollingSegment],
     runtime_epoch_id: str,
+    row_loader: Callable[[RollingSegment], list[dict]] | None = None,
 ) -> dict[str, object]:
     event_id = str(event_context.get("event_id") or row.get("event_id") or "")
     if not event_id:
         raise ValueError("face_image_missing_event_id")
-    frame = _rolling_cache_frame_for_image_event(event_context, segments)
+    frame = _rolling_cache_frame_for_image_event(
+        event_context,
+        segments,
+        row_loader=row_loader,
+    )
     segment = frame["segment"]
     frame_pts = int(frame["pts"])
     output_dir = Path(cfg.evidence_output_dir) / event_id
@@ -10178,6 +10362,8 @@ def _materialize_face_image_from_rolling_cache(
 def _rolling_cache_frame_for_image_event(
     event_context: dict,
     segments: list[RollingSegment],
+    *,
+    row_loader: Callable[[RollingSegment], list[dict]] | None = None,
 ) -> dict[str, object]:
     if not segments:
         raise RollingCacheCoverageMiss("face_image_no_rolling_cache_segments")
@@ -10193,7 +10379,12 @@ def _rolling_cache_frame_for_image_event(
     frame_pts = _to_int(media.get("frame_pts") or event_context.get("frame_pts"))
     if frame_uuid:
         for segment in segments:
-            for record in _safe_load_native_metadata(segment.metadata_path):
+            records = (
+                row_loader(segment)
+                if row_loader is not None
+                else _safe_load_native_metadata(segment.metadata_path)
+            )
+            for record in records:
                 record_uuid = str(record.get("uuid") or record.get("frame_uuid") or "")
                 if record_uuid == frame_uuid:
                     pts = _to_int(record.get("pts") or record.get("frame_pts"))
@@ -10215,7 +10406,12 @@ def _rolling_cache_frame_for_image_event(
     nearest: dict[str, object] | None = None
     nearest_delta: int | None = None
     for segment in segments:
-        for record in _safe_load_native_metadata(segment.metadata_path):
+        records = (
+            row_loader(segment)
+            if row_loader is not None
+            else _safe_load_native_metadata(segment.metadata_path)
+        )
+        for record in records:
             pts = _to_int(record.get("pts") or record.get("frame_pts"))
             if pts is None:
                 continue
@@ -10802,9 +10998,11 @@ class _RollingCacheMaterializationRunner:
         max_workers: int,
         runtime_resources: MaterializationResources | None = None,
         finalizer_scheduler_v2: _FinalizerSchedulerV2 | None = None,
+        segment_index: RollingSegmentIndex | None = None,
     ) -> None:
         self._runtime_resources = runtime_resources
         self._finalizer_scheduler_v2 = finalizer_scheduler_v2
+        self._segment_index = segment_index
         shared_lane = runtime_resources.remux_lane if runtime_resources else None
         self.max_workers = min(
             max(1, int(max_workers or 1)),
@@ -10931,6 +11129,7 @@ class _RollingCacheMaterializationRunner:
                         cfg,
                         row,
                         segment_cache=segment_cache,
+                        segment_index=self._segment_index,
                     )
                 except Exception:
                     if work_permit is not None:
@@ -10978,6 +11177,7 @@ class _RollingCacheMaterializationRunner:
                             root=cfg.rolling_cache_root,
                             output_root=cfg.rolling_cache_materialized_root,
                             job=job,
+                            segment_index=self._segment_index,
                         )
                     else:
                         assert self._executor is not None
@@ -10986,6 +11186,7 @@ class _RollingCacheMaterializationRunner:
                             root=cfg.rolling_cache_root,
                             output_root=cfg.rolling_cache_materialized_root,
                             job=job,
+                            segment_index=self._segment_index,
                         )
                 except Exception as exc:
                     if heartbeat_supervisor is not None:
@@ -11130,6 +11331,7 @@ def _prepare_rolling_cache_job(
     row: dict[str, object],
     *,
     segment_cache: dict[tuple[str, str], list[RollingSegment]],
+    segment_index: RollingSegmentIndex | None = None,
 ) -> dict[str, object] | None:
     event_id = str(row.get("event_id") or "")
     source_id = str(row.get("source_id") or row.get("replay_source_id") or "")
@@ -11174,15 +11376,13 @@ def _prepare_rolling_cache_job(
             requested_end_pts=requested_end_pts,
             event_frame_pts=event_frame_pts,
         )
-        cache_key = (source_id, runtime_epoch_id)
-        segments = segment_cache.get(cache_key)
-        if segments is None:
-            segments = find_segments(
-                cfg.rolling_cache_root,
-                source_id=source_id,
-                runtime_epoch_id=runtime_epoch_id,
-            )
-            segment_cache[cache_key] = segments
+        segments = _find_rolling_segments(
+            cfg=cfg,
+            source_id=source_id,
+            runtime_epoch_id=runtime_epoch_id,
+            segment_index=segment_index,
+            segment_cache=segment_cache,
+        )
         return {
             "event_id": event_id,
             "source_id": source_id,
@@ -11216,23 +11416,43 @@ def _materialize_rolling_cache_job(
     root: str,
     output_root: str,
     job: dict[str, object],
+    segment_index: RollingSegmentIndex | None = None,
 ) -> dict:
     event_id = str(job.get("event_id") or "")
-    materialized = materialize_window(
-        root=root,
-        output_root=output_root,
-        event_id=event_id,
-        source_id=str(job.get("source_id") or ""),
-        requested_start_pts=int(job.get("requested_start_pts") or 0),
-        requested_end_pts=int(job.get("requested_end_pts") or 0),
-        runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
-        labels=job.get("labels") if isinstance(job.get("labels"), dict) else {},
-        segments=(
-            job.get("segments")
-            if isinstance(job.get("segments"), list)
-            else None
-        ),
+    requested_start_pts = int(job.get("requested_start_pts") or 0)
+    requested_end_pts = int(job.get("requested_end_pts") or 0)
+    segments = (
+        job.get("segments")
+        if isinstance(job.get("segments"), list)
+        else None
     )
+    selected_for_pin = overlapping_segments(
+        segments or (),
+        requested_start_pts=requested_start_pts,
+        requested_end_pts=requested_end_pts,
+    )
+    pin_context = (
+        segment_index.pin_segments(selected_for_pin)
+        if segment_index is not None
+        else nullcontext()
+    )
+    with pin_context:
+        materialized = materialize_window(
+            root=root,
+            output_root=output_root,
+            event_id=event_id,
+            source_id=str(job.get("source_id") or ""),
+            requested_start_pts=requested_start_pts,
+            requested_end_pts=requested_end_pts,
+            runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
+            labels=job.get("labels") if isinstance(job.get("labels"), dict) else {},
+            segments=segments,
+            row_loader=(
+                segment_index.rows_for_segment
+                if segment_index is not None
+                else None
+            ),
+        )
     metadata = _load_scan_metadata_payload(materialized.metadata_path)
     if metadata is None:
         raise RuntimeError("rolling_cache_materialized_metadata_unreadable")
@@ -11262,6 +11482,7 @@ def _materialize_rolling_cache_job(
         "inode": int(identity.st_ino),
         "size": int(identity.st_size),
         "mtime_ns": int(identity.st_mtime_ns),
+        "immutable_probe": materialized.immutable_probe,
     }
     observed_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -12479,6 +12700,43 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     scheduler_v2_enabled = bool(
         getattr(cfg, "media_worker_scheduler_v2_enabled", False)
     )
+    segment_index = (
+        RollingSegmentIndex(
+            cfg.rolling_cache_root,
+            refresh_interval_s=getattr(
+                cfg,
+                "media_worker_segment_index_refresh_interval_s",
+                0.5,
+            ),
+            reconcile_interval_s=getattr(
+                cfg,
+                "media_worker_segment_index_reconcile_interval_s",
+                30.0,
+            ),
+            stability_age_s=getattr(
+                cfg,
+                "media_worker_segment_index_stability_age_s",
+                0.25,
+            ),
+            row_cache_max_entries=getattr(
+                cfg,
+                "media_worker_segment_index_row_cache_entries",
+                256,
+            ),
+            max_catalogs=getattr(
+                cfg,
+                "media_worker_segment_index_max_catalogs",
+                256,
+            ),
+            read_pin_ttl_s=getattr(
+                cfg,
+                "rolling_cache_read_pin_ttl_s",
+                600.0,
+            ),
+        )
+        if getattr(cfg, "media_worker_segment_index_enabled", False)
+        else None
+    )
     finalizer_scheduler_v2 = (
         _FinalizerSchedulerV2(
             cfg=cfg,
@@ -12491,6 +12749,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         _ImageSchedulerV2(
             cfg=cfg,
             runtime_resources=runtime_resources,
+            segment_index=segment_index,
         )
         if scheduler_v2_enabled and cfg.materialization_max_active > 0
         else None
@@ -12500,6 +12759,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             max_workers=cfg.rolling_cache_materialization_workers,
             runtime_resources=runtime_resources,
             finalizer_scheduler_v2=finalizer_scheduler_v2,
+            segment_index=segment_index,
         )
         if (
             cfg.rolling_cache_enabled
@@ -12512,6 +12772,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "media_worker_resources schema_version=phase3-resources-v1 "
         "scheduler_v2_requested=%s db_pool_requested=%s "
         "db_pool_effective=%s segment_index_requested=%s "
+        "segment_index_effective=%s segment_index_refresh_s=%s "
+        "segment_index_reconcile_s=%s segment_index_row_cache_entries=%s "
+        "segment_read_pin_ttl_s=%s "
         "lanes_effective=%s "
         "max_active=%s image_workers=%s remux_workers=%s finalizer_workers=%s "
         "image_queue_capacity=%s remux_queue_capacity=%s "
@@ -12521,6 +12784,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         getattr(cfg, "media_worker_db_pool_enabled", False),
         runtime_resources.db_pool is not None,
         getattr(cfg, "media_worker_segment_index_enabled", False),
+        segment_index is not None,
+        getattr(cfg, "media_worker_segment_index_refresh_interval_s", 0.5),
+        getattr(cfg, "media_worker_segment_index_reconcile_interval_s", 30.0),
+        getattr(cfg, "media_worker_segment_index_row_cache_entries", 256),
+        getattr(cfg, "rolling_cache_read_pin_ttl_s", 600.0),
         runtime_resources.finalizer_lane is not None,
         cfg.materialization_max_active,
         getattr(cfg, "materialization_image_workers", 1),
@@ -12739,6 +13007,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         cfg,
                         runner=rolling_cache_runner,
                         runtime_resources=runtime_resources,
+                        segment_index=segment_index,
                         recover_lifecycle=False,
                     )
                     if rolling_updates:
@@ -12856,6 +13125,25 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             tick_duration_ms = int((time.monotonic() - tick_started_at) * 1000)
             permit_snapshot = materialization_guard.snapshot()
             resource_snapshot = runtime_resources.snapshot()
+            segment_index_snapshot = (
+                segment_index.snapshot()
+                if segment_index is not None
+                else {
+                    "mode": "legacy_recursive_scan",
+                    "hits": "unavailable",
+                    "misses": "unavailable",
+                    "refreshes": "unavailable",
+                    "metadata_parses": "unavailable",
+                    "stale_entries": "unavailable",
+                    "fallback_scans": "unavailable",
+                    "row_cache_entries": "unavailable",
+                    "row_cache_evictions": "unavailable",
+                    "active_read_pins": "unavailable",
+                    "read_pins_created": "unavailable",
+                    "read_pins_released": "unavailable",
+                    "generation": "unavailable",
+                }
+            )
             remux_snapshot = (
                 rolling_cache_runner.snapshot()
                 if rolling_cache_runner is not None
@@ -12894,9 +13182,17 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "lease_heartbeat_active=%s lease_heartbeat_total=%s "
                 "lease_heartbeat_lost=%s lease_heartbeat_expired=%s "
                 "lease_heartbeat_errors=%s "
-                "segment_index_mode=legacy_recursive_scan "
-                "segment_index_hits=unavailable segment_index_misses=unavailable "
-                "segment_index_fallback_scans=unavailable",
+                "segment_index_mode=%s "
+                "segment_index_hits=%s segment_index_misses=%s "
+                "segment_index_refreshes=%s segment_index_parses=%s "
+                "segment_index_stale_entries=%s "
+                "segment_index_fallback_scans=%s "
+                "segment_index_row_cache_entries=%s "
+                "segment_index_row_cache_evictions=%s "
+                "segment_index_active_read_pins=%s "
+                "segment_index_read_pins_created=%s "
+                "segment_index_read_pins_released=%s "
+                "segment_index_generation=%s",
                 "v2" if scheduler_v2_enabled else "legacy",
                 scheduler_tick_sequence,
                 tick_duration_ms,
@@ -12945,6 +13241,19 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                     "error_total",
                     0,
                 ),
+                segment_index_snapshot.get("mode", "legacy_recursive_scan"),
+                segment_index_snapshot.get("hits", "unavailable"),
+                segment_index_snapshot.get("misses", "unavailable"),
+                segment_index_snapshot.get("refreshes", "unavailable"),
+                segment_index_snapshot.get("metadata_parses", "unavailable"),
+                segment_index_snapshot.get("stale_entries", "unavailable"),
+                segment_index_snapshot.get("fallback_scans", "unavailable"),
+                segment_index_snapshot.get("row_cache_entries", "unavailable"),
+                segment_index_snapshot.get("row_cache_evictions", "unavailable"),
+                segment_index_snapshot.get("active_read_pins", "unavailable"),
+                segment_index_snapshot.get("read_pins_created", "unavailable"),
+                segment_index_snapshot.get("read_pins_released", "unavailable"),
+                segment_index_snapshot.get("generation", "unavailable"),
             )
 
             now_monotonic = time.monotonic()

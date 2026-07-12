@@ -62,6 +62,12 @@ class Config:
     media_worker_db_pool_timeout_s: float = 5.0
     media_worker_scheduler_v2_enabled: bool = False
     media_worker_segment_index_enabled: bool = False
+    media_worker_segment_index_refresh_interval_s: float = 0.5
+    media_worker_segment_index_reconcile_interval_s: float = 30.0
+    media_worker_segment_index_stability_age_s: float = 0.25
+    media_worker_segment_index_row_cache_entries: int = 256
+    media_worker_segment_index_max_catalogs: int = 256
+    rolling_cache_read_pin_ttl_s: float = 600.0
     media_worker_shutdown_grace_s: float = 45.0
     media_worker_shutdown_kill_timeout_s: float = 5.0
     materialization_lease_heartbeat_interval_s: float = 10.0
@@ -296,6 +302,55 @@ def load_config() -> Config:
         .strip()
         .lower()
         in ("1", "true", "yes", "on"),
+        media_worker_segment_index_refresh_interval_s=max(
+            0.0,
+            float(
+                os.getenv(
+                    "MEDIA_WORKER_SEGMENT_INDEX_REFRESH_INTERVAL_S",
+                    "0.5",
+                )
+            ),
+        ),
+        media_worker_segment_index_reconcile_interval_s=max(
+            1.0,
+            float(
+                os.getenv(
+                    "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
+                    "30.0",
+                )
+            ),
+        ),
+        media_worker_segment_index_stability_age_s=max(
+            0.0,
+            float(
+                os.getenv(
+                    "MEDIA_WORKER_SEGMENT_INDEX_STABILITY_AGE_S",
+                    "0.25",
+                )
+            ),
+        ),
+        media_worker_segment_index_row_cache_entries=max(
+            1,
+            int(
+                os.getenv(
+                    "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
+                    "256",
+                )
+            ),
+        ),
+        media_worker_segment_index_max_catalogs=max(
+            1,
+            int(
+                os.getenv(
+                    "MEDIA_WORKER_SEGMENT_INDEX_MAX_CATALOGS",
+                    "256",
+                )
+            ),
+        ),
+        rolling_cache_read_pin_ttl_s=max(
+            1.0,
+            float(os.getenv("ROLLING_CACHE_READ_PIN_TTL_SECONDS", "600.0")),
+        ),
         media_worker_shutdown_grace_s=max(
             0.0,
             float(os.getenv("MEDIA_WORKER_SHUTDOWN_GRACE_S", "45")),

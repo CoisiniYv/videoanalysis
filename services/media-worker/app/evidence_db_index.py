@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ def upsert_evidence_bundle_index(
     only URI/path strings and structured small metadata.
     """
 
+    total_started = time.monotonic()
     bundle = Path(bundle_dir)
     metadata = _load_json(bundle / "metadata.json")
     summary = _load_json(bundle / BUNDLE_SUMMARY_FILE)
@@ -59,6 +61,7 @@ def upsert_evidence_bundle_index(
     )
     materialization = _materialization(summary, sidecar_summary)
 
+    bundle_index_started = time.monotonic()
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -141,6 +144,7 @@ def upsert_evidence_bundle_index(
                 "materialization": Jsonb(materialization),
             },
         )
+    bundle_index_ms = int((time.monotonic() - bundle_index_started) * 1000)
 
     artifacts = [
         ("raw_clip", raw_clip, _content_type(raw_clip), None, raw_clip_size, raw_clip_sha, {"filename": raw_clip.name if raw_clip else None}),
@@ -195,6 +199,7 @@ def upsert_evidence_bundle_index(
             )
         )
     artifact_count = 0
+    artifact_index_started = time.monotonic()
     for artifact_type, path, content_type, compression, size, sha, artifact_meta in artifacts:
         if path is None:
             continue
@@ -210,13 +215,18 @@ def upsert_evidence_bundle_index(
             metadata=artifact_meta,
         )
         artifact_count += 1
+    artifact_index_ms = int((time.monotonic() - artifact_index_started) * 1000)
 
     timeline_count = 0
     overlay_count = 0
+    timeline_index_started = time.monotonic()
     if include_timeline and sink_metadata_path.is_file():
         timeline_count = _upsert_timeline(conn, event_id=event_id, path=sink_metadata_path)
+    timeline_index_ms = int((time.monotonic() - timeline_index_started) * 1000)
+    overlay_index_started = time.monotonic()
     if include_overlays and annotations_path.is_file():
         overlay_count = _upsert_overlays(conn, event_id=event_id, path=annotations_path)
+    overlay_index_ms = int((time.monotonic() - overlay_index_started) * 1000)
 
     return {
         "event_id": event_id,
@@ -224,6 +234,15 @@ def upsert_evidence_bundle_index(
         "artifacts": artifact_count,
         "timeline_rows": timeline_count,
         "overlay_rows": overlay_count,
+        "sidecar_build_ms": _int_or_none(
+            summary.get("sidecar_build_ms")
+            or _dict(summary.get("media_worker_perf")).get("sidecar_build_ms")
+        ),
+        "db_bundle_index_ms": bundle_index_ms,
+        "db_artifact_index_ms": artifact_index_ms,
+        "db_timeline_index_ms": timeline_index_ms,
+        "db_overlay_index_ms": overlay_index_ms,
+        "db_index_total_ms": int((time.monotonic() - total_started) * 1000),
     }
 
 

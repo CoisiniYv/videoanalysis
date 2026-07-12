@@ -64,10 +64,21 @@ Implementation checkpoint (2026-07-12):
   zero-residual audit are recorded in
   `docs/code_review/clip_media_phase4b_media_scheduler_v2_2026-07-13.md` with
   token `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`;
-- this completes only the Scheduler V2 substep of Spec 34 Phase 4. The
-  `RollingSegmentIndex`, capacity/performance gates, full cross-worker soak,
-  two 60-source closure runs and legacy removal remain unclaimed, so Spec 34
-  Phase 4 as a whole is not complete.
+- that checkpoint completed only the Scheduler V2 substep of Spec 34 Phase 4.
+  Its then-open `RollingSegmentIndex` item is closed by the next checkpoint;
+  capacity/performance gates, the full cross-worker soak, two 60-source closure
+  runs and legacy removal remain unclaimed.
+- Spec 33 Phase 5 now provides the process-lifetime source/epoch
+  `RollingSegmentIndex`, bounded parsed-row cache, read pins, single-owner
+  rolling retention/byte quota, identity-fenced probe reuse, and separate DB
+  index subphase timings. Its retained `.510/.511/.512` canary and zero-residual
+  proof are recorded in
+  `docs/code_review/clip_media_phase5_segment_index_2026-07-13.md` with token
+  `PASS_MEDIA_WORKER_INCREMENTAL_SEGMENT_AND_FINALIZER_PATH`;
+- this completes item 6 and the segment/probe/maintenance portion of item 8 in
+  Spec 34 Phase 4. Capacity/performance calibration, two 60-source closure
+  runs, the full cross-worker soak and legacy removal remain unclaimed, so
+  Spec 34 Phase 4 as a whole is still not complete.
 
 ## 0. 执行摘要
 
@@ -742,9 +753,14 @@ managed process groups and the shutdown state machine are verified.
 The Spec 33 Phase 4 portions of items 2-5/7/8 are complete under token
 `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`: non-blocking three-lane
 dispatch, durable submit retry, common finalizer recovery, SIGKILL restart
-convergence, and recovery with rolling admission disabled are verified. Item 6,
-capacity/performance portions of item 8, and the two required 60-source closures
-remain pending; therefore Spec 34 Phase 4 as a whole is not complete.
+convergence, and recovery with rolling admission disabled are verified. Item 6
+and the segment/probe/maintenance portion of item 8 are complete under Spec 33
+Phase 5 token `PASS_MEDIA_WORKER_INCREMENTAL_SEGMENT_AND_FINALIZER_PATH`: the
+source/epoch index, bounded row cache, read pins, single-owner cleanup,
+identity-fenced probe reuse, and DB subphase metrics passed retained canary and
+8090 validation. Capacity/performance portions of item 8 and the two required
+60-source closures remain pending; therefore Spec 34 Phase 4 as a whole is not
+complete.
 
 ### Phase 5 - Extract Remaining Media Responsibilities
 
