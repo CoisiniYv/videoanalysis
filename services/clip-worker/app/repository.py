@@ -701,6 +701,787 @@ def record_replay_job_for_slot(
         return False
 
 
+def _fenced_slot_result(row: object) -> dict[str, object] | None:
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        values = dict(row)
+    else:
+        names = (
+            "global_count",
+            "shard_count",
+            "source_count",
+            "deny_reason",
+            "acquired",
+            "event_updated",
+            "slot_owner",
+            "slot_token",
+            "slot_generation",
+            "create_state",
+            "replay_job_id",
+            "resulting_stream_id",
+            "plan_hash",
+        )
+        values = {
+            name: row[index] if index < len(row) else None
+            for index, name in enumerate(names)
+        }
+    counts = {
+        "replay_active_global_count": _safe_int(values.get("global_count")),
+        "replay_active_shard_count": _safe_int(values.get("shard_count")),
+        "replay_active_source_count": _safe_int(values.get("source_count")),
+    }
+    result = {
+        **values,
+        "counts": counts,
+        "acquired": bool(values.get("acquired")),
+        "event_updated": bool(values.get("event_updated")),
+        "deny_reason": str(values.get("deny_reason") or ""),
+        "slot_owner": str(values.get("slot_owner") or ""),
+        "slot_token": str(values.get("slot_token") or ""),
+        "slot_generation": _safe_int(values.get("slot_generation")),
+        "create_state": str(values.get("create_state") or ""),
+        "replay_job_id": str(values.get("replay_job_id") or ""),
+        "resulting_stream_id": str(values.get("resulting_stream_id") or ""),
+        "plan_hash": str(values.get("plan_hash") or ""),
+    }
+    reason = result["deny_reason"]
+    result["reason"] = reason
+    result["error_message"] = reason
+    if reason == "max_concurrent_reached":
+        result["quota_decision"] = {
+            "scope": "global_concurrency",
+            "admission_mode": "fenced",
+        }
+    elif reason == "max_concurrent_per_shard_reached":
+        result["quota_decision"] = {
+            "scope": "shard_concurrency",
+            "admission_mode": "fenced",
+        }
+    elif reason == "max_concurrent_per_source_reached":
+        result["quota_decision"] = {
+            "scope": "source_concurrency",
+            "admission_mode": "fenced",
+        }
+    else:
+        result["quota_decision"] = {}
+    return result
+
+
+def try_acquire_fenced_replay_slot(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    owner: str,
+    slot_token: str,
+    request_id: str,
+    delivery_id: str,
+    plan_hash: str,
+    source_id: str,
+    camera_id: str,
+    replay_shard: dict | None,
+    sink_instance: str,
+    replay_duration_seconds_effective: float,
+    replay_duration_effective_reason: str,
+    timeout_budget_s: float,
+    max_global: int,
+    max_per_shard: int,
+    max_per_source: int,
+) -> dict[str, object] | None:
+    """Reserve one Replay slot and bind its first owner/fence atomically."""
+    if not event_id or not owner or not slot_token or not plan_hash:
+        return None
+    cursor_factory = getattr(pg_conn, "cursor", None)
+    if not callable(cursor_factory):
+        return None
+    replay_shard_id = _replay_shard_value(replay_shard, "shard_id")
+    replay_api_url = _replay_shard_value(replay_shard, "replay_api_url")
+    sink_url = _replay_shard_value(replay_shard, "replay_job_sink_url")
+    params = {
+        "event_id": event_id,
+        "owner": owner,
+        "slot_token": slot_token,
+        "request_id": request_id,
+        "delivery_id": delivery_id,
+        "plan_hash": plan_hash,
+        "source_id": source_id,
+        "camera_id": camera_id,
+        "replay_shard_id": replay_shard_id,
+        "replay_api_url": replay_api_url,
+        "sink_url": sink_url,
+        "sink_instance": sink_instance,
+        "duration_s": max(_safe_float(replay_duration_seconds_effective), 0.0),
+        "duration_reason": replay_duration_effective_reason,
+        "timeout_s": max(_safe_float(timeout_budget_s), 0.0),
+        "max_global": max(_safe_int(max_global), 0),
+        "max_per_shard": max(_safe_int(max_per_shard), 0),
+        "max_per_source": max(_safe_int(max_per_source), 0),
+    }
+    try:
+        with cursor_factory() as cur:
+            cur.execute(
+                """
+                WITH admission_lock AS (
+                    SELECT pg_advisory_xact_lock(
+                        hashtext('clip_worker_replay_admission_v2')
+                    )
+                ),
+                target AS (
+                    SELECT
+                        et.event_id,
+                        et.replay_slot_status AS current_slot_status,
+                        et.replay_slot_owner AS current_slot_owner,
+                        et.replay_slot_token AS current_slot_token,
+                        et.replay_slot_generation AS current_slot_generation,
+                        et.replay_create_state AS current_create_state,
+                        et.replay_job_id AS current_replay_job_id,
+                        et.replay_resulting_stream_id AS current_resulting_stream_id,
+                        et.replay_plan_hash AS current_plan_hash
+                    FROM evidence_tasks et, admission_lock
+                    WHERE et.event_id = %(event_id)s::uuid
+                    FOR UPDATE
+                ),
+                active AS (
+                    SELECT
+                        count(*) AS global_count,
+                        count(*) FILTER (
+                            WHERE replay_shard_id = %(replay_shard_id)s::text
+                        ) AS shard_count,
+                        count(*) FILTER (
+                            WHERE COALESCE(replay_source_id, source_id)
+                                = %(source_id)s::text
+                        ) AS source_count
+                    FROM evidence_tasks, admission_lock
+                    WHERE replay_slot_status = 'active'
+                      AND (
+                          replay_slot_deadline_at IS NULL
+                          OR replay_slot_deadline_at > now()
+                      )
+                ),
+                decision AS (
+                    SELECT
+                        active.global_count,
+                        active.shard_count,
+                        active.source_count,
+                        CASE
+                            WHEN NOT EXISTS (SELECT 1 FROM target)
+                                THEN 'replay_slot_target_missing'
+                            WHEN EXISTS (
+                                SELECT 1 FROM target
+                                WHERE current_slot_status = 'active'
+                            )
+                                THEN 'replay_slot_active_existing'
+                            WHEN EXISTS (
+                                SELECT 1 FROM target
+                                WHERE current_slot_status IN ('released', 'timeout')
+                            )
+                                THEN 'replay_slot_terminal_state'
+                            WHEN %(max_global)s::int > 0
+                             AND active.global_count >= %(max_global)s::int
+                                THEN 'max_concurrent_reached'
+                            WHEN %(max_per_shard)s::int > 0
+                             AND active.shard_count >= %(max_per_shard)s::int
+                                THEN 'max_concurrent_per_shard_reached'
+                            WHEN %(max_per_source)s::int > 0
+                             AND active.source_count >= %(max_per_source)s::int
+                                THEN 'max_concurrent_per_source_reached'
+                            ELSE ''
+                        END AS deny_reason
+                    FROM active
+                ),
+                reserved AS (
+                    UPDATE evidence_tasks et
+                    SET replay_shard_id = NULLIF(%(replay_shard_id)s::text, ''),
+                        replay_api_url = NULLIF(%(replay_api_url)s::text, ''),
+                        replay_job_sink_url = NULLIF(%(sink_url)s::text, ''),
+                        replay_source_id = NULLIF(%(source_id)s::text, ''),
+                        replay_sink_instance = NULLIF(%(sink_instance)s::text, ''),
+                        replay_duration_seconds_effective = %(duration_s)s,
+                        replay_duration_effective_reason = %(duration_reason)s,
+                        replay_slot_status = 'active',
+                        replay_slot_owner = %(owner)s,
+                        replay_slot_token = %(slot_token)s,
+                        replay_slot_generation = replay_slot_generation + 1,
+                        replay_create_state = 'reserved',
+                        replay_create_started_at = NULL,
+                        replay_create_committed_at = NULL,
+                        replay_plan_hash = %(plan_hash)s,
+                        replay_request_id = NULLIF(%(request_id)s::text, ''),
+                        replay_delivery_id = NULLIF(%(delivery_id)s::text, ''),
+                        replay_job_id = NULL,
+                        replay_resulting_stream_id = NULL,
+                        replay_slot_acquired_at = now(),
+                        replay_slot_deadline_at = now() + (
+                            %(timeout_s)s::double precision * interval '1 second'
+                        ),
+                        replay_slot_released_at = NULL,
+                        replay_slot_release_reason = NULL,
+                        replay_slot_timeout_budget_s = %(timeout_s)s,
+                        replay_slot_active_age_s = NULL,
+                        replay_window = COALESCE(replay_window, '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'duration_seconds_effective',
+                                    %(duration_s)s::double precision,
+                                'duration_effective_reason',
+                                    %(duration_reason)s::text
+                            )),
+                        materialization_audit = COALESCE(
+                            materialization_audit,
+                            '{}'::jsonb
+                        ) || jsonb_build_object(
+                            'replay_slot',
+                            jsonb_strip_nulls(jsonb_build_object(
+                                'status', 'active',
+                                'owner', %(owner)s::text,
+                                'token', %(slot_token)s::text,
+                                'generation', replay_slot_generation + 1,
+                                'create_state', 'reserved',
+                                'plan_hash', %(plan_hash)s::text,
+                                'request_id', NULLIF(%(request_id)s::text, ''),
+                                'delivery_id', NULLIF(%(delivery_id)s::text, ''),
+                                'source_id', NULLIF(%(source_id)s::text, ''),
+                                'camera_id', NULLIF(%(camera_id)s::text, ''),
+                                'replay_shard_id',
+                                    NULLIF(%(replay_shard_id)s::text, ''),
+                                'sink_instance',
+                                    NULLIF(%(sink_instance)s::text, ''),
+                                'acquired_at', now(),
+                                'deadline_at', now() + (
+                                    %(timeout_s)s::double precision
+                                    * interval '1 second'
+                                )
+                            ))
+                        ),
+                        updated_at = now()
+                    FROM decision
+                    WHERE et.event_id = %(event_id)s::uuid
+                      AND decision.deny_reason = ''
+                      AND COALESCE(et.replay_slot_status, '') NOT IN (
+                          'active', 'released', 'timeout'
+                      )
+                    RETURNING
+                        et.event_id,
+                        et.replay_slot_owner AS slot_owner,
+                        et.replay_slot_token AS slot_token,
+                        et.replay_slot_generation AS slot_generation,
+                        et.replay_create_state AS create_state,
+                        et.replay_job_id,
+                        et.replay_resulting_stream_id AS resulting_stream_id,
+                        et.replay_plan_hash AS plan_hash
+                ),
+                event_reserved AS (
+                    UPDATE events e
+                    SET payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'replay_slot_status', 'active',
+                                'replay_slot_owner', reserved.slot_owner,
+                                'replay_slot_token', reserved.slot_token,
+                                'replay_slot_generation', reserved.slot_generation,
+                                'replay_create_state', reserved.create_state,
+                                'replay_plan_hash', reserved.plan_hash,
+                                'replay_slot_acquired_at', now(),
+                                'replay_slot_deadline_at', now() + (
+                                    %(timeout_s)s::double precision
+                                    * interval '1 second'
+                                )
+                            ))
+                        ),
+                        updated_at = now()
+                    FROM reserved
+                    WHERE e.id = reserved.event_id
+                    RETURNING e.id
+                )
+                SELECT
+                    decision.global_count,
+                    decision.shard_count,
+                    decision.source_count,
+                    decision.deny_reason,
+                    EXISTS (SELECT 1 FROM reserved) AS acquired,
+                    EXISTS (SELECT 1 FROM event_reserved) AS event_updated,
+                    COALESCE(
+                        (SELECT slot_owner FROM reserved),
+                        (SELECT current_slot_owner FROM target)
+                    ) AS slot_owner,
+                    COALESCE(
+                        (SELECT slot_token FROM reserved),
+                        (SELECT current_slot_token FROM target)
+                    ) AS slot_token,
+                    COALESCE(
+                        (SELECT slot_generation FROM reserved),
+                        (SELECT current_slot_generation FROM target)
+                    ) AS slot_generation,
+                    COALESCE(
+                        (SELECT create_state FROM reserved),
+                        (SELECT current_create_state FROM target)
+                    ) AS create_state,
+                    COALESCE(
+                        (SELECT replay_job_id FROM reserved),
+                        (SELECT current_replay_job_id FROM target)
+                    ) AS replay_job_id,
+                    COALESCE(
+                        (SELECT resulting_stream_id FROM reserved),
+                        (SELECT current_resulting_stream_id FROM target)
+                    ) AS resulting_stream_id,
+                    COALESCE(
+                        (SELECT plan_hash FROM reserved),
+                        (SELECT current_plan_hash FROM target)
+                    ) AS plan_hash
+                FROM decision
+                """,
+                params,
+            )
+            result = _fenced_slot_result(cur.fetchone())
+    except Exception:
+        logger.exception(
+            "try_acquire_fenced_replay_slot failed event_id=%s owner=%s",
+            event_id,
+            owner,
+        )
+        return None
+    if result and result.get("acquired") and not result.get("event_updated"):
+        logger.error(
+            "fenced_replay_slot_event_projection_missing event_id=%s owner=%s",
+            event_id,
+            owner,
+        )
+        return None
+    return result
+
+
+def takeover_fenced_replay_slot(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    owner: str,
+    expected_token: str,
+    expected_generation: int,
+    delivery_id: str,
+) -> dict[str, object] | None:
+    """Transfer an uncommitted active slot to a reclaimed Redis delivery."""
+    if not event_id or not owner or not expected_token:
+        return None
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH claimed AS (
+                    UPDATE evidence_tasks
+                    SET replay_slot_owner = %(owner)s,
+                        replay_slot_generation = replay_slot_generation + 1,
+                        replay_delivery_id = NULLIF(%(delivery_id)s::text, ''),
+                        materialization_audit = COALESCE(
+                            materialization_audit,
+                            '{}'::jsonb
+                        ) || jsonb_build_object(
+                            'replay_slot',
+                            COALESCE(
+                                materialization_audit->'replay_slot',
+                                '{}'::jsonb
+                            ) || jsonb_build_object(
+                                'owner', %(owner)s::text,
+                                'generation', replay_slot_generation + 1,
+                                'delivery_id',
+                                    NULLIF(%(delivery_id)s::text, ''),
+                                'taken_over_at', now()
+                            )
+                        ),
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                      AND replay_slot_status = 'active'
+                      AND replay_slot_token = %(expected_token)s
+                      AND replay_slot_generation = %(expected_generation)s
+                      AND replay_job_id IS NULL
+                    RETURNING
+                        event_id,
+                        replay_slot_owner AS slot_owner,
+                        replay_slot_token AS slot_token,
+                        replay_slot_generation AS slot_generation,
+                        replay_create_state AS create_state,
+                        replay_job_id,
+                        replay_resulting_stream_id AS resulting_stream_id,
+                        replay_plan_hash AS plan_hash
+                ),
+                event_claimed AS (
+                    UPDATE events e
+                    SET payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'replay_slot_owner', claimed.slot_owner,
+                                'replay_slot_token', claimed.slot_token,
+                                'replay_slot_generation',
+                                    claimed.slot_generation,
+                                'replay_create_state', claimed.create_state
+                            )
+                        ),
+                        updated_at = now()
+                    FROM claimed
+                    WHERE e.id = claimed.event_id
+                    RETURNING e.id
+                )
+                SELECT
+                    EXISTS (SELECT 1 FROM claimed) AS claimed,
+                    EXISTS (SELECT 1 FROM event_claimed) AS event_updated,
+                    (SELECT slot_owner FROM claimed) AS slot_owner,
+                    (SELECT slot_token FROM claimed) AS slot_token,
+                    (SELECT slot_generation FROM claimed) AS slot_generation,
+                    (SELECT create_state FROM claimed) AS create_state,
+                    (SELECT replay_job_id FROM claimed) AS replay_job_id,
+                    (SELECT resulting_stream_id FROM claimed)
+                        AS resulting_stream_id,
+                    (SELECT plan_hash FROM claimed) AS plan_hash
+                """,
+                {
+                    "event_id": event_id,
+                    "owner": owner,
+                    "expected_token": expected_token,
+                    "expected_generation": max(_safe_int(expected_generation), 0),
+                    "delivery_id": delivery_id,
+                },
+            )
+            row = cur.fetchone()
+    except Exception:
+        logger.exception(
+            "takeover_fenced_replay_slot failed event_id=%s owner=%s",
+            event_id,
+            owner,
+        )
+        return None
+    if row is None:
+        return None
+    values = dict(row) if isinstance(row, dict) else {
+        "claimed": row[0] if len(row) > 0 else False,
+        "event_updated": row[1] if len(row) > 1 else False,
+        "slot_owner": row[2] if len(row) > 2 else "",
+        "slot_token": row[3] if len(row) > 3 else "",
+        "slot_generation": row[4] if len(row) > 4 else 0,
+        "create_state": row[5] if len(row) > 5 else "",
+        "replay_job_id": row[6] if len(row) > 6 else "",
+        "resulting_stream_id": row[7] if len(row) > 7 else "",
+        "plan_hash": row[8] if len(row) > 8 else "",
+    }
+    values["claimed"] = bool(values.get("claimed"))
+    values["event_updated"] = bool(values.get("event_updated"))
+    values["slot_generation"] = _safe_int(values.get("slot_generation"))
+    if values["claimed"] and not values["event_updated"]:
+        return None
+    return values
+
+
+def mark_replay_create_started(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    owner: str,
+    slot_token: str,
+    slot_generation: int,
+    plan_hash: str,
+) -> bool:
+    """Persist the external-side-effect boundary before calling Replay."""
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE evidence_tasks
+                SET replay_create_state = 'submitting',
+                    replay_create_started_at = COALESCE(
+                        replay_create_started_at,
+                        now()
+                    ),
+                    materialization_audit = COALESCE(
+                        materialization_audit,
+                        '{}'::jsonb
+                    ) || jsonb_build_object(
+                        'replay_create',
+                        jsonb_build_object(
+                            'state', 'submitting',
+                            'started_at', now(),
+                            'owner', %(owner)s::text,
+                            'token', %(slot_token)s::text,
+                            'generation', %(slot_generation)s::bigint,
+                            'plan_hash', %(plan_hash)s::text
+                        )
+                    ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                  AND replay_slot_status = 'active'
+                  AND replay_slot_owner = %(owner)s
+                  AND replay_slot_token = %(slot_token)s
+                  AND replay_slot_generation = %(slot_generation)s
+                  AND replay_plan_hash = %(plan_hash)s
+                  AND replay_job_id IS NULL
+                  AND replay_create_state IN ('reserved', 'submitting')
+                """,
+                {
+                    "event_id": event_id,
+                    "owner": owner,
+                    "slot_token": slot_token,
+                    "slot_generation": max(_safe_int(slot_generation), 0),
+                    "plan_hash": plan_hash,
+                },
+            )
+            return bool(getattr(cur, "rowcount", 0) or 0)
+    except Exception:
+        logger.exception(
+            "mark_replay_create_started failed event_id=%s owner=%s",
+            event_id,
+            owner,
+        )
+        return False
+
+
+def commit_replay_job_handoff(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    owner: str,
+    slot_token: str,
+    slot_generation: int,
+    plan_hash: str,
+    replay_job_id: str,
+    resulting_stream_id: str,
+    replay_job_request: dict | None,
+    diagnostics: dict | None,
+    replay_shard: dict | None,
+) -> bool:
+    """Atomically persist Replay job, handoff, task state, and event projection."""
+    if not event_id or not replay_job_id:
+        return False
+    params = {
+        "event_id": event_id,
+        "owner": owner,
+        "slot_token": slot_token,
+        "slot_generation": max(_safe_int(slot_generation), 0),
+        "plan_hash": plan_hash,
+        "replay_job_id": replay_job_id,
+        "resulting_stream_id": resulting_stream_id,
+        "replay_job_request": json.dumps(replay_job_request or {}),
+        "diagnostics": json.dumps(diagnostics or {}),
+        "replay_shard_id": _replay_shard_value(replay_shard, "shard_id"),
+        "replay_api_url": _replay_shard_value(replay_shard, "replay_api_url"),
+        "replay_job_sink_url": _replay_shard_value(
+            replay_shard,
+            "replay_job_sink_url",
+        ),
+    }
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH target_event AS (
+                    SELECT id
+                    FROM events
+                    WHERE id = %(event_id)s::uuid
+                ),
+                updated_task AS (
+                    UPDATE evidence_tasks et
+                    SET status = 'materializing',
+                        materialization_status = 'materializing',
+                        materialization_phase = 'waiting_ready',
+                        materialization_phase_updated_at = now(),
+                        materialization_owner = 'replay',
+                        replay_job_id = %(replay_job_id)s,
+                        replay_resulting_stream_id = NULLIF(
+                            %(resulting_stream_id)s::text,
+                            ''
+                        ),
+                        replay_create_state = 'committed',
+                        replay_create_committed_at = now(),
+                        replay_shard_id = COALESCE(
+                            NULLIF(%(replay_shard_id)s::text, ''),
+                            replay_shard_id
+                        ),
+                        replay_api_url = COALESCE(
+                            NULLIF(%(replay_api_url)s::text, ''),
+                            replay_api_url
+                        ),
+                        replay_job_sink_url = COALESCE(
+                            NULLIF(%(replay_job_sink_url)s::text, ''),
+                            replay_job_sink_url
+                        ),
+                        replay_window = COALESCE(replay_window, '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'resulting_stream_id',
+                                    NULLIF(%(resulting_stream_id)s::text, '')
+                            )),
+                        materialization_handoff = jsonb_strip_nulls(
+                            jsonb_build_object(
+                                'kind', 'replay',
+                                'event_id', %(event_id)s::text,
+                                'replay_job_id', %(replay_job_id)s::text,
+                                'resulting_stream_id',
+                                    NULLIF(%(resulting_stream_id)s::text, ''),
+                                'slot_owner', %(owner)s::text,
+                                'slot_token', %(slot_token)s::text,
+                                'slot_generation', %(slot_generation)s::bigint,
+                                'plan_hash', %(plan_hash)s::text,
+                                'committed_at', now()
+                            )
+                        ),
+                        materialization_audit = COALESCE(
+                            materialization_audit,
+                            '{}'::jsonb
+                        ) || jsonb_build_object(
+                            'replay_slot',
+                            COALESCE(
+                                materialization_audit->'replay_slot',
+                                '{}'::jsonb
+                            ) || jsonb_build_object(
+                                'create_state', 'committed',
+                                'replay_job_id', %(replay_job_id)s::text,
+                                'resulting_stream_id',
+                                    NULLIF(%(resulting_stream_id)s::text, ''),
+                                'committed_at', now()
+                            )
+                        ),
+                        error_message = NULL,
+                        updated_at = now()
+                    WHERE et.event_id = %(event_id)s::uuid
+                      AND EXISTS (SELECT 1 FROM target_event)
+                      AND et.replay_slot_status = 'active'
+                      AND et.replay_slot_owner = %(owner)s
+                      AND et.replay_slot_token = %(slot_token)s
+                      AND et.replay_slot_generation = %(slot_generation)s
+                      AND et.replay_plan_hash = %(plan_hash)s
+                      AND et.replay_create_state IN ('submitting', 'committed')
+                      AND (
+                          et.replay_job_id IS NULL
+                          OR et.replay_job_id = %(replay_job_id)s
+                      )
+                    RETURNING et.event_id
+                ),
+                updated_event AS (
+                    UPDATE events e
+                    SET payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'clip_status', 'replay_job_created',
+                                'recording_strategy', 'savant_replay',
+                                'replay_job_id', %(replay_job_id)s::text,
+                                'resulting_stream_id',
+                                    NULLIF(%(resulting_stream_id)s::text, ''),
+                                'replay_job_request',
+                                    %(replay_job_request)s::jsonb,
+                                'evidence_state', 'materializing',
+                                'materialization_status', 'materializing',
+                                'materialization_phase', 'waiting_ready',
+                                'materialization_owner', 'replay',
+                                'evidence_diagnostics',
+                                    %(diagnostics)s::jsonb,
+                                'replay_shard_id',
+                                    NULLIF(%(replay_shard_id)s::text, ''),
+                                'replay_api_url',
+                                    NULLIF(%(replay_api_url)s::text, ''),
+                                'replay_job_sink_url',
+                                    NULLIF(%(replay_job_sink_url)s::text, ''),
+                                'replay_slot_owner', %(owner)s::text,
+                                'replay_slot_token', %(slot_token)s::text,
+                                'replay_slot_generation',
+                                    %(slot_generation)s::bigint,
+                                'replay_create_state', 'committed',
+                                'replay_plan_hash', %(plan_hash)s::text
+                            ))
+                        ),
+                        media_status = 'materializing',
+                        updated_at = now()
+                    FROM updated_task
+                    WHERE e.id = updated_task.event_id
+                    RETURNING e.id
+                )
+                SELECT
+                    EXISTS (SELECT 1 FROM updated_task) AS task_updated,
+                    EXISTS (SELECT 1 FROM updated_event) AS event_updated
+                """,
+                params,
+            )
+            row = cur.fetchone()
+    except Exception:
+        logger.exception(
+            "commit_replay_job_handoff failed event_id=%s owner=%s job_id=%s",
+            event_id,
+            owner,
+            replay_job_id,
+        )
+        return False
+    if row is None:
+        return False
+    if isinstance(row, dict):
+        return bool(row.get("task_updated") and row.get("event_updated"))
+    return bool(
+        len(row) > 1
+        and row[0]
+        and row[1]
+    )
+
+
+def get_replay_slot_state(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+) -> dict[str, object] | None:
+    """Read the durable Replay slot identity used by reclaim/recovery."""
+    if not event_id:
+        return None
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    event_id,
+                    replay_slot_status,
+                    replay_slot_owner,
+                    replay_slot_token,
+                    replay_slot_generation,
+                    replay_create_state,
+                    replay_create_started_at,
+                    replay_create_committed_at,
+                    replay_plan_hash,
+                    replay_request_id,
+                    replay_delivery_id,
+                    replay_job_id,
+                    replay_resulting_stream_id,
+                    replay_slot_deadline_at
+                FROM evidence_tasks
+                WHERE event_id = %(event_id)s::uuid
+                """,
+                {"event_id": event_id},
+            )
+            row = cur.fetchone()
+    except Exception:
+        logger.exception("get_replay_slot_state failed event_id=%s", event_id)
+        return None
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return dict(row)
+    names = (
+        "event_id",
+        "replay_slot_status",
+        "replay_slot_owner",
+        "replay_slot_token",
+        "replay_slot_generation",
+        "replay_create_state",
+        "replay_create_started_at",
+        "replay_create_committed_at",
+        "replay_plan_hash",
+        "replay_request_id",
+        "replay_delivery_id",
+        "replay_job_id",
+        "replay_resulting_stream_id",
+        "replay_slot_deadline_at",
+    )
+    return {
+        name: row[index] if index < len(row) else None
+        for index, name in enumerate(names)
+    }
+
+
 def acquire_replay_slot(
     pg_conn: psycopg.Connection,
     *,

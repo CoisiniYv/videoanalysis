@@ -652,6 +652,21 @@ not claim the Phase 3 acceptance token: real one-message business orchestration,
 fenced slot owner/token, durable Replay commit and reclaim/crash convergence
 remain pending.
 
+Implementation checkpoint (Phase 3B, 2026-07-12): Migration 031 and the named
+Replay-admission repository now provide an additive owner/token/generation
+fence. The token is the stable logical Replay identity propagated across an
+ownership transfer; owner plus monotonically increasing generation fence a
+stale clip process. Replay create-start is persisted with the pure plan hash,
+and the successful job/resulting-stream/task/event handoff is one SQL statement
+with the full fence in its CAS predicate. The migration passed upgrade and
+idempotence application against PostgreSQL 16, and a rollback-only real-DB test
+proved that the pre-takeover owner cannot commit while the new generation can.
+The pre-migration runtime DB backup and verification are recorded in
+`docs/code_review/clip_media_phase3b_replay_slot_fencing_2026-07-12.md`.
+Coordinator V2 is still disabled: the one-message business processor, Replay
+uncertain-response recovery, centralized outcome mapping and runtime canaries
+remain before the Phase 3 acceptance token can be claimed.
+
 Acceptance token:
 
 ```text

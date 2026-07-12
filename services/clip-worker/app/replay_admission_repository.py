@@ -16,6 +16,13 @@ class ReplaySlotReservation:
     counts: tuple[tuple[str, int], ...]
     quota_decision: tuple[tuple[str, object], ...]
     error_message: str = ""
+    owner: str = ""
+    token: str = ""
+    generation: int = 0
+    create_state: str = ""
+    replay_job_id: str = ""
+    resulting_stream_id: str = ""
+    plan_hash: str = ""
 
     def counts_dict(self) -> dict[str, int]:
         return dict(self.counts)
@@ -41,6 +48,111 @@ class ReplayAdmissionRepository:
         result = repository.try_acquire_replay_slot(self.connection, **kwargs)
         if result is None:
             return None
+        return self._reservation_from_result(kwargs, result)
+
+    def acquire_fenced(self, **kwargs: Any) -> ReplaySlotReservation | None:
+        result = repository.try_acquire_fenced_replay_slot(
+            self.connection,
+            **kwargs,
+        )
+        if result is None:
+            return None
+        return self._reservation_from_result(kwargs, result)
+
+    def takeover(
+        self,
+        reservation: ReplaySlotReservation,
+        *,
+        owner: str,
+        delivery_id: str,
+    ) -> ReplaySlotReservation | None:
+        result = repository.takeover_fenced_replay_slot(
+            self.connection,
+            event_id=reservation.event_id,
+            owner=owner,
+            expected_token=reservation.token,
+            expected_generation=reservation.generation,
+            delivery_id=delivery_id,
+        )
+        if result is None or not bool(result.get("claimed")):
+            return None
+        values = {
+            **result,
+            "acquired": True,
+            "reason": "replay_slot_taken_over",
+            "counts": reservation.counts_dict(),
+            "quota_decision": reservation.quota_dict(),
+        }
+        return self._reservation_from_result(
+            {"event_id": reservation.event_id, "owner": owner},
+            values,
+        )
+
+    def mark_submitting(self, reservation: ReplaySlotReservation) -> bool:
+        if not reservation.acquired:
+            return False
+        return repository.mark_replay_create_started(
+            self.connection,
+            event_id=reservation.event_id,
+            owner=reservation.owner,
+            slot_token=reservation.token,
+            slot_generation=reservation.generation,
+            plan_hash=reservation.plan_hash,
+        )
+
+    def commit_handoff(
+        self,
+        reservation: ReplaySlotReservation,
+        *,
+        replay_job_id: str,
+        resulting_stream_id: str,
+        replay_job_request: dict | None,
+        diagnostics: dict | None,
+        replay_shard: dict | None,
+    ) -> bool:
+        if not reservation.acquired:
+            return False
+        return repository.commit_replay_job_handoff(
+            self.connection,
+            event_id=reservation.event_id,
+            owner=reservation.owner,
+            slot_token=reservation.token,
+            slot_generation=reservation.generation,
+            plan_hash=reservation.plan_hash,
+            replay_job_id=replay_job_id,
+            resulting_stream_id=resulting_stream_id,
+            replay_job_request=replay_job_request,
+            diagnostics=diagnostics,
+            replay_shard=replay_shard,
+        )
+
+    def load(self, event_id: str) -> ReplaySlotReservation | None:
+        result = repository.get_replay_slot_state(
+            self.connection,
+            event_id=event_id,
+        )
+        if result is None:
+            return None
+        values = {
+            "acquired": str(result.get("replay_slot_status") or "") == "active",
+            "reason": "replay_slot_loaded",
+            "counts": {},
+            "quota_decision": {},
+            "slot_owner": result.get("replay_slot_owner"),
+            "slot_token": result.get("replay_slot_token"),
+            "slot_generation": result.get("replay_slot_generation"),
+            "create_state": result.get("replay_create_state"),
+            "replay_job_id": result.get("replay_job_id"),
+            "resulting_stream_id": result.get("replay_resulting_stream_id"),
+            "plan_hash": result.get("replay_plan_hash"),
+        }
+        return self._reservation_from_result({"event_id": event_id}, values)
+
+    @staticmethod
+    def _reservation_from_result(
+        kwargs: dict[str, Any],
+        result: dict[str, object],
+    ) -> ReplaySlotReservation:
         counts = result.get("counts")
         counts = counts if isinstance(counts, dict) else {}
         quota = result.get("quota_decision")
@@ -54,6 +166,13 @@ class ReplayAdmissionRepository:
             ),
             quota_decision=tuple(sorted((str(key), value) for key, value in quota.items())),
             error_message=str(result.get("error_message") or ""),
+            owner=str(result.get("slot_owner") or kwargs.get("owner") or ""),
+            token=str(result.get("slot_token") or kwargs.get("slot_token") or ""),
+            generation=int(result.get("slot_generation") or 0),
+            create_state=str(result.get("create_state") or ""),
+            replay_job_id=str(result.get("replay_job_id") or ""),
+            resulting_stream_id=str(result.get("resulting_stream_id") or ""),
+            plan_hash=str(result.get("plan_hash") or kwargs.get("plan_hash") or ""),
         )
 
     def record_job(
