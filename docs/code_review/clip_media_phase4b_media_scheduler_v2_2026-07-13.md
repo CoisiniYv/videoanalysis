@@ -54,6 +54,15 @@ Remux persists an immutable file-identity handoff and
 finalizer acquires a fenced owner/token/generation lease. A stale owner cannot
 publish, commit, prune sidecars, or clean the winning sink output.
 
+Lifecycle recovery is intentionally independent from rolling admission. The
+main loop advances a dedicated recovery cadence before either Scheduler V2 or
+legacy admission; it scans all rolling-owned lifecycle rows, rather than only
+the sources currently selected by `ROLLING_CACHE_SOURCES`. Consequently a
+durable handoff created by an earlier rolling runtime remains recoverable after
+`ROLLING_CACHE_ENABLED` and `ROLLING_CACHE_MATERIALIZATION_ENABLED` are turned
+off. Database lease expiry and generation fencing still prevent recovery from
+stealing a live lease.
+
 Fault-injection coverage includes:
 
 - ordinary claimed-finalizer exceptions and terminal-write failure;
@@ -91,6 +100,26 @@ bundle, one raw-clip artifact, 82 DB timeline rows, six displayable overlay
 segments, no active lease/token, and no Replay slot. There were zero duplicate
 bundles and zero terminal contradictions.
 
+### 4.1 Rolling-off retained recovery canary
+
+An additional retained `.500` canary closed a flag-coupling gap found after the
+initial Phase 4B checkpoint. It started as an immutable `finalizer_pending`
+handoff with generation 1 and a valid 10-second lease while the daily worker
+had Scheduler V2 and the DB pool enabled, but both rolling admission flags
+disabled. A snapshot 9.54 seconds before lease expiry still showed the original
+owner/token, generation 1, and zero bundles, proving that the new worker did not
+steal the valid lease.
+
+After expiry, the dedicated lifecycle pass logged
+`handoff_recovered=1 rolling_admission_enabled=False`; finalizer admission then
+converged the row to generation 2 and `materialized/terminal`. The result has
+exactly one bundle, one raw-clip artifact, 82 timeline rows, six DB-backed
+displayable `person_context` overlays, and no lease, Replay slot, lane, permit,
+pool checkout, or Redis residual. 8090 returned DB-backed detail/annotations,
+`fallback_used=false`, and HTTP 206 for a 1024-byte MOV Range request. The
+canary and every pre/post snapshot remain retained; no prior evidence was
+removed or reused.
+
 ## 5. Retained Functional Canaries And 8090
 
 The retained functional set remains visible:
@@ -120,11 +149,13 @@ Executed checks:
 ```text
 Phase 4 scheduler/regression gate:  288 passed, 7 skipped
 focused fault-injection gate:       43 passed
+rolling-off recovery regression:    183 passed, 7 skipped
 compileall / py_compile:            passed
 docker compose config:              passed
 git diff --check:                    passed
 mixed three-lane retained canary:   passed
 SIGKILL finalizer recovery canary:  passed, 8/8 unique bundles
+rolling-off finalizer recovery:     passed, generation 1 -> 2
 8090 DB/media audit:                passed
 global DB/Redis/runtime residuals:  zero
 ```
@@ -144,6 +175,7 @@ Auditable artifact:
 
 ```text
 /data/video-analytics/artifacts/clip_media_phase4b_scheduler_v2_closure_20260712T162955Z
+/data/video-analytics/artifacts/clip_media_phase4b_flag_independent_recovery_20260712T171945Z
 ```
 
 Frozen source hashes are recorded in the artifact and match the source used by

@@ -59,8 +59,9 @@ Implementation checkpoint (2026-07-12):
   closure runs and legacy removal remain unclaimed.
 - Spec 33 Phase 4 now provides the non-blocking image/remux/finalizer scheduler,
   pre-claim bounded lane/source/permit reservation, durable submit retry and
-  flag-independent `finalizer_pending` recovery. Its retained mixed and
-  SIGKILL/restart canaries, 8090 proof and zero-residual audit are recorded in
+  flag-independent `finalizer_pending` recovery. Its retained mixed,
+  SIGKILL/restart and rolling-disabled recovery canaries, 8090 proof and
+  zero-residual audit are recorded in
   `docs/code_review/clip_media_phase4b_media_scheduler_v2_2026-07-13.md` with
   token `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`;
 - this completes only the Scheduler V2 substep of Spec 34 Phase 4. The
@@ -740,10 +741,10 @@ executors/source caps, bounded PostgreSQL pool, heartbeat/attempt-age fencing,
 managed process groups and the shutdown state machine are verified.
 The Spec 33 Phase 4 portions of items 2-5/7/8 are complete under token
 `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`: non-blocking three-lane
-dispatch, durable submit retry, common finalizer recovery and SIGKILL restart
-convergence are verified. Item 6, capacity/performance portions of item 8, and
-the two required 60-source closures remain pending; therefore Spec 34 Phase 4
-as a whole is not complete.
+dispatch, durable submit retry, common finalizer recovery, SIGKILL restart
+convergence, and recovery with rolling admission disabled are verified. Item 6,
+capacity/performance portions of item 8, and the two required 60-source closures
+remain pending; therefore Spec 34 Phase 4 as a whole is not complete.
 
 ### Phase 5 - Extract Remaining Media Responsibilities
 

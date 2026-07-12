@@ -156,6 +156,77 @@ def test_scheduler_v2_finalizer_admission_returns_without_waiting(
     runtime.close(wait=True)
 
 
+def test_lifecycle_recovery_is_global_and_ignores_current_admission_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    observed: list[tuple[str, ...]] = []
+
+    class Result:
+        changed = 4
+        ready_deadline_expired = 0
+        running_sla_missed = 0
+        handoff_recovered = 4
+        lease_retry_scheduled = 0
+        lease_deadline_expired = 0
+
+    monkeypatch.setattr(
+        worker,
+        "recover_and_expire_rolling_tasks",
+        lambda _conn, *, source_ids: observed.append(source_ids) or Result(),
+    )
+
+    updated = worker._recover_rolling_cache_lifecycle(
+        object(),
+        SimpleNamespace(rolling_cache_sources=("currently-admitted-only",)),
+    )
+
+    assert updated == 4
+    assert observed == [()]
+
+
+def test_rolling_off_still_runs_common_recovery_without_duplicate_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_recover_rolling_cache_lifecycle",
+        lambda *_a, **_k: calls.append("recovery") or 2,
+    )
+    cfg = SimpleNamespace(
+        rolling_cache_enabled=False,
+        rolling_cache_materialization_enabled=False,
+    )
+
+    assert worker._process_rolling_cache_tasks(object(), cfg) == 2
+    assert calls == ["recovery"]
+    assert (
+        worker._process_rolling_cache_tasks(
+            object(),
+            cfg,
+            recover_lifecycle=False,
+        )
+        == 0
+    )
+    assert calls == ["recovery"]
+
+
+def test_run_loop_places_common_recovery_before_scheduler_flag_branches() -> None:
+    worker = _worker()
+    source = inspect.getsource(worker.run_worker)
+
+    recovery_call = source.index(
+        "recovery_updates = _recover_rolling_cache_lifecycle("
+    )
+    v2_branch = source.index("if scheduler_v2_enabled:")
+    legacy_call = source.index("recover_lifecycle=False")
+
+    assert recovery_call < v2_branch < legacy_call
+    assert "lifecycle_recovery_due" in source
+
+
 def test_finalizer_probe_and_stability_are_not_in_admission_thread() -> None:
     worker = _worker()
     admission_source = inspect.getsource(worker._FinalizerSchedulerV2.admit_metadata)

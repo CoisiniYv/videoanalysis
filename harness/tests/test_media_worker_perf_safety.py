@@ -514,7 +514,7 @@ def test_rolling_cache_retry_preserves_ready_at_and_sets_next_attempt() -> None:
     assert task_params["reason_code"] == "coverage_not_complete"
 
 
-def test_rolling_cache_deadline_miss_is_terminal_expired() -> None:
+def test_global_rolling_recovery_expires_deadline_miss() -> None:
     worker = _activate("media-worker", "app.worker")
 
     class _Cursor:
@@ -552,8 +552,8 @@ def test_rolling_cache_deadline_miss_is_terminal_expired() -> None:
     conn = _Conn()
     cfg = SimpleNamespace(rolling_cache_sources=("source-1",))
 
-    assert worker._expire_overdue_rolling_cache_tasks(conn, cfg) == 2
-    task_query, _task_params = next(
+    assert worker._recover_rolling_cache_lifecycle(conn, cfg) == 2
+    task_query, task_params = next(
         execution
         for execution in conn.cursor_obj.executions
         if "UPDATE evidence_tasks" in execution[0]
@@ -561,6 +561,8 @@ def test_rolling_cache_deadline_miss_is_terminal_expired() -> None:
     assert "SET status = 'materialization_expired'" in task_query
     assert "materialization_failure_reason = NULL" in task_query
     assert "materialization_expired_reason = 'business_deadline_expired'" in task_query
+    assert task_params["sources_empty"] is True
+    assert task_params["sources"] == []
 
 
 def test_rolling_cache_coverage_retry_waits_for_observed_gap() -> None:

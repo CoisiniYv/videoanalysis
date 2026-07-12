@@ -1159,7 +1159,7 @@ def test_max_active_zero_runs_recovery_but_claims_no_rolling_work(
         database_url="postgresql://unused",
         max_active=0,
     )
-    monkeypatch.setattr(worker, "_expire_overdue_rolling_cache_tasks", lambda *_a: 3)
+    monkeypatch.setattr(worker, "_recover_rolling_cache_lifecycle", lambda *_a: 3)
     monkeypatch.setattr(
         worker,
         "_process_rolling_cache_image_tasks",

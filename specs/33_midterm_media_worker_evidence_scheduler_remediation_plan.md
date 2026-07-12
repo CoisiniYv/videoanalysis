@@ -844,6 +844,14 @@ duplicate, lease, slot, permit, lane or pool residual. The proof is recorded in
 `docs/code_review/clip_media_phase4b_media_scheduler_v2_2026-07-13.md`. This
 checkpoint does not enable or claim the Phase 5 segment index.
 
+Post-checkpoint closure: lifecycle recovery now has its own cadence before the
+Scheduler V2/legacy admission branches, scans all rolling-owned rows, and runs
+even when both rolling admission flags are false. Retained canary `.500` proved
+that a valid generation-1 handoff lease was not stolen, then recovered after
+expiry to one generation-2 terminal bundle with DB-backed timeline/bbox and
+zero runtime residual. Evidence is retained under
+`/data/video-analytics/artifacts/clip_media_phase4b_flag_independent_recovery_20260712T171945Z`.
+
 ### Phase 5 - Add Segment Index And Reduce Finalizer Work
 
 1. Replace per-poll recursive lookup with `RollingSegmentIndex`.

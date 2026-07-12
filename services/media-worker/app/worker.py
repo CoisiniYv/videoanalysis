@@ -9118,11 +9118,17 @@ def _process_rolling_cache_tasks(
     cfg: Config,
     runner: "_RollingCacheMaterializationRunner | None" = None,
     runtime_resources: MaterializationResources | None = None,
+    *,
+    recover_lifecycle: bool = True,
 ) -> int:
+    updated = (
+        _recover_rolling_cache_lifecycle(pg_conn, cfg)
+        if recover_lifecycle
+        else 0
+    )
     if not (cfg.rolling_cache_enabled and cfg.rolling_cache_materialization_enabled):
-        return 0
+        return updated
 
-    updated = _recover_rolling_cache_lifecycle(pg_conn, cfg)
     if runtime_resources is not None and runtime_resources.max_active <= 0:
         return updated
     updated += _process_rolling_cache_image_tasks(
@@ -11332,14 +11338,18 @@ def _persist_rolling_cache_handoff_metadata(
     return True
 
 
-def _expire_overdue_rolling_cache_tasks(
+def _recover_rolling_cache_lifecycle(
     pg_conn: psycopg.Connection,
     cfg: Config,
 ) -> int:
-    result = recover_and_expire_rolling_tasks(
-        pg_conn,
-        source_ids=tuple(cfg.rolling_cache_sources),
-    )
+    """Flag-independent owner for rolling expiry and finalizer lease recovery.
+
+    Admission may be disabled or scoped to a temporary source set while a
+    durable handoff from an earlier runtime still needs fencing and recovery.
+    Recovery therefore owns every rolling task and finalizer handoff, not only
+    sources currently admitted by ``ROLLING_CACHE_SOURCES``.
+    """
+    result = recover_and_expire_rolling_tasks(pg_conn, source_ids=())
     if result.changed:
         logger.info(
             "rolling_lifecycle_recovery ready_deadline_expired=%s "
@@ -11352,14 +11362,6 @@ def _expire_overdue_rolling_cache_tasks(
             result.lease_deadline_expired,
         )
     return result.changed
-
-
-def _recover_rolling_cache_lifecycle(
-    pg_conn: psycopg.Connection,
-    cfg: Config,
-) -> int:
-    """Single scheduler-tick owner for rolling expiry and lease recovery."""
-    return _expire_overdue_rolling_cache_tasks(pg_conn, cfg)
 
 
 def _flush_rolling_cache_finalizer_batch_or_defer(
@@ -12537,6 +12539,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
 
     next_rolling_cache_poll_at = 0.0
     next_general_poll_at = 0.0
+    next_lifecycle_recovery_poll_at = 0.0
     last_scheduler_tick_started_at: float | None = None
     scheduler_tick_sequence = 0
     try:
@@ -12556,7 +12559,29 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 and now_monotonic >= next_rolling_cache_poll_at
             )
             general_due = now_monotonic >= next_general_poll_at
+            lifecycle_recovery_due = (
+                now_monotonic >= next_lifecycle_recovery_poll_at
+            )
             try:
+                recovery_updates = 0
+                if lifecycle_recovery_due:
+                    next_lifecycle_recovery_poll_at = (
+                        now_monotonic + rolling_cache_poll_interval_s
+                    )
+                    recovery_updates = _recover_rolling_cache_lifecycle(
+                        pg_conn,
+                        cfg,
+                    )
+                    if recovery_updates:
+                        logger.info(
+                            "media_scheduler_lifecycle_recovery updated=%s "
+                            "rolling_admission_enabled=%s",
+                            recovery_updates,
+                            bool(
+                                cfg.rolling_cache_enabled
+                                and cfg.rolling_cache_materialization_enabled
+                            ),
+                        )
                 if scheduler_v2_enabled:
                     completed_updates = 0
                     if finalizer_scheduler_v2 is not None:
@@ -12672,19 +12697,14 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         next_rolling_cache_poll_at = (
                             now_monotonic + rolling_cache_poll_interval_s
                         )
-                        recovery_updates = _recover_rolling_cache_lifecycle(
-                            pg_conn,
-                            cfg,
-                        )
                         remux_updates = (
                             rolling_cache_runner.process(pg_conn, cfg)
                             if rolling_cache_runner is not None
                             else 0
                         )
-                        if recovery_updates or remux_updates:
+                        if remux_updates:
                             logger.info(
-                                "media_scheduler_v2_rolling recovery=%s remux=%s",
-                                recovery_updates,
+                                "media_scheduler_v2_rolling remux=%s",
                                 remux_updates,
                             )
 
@@ -12719,6 +12739,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         cfg,
                         runner=rolling_cache_runner,
                         runtime_resources=runtime_resources,
+                        recover_lifecycle=False,
                     )
                     if rolling_updates:
                         logger.info(
@@ -12860,7 +12881,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             logger.info(
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=%s sequence=%s tick_duration_ms=%s "
-                "tick_gap_ms=%s rolling_due=%s general_due=%s "
+                "tick_gap_ms=%s recovery_due=%s rolling_due=%s general_due=%s "
                 "oldest_ready_age_ms=%s "
                 "image_lane_depth=%s remux_lane_depth=%s "
                 "finalizer_lane_depth=%s "
@@ -12880,6 +12901,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 scheduler_tick_sequence,
                 tick_duration_ms,
                 tick_gap_ms if tick_gap_ms is not None else "unavailable",
+                lifecycle_recovery_due,
                 rolling_cache_due,
                 general_due,
                 oldest_ready_age_ms,
