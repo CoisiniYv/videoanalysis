@@ -4937,11 +4937,13 @@ def remove_tree_best_effort(path: Path) -> tuple[bool, str | None]:
     except FileNotFoundError:
         return False, None
     except OSError as exc:
-        try:
-            shutil.rmtree(path, ignore_errors=True)
-        except OSError:
-            pass
-        return False, f"{type(exc).__name__}: {exc}"
+        removed, container_error = remove_host_path_via_container(path)
+        if removed:
+            return True, None
+        detail = f"{type(exc).__name__}: {exc}"
+        if container_error:
+            detail = f"{detail}; container_fallback={container_error}"
+        return False, detail
 
 
 def clear_pressure_warmup_rows(conn, cfg: PressureConfig) -> dict[str, Any]:
@@ -8017,6 +8019,144 @@ def resolve_container_bind_source(
     return None
 
 
+def resolve_host_path_in_container(
+    host_path: Path,
+    *,
+    container_names: tuple[str, ...] = (
+        "video-analytics-midterm-media-worker",
+        "video-analytics-midterm-rolling-cache-sink-a",
+        "video-analytics-midterm-rolling-cache-sink-b",
+    ),
+) -> tuple[str, Path] | None:
+    """Map a host bind path to a writable path inside a running container."""
+    target = host_path.resolve(strict=False)
+    for container_name in container_names:
+        completed = subprocess.run(
+            ["docker", "inspect", container_name, "--format", "{{json .Mounts}}"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            continue
+        try:
+            mounts = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            continue
+        candidates: list[tuple[int, Path]] = []
+        for mount in mounts if isinstance(mounts, list) else []:
+            if not bool(mount.get("RW")):
+                continue
+            source = str(mount.get("Source") or "")
+            destination = str(mount.get("Destination") or "")
+            if not source or not destination:
+                continue
+            source_path = Path(source).resolve(strict=False)
+            try:
+                relative = target.relative_to(source_path)
+            except ValueError:
+                continue
+            candidates.append(
+                (len(source_path.parts), Path(destination).joinpath(relative))
+            )
+        if candidates:
+            return container_name, max(candidates, key=lambda item: item[0])[1]
+    return None
+
+
+def remove_host_path_via_container(path: Path) -> tuple[bool, str | None]:
+    mapping = resolve_host_path_in_container(path)
+    if mapping is None:
+        return False, "no_writable_container_bind"
+    container_name, container_path = mapping
+    completed = subprocess.run(
+        ["docker", "exec", container_name, "rm", "-rf", "--", str(container_path)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        return False, (
+            f"docker_exec_rc={completed.returncode} "
+            f"stderr={completed.stderr.strip()[:500]}"
+        )
+    if path.exists():
+        return False, "path_still_exists_after_container_delete"
+    return True, None
+
+
+def clear_directory_contents_strict(path: Path) -> dict[str, Any]:
+    """Remove every child and fail if root-owned container output survives."""
+    path.mkdir(parents=True, exist_ok=True)
+    discovered = list(path.iterdir())
+    host_failures: list[dict[str, str]] = []
+    for child in discovered:
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+        except OSError as exc:
+            host_failures.append(
+                {"path": str(child), "error": f"{type(exc).__name__}: {exc}"}
+            )
+
+    remaining = list(path.iterdir())
+    container_fallback: dict[str, Any] = {"used": False}
+    if remaining:
+        mapping = resolve_host_path_in_container(path)
+        if mapping is not None:
+            container_name, container_path = mapping
+            completed = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    container_name,
+                    "sh",
+                    "-c",
+                    (
+                        'for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do '
+                        '[ -e "$child" ] || continue; rm -rf -- "$child"; done'
+                    ),
+                    "sh",
+                    str(container_path),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            container_fallback = {
+                "used": True,
+                "container": container_name,
+                "container_path": str(container_path),
+                "returncode": completed.returncode,
+                "stderr": completed.stderr.strip()[:1000],
+            }
+        else:
+            container_fallback = {
+                "used": True,
+                "error": "no_writable_container_bind",
+            }
+
+    remaining = list(path.iterdir())
+    if remaining:
+        raise RuntimeError(
+            f"directory cleanup incomplete path={path} "
+            f"remaining={len(remaining)} samples={[item.name for item in remaining[:20]]}"
+        )
+    return {
+        "discovered_paths": len(discovered),
+        "removed_paths": len(discovered),
+        "remaining_paths": 0,
+        "host_remove_failures": len(host_failures),
+        "host_remove_failure_samples": host_failures[:20],
+        "container_fallback": container_fallback,
+    }
+
+
 def evidence_database_counts(conn) -> dict[str, int]:
     row = conn.execute(
         """
@@ -8044,18 +8184,10 @@ def clear_existing_evidence_state(
     """Clear evidence while preserving observations, people, and trajectories."""
     cleanup: dict[str, Any] = {}
     cleanup["database_counts_before"] = evidence_database_counts(conn)
-    removed_evidence_dirs = 0
-    if evidence_root.exists():
-        for child in list(evidence_root.iterdir()):
-            if child.name.startswith("."):
-                continue
-            if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
-                removed_evidence_dirs += 1
-            else:
-                child.unlink(missing_ok=True)
-                removed_evidence_dirs += 1
-    cleanup["removed_evidence_paths"] = removed_evidence_dirs
+    evidence_cleanup = clear_directory_contents_strict(evidence_root)
+    cleanup["removed_evidence_paths"] = evidence_cleanup["removed_paths"]
+    cleanup["remaining_evidence_paths"] = evidence_cleanup["remaining_paths"]
+    cleanup["evidence_filesystem_cleanup"] = evidence_cleanup
 
     for key, root in (
         ("removed_rolling_cache_root", pressure_rolling_cache_root_host()),
@@ -8064,12 +8196,9 @@ def clear_existing_evidence_state(
             pressure_rolling_cache_materialized_root_host(),
         ),
     ):
-        if root.exists():
-            shutil.rmtree(root, ignore_errors=True)
-            cleanup[key] = True
-        else:
-            cleanup[key] = False
-        root.mkdir(parents=True, exist_ok=True)
+        root_cleanup = clear_directory_contents_strict(root)
+        cleanup[key] = bool(root_cleanup["removed_paths"])
+        cleanup[f"{key}_details"] = root_cleanup
 
     with conn.transaction():
         cleanup["deleted_events"] = conn.execute("DELETE FROM events").rowcount

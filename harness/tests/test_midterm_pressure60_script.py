@@ -776,10 +776,56 @@ def test_clear_existing_evidence_preserves_observations_and_trajectory_files(
     assert summary["deleted_person_bbox_observations"] == 0
     assert summary["database_counts_after"]["face_observations"] == 123
     assert summary["database_counts_after"]["person_bbox_observations"] == 456
+    assert summary["removed_evidence_paths"] == 1
+    assert summary["remaining_evidence_paths"] == 0
     assert list(evidence_root.iterdir()) == []
     assert list(rolling_root.iterdir()) == []
     assert list(materialized_root.iterdir()) == []
     assert trajectory.read_bytes() == b"jpeg"
+
+
+def test_strict_directory_cleanup_uses_writable_container_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    root = tmp_path / "evidence"
+    child = root / "root-owned-event"
+    child.mkdir(parents=True)
+    (child / "raw_clip.mov").write_bytes(b"mov")
+    real_rmtree = module.shutil.rmtree
+
+    def deny_host_delete(path, *args, **kwargs):
+        if Path(path) == child:
+            raise PermissionError("root-owned")
+        return real_rmtree(path, *args, **kwargs)
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **_kwargs):
+        assert command[:3] == ["docker", "exec", "media-worker"]
+        real_rmtree(child)
+        return Completed()
+
+    monkeypatch.setattr(module.shutil, "rmtree", deny_host_delete)
+    monkeypatch.setattr(
+        module,
+        "resolve_host_path_in_container",
+        lambda _path: ("media-worker", Path("/media/evidence")),
+    )
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    summary = module.clear_directory_contents_strict(root)
+
+    assert summary["discovered_paths"] == 1
+    assert summary["removed_paths"] == 1
+    assert summary["remaining_paths"] == 0
+    assert summary["host_remove_failures"] == 1
+    assert summary["container_fallback"]["used"] is True
+    assert list(root.iterdir()) == []
 
 
 def test_t4_profile_supports_uniform_5s_window_and_evidence_only_reset() -> None:
