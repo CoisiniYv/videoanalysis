@@ -938,7 +938,9 @@ only `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE`. Artifact schema v6 includes all
 three lane depths, oldest-ready age, WIP, pool, lease-heartbeat, segment-index,
 read-pin, DB-index subphase, sidecar-prune, and effective resource metrics. No
 Phase 6 acceptance token is claimed until the fixed-input 4/8/12 runs and the
-required repeat pass complete.
+required repeat pass complete. The fixed-input profile preserves warmup visual
+results and excludes them from formal gates with an event-time/creation-time
+cutoff; local republisher input bytes are SHA-256 identified in the artifact.
 
 ### Phase 7 - Remove Legacy And Misleading Contracts
 

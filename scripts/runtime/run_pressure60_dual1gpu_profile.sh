@@ -15,6 +15,14 @@ Environment overrides:
   PYTHON_CMD=python3  Python interpreter for the pressure harness.
   RUN_ID=<id>         Override generated run id.
   RTSP_URI=<uri>      Override pressure input URI.
+  RTSP_REPUBLISH_OUTPUT_BASE=<uri>
+                      Per-source RTSP output base; supports {run_id}/{source_id}.
+  RTSP_REPUBLISH_INPUT_URI=<uri-or-file>
+                      Deterministic source read by every host republisher.
+  RTSP_REPUBLISH_MODE=copy
+  RTSP_REPUBLISH_INPUT_OFFSET_S=0
+  RTSP_REPUBLISH_INPUT_LOOP=0
+  RTSP_REPUBLISH_WARMUP_S=10
   STREAMS=60          Override stream count for local smoke runs.
   DURATION_S=400      Override measured sampling duration.
   DRAIN_S=120         Override evidence drain duration.
@@ -50,6 +58,8 @@ Environment overrides:
                       AdaFace ROI batch16 aggregation wait (T4: 200ms).
   MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=4
                       Shared media-worker WIP candidate for Phase 6 A/B.
+  PRESERVE_WARMUP_RESULTS=1
+                      Retain prefill event/evidence and fence formal gates by time.
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -119,6 +129,13 @@ adaface_sharded="${ADAFACE_SHARDED:-0}"
 adaface_roi_redis="${ADAFACE_ROI_REDIS:-${adaface_roi_redis_default}}"
 roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
 media_worker_materialization_max_active="${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
+preserve_warmup_results="${PRESERVE_WARMUP_RESULTS:-1}"
+rtsp_republish_output_base="${RTSP_REPUBLISH_OUTPUT_BASE:-}"
+rtsp_republish_input_uri="${RTSP_REPUBLISH_INPUT_URI:-}"
+rtsp_republish_mode="${RTSP_REPUBLISH_MODE:-copy}"
+rtsp_republish_input_offset_s="${RTSP_REPUBLISH_INPUT_OFFSET_S:-0}"
+rtsp_republish_input_loop="${RTSP_REPUBLISH_INPUT_LOOP:-0}"
+rtsp_republish_warmup_s="${RTSP_REPUBLISH_WARMUP_S:-10}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -171,6 +188,10 @@ if [[ "${clear_existing_evidence}" == "1" ]]; then
   cmd+=(--clear-existing-evidence)
 fi
 
+if [[ "${preserve_warmup_results}" == "1" ]]; then
+  cmd+=(--preserve-warmup-results)
+fi
+
 if [[ "${cuda_mps}" == "1" ]]; then
   cmd+=(
     --cuda-mps
@@ -206,6 +227,20 @@ fi
 if [[ -n "${RTSP_URI:-}" ]]; then
   cmd+=(--rtsp-uri "${RTSP_URI}")
 fi
+if [[ -n "${rtsp_republish_output_base}" ]]; then
+  cmd+=(
+    --rtsp-republish-output-base "${rtsp_republish_output_base}"
+    --rtsp-republish-mode "${rtsp_republish_mode}"
+    --rtsp-republish-input-offset-s "${rtsp_republish_input_offset_s}"
+    --rtsp-republish-warmup-s "${rtsp_republish_warmup_s}"
+  )
+  if [[ -n "${rtsp_republish_input_uri}" ]]; then
+    cmd+=(--rtsp-republish-input-uri "${rtsp_republish_input_uri}")
+  fi
+  if [[ "${rtsp_republish_input_loop}" == "1" ]]; then
+    cmd+=(--rtsp-republish-input-loop)
+  fi
+fi
 
 printf 'pressure_profile=%s\n' "${profile}"
 printf 'run_id=%s\n' "${run_id}"
@@ -228,6 +263,12 @@ printf 'adaface_crop_resize=%s\n' "${adaface_crop}"
 printf 'adaface_pre_gate=%s\n' "${adaface_pre_gate}"
 printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
 printf 'media_worker_materialization_max_active=%s\n' "${media_worker_materialization_max_active}"
+printf 'preserve_warmup_results=%s\n' "${preserve_warmup_results}"
+printf 'rtsp_republish_output_base=%s\n' "${rtsp_republish_output_base}"
+printf 'rtsp_republish_input_uri=%s\n' "${rtsp_republish_input_uri}"
+printf 'rtsp_republish_mode=%s\n' "${rtsp_republish_mode}"
+printf 'rtsp_republish_input_offset_s=%s\n' "${rtsp_republish_input_offset_s}"
+printf 'rtsp_republish_input_loop=%s\n' "${rtsp_republish_input_loop}"
 printf 'adaface_decoupled_sharded=%s\n' "${adaface_sharded}"
 printf 'adaface_roi_redis=%s\n' "${adaface_roi_redis}"
 printf 'adaface_roi_batch_timeout_ms=%s\n' "${roi_batch_timeout_ms}"

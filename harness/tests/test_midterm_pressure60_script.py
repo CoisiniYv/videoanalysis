@@ -125,6 +125,56 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "--face-embedding-batch-size 16" in output
     assert "media_worker_materialization_max_active=4" in output
     assert "--media-worker-materialization-max-active 4" in output
+    assert "preserve_warmup_results=1" in output
+    assert "--preserve-warmup-results" in output
+
+
+def test_profile_propagates_deterministic_rtsp_republish_contract() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "fixed-input-dry-run",
+            "RTSP_REPUBLISH_OUTPUT_BASE": (
+                "rtsp://192.168.1.105:8554/pressure/{run_id}/{source_id}"
+            ),
+            "RTSP_REPUBLISH_INPUT_URI": "/data/fixture.mp4",
+            "RTSP_REPUBLISH_MODE": "copy",
+            "RTSP_REPUBLISH_INPUT_OFFSET_S": "0",
+            "RTSP_REPUBLISH_INPUT_LOOP": "1",
+            "RTSP_REPUBLISH_WARMUP_S": "10",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    output = completed.stdout
+    assert "--rtsp-republish-output-base" in output
+    assert "rtsp://192.168.1.105:8554/pressure/" in output
+    assert "--rtsp-republish-input-uri /data/fixture.mp4" in output
+    assert "--rtsp-republish-mode copy" in output
+    assert "--rtsp-republish-input-offset-s 0" in output
+    assert "--rtsp-republish-input-loop" in output
+    assert "--rtsp-republish-warmup-s 10" in output
+
+
+def test_rtsp_republish_input_identity_hashes_fixed_local_fixture(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    fixture = tmp_path / "fixture.mp4"
+    fixture.write_bytes(b"abc")
+
+    identity = module.rtsp_republish_input_identity(str(fixture))
+
+    assert identity["kind"] == "local_file"
+    assert identity["size_bytes"] == 3
+    assert identity["sha256"] == (
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    )
 
 
 def test_pressure_rtsp_uri_uses_source_id_when_republish_base_has_no_placeholder() -> None:
@@ -752,13 +802,57 @@ def test_prepare_pressure_sampling_window_clears_warmup_evidence_but_keeps_traje
     )
     monkeypatch.setattr(module.time, "time", lambda: 1234.0)
 
-    started = module.prepare_pressure_sampling_window(object(), cfg, pressure_started_monotonic=99.0)
+    started = module.prepare_pressure_sampling_window(
+        object(), cfg, pressure_started_monotonic=99.0
+    )
 
-    assert started == 1234.0
+    assert started["sampling_started_monotonic"] == 1234.0
+    assert started["warmup_results_preserved"] is False
     assert calls == ["cleared"]
     summary = json.loads((tmp_path / "rolling_cache_prefill_summary.json").read_text())
     assert summary["cleanup"]["event_rows_deleted"] == 3
     assert summary["cleanup"]["face_observation_rows_deleted"] == 0
+
+
+def test_prepare_pressure_sampling_window_preserves_warmup_visual_results(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        preserve_warmup_results=True,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "pressure_warmup_rows_snapshot",
+        lambda _conn, _cfg: calls.append("preserved")
+        or {
+            "status": "preserved",
+            "event_rows_deleted": 0,
+            "evidence_dirs_removed": 0,
+            "event_rows_preserved": 7,
+            "evidence_bundle_rows_preserved": 3,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "clear_pressure_warmup_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("preserve mode must not delete warmup rows")
+        ),
+    )
+    monkeypatch.setattr(module.time, "time", lambda: 1234.0)
+
+    window = module.prepare_pressure_sampling_window(object(), cfg)
+
+    assert calls == ["preserved"]
+    assert window["warmup_results_preserved"] is True
+    assert window["cleanup"]["event_rows_deleted"] == 0
+    assert window["cleanup"]["evidence_dirs_removed"] == 0
+    assert window["sampling_start_event_ts_ms"] > 0
 
 
 def test_prepare_pressure_sampling_window_cleanup_does_not_depend_on_result_retention(
@@ -1460,7 +1554,18 @@ def test_cleanup_keeps_covered_event_alias_rows() -> None:
 
     assert covered == {"00000000-0000-4000-8000-000000000002"}
     assert "evidence_event_links" in conn.sql
-    assert conn.params[1] == "rolling_canary_%"
+    assert conn.params["prefix"] == "rolling_canary_%"
+    assert conn.params["sampling_start_event_ts_ms"] == 0
+
+
+def test_formal_pressure_window_fences_warmup_by_event_or_creation_time() -> None:
+    module = _load_module()
+
+    predicate = module._formal_pressure_event_predicate("e")
+
+    assert "e.event_ts_ms >= 946684800000" in predicate
+    assert "e.event_ts_ms >= %(sampling_start_event_ts_ms)s" in predicate
+    assert "e.created_at >= to_timestamp" in predicate
 
 
 def test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata(

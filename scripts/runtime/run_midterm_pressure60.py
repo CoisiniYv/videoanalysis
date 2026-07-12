@@ -24,7 +24,7 @@ import sys
 import time
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -397,6 +397,8 @@ class PressureConfig:
     adaface_roi_redis: bool = False
     adaface_roi_batch_timeout_ms: int = 10
     media_worker_materialization_max_active: int = 4
+    preserve_warmup_results: bool = False
+    pressure_sampling_start_event_ts_ms: int = 0
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -688,6 +690,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Seconds to let pressure sources fill rolling-cache segments before "
             "the measured window starts. Pressure DB rows from the warmup are "
             "deleted before sampling so pre-roll evidence windows are possible."
+        ),
+    )
+    parser.add_argument(
+        "--preserve-warmup-results",
+        action="store_true",
+        help=(
+            "Retain prefill/visibility event and evidence rows. Formal pressure "
+            "queries are fenced by the measured-window start timestamp."
         ),
     )
     parser.add_argument(
@@ -1049,6 +1059,7 @@ def main(argv: list[str] | None = None) -> int:
         media_worker_materialization_max_active=int(
             args.media_worker_materialization_max_active
         ),
+        preserve_warmup_results=bool(args.preserve_warmup_results),
     )
     report: dict[str, Any] = {
         "run_id": cfg.run_id,
@@ -1333,13 +1344,24 @@ def main(argv: list[str] | None = None) -> int:
             sources_path=pressure_sources_path,
         )
 
+        sampling_window = prepare_pressure_sampling_window(
+            conn,
+            cfg,
+            pressure_started_monotonic=pressure_started_monotonic,
+        )
+        cfg = replace(
+            cfg,
+            pressure_sampling_start_event_ts_ms=int(
+                sampling_window["sampling_start_event_ts_ms"]
+            ),
+        )
+        report["config"] = _jsonable_config(cfg)
+        write_json(cfg.artifact_dir / "run_config.json", report["config"])
         report["pressure_sampling_window"] = sample_runtime(
             cfg,
             started_at,
-            pressure_started_monotonic=prepare_pressure_sampling_window(
-                conn,
-                cfg,
-                pressure_started_monotonic=pressure_started_monotonic,
+            pressure_started_monotonic=float(
+                sampling_window["sampling_started_monotonic"]
             ),
         )
         report["pressure_sampling_cutoff"] = pressure_event_sampling_cutoff(conn, cfg)
@@ -1410,11 +1432,16 @@ def main(argv: list[str] | None = None) -> int:
         capture_runtime_logs_since_start(cfg, started_at)
         diagnostics["log_summary"] = summarize_logs(cfg)
         write_json(cfg.artifact_dir / "pressure_diagnostics.json", diagnostics)
-        report["db_summary_before_cleanup"] = db_summary(conn, cfg.run_id)
+        report["db_summary_before_cleanup"] = db_summary(
+            conn,
+            cfg.run_id,
+            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+        )
         write_json(cfg.artifact_dir / "db_summary_before_cleanup.json", report["db_summary_before_cleanup"])
         report["non_materialized_task_details"] = non_materialized_task_details(
             conn,
             cfg.run_id,
+            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
         )
         write_json(
             cfg.artifact_dir / "non_materialized_task_details.json",
@@ -1572,7 +1599,11 @@ def main(argv: list[str] | None = None) -> int:
                 original_worker_cpu_isolation,
             )
             original_worker_cpu_isolation = None
-        report["db_summary_after_cleanup"] = db_summary(conn, cfg.run_id)
+        report["db_summary_after_cleanup"] = db_summary(
+            conn,
+            cfg.run_id,
+            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+        )
         report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
         report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
         write_json(cfg.artifact_dir / "report.json", report)
@@ -4500,7 +4531,7 @@ def write_dual_shard_pressure_sources(conn, cfg: PressureConfig) -> dict[str, An
         """
         SELECT id, name, source_id, rtsp_url, enabled
         FROM cameras
-        WHERE source_id LIKE %s
+        WHERE source_id LIKE %(prefix)s
         ORDER BY source_id
         """,
         (f"{cfg.run_id}_%",),
@@ -4589,6 +4620,11 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
         raise RuntimeError("rtsp republish requested but host ffmpeg is not available")
     log_dir = cfg.artifact_dir / "rtsp_republish"
     log_dir.mkdir(parents=True, exist_ok=True)
+    input_identity = rtsp_republish_input_identity(cfg.rtsp_republish_input_uri)
+    write_json(
+        cfg.artifact_dir / "rtsp_republish_input_identity.json",
+        input_identity,
+    )
     manifest: list[dict[str, Any]] = []
     processes: list[subprocess.Popen] = []
     for index in range(cfg.stream_count):
@@ -4617,6 +4653,8 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
             {
                 "source_id": source_id,
                 "input_uri": cfg.rtsp_republish_input_uri,
+                "input_sha256": input_identity.get("sha256"),
+                "input_size_bytes": input_identity.get("size_bytes"),
                 "input_offset_s": cfg.rtsp_republish_input_offset_s,
                 "input_loop": cfg.rtsp_republish_input_loop,
                 "output_uri": output_uri,
@@ -4639,6 +4677,30 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
         stop_rtsp_republishers(processes, cfg)
         raise RuntimeError(f"rtsp republishers exited during warmup: {failed[:5]}")
     return processes
+
+
+def rtsp_republish_input_identity(input_uri: str) -> dict[str, Any]:
+    path = Path(str(input_uri or ""))
+    if not path.is_file():
+        return {
+            "input_uri": str(input_uri or ""),
+            "kind": "non_local_uri",
+            "sha256": None,
+            "size_bytes": None,
+        }
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    stat = path.stat()
+    return {
+        "input_uri": str(input_uri),
+        "resolved_path": str(path.resolve()),
+        "kind": "local_file",
+        "sha256": digest.hexdigest(),
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
 
 
 def rtsp_republish_command(
@@ -5086,27 +5148,94 @@ def prepare_pressure_sampling_window(
     cfg: PressureConfig,
     *,
     pressure_started_monotonic: float | None = None,
-) -> float | None:
+) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc)
     if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
         time.sleep(cfg.rolling_cache_prefill_s)
     # Visibility and rolling-cache prefill happen before the measured window.
-    # Always remove their event/evidence rows so startup-boundary tasks cannot
-    # expire inside the formal result set. Trajectory observations are retained
-    # by clear_pressure_warmup_rows and remain visible to operators.
-    cleanup = clear_pressure_warmup_rows(conn, cfg)
+    # Production-facing runs retain those visual results and fence formal
+    # queries by the sampling start. The destructive legacy isolation remains
+    # available only when preserve_warmup_results is not requested.
+    cleanup = (
+        pressure_warmup_rows_snapshot(conn, cfg)
+        if cfg.preserve_warmup_results
+        else clear_pressure_warmup_rows(conn, cfg)
+    )
     sampling_started_monotonic = time.time()
+    sampling_started_at = datetime.now(timezone.utc)
     summary = {
         "status": "completed",
         "prefill_s": (
             cfg.rolling_cache_prefill_s if cfg.rolling_cache_evidence else 0
         ),
         "started_at": started_at.isoformat(),
-        "sampling_started_at": datetime.now(timezone.utc).isoformat(),
+        "sampling_started_at": sampling_started_at.isoformat(),
+        "sampling_start_event_ts_ms": int(sampling_started_at.timestamp() * 1000),
+        "warmup_results_preserved": bool(cfg.preserve_warmup_results),
         "cleanup": cleanup,
     }
     write_json(cfg.artifact_dir / "rolling_cache_prefill_summary.json", summary)
-    return sampling_started_monotonic
+    return {
+        **summary,
+        "sampling_started_monotonic": sampling_started_monotonic,
+    }
+
+
+def pressure_warmup_rows_snapshot(conn, cfg: PressureConfig) -> dict[str, Any]:
+    source_ids = pressure_source_ids(cfg)
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM events
+             WHERE source_id = ANY(%(source_ids)s)) AS events,
+          (SELECT count(*) FROM evidence_tasks
+             WHERE source_id = ANY(%(source_ids)s)) AS evidence_tasks,
+          (SELECT count(*) FROM evidence_bundles
+             WHERE source_id = ANY(%(source_ids)s)) AS evidence_bundles,
+          (SELECT count(*) FROM face_observations
+             WHERE source_id = ANY(%(source_ids)s)) AS face_observations,
+          (SELECT count(*) FROM person_bbox_observations
+             WHERE source_id = ANY(%(source_ids)s)) AS person_observations
+        """,
+        {"source_ids": source_ids},
+    ).fetchone() or {}
+    return {
+        "status": "preserved",
+        "event_rows_deleted": 0,
+        "face_observation_rows_deleted": 0,
+        "person_observation_rows_deleted": 0,
+        "evidence_dirs_removed": 0,
+        "event_rows_preserved": int(row.get("events") or 0),
+        "evidence_task_rows_preserved": int(row.get("evidence_tasks") or 0),
+        "evidence_bundle_rows_preserved": int(row.get("evidence_bundles") or 0),
+        "face_observation_rows_preserved": int(row.get("face_observations") or 0),
+        "person_observation_rows_preserved": int(
+            row.get("person_observations") or 0
+        ),
+    }
+
+
+def _formal_pressure_event_predicate(alias: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+        raise ValueError(f"invalid SQL alias: {alias!r}")
+    # Epoch-ms event timestamps are authoritative. Stream-relative or missing
+    # timestamps fall back to the DB creation clock so delayed warmup inserts
+    # still cannot enter the measured result set.
+    return f"""
+      (
+        %(sampling_start_event_ts_ms)s <= 0
+        OR (
+          {alias}.event_ts_ms >= 946684800000
+          AND {alias}.event_ts_ms >= %(sampling_start_event_ts_ms)s
+        )
+        OR (
+          COALESCE({alias}.event_ts_ms, 0) < 946684800000
+          AND {alias}.created_at >= to_timestamp(
+            %(sampling_start_event_ts_ms)s / 1000.0
+          )
+        )
+      )
+    """
 
 
 def remove_tree_best_effort(path: Path) -> tuple[bool, str | None]:
@@ -5178,14 +5307,18 @@ def pressure_event_sampling_cutoff(conn, cfg: PressureConfig) -> dict[str, Any]:
     cutoff_created_at = datetime.now(timezone.utc)
     source_ids = pressure_source_ids(cfg)
     row = conn.execute(
-        """
+        f"""
         SELECT count(*) AS event_count,
                max(event_ts_ms) AS max_event_ts_ms,
                max(created_at) AS max_created_at
-        FROM events
+        FROM events e
         WHERE source_id = ANY(%(source_ids)s)
+          AND {_formal_pressure_event_predicate("e")}
         """,
-        {"source_ids": source_ids},
+        {
+            "source_ids": source_ids,
+            "sampling_start_event_ts_ms": cfg.pressure_sampling_start_event_ts_ms,
+        },
     ).fetchone() or {}
     summary = {
         "status": "captured",
@@ -5288,6 +5421,7 @@ def clear_pressure_post_sample_rows(
         conn,
         cfg.run_id,
         cooldown_s=cfg.pressure_algorithm_cooldown_s,
+        sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
     )
     summary = {
         "status": "completed",
@@ -5406,6 +5540,7 @@ def prune_pressure_post_sample_nonplayable_rows(
             conn,
             cfg.run_id,
             cooldown_s=cfg.pressure_algorithm_cooldown_s,
+            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
         ),
     }
     write_json(cfg.artifact_dir / "pressure_post_sample_cleanup.json", summary)
@@ -5847,6 +5982,7 @@ def db_pressure_event_ingest_summary_connect(cfg: PressureConfig) -> dict[str, A
             conn,
             cfg.run_id,
             cooldown_s=cfg.pressure_algorithm_cooldown_s,
+            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
         )
 
 
@@ -5855,10 +5991,11 @@ def db_pressure_event_ingest_summary(
     run_id: str,
     *,
     cooldown_s: int = PRESSURE_COOLDOWN_SECONDS,
+    sampling_start_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     row = conn.execute(
-        """
+        f"""
         SELECT
           count(*) AS events,
           count(*) FILTER (WHERE status = 'new') AS new_events,
@@ -5875,10 +6012,14 @@ def db_pressure_event_ingest_summary(
               FILTER (WHERE event_ts_ms IS NOT NULL),
             0
           ) AS max_created_minus_event_ts_s
-        FROM events
-        WHERE source_id LIKE %s
+        FROM events e
+        WHERE source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
         """,
-        (prefix,),
+        {
+            "prefix": prefix,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchone()
     summary = _row_json(row)
     cooldown_s = max(1, int(cooldown_s or PRESSURE_COOLDOWN_SECONDS))
@@ -5889,6 +6030,7 @@ def db_pressure_event_ingest_summary(
             cooldown_s=cooldown_s,
             grace_ms=PRESSURE_COOLDOWN_GRACE_MS,
             event_types=PRESSURE_COOLDOWN_EVENT_TYPES,
+            sampling_start_event_ts_ms=sampling_start_event_ts_ms,
         )
     )
     return summary
@@ -5901,11 +6043,12 @@ def db_pressure_algorithm_cooldown_summary(
     cooldown_s: int,
     grace_ms: int,
     event_types: tuple[str, ...],
+    sampling_start_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     threshold_ms = max(0, cooldown_s * 1000 - max(0, grace_ms))
     rows = conn.execute(
-        """
+        f"""
         WITH ordered AS (
           SELECT
             source_id,
@@ -5915,8 +6058,9 @@ def db_pressure_algorithm_cooldown_summary(
               PARTITION BY source_id, event_type
               ORDER BY event_ts_ms, created_at, id
             ) AS prev_event_ts_ms
-          FROM events
+          FROM events e
           WHERE source_id LIKE %(prefix)s
+            AND {_formal_pressure_event_predicate("e")}
             AND status = 'new'
             AND event_type = ANY(%(event_types)s)
             AND event_ts_ms IS NOT NULL
@@ -5938,32 +6082,46 @@ def db_pressure_algorithm_cooldown_summary(
             "prefix": prefix,
             "event_types": list(event_types),
             "threshold_ms": threshold_ms,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
         },
     ).fetchone()
     source_count = conn.execute(
-        """
+        f"""
         SELECT count(DISTINCT source_id) AS source_count
-        FROM events
-        WHERE source_id LIKE %s
+        FROM events e
+        WHERE source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
         """,
-        (prefix,),
+        {
+            "prefix": prefix,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchone()
     type_rows = conn.execute(
-        """
+        f"""
         SELECT event_type, count(*) AS count
-        FROM events
+        FROM events e
         WHERE source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
           AND status = 'new'
           AND event_type = ANY(%(event_types)s)
         GROUP BY event_type
         ORDER BY event_type
         """,
-        {"prefix": prefix, "event_types": list(event_types)},
+        {
+            "prefix": prefix,
+            "event_types": list(event_types),
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchall()
     summary = _row_json(rows)
     source_total = int((_row_json(source_count).get("source_count") or 0))
     span_s = float(
-        db_pressure_event_span_seconds(conn, run_id)
+        db_pressure_event_span_seconds(
+            conn,
+            run_id,
+            sampling_start_event_ts_ms=sampling_start_event_ts_ms,
+        )
     )
     windows_per_source_type = int(span_s // max(cooldown_s, 1)) + 1 if source_total else 0
     summary.update(
@@ -5984,14 +6142,23 @@ def db_pressure_algorithm_cooldown_summary(
     return summary
 
 
-def db_pressure_event_span_seconds(conn, run_id: str) -> float:
+def db_pressure_event_span_seconds(
+    conn,
+    run_id: str,
+    *,
+    sampling_start_event_ts_ms: int = 0,
+) -> float:
     row = conn.execute(
-        """
+        f"""
         SELECT COALESCE((max(event_ts_ms) - min(event_ts_ms)) / 1000.0, 0) AS span_s
-        FROM events
-        WHERE source_id LIKE %s
+        FROM events e
+        WHERE source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
         """,
-        (f"{run_id}_%",),
+        {
+            "prefix": f"{run_id}_%",
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchone()
     try:
         return float((_row_json(row).get("span_s") or 0))
@@ -8063,12 +8230,13 @@ def _adaface_forwarder_send_failure_ratio(
 
 
 def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
-    limit_sql = "" if cfg.keep_evidence < 0 else "LIMIT %s"
-    params: tuple[Any, ...]
-    if cfg.keep_evidence < 0:
-        params = (f"{cfg.run_id}_%",)
-    else:
-        params = (f"{cfg.run_id}_%", cfg.keep_evidence)
+    limit_sql = "" if cfg.keep_evidence < 0 else "LIMIT %(limit)s"
+    params: dict[str, Any] = {
+        "prefix": f"{cfg.run_id}_%",
+        "sampling_start_event_ts_ms": cfg.pressure_sampling_start_event_ts_ms,
+    }
+    if cfg.keep_evidence >= 0:
+        params["limit"] = cfg.keep_evidence
     rows = conn.execute(
         f"""
         SELECT eb.event_id, eb.source_id, eb.camera_id, eb.camera_name, eb.event_type,
@@ -8112,7 +8280,8 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
             ORDER BY cr.updated_at DESC NULLS LAST, cr.created_at DESC NULLS LAST
             LIMIT 1
         ) rule_policy ON true
-        WHERE eb.source_id LIKE %s
+        WHERE eb.source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
           AND (
               (
                 eb.raw_clip_uri IS NOT NULL
@@ -8178,15 +8347,20 @@ def select_covered_event_ids_for_bundles(
     if not bundle_event_ids:
         return set()
     rows = conn.execute(
-        """
+        f"""
         SELECT l.event_id
         FROM evidence_event_links l
         JOIN events e ON e.id = l.event_id
-        WHERE l.bundle_event_id = ANY(%s::uuid[])
+        WHERE l.bundle_event_id = ANY(%(bundle_event_ids)s::uuid[])
           AND l.relation = 'covered_by'
-          AND e.source_id LIKE %s
+          AND e.source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
         """,
-        (list(bundle_event_ids), f"{cfg.run_id}_%"),
+        {
+            "bundle_event_ids": list(bundle_event_ids),
+            "prefix": f"{cfg.run_id}_%",
+            "sampling_start_event_ts_ms": cfg.pressure_sampling_start_event_ts_ms,
+        },
     ).fetchall()
     return {str(row["event_id"]) for row in rows}
 
@@ -8807,23 +8981,34 @@ def restore_runtime(cfg: PressureConfig, original_perf: dict[str, Any]) -> None:
 
 def db_summary_connect(cfg: PressureConfig) -> dict[str, Any]:
     with psycopg.connect(cfg.db_url, row_factory=dict_row) as conn:
-        return db_summary(conn, cfg.run_id)
+        return db_summary(
+            conn,
+            cfg.run_id,
+            sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+        )
 
 
-def db_summary(conn, run_id: str) -> dict[str, Any]:
+def db_summary(
+    conn,
+    run_id: str,
+    *,
+    sampling_start_event_ts_ms: int = 0,
+) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     row = conn.execute(
-        """
+        f"""
         WITH run_events AS (
           SELECT id, status, event_type
-          FROM events
+          FROM events e
           WHERE source_id LIKE %(prefix)s
+            AND {_formal_pressure_event_predicate("e")}
         ),
         run_tasks AS (
           SELECT event_id, materialization_status, status,
                  materialization_defer_reason, materialization_ready_at
-          FROM evidence_tasks
+          FROM evidence_tasks et
           WHERE source_id LIKE %(prefix)s
+            AND {_formal_pressure_event_predicate("et")}
         ),
         parent_playable_events AS (
           SELECT DISTINCT eb.event_id
@@ -8924,8 +9109,12 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
           (SELECT count(*) FROM run_events) AS events,
           (SELECT count(*) FROM run_events WHERE status = 'suppressed') AS suppressed_events,
           (SELECT count(*) FROM run_events WHERE status <> 'suppressed') AS unsuppressed_events,
-          (SELECT count(*) FROM evidence_tasks WHERE source_id LIKE %(prefix)s) AS tasks,
-          (SELECT count(*) FROM evidence_bundles WHERE source_id LIKE %(prefix)s) AS bundles,
+          (SELECT count(*) FROM run_tasks) AS tasks,
+          (
+            SELECT count(*)
+            FROM evidence_bundles eb
+            JOIN run_events re ON re.id = eb.event_id
+          ) AS bundles,
           (SELECT count(*) FROM parent_playable_events) AS playable_bundles,
           (SELECT count(*) FROM parent_video_playable_events) AS behavior_video_playable_bundles,
           (SELECT count(*) FROM parent_image_ready_events) AS face_image_ready_bundles,
@@ -8934,9 +9123,8 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
           (SELECT count(*) FROM covered_playable_events_distinct) AS covered_playable_events,
           (
             SELECT count(*)
-            FROM evidence_tasks
-            WHERE source_id LIKE %(prefix)s
-              AND materialization_status = ANY(%(active_materialization_states)s)
+            FROM run_tasks rt
+            WHERE materialization_status = ANY(%(active_materialization_states)s)
           ) AS active_materialization_tasks,
           (
             SELECT count(*)
@@ -8985,21 +9173,36 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
         {
             "prefix": prefix,
             "active_materialization_states": sorted(ACTIVE_MATERIALIZATION_STATES),
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
         },
     ).fetchone()
     statuses = conn.execute(
-        """
-        SELECT status, materialization_status, count(*) AS count
-        FROM evidence_tasks
-        WHERE source_id LIKE %s
+        f"""
+        SELECT et.status, et.materialization_status, count(*) AS count
+        FROM evidence_tasks et
+        WHERE source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("et")}
         GROUP BY status, materialization_status
         ORDER BY count DESC
         """,
-        (prefix,),
+        {
+            "prefix": prefix,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchall()
     event_types = conn.execute(
-        "SELECT event_type, count(*) AS count FROM events WHERE source_id LIKE %s GROUP BY event_type ORDER BY count DESC",
-        (prefix,),
+        f"""
+        SELECT event_type, count(*) AS count
+        FROM events e
+        WHERE source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
+        GROUP BY event_type
+        ORDER BY count DESC
+        """,
+        {
+            "prefix": prefix,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchall()
     data = _row_json(row)
     data["task_statuses"] = [_row_json(item) for item in statuses]
@@ -9014,17 +9217,29 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
         FROM face_observations
         WHERE source_id LIKE %(prefix)s
           AND payload ? 'roi_transport'
+          AND (
+            %(sampling_start_event_ts_ms)s <= 0
+            OR timestamp_ms >= %(sampling_start_event_ts_ms)s
+          )
         """,
-        {"prefix": prefix},
+        {
+            "prefix": prefix,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchone()
     data["adaface_roi"] = _row_json(roi_row)
     return data
 
 
-def non_materialized_task_details(conn, run_id: str) -> list[dict[str, Any]]:
+def non_materialized_task_details(
+    conn,
+    run_id: str,
+    *,
+    sampling_start_event_ts_ms: int = 0,
+) -> list[dict[str, Any]]:
     prefix = f"{run_id}_%"
     rows = conn.execute(
-        """
+        f"""
         SELECT
           et.task_id,
           et.event_id,
@@ -9056,10 +9271,14 @@ def non_materialized_task_details(conn, run_id: str) -> list[dict[str, Any]]:
         LEFT JOIN events e ON e.id = et.event_id
         LEFT JOIN evidence_event_links l ON l.event_id = et.event_id
         WHERE et.source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("et")}
           AND COALESCE(et.materialization_status, '') <> 'materialized'
         ORDER BY et.created_at, et.source_id, et.event_type
         """,
-        {"prefix": prefix},
+        {
+            "prefix": prefix,
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
     ).fetchall()
     return [_row_json(row) for row in rows]
 
@@ -9099,7 +9318,11 @@ def collect_downstream_observability(
 ) -> dict[str, Any]:
     replay_topology = replay_topology_summary()
     video_file_sink = video_file_sink_observability_summary(diagnostics)
-    postgresql = postgres_observability_summary(conn, cfg.run_id)
+    postgresql = postgres_observability_summary(
+        conn,
+        cfg.run_id,
+        sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+    )
     run_summary = postgresql.get("run_summary")
     run_summary = run_summary if isinstance(run_summary, dict) else {}
     summary = {
@@ -9150,8 +9373,19 @@ def redis_observability_summary(redis_client: Redis) -> dict[str, Any]:
     return {"streams": streams}
 
 
-def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
-    summary: dict[str, Any] = {"run_summary": db_summary(conn, run_id)}
+def postgres_observability_summary(
+    conn,
+    run_id: str,
+    *,
+    sampling_start_event_ts_ms: int = 0,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "run_summary": db_summary(
+            conn,
+            run_id,
+            sampling_start_event_ts_ms=sampling_start_event_ts_ms,
+        )
+    }
     tables = [
         "events",
         "evidence_tasks",
@@ -9177,7 +9411,7 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
         )
     try:
         row = conn.execute(
-            """
+            f"""
             SELECT count(*) AS count,
                    percentile_cont(0.50) WITHIN GROUP (
                      ORDER BY EXTRACT(EPOCH FROM (COALESCE(last_materialization_at, updated_at) - created_at))
@@ -9188,12 +9422,16 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
                    percentile_cont(0.99) WITHIN GROUP (
                      ORDER BY EXTRACT(EPOCH FROM (COALESCE(last_materialization_at, updated_at) - created_at))
                    ) AS p99_seconds
-            FROM evidence_tasks
-            WHERE source_id LIKE %s
+            FROM evidence_tasks et
+            WHERE source_id LIKE %(prefix)s
+              AND {_formal_pressure_event_predicate("et")}
               AND created_at IS NOT NULL
               AND COALESCE(last_materialization_at, updated_at) IS NOT NULL
             """,
-            (f"{run_id}_%",),
+            {
+                "prefix": f"{run_id}_%",
+                "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            },
         ).fetchone()
         lifecycle = _row_json(row)
         lifecycle["status"] = (
@@ -9206,7 +9444,7 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
         )
     try:
         row = conn.execute(
-            """
+            f"""
             WITH measured AS (
                 SELECT
                     et.materialization_ready_at,
@@ -9216,7 +9454,8 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
                     )::timestamptz AS claimed_at,
                     et.last_materialization_at
                 FROM evidence_tasks et
-                WHERE et.source_id LIKE %s
+                WHERE et.source_id LIKE %(prefix)s
+                  AND {_formal_pressure_event_predicate("et")}
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_audit ? 'rolling_cache'
             ),
@@ -9245,7 +9484,10 @@ def postgres_observability_summary(conn, run_id: str) -> dict[str, Any]:
                     FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_max_s
             FROM deltas
             """,
-            (f"{run_id}_%",),
+            {
+                "prefix": f"{run_id}_%",
+                "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            },
         ).fetchone()
         ready_metrics = _row_json(row)
         ready_metrics["status"] = (

@@ -54,9 +54,19 @@ MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=4|8|12
 ```
 
 The normal pressure cleanup still removes temporary runtime sources/workers
-only. It does not use `--clear-existing-evidence` or
-`--discard-pressure-results`; formal-window evidence and trajectories remain
-visible.
+only. The profile enables `--preserve-warmup-results`: visibility/prefill rows,
+bundles, evidence directories, and trajectory observations are counted but not
+deleted. Formal-window SQL uses an epoch event timestamp cutoff, with DB
+creation time as the fallback for non-epoch timestamps, so retained warmup
+results do not enter the 4/8/12 gates. The run does not use
+`--clear-existing-evidence` or `--discard-pressure-results`; formal-window,
+warmup, and playable postfill evidence remain visible.
+
+Deterministic republish settings are explicit profile inputs. For a local file,
+the harness hashes the input once and records path, SHA-256, size, and mtime in
+`rtsp_republish_input_identity.json`; every source manifest row carries the same
+hash and size. This prevents two nominally identical capacity runs from using
+different fixture bytes.
 
 ## 3. Artifact Schema
 
@@ -83,8 +93,8 @@ override mechanism, so a candidate cannot leak into daily runtime.
 Executed checks:
 
 ```text
-pressure harness focused tests:        145 passed
-Spec 33 + scheduler/index regression:  335 passed
+pressure harness focused tests:        149 passed
+Spec 33 + scheduler/index regression:  339 passed
 python py_compile:                      passed
 profile shell syntax:                   passed
 docker compose effective config:       passed
@@ -93,7 +103,11 @@ git diff --check:                       passed
 
 The test fixture exercises numeric V2 scheduler ticks, effective resource
 startup fields, DB-index subphase logs, the nested artifact mapping, fixed lane
-configuration, CLI/profile propagation, and retained Compose override output.
+configuration, CLI/profile propagation, warmup preservation/formal-window
+fencing, deterministic republish hashing, and retained Compose override output.
+The formal-window DB summary, event/cooldown summary, non-materialized detail,
+kept-evidence, covered-alias, lifecycle, and ready-to-claim SQL were also run
+read-only against the live PostgreSQL schema.
 
 ## 5. Remaining Phase 6 Work
 
