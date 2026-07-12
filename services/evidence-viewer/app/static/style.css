@@ -395,7 +395,11 @@ p {
 }
 
 .runtime-workspace {
-  grid-template-columns: minmax(320px, 0.95fr) minmax(520px, 1.4fr);
+  /* Runtime sections have very different heights. Keep them in one
+     operator-flow column so a tall configuration form cannot stretch the
+     overview card into a large blank panel. */
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
 }
 
 .operator-view[hidden] {
@@ -2185,8 +2189,7 @@ textarea[readonly] {
   .camera-workspace,
   .people-workspace,
   .trajectory-workspace,
-  .evidence-workspace,
-  .runtime-workspace {
+  .evidence-workspace {
     grid-template-columns: 280px minmax(0, 1fr);
   }
 
