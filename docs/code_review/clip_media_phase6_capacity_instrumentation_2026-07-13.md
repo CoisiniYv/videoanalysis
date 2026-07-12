@@ -93,8 +93,8 @@ override mechanism, so a candidate cannot leak into daily runtime.
 Executed checks:
 
 ```text
-pressure harness focused tests:        150 passed
-Spec 33 + scheduler/index regression:  340 passed
+pressure harness focused tests:        151 passed
+Spec 33 + scheduler/index regression:  341 passed
 python py_compile:                      passed
 profile shell syntax:                   passed
 docker compose effective config:       passed
@@ -115,6 +115,13 @@ the harness still targeted `(camera_id, zone_name)`. The upsert now uses the
 published unique key and updates the display name as mutable metadata. A live
 PostgreSQL transaction exercised provisioning and was rolled back before the
 capacity run.
+
+The next pre-sampling attempt exposed one query whose placeholder had been
+converted to named `%(prefix)s` while its call still passed a tuple. The caller
+now passes a mapping, and a whole-file AST contract rejects named placeholders
+with sequence parameters or positional placeholders with mapping parameters.
+A live two-source transaction then completed camera/zone/rule provisioning and
+dual-shard source-plan generation before rolling back all DB changes.
 The formal-window DB summary, event/cooldown summary, non-materialized detail,
 kept-evidence, covered-alias, lifecycle, and ready-to-claim SQL were also run
 read-only against the live PostgreSQL schema.

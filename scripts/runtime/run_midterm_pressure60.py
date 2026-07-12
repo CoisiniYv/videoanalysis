@@ -4538,7 +4538,7 @@ def write_dual_shard_pressure_sources(conn, cfg: PressureConfig) -> dict[str, An
         WHERE source_id LIKE %(prefix)s
         ORDER BY source_id
         """,
-        (f"{cfg.run_id}_%",),
+        {"prefix": f"{cfg.run_id}_%"},
     ).fetchall()
     if len(rows) != cfg.stream_count:
         raise RuntimeError(

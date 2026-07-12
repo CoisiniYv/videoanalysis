@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -112,6 +114,31 @@ def test_pressure_runner_is_directly_executable_from_repo_root() -> None:
     )
 
     assert "Run a full midterm 60-source pressure test" in completed.stdout
+
+
+def test_pressure_runner_sql_placeholder_styles_match_parameter_types() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    issues: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or len(node.args) < 2:
+            continue
+        function = node.func
+        if not isinstance(function, ast.Attribute) or function.attr not in {
+            "execute",
+            "executemany",
+        }:
+            continue
+        query = ast.get_source_segment(source, node.args[0]) or ""
+        params = node.args[1]
+        has_named = bool(re.search(r"%\([A-Za-z_][A-Za-z0-9_]*\)s", query))
+        has_positional = bool(re.search(r"(?<!%)%s", query))
+        if has_named and isinstance(params, (ast.Tuple, ast.List)):
+            issues.append((node.lineno, "named_placeholders_with_sequence"))
+        if has_positional and isinstance(params, ast.Dict):
+            issues.append((node.lineno, "positional_placeholders_with_mapping"))
+
+    assert issues == []
 
 
 def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
