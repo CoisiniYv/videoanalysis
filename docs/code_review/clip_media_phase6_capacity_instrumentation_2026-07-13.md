@@ -244,10 +244,52 @@ window gates. A read-only live recomputation returned 1,534 total rows, 548 new
 events/tasks, and a 407.183-second event-time span instead of the contaminated
 548-second span. Neither correction changes the real 356-expiry failure.
 
-## 7. Remaining Phase 6 Work
+## 7. Fixed-Input Capacity Matrix Result
 
-Run the fixed-input 60-source workload at `max_active=4`, `8`, and `12`, select
-the lowest candidate satisfying correctness, structural, CPU, connection, and
-latency gates, then repeat the selected candidate. Grace remains 9 seconds
-through both accepted scheduler runs. Only then may explicit segment coverage
-readiness and a shorter measured grace be considered.
+The fixed-input 4/8/12 matrix has no selectable `max_active` candidate:
+
+| max_active | formal new events | intrusion | watchlist | retained bundles | video bundles | WIP p95/max | remux p95/max | oldest-ready p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 548 | 356 | 192 | 195 | 0 | 3/3 | 1/1 | 285.9s |
+| 8 | 430 | 347 | 83 | 87 | 0 | 1/7 | 1/1 | 283.2s |
+| 12 | 564 | 353 | 211 | 214 | 0 | 2/7 | 1/1 | 285.8s |
+
+The comparable `max_active=8` artifact is:
+
+```text
+/data/video-analytics/artifacts/phase6_fixed60_8fps_5p5_maxactive8_fair_fb02531_20260713T0558CST
+```
+
+The `max_active=12` artifact is:
+
+```text
+/data/video-analytics/artifacts/phase6_fixed60_8fps_5p5_maxactive12_loop_fb02531_20260713T0538CST
+```
+
+Every candidate had 60/60 source visibility, zero source restart, full-rate
+rolling segments, no DB pool timeout/error/lost connection, DB-backed retained
+image visibility, and zero video bundle. All failed on materialization expiry,
+steady FPS and nonzero forwarder queue. WIP never reached either 8 or 12 while
+the remux lane remained exactly one and oldest-ready converged near rolling
+retention. Increasing shared WIP therefore does not address video service rate.
+
+One discarded `max_active=8` attempt omitted the fixture loop flag and was
+interrupted after the 520-second input ended. Another informative 8 run began
+with face consumer lag inherited from that interruption. Neither is used for
+the table. The fair 8 run and the 12 run both started with face lag zero. Event
+mix still varied because publishers begin playback before runtime setup, so a
+future deterministic regression decision must also freeze sampling-to-fixture
+phase, not merely fixture bytes.
+
+The harness now exposes `--media-worker-rolling-remux-workers`, defaulting to
+one. This does not revise the completed max-active matrix. A non-default value
+is explicitly a separate remux-lane experiment and is recorded/restored with
+the same Compose override contract.
+
+## 8. Remaining Phase 6 Work
+
+Run a separately labeled bounded remux-lane canary with the fixed workload and
+prove that configured/effective workers, WIP, CPU, leases and DB pool remain
+bounded. If it produces videos, run the full gate twice with identical fixture
+phase. If it does not, investigate coverage retry/segment selection before any
+further concurrency increase. Grace remains 9 seconds until two accepted runs.

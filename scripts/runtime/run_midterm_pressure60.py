@@ -416,6 +416,7 @@ class PressureConfig:
     adaface_roi_redis: bool = False
     adaface_roi_batch_timeout_ms: int = 10
     media_worker_materialization_max_active: int = 4
+    media_worker_rolling_remux_workers: int = 1
     preserve_warmup_results: bool = False
     pressure_sampling_start_event_ts_ms: int = 0
 
@@ -531,6 +532,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Shared end-to-end media-worker materialization WIP limit. "
             "Phase 6 compares this value with all lane worker counts fixed."
+        ),
+    )
+    parser.add_argument(
+        "--media-worker-rolling-remux-workers",
+        type=int,
+        default=1,
+        help=(
+            "Rolling-cache remux lane worker count. Keep at 1 for the Phase 6 "
+            "max_active matrix; vary only in a separately labeled remux-lane experiment."
         ),
     )
     parser.add_argument(
@@ -995,6 +1005,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--media-worker-materialization-max-active must be non-negative"
         )
+    if args.media_worker_rolling_remux_workers < 1:
+        raise SystemExit("--media-worker-rolling-remux-workers must be positive")
     if (
         args.rolling_cache_evidence
         and args.media_worker_materialization_max_active < 2
@@ -1002,6 +1014,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--rolling-cache-evidence requires "
             "--media-worker-materialization-max-active >= 2"
+        )
+    if (
+        args.rolling_cache_evidence
+        and args.media_worker_rolling_remux_workers
+        > args.media_worker_materialization_max_active
+    ):
+        raise SystemExit(
+            "--media-worker-rolling-remux-workers cannot exceed "
+            "--media-worker-materialization-max-active"
         )
     if args.dual_shard_same_gpu and args.keep_evidence > 0 and not args.dual_shard_api:
         raise SystemExit(
@@ -1187,6 +1208,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         media_worker_materialization_max_active=int(
             args.media_worker_materialization_max_active
+        ),
+        media_worker_rolling_remux_workers=int(
+            args.media_worker_rolling_remux_workers
         ),
         preserve_warmup_results=bool(args.preserve_warmup_results),
     )
@@ -3989,8 +4013,9 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
             }
         )
     media_values = {
-        # Phase 6 changes only the shared WIP limit. Executor counts and the
-        # ffmpeg/OpenCV CPU budget stay fixed so 4/8/12 runs are comparable.
+        # The Phase 6 4/8/12 matrix keeps the remux candidate at one and changes
+        # only shared WIP.  A non-default value is a separately labeled remux
+        # lane experiment; the complete override remains in the artifact.
         "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE": str(
             cfg.media_worker_materialization_max_active
         ),
@@ -4021,7 +4046,9 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL": str(
             max(16, min(256, cfg.stream_count * 4))
         ),
-        "ROLLING_CACHE_MATERIALIZATION_WORKERS": "1",
+        "ROLLING_CACHE_MATERIALIZATION_WORKERS": str(
+            cfg.media_worker_rolling_remux_workers
+        ),
         "ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S": "1",
         # Fallback for tasks created before materialization_ready_at existed.
         # Keep it aligned with the event-worker ready_at grace so old rows do

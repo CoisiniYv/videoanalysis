@@ -201,6 +201,8 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "--face-embedding-batch-size 16" in output
     assert "media_worker_materialization_max_active=4" in output
     assert "--media-worker-materialization-max-active 4" in output
+    assert "media_worker_rolling_remux_workers=1" in output
+    assert "--media-worker-rolling-remux-workers 1" in output
     assert "preserve_warmup_results=1" in output
     assert "--preserve-warmup-results" in output
 
@@ -677,14 +679,20 @@ def test_pressure_runner_exposes_rolling_cache_canary_flags() -> None:
     assert parsed.rolling_cache_enable_coverage_merge is True
 
 
-def test_pressure_runner_exposes_media_worker_wip_candidate() -> None:
+def test_pressure_runner_exposes_media_worker_capacity_candidates() -> None:
     module = _load_module()
 
     parsed = module.parse_args(
-        ["--media-worker-materialization-max-active", "12"]
+        [
+            "--media-worker-materialization-max-active",
+            "12",
+            "--media-worker-rolling-remux-workers",
+            "4",
+        ]
     )
 
     assert parsed.media_worker_materialization_max_active == 12
+    assert parsed.media_worker_rolling_remux_workers == 4
 
 
 def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
@@ -780,6 +788,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
         module,
         rolling_cache_evidence=True,
         media_worker_materialization_max_active=8,
+        media_worker_rolling_remux_workers=4,
     )
     captured: dict[str, dict[str, str]] = {}
 
@@ -802,7 +811,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
     assert values["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
     assert values["MEDIA_WORKER_IMAGE_WORKERS"] == "4"
-    assert values["ROLLING_CACHE_MATERIALIZATION_WORKERS"] == "1"
+    assert values["ROLLING_CACHE_MATERIALIZATION_WORKERS"] == "4"
     assert values["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
     assert values["MEDIA_WORKER_SCHEDULER_V2_ENABLED"] == "true"
     assert values["MEDIA_WORKER_DB_POOL_ENABLED"] == "true"

@@ -968,6 +968,18 @@ observed-window statistics by an upper event-time/creation-time sampling fence.
 These corrections do not waive or alter the expiry, FPS, queue, duration,
 annotation, or correctness gates. Candidates 8 and 12 remain required.
 
+Capacity matrix checkpoint (2026-07-13): comparable 4/8/12 candidates all
+completed with 60/60 source visibility and zero source restart, but all produced
+zero video bundles. WIP p95/max was 3/3, 1/7 and 2/7 respectively; remux depth
+remained 1/1 for every candidate and oldest-ready p95 remained about 283-286
+seconds. There is no selectable `max_active`; increasing shared WIP only absorbs
+short image bursts. The harness now exposes a default-one, artifact-audited and
+restored `--media-worker-rolling-remux-workers` parameter solely for a separately
+labeled remux-lane experiment. This does not retroactively change the matrix or
+claim `PASS_MEDIA_WORKER_CAPACITY_AND_READY_POLICY_CALIBRATED`. Fixture bytes
+were fixed, but event mix still showed that publisher-to-sampling phase must be
+frozen before a deterministic scheduler regression decision.
+
 ### Phase 7 - Remove Legacy And Misleading Contracts
 
 After two accepted 60-source runs and one restart-recovery soak:

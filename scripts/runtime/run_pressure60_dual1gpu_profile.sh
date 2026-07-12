@@ -63,6 +63,8 @@ Environment overrides:
                       AdaFace ROI batch16 aggregation wait (T4: 200ms).
   MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=4
                       Shared media-worker WIP candidate for Phase 6 A/B.
+  MEDIA_WORKER_ROLLING_REMUX_WORKERS=1
+                      Keep 1 for max_active A/B; vary only in a labeled remux experiment.
   PRESERVE_WARMUP_RESULTS=1
                       Retain prefill event/evidence and fence formal gates by time.
   DRY_RUN=1           Print the command without executing it.
@@ -134,6 +136,7 @@ adaface_sharded="${ADAFACE_SHARDED:-0}"
 adaface_roi_redis="${ADAFACE_ROI_REDIS:-${adaface_roi_redis_default}}"
 roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
 media_worker_materialization_max_active="${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
+media_worker_rolling_remux_workers="${MEDIA_WORKER_ROLLING_REMUX_WORKERS:-1}"
 preserve_warmup_results="${PRESERVE_WARMUP_RESULTS:-1}"
 rtsp_republish_output_base="${RTSP_REPUBLISH_OUTPUT_BASE:-}"
 rtsp_republish_input_uri="${RTSP_REPUBLISH_INPUT_URI:-}"
@@ -164,6 +167,7 @@ cmd=(
   --max-parallel-streams 64
   --batched-push-timeout "${batch_timeout_us}"
   --media-worker-materialization-max-active "${media_worker_materialization_max_active}"
+  --media-worker-rolling-remux-workers "${media_worker_rolling_remux_workers}"
   --savant-ablation-stage "${ablation_stage}"
   --savant-output-mode "${output_mode}"
   --cpu-isolation-profile "${cpu_profile}"
@@ -287,6 +291,7 @@ printf 'adaface_crop_resize=%s\n' "${adaface_crop}"
 printf 'adaface_pre_gate=%s\n' "${adaface_pre_gate}"
 printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
 printf 'media_worker_materialization_max_active=%s\n' "${media_worker_materialization_max_active}"
+printf 'media_worker_rolling_remux_workers=%s\n' "${media_worker_rolling_remux_workers}"
 printf 'preserve_warmup_results=%s\n' "${preserve_warmup_results}"
 printf 'rtsp_republish_output_base=%s\n' "${rtsp_republish_output_base}"
 printf 'rtsp_republish_input_uri=%s\n' "${rtsp_republish_input_uri}"
