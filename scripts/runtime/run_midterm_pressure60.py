@@ -3269,6 +3269,9 @@ def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) 
             ),
         }
     if recreate:
+        storage_override = Path(cfg.compose_file).with_name(
+            "midterm-storage.override.yml"
+        )
         compose = [
             "docker",
             "compose",
@@ -3276,12 +3279,18 @@ def restore_worker_cpu_isolation(cfg: PressureConfig, snapshot: dict[str, Any]) 
             cfg.env_file,
             "-f",
             cfg.compose_file,
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            *[service for _container, service in recreate],
         ]
+        if storage_override.is_file():
+            compose.extend(["-f", str(storage_override)])
+        compose.extend(
+            [
+                "up",
+                "-d",
+                "--no-deps",
+                "--force-recreate",
+                *[service for _container, service in recreate],
+            ]
+        )
         completed = run(
             compose,
             cfg.artifact_dir / "compose_restore_worker_cpu_isolation.log",

@@ -1911,7 +1911,15 @@ def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
     tmp_path, monkeypatch
 ) -> None:
     module = _load_module()
-    cfg = _config(module, artifact_dir=tmp_path)
+    compose_file = tmp_path / "docker-compose.midterm.yml"
+    compose_file.touch()
+    storage_override = tmp_path / "midterm-storage.override.yml"
+    storage_override.touch()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        compose_file=str(compose_file),
+    )
     subprocess_calls: list[list[str]] = []
     compose_calls: list[list[str]] = []
 
@@ -1955,6 +1963,16 @@ def test_worker_cpu_restore_recreates_containers_for_empty_original_cpuset(
             "video-analytics-midterm-event-worker",
         ]
     ]
+    assert compose_calls[0][0:7] == [
+        "docker",
+        "compose",
+        "--env-file",
+        cfg.env_file,
+        "-f",
+        str(compose_file),
+        "-f",
+    ]
+    assert compose_calls[0][7] == str(storage_override)
     assert compose_calls[0][-1] == "face-worker"
     assert result["containers"]["video-analytics-midterm-event-worker"]["ok"] is True
     assert result["containers"]["video-analytics-midterm-face-worker"] == {
