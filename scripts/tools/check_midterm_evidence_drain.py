@@ -12,24 +12,16 @@ from typing import Any
 import psycopg
 from redis import Redis
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+)
+
 
 DEFAULT_DB_URL = "postgresql://video:video@127.0.0.1:5432/video_analytics"
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6396/0"
-ACTIVE_MATERIALIZATION_STATES = (
-    "manifest_ready",
-    "materialization_pending",
-    "materializing",
-    "finalizing",
-)
-ACTIVE_TASK_STATES = (
-    "pending",
-    "waiting_proof",
-    "queued",
-    "replay_job_created",
-    "replaying",
-    "materializing",
-    "finalizing",
-)
+ACTIVE_MATERIALIZATION_STATES = tuple(sorted(ACTIVE_MATERIALIZATION_STATUSES))
+ACTIVE_TASK_STATES = tuple(sorted(ACTIVE_COMPATIBILITY_TASK_STATUSES))
 
 
 def _scalar(conn: psycopg.Connection, sql: str, params: dict[str, Any] | None = None) -> int:

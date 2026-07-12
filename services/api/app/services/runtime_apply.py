@@ -17,6 +17,12 @@ from psycopg.rows import dict_row
 from redis import Redis
 import yaml
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+    TERMINAL_MATERIALIZATION_STATUSES,
+)
+
 from app.config import get_settings
 from app.services.replay_shards import (
     ReplayShardConfigError,
@@ -65,33 +71,15 @@ SAVANT_READY_PATTERNS = (
     re.compile(r"\bpipeline\b.*\bready\b", re.IGNORECASE),
     re.compile(r"\bpipeline\b.*\bstarted\b", re.IGNORECASE),
 )
-RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES = (
-    "pending",
-    "waiting_proof",
-    "queued",
-    "replay_job_created",
-    "replaying",
-    "materializing",
-    "finalizing",
+RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES = tuple(
+    sorted(ACTIVE_COMPATIBILITY_TASK_STATUSES)
 )
-RUNTIME_RESTART_TERMINAL_EVIDENCE_STATES = (
-    "materialization_expired",
-    "materialization_failed",
-    "materialization_skipped",
+RUNTIME_RESTART_TERMINAL_EVIDENCE_STATES = tuple(
+    sorted(TERMINAL_MATERIALIZATION_STATUSES - {"materialized", "materialization_deferred"})
 )
-RUNTIME_EPOCH_BARRIER_TASK_STATES = (
-    "pending",
-    "waiting_proof",
-    "queued",
-    "replay_job_created",
-    "replaying",
-    "materializing",
-    "finalizing",
-)
-RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES = (
-    "manifest_ready",
-    "materialization_pending",
-    "materializing",
+RUNTIME_EPOCH_BARRIER_TASK_STATES = RUNTIME_RESTART_BLOCKING_EVIDENCE_STATES
+RUNTIME_EPOCH_BARRIER_MATERIALIZATION_STATES = tuple(
+    sorted(ACTIVE_MATERIALIZATION_STATUSES)
 )
 RUNTIME_EPOCH_BARRIER_FORCE_REASON = "epoch_superseded_incomplete"
 DEFAULT_EVIDENCE_GUARD_LIMIT = 12

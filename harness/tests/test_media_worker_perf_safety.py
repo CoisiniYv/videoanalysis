@@ -393,14 +393,18 @@ def test_rolling_cache_candidates_do_not_claim_before_ready_at() -> None:
     assert worker._rolling_cache_candidate_tasks(conn, cfg) == []
     assert "rolling_cache_ready_at <= now()" in conn.cursor_obj.sql
     assert "et.materialization_ready_at <= now()" in conn.cursor_obj.sql
-    assert conn.cursor_obj.params["segment_ready_delay_s"] == 5.0
-    assert "materialization_deferred" in worker.ROLLING_CACHE_TASK_STATUSES
+    assert "segment_ready_delay_s" not in conn.cursor_obj.params
+    assert worker.ROLLING_CACHE_TASK_STATUSES == (
+        "manifest_ready",
+        "materialization_pending",
+    )
 
 
-def test_rolling_cache_coverage_miss_deferred_tasks_are_retryable() -> None:
+def test_rolling_cache_coverage_miss_uses_pending_not_terminal_deferred() -> None:
     worker = _activate("media-worker", "app.worker")
 
-    assert "materialization_deferred" in worker.ROLLING_CACHE_TASK_STATUSES
+    assert "materialization_pending" in worker.ROLLING_CACHE_TASK_STATUSES
+    assert "materialization_deferred" not in worker.ROLLING_CACHE_TASK_STATUSES
 
 
 def test_rolling_cache_claim_preserves_existing_processing_deadline() -> None:
@@ -409,6 +413,9 @@ def test_rolling_cache_claim_preserves_existing_processing_deadline() -> None:
     class _Cursor:
         rowcount = 1
 
+        def __init__(self) -> None:
+            self.executions: list[tuple[str, dict[str, Any]]] = []
+
         def __enter__(self):
             return self
 
@@ -418,33 +425,51 @@ def test_rolling_cache_claim_preserves_existing_processing_deadline() -> None:
         def execute(self, sql: str, params: dict[str, Any]) -> None:
             self.sql = sql
             self.params = params
+            self.executions.append((sql, params))
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+        def fetchone(self) -> tuple[int]:
+            return (1,)
 
     class _Conn:
         def __init__(self) -> None:
             self.cursor_obj = _Cursor()
 
-        def cursor(self) -> _Cursor:
+        def cursor(self, *_args: Any, **_kwargs: Any) -> _Cursor:
             return self.cursor_obj
 
     conn = _Conn()
     ready_at = "2026-07-06T01:02:03+00:00"
 
-    assert worker._claim_rolling_cache_task(
+    lease = worker._claim_rolling_cache_task(
         conn,
         event_id=EVENT_ID,
         ready_at=ready_at,
         processing_deadline_s=45.0,
     )
-    assert "materialization_deadline_at = COALESCE(" in conn.cursor_obj.sql
-    assert "processing_deadline_s" in conn.cursor_obj.sql
-    assert conn.cursor_obj.params["ready_at"] == ready_at
-    assert conn.cursor_obj.params["processing_deadline_s"] == 45.0
+    assert lease is not None
+    task_query, task_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "UPDATE evidence_tasks" in execution[0]
+    )
+    assert "materialization_ready_at =" not in task_query
+    assert "materialization_deadline_at =" not in task_query
+    assert "ready_at" not in task_params
+    assert "processing_deadline_s" not in task_params
 
 
-def test_rolling_cache_defer_sets_retry_ready_at() -> None:
+def test_rolling_cache_retry_preserves_ready_at_and_sets_next_attempt() -> None:
     worker = _activate("media-worker", "app.worker")
 
     class _Cursor:
+        rowcount = 1
+
+        def __init__(self) -> None:
+            self.executions: list[tuple[str, dict[str, Any]]] = []
+
         def __enter__(self):
             return self
 
@@ -454,33 +479,51 @@ def test_rolling_cache_defer_sets_retry_ready_at() -> None:
         def execute(self, sql: str, params: dict[str, Any]) -> None:
             self.sql = sql
             self.params = params
+            self.executions.append((sql, params))
 
     class _Conn:
         def __init__(self) -> None:
             self.cursor_obj = _Cursor()
 
-        def cursor(self) -> _Cursor:
+        def cursor(self, *_args: Any, **_kwargs: Any) -> _Cursor:
             return self.cursor_obj
 
     conn = _Conn()
-    worker._defer_rolling_cache_task(
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="media-worker:test",
+        token="lease-token",
+        generation=1,
+        phase=worker.MaterializationPhase.REMUX_RUNNING.value,
+    )
+    assert worker._defer_rolling_cache_task(
         conn,
         event_id=EVENT_ID,
         reason="rolling_cache_requested_window_not_fully_covered:post_gap_ns=100",
         retry_after_s=1.5,
+        lease=lease,
     )
 
-    assert "materialization_ready_at =" in conn.cursor_obj.sql
-    assert "retry_after_s" in conn.cursor_obj.sql
-    assert conn.cursor_obj.params["retry_after_s"] == 1.5
+    task_query, task_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "materialization_next_attempt_at" in execution[0]
+    )
+    assert "materialization_ready_at =" not in task_query
+    assert task_params["delay_s"] >= 1.5
+    assert task_params["reason_code"] == "coverage_not_complete"
 
 
-def test_rolling_cache_deadline_miss_is_terminal_failed_not_expired() -> None:
+def test_rolling_cache_deadline_miss_is_terminal_expired() -> None:
     worker = _activate("media-worker", "app.worker")
 
     class _Cursor:
         rowcount = 2
 
+        def __init__(self) -> None:
+            self.executions: list[tuple[str, dict[str, Any]]] = []
+            self.sql = ""
+
         def __enter__(self):
             return self
 
@@ -490,22 +533,34 @@ def test_rolling_cache_deadline_miss_is_terminal_failed_not_expired() -> None:
         def execute(self, sql: str, params: dict[str, Any]) -> None:
             self.sql = sql
             self.params = params
+            self.executions.append((sql, params))
+
+        def fetchall(self) -> list[tuple[str]]:
+            if "information_schema.columns" in self.sql:
+                return []
+            if "RETURNING event_id" in self.sql:
+                return [(EVENT_ID,), ("22222222-2222-4222-8222-222222222222",)]
+            return []
 
     class _Conn:
         def __init__(self) -> None:
             self.cursor_obj = _Cursor()
 
-        def cursor(self) -> _Cursor:
+        def cursor(self, *_args: Any, **_kwargs: Any) -> _Cursor:
             return self.cursor_obj
 
     conn = _Conn()
     cfg = SimpleNamespace(rolling_cache_sources=("source-1",))
 
     assert worker._expire_overdue_rolling_cache_tasks(conn, cfg) == 2
-    assert "SET status = 'materialization_failed'" in conn.cursor_obj.sql
-    assert "materialization_failure_reason" in conn.cursor_obj.sql
-    assert "'rolling_cache_materialization_deadline_missed'" in conn.cursor_obj.sql
-    assert "materialization_expired_reason = NULL" in conn.cursor_obj.sql
+    task_query, _task_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "UPDATE evidence_tasks" in execution[0]
+    )
+    assert "SET status = 'materialization_expired'" in task_query
+    assert "materialization_failure_reason = NULL" in task_query
+    assert "materialization_expired_reason = 'business_deadline_expired'" in task_query
 
 
 def test_rolling_cache_coverage_retry_waits_for_observed_gap() -> None:
@@ -1204,9 +1259,17 @@ def test_rolling_cache_runtime_errors_are_terminal_not_deferred() -> None:
     source = (REPO_ROOT / "services" / "media-worker" / "app" / "worker.py").read_text(
         encoding="utf-8"
     )
+    repository_source = (
+        REPO_ROOT
+        / "services"
+        / "media-worker"
+        / "app"
+        / "materialization_repository.py"
+    ).read_text(encoding="utf-8")
 
     assert "def _fail_rolling_cache_task" in source
     assert "def _rolling_cache_failure_reason" in source
-    assert "status = 'materialization_failed'" in source
-    assert "materialization_failure_reason = %(reason)s" in source
+    assert "return fail_rolling_task(pg_conn, lease, reason=reason)" in source
+    assert "status = 'materialization_failed'" in repository_source
+    assert "materialization_failure_reason = %(reason_code)s" in repository_source
     assert "reason=_rolling_cache_failure_reason(exc)" in source

@@ -73,20 +73,22 @@ def test_required_characterization_scenarios_are_named_and_executable() -> None:
         assert test_name in _test_names(ROOT / relative), scenario
 
 
-def test_legacy_side_effect_inventory_is_frozen_before_extraction() -> None:
+def test_legacy_side_effect_inventory_remains_recorded_during_phase1() -> None:
     expected = _json("legacy_behavior_manifest.json")["legacy_source_inventory"]
     clip_worker = CLIP_WORKER_DIR / "app" / "worker.py"
     media_worker = MEDIA_WORKER_DIR / "app" / "worker.py"
 
-    assert _call_count(clip_worker, "xack") == expected["clip_direct_xack_calls"]
-    assert _call_count(media_worker, "ThreadPoolExecutor") == expected[
-        "media_thread_pool_executor_calls"
-    ]
-    assert _call_count(media_worker, "_expire_overdue_rolling_cache_tasks") == expected[
+    # The manifest remains the immutable Phase 0 source baseline. Phase 1
+    # deliberately consolidates ACK and expiry ownership without rewriting it.
+    assert expected == {
+        "clip_direct_xack_calls": 16,
+        "media_thread_pool_executor_calls": 3,
+        "media_rolling_expiry_call_sites": 2,
+        "media_process_sink_output_call_sites": 3,
+    }
+    assert _call_count(clip_worker, "xack") < expected["clip_direct_xack_calls"]
+    assert _call_count(media_worker, "_expire_overdue_rolling_cache_tasks") < expected[
         "media_rolling_expiry_call_sites"
-    ]
-    assert _call_count(media_worker, "_process_sink_output") == expected[
-        "media_process_sink_output_call_sites"
     ]
 
 
@@ -223,6 +225,7 @@ def test_malformed_request_is_acked_without_side_effect(monkeypatch) -> None:
 
 
 def test_replay_empty_response_releases_slot_and_acks(monkeypatch) -> None:
+    """Keep the Phase 0 scenario nodeid while asserting the Phase 1 contract."""
     helpers = _load_clip_helpers()
     helpers._activate()
     import app.worker as worker
@@ -258,12 +261,14 @@ def test_replay_empty_response_releases_slot_and_acks(monkeypatch) -> None:
         helpers._DiagnosticsConn(),
     )
 
-    assert redis_client.acked == ["1-0"]
-    assert updates[-1]["status"] == "failed"
+    assert redis_client.acked == []
+    assert updates[-1]["status"] == "pending"
+    assert updates[-1]["evidence_state"] == "materialization_pending"
+    assert updates[-1]["evidence_reason"] == "replay_unavailable"
     assert releases[-1]["release_reason"] == "replay_job_create_failed"
 
 
-def test_legacy_replay_success_ack_is_characterized_after_persist_calls(
+def test_replay_success_ack_is_withheld_when_persist_calls_fail(
     monkeypatch,
 ) -> None:
     helpers = _load_clip_helpers()
@@ -298,5 +303,5 @@ def test_legacy_replay_success_ack_is_characterized_after_persist_calls(
         helpers._DiagnosticsConn(),
     )
 
-    assert call_order[-3:] == ["status_persist", "slot_persist", "xack"]
-    assert redis_client.acked == ["1-0"]
+    assert call_order == ["status_persist", "slot_persist"]
+    assert redis_client.acked == []

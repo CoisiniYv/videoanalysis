@@ -180,8 +180,19 @@ SET status = CASE
             THEN 'terminal'
         WHEN r.normalized_reason IN (
             'coverage_not_complete', 'no_overlapping_final_segment',
-            'segment_not_stable', 'segment_disappeared',
-            'legacy_empty_deferred'
+            'segment_not_stable', 'segment_disappeared'
+        ) OR (
+            r.normalized_reason = 'legacy_empty_deferred'
+            AND (
+                COALESCE(
+                    et.materialization_audit->'rolling_cache'->>'status',
+                    ''
+                ) <> ''
+                OR COALESCE(
+                    et.materialization_audit->>'materialization_mode',
+                    ''
+                ) LIKE 'rolling_cache%'
+            )
         ) THEN 'waiting_coverage'
         ELSE 'waiting_ready'
     END,
@@ -211,6 +222,14 @@ SET status = CASE
          AND et.materialization_deadline_at <= now()
             THEN 'terminal'
         WHEN COALESCE(et.task_type, '') = 'image_only'
+          OR COALESCE(
+                et.materialization_audit->'rolling_cache'->>'status',
+                ''
+             ) <> ''
+          OR COALESCE(
+                et.materialization_audit->>'materialization_mode',
+                ''
+             ) LIKE 'rolling_cache%'
           OR r.normalized_reason IN (
               'coverage_not_complete', 'no_overlapping_final_segment',
               'segment_not_stable', 'segment_disappeared'

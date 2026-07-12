@@ -20,6 +20,17 @@ from threading import Lock, local
 import psycopg
 from psycopg.rows import dict_row
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+    CLAIMABLE_MATERIALIZATION_STATUSES,
+    MATERIALIZATION_STATE_CONTRACT_VERSION,
+    MaterializationPhase,
+    TERMINAL_MATERIALIZATION_STATUSES,
+    classify_reason,
+    retry_delay_seconds,
+)
+
 from app.annotated_snapshot import generate_annotated_snapshot
 from app.config import Config, load_config
 from app.evidence_db_index import upsert_evidence_bundle_index
@@ -27,6 +38,22 @@ from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
 from app.legacy_observability import (
     guard_failure_attribution,
     materialization_correlation,
+)
+from app.materialization_repository import (
+    MaterializationLease,
+    claim_finalizer_task,
+    claim_rolling_task,
+    complete_finalizer_task,
+    current_lease,
+    defer_terminal_task,
+    fail_unclaimed_task,
+    fail_rolling_task,
+    persist_finalizer_handoff,
+    recover_and_expire_rolling_tasks,
+    retry_finalizer_handoff,
+    retry_rolling_task,
+    schedule_unclaimed_retry,
+    supports_lifecycle_v2,
 )
 from app.post_savant_evidence_bundle import (
     EVIDENCE_TOPOLOGY as POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
@@ -91,10 +118,7 @@ MATERIALIZATION_STATUS_DEFERRED = "materialization_deferred"
 MATERIALIZATION_STATUS_FAILED = "materialization_failed"
 EPOCH_SUPERSEDED_INCOMPLETE_REASON = "epoch_superseded_incomplete"
 MATERIALIZATION_BACKLOG_STATUSES = (
-    "pending",
-    "replaying",
-    "finalizing",
-    MATERIALIZATION_STATUS_DEFERRED,
+    *sorted(ACTIVE_COMPATIBILITY_TASK_STATUSES),
 )
 POST_SAVANT_FINALIZER_ENV = "EVIDENCE_TOPOLOGY"
 SNAPSHOT_ELIGIBLE_CLIP_STATUSES = ("ready", "generated")
@@ -1802,14 +1826,21 @@ def _mark_media_materialization_deferred(
     sink_path: str,
     reason: str,
     guardrails: dict,
-) -> None:
-    _mark_media_materialization_terminal(
+) -> bool:
+    lease = current_lease(
+        pg_conn,
+        event_id=event_id,
+        fallback_owner="media-finalizer",
+        fallback_phase=MaterializationPhase.FINALIZER_PENDING.value,
+    )
+    return _mark_media_materialization_terminal(
         pg_conn,
         event_id=event_id,
         sink_path=sink_path,
         state=MATERIALIZATION_STATUS_DEFERRED,
         reason=reason,
         guardrails=guardrails,
+        lease=lease,
     )
 
 
@@ -1820,15 +1851,81 @@ def _mark_media_materialization_failed(
     sink_path: str,
     reason: str,
     guardrails: dict,
-) -> None:
-    _mark_media_materialization_terminal(
+    lease: MaterializationLease | None = None,
+) -> bool:
+    return _mark_media_materialization_terminal(
         pg_conn,
         event_id=event_id,
         sink_path=sink_path,
         state=MATERIALIZATION_STATUS_FAILED,
         reason=reason,
         guardrails=guardrails,
+        lease=lease,
     )
+
+
+def _mark_media_materialization_retry(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    sink_path: str,
+    reason: str,
+    guardrails: dict,
+    retry_after_s: float = 1.0,
+) -> bool:
+    lease = current_lease(
+        pg_conn,
+        event_id=event_id,
+        fallback_owner="media-finalizer",
+        fallback_phase=MaterializationPhase.FINALIZER_PENDING.value,
+    )
+    if lease is not None and lease.phase in {
+        MaterializationPhase.FINALIZER_PENDING.value,
+        MaterializationPhase.FINALIZING.value,
+    }:
+        changed = retry_finalizer_handoff(
+            pg_conn,
+            lease,
+            reason=reason,
+            retry_hint_s=retry_after_s,
+        )
+    elif lease is not None:
+        changed = retry_rolling_task(
+            pg_conn,
+            lease,
+            reason=reason,
+            retry_hint_s=retry_after_s,
+        )
+    else:
+        changed = schedule_unclaimed_retry(
+            pg_conn,
+            event_id=event_id,
+            reason=reason,
+            retry_hint_s=retry_after_s,
+            sink_output_path=sink_path,
+        )
+    if changed:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE evidence_tasks
+                SET materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'last_guardrails', %(guardrails)s::jsonb,
+                            'last_reason_detail', %(reason)s::text,
+                            'last_sink_output_path', %(sink_path)s::text
+                        ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                """,
+                {
+                    "event_id": event_id,
+                    "reason": reason,
+                    "sink_path": sink_path,
+                    "guardrails": json.dumps(guardrails),
+                },
+            )
+    return changed
 
 
 def _mark_media_materialization_terminal(
@@ -1839,26 +1936,48 @@ def _mark_media_materialization_terminal(
     state: str,
     reason: str,
     guardrails: dict,
-) -> None:
+    lease: MaterializationLease | None = None,
+) -> bool:
     try:
+        if state == MATERIALIZATION_STATUS_DEFERRED:
+            changed = defer_terminal_task(
+                pg_conn,
+                event_id=event_id,
+                reason=reason,
+                sink_output_path=sink_path,
+                lease=lease,
+            )
+        elif state == MATERIALIZATION_STATUS_FAILED:
+            lease = lease or current_lease(
+                pg_conn,
+                event_id=event_id,
+                fallback_owner="media-finalizer",
+                fallback_phase=MaterializationPhase.FINALIZING.value,
+            )
+            if lease is not None:
+                changed = fail_rolling_task(pg_conn, lease, reason=reason)
+            else:
+                changed = fail_unclaimed_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=reason,
+                    sink_output_path=sink_path,
+                )
+        else:
+            raise ValueError(f"unsupported terminal materialization state: {state}")
+        if not changed:
+            return False
         with pg_conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE events
-                SET media_status = %(state)s,
-                    payload = COALESCE(payload, '{}'::jsonb)
+                SET payload = COALESCE(payload, '{}'::jsonb)
                         || jsonb_build_object(
                             'media',
                             COALESCE(payload->'media', '{}'::jsonb)
-                            || jsonb_strip_nulls(jsonb_build_object(
-                                'sink_output_path', %(sink_path)s::text,
-                                'materialization_status', %(state)s::text,
-                                'materialization_reason', %(reason)s::text,
-                                'materialization_guardrails', %(guardrails)s::jsonb,
-                                'evidence_state', %(state)s::text,
-                                'evidence_reason', %(reason)s::text,
-                                'evidence_state_updated_at', now()
-                            ))
+                            || jsonb_build_object(
+                                'materialization_guardrails', %(guardrails)s::jsonb
+                            )
                         ),
                     updated_at = now()
                 WHERE id = %(event_id)s::uuid
@@ -1871,47 +1990,35 @@ def _mark_media_materialization_terminal(
                     "guardrails": json.dumps(guardrails),
                 },
             )
-            if cur.rowcount and cur.rowcount > 0:
-                cur.execute(
-                    """
-                    UPDATE evidence_tasks
-                    SET status = %(state)s,
-                        materialization_status = %(state)s,
-                        error_message = %(reason)s,
-                        sink_output_path = %(sink_path)s,
-                        materialization_defer_reason = CASE
-                            WHEN %(state)s::text = 'materialization_deferred'
-                                THEN %(reason)s
-                            ELSE materialization_defer_reason
-                        END,
-                        materialization_failure_reason = CASE
-                            WHEN %(state)s::text = 'materialization_failed'
-                                THEN %(reason)s
-                            ELSE materialization_failure_reason
-                        END,
-                        materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                            || jsonb_build_object(
-                                'last_guardrails', %(guardrails)s::jsonb,
-                                'last_reason', %(reason)s::text,
-                                'last_sink_output_path', %(sink_path)s::text
-                            ),
-                        updated_at = now()
-                    WHERE event_id = %(event_id)s::uuid
-                    """,
-                    {
-                        "event_id": event_id,
-                        "state": state,
-                        "reason": reason,
-                        "sink_path": sink_path,
-                        "guardrails": json.dumps(guardrails),
-                    },
-                )
+            cur.execute(
+                """
+                UPDATE evidence_tasks
+                SET materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'last_guardrails', %(guardrails)s::jsonb,
+                            'last_reason_detail', %(reason)s::text,
+                            'last_sink_output_path', %(sink_path)s::text
+                        ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                  AND materialization_status = %(state)s
+                """,
+                {
+                    "event_id": event_id,
+                    "state": state,
+                    "reason": reason,
+                    "sink_path": sink_path,
+                    "guardrails": json.dumps(guardrails),
+                },
+            )
+        return True
     except Exception:
         logger.exception(
             "failed to mark materialization state event_id=%s state=%s",
             event_id,
             state,
         )
+        return False
 
 
 def _claim_media_finalization(
@@ -1921,67 +2028,18 @@ def _claim_media_finalization(
     sink_path: str,
     worker_id: str,
 ) -> dict[str, object]:
-    terminal_states = (
-        "ready",
-        "materialized",
-        "failed",
-        "materialization_failed",
-        "materialization_expired",
-        "materialization_skipped",
-    )
     try:
-        with pg_conn.cursor() as cur:
-            cur.execute(
-                """
-                WITH candidate AS (
-                    SELECT event_id
-                    FROM evidence_tasks
-                    WHERE event_id = %(event_id)s::uuid
-                      AND COALESCE(materialization_status, status, '') <> ALL(%(terminal_states)s)
-                    FOR UPDATE SKIP LOCKED
-                ),
-                claimed AS (
-                    UPDATE evidence_tasks et
-                    SET status = 'finalizing',
-                        materialization_status = 'finalizing',
-                        sink_output_path = %(sink_path)s,
-                        materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                            || jsonb_build_object(
-                                'finalizer_claimed_by', %(worker_id)s::text,
-                                'finalizer_claimed_at', now(),
-                                'sink_output_path', %(sink_path)s::text
-                            ),
-                        updated_at = now()
-                    FROM candidate c
-                    WHERE et.event_id = c.event_id
-                    RETURNING et.event_id
-                )
-                SELECT CASE
-                    WHEN EXISTS (SELECT 1 FROM claimed) THEN 'claimed'
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM evidence_tasks
-                        WHERE event_id = %(event_id)s::uuid
-                          AND COALESCE(materialization_status, status, '') = ANY(%(terminal_states)s)
-                    ) THEN 'terminal'
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM evidence_tasks
-                        WHERE event_id = %(event_id)s::uuid
-                    ) THEN 'busy'
-                    ELSE 'missing'
-                END AS claim_status
-                """,
-                {
-                    "event_id": event_id,
-                    "sink_path": sink_path,
-                    "worker_id": worker_id,
-                    "terminal_states": list(terminal_states),
-                },
-            )
-            row = cur.fetchone()
-            status = str(row[0]) if row else "missing"
-            return {"status": status, "claimed": status == "claimed"}
+        return claim_finalizer_task(
+            pg_conn,
+            event_id=event_id,
+            sink_output_path=sink_path,
+            worker_id=worker_id,
+            lease_seconds=max(
+                1.0,
+                _materialization_timeout_s()
+                or float(os.getenv("ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS", "120")),
+            ),
+        )
     except Exception as exc:
         logger.exception("media_finalization_claim_failed event_id=%s", event_id)
         return {
@@ -4911,6 +4969,7 @@ def _process_sink_output(
             if isinstance(finalizer_phase, dict)
             else _mark_sink_phase(str(meta_dir), event_id, "sink_metadata_first_seen")
         )
+        finalizer_lease: MaterializationLease | None = None
 
         # Idempotency: skip if already marked ready
         if _is_already_ready(pg_conn, event_id):
@@ -5037,6 +5096,7 @@ def _process_sink_output(
                             event_id=event_id,
                             sink_path=meta_dir,
                             error_message=error_message,
+                            lease=finalizer_lease,
                         )
                         processed_dirs.add(meta_dir)
                         continue
@@ -5068,6 +5128,27 @@ def _process_sink_output(
                 )
             )
         ):
+            reason = "materialization_max_per_poll_reached"
+            guardrails = _materialization_guardrails(
+                guard=materialization_guard,
+                pacer=materialization_pacer,
+                timeout_s=materialization_timeout_s,
+                max_backlog=materialization_max_backlog,
+                backlog_depth=None,
+                admission_status="retry",
+                reason=reason,
+            )
+            _mark_media_materialization_retry(
+                pg_conn,
+                event_id=event_id,
+                sink_path=meta_dir,
+                reason=reason,
+                guardrails=guardrails,
+                retry_after_s=max(
+                    1.0,
+                    float(os.getenv("MEDIA_POLL_INTERVAL_S", "2")),
+                ),
+            )
             logger.info(
                 "media_materialization_paced event_id=%s meta_dir=%s "
                 "reason=max_per_poll_reached max_per_poll=%s processed_this_poll=%s",
@@ -5147,12 +5228,16 @@ def _process_sink_output(
                 admission_status="deferred",
                 reason=reason,
             )
-            _mark_media_materialization_deferred(
+            _mark_media_materialization_retry(
                 pg_conn,
                 event_id=event_id,
                 sink_path=meta_dir,
                 reason=reason,
                 guardrails=guardrails,
+                retry_after_s=max(
+                    1.0,
+                    float(os.getenv("MEDIA_POLL_INTERVAL_S", "2")),
+                ),
             )
             logger.info(
                 "media_materialization_deferred event_id=%s meta_dir=%s reason=%s",
@@ -5175,12 +5260,13 @@ def _process_sink_output(
                     admission_status="deferred",
                     reason=reason,
                 )
-                _mark_media_materialization_deferred(
+                _mark_media_materialization_retry(
                     pg_conn,
                     event_id=event_id,
                     sink_path=meta_dir,
                     reason=reason,
                     guardrails=guardrails,
+                    retry_after_s=max(1.0, float(os.getenv("MEDIA_POLL_INTERVAL_S", "2"))),
                 )
                 logger.info(
                     "media_materialization_deferred event_id=%s meta_dir=%s reason=%s",
@@ -5227,6 +5313,11 @@ def _process_sink_output(
             )
             claim_wait_ms = int((time.monotonic() - claim_started) * 1000)
             claim_status = str(claim_result.get("status") or "")
+            finalizer_lease = (
+                claim_result.get("lease")
+                if isinstance(claim_result.get("lease"), MaterializationLease)
+                else None
+            )
             if claim_status in {"terminal"}:
                 if meta_dir:
                     processed_dirs.add(meta_dir)
@@ -5280,6 +5371,9 @@ def _process_sink_output(
                 )
                 continue
         _set_event_evidence_state(pg_conn, event_id, state="materializing")
+        terminal_transition_persisted = False
+        evidence_state = "materializing"
+        evidence_reason = ""
         try:
             if post_savant_finalizer_enabled:
                 if not evidence_output_dir:
@@ -5315,6 +5409,7 @@ def _process_sink_output(
                             sink_path=meta_dir,
                             reason=error_message,
                             guardrails=failed_guardrails,
+                            lease=finalizer_lease,
                         )
                     else:
                         _mark_media_finalize_failed(
@@ -5329,6 +5424,37 @@ def _process_sink_output(
                     continue
                 clip_path = bundle["raw_clip"]
                 clip_status = bundle.get("clip_status", "generated_unverified")
+                evidence_state = _evidence_state_for_clip_status(clip_status)
+                evidence_reason = _evidence_reason_for_bundle(
+                    clip_status,
+                    bundle if isinstance(bundle, dict) else None,
+                )
+                if finalizer_lease is None:
+                    logger.error(
+                        "media_terminal_transition_missing_lease "
+                        "event_id=%s worker_id=%s",
+                        event_id,
+                        finalizer_worker_id,
+                    )
+                    continue
+                terminal_transition_persisted = complete_finalizer_task(
+                    pg_conn,
+                    finalizer_lease,
+                    materialization_status=evidence_state,
+                    reason=evidence_reason,
+                    clip_path=clip_path,
+                    metadata_path=bundle.get("metadata") or metadata_file,
+                    output_root=bundle.get("evidence_dir") or "",
+                )
+                if not terminal_transition_persisted:
+                    logger.warning(
+                        "media_terminal_transition_fence_lost "
+                        "event_id=%s token=%s generation=%s",
+                        event_id,
+                        finalizer_lease.token,
+                        finalizer_lease.generation,
+                    )
+                    continue
             else:
                 clip_path = video_file
                 clip_status = "ready"
@@ -5428,7 +5554,6 @@ def _process_sink_output(
                         """
                         UPDATE events
                         SET clip_path = %(clip_path)s,
-                            media_status = %(clip_status_text)s,
                             payload = jsonb_set(
                                 jsonb_set(
                                     jsonb_set(
@@ -5463,7 +5588,6 @@ def _process_sink_output(
                         """
                         UPDATE events
                         SET clip_path = %(clip_path)s,
-                            media_status = %(clip_status_text)s,
                             payload = jsonb_set(
                                 jsonb_set(
                                     jsonb_set(
@@ -5668,6 +5792,105 @@ def _process_sink_output(
                         clip_status,
                         bundle if isinstance(bundle, dict) else None,
                     )
+                    lifecycle_fields = ""
+                    lifecycle_predicate = ""
+                    lifecycle_params: dict[str, object] = {}
+                    if finalizer_lease and finalizer_lease.schema_v2:
+                        lifecycle_fields = """
+                            materialization_phase = 'terminal',
+                            materialization_phase_updated_at = now(),
+                            materialization_owner = 'terminal',
+                            materialization_next_attempt_at = NULL,
+                            materialization_retry_reason = NULL,
+                            materialization_lease_owner = NULL,
+                            materialization_lease_token = NULL,
+                            materialization_lease_expires_at = NULL,
+                            materialization_lease_heartbeat_at = NULL,
+                        """
+                        lifecycle_predicate = """
+                          AND materialization_status = 'materializing'
+                          AND materialization_lease_owner = %(lease_owner)s
+                          AND materialization_lease_token = %(lease_token)s
+                          AND materialization_lease_generation = %(lease_generation)s
+                        """
+                        lifecycle_params = {
+                            "lease_owner": finalizer_lease.owner,
+                            "lease_token": finalizer_lease.token,
+                            "lease_generation": finalizer_lease.generation,
+                        }
+                    if terminal_transition_persisted:
+                        # The fenced repository transition already won and
+                        # cleared the lease. This legacy enrichment write may
+                        # only replay the exact terminal state it committed.
+                        lifecycle_fields = ""
+                        lifecycle_predicate = """
+                          AND materialization_status = %(evidence_state)s
+                          AND materialization_phase = 'terminal'
+                        """
+                        lifecycle_params = {}
+                    cur.execute(
+                        f"""
+                        UPDATE evidence_tasks
+                        SET status = %(evidence_state)s,
+                            materialization_status = %(evidence_state)s,
+                            {lifecycle_fields}
+                            clip_path = COALESCE(%(clip_path)s, clip_path),
+                            metadata_path = COALESCE(%(metadata_path)s, metadata_path),
+                            output_root = COALESCE(%(output_root)s, output_root),
+                            last_materialization_at = CASE
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN now()
+                                ELSE last_materialization_at
+                            END,
+                            materialization_failure_reason = CASE
+                                WHEN %(evidence_state)s::text = 'materialization_failed'
+                                    THEN %(evidence_reason)s::text
+                                ELSE NULL
+                            END,
+                            materialization_defer_reason = CASE
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN NULL
+                                ELSE NULL
+                            END,
+                            materialization_expired_reason = CASE
+                                WHEN %(evidence_state)s::text = 'materialization_expired'
+                                    THEN %(evidence_reason)s::text
+                                ELSE NULL
+                            END,
+                            error_message = CASE
+                                WHEN %(evidence_reason)s::text != ''
+                                    THEN %(evidence_reason)s::text
+                                WHEN %(evidence_state)s::text = 'materialized'
+                                    THEN NULL
+                                ELSE error_message
+                            END,
+                            updated_at = now()
+                        WHERE event_id = %(event_id)s::uuid
+                          AND COALESCE(materialization_failure_reason, '') <> %(superseded_reason)s
+                          {lifecycle_predicate}
+                        """,
+                        {
+                            "event_id": event_id,
+                            "evidence_state": evidence_state,
+                            "clip_path": clip_path,
+                            "metadata_path": (
+                                bundle.get("metadata") if bundle else metadata_file
+                            ),
+                            "output_root": bundle.get("evidence_dir") if bundle else None,
+                            "evidence_reason": evidence_reason,
+                            "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
+                            **lifecycle_params,
+                        },
+                    )
+                    if not cur.rowcount:
+                        logger.warning(
+                            "media_terminal_transition_fence_lost "
+                            "event_id=%s token=%s generation=%s",
+                            event_id,
+                            finalizer_lease.token if finalizer_lease else None,
+                            finalizer_lease.generation if finalizer_lease else None,
+                        )
+                        continue
                     cur.execute(
                         """
                         UPDATE events
@@ -5683,6 +5906,7 @@ def _process_sink_output(
                                         'evidence_state_updated_at', now(),
                                         'materialization_status',
                                             %(evidence_state)s::text,
+                                        'materialization_phase', 'terminal',
                                         'materialization_reason',
                                             NULLIF(%(evidence_reason)s::text, '')
                                     ))
@@ -5699,57 +5923,6 @@ def _process_sink_output(
                         {
                             "event_id": event_id,
                             "evidence_state": evidence_state,
-                            "evidence_reason": evidence_reason,
-                            "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
-                        },
-                    )
-                    cur.execute(
-                        """
-                        UPDATE evidence_tasks
-                        SET status = %(evidence_state)s,
-                            materialization_status = %(evidence_state)s,
-                            clip_path = COALESCE(%(clip_path)s, clip_path),
-                            metadata_path = COALESCE(%(metadata_path)s, metadata_path),
-                            output_root = COALESCE(%(output_root)s, output_root),
-                            last_materialization_at = CASE
-                                WHEN %(evidence_state)s::text = 'materialized'
-                                    THEN now()
-                                ELSE last_materialization_at
-                            END,
-                            materialization_failure_reason = CASE
-                                WHEN %(evidence_state)s::text = 'materialization_failed'
-                                    THEN %(evidence_reason)s::text
-                                ELSE materialization_failure_reason
-                            END,
-                            materialization_defer_reason = CASE
-                                WHEN %(evidence_state)s::text = 'materialized'
-                                    THEN NULL
-                                ELSE materialization_defer_reason
-                            END,
-                            materialization_expired_reason = CASE
-                                WHEN %(evidence_state)s::text = 'materialized'
-                                    THEN NULL
-                                ELSE materialization_expired_reason
-                            END,
-                            error_message = CASE
-                                WHEN %(evidence_reason)s::text != ''
-                                    THEN %(evidence_reason)s::text
-                                WHEN %(evidence_state)s::text = 'materialized'
-                                    THEN NULL
-                                ELSE error_message
-                            END,
-                            updated_at = now()
-                        WHERE event_id = %(event_id)s::uuid
-                          AND COALESCE(materialization_failure_reason, '') <> %(superseded_reason)s
-                        """,
-                        {
-                            "event_id": event_id,
-                            "evidence_state": evidence_state,
-                            "clip_path": clip_path,
-                            "metadata_path": (
-                                bundle.get("metadata") if bundle else metadata_file
-                            ),
-                            "output_root": bundle.get("evidence_dir") if bundle else None,
                             "evidence_reason": evidence_reason,
                             "superseded_reason": EPOCH_SUPERSEDED_INCOMPLETE_REASON,
                         },
@@ -6322,8 +6495,30 @@ def _mark_media_finalize_failed(
     event_id: str,
     sink_path: str,
     error_message: str,
-) -> None:
+    lease: MaterializationLease | None = None,
+) -> bool:
     try:
+        lease = lease or current_lease(
+            pg_conn,
+            event_id=event_id,
+            fallback_owner="media-finalizer",
+            fallback_phase=MaterializationPhase.FINALIZING.value,
+        )
+        if lease is not None:
+            changed = fail_rolling_task(
+                pg_conn,
+                lease,
+                reason=error_message,
+            )
+        else:
+            changed = fail_unclaimed_task(
+                pg_conn,
+                event_id=event_id,
+                reason=error_message,
+                sink_output_path=sink_path,
+            )
+        if not changed:
+            return False
         with pg_conn.cursor() as cur:
             cur.execute(
                 """
@@ -6352,27 +6547,13 @@ def _mark_media_finalize_failed(
                     "error_message": error_message,
                 },
             )
-            if cur.rowcount and cur.rowcount > 0:
-                cur.execute(
-                    """
-                    UPDATE evidence_tasks
-                    SET status = 'failed',
-                        error_message = %(error_message)s,
-                        updated_at = now()
-                    WHERE event_id = %(event_id)s::uuid
-                    """,
-                    {"event_id": event_id, "error_message": error_message},
-                )
+        return True
     except Exception:
         logger.exception("failed to mark media finalizer failure event_id=%s", event_id)
+        return False
 
 
-ROLLING_CACHE_TASK_STATUSES = (
-    "manifest_ready",
-    "materialization_pending",
-    "materialization_deferred",
-    "pending",
-)
+ROLLING_CACHE_TASK_STATUSES = tuple(sorted(CLAIMABLE_MATERIALIZATION_STATUSES))
 
 
 def _process_rolling_cache_tasks(
@@ -6402,14 +6583,16 @@ def _process_rolling_cache_tasks(
             continue
         if _is_already_ready(pg_conn, event_id):
             continue
-        if not _claim_rolling_cache_task(
+        lease = _claim_rolling_cache_task(
             pg_conn,
             event_id=event_id,
             ready_at=row.get("rolling_cache_ready_at"),
             processing_deadline_s=(
                 cfg.rolling_cache_materialization_processing_deadline_seconds
             ),
-        ):
+            phase=MaterializationPhase.REMUX_RUNNING.value,
+        )
+        if lease is None:
             continue
         try:
             event_context = _load_event_context(pg_conn, event_id)
@@ -6419,6 +6602,7 @@ def _process_rolling_cache_tasks(
                     pg_conn,
                     event_id=event_id,
                     reason="rolling_cache_missing_event_frame_pts",
+                    lease=lease,
                 )
                 continue
             requested_start_pts, requested_end_pts, event_frame_pts = window
@@ -6452,6 +6636,7 @@ def _process_rolling_cache_tasks(
                     "runtime_epoch_id": runtime_epoch_id,
                     "labels": labels,
                     "segments": segments,
+                    "lease": lease,
                 }
             )
         except RollingCacheCoverageMiss as exc:
@@ -6460,6 +6645,7 @@ def _process_rolling_cache_tasks(
                 event_id=event_id,
                 reason=str(exc) or "rolling_cache_coverage_miss",
                 retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+                lease=lease,
             )
         except Exception as exc:
             logger.exception("rolling_cache_materialization_failed event_id=%s", event_id)
@@ -6467,24 +6653,32 @@ def _process_rolling_cache_tasks(
                 pg_conn,
                 event_id=event_id,
                 reason=_rolling_cache_failure_reason(exc),
+                lease=lease,
             )
     workers = max(1, int(getattr(cfg, "rolling_cache_materialization_workers", 1)))
     if workers <= 1 or len(jobs) <= 1:
         for job in jobs:
             event_id = str(job.get("event_id") or "")
+            lease = (
+                job.get("lease")
+                if isinstance(job.get("lease"), MaterializationLease)
+                else None
+            )
             try:
                 metadata = _materialize_rolling_cache_job(
                     root=cfg.rolling_cache_root,
                     output_root=cfg.rolling_cache_materialized_root,
                     job=job,
                 )
-                metadata_overrides.append(metadata)
+                if _persist_rolling_cache_handoff_metadata(pg_conn, cfg, metadata):
+                    metadata_overrides.append(metadata)
             except RollingCacheCoverageMiss as exc:
                 _defer_rolling_cache_task(
                     pg_conn,
                     event_id=event_id,
                     reason=str(exc) or "rolling_cache_coverage_miss",
                     retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+                    lease=lease,
                 )
             except Exception as exc:
                 logger.exception(
@@ -6495,6 +6689,7 @@ def _process_rolling_cache_tasks(
                     pg_conn,
                     event_id=event_id,
                     reason=_rolling_cache_failure_reason(exc),
+                    lease=lease,
                 )
             if len(metadata_overrides) >= finalizer_chunk_size:
                 updated += _flush_rolling_cache_finalizer_batch_or_defer(
@@ -6511,19 +6706,31 @@ def _process_rolling_cache_tasks(
                     root=cfg.rolling_cache_root,
                     output_root=cfg.rolling_cache_materialized_root,
                     job=job,
-                ): str(job.get("event_id") or "")
+                ): (
+                    str(job.get("event_id") or ""),
+                    job.get("lease")
+                    if isinstance(job.get("lease"), MaterializationLease)
+                    else None,
+                )
                 for job in jobs
             }
             for future in as_completed(futures):
-                event_id = futures[future]
+                event_id, lease = futures[future]
                 try:
-                    metadata_overrides.append(future.result())
+                    metadata = future.result()
+                    if _persist_rolling_cache_handoff_metadata(
+                        pg_conn,
+                        cfg,
+                        metadata,
+                    ):
+                        metadata_overrides.append(metadata)
                 except RollingCacheCoverageMiss as exc:
                     _defer_rolling_cache_task(
                         pg_conn,
                         event_id=event_id,
                         reason=str(exc) or "rolling_cache_coverage_miss",
                         retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+                        lease=lease,
                     )
                 except Exception as exc:
                     logger.exception(
@@ -6534,6 +6741,7 @@ def _process_rolling_cache_tasks(
                         pg_conn,
                         event_id=event_id,
                         reason=_rolling_cache_failure_reason(exc),
+                        lease=lease,
                     )
                 if len(metadata_overrides) >= finalizer_chunk_size:
                     updated += _flush_rolling_cache_finalizer_batch_or_defer(
@@ -6568,14 +6776,16 @@ def _process_rolling_cache_image_tasks(
             continue
         if cfg.rolling_cache_sources and source_id not in cfg.rolling_cache_sources:
             continue
-        if not _claim_rolling_cache_task(
+        lease = _claim_rolling_cache_task(
             pg_conn,
             event_id=event_id,
             ready_at=row.get("rolling_cache_ready_at"),
             processing_deadline_s=(
                 cfg.rolling_cache_materialization_processing_deadline_seconds
             ),
-        ):
+            phase=MaterializationPhase.IMAGE_RUNNING.value,
+        )
+        if lease is None:
             continue
         try:
             event_context = _load_event_context(pg_conn, event_id)
@@ -6599,18 +6809,20 @@ def _process_rolling_cache_image_tasks(
                 segments=segments,
                 runtime_epoch_id=runtime_epoch_id,
             )
-            _mark_image_evidence_materialized(
+            if _mark_image_evidence_materialized(
                 pg_conn,
                 event_id=event_id,
                 event_context=event_context,
                 result=result,
-            )
-            updated += 1
+                lease=lease,
+            ):
+                updated += 1
         except RollingCacheCoverageMiss as exc:
             _mark_image_evidence_failed(
                 pg_conn,
                 event_id=event_id,
                 reason=str(exc) or "face_image_frame_not_found",
+                lease=lease,
             )
         except Exception as exc:
             logger.exception("rolling_cache_image_materialization_failed event_id=%s", event_id)
@@ -6618,6 +6830,7 @@ def _process_rolling_cache_image_tasks(
                 pg_conn,
                 event_id=event_id,
                 reason=_image_materialization_failure_reason(exc),
+                lease=lease,
             )
     return updated
 
@@ -6637,17 +6850,7 @@ def _rolling_cache_image_candidate_tasks(
                     et.camera_id, et.event_type, et.event_ts_ms,
                     et.pre_seconds, et.post_seconds, et.replay_window,
                     et.priority, e.payload, e.frame_uuid, e.created_at,
-                    COALESCE(
-                        et.materialization_ready_at,
-                        (
-                            CASE
-                                WHEN et.event_ts_ms BETWEEN 946684800000 AND 4102444800000
-                                    THEN to_timestamp(et.event_ts_ms / 1000.0)
-                                ELSE e.created_at
-                            END
-                            + %(segment_ready_delay_s)s::double precision * interval '1 second'
-                        )
-                    ) AS rolling_cache_ready_at
+                    et.materialization_ready_at AS rolling_cache_ready_at
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
                 WHERE et.materialization_status = ANY(%(statuses)s)
@@ -6657,10 +6860,19 @@ def _rolling_cache_image_candidate_tasks(
                       %(sources_empty)s
                       OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
                   )
-                  AND (
-                      et.materialization_ready_at IS NULL
-                      OR et.materialization_ready_at <= now()
-                  )
+                  AND et.materialization_ready_at IS NOT NULL
+                  AND et.materialization_ready_at <= now()
+                  AND COALESCE(
+                        NULLIF(
+                            to_jsonb(et)->>'materialization_next_attempt_at',
+                            ''
+                        )::timestamptz,
+                        et.materialization_ready_at
+                      ) <= now()
+                  AND COALESCE(
+                        NULLIF(to_jsonb(et)->>'materialization_owner', ''),
+                        'rolling'
+                      ) = 'rolling'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM evidence_artifacts ea
@@ -6688,16 +6900,6 @@ def _rolling_cache_image_candidate_tasks(
                     max(1, int(limit))
                     if limit is not None
                     else cfg.rolling_cache_materialization_max_per_poll
-                ),
-                "segment_ready_delay_s": (
-                    float(getattr(cfg, "rolling_cache_segment_seconds", 4))
-                    + float(
-                        getattr(
-                            cfg,
-                            "rolling_cache_materialization_ready_segment_grace_seconds",
-                            1.0,
-                        )
-                    )
                 ),
             },
         )
@@ -7066,33 +7268,54 @@ def _mark_image_evidence_materialized(
     event_id: str,
     event_context: dict,
     result: dict[str, object],
-) -> None:
+    lease: MaterializationLease,
+) -> bool:
     summary = _image_materialization_summary(event_context, result)
     materialization = _image_materialization_doc(result)
     full_frame_path = str(result.get("full_frame_path") or "")
     face_crop_path = str(result.get("face_crop_path") or "")
     annotated_frame_path = str(result.get("annotated_frame_path") or "")
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE evidence_tasks
-            SET status = 'materialized',
-                materialization_status = 'materialized',
-                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                    || %(materialization)s::jsonb,
-                error_message = '',
-                updated_at = now()
-            WHERE event_id = %(event_id)s::uuid
-              AND COALESCE(task_type, '') = 'image_only'
-            """,
-            {
-                "event_id": event_id,
-                "materialization": json.dumps(
-                    {"image_only": materialization},
-                    ensure_ascii=False,
-                ),
-            },
-        )
+    with pg_conn.transaction(), pg_conn.cursor() as cur:
+        if lease.schema_v2:
+            cur.execute(
+                """
+                SELECT 1
+                FROM evidence_tasks
+                WHERE event_id = %(event_id)s::uuid
+                  AND materialization_status = 'materializing'
+                  AND materialization_phase = 'image_running'
+                  AND materialization_lease_owner = %(lease_owner)s
+                  AND materialization_lease_token = %(lease_token)s
+                  AND materialization_lease_generation = %(lease_generation)s
+                FOR UPDATE
+                """,
+                {
+                    "event_id": event_id,
+                    "lease_owner": lease.owner,
+                    "lease_token": lease.token,
+                    "lease_generation": lease.generation,
+                },
+            )
+        else:
+            cur.execute(
+                """
+                SELECT 1
+                FROM evidence_tasks
+                WHERE event_id = %(event_id)s::uuid
+                  AND materialization_status = 'materializing'
+                  AND COALESCE(task_type, '') = 'image_only'
+                FOR UPDATE
+                """,
+                {"event_id": event_id},
+            )
+        if not cur.fetchone():
+            logger.warning(
+                "image_materialization_fence_lost event_id=%s token=%s generation=%s",
+                event_id,
+                lease.token,
+                lease.generation,
+            )
+            return False
         cur.execute(
             """
             INSERT INTO evidence_bundles (
@@ -7238,6 +7461,64 @@ def _mark_image_evidence_materialized(
                     "annotated_frame_path": annotated_frame_path,
                 },
             )
+        lifecycle_fields = ""
+        lifecycle_predicate = ""
+        lifecycle_params: dict[str, object] = {}
+        if lease.schema_v2:
+            lifecycle_fields = """
+                materialization_phase = 'terminal',
+                materialization_phase_updated_at = now(),
+                materialization_owner = 'terminal',
+                materialization_next_attempt_at = NULL,
+                materialization_retry_reason = NULL,
+                materialization_defer_reason = NULL,
+                materialization_failure_reason = NULL,
+                materialization_expired_reason = NULL,
+                materialization_lease_owner = NULL,
+                materialization_lease_token = NULL,
+                materialization_lease_expires_at = NULL,
+                materialization_lease_heartbeat_at = NULL,
+                materialization_handoff = '{}'::jsonb,
+            """
+            lifecycle_predicate = """
+              AND materialization_lease_owner = %(lease_owner)s
+              AND materialization_lease_token = %(lease_token)s
+              AND materialization_lease_generation = %(lease_generation)s
+            """
+            lifecycle_params = {
+                "lease_owner": lease.owner,
+                "lease_token": lease.token,
+                "lease_generation": lease.generation,
+            }
+        cur.execute(
+            f"""
+            UPDATE evidence_tasks
+            SET status = 'materialized',
+                materialization_status = 'materialized',
+                {lifecycle_fields}
+                materialization_audit = COALESCE(materialization_audit, '{{}}'::jsonb)
+                    || %(materialization)s::jsonb,
+                error_message = '',
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND materialization_status = 'materializing'
+              AND COALESCE(task_type, '') = 'image_only'
+              {lifecycle_predicate}
+            """,
+            {
+                "event_id": event_id,
+                "materialization": json.dumps(
+                    {"image_only": materialization},
+                    ensure_ascii=False,
+                ),
+                **lifecycle_params,
+            },
+        )
+        if not cur.rowcount:
+            raise RuntimeError(
+                f"image_materialization_terminal_fence_lost:{event_id}"
+            )
+    return True
 
 
 def _mark_image_evidence_failed(
@@ -7245,21 +7526,11 @@ def _mark_image_evidence_failed(
     *,
     event_id: str,
     reason: str,
-) -> None:
+    lease: MaterializationLease,
+) -> bool:
+    if not fail_rolling_task(pg_conn, lease, reason=reason):
+        return False
     with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE evidence_tasks
-            SET status = 'materialization_failed',
-                materialization_status = 'materialization_failed',
-                materialization_failure_reason = %(reason)s,
-                error_message = %(reason)s,
-                updated_at = now()
-            WHERE event_id = %(event_id)s::uuid
-              AND COALESCE(task_type, '') = 'image_only'
-            """,
-            {"event_id": event_id, "reason": reason},
-        )
         cur.execute(
             """
             UPDATE evidence_bundles
@@ -7301,6 +7572,7 @@ def _mark_image_evidence_failed(
             """,
             {"event_id": event_id, "reason": reason},
         )
+    return True
 
 
 def _file_size_or_none(path: str) -> int | None:
@@ -7333,7 +7605,7 @@ class _RollingCacheMaterializationRunner:
     def __init__(self, *, max_workers: int) -> None:
         self.max_workers = max(1, int(max_workers or 1))
         self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        self._futures: dict[object, str] = {}
+        self._futures: dict[object, tuple[str, MaterializationLease | None]] = {}
 
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
@@ -7345,8 +7617,9 @@ class _RollingCacheMaterializationRunner:
         }
 
     def process(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
-        updated = _expire_overdue_rolling_cache_tasks(pg_conn, cfg)
-        updated += self._drain_completed(pg_conn, cfg)
+        # Recovery/expiry is owned by _process_rolling_cache_tasks and runs
+        # exactly once before either legacy or persistent-runner admission.
+        updated = self._drain_completed(pg_conn, cfg)
 
         available = self.max_workers - len(self._futures)
         if available > 0:
@@ -7373,7 +7646,12 @@ class _RollingCacheMaterializationRunner:
                     output_root=cfg.rolling_cache_materialized_root,
                     job=job,
                 )
-                self._futures[future] = str(job.get("event_id") or "")
+                self._futures[future] = (
+                    str(job.get("event_id") or ""),
+                    job.get("lease")
+                    if isinstance(job.get("lease"), MaterializationLease)
+                    else None,
+                )
 
         return updated + self._drain_completed(pg_conn, cfg)
 
@@ -7382,17 +7660,25 @@ class _RollingCacheMaterializationRunner:
             return 0
 
         metadata_overrides: list[dict] = []
-        for future, event_id in list(self._futures.items()):
+        for future, future_context in list(self._futures.items()):
             if not future.done():
                 continue
             self._futures.pop(future, None)
+            event_id, lease = future_context
             try:
-                metadata_overrides.append(future.result())
+                metadata = future.result()
+                if _persist_rolling_cache_handoff_metadata(
+                    pg_conn,
+                    cfg,
+                    metadata,
+                ):
+                    metadata_overrides.append(metadata)
             except RollingCacheCoverageMiss as exc:
                 _defer_rolling_cache_task(
                     pg_conn,
                     event_id=event_id,
                     reason=str(exc) or "rolling_cache_coverage_miss",
+                    lease=lease,
                 )
             except Exception as exc:
                 logger.exception(
@@ -7403,6 +7689,7 @@ class _RollingCacheMaterializationRunner:
                     pg_conn,
                     event_id=event_id,
                     reason=_rolling_cache_failure_reason(exc),
+                    lease=lease,
                 )
 
         if not metadata_overrides:
@@ -7429,14 +7716,16 @@ def _prepare_rolling_cache_job(
         return None
     if _is_already_ready(pg_conn, event_id):
         return None
-    if not _claim_rolling_cache_task(
+    lease = _claim_rolling_cache_task(
         pg_conn,
         event_id=event_id,
         ready_at=row.get("rolling_cache_ready_at"),
         processing_deadline_s=(
             cfg.rolling_cache_materialization_processing_deadline_seconds
         ),
-    ):
+        phase=MaterializationPhase.REMUX_RUNNING.value,
+    )
+    if lease is None:
         return None
     try:
         event_context = _load_event_context(pg_conn, event_id)
@@ -7446,6 +7735,7 @@ def _prepare_rolling_cache_job(
                 pg_conn,
                 event_id=event_id,
                 reason="rolling_cache_missing_event_frame_pts",
+                lease=lease,
             )
             return None
         requested_start_pts, requested_end_pts, event_frame_pts = window
@@ -7478,12 +7768,14 @@ def _prepare_rolling_cache_job(
             "runtime_epoch_id": runtime_epoch_id,
             "labels": labels,
             "segments": segments,
+            "lease": lease,
         }
     except RollingCacheCoverageMiss as exc:
         _defer_rolling_cache_task(
             pg_conn,
             event_id=event_id,
             reason=str(exc) or "rolling_cache_coverage_miss",
+            lease=lease,
         )
     except Exception as exc:
         logger.exception("rolling_cache_materialization_failed event_id=%s", event_id)
@@ -7491,6 +7783,7 @@ def _prepare_rolling_cache_job(
             pg_conn,
             event_id=event_id,
             reason=_rolling_cache_failure_reason(exc),
+            lease=lease,
         )
     return None
 
@@ -7520,10 +7813,46 @@ def _materialize_rolling_cache_job(
     metadata = _load_scan_metadata_payload(materialized.metadata_path)
     if metadata is None:
         raise RuntimeError("rolling_cache_materialized_metadata_unreadable")
+    lease = job.get("lease")
+    if not isinstance(lease, MaterializationLease):
+        raise RuntimeError("rolling_cache_materialization_missing_lease")
+    try:
+        identity = materialized.video_path.stat()
+    except OSError as exc:
+        raise RollingCacheCoverageMiss(
+            f"segment_disappeared:{materialized.video_path}:{exc}"
+        ) from exc
+    handoff = {
+        "attempt_token": lease.token or f"legacy:{lease.event_id}:{lease.generation}",
+        "source_id": str(job.get("source_id") or ""),
+        "runtime_epoch_id": str(job.get("runtime_epoch_id") or ""),
+        "requested_window": {
+            "start_pts": int(job.get("requested_start_pts") or 0),
+            "end_pts": int(job.get("requested_end_pts") or 0),
+        },
+        "selected_segment_ids": list(materialized.segment_ids),
+        # Phase 4 moves this to an attempt-specific staging tree.  Phase 1
+        # freezes the existing immutable output identity before finalization.
+        "staging_path": str(materialized.sink_dir),
+        "canonical_path": str(materialized.video_path),
+        "device": int(identity.st_dev),
+        "inode": int(identity.st_ino),
+        "size": int(identity.st_size),
+        "mtime_ns": int(identity.st_mtime_ns),
+    }
     observed_at = datetime.now(timezone.utc).isoformat()
     return {
         **metadata,
         "_meta_dir": str(materialized.sink_dir),
+        "_lifecycle_lease": {
+            "event_id": lease.event_id,
+            "owner": lease.owner,
+            "token": lease.token,
+            "generation": lease.generation,
+            "phase": lease.phase,
+            "schema_v2": lease.schema_v2,
+        },
+        "_lifecycle_handoff": handoff,
         "_finalizer_phase": {
             "sink_metadata_first_seen_at": observed_at,
             "sink_video_first_seen_at": observed_at,
@@ -7535,70 +7864,77 @@ def _materialize_rolling_cache_job(
     }
 
 
+def _persist_rolling_cache_handoff_metadata(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    metadata: dict,
+) -> bool:
+    lease_payload = metadata.pop("_lifecycle_lease", None)
+    handoff = metadata.pop("_lifecycle_handoff", None)
+    if not isinstance(lease_payload, dict) or not isinstance(handoff, dict):
+        logger.error(
+            "rolling_cache_handoff_missing event_id=%s",
+            _metadata_override_event_ids([metadata])[:1],
+        )
+        return False
+    lease = MaterializationLease(
+        event_id=str(lease_payload.get("event_id") or ""),
+        owner=str(lease_payload.get("owner") or ""),
+        token=str(lease_payload.get("token") or ""),
+        generation=int(lease_payload.get("generation") or 0),
+        phase=str(lease_payload.get("phase") or ""),
+        schema_v2=bool(lease_payload.get("schema_v2", True)),
+    )
+    sink_path = str(metadata.get("_meta_dir") or handoff.get("staging_path") or "")
+    persisted = persist_finalizer_handoff(
+        pg_conn,
+        lease,
+        sink_output_path=sink_path,
+        handoff=handoff,
+        lease_seconds=(
+            cfg.rolling_cache_materialization_processing_deadline_seconds
+        ),
+    )
+    if not persisted:
+        logger.warning(
+            "rolling_cache_handoff_fence_lost event_id=%s token=%s generation=%s",
+            lease.event_id,
+            lease.token,
+            lease.generation,
+        )
+        return False
+    finalizer_phase = metadata.get("_finalizer_phase")
+    if isinstance(finalizer_phase, dict):
+        finalizer_phase.update(
+            {
+                "lease_token": lease.token or None,
+                "lease_generation": lease.generation,
+                "handoff_persisted_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    return True
+
+
 def _expire_overdue_rolling_cache_tasks(
     pg_conn: psycopg.Connection,
     cfg: Config,
 ) -> int:
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            WITH failed AS (
-                UPDATE evidence_tasks
-                SET status = 'materialization_failed',
-                    materialization_status = 'materialization_failed',
-                    materialization_defer_reason = COALESCE(
-                        NULLIF(materialization_defer_reason, ''),
-                        'rolling_cache_materialization_deadline_missed'
-                    ),
-                    materialization_failure_reason = COALESCE(
-                        NULLIF(materialization_defer_reason, ''),
-                        'rolling_cache_materialization_deadline_missed'
-                    ),
-                    materialization_expired_reason = NULL,
-                    materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                        || jsonb_build_object(
-                            'rolling_cache',
-                            jsonb_build_object(
-                                'status', 'failed',
-                                'reason', 'rolling_cache_materialization_deadline_missed',
-                                'observed_at', now()
-                            )
-                        ),
-                    updated_at = now()
-                WHERE materialization_status = 'materializing'
-                  AND materialization_deadline_at IS NOT NULL
-                  AND materialization_deadline_at < now()
-                  AND (
-                      %(sources_empty)s
-                      OR COALESCE(source_id, replay_source_id, '') = ANY(%(sources)s)
-                  )
-                RETURNING event_id, materialization_failure_reason
-            )
-            UPDATE events e
-            SET media_status = 'materialization_failed',
-                payload = COALESCE(e.payload, '{}'::jsonb)
-                    || jsonb_build_object(
-                        'media',
-                        COALESCE(e.payload->'media', '{}'::jsonb)
-                        || jsonb_build_object(
-                            'clip_status', 'materialization_failed',
-                            'evidence_state', 'materialization_failed',
-                            'evidence_reason', failed.materialization_failure_reason,
-                            'materialization_status', 'materialization_failed',
-                            'materialization_reason', failed.materialization_failure_reason,
-                            'evidence_state_updated_at', now()
-                        )
-                    ),
-                updated_at = now()
-            FROM failed
-            WHERE e.id = failed.event_id
-            """,
-            {
-                "sources": list(cfg.rolling_cache_sources),
-                "sources_empty": not bool(cfg.rolling_cache_sources),
-            },
+    result = recover_and_expire_rolling_tasks(
+        pg_conn,
+        source_ids=tuple(cfg.rolling_cache_sources),
+    )
+    if result.changed:
+        logger.info(
+            "rolling_lifecycle_recovery ready_deadline_expired=%s "
+            "running_sla_missed=%s handoff_recovered=%s "
+            "lease_retry_scheduled=%s lease_deadline_expired=%s",
+            result.ready_deadline_expired,
+            result.running_sla_missed,
+            result.handoff_recovered,
+            result.lease_retry_scheduled,
+            result.lease_deadline_expired,
         )
-        return int(cur.rowcount or 0)
+    return result.changed
 
 
 def _flush_rolling_cache_finalizer_batch_or_defer(
@@ -7699,20 +8035,7 @@ def _rolling_cache_candidate_tasks(
                     et.camera_id, et.event_type, et.event_ts_ms,
                     et.pre_seconds, et.post_seconds, et.replay_window,
                     et.priority, e.payload, e.frame_uuid, e.created_at,
-                    COALESCE(
-                        et.materialization_ready_at,
-                        (
-                            CASE
-                                WHEN et.event_ts_ms BETWEEN 946684800000 AND 4102444800000
-                                    THEN to_timestamp(et.event_ts_ms / 1000.0)
-                                ELSE e.created_at
-                            END
-                            + (
-                                COALESCE(et.post_seconds, 5)::double precision
-                                + %(segment_ready_delay_s)s::double precision
-                            ) * interval '1 second'
-                        )
-                    ) AS rolling_cache_ready_at
+                    et.materialization_ready_at AS rolling_cache_ready_at
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
                 LEFT JOIN evidence_bundles eb ON eb.event_id = et.event_id
@@ -7723,10 +8046,19 @@ def _rolling_cache_candidate_tasks(
                       %(sources_empty)s
                       OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
                   )
-                  AND (
-                      et.materialization_ready_at IS NULL
-                      OR et.materialization_ready_at <= now()
-                  )
+                  AND et.materialization_ready_at IS NOT NULL
+                  AND et.materialization_ready_at <= now()
+                  AND COALESCE(
+                        NULLIF(
+                            to_jsonb(et)->>'materialization_next_attempt_at',
+                            ''
+                        )::timestamptz,
+                        et.materialization_ready_at
+                      ) <= now()
+                  AND COALESCE(
+                        NULLIF(to_jsonb(et)->>'materialization_owner', ''),
+                        'rolling'
+                      ) = 'rolling'
                   AND COALESCE(et.replay_slot_status, '') <> 'active'
                   AND eb.event_id IS NULL
             )
@@ -7750,16 +8082,6 @@ def _rolling_cache_candidate_tasks(
                     if limit is not None
                     else cfg.rolling_cache_materialization_max_per_poll
                 ),
-                "segment_ready_delay_s": (
-                    float(getattr(cfg, "rolling_cache_segment_seconds", 4))
-                    + float(
-                        getattr(
-                            cfg,
-                            "rolling_cache_materialization_ready_segment_grace_seconds",
-                            1.0,
-                        )
-                    )
-                ),
             },
         )
         return [dict(row) for row in cur.fetchall()]
@@ -7771,53 +8093,23 @@ def _claim_rolling_cache_task(
     event_id: str,
     ready_at: object | None = None,
     processing_deadline_s: float = 120.0,
-) -> bool:
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE evidence_tasks
-            SET status = 'materializing',
-                materialization_status = 'materializing',
-                materialization_ready_at = COALESCE(
-                    materialization_ready_at,
-                    %(ready_at)s::timestamptz
-                ),
-                materialization_deadline_at = COALESCE(
-                    materialization_deadline_at,
-                    now() + %(processing_deadline_s)s::double precision * interval '1 second'
-                ),
-                materialization_attempt_count = materialization_attempt_count + 1,
-                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                    || jsonb_build_object(
-                        'rolling_cache',
-                        jsonb_build_object(
-                            'status', 'materializing',
-                            'claimed_at', now(),
-                            'ready_at', %(ready_at)s::timestamptz,
-                            'ready_lag_ms',
-                                GREATEST(
-                                    0,
-                                    floor(extract(epoch FROM (now() - %(ready_at)s::timestamptz)) * 1000)
-                                )::bigint,
-                            'processing_deadline_s', %(processing_deadline_s)s::double precision
-                        )
-                    ),
-                updated_at = now()
-            WHERE event_id = %(event_id)s::uuid
-              AND materialization_status = ANY(%(statuses)s)
-              AND (
-                  %(ready_at)s::timestamptz IS NULL
-                  OR %(ready_at)s::timestamptz <= now()
-              )
-            """,
-            {
-                "event_id": event_id,
-                "statuses": list(ROLLING_CACHE_TASK_STATUSES),
-                "ready_at": ready_at,
-                "processing_deadline_s": max(1.0, float(processing_deadline_s)),
-            },
-        )
-        return bool(cur.rowcount and cur.rowcount > 0)
+    phase: str = MaterializationPhase.REMUX_RUNNING.value,
+    worker_id: str = "",
+) -> MaterializationLease | None:
+    # ready_at remains accepted for legacy callers/metrics, but event-worker is
+    # the sole ready-time producer and the claim never writes it.
+    del ready_at
+    return claim_rolling_task(
+        pg_conn,
+        event_id=event_id,
+        worker_id=(
+            worker_id
+            or os.getenv("MEDIA_WORKER_ID")
+            or f"media-worker:{os.getenv('HOSTNAME', 'local')}:{os.getpid()}"
+        ),
+        phase=phase,
+        lease_seconds=max(1.0, float(processing_deadline_s)),
+    )
 
 
 def _rolling_cache_coverage_retry_after_s(exc: BaseException) -> float:
@@ -7845,38 +8137,27 @@ def _defer_rolling_cache_task(
     event_id: str,
     reason: str,
     retry_after_s: float = 2.0,
-) -> None:
-    retry_after_s = max(0.5, float(retry_after_s or 0.0))
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE evidence_tasks
-            SET status = 'materialization_deferred',
-                materialization_status = 'materialization_deferred',
-                materialization_defer_reason = %(reason)s,
-                materialization_ready_at =
-                    now() + %(retry_after_s)s::double precision * interval '1 second',
-                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                    || jsonb_build_object(
-                        'rolling_cache',
-                        jsonb_build_object(
-                            'status', 'miss',
-                            'reason', %(reason)s::text,
-                            'retry_after_s', %(retry_after_s)s::double precision,
-                            'observed_at', now()
-                        )
-                    ),
-                updated_at = now()
-            WHERE event_id = %(event_id)s::uuid
-              AND materialization_status NOT IN (
-                  'materialized',
-                  'materialization_skipped',
-                  'materialization_expired',
-                  'materialization_failed'
-              )
-            """,
-            {"event_id": event_id, "reason": reason, "retry_after_s": retry_after_s},
+    lease: MaterializationLease | None = None,
+) -> bool:
+    lease = lease or current_lease(
+        pg_conn,
+        event_id=event_id,
+        fallback_owner="rolling-cache",
+        fallback_phase=MaterializationPhase.REMUX_RUNNING.value,
+    )
+    if lease is None:
+        logger.warning(
+            "rolling_retry_ignored_stale_owner event_id=%s reason=%s",
+            event_id,
+            reason,
         )
+        return False
+    return retry_rolling_task(
+        pg_conn,
+        lease,
+        reason=reason,
+        retry_hint_s=max(0.5, float(retry_after_s or 0.0)),
+    )
 
 
 def _rolling_cache_failure_reason(exc: Exception, *, max_chars: int = 900) -> str:
@@ -7895,35 +8176,22 @@ def _fail_rolling_cache_task(
     *,
     event_id: str,
     reason: str,
-) -> None:
-    with pg_conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE evidence_tasks
-            SET status = 'materialization_failed',
-                materialization_status = 'materialization_failed',
-                materialization_defer_reason = %(reason)s,
-                materialization_failure_reason = %(reason)s,
-                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
-                    || jsonb_build_object(
-                        'rolling_cache',
-                        jsonb_build_object(
-                            'status', 'failed',
-                            'reason', %(reason)s::text,
-                            'observed_at', now()
-                        )
-                    ),
-                updated_at = now()
-            WHERE event_id = %(event_id)s::uuid
-              AND materialization_status NOT IN (
-                  'materialized',
-                  'materialization_skipped',
-                  'materialization_expired',
-                  'materialization_failed'
-              )
-            """,
-            {"event_id": event_id, "reason": reason},
+    lease: MaterializationLease | None = None,
+) -> bool:
+    lease = lease or current_lease(
+        pg_conn,
+        event_id=event_id,
+        fallback_owner="rolling-cache",
+        fallback_phase=MaterializationPhase.REMUX_RUNNING.value,
+    )
+    if lease is None:
+        logger.warning(
+            "rolling_failure_ignored_stale_owner event_id=%s reason=%s",
+            event_id,
+            reason,
         )
+        return False
+    return fail_rolling_task(pg_conn, lease, reason=reason)
 
 
 def _rolling_cache_window(

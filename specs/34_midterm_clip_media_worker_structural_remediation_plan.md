@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: 执行中；Phase 0 已完成，Phase 1-7 尚未执行
+Status: 执行中；Phase 0-1 已完成，Phase 2-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -12,6 +12,19 @@ Implementation checkpoint (2026-07-12):
 - acceptance token: `PASS_CLIP_MEDIA_LEGACY_BEHAVIOR_BASELINE_FROZEN`;
 - this checkpoint does not claim lifecycle ownership, Coordinator V2, Media
   Scheduler V2, crash recovery, pressure closure, or legacy removal.
+- Phase 1 now has one canonical lifecycle vocabulary, task-first Clip CAS,
+  persisted-outcome ACK policy, Replay-only Clip expiry, rolling-only Media
+  recovery, fenced Media claims/retries/handoff/completion, and shared
+  API/report/drain validation sets;
+- Migrations 029/030 are applied to the local runtime after a verified backup;
+  fresh/upgrade/idempotence fixtures and real PostgreSQL owner-fence tests pass;
+- the implementation, migration proof and runtime smoke are recorded in
+  `docs/code_review/clip_media_phase1_lifecycle_contract_2026-07-12.md`;
+- acceptance token: `PASS_CLIP_MEDIA_LIFECYCLE_OWNERSHIP_UNIFIED` together with
+  Spec 33 token `PASS_EVIDENCE_MATERIALIZATION_STATE_CONTRACT_UNIFIED`;
+- Coordinator V2, the single-finalizer/outermost-permit boundary, atomic
+  artifact publication, long-lived pools/lanes, crash soak, pressure closure
+  and legacy removal remain unclaimed.
 
 ## 0. 执行摘要
 

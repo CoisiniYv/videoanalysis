@@ -498,10 +498,15 @@ def test_media_worker_claim_uses_skip_locked_for_idempotent_finalization() -> No
         worker_id="finalizer-1",
     )
 
-    query, params = conn.cursor_obj.executions[0]
+    query, params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "FOR UPDATE SKIP LOCKED" in execution[0]
+    )
     assert result["claimed"] is True
     assert "FOR UPDATE SKIP LOCKED" in query
-    assert params["worker_id"] == "finalizer-1"
+    assert result["lease"] is not None
+    assert result["lease"].owner == "finalizer-1"
     assert "terminal_states" in params
 
 
@@ -517,7 +522,7 @@ def test_media_worker_claim_missing_is_not_claimed() -> None:
         worker_id="finalizer-1",
     )
 
-    assert result == {"status": "missing", "claimed": False}
+    assert result == {"status": "missing", "claimed": False, "lease": None}
 
 
 def test_media_worker_finalizer_pool_schedules_different_sources(monkeypatch) -> None:
@@ -803,7 +808,41 @@ def test_media_worker_cpu_thread_limit_sets_process_env(monkeypatch) -> None:
     assert result["applied_env"]["OPENBLAS_NUM_THREADS"] == "4"
 
 
-def test_media_worker_phase1a_deferred_state_updates_event_and_task() -> None:
+def test_media_worker_phase1a_capacity_state_schedules_retry() -> None:
+    worker = _activate_media_worker()
+    conn = _FakeConnection()
+    guardrails = {
+        "schema_version": "phase1a-materialization-guardrails-v1",
+        "mode": "bounded_crop",
+        "admission_status": "retry",
+    }
+
+    assert worker._mark_media_materialization_retry(
+        conn,
+        event_id="11111111-1111-4111-8111-111111111111",
+        sink_path="/media/replay-sink-output/example",
+        reason="materialization_backlog_limit_exceeded:10>=10",
+        guardrails=guardrails,
+        retry_after_s=1.0,
+    )
+
+    task_query, task_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "SET status = 'materialization_pending'" in execution[0]
+    )
+    assert "materialization_ready_at =" not in task_query
+    assert task_params["reason_code"] == "capacity_unavailable"
+    audit_query, audit_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "last_guardrails" in execution[0]
+    )
+    assert "UPDATE evidence_tasks" in audit_query
+    assert json.loads(audit_params["guardrails"]) == guardrails
+
+
+def test_media_worker_phase1a_hard_storage_stop_is_terminal_deferred() -> None:
     worker = _activate_media_worker()
     conn = _FakeConnection()
     guardrails = {
@@ -812,22 +851,29 @@ def test_media_worker_phase1a_deferred_state_updates_event_and_task() -> None:
         "admission_status": "deferred",
     }
 
-    worker._mark_media_materialization_deferred(
+    assert worker._mark_media_materialization_deferred(
         conn,
         event_id="11111111-1111-4111-8111-111111111111",
         sink_path="/media/replay-sink-output/example",
-        reason="materialization_backlog_limit_exceeded:10>=10",
+        reason="storage_hard_limit_exceeded",
         guardrails=guardrails,
     )
 
-    assert len(conn.cursor_obj.executions) == 2
-    first_query, first_params = conn.cursor_obj.executions[0]
-    second_query, second_params = conn.cursor_obj.executions[1]
-    assert "materialization_status" in first_query
-    assert first_params["state"] == "materialization_deferred"
-    assert json.loads(first_params["guardrails"]) == guardrails
-    assert "UPDATE evidence_tasks" in second_query
-    assert second_params["state"] == "materialization_deferred"
+    task_query, task_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "SET status = 'materialization_deferred'" in execution[0]
+    )
+    assert "materialization_status = 'materialization_deferred'" in task_query
+    assert task_params["reason_code"] == "storage_hard_stop"
+    event_query, event_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "materialization_status" in execution[1]
+        and execution[1]["materialization_status"] == "materialization_deferred"
+    )
+    assert "UPDATE events" in event_query
+    assert event_params["phase"] == "terminal"
 
 
 def test_media_worker_phase1a_failed_state_updates_event_and_task() -> None:
@@ -839,7 +885,7 @@ def test_media_worker_phase1a_failed_state_updates_event_and_task() -> None:
         "admission_status": "failed",
     }
 
-    worker._mark_media_materialization_failed(
+    assert worker._mark_media_materialization_failed(
         conn,
         event_id="11111111-1111-4111-8111-111111111111",
         sink_path="/media/replay-sink-output/example",
@@ -847,14 +893,26 @@ def test_media_worker_phase1a_failed_state_updates_event_and_task() -> None:
         guardrails=guardrails,
     )
 
-    assert len(conn.cursor_obj.executions) == 2
-    first_query, first_params = conn.cursor_obj.executions[0]
-    second_query, second_params = conn.cursor_obj.executions[1]
-    assert "materialization_status" in first_query
-    assert first_params["state"] == "materialization_failed"
-    assert json.loads(first_params["guardrails"]) == guardrails
-    assert "UPDATE evidence_tasks" in second_query
-    assert second_params["state"] == "materialization_failed"
+    task_query, _task_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "SET" in execution[0]
+        and "status = 'materialization_failed'" in execution[0]
+    )
+    assert "materialization_failure_reason" in task_query
+    event_query, event_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if execution[1].get("materialization_status") == "materialization_failed"
+    )
+    assert "UPDATE events" in event_query
+    assert event_params["phase"] == "terminal"
+    _audit_query, audit_params = next(
+        execution
+        for execution in conn.cursor_obj.executions
+        if "last_guardrails" in execution[0]
+    )
+    assert json.loads(audit_params["guardrails"]) == guardrails
 
 
 def _metadata_rows() -> list[dict[str, Any]]:
@@ -937,6 +995,9 @@ class _FakeCursor:
 
     def fetchone(self) -> tuple[int]:
         return (0,)
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return []
 
 
 class _FakeConnection:

@@ -1331,8 +1331,8 @@ def _fail_clip_request(
     attempt_count: int | None = None,
     diagnostics: dict | None = None,
     replay_shard: dict | None = None,
-) -> None:
-    update_clip_status(
+) -> bool:
+    status_persisted = update_clip_status(
         pg_conn,
         event_id,
         "failed",
@@ -1344,8 +1344,44 @@ def _fail_clip_request(
         diagnostics=diagnostics,
         replay_shard=replay_shard,
     )
+    return _ack_persisted_clip_outcome(
+        redis_client,
+        stream=stream,
+        group=group,
+        msg_id=msg_id,
+        event_id=event_id,
+        request_id=request_id,
+        outcome="failed",
+        persisted=status_persisted,
+        seen_requests=seen_requests,
+    )
+
+
+def _ack_persisted_clip_outcome(
+    redis_client: Redis,
+    *,
+    stream: str,
+    group: str,
+    msg_id: object,
+    event_id: str,
+    request_id: str,
+    outcome: str,
+    persisted: bool,
+    seen_requests: set[str],
+) -> bool:
+    """ACK only after a task CAS and its event projection both persisted."""
+    if not persisted:
+        logger.error(
+            "clip_ack_withheld_no_durable_outcome request_id=%s event_id=%s "
+            "outcome=%s",
+            request_id,
+            event_id,
+            outcome,
+        )
+        return False
     seen_requests.add(request_id)
     redis_client.xack(stream, group, msg_id)
+    return True
 
 
 def _message_id_text(msg_id: object) -> str:
@@ -1613,7 +1649,7 @@ def _defer_clip_request(
     max_retries: int,
     seen_requests: set[str],
     replay_shard: dict | None = None,
-    evidence_state: str = "materialization_deferred",
+    evidence_state: str = "materialization_pending",
     quota_decision: dict | None = None,
     degrade_decision: dict | None = None,
 ) -> bool:
@@ -1633,7 +1669,7 @@ def _defer_clip_request(
             retry_age_s,
             final_error,
         )
-        update_clip_status(
+        status_persisted = update_clip_status(
             pg_conn,
             event_id,
             "failed",
@@ -1644,8 +1680,17 @@ def _defer_clip_request(
             quota_decision=quota_decision,
             degrade_decision=degrade_decision,
         )
-        seen_requests.add(request_id)
-        redis_client.xack(stream, group, msg_id)
+        _ack_persisted_clip_outcome(
+            redis_client,
+            stream=stream,
+            group=group,
+            msg_id=msg_id,
+            event_id=event_id,
+            request_id=request_id,
+            outcome="retry_budget_exhausted",
+            persisted=status_persisted,
+            seen_requests=seen_requests,
+        )
         return True
 
     logger.info(
@@ -1691,14 +1736,14 @@ def _defer_clip_request_terminal(
     replay_shard: dict | None = None,
     quota_decision: dict | None = None,
     degrade_decision: dict | None = None,
-) -> None:
+) -> bool:
     diagnostics = {
         "defer_reason": reason,
         "terminal_defer": True,
         "quota_decision": quota_decision or {},
         "degrade_decision": degrade_decision or {},
     }
-    update_clip_status(
+    status_persisted = update_clip_status(
         pg_conn,
         event_id,
         "pending",
@@ -1711,8 +1756,17 @@ def _defer_clip_request_terminal(
         quota_decision=quota_decision,
         degrade_decision=degrade_decision,
     )
-    seen_requests.add(request_id)
-    redis_client.xack(stream, group, msg_id)
+    return _ack_persisted_clip_outcome(
+        redis_client,
+        stream=stream,
+        group=group,
+        msg_id=msg_id,
+        event_id=event_id,
+        request_id=request_id,
+        outcome="terminal_deferred",
+        persisted=status_persisted,
+        seen_requests=seen_requests,
+    )
 
 
 def _defer_post_savant_frame_proof(
@@ -1823,7 +1877,7 @@ def _queue_clip_request(
         event_id,
         "pending",
         error_message=error_message,
-        evidence_state="materialization_deferred",
+        evidence_state="queued",
         evidence_reason=reason,
         request_id=request_id,
         attempt_count=retry_count,
@@ -3338,7 +3392,7 @@ def run_worker(
                             "replay_shard_error": str(exc),
                             "replay_shards": cfg.replay_shards.to_dict(),
                         }
-                        update_clip_status(
+                        status_persisted = update_clip_status(
                             pg_conn,
                             event_id,
                             "failed",
@@ -3348,8 +3402,17 @@ def run_worker(
                             request_id=request_id,
                             diagnostics=diagnostics,
                         )
-                        seen_requests.add(request_id)
-                        redis_client.xack(stream, group, msg_id)
+                        _ack_persisted_clip_outcome(
+                            redis_client,
+                            stream=stream,
+                            group=group,
+                            msg_id=msg_id,
+                            event_id=event_id,
+                            request_id=request_id,
+                            outcome="replay_shard_routing_failed",
+                            persisted=status_persisted,
+                            seen_requests=seen_requests,
+                        )
                         total_processed += 1
                         continue
                     replay = replay_route.client
@@ -3507,15 +3570,24 @@ def run_worker(
                             jobs_created,
                             cfg.run_once,
                         )
-                        update_clip_status(
+                        status_persisted = update_clip_status(
                             pg_conn,
                             event_id,
                             "skipped_by_poc_limit",
                             error_message=schedule_gate.error_message,
                             replay_shard=replay_shard,
                         )
-                        seen_requests.add(request_id)
-                        redis_client.xack(stream, group, msg_id)
+                        _ack_persisted_clip_outcome(
+                            redis_client,
+                            stream=stream,
+                            group=group,
+                            msg_id=msg_id,
+                            event_id=event_id,
+                            request_id=request_id,
+                            outcome="schedule_terminal_skip",
+                            persisted=status_persisted,
+                            seen_requests=seen_requests,
+                        )
                         total_processed += 1
                         continue
 
@@ -3582,7 +3654,7 @@ def run_worker(
                             proof_wait_diagnostics["proof_retry_count"] = proof_retry_count
                             proof_wait_diagnostics["redis_delivery_retry_count"] = retry_count
                             proof_wait_attempt_count = attempt
-                            update_clip_status(
+                            status_persisted = update_clip_status(
                                 pg_conn,
                                 event_id,
                                 "pending",
@@ -3769,25 +3841,44 @@ def run_worker(
                                 source_id,
                                 event_ts_ms,
                             )
-                            update_clip_status(
+                            status_persisted = update_clip_status(
                                 pg_conn,
                                 event_id,
                                 "failed",
                                 error_message=MISSING_KEYFRAME_ERROR,
                                 replay_shard=replay_shard,
                             )
-                            seen_requests.add(request_id)
-                            redis_client.xack(stream, group, msg_id)
+                            _ack_persisted_clip_outcome(
+                                redis_client,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                outcome="missing_keyframe_contract",
+                                persisted=status_persisted,
+                                seen_requests=seen_requests,
+                            )
                             total_processed += 1
                             continue
 
                         if not source_id:
-                            update_clip_status(
+                            status_persisted = update_clip_status(
                                 pg_conn, event_id, "failed",
                                 error_message="missing source_id in record_request",
                                 replay_shard=replay_shard,
                             )
-                            redis_client.xack(stream, group, msg_id)
+                            _ack_persisted_clip_outcome(
+                                redis_client,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                outcome="missing_source_id",
+                                persisted=status_persisted,
+                                seen_requests=seen_requests,
+                            )
                             total_processed += 1
                             continue
 
@@ -3797,7 +3888,7 @@ def run_worker(
                                 req.get("request_id"),
                                 source_event_id,
                             )
-                            update_clip_status(
+                            status_persisted = update_clip_status(
                                 pg_conn, event_id, "failed",
                                 error_message=(
                                     f"missing event_ts_ms in record_request "
@@ -3805,7 +3896,17 @@ def run_worker(
                                 ),
                                 replay_shard=replay_shard,
                             )
-                            redis_client.xack(stream, group, msg_id)
+                            _ack_persisted_clip_outcome(
+                                redis_client,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                outcome="missing_event_ts_ms",
+                                persisted=status_persisted,
+                                seen_requests=seen_requests,
+                            )
                             total_processed += 1
                             continue
 
@@ -3854,7 +3955,7 @@ def run_worker(
                             source_id,
                             event_ts_ms,
                         )
-                        update_clip_status(
+                        status_persisted = update_clip_status(
                             pg_conn, event_id, "failed",
                             error_message=(
                                 f"no keyframe found for source_id={source_id}"
@@ -3862,7 +3963,17 @@ def run_worker(
                             ),
                             replay_shard=replay_shard,
                         )
-                        redis_client.xack(stream, group, msg_id)
+                        _ack_persisted_clip_outcome(
+                            redis_client,
+                            stream=stream,
+                            group=group,
+                            msg_id=msg_id,
+                            event_id=event_id,
+                            request_id=request_id,
+                            outcome="keyframe_not_found",
+                            persisted=status_persisted,
+                            seen_requests=seen_requests,
+                        )
                         total_processed += 1
                         continue
 
@@ -4069,32 +4180,44 @@ def run_worker(
                             req.get("request_id"),
                             event_id,
                         )
-                        update_clip_status(
-                            pg_conn, event_id, "failed",
-                            error_message=f"Replay job creation failed: {exc}",
-                            diagnostics={
-                                **phase_diagnostics,
-                                **proof_wait_diagnostics,
-                                "replay_job_create_started_at": (
-                                    replay_job_create_started_at
-                                ),
-                                "replay_job_create_ms": replay_job_create_ms,
-                                "replay_job_create_failed_at": replay_job_created_at,
-                            },
-                            replay_shard=replay_shard,
-                        )
-                        release_replay_slot(
+                        slot_released = release_replay_slot(
                             pg_conn,
                             event_id=event_id,
                             release_reason="replay_job_create_exception",
                         )
-                        seen_requests.add(request_id)
-                        redis_client.xack(stream, group, msg_id)
+                        if slot_released:
+                            _defer_clip_request(
+                                redis_client,
+                                pg_conn,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason="replay_unavailable",
+                                error_message=(
+                                    f"Replay job creation failed: {type(exc).__name__}:{exc}"
+                                ),
+                                retry_count=retry_count,
+                                max_retries=cfg.deferred_retry_max_attempts,
+                                seen_requests=seen_requests,
+                                replay_shard=replay_shard,
+                            )
+                        else:
+                            logger.error(
+                                "clip_ack_withheld_no_durable_outcome "
+                                "request_id=%s event_id=%s slot_released=%s "
+                                "outcome=replay_exception",
+                                request_id,
+                                event_id,
+                                slot_released,
+                            )
                         total_processed += 1
                         continue
                     replay_job_create_ms = _elapsed_ms_since(replay_job_create_started)
                     replay_job_created_at = _utc_now_iso()
 
+                    durable_outcome = False
                     if job_id:
                         resulting_stream_id = _resulting_stream_id_from_job_request(
                             replay.last_job_request
@@ -4184,7 +4307,7 @@ def run_worker(
                             replay_counts["replay_active_shard_count"],
                             replay_counts["replay_active_source_count"],
                         )
-                        update_clip_status(
+                        status_persisted = update_clip_status(
                             pg_conn, event_id, "replay_job_created",
                             replay_job_id=job_id,
                             replay_job_request=replay.last_job_request,
@@ -4213,6 +4336,19 @@ def run_worker(
                             replay_slot_timing.replay_duration_seconds_effective,
                             replay_slot_timing.timeout_budget_s,
                         )
+                        durable_outcome = bool(status_persisted and slot_acquired)
+                        if not durable_outcome:
+                            logger.error(
+                                "clip_ack_withheld_no_durable_outcome "
+                                "request_id=%s event_id=%s job_id=%s "
+                                "status_persisted=%s slot_job_persisted=%s "
+                                "outcome=replay_created",
+                                request_id,
+                                event_id,
+                                job_id,
+                                status_persisted,
+                                slot_acquired,
+                            )
                         jobs_created += 1
                         active_jobs.append(
                             ActiveReplayJob(
@@ -4227,7 +4363,8 @@ def run_worker(
                         )
                         if event_type:
                             event_type_counts[event_type] += 1
-                        seen_requests.add(request_id)
+                        if durable_outcome:
+                            seen_requests.add(request_id)
                         if camera_id:
                             last_job_by_camera[camera_id] = cooldown_gate_ts_ms
                     else:
@@ -4236,26 +4373,40 @@ def run_worker(
                             req.get("request_id"),
                             event_id,
                         )
-                        update_clip_status(
-                            pg_conn, event_id, "failed",
-                            error_message="Replay job creation returned None",
-                            diagnostics={
-                                **phase_diagnostics,
-                                **proof_wait_diagnostics,
-                                "replay_job_create_started_at": replay_job_create_started_at,
-                                "replay_job_create_ms": replay_job_create_ms,
-                                "replay_job_create_failed_at": replay_job_created_at,
-                            },
-                            replay_shard=replay_shard,
-                        )
-                        release_replay_slot(
+                        slot_released = release_replay_slot(
                             pg_conn,
                             event_id=event_id,
                             release_reason="replay_job_create_failed",
                         )
+                        if slot_released:
+                            _defer_clip_request(
+                                redis_client,
+                                pg_conn,
+                                stream=stream,
+                                group=group,
+                                msg_id=msg_id,
+                                event_id=event_id,
+                                request_id=request_id,
+                                reason="replay_unavailable",
+                                error_message="Replay job creation returned None",
+                                retry_count=retry_count,
+                                max_retries=cfg.deferred_retry_max_attempts,
+                                seen_requests=seen_requests,
+                                replay_shard=replay_shard,
+                            )
+                        else:
+                            logger.error(
+                                "clip_ack_withheld_no_durable_outcome "
+                                "request_id=%s event_id=%s slot_released=%s "
+                                "outcome=replay_empty_response",
+                                request_id,
+                                event_id,
+                                slot_released,
+                            )
 
-                    seen_requests.add(request_id)
-                    redis_client.xack(stream, group, msg_id)
+                    if durable_outcome:
+                        seen_requests.add(request_id)
+                        redis_client.xack(stream, group, msg_id)
                     total_processed += 1
 
             now = time.monotonic()

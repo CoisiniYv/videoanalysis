@@ -390,11 +390,12 @@ def test_stable_invalid_sink_output_is_marked_failed_and_not_retried(
     assert (first, second, third) == (0, 0, 0)
     assert failures == [
         {
-            "event_id": event_id,
-            "sink_path": str(meta_dir),
-            "error_message": "sink_output_invalid:video_duration_unavailable",
-        }
-    ]
+                "event_id": event_id,
+                "sink_path": str(meta_dir),
+                "error_message": "sink_output_invalid:video_duration_unavailable",
+                "lease": None,
+            }
+        ]
     assert str(meta_dir) in processed
     marker = meta_dir / worker.INVALID_SINK_OUTPUT_MARKER
     assert marker.exists()

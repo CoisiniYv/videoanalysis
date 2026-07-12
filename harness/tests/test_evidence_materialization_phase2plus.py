@@ -630,8 +630,12 @@ class _ExpireCursor:
     def __exit__(self, *_exc: object) -> None:
         return None
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
         self.sql = sql
+        self.params = params or {}
+
+    def fetchone(self) -> tuple[int]:
+        return (0,)
 
 
 class _ExpireConn:
@@ -650,9 +654,10 @@ def test_expire_materialization_deadlines_marks_expired_state() -> None:
 
     assert expire_materialization_deadlines(conn) == 3
     assert "materialization_expired" in conn.cursor_obj.sql
-    assert "'materializing'" in conn.cursor_obj.sql
-    assert "'replay_job_created'" in conn.cursor_obj.sql
+    assert "'materializing'" not in conn.cursor_obj.sql
+    assert "replay_job_created" in conn.cursor_obj.params["replay_statuses"]
     assert "materialization_deadline_at <= now()" in conn.cursor_obj.sql
+    assert "materialization_owner" in conn.cursor_obj.sql
     assert "materialization_audit->'rolling_cache'->>'status'" in conn.cursor_obj.sql
     assert "l.bundle_event_id = evidence_tasks.event_id" in conn.cursor_obj.sql
 

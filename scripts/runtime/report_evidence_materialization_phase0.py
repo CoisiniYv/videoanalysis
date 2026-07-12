@@ -12,19 +12,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+)
+
 
 DEFAULT_DATABASE_URL = "postgresql://video:video@127.0.0.1:5432/video_analytics"
 DEFAULT_ENV_FILE = Path("infra/env/midterm.env")
 PENDING_TASK_STATUSES = {
-    "pending",
-    "replaying",
-    "finalizing",
     "claimed",
     "processing",
-    "manifest_ready",
-    "materialization_pending",
-    "materialization_deferred",
-    "materializing",
+    *ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    *ACTIVE_MATERIALIZATION_STATUSES,
 }
 
 

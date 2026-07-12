@@ -15,6 +15,11 @@ from typing import Any
 
 import re
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+)
+
 from app.repositories.maintenance import MaintenanceRepository
 from app.schemas.maintenance import (
     EvidenceDeletePreviewRequest,
@@ -33,6 +38,8 @@ ACTIVE_TASK_STATUSES = {
     "processing",
     "running",
     "in_progress",
+    *ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    *ACTIVE_MATERIALIZATION_STATUSES,
 }
 STALE_PENDING_DELETABLE_MEDIA_STATUSES = {
     "ready",

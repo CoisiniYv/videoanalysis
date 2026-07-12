@@ -8,9 +8,57 @@ import uuid
 
 import psycopg
 
+from libs.evidence_lifecycle import (
+    ACTIVE_MATERIALIZATION_STATUSES,
+    MaterializationPhase,
+    MaterializationStatus,
+    OPERATOR_EVIDENCE_STATES,
+    REPLAY_OWNED_TASK_STATUSES,
+    TERMINAL_MATERIALIZATION_STATUSES,
+    classify_reason,
+    compatibility_status_for,
+    materialization_status_for_operator_state,
+)
+
 logger = logging.getLogger(__name__)
 
+_LIFECYCLE_V2_SUPPORTED: dict[int, bool] = {}
+
+
+def _supports_lifecycle_v2(pg_conn: psycopg.Connection) -> bool:
+    cache_key = id(pg_conn)
+    if cache_key in _LIFECYCLE_V2_SUPPORTED:
+        return _LIFECYCLE_V2_SUPPORTED[cache_key]
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*)
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'evidence_tasks'
+                  AND column_name IN (
+                      'materialization_phase', 'materialization_owner',
+                      'materialization_retry_reason',
+                      'materialization_lease_token'
+                  )
+                """
+            )
+            row = cur.fetchone()
+        count = int(row.get("count") if isinstance(row, dict) else row[0]) if row else 0
+        supported = count == 4
+    except Exception:
+        supported = False
+    _LIFECYCLE_V2_SUPPORTED[cache_key] = supported
+    return supported
+
+
+def clear_lifecycle_schema_capability_cache() -> None:
+    """Clear mixed-order deployment schema detection state for tests/postflight."""
+    _LIFECYCLE_V2_SUPPORTED.clear()
+
 EVIDENCE_STATES = {
+    *OPERATOR_EVIDENCE_STATES,
     "manifest_ready",
     "materialization_pending",
     "materializing",
@@ -69,24 +117,7 @@ def evidence_state_for_status(status: str, override: str | None = None) -> str:
 
 def materialization_status_for_state(state: str) -> str:
     """Return the manifest-first materialization status for an evidence state."""
-    if state in {
-        "manifest_ready",
-        "materialization_pending",
-        "materializing",
-        "materialized",
-        "materialization_deferred",
-        "materialization_failed",
-        "materialization_expired",
-        "materialization_skipped",
-    }:
-        return state
-    if state in {"pending", "queued", "waiting_proof", "replaying", "finalizing"}:
-        return "materialization_pending"
-    if state == "ready":
-        return "materialized"
-    if state == "failed":
-        return "materialization_failed"
-    return "manifest_ready"
+    return materialization_status_for_operator_state(state)
 
 
 def _json_or_null(value: object) -> str:
@@ -914,17 +945,33 @@ def release_replay_slot(
 
 
 def expire_materialization_deadlines(pg_conn: psycopg.Connection) -> int:
-    """Mark deferred or pending manifest-first tasks expired after TTL deadline."""
+    """Expire only Replay-owned waiting work after its business deadline."""
     if not callable(getattr(pg_conn, "cursor", None)):
         return 0
     try:
+        lifecycle_fields = ""
+        if _supports_lifecycle_v2(pg_conn):
+            lifecycle_fields = """
+                        materialization_phase = 'terminal',
+                        materialization_phase_updated_at = now(),
+                        materialization_owner = 'terminal',
+                        materialization_next_attempt_at = NULL,
+                        materialization_retry_reason = NULL,
+                        materialization_defer_reason = NULL,
+                        materialization_failure_reason = NULL,
+                        materialization_lease_owner = NULL,
+                        materialization_lease_token = NULL,
+                        materialization_lease_expires_at = NULL,
+                        materialization_lease_heartbeat_at = NULL,
+            """
         with pg_conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 WITH expired AS (
                     UPDATE evidence_tasks
                     SET status = 'materialization_expired',
                         materialization_status = 'materialization_expired',
+                        {lifecycle_fields}
                         materialization_expired_reason = concat(
                             'materialization_deadline_expired:',
                             COALESCE(materialization_deadline_at::text, '')
@@ -934,25 +981,31 @@ def expire_materialization_deadlines(pg_conn: psycopg.Connection) -> int:
                             COALESCE(materialization_deadline_at::text, '')
                         ),
                         updated_at = now()
-                    WHERE materialization_status IN (
-                        'manifest_ready',
-                        'materialization_pending',
-                        'materialization_deferred',
-                        'waiting_proof',
-                        'queued',
-                        'replay_job_created',
-                        'replaying',
-                        'materializing',
-                        'finalizing'
+                    WHERE (
+                        materialization_status IN (
+                            'manifest_ready', 'materialization_pending'
+                        )
+                        OR status = ANY(%(replay_statuses)s)
                     )
                       AND materialization_deadline_at IS NOT NULL
                       AND materialization_deadline_at <= now()
-                      AND NOT (
-                          materialization_status = 'materializing'
-                          AND COALESCE(
-                              materialization_audit->'rolling_cache'->>'status',
+                      AND COALESCE(replay_slot_status, '') <> 'active'
+                      AND (
+                          COALESCE(
+                              to_jsonb(evidence_tasks)->>'materialization_owner',
                               ''
-                          ) = 'materializing'
+                          ) = 'replay'
+                          OR (
+                              COALESCE(
+                                  to_jsonb(evidence_tasks)->>'materialization_owner',
+                                  ''
+                              ) = ''
+                              AND status = ANY(%(replay_statuses)s)
+                              AND COALESCE(
+                                  materialization_audit->'rolling_cache'->>'status',
+                                  ''
+                              ) = ''
+                          )
                       )
                       AND NOT EXISTS (
                           SELECT 1
@@ -970,10 +1023,10 @@ def expire_materialization_deadlines(pg_conn: psycopg.Connection) -> int:
                 )
                 UPDATE events e
                 SET media_status = 'materialization_expired',
-                    payload = COALESCE(e.payload, '{}'::jsonb)
+                    payload = COALESCE(e.payload, '{{}}'::jsonb)
                         || jsonb_build_object(
                             'media',
-                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            COALESCE(e.payload->'media', '{{}}'::jsonb)
                             || jsonb_build_object(
                                 'evidence_state', 'materialization_expired',
                                 'evidence_reason',
@@ -988,7 +1041,8 @@ def expire_materialization_deadlines(pg_conn: psycopg.Connection) -> int:
                         ),
                     updated_at = now()
                 WHERE e.id IN (SELECT event_id FROM expired)
-                """
+                """,
+                {"replay_statuses": sorted(REPLAY_OWNED_TASK_STATUSES)},
             )
             return int(getattr(cur, "rowcount", 0) or 0)
     except Exception:
@@ -1156,6 +1210,80 @@ def record_request_target_exists(
     return bool(value)
 
 
+def _clip_transition_phase(materialization_status: str) -> str:
+    if materialization_status in TERMINAL_MATERIALIZATION_STATUSES:
+        return MaterializationPhase.TERMINAL.value
+    # Replay admission has its own fenced slot lifecycle.  The shared
+    # materialization phase remains waiting_ready until media takes ownership.
+    return MaterializationPhase.WAITING_READY.value
+
+
+def _clip_transition_owner(materialization_status: str) -> str:
+    if materialization_status in TERMINAL_MATERIALIZATION_STATUSES:
+        return "terminal"
+    return "replay"
+
+
+def _clip_expected_materialization_statuses(
+    materialization_status: str,
+) -> list[str]:
+    expected = {
+        MaterializationStatus.MANIFEST_READY.value,
+        MaterializationStatus.PENDING.value,
+        "pending",
+        "waiting_proof",
+        "queued",
+    }
+    if materialization_status != MaterializationStatus.PENDING.value:
+        expected.update(
+            {
+                MaterializationStatus.RUNNING.value,
+                "replay_job_created",
+                "replaying",
+            }
+        )
+    # Repeating the same durable transition is required for the crash window
+    # where the task CAS committed but the event projection or Redis ACK did
+    # not.  Other terminal states are never overwritten.
+    expected.add(materialization_status)
+    return sorted(expected)
+
+
+def _normalized_clip_reason(
+    *,
+    status: str,
+    materialization_status: str,
+    explicit_reason: str,
+    error_message: str,
+) -> tuple[str, str]:
+    detail = _reason_for_state(
+        status,
+        materialization_status,
+        explicit_reason,
+        error_message,
+    )
+    if not detail:
+        return "", ""
+    classified = classify_reason(detail)
+    if classified.code != "unknown":
+        return classified.code, detail
+    # Explicit short identifiers are already stable reason codes.  Free-form
+    # exception prose is retained only as diagnostic detail.
+    if explicit_reason:
+        candidate = explicit_reason.strip()
+        if (
+            candidate
+            and len(candidate) <= 128
+            and all(ch.isalnum() or ch in "_.-" for ch in candidate)
+        ):
+            return candidate, detail
+    if materialization_status == MaterializationStatus.FAILED.value:
+        return MaterializationStatus.FAILED.value, detail
+    if materialization_status == MaterializationStatus.DEFERRED.value:
+        return MaterializationStatus.DEFERRED.value, detail
+    return str(status or materialization_status), detail
+
+
 def update_clip_status(
     pg_conn: psycopg.Connection,
     event_id: str,
@@ -1173,96 +1301,174 @@ def update_clip_status(
     quota_decision: dict | None = None,
     degrade_decision: dict | None = None,
 ) -> bool:
-    """Set clip status and synchronize operator-visible evidence state."""
+    """CAS the Replay-owned task first, then project operator-visible state.
+
+    The task row is the durable scheduling authority.  Returning ``True``
+    means both the task transition and event projection were persisted, so a
+    caller may safely ACK its Redis delivery.  A failed/stale CAS returns
+    ``False`` and must not be treated as a terminal delivery outcome.
+    """
     if not event_id:
         return False
     state = evidence_state_for_status(status, evidence_state)
     materialization_state = materialization_status_for_state(state)
-    reason = _reason_for_state(status, state, evidence_reason, error_message)
+    phase = _clip_transition_phase(materialization_state)
+    owner = _clip_transition_owner(materialization_state)
+    compatibility_status = compatibility_status_for(materialization_state, phase)
+    reason_code, reason_detail = _normalized_clip_reason(
+        status=status,
+        materialization_status=materialization_state,
+        explicit_reason=evidence_reason,
+        error_message=error_message,
+    )
+    diagnostics_payload = dict(diagnostics or {})
+    if reason_detail and reason_detail != reason_code:
+        diagnostics_payload.setdefault("lifecycle_reason_detail", reason_detail)
+    expected_statuses = _clip_expected_materialization_statuses(
+        materialization_state
+    )
+    params = {
+        "status_text": status,
+        "compatibility_status": compatibility_status,
+        "replay_job_id": replay_job_id,
+        "replay_job_request": _json_or_null(replay_job_request),
+        "evidence_state": state,
+        "materialization_status": materialization_state,
+        "materialization_phase": phase,
+        "materialization_owner": owner,
+        "evidence_reason": reason_code,
+        "error_message": error_message or reason_detail,
+        "request_id": request_id,
+        "attempt_count": attempt_count,
+        "diagnostics": _json_or_null(diagnostics_payload),
+        "quota_decision": _json_or_null(quota_decision or {}),
+        "degrade_decision": _json_or_null(degrade_decision or {}),
+        "materialization_deadline_at": materialization_deadline_at,
+        "replay_shard_id": _replay_shard_value(replay_shard, "shard_id"),
+        "replay_api_url": _replay_shard_value(replay_shard, "replay_api_url"),
+        "replay_job_sink_url": _replay_shard_value(
+            replay_shard,
+            "replay_job_sink_url",
+        ),
+        "event_id": event_id,
+        "expected_statuses": expected_statuses,
+    }
     try:
+        lifecycle_v2 = _supports_lifecycle_v2(pg_conn)
         with pg_conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE events
-                SET payload = COALESCE(payload, '{}'::jsonb)
-                        || jsonb_build_object(
-                            'media',
-                            COALESCE(payload->'media', '{}'::jsonb)
-                            || jsonb_strip_nulls(jsonb_build_object(
-                                'clip_status', %(status_text)s::text,
-                                'recording_strategy', 'savant_replay',
-                                'replay_job_id', NULLIF(%(replay_job_id)s::text, ''),
-                                'evidence_state', %(evidence_state)s::text,
-                                'evidence_reason', NULLIF(%(evidence_reason)s::text, ''),
-                                'evidence_state_updated_at', now(),
-                                'materialization_status', %(materialization_status)s::text,
-                                'materialization_reason', NULLIF(%(evidence_reason)s::text, ''),
-                                'materialization_deadline_at',
-                                    NULLIF(%(materialization_deadline_at)s::text, ''),
-                                'quota_decision', %(quota_decision)s::jsonb,
-                                'degrade_decision', %(degrade_decision)s::jsonb,
-                                'evidence_request_id', NULLIF(%(request_id)s::text, ''),
-                                'evidence_attempt_count', %(attempt_count)s::int,
-                                'evidence_diagnostics', %(diagnostics)s::jsonb,
-                                'replay_shard_id', NULLIF(%(replay_shard_id)s::text, ''),
-                                'replay_api_url', NULLIF(%(replay_api_url)s::text, ''),
-                                'replay_job_sink_url', NULLIF(%(replay_job_sink_url)s::text, ''),
-                                'error_message', NULLIF(%(error_message)s::text, '')
-                            ))
-                        ),
-                    media_status = %(evidence_state)s,
-                    updated_at = now()
-                WHERE id = %(event_id)s::uuid
-                """,
-                {
-                    "status_text": status,
-                    "replay_job_id": replay_job_id,
-                    "evidence_state": state,
-                    "materialization_status": materialization_state,
-                    "evidence_reason": reason,
-                    "request_id": request_id,
-                    "attempt_count": attempt_count,
-                    "diagnostics": _json_or_null(diagnostics),
-                    "quota_decision": _json_or_null(quota_decision or {}),
-                    "degrade_decision": _json_or_null(degrade_decision or {}),
-                    "materialization_deadline_at": materialization_deadline_at,
-                    "replay_shard_id": _replay_shard_value(replay_shard, "shard_id"),
-                    "replay_api_url": _replay_shard_value(replay_shard, "replay_api_url"),
-                    "replay_job_sink_url": _replay_shard_value(
-                        replay_shard,
-                        "replay_job_sink_url",
-                    ),
-                    "error_message": error_message,
-                    "event_id": event_id,
-                },
-            )
-            event_updated = cur.rowcount is not None and cur.rowcount > 0
-            if replay_job_request is not None:
-                cur.execute(
-                    """
-                    UPDATE events
-                    SET payload = jsonb_set(
-                            COALESCE(payload, '{}'::jsonb),
-                            '{media,replay_job_request}',
-                            %(request)s::jsonb
-                        ),
-                        updated_at = now()
-                    WHERE id = %(event_id)s::uuid
-                    """,
-                    {
-                        "request": json.dumps(replay_job_request),
-                        "event_id": event_id,
-                    },
-                )
-            if event_updated:
+            if lifecycle_v2:
                 cur.execute(
                     """
                     UPDATE evidence_tasks
-                    SET status = %(materialization_status)s,
+                    SET status = %(compatibility_status)s,
                         materialization_status = %(materialization_status)s,
+                        materialization_phase = %(materialization_phase)s,
+                        materialization_phase_updated_at = now(),
+                        materialization_owner = %(materialization_owner)s,
+                        materialization_next_attempt_at = CASE
+                            WHEN %(materialization_status)s = 'materialization_pending'
+                                THEN now()
+                            ELSE NULL
+                        END,
+                        materialization_retry_reason = CASE
+                            WHEN %(materialization_status)s = 'materialization_pending'
+                                THEN NULLIF(%(evidence_reason)s, '')
+                            ELSE NULL
+                        END,
+                        materialization_defer_reason = CASE
+                            WHEN %(materialization_status)s = 'materialization_deferred'
+                                THEN NULLIF(%(evidence_reason)s, '')
+                            ELSE NULL
+                        END,
+                        materialization_failure_reason = CASE
+                            WHEN %(materialization_status)s = 'materialization_failed'
+                                THEN NULLIF(%(evidence_reason)s, '')
+                            ELSE NULL
+                        END,
+                        materialization_expired_reason = CASE
+                            WHEN %(materialization_status)s = 'materialization_expired'
+                                THEN NULLIF(%(evidence_reason)s, '')
+                            ELSE NULL
+                        END,
+                        materialization_lease_owner = NULL,
+                        materialization_lease_token = NULL,
+                        materialization_lease_expires_at = NULL,
+                        materialization_lease_heartbeat_at = NULL,
+                        materialization_handoff = '{}'::jsonb,
+                        replay_job_id = COALESCE(
+                            NULLIF(%(replay_job_id)s, ''), replay_job_id
+                        ),
                         error_message = CASE
-                            WHEN %(evidence_reason)s::text != ''
-                                THEN %(evidence_reason)s::text
+                            WHEN %(error_message)s <> '' THEN %(error_message)s
+                            WHEN %(materialization_status)s = 'materialized' THEN NULL
+                            ELSE error_message
+                        END,
+                        replay_shard_id = COALESCE(
+                            NULLIF(%(replay_shard_id)s, ''), replay_shard_id
+                        ),
+                        replay_api_url = COALESCE(
+                            NULLIF(%(replay_api_url)s, ''), replay_api_url
+                        ),
+                        replay_job_sink_url = COALESCE(
+                            NULLIF(%(replay_job_sink_url)s, ''), replay_job_sink_url
+                        ),
+                        materialization_deadline_at = COALESCE(
+                            NULLIF(%(materialization_deadline_at)s, '')::timestamptz,
+                            materialization_deadline_at
+                        ),
+                        materialization_attempt_count = GREATEST(
+                            materialization_attempt_count,
+                            COALESCE(%(attempt_count)s, materialization_attempt_count)
+                        ),
+                        quota_decision = CASE
+                            WHEN %(quota_decision)s::jsonb <> '{}'::jsonb
+                                THEN %(quota_decision)s::jsonb
+                            ELSE quota_decision
+                        END,
+                        degrade_decision = CASE
+                            WHEN %(degrade_decision)s::jsonb <> '{}'::jsonb
+                                THEN %(degrade_decision)s::jsonb
+                            ELSE degrade_decision
+                        END,
+                        retry_count = GREATEST(
+                            retry_count,
+                            COALESCE(%(attempt_count)s, retry_count)
+                        ),
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                      AND COALESCE(task_type, '') <> 'image_only'
+                      AND COALESCE(
+                            NULLIF(materialization_status, ''), status, ''
+                          ) = ANY(%(expected_statuses)s)
+                      AND (
+                          materialization_owner = 'replay'
+                          OR (
+                              COALESCE(materialization_owner, '') = ''
+                              AND COALESCE(
+                                  materialization_audit->'rolling_cache'->>'status',
+                                  ''
+                              ) = ''
+                          )
+                          OR (
+                              materialization_status = %(materialization_status)s
+                              AND materialization_owner = 'terminal'
+                          )
+                      )
+                    """,
+                    params,
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE evidence_tasks
+                    SET status = %(compatibility_status)s,
+                        materialization_status = %(materialization_status)s,
+                        replay_job_id = COALESCE(
+                            NULLIF(%(replay_job_id)s, ''), replay_job_id
+                        ),
+                        error_message = CASE
+                            WHEN %(error_message)s <> '' THEN %(error_message)s
+                            WHEN %(materialization_status)s = 'materialized' THEN NULL
                             ELSE error_message
                         END,
                         replay_shard_id = COALESCE(
@@ -1288,17 +1494,17 @@ def update_clip_status(
                         materialization_defer_reason = CASE
                             WHEN %(materialization_status)s::text = 'materialization_deferred'
                                 THEN %(evidence_reason)s::text
-                            ELSE materialization_defer_reason
+                            ELSE NULL
                         END,
                         materialization_failure_reason = CASE
                             WHEN %(materialization_status)s::text = 'materialization_failed'
                                 THEN %(evidence_reason)s::text
-                            ELSE materialization_failure_reason
+                            ELSE NULL
                         END,
                         materialization_expired_reason = CASE
                             WHEN %(materialization_status)s::text = 'materialization_expired'
                                 THEN %(evidence_reason)s::text
-                            ELSE materialization_expired_reason
+                            ELSE NULL
                         END,
                         quota_decision = CASE
                             WHEN %(quota_decision)s::jsonb <> '{}'::jsonb
@@ -1316,29 +1522,86 @@ def update_clip_status(
                         ),
                         updated_at = now()
                     WHERE event_id = %(event_id)s::uuid
+                      AND COALESCE(task_type, '') <> 'image_only'
+                      AND COALESCE(
+                            NULLIF(materialization_status, ''), status, ''
+                          ) = ANY(%(expected_statuses)s)
+                      AND COALESCE(
+                            materialization_audit->'rolling_cache'->>'status',
+                            ''
+                          ) = ''
                     """,
-                    {
-                        "event_id": event_id,
-                        "evidence_state": state,
-                        "materialization_status": materialization_state,
-                        "evidence_reason": reason,
-                        "attempt_count": attempt_count,
-                        "replay_shard_id": _replay_shard_value(
-                            replay_shard,
-                            "shard_id",
+                    params,
+                )
+            task_updated = bool(cur.rowcount and cur.rowcount > 0)
+            if not task_updated:
+                logger.warning(
+                    "clip_task_transition_cas_missed event_id=%s status=%s "
+                    "materialization_status=%s",
+                    event_id,
+                    status,
+                    materialization_state,
+                )
+                return False
+
+            cur.execute(
+                """
+                UPDATE events
+                SET payload = COALESCE(payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(payload->'media', '{}'::jsonb)
+                            || jsonb_strip_nulls(jsonb_build_object(
+                                'clip_status', %(status_text)s::text,
+                                'recording_strategy', 'savant_replay',
+                                'replay_job_id',
+                                    NULLIF(%(replay_job_id)s::text, ''),
+                                'replay_job_request', %(replay_job_request)s::jsonb,
+                                'evidence_state', %(evidence_state)s::text,
+                                'evidence_reason',
+                                    NULLIF(%(evidence_reason)s::text, ''),
+                                'evidence_state_updated_at', now(),
+                                'materialization_status',
+                                    %(materialization_status)s::text,
+                                'materialization_phase',
+                                    %(materialization_phase)s::text,
+                                'materialization_owner',
+                                    %(materialization_owner)s::text,
+                                'materialization_reason',
+                                    NULLIF(%(evidence_reason)s::text, ''),
+                                'materialization_deadline_at',
+                                    NULLIF(
+                                        %(materialization_deadline_at)s::text,
+                                        ''
+                                    ),
+                                'quota_decision', %(quota_decision)s::jsonb,
+                                'degrade_decision', %(degrade_decision)s::jsonb,
+                                'evidence_request_id',
+                                    NULLIF(%(request_id)s::text, ''),
+                                'evidence_attempt_count', %(attempt_count)s::int,
+                                'evidence_diagnostics', %(diagnostics)s::jsonb,
+                                'replay_shard_id',
+                                    NULLIF(%(replay_shard_id)s::text, ''),
+                                'replay_api_url',
+                                    NULLIF(%(replay_api_url)s::text, ''),
+                                'replay_job_sink_url',
+                                    NULLIF(%(replay_job_sink_url)s::text, ''),
+                                'error_message',
+                                    NULLIF(%(error_message)s::text, '')
+                            ))
                         ),
-                        "replay_api_url": _replay_shard_value(
-                            replay_shard,
-                            "replay_api_url",
-                        ),
-                        "replay_job_sink_url": _replay_shard_value(
-                            replay_shard,
-                            "replay_job_sink_url",
-                        ),
-                        "materialization_deadline_at": materialization_deadline_at,
-                        "quota_decision": _json_or_null(quota_decision or {}),
-                        "degrade_decision": _json_or_null(degrade_decision or {}),
-                    },
+                    media_status = %(evidence_state)s::text,
+                    updated_at = now()
+                WHERE id = %(event_id)s::uuid
+                """,
+                params,
+            )
+            event_updated = bool(cur.rowcount and cur.rowcount > 0)
+            if not event_updated:
+                logger.error(
+                    "clip_event_projection_missing event_id=%s status=%s",
+                    event_id,
+                    status,
                 )
             return event_updated
     except Exception:

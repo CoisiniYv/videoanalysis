@@ -37,6 +37,12 @@ import yaml
 from psycopg.rows import dict_row
 from redis import Redis
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+    TERMINAL_MATERIALIZATION_STATUSES,
+)
+
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
@@ -147,25 +153,9 @@ SAVANT_GAUGE_METRICS = {
     "va_savant_effective_fps",
     "va_savant_last_frame_age_seconds",
 }
-ACTIVE_MATERIALIZATION_STATES = {
-    "manifest_ready",
-    "materialization_pending",
-    "materializing",
-}
-ACTIVE_TASK_STATES = {
-    "pending",
-    "waiting_proof",
-    "queued",
-    "replay_job_created",
-    "replaying",
-    "materializing",
-    "finalizing",
-}
-TERMINAL_EVIDENCE_STATES = {
-    "materialization_expired",
-    "materialization_failed",
-    "materialization_skipped",
-}
+ACTIVE_MATERIALIZATION_STATES = set(ACTIVE_MATERIALIZATION_STATUSES)
+ACTIVE_TASK_STATES = set(ACTIVE_COMPATIBILITY_TASK_STATUSES)
+TERMINAL_EVIDENCE_STATES = set(TERMINAL_MATERIALIZATION_STATUSES)
 SECURITY_STREAMS = [
     "security.events",
     "security.face_observations",

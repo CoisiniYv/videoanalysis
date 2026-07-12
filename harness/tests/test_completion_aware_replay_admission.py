@@ -259,6 +259,7 @@ def test_terminal_replay_slot_admission_is_acked_without_queue(
 
 
 def test_replay_job_creation_exception_releases_reserved_slot(monkeypatch) -> None:
+    """Keep the Phase 0 scenario nodeid while asserting the Phase 1 contract."""
     _activate_clip()
     import app.worker as worker
 
@@ -318,9 +319,11 @@ def test_replay_job_creation_exception_releases_reserved_slot(monkeypatch) -> No
             "release_reason": "replay_job_create_exception",
         }
     ]
-    assert statuses[-1]["status"] == "failed"
+    assert statuses[-1]["status"] == "pending"
+    assert statuses[-1]["evidence_state"] == "materialization_pending"
+    assert statuses[-1]["evidence_reason"] == "replay_unavailable"
     assert "replay unavailable" in statuses[-1]["error_message"]
-    assert redis_client.acked == ["1-0"]
+    assert redis_client.acked == []
 
 
 def test_db_active_slot_count_blocks_low_priority_admission() -> None:

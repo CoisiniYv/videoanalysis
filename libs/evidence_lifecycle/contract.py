@@ -60,6 +60,9 @@ class NormalizedReason(StrEnum):
     DB_POOL_TIMEOUT = "db_pool_timeout"
     TEMPORARY_IO_ERROR = "temporary_io_error"
     CAPACITY_UNAVAILABLE = "capacity_unavailable"
+    PROOF_NOT_READY = "proof_not_ready"
+    COOLDOWN_ACTIVE = "cooldown_active"
+    REPLAY_UNAVAILABLE = "replay_unavailable"
     LEGACY_EMPTY_DEFERRED = "legacy_empty_deferred"
     MISSING_EVENT_FRAME_PTS = "missing_event_frame_pts"
     INVALID_REQUESTED_WINDOW = "invalid_requested_window"
@@ -180,6 +183,31 @@ _REASON_RULES: Final = (
         ),
     ),
     (
+        NormalizedReason.PROOF_NOT_READY,
+        EvidenceErrorClass.NOT_READY,
+        (
+            "proof_not_ready",
+            "waiting_proof",
+            "missing_post_savant_frame_proof",
+            "frame_proof",
+        ),
+    ),
+    (
+        NormalizedReason.COOLDOWN_ACTIVE,
+        EvidenceErrorClass.CAPACITY,
+        ("cooldown_active", "reason=cooldown", "cooldown"),
+    ),
+    (
+        NormalizedReason.REPLAY_UNAVAILABLE,
+        EvidenceErrorClass.TRANSIENT_DEPENDENCY,
+        (
+            "replay_unavailable",
+            "replay unavailable",
+            "replay dependency",
+            "replay job creation returned none",
+        ),
+    ),
+    (
         NormalizedReason.NO_OVERLAPPING_FINAL_SEGMENT,
         EvidenceErrorClass.NOT_READY,
         ("no_overlapping_final_segment", "no_overlapping_segments"),
@@ -223,7 +251,7 @@ _REASON_RULES: Final = (
     (
         NormalizedReason.MISSING_EVENT_FRAME_PTS,
         EvidenceErrorClass.INVALID_INPUT,
-        ("missing_event_frame_pts",),
+        ("missing_event_frame_pts", "missing event frame pts"),
     ),
     (
         NormalizedReason.INVALID_REQUESTED_WINDOW,
@@ -233,12 +261,12 @@ _REASON_RULES: Final = (
     (
         NormalizedReason.MISSING_SOURCE_ID,
         EvidenceErrorClass.INVALID_INPUT,
-        ("missing_source_id",),
+        ("missing_source_id", "missing source_id", "missing source id"),
     ),
     (
         NormalizedReason.MISSING_RUNTIME_EPOCH,
         EvidenceErrorClass.INVALID_INPUT,
-        ("missing_runtime_epoch",),
+        ("missing_runtime_epoch", "missing runtime_epoch", "missing runtime epoch"),
     ),
     (
         NormalizedReason.STABLE_METADATA_INVALID,

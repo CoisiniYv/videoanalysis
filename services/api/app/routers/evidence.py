@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from libs.evidence_lifecycle import ACTIVE_MATERIALIZATION_STATUSES
+
 from app.db import get_conn
 from app.repositories.events import EventRepository
 
@@ -38,6 +40,7 @@ RAW_CLIP_UNAVAILABLE_STATUSES = {
     "replaying",
     "finalizing",
 }
+RAW_CLIP_UNAVAILABLE_STATUSES.update(ACTIVE_MATERIALIZATION_STATUSES)
 PRODUCTION_ANNOTATIONS_FILE = "annotations.frame_cache.identity.jsonl"
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", "/data/video-analytics/media"))
 

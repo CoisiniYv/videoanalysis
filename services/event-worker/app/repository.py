@@ -11,6 +11,15 @@ from typing import Any, Dict, Optional
 import psycopg
 from psycopg.rows import dict_row
 
+from libs.evidence_lifecycle import (
+    ACTIVE_COMPATIBILITY_TASK_STATUSES,
+    ACTIVE_MATERIALIZATION_STATUSES,
+    MaterializationPhase,
+    NormalizedReason,
+    OPERATOR_EVIDENCE_STATES as CANONICAL_OPERATOR_EVIDENCE_STATES,
+    materialization_status_for_operator_state,
+)
+
 
 _INSERT_SQL = """
 INSERT INTO events (
@@ -132,6 +141,7 @@ EVIDENCE_TASK_STATUSES = (
 )
 
 OPERATOR_EVIDENCE_STATES = {
+    *CANONICAL_OPERATOR_EVIDENCE_STATES,
     "manifest_ready",
     "materialization_pending",
     "materializing",
@@ -261,6 +271,20 @@ def _runtime_epoch_id_for_task(event: Dict[str, Any]) -> str:
     return ""
 
 
+def _materialization_owner_for_task(
+    event: Dict[str, Any],
+    materialization_status: str,
+) -> str:
+    if materialization_status not in ACTIVE_MATERIALIZATION_STATUSES:
+        return "terminal"
+    if _is_image_only_evidence(event) or _bool_env(
+        "ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS",
+        "false",
+    ):
+        return "rolling"
+    return "replay"
+
+
 def _payload_media(event: Dict[str, Any]) -> dict[str, Any]:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
@@ -340,15 +364,7 @@ def _content_type_for_path(path: str) -> str:
 
 
 ACTIVE_ADMISSION_STATUSES = (
-    "pending",
-    "materialization_pending",
-    "waiting_proof",
-    "queued",
-    "replay_job_created",
-    "replaying",
-    "materializing",
-    "finalizing",
-    "materialization_deferred",
+    *sorted(ACTIVE_COMPATIBILITY_TASK_STATUSES),
 )
 
 
@@ -518,7 +534,11 @@ def _extend_coverage_parent_window(
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT event_ts_ms, pre_seconds, post_seconds, materialization_status
+            SELECT event_ts_ms, pre_seconds, post_seconds, materialization_status,
+                   COALESCE(to_jsonb(evidence_tasks)->>'materialization_phase', '')
+                       AS materialization_phase,
+                   COALESCE(to_jsonb(evidence_tasks)->>'materialization_lease_token', '')
+                       AS materialization_lease_token
             FROM evidence_tasks
             WHERE event_id = %(parent_event_id)s::uuid
             FOR UPDATE
@@ -528,8 +548,17 @@ def _extend_coverage_parent_window(
         row = cur.fetchone()
         if not row:
             return {"extended": False, "reason": "parent_missing"}
-        if str(row.get("materialization_status") or "") == "materialized":
-            return {"extended": False, "reason": "parent_already_materialized"}
+        parent_status = str(row.get("materialization_status") or "")
+        if parent_status not in {"manifest_ready", "materialization_pending"}:
+            return {"extended": False, "reason": "parent_not_waiting"}
+        if str(row.get("materialization_lease_token") or ""):
+            return {"extended": False, "reason": "parent_already_leased"}
+        parent_phase = str(row.get("materialization_phase") or "")
+        if parent_phase and parent_phase not in {
+            MaterializationPhase.WAITING_READY.value,
+            MaterializationPhase.WAITING_COVERAGE.value,
+        }:
+            return {"extended": False, "reason": "parent_not_waiting"}
 
         parent_ts_ms = int(row.get("event_ts_ms") or 0)
         if parent_ts_ms <= 0:
@@ -579,6 +608,15 @@ def _extend_coverage_parent_window(
                         'coverage_extended', true,
                         'coverage_extended_at', now()
                     ),
+                materialization_ready_at = CASE
+                    WHEN event_ts_ms BETWEEN 946684800000 AND 4102444800000
+                        THEN to_timestamp(event_ts_ms::double precision / 1000.0)
+                            + (
+                                %(post_seconds)s::double precision
+                                + %(ready_grace_s)s::double precision
+                            ) * interval '1 second'
+                    ELSE materialization_ready_at
+                END,
                 materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
                     || jsonb_build_object(
                         'coverage_extension',
@@ -591,13 +629,30 @@ def _extend_coverage_parent_window(
                     ),
                 updated_at = now()
             WHERE event_id = %(parent_event_id)s::uuid
-              AND COALESCE(materialization_status, '') <> 'materialized'
+              AND materialization_status IN (
+                  'manifest_ready', 'materialization_pending'
+              )
+              AND COALESCE(
+                  to_jsonb(evidence_tasks)->>'materialization_lease_token',
+                  ''
+              ) = ''
+              AND COALESCE(
+                  to_jsonb(evidence_tasks)->>'materialization_phase',
+                  'waiting_ready'
+              ) IN ('waiting_ready', 'waiting_coverage')
             """,
             {
                 "parent_event_id": parent_event_id,
                 "child_event_ts_ms": child_event_ts_ms,
                 "pre_seconds": required_pre,
                 "post_seconds": required_post,
+                "ready_grace_s": max(
+                    0.0,
+                    _float_env(
+                        "EVIDENCE_MATERIALIZATION_READY_SEGMENT_GRACE_SECONDS",
+                        0.0,
+                    ),
+                ),
             },
         )
     return {
@@ -769,6 +824,45 @@ class EventRepository:
 
     def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
+        self._lifecycle_v2_supported: bool | None = None
+
+    def _supports_lifecycle_v2(self) -> bool:
+        """Feature-detect Migration 029 for mixed-order deployments."""
+        if self._lifecycle_v2_supported is not None:
+            return self._lifecycle_v2_supported
+        required = {
+            "materialization_phase",
+            "materialization_next_attempt_at",
+            "materialization_retry_reason",
+            "materialization_owner",
+            "materialization_lease_token",
+            "materialization_handoff",
+        }
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'evidence_tasks'
+                      AND column_name = ANY(%(columns)s)
+                    """,
+                    {"columns": sorted(required)},
+                )
+                rows = cur.fetchall()
+            observed = {
+                str(row.get("column_name") if isinstance(row, dict) else row[0])
+                for row in rows
+                if row
+            }
+            self._lifecycle_v2_supported = observed == required
+        except Exception:
+            # Migration 029 may intentionally be deployed after compatible
+            # code.  Legacy columns remain usable until the service recreate
+            # following migration application.
+            self._lifecycle_v2_supported = False
+        return self._lifecycle_v2_supported
 
     def insert_event(self, event: Dict[str, Any]) -> str | None:
         """Insert *event* dict into the events table.
@@ -883,6 +977,24 @@ class EventRepository:
         image_status = "image_ready" if image_artifact_ready else "image_pending"
         task_status = "materialized" if image_artifact_ready else "materialization_pending"
         image_reason = ""
+        source_id = str(event.get("source_id") or "").strip()
+        runtime_epoch_id = _runtime_epoch_id_for_task(event)
+        materialization_phase = (
+            MaterializationPhase.TERMINAL.value
+            if image_artifact_ready
+            else MaterializationPhase.WAITING_READY.value
+        )
+        materialization_owner = "terminal" if image_artifact_ready else "rolling"
+        if not image_artifact_ready and (not source_id or not runtime_epoch_id):
+            image_reason = (
+                NormalizedReason.MISSING_SOURCE_ID.value
+                if not source_id
+                else NormalizedReason.MISSING_RUNTIME_EPOCH.value
+            )
+            image_status = "image_failed"
+            task_status = "materialization_failed"
+            materialization_phase = MaterializationPhase.MANUAL_QUARANTINE.value
+            materialization_owner = "terminal"
         event_ts_ms = int(event.get("event_ts_ms") or event.get("start_ts_ms", 0))
         policy = event.get("evidence_policy") if isinstance(event.get("evidence_policy"), dict) else {}
         ttl_metadata = _materialization_ttl_metadata(event)
@@ -919,14 +1031,44 @@ class EventRepository:
             "created_by": "event-worker",
             "materialization_status": task_status,
             "materialization_reason": image_reason,
+            "materialization_phase": materialization_phase,
+            "materialization_owner": materialization_owner,
             "materialization_ready_at": materialization_ready_at.isoformat(),
             "materialization_deadline_at": ttl_metadata["materialization_deadline_at"],
             "replay_window": replay_window,
         }
 
+        lifecycle_columns = ""
+        lifecycle_values = ""
+        lifecycle_updates = ""
+        if self._supports_lifecycle_v2():
+            lifecycle_columns = """
+                    materialization_phase, materialization_phase_updated_at,
+                    materialization_owner, materialization_failure_reason,
+            """
+            lifecycle_values = """
+                    %(materialization_phase)s, now(),
+                    %(materialization_owner)s,
+                    CASE
+                        WHEN %(task_status)s = 'materialization_failed'
+                            THEN NULLIF(%(image_reason)s::text, '')
+                        ELSE NULL
+                    END,
+            """
+            lifecycle_updates = """
+                    materialization_phase = %(materialization_phase)s,
+                    materialization_phase_updated_at = now(),
+                    materialization_owner = %(materialization_owner)s,
+                    materialization_failure_reason = CASE
+                        WHEN %(task_status)s = 'materialization_failed'
+                            THEN NULLIF(%(image_reason)s::text, '')
+                        ELSE NULL
+                    END,
+            """
+
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """
+                f"""
                 INSERT INTO evidence_tasks (
                     task_id, event_id, source_event_id, camera_id, source_id,
                     event_type, event_ts_ms, task_type,
@@ -939,6 +1081,7 @@ class EventRepository:
                     materialization_deadline_at, materialization_ready_at,
                     materialization_audit,
                     materialization_defer_reason,
+                    {lifecycle_columns}
                     error_message
                 ) VALUES (
                     %(task_id)s, %(event_id)s::uuid, %(source_event_id)s,
@@ -956,6 +1099,7 @@ class EventRepository:
                     %(materialization_ready_at)s::timestamptz,
                     %(materialization_audit)s::jsonb,
                     NULL,
+                    {lifecycle_values}
                     %(image_reason)s
                 )
                 ON CONFLICT (task_id) DO UPDATE SET
@@ -963,6 +1107,7 @@ class EventRepository:
                     materialization_status = %(task_status)s,
                     task_type = 'image_only',
                     clip_required = false,
+                    {lifecycle_updates}
                     error_message = %(image_reason)s,
                     updated_at = now()
                 RETURNING task_id
@@ -972,16 +1117,18 @@ class EventRepository:
                     "event_id": event_id,
                     "source_event_id": event.get("source_event_id", ""),
                     "camera_id": event.get("camera_id", ""),
-                    "source_id": event.get("source_id", ""),
+                    "source_id": source_id,
                     "event_type": event.get("event_type", ""),
                     "event_ts_ms": event_ts_ms,
                     "task_status": task_status,
+                    "materialization_phase": materialization_phase,
+                    "materialization_owner": materialization_owner,
                     "image_reason": image_reason,
                     "pre_seconds": int(policy.get("pre_seconds", 5)),
                     "post_seconds": int(policy.get("post_seconds", 5)),
                     "priority": _materialization_priority(event),
-                    "runtime_epoch_id": _runtime_epoch_id_for_task(event),
-                    "replay_source_id": event.get("source_id", ""),
+                    "runtime_epoch_id": runtime_epoch_id,
+                    "replay_source_id": source_id,
                     "replay_window": json.dumps(replay_window, ensure_ascii=False),
                     "replay_deadline_at": ttl_metadata["replay_deadline_at"],
                     "annotation_deadline_at": ttl_metadata["annotation_deadline_at"],
@@ -1038,7 +1185,15 @@ class EventRepository:
                     "event_ts_ms": event_ts_ms,
                     "image_status": image_status,
                     "image_reason": image_reason,
-                    "visual_evidence_status": "verified" if image_artifact_ready else "pending",
+                    "visual_evidence_status": (
+                        "verified"
+                        if image_artifact_ready
+                        else (
+                            "failed"
+                            if task_status == "materialization_failed"
+                            else "pending"
+                        )
+                    ),
                     "summary": json.dumps(summary, ensure_ascii=False),
                     "materialization": json.dumps(materialization, ensure_ascii=False),
                 },
@@ -1201,6 +1356,34 @@ class EventRepository:
                     admission_decision.get("reason") or "admission_denied"
                 )
 
+        runtime_epoch_id = _runtime_epoch_id_for_task(event)
+        materialization_status = materialization_status_for_operator_state(
+            initial_status
+        )
+        materialization_phase = (
+            MaterializationPhase.WAITING_READY.value
+            if materialization_status in ACTIVE_MATERIALIZATION_STATUSES
+            else MaterializationPhase.TERMINAL.value
+        )
+        materialization_failure_reason = ""
+        if materialization_status in ACTIVE_MATERIALIZATION_STATUSES and (
+            not str(source_id or "").strip() or not runtime_epoch_id
+        ):
+            missing_reason = (
+                NormalizedReason.MISSING_SOURCE_ID.value
+                if not str(source_id or "").strip()
+                else NormalizedReason.MISSING_RUNTIME_EPOCH.value
+            )
+            initial_status = "materialization_failed"
+            materialization_status = "materialization_failed"
+            materialization_phase = MaterializationPhase.MANUAL_QUARANTINE.value
+            materialization_failure_reason = missing_reason
+            error_message = f"{missing_reason}:manual_quarantine"
+        materialization_owner = _materialization_owner_for_task(
+            event,
+            materialization_status,
+        )
+
         params = {
             "task_id": task_id,
             "event_id": event_id,
@@ -1215,10 +1398,13 @@ class EventRepository:
             "pre_seconds": pre_seconds,
             "post_seconds": post_seconds,
             "status": initial_status,
-            "materialization_status": initial_status,
+            "materialization_status": materialization_status,
+            "materialization_phase": materialization_phase,
+            "materialization_owner": materialization_owner,
+            "materialization_failure_reason": materialization_failure_reason,
             "materialization_policy": materialization_policy,
             "priority": priority,
-            "runtime_epoch_id": _runtime_epoch_id_for_task(event),
+            "runtime_epoch_id": runtime_epoch_id,
             "replay_source_id": source_id,
             "replay_window": json.dumps(replay_window, ensure_ascii=False),
             "replay_deadline_at": ttl_metadata["replay_deadline_at"],
@@ -1244,9 +1430,22 @@ class EventRepository:
             "error_message": error_message,
         }
 
+        lifecycle_columns = ""
+        lifecycle_values = ""
+        if self._supports_lifecycle_v2():
+            lifecycle_columns = """
+                    materialization_phase, materialization_phase_updated_at,
+                    materialization_owner, materialization_failure_reason,
+            """
+            lifecycle_values = """
+                    %(materialization_phase)s, now(),
+                    %(materialization_owner)s,
+                    NULLIF(%(materialization_failure_reason)s::text, ''),
+            """
+
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """
+                f"""
                 INSERT INTO evidence_tasks (
                     task_id, event_id, source_event_id, camera_id, source_id,
                     event_type, event_ts_ms, task_type,
@@ -1259,6 +1458,7 @@ class EventRepository:
                     materialization_deadline_at, materialization_ready_at,
                     materialization_audit,
                     materialization_defer_reason,
+                    {lifecycle_columns}
                     error_message
                 ) VALUES (
                     %(task_id)s, %(event_id)s::uuid, %(source_event_id)s,
@@ -1276,6 +1476,7 @@ class EventRepository:
                     %(materialization_ready_at)s::timestamptz,
                     %(materialization_audit)s::jsonb,
                     NULLIF(%(materialization_defer_reason)s::text, ''),
+                    {lifecycle_values}
                     %(error_message)s
                 )
                 ON CONFLICT (task_id) DO UPDATE SET
@@ -1313,6 +1514,7 @@ class EventRepository:
             "manifest_ready",
             "materialization_skipped",
             "materialization_deferred",
+            "materialization_failed",
         }:
             self.set_evidence_status(
                 event_id=event_id,
@@ -1346,11 +1548,8 @@ class EventRepository:
             raise ValueError(f"unsupported evidence status: {status}")
 
         evidence_state = _evidence_state_for_status(status)
-        materialization_state = (
+        materialization_state = materialization_status_for_operator_state(
             evidence_state
-            if evidence_state.startswith("materialization_")
-            or evidence_state == "manifest_ready"
-            else status
         )
         materialization_metadata = materialization_metadata or {}
         with self._conn.cursor() as cur:

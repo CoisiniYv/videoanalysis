@@ -650,7 +650,7 @@ def test_concurrency_pressure_queues_without_permanent_skip(monkeypatch) -> None
 
     assert redis_client.acked == ["1-0"]
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "materialization_deferred"
+    assert updates[-1]["evidence_state"] == "queued"
     assert updates[-1]["diagnostics"]["active_job_count"] == 1
     assert updates[-1]["diagnostics"]["max_concurrent_jobs"] == 1
     assert updates[-1]["diagnostics"]["replay_active_global_count"] == 1
@@ -695,7 +695,7 @@ def test_post_savant_concurrency_queue_does_not_wait_for_proof(monkeypatch) -> N
     assert redis_client.acked == ["1-0"]
     assert redis_client.proof_reads == 0
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "materialization_deferred"
+    assert updates[-1]["evidence_state"] == "queued"
 
 
 def test_post_savant_proof_wait_fast_path_triggers_on_record_request_batch() -> None:
@@ -1014,7 +1014,7 @@ def test_concurrency_queue_does_not_fail_on_retry_budget(monkeypatch) -> None:
 
     assert redis_client.acked == ["9-0"]
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "materialization_deferred"
+    assert updates[-1]["evidence_state"] == "queued"
     assert "retry_budget_exhausted" not in updates[-1].get("error_message", "")
     assert updates[-1]["attempt_count"] == 7
 
@@ -1048,7 +1048,7 @@ def test_priority_event_does_not_bypass_hard_replay_concurrency(monkeypatch) -> 
 
     assert redis_client.acked == ["1-0"]
     assert [update["status"] for update in updates] == ["replay_job_created", "pending"]
-    assert updates[-1]["evidence_state"] == "materialization_deferred"
+    assert updates[-1]["evidence_state"] == "queued"
     assert updates[-1]["diagnostics"]["replay_admission_reason"] == (
         "max_concurrent_reached"
     )

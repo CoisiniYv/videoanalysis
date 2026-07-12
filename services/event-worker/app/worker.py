@@ -14,6 +14,8 @@ from typing import Dict
 import psycopg
 from redis import Redis
 
+from libs.evidence_lifecycle import READY_MATERIALIZATION_STATUSES
+
 from app.alert_policy import AlertPolicyDecision, AlertPolicyService
 from app.alert_publisher import AlertPublisher
 from app.config import Config, load_config
@@ -34,7 +36,7 @@ MIDTERM_DEFAULT_EVIDENCE_POLICY = {
 }
 MATERIALIZATION_RECORDABLE_TASK_STATUSES = {
     "pending",
-    "materialization_pending",
+    *READY_MATERIALIZATION_STATUSES,
 }
 RECORDING_POLICY_TERMINAL_SKIP_REASONS = {
     "cooldown",

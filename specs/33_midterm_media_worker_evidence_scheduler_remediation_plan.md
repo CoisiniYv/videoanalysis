@@ -2,7 +2,7 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 0 已完成，Phase 1-7 尚未执行
+Status: 执行中；Phase 0-1 已完成，Phase 2-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -14,6 +14,19 @@ Implementation checkpoint (2026-07-12):
 - acceptance token: `PASS_MEDIA_WORKER_SCHEDULER_BASELINE_TRUSTED` is satisfied
   only as the Spec 33 Phase 0 observability/baseline gate; no later scheduler
   acceptance token is claimed.
+- Phase 1 applies Migrations 029/030, makes deferred claim-terminal, separates
+  retry time from immutable ready time, introduces phase/owner/fenced leases
+  and durable handoff, and gives media-worker sole ownership of rolling
+  deadline/lease recovery;
+- Clip expiry is now Replay-only, worker/API/report/drain state sets share the
+  dependency-free lifecycle contract, and finalizer terminal task CAS plus the
+  basic event projection is one fenced PostgreSQL transition;
+- fresh 001-030, 028 upgrade, repeated 029/030, real-PostgreSQL stale-owner and
+  recovery tests, service recreate, Redis/DB and 8090 smoke are recorded in
+  `docs/code_review/clip_media_phase1_lifecycle_contract_2026-07-12.md`;
+- acceptance token: `PASS_EVIDENCE_MATERIALIZATION_STATE_CONTRACT_UNIFIED`.
+  This does not claim the Phase 2 single-finalizer boundary: attempt-scoped
+  canonical publish and outermost permit release still belong to Phase 2.
 
 ## 0. 执行摘要
 
