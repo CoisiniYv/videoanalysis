@@ -847,9 +847,13 @@ def test_midterm_replay_uses_constant_cadence_by_default() -> None:
     assert clip_env["CLIP_WORKER_PLANNER_SHADOW_ENABLED"] == (
         "${CLIP_WORKER_PLANNER_SHADOW_ENABLED:-true}"
     )
+    assert clip_env["CLIP_WORKER_COORDINATOR_V2_ENABLED"] == (
+        "${CLIP_WORKER_COORDINATOR_V2_ENABLED:-false}"
+    )
     assert clip_env["REPLAY_TS_SYNC"] == "${REPLAY_TS_SYNC:-false}"
     assert env_file["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
     assert env_file["CLIP_WORKER_PLANNER_SHADOW_ENABLED"] == "true"
+    assert env_file["CLIP_WORKER_COORDINATOR_V2_ENABLED"] == "false"
     assert env_file["REPLAY_TS_SYNC"] == "false"
 
 

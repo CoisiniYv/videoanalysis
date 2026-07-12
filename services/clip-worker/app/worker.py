@@ -3273,6 +3273,10 @@ def _resolve_replay_route(
 def run_worker(
     cfg: Config, redis_client: Redis, pg_conn: psycopg.Connection
 ) -> None:
+    if cfg.coordinator_v2_enabled:
+        raise RuntimeError(
+            "CLIP_WORKER_COORDINATOR_V2_ENABLED requires the Phase 3 processor"
+        )
     stream = cfg.record_request_stream
     group = cfg.consumer_group
     consumer = cfg.consumer_name
@@ -3303,7 +3307,7 @@ def run_worker(
         "frame_annotation_range_cache_bucket_ms=%s "
         "frame_annotation_range_cache_max_entries=%s "
         "planner_shadow_enabled=%s replay_force_constant_cadence=%s "
-        "replay_ts_sync=%s",
+        "replay_ts_sync=%s coordinator_v2_enabled=%s",
         stream,
         group,
         consumer,
@@ -3329,6 +3333,7 @@ def run_worker(
         cfg.planner_shadow_enabled,
         cfg.replay_force_constant_cadence,
         cfg.replay_ts_sync,
+        cfg.coordinator_v2_enabled,
     )
 
     total_processed = 0

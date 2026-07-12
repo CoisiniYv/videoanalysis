@@ -640,6 +640,18 @@ Replay job. Proof and implementation details are recorded in
 V2 默认关闭，完成一源、二源和重启恢复后才切为默认开启。关闭 V2 只能切换
 coordinator，数据库状态合同和幂等 repository 不能回退。
 
+Implementation checkpoint (Phase 3A, 2026-07-12): delivery/outcome/ACK/crash
+contracts, the Redis Stream delivery adapter, named Replay-admission and
+evidence-state ports, and the side-effect-free `ClipCoordinator` ACK boundary
+are implemented. `CLIP_WORKER_COORDINATOR_V2_ENABLED` is tracked with default
+`false` and fails closed if enabled before the real processor is installed.
+The coordinator contains no Redis command, SQL or Replay call; ACK is decided
+only from a durable `ProcessingOutcome`. This foundation is recorded in
+`docs/code_review/clip_media_phase3a_coordinator_ports_2026-07-12.md`. It does
+not claim the Phase 3 acceptance token: real one-message business orchestration,
+fenced slot owner/token, durable Replay commit and reclaim/crash convergence
+remain pending.
+
 Acceptance token:
 
 ```text

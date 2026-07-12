@@ -77,6 +77,7 @@ class Config:
     replay_force_constant_cadence: bool = True
     replay_ts_sync: bool = False
     planner_shadow_enabled: bool = True
+    coordinator_v2_enabled: bool = False
 
 
 def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
@@ -336,5 +337,8 @@ def load_config() -> Config:
         replay_ts_sync=_bool_env("REPLAY_TS_SYNC", "false"),
         planner_shadow_enabled=_bool_env(
             "CLIP_WORKER_PLANNER_SHADOW_ENABLED", "true"
+        ),
+        coordinator_v2_enabled=_bool_env(
+            "CLIP_WORKER_COORDINATOR_V2_ENABLED", "false"
         ),
     )

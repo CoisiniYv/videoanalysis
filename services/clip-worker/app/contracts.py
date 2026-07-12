@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import json
 from typing import Any, Mapping
@@ -12,6 +12,67 @@ class ProofResolutionKind(str, Enum):
     READY = "ready"
     NOT_READY = "not_ready"
     INVALID = "invalid"
+
+
+class AckDisposition(str, Enum):
+    ACK = "ack"
+    HOLD = "hold"
+
+
+class ProcessingCode(str, Enum):
+    MALFORMED = "malformed"
+    DUPLICATE_TERMINAL = "duplicate_terminal"
+    STALE_TARGET = "stale_target"
+    RETRY_PENDING = "retry_pending"
+    CAPACITY_PENDING = "capacity_pending"
+    REPLAY_CREATED = "replay_created"
+    PERMANENT_FAILURE = "permanent_failure"
+    TRANSIENT_FAILURE = "transient_failure"
+    UNEXPECTED_FAILURE = "unexpected_failure"
+
+
+class CrashPoint(str, Enum):
+    BEFORE_REPLAY_CREATE = "before_replay_create"
+    AFTER_REPLAY_RESPONSE = "after_replay_response"
+    BEFORE_DURABLE_COMMIT = "before_durable_commit"
+    AFTER_DURABLE_COMMIT = "after_durable_commit"
+    BEFORE_ACK = "before_ack"
+    AFTER_ACK = "after_ack"
+
+
+@dataclass(frozen=True)
+class DeliveryEnvelope:
+    stream: str
+    group: str
+    consumer: str
+    message_id: str
+    fields: tuple[tuple[object, object], ...]
+    delivery_count: int = 1
+    reclaimed: bool = False
+
+    @property
+    def retry_count(self) -> int:
+        return max(0, int(self.delivery_count) - 1)
+
+    def field_map(self) -> dict[object, object]:
+        return dict(self.fields)
+
+
+@dataclass(frozen=True)
+class ProcessingOutcome:
+    code: ProcessingCode
+    ack_disposition: AckDisposition
+    durable: bool
+    event_id: str = ""
+    request_id: str = ""
+    reason: str = ""
+    replay_job_id: str = ""
+    slot_token: str = ""
+    diagnostics: tuple[tuple[str, object], ...] = ()
+    ack_performed: bool = False
+
+    def with_ack_performed(self, value: bool) -> "ProcessingOutcome":
+        return replace(self, ack_performed=bool(value))
 
 
 @dataclass(frozen=True)
