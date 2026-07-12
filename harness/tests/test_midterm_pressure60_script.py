@@ -123,6 +123,8 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "--pose-batch-size 4" in output
     assert "--face-detector-batch-size 4" in output
     assert "--face-embedding-batch-size 16" in output
+    assert "media_worker_materialization_max_active=4" in output
+    assert "--media-worker-materialization-max-active 4" in output
 
 
 def test_pressure_rtsp_uri_uses_source_id_when_republish_base_has_no_placeholder() -> None:
@@ -411,6 +413,16 @@ def test_pressure_runner_exposes_rolling_cache_canary_flags() -> None:
     assert parsed.rolling_cache_enable_coverage_merge is True
 
 
+def test_pressure_runner_exposes_media_worker_wip_candidate() -> None:
+    module = _load_module()
+
+    parsed = module.parse_args(
+        ["--media-worker-materialization-max-active", "12"]
+    )
+
+    assert parsed.media_worker_materialization_max_active == 12
+
+
 def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
     module = _load_module()
 
@@ -494,6 +506,79 @@ def test_rolling_cache_pressure_attempts_sidecar_for_all_retained_evidence() -> 
     assert '"FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN": str(' in source
     assert "max(1000, cfg.stream_count * 40)" in source
     assert '"FRAME_CACHE_SIDECAR_MAX_EVENTS_PER_RUN",' in source
+
+
+def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        rolling_cache_evidence=True,
+        media_worker_materialization_max_active=8,
+    )
+    captured: dict[str, dict[str, str]] = {}
+
+    monkeypatch.setattr(
+        module,
+        "configure_event_worker_evidence_admission",
+        lambda _cfg, *, values, artifact_name: {"requested": values},
+    )
+
+    def capture_media(_cfg, *, values, artifact_name):
+        captured[artifact_name] = dict(values)
+        return {"requested": values}
+
+    monkeypatch.setattr(module, "configure_media_worker_rolling_cache", capture_media)
+
+    module.configure_rolling_cache_workers_for_pressure(cfg)
+
+    values = captured["compose_recreate_media_worker_rolling_cache.log"]
+    assert values["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "8"
+    assert values["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
+    assert values["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
+    assert values["MEDIA_WORKER_IMAGE_WORKERS"] == "4"
+    assert values["ROLLING_CACHE_MATERIALIZATION_WORKERS"] == "1"
+    assert values["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
+    assert values["MEDIA_WORKER_SCHEDULER_V2_ENABLED"] == "true"
+    assert values["MEDIA_WORKER_DB_POOL_ENABLED"] == "true"
+    assert values["MEDIA_WORKER_SEGMENT_INDEX_ENABLED"] == "true"
+
+
+def test_media_worker_pressure_config_writes_auditable_compose_override(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    values = {
+        "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE": "8",
+        "ROLLING_CACHE_ENABLED": "true",
+    }
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, *_args, **_kwargs: commands.append(list(command)),
+    )
+    monkeypatch.setattr(
+        module,
+        "media_worker_rolling_cache_env_snapshot",
+        lambda: dict(values),
+    )
+
+    summary = module.configure_media_worker_rolling_cache(
+        cfg,
+        values=values,
+        artifact_name="media-pressure.log",
+    )
+
+    override_path = tmp_path / "media-pressure.override.yml"
+    override = yaml.safe_load(override_path.read_text(encoding="utf-8"))
+    assert override["services"]["media-worker"]["environment"] == values
+    assert str(override_path) in commands[0]
+    assert summary == {"requested": values, "observed": values}
 
 
 def test_pressure_drain_does_not_treat_reasoned_deferred_as_active() -> None:
@@ -4458,6 +4543,7 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "queue_wait_ms_by_source": {},
             "queue_wait_ms_by_shard": {},
             "duplicate_materialization_count": 0,
+            "db_index": module._not_enough_data("synthetic"),
             "scheduler": module._not_enough_data("synthetic"),
         },
         "evidence_types": {
@@ -4632,23 +4718,60 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "replay_slot_released event_id=e2 "
                 "release_reason=sink_video_stable sink_video_to_stable_ms=31000",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
-                "scheduler_mode=legacy sequence=1 tick_duration_ms=1200 "
+                "scheduler_mode=v2 sequence=1 tick_duration_ms=1200 "
                 "tick_gap_ms=unavailable rolling_due=True general_due=True "
-                "oldest_ready_age_ms=unavailable image_lane_depth=unavailable "
-                "remux_lane_depth=3 finalizer_lane_depth=unavailable "
-                "permit_active=2 permit_limit=4 db_pool_in_use=unavailable "
-                "db_pool_limit=unavailable segment_index_mode=legacy_recursive_scan "
-                "segment_index_hits=unavailable segment_index_misses=unavailable "
-                "segment_index_fallback_scans=unavailable",
+                "oldest_ready_age_ms=9000 image_lane_depth=3 "
+                "remux_lane_depth=2 finalizer_lane_depth=1 "
+                "permit_active=4 permit_limit=4 db_pool_in_use=3 "
+                "db_pool_limit=4 db_pool_peak_in_use=4 db_pool_checkout_count=20 "
+                "db_pool_checkout_wait_ms=15 db_pool_checkout_timeouts=0 "
+                "db_pool_checkout_errors=0 db_pool_resets=1 "
+                "db_pool_connections_lost=0 lease_heartbeat_active=2 "
+                "lease_heartbeat_total=8 lease_heartbeat_lost=0 "
+                "lease_heartbeat_expired=0 lease_heartbeat_errors=0 "
+                "segment_index_mode=incremental segment_index_hits=10 "
+                "segment_index_misses=2 segment_index_refreshes=4 "
+                "segment_index_parses=8 segment_index_stale_entries=1 "
+                "segment_index_fallback_scans=0 segment_index_row_cache_entries=7 "
+                "segment_index_row_cache_evictions=1 "
+                "segment_index_active_read_pins=2 segment_index_read_pins_created=4 "
+                "segment_index_read_pins_released=2 segment_index_generation=3",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
-                "scheduler_mode=legacy sequence=2 tick_duration_ms=200 "
+                "scheduler_mode=v2 sequence=2 tick_duration_ms=200 "
                 "tick_gap_ms=1300 rolling_due=True general_due=True "
-                "oldest_ready_age_ms=unavailable image_lane_depth=unavailable "
-                "remux_lane_depth=1 finalizer_lane_depth=unavailable "
-                "permit_active=1 permit_limit=4 db_pool_in_use=unavailable "
-                "db_pool_limit=unavailable segment_index_mode=legacy_recursive_scan "
-                "segment_index_hits=unavailable segment_index_misses=unavailable "
-                "segment_index_fallback_scans=unavailable",
+                "oldest_ready_age_ms=5000 image_lane_depth=1 "
+                "remux_lane_depth=1 finalizer_lane_depth=0 "
+                "permit_active=1 permit_limit=4 db_pool_in_use=1 "
+                "db_pool_limit=4 db_pool_peak_in_use=4 db_pool_checkout_count=25 "
+                "db_pool_checkout_wait_ms=18 db_pool_checkout_timeouts=0 "
+                "db_pool_checkout_errors=0 db_pool_resets=1 "
+                "db_pool_connections_lost=0 lease_heartbeat_active=1 "
+                "lease_heartbeat_total=10 lease_heartbeat_lost=0 "
+                "lease_heartbeat_expired=0 lease_heartbeat_errors=0 "
+                "segment_index_mode=incremental segment_index_hits=14 "
+                "segment_index_misses=2 segment_index_refreshes=5 "
+                "segment_index_parses=9 segment_index_stale_entries=1 "
+                "segment_index_fallback_scans=0 segment_index_row_cache_entries=8 "
+                "segment_index_row_cache_evictions=1 "
+                "segment_index_active_read_pins=0 segment_index_read_pins_created=4 "
+                "segment_index_read_pins_released=4 segment_index_generation=3",
+                "media-worker started materialization_max_active=4 "
+                "materialization_finalizer_workers=32 "
+                "materialization_cpu_thread_limit=4 cpu_thread_limit_result=applied",
+                "media_worker_resources schema_version=phase3-resources-v1 "
+                "scheduler_v2_requested=True db_pool_requested=True "
+                "db_pool_effective=True segment_index_requested=True "
+                "segment_index_effective=True lanes_effective=True "
+                "max_active=4 image_workers=4 remux_workers=1 finalizer_workers=4 "
+                "image_queue_capacity=4 remux_queue_capacity=4 "
+                "finalizer_queue_capacity=4 source_limit=4 shutdown_grace_s=45",
+                "evidence_db_index_upserted event_id=e1 "
+                "expanded_rows_enabled=True duration_ms=40 sidecar_ms=8 "
+                "bundle_ms=2 artifact_ms=3 timeline_ms=17 overlay_ms=10 result={}",
+                "evidence_db_index_upserted event_id=e2 "
+                "expanded_rows_enabled=True duration_ms=60 sidecar_ms=10 "
+                "bundle_ms=4 artifact_ms=5 timeline_ms=25 overlay_ms=16 result={}",
+                "evidence_sidecars_pruned event_id=e1 duration_ms=3 result={}",
             ]
         ),
         encoding="utf-8",
@@ -4736,12 +4859,36 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_deadline_slack_s"]["min"] == 45.0
     assert summary["media_worker"]["media_scheduler_tick_duration_ms"]["p50"] == 700.0
     assert summary["media_worker"]["media_scheduler_tick_gap_ms"]["max"] == 1300.0
-    assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 3.0
-    assert summary["media_worker"]["media_scheduler_permit_active"]["max"] == 2.0
-    assert summary["media_worker"]["media_scheduler_modes"] == {"legacy": 2}
+    assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 2.0
+    assert summary["media_worker"]["media_scheduler_image_lane_depth"]["max"] == 3.0
+    assert summary["media_worker"]["media_scheduler_finalizer_lane_depth"]["max"] == 1.0
+    assert summary["media_worker"]["media_scheduler_oldest_ready_age_ms"]["max"] == 9000.0
+    assert summary["media_worker"]["media_scheduler_permit_active"]["max"] == 4.0
+    assert summary["media_worker"]["media_scheduler_db_pool_peak_in_use"]["max"] == 4.0
+    assert summary["media_worker"]["media_scheduler_db_pool_checkout_wait_ms"]["max"] == 18.0
+    assert summary["media_worker"]["media_scheduler_segment_index_hits"]["max"] == 14.0
+    assert summary["media_worker"]["media_scheduler_segment_index_parses"]["max"] == 9.0
+    assert summary["media_worker"]["media_scheduler_segment_index_fallback_scans"]["max"] == 0.0
+    assert summary["media_worker"]["media_scheduler_segment_index_active_read_pins"]["max"] == 2.0
+    assert summary["media_worker"]["media_resource_max_active"]["max"] == 4.0
+    assert summary["media_worker"]["media_resource_cpu_thread_limit"]["max"] == 4.0
+    assert summary["media_worker"]["media_resource_remux_workers"]["max"] == 1.0
+    assert summary["media_worker"]["media_db_index_duration_ms"]["p50"] == 50.0
+    assert summary["media_worker"]["media_db_index_sidecar_ms"]["max"] == 10.0
+    assert summary["media_worker"]["media_db_index_timeline_ms"]["max"] == 25.0
+    assert summary["media_worker"]["media_sidecar_prune_duration_ms"]["max"] == 3.0
+    assert summary["media_worker"]["media_scheduler_modes"] == {"v2": 2}
     assert summary["media_worker"]["media_segment_index_modes"] == {
-        "legacy_recursive_scan": 2
+        "incremental": 2
     }
+    observable = module.media_worker_observability_summary(
+        {"log_summary": summary}
+    )
+    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v1"
+    assert observable["scheduler"]["db_pool"]["limit"]["max"] == 4.0
+    assert observable["scheduler"]["segment_index"]["parses"]["max"] == 9.0
+    assert observable["scheduler"]["capacity"]["remux_workers"]["max"] == 1.0
+    assert observable["db_index"]["overlay_ms"]["max"] == 16.0
     sink_summary = summary["video_file_sink"]
     assert sink_summary["instances"]["video-file-sink-a"]["new_writer_count"] == 1
     assert sink_summary["instances"]["video-file-sink-b"]["resident_writer_max"] == 47

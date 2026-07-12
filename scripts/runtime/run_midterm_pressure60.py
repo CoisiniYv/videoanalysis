@@ -164,7 +164,7 @@ SECURITY_STREAMS = [
     "security.record_requests",
     "security.alerts",
 ]
-DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 5
+DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 6
 DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "redis",
     "postgresql",
@@ -396,6 +396,7 @@ class PressureConfig:
     adaface_decoupled_sharded: bool = False
     adaface_roi_redis: bool = False
     adaface_roi_batch_timeout_ms: int = 10
+    media_worker_materialization_max_active: int = 4
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -502,6 +503,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--max-parallel-streams", type=int, default=64)
     parser.add_argument("--batched-push-timeout", type=int, default=40000)
+    parser.add_argument(
+        "--media-worker-materialization-max-active",
+        type=int,
+        default=4,
+        help=(
+            "Shared end-to-end media-worker materialization WIP limit. "
+            "Phase 6 compares this value with all lane worker counts fixed."
+        ),
+    )
     parser.add_argument(
         "--savant-ablation-stage",
         choices=SAVANT_ABLATION_STAGES,
@@ -885,6 +895,18 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--max-adaface-forwarder-send-failure-ratio must be between 0 and 1"
         )
+    if args.media_worker_materialization_max_active < 0:
+        raise SystemExit(
+            "--media-worker-materialization-max-active must be non-negative"
+        )
+    if (
+        args.rolling_cache_evidence
+        and args.media_worker_materialization_max_active < 2
+    ):
+        raise SystemExit(
+            "--rolling-cache-evidence requires "
+            "--media-worker-materialization-max-active >= 2"
+        )
     if args.dual_shard_same_gpu and args.keep_evidence > 0 and not args.dual_shard_api:
         raise SystemExit(
             "--dual-shard-same-gpu with evidence retention requires "
@@ -1023,6 +1045,9 @@ def main(argv: list[str] | None = None) -> int:
         adaface_roi_redis=bool(args.adaface_roi_redis),
         adaface_roi_batch_timeout_ms=max(
             1, int(args.adaface_roi_batch_timeout_ms)
+        ),
+        media_worker_materialization_max_active=int(
+            args.media_worker_materialization_max_active
         ),
     )
     report: dict[str, Any] = {
@@ -3439,6 +3464,17 @@ def event_worker_evidence_env_snapshot() -> dict[str, str]:
 def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
     env = docker_container_env("video-analytics-midterm-media-worker")
     keys = (
+        "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE",
+        "MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT",
+        "MEDIA_WORKER_FFMPEG_X264_PRESET",
+        "MEDIA_WORKER_IMAGE_WORKERS",
+        "MEDIA_WORKER_IMAGE_QUEUE_CAPACITY",
+        "MEDIA_WORKER_REMUX_QUEUE_CAPACITY",
+        "MEDIA_WORKER_FINALIZER_WORKERS",
+        "MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY",
+        "MEDIA_WORKER_SCHEDULER_V2_ENABLED",
+        "MEDIA_WORKER_DB_POOL_ENABLED",
+        "MEDIA_WORKER_SEGMENT_INDEX_ENABLED",
         "ROLLING_CACHE_ENABLED",
         "ROLLING_CACHE_MATERIALIZATION_ENABLED",
         "ROLLING_CACHE_SOURCES",
@@ -3494,6 +3530,16 @@ def configure_media_worker_rolling_cache(
 ) -> dict[str, Any]:
     env = os.environ.copy()
     env.update(values)
+    override_path = cfg.artifact_dir / artifact_name.replace(
+        ".log", ".override.yml"
+    )
+    write_text(
+        override_path,
+        yaml.safe_dump(
+            {"services": {"media-worker": {"environment": values}}},
+            sort_keys=False,
+        ),
+    )
     run(
         [
             "docker",
@@ -3502,6 +3548,8 @@ def configure_media_worker_rolling_cache(
             cfg.env_file,
             "-f",
             cfg.compose_file,
+            "-f",
+            str(override_path),
             "up",
             "-d",
             "--no-deps",
@@ -3764,6 +3812,21 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
             }
         )
     media_values = {
+        # Phase 6 changes only the shared WIP limit. Executor counts and the
+        # ffmpeg/OpenCV CPU budget stay fixed so 4/8/12 runs are comparable.
+        "MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE": str(
+            cfg.media_worker_materialization_max_active
+        ),
+        "MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT": "4",
+        "MEDIA_WORKER_FFMPEG_X264_PRESET": "ultrafast",
+        "MEDIA_WORKER_IMAGE_WORKERS": "4",
+        "MEDIA_WORKER_IMAGE_QUEUE_CAPACITY": "4",
+        "MEDIA_WORKER_REMUX_QUEUE_CAPACITY": "4",
+        "MEDIA_WORKER_FINALIZER_WORKERS": "32",
+        "MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY": "4",
+        "MEDIA_WORKER_SCHEDULER_V2_ENABLED": "true",
+        "MEDIA_WORKER_DB_POOL_ENABLED": "true",
+        "MEDIA_WORKER_SEGMENT_INDEX_ENABLED": "true",
         "EVIDENCE_DENSITY_PROFILE": "high_density",
         "ROLLING_CACHE_ENABLED": "true",
         "ROLLING_CACHE_MATERIALIZATION_ENABLED": "true",
@@ -3781,9 +3844,7 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         "ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL": str(
             max(16, min(256, cfg.stream_count * 4))
         ),
-        "ROLLING_CACHE_MATERIALIZATION_WORKERS": str(
-            max(4, min(64, cfg.stream_count or 1))
-        ),
+        "ROLLING_CACHE_MATERIALIZATION_WORKERS": "1",
         "ROLLING_CACHE_MATERIALIZATION_POLL_INTERVAL_S": "1",
         # Fallback for tasks created before materialization_ready_at existed.
         # Keep it aligned with the event-worker ready_at grace so old rows do
@@ -7145,6 +7206,88 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             marker="media_scheduler_tick",
             field="permit_limit",
         )
+        media_scheduler_capacity_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_scheduler_tick",
+                field=field,
+            )
+            for field in (
+                "oldest_ready_age_ms",
+                "image_lane_depth",
+                "finalizer_lane_depth",
+                "db_pool_in_use",
+                "db_pool_limit",
+                "db_pool_peak_in_use",
+                "db_pool_checkout_count",
+                "db_pool_checkout_wait_ms",
+                "db_pool_checkout_timeouts",
+                "db_pool_checkout_errors",
+                "db_pool_resets",
+                "db_pool_connections_lost",
+                "lease_heartbeat_active",
+                "lease_heartbeat_total",
+                "lease_heartbeat_lost",
+                "lease_heartbeat_expired",
+                "lease_heartbeat_errors",
+                "segment_index_hits",
+                "segment_index_misses",
+                "segment_index_refreshes",
+                "segment_index_parses",
+                "segment_index_stale_entries",
+                "segment_index_fallback_scans",
+                "segment_index_row_cache_entries",
+                "segment_index_row_cache_evictions",
+                "segment_index_active_read_pins",
+                "segment_index_read_pins_created",
+                "segment_index_read_pins_released",
+                "segment_index_generation",
+            )
+        }
+        media_resource_capacity_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_worker_resources",
+                field=field,
+            )
+            for field in (
+                "max_active",
+                "image_workers",
+                "remux_workers",
+                "finalizer_workers",
+                "image_queue_capacity",
+                "remux_queue_capacity",
+                "finalizer_queue_capacity",
+                "source_limit",
+            )
+        }
+        media_resource_capacity_metrics["cpu_thread_limit"] = (
+            _log_metric_numbers_for_lines(
+                text,
+                marker="media-worker started",
+                field="materialization_cpu_thread_limit",
+            )
+        )
+        media_db_index_metrics = {
+            name: _log_metric_numbers_for_lines(
+                text,
+                marker="evidence_db_index_upserted",
+                field=field,
+            )
+            for name, field in (
+                ("duration_ms", "duration_ms"),
+                ("sidecar_ms", "sidecar_ms"),
+                ("bundle_ms", "bundle_ms"),
+                ("artifact_ms", "artifact_ms"),
+                ("timeline_ms", "timeline_ms"),
+                ("overlay_ms", "overlay_ms"),
+            )
+        }
+        media_sidecar_prune_duration_ms = _log_metric_numbers_for_lines(
+            text,
+            marker="evidence_sidecars_pruned",
+            field="duration_ms",
+        )
         media_throttle_sleep_s = _extract_metric_numbers(text, "throttle_sleep_s")
         media_deadline_slack_s = _extract_metric_numbers(text, "deadline_slack_s")
         clip_record_request_pending_ms = _extract_metric_ints(
@@ -7317,6 +7460,21 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "media_scheduler_permit_limit": _numeric_distribution(
                 media_scheduler_permit_limit
+            ),
+            **{
+                f"media_scheduler_{field}": _numeric_distribution(values)
+                for field, values in media_scheduler_capacity_metrics.items()
+            },
+            **{
+                f"media_resource_{field}": _numeric_distribution(values)
+                for field, values in media_resource_capacity_metrics.items()
+            },
+            **{
+                f"media_db_index_{field}": _numeric_distribution(values)
+                for field, values in media_db_index_metrics.items()
+            },
+            "media_sidecar_prune_duration_ms": _numeric_distribution(
+                media_sidecar_prune_duration_ms
             ),
             "media_scheduler_modes": _log_field_counts(
                 text,
@@ -9264,25 +9422,42 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         or _not_enough_data("finalizer start readiness logs unavailable"),
         "finalizer_pool_wait_ms": logs.get("media_finalizer_pool_wait_ms")
         or _not_enough_data("finalizer pool wait logs unavailable"),
+        "db_index": {
+            "duration_ms": logs.get("media_db_index_duration_ms")
+            or _not_enough_data("DB index timing logs unavailable"),
+            "sidecar_ms": logs.get("media_db_index_sidecar_ms")
+            or _not_enough_data("sidecar build timing logs unavailable"),
+            "bundle_ms": logs.get("media_db_index_bundle_ms")
+            or _not_enough_data("bundle index timing logs unavailable"),
+            "artifact_ms": logs.get("media_db_index_artifact_ms")
+            or _not_enough_data("artifact index timing logs unavailable"),
+            "timeline_ms": logs.get("media_db_index_timeline_ms")
+            or _not_enough_data("timeline index timing logs unavailable"),
+            "overlay_ms": logs.get("media_db_index_overlay_ms")
+            or _not_enough_data("overlay index timing logs unavailable"),
+            "sidecar_prune_ms": logs.get("media_sidecar_prune_duration_ms")
+            or _not_enough_data("sidecar prune timing logs unavailable"),
+        },
         "scheduler": {
-            "schema_version": "phase0-scheduler-v1",
+            "schema_version": "phase6-capacity-v1",
             "modes": logs.get("media_scheduler_modes") or {},
             "poll_duration_ms": logs.get("media_scheduler_tick_duration_ms")
             or _not_enough_data("scheduler tick logs unavailable"),
             "poll_gap_ms": logs.get("media_scheduler_tick_gap_ms")
             or _not_enough_data("scheduler tick logs unavailable"),
-            "oldest_ready_age_ms": _not_enough_data(
-                "legacy scheduler does not emit oldest-ready age"
-            ),
+            "oldest_ready_age_ms": logs.get(
+                "media_scheduler_oldest_ready_age_ms"
+            )
+            or _not_enough_data("scheduler oldest-ready age unavailable"),
             "lanes": {
-                "image_depth": _not_enough_data(
-                    "legacy image work executes inline"
-                ),
+                "image_depth": logs.get("media_scheduler_image_lane_depth")
+                or _not_enough_data("image lane depth unavailable"),
                 "remux_depth": logs.get("media_scheduler_remux_lane_depth")
                 or _not_enough_data("rolling remux lane unavailable"),
-                "finalizer_depth": _not_enough_data(
-                    "legacy finalizer uses synchronous batches"
-                ),
+                "finalizer_depth": logs.get(
+                    "media_scheduler_finalizer_lane_depth"
+                )
+                or _not_enough_data("finalizer lane depth unavailable"),
             },
             "work_budget": {
                 "active": logs.get("media_scheduler_permit_active")
@@ -9290,20 +9465,106 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                 "limit": logs.get("media_scheduler_permit_limit")
                 or _not_enough_data("legacy permit logs unavailable"),
             },
-            "db_pool": _not_enough_data(
-                "legacy scheduler has no bounded PostgreSQL pool"
-            ),
+            "db_pool": {
+                "in_use": logs.get("media_scheduler_db_pool_in_use")
+                or _not_enough_data("DB pool in-use metrics unavailable"),
+                "limit": logs.get("media_scheduler_db_pool_limit")
+                or _not_enough_data("DB pool limit metrics unavailable"),
+                "peak_in_use": logs.get("media_scheduler_db_pool_peak_in_use")
+                or _not_enough_data("DB pool peak metrics unavailable"),
+                "checkout_count": logs.get(
+                    "media_scheduler_db_pool_checkout_count"
+                )
+                or _not_enough_data("DB pool checkout metrics unavailable"),
+                "checkout_wait_ms": logs.get(
+                    "media_scheduler_db_pool_checkout_wait_ms"
+                )
+                or _not_enough_data("DB pool wait metrics unavailable"),
+                "checkout_timeouts": logs.get(
+                    "media_scheduler_db_pool_checkout_timeouts"
+                )
+                or _not_enough_data("DB pool timeout metrics unavailable"),
+                "checkout_errors": logs.get(
+                    "media_scheduler_db_pool_checkout_errors"
+                )
+                or _not_enough_data("DB pool error metrics unavailable"),
+                "resets": logs.get("media_scheduler_db_pool_resets")
+                or _not_enough_data("DB pool reset metrics unavailable"),
+                "connections_lost": logs.get(
+                    "media_scheduler_db_pool_connections_lost"
+                )
+                or _not_enough_data("DB pool loss metrics unavailable"),
+            },
             "segment_index": {
                 "modes": logs.get("media_segment_index_modes") or {},
-                "hits": _not_enough_data(
-                    "legacy recursive scan has no segment-index hits"
-                ),
-                "misses": _not_enough_data(
-                    "legacy recursive scan has no segment-index misses"
-                ),
-                "fallback_scans": _not_enough_data(
-                    "legacy scan is the only lookup path"
-                ),
+                "hits": logs.get("media_scheduler_segment_index_hits")
+                or _not_enough_data("segment-index hits unavailable"),
+                "misses": logs.get("media_scheduler_segment_index_misses")
+                or _not_enough_data("segment-index misses unavailable"),
+                "refreshes": logs.get(
+                    "media_scheduler_segment_index_refreshes"
+                )
+                or _not_enough_data("segment-index refreshes unavailable"),
+                "parses": logs.get("media_scheduler_segment_index_parses")
+                or _not_enough_data("segment-index parses unavailable"),
+                "stale_entries": logs.get(
+                    "media_scheduler_segment_index_stale_entries"
+                )
+                or _not_enough_data("segment-index stale entries unavailable"),
+                "fallback_scans": logs.get(
+                    "media_scheduler_segment_index_fallback_scans"
+                )
+                or _not_enough_data("segment-index fallback scans unavailable"),
+                "row_cache_entries": logs.get(
+                    "media_scheduler_segment_index_row_cache_entries"
+                )
+                or _not_enough_data("segment-index row cache unavailable"),
+                "row_cache_evictions": logs.get(
+                    "media_scheduler_segment_index_row_cache_evictions"
+                )
+                or _not_enough_data("segment-index row cache evictions unavailable"),
+                "active_read_pins": logs.get(
+                    "media_scheduler_segment_index_active_read_pins"
+                )
+                or _not_enough_data("segment-index active pins unavailable"),
+                "read_pins_created": logs.get(
+                    "media_scheduler_segment_index_read_pins_created"
+                )
+                or _not_enough_data("segment-index created pins unavailable"),
+                "read_pins_released": logs.get(
+                    "media_scheduler_segment_index_read_pins_released"
+                )
+                or _not_enough_data("segment-index released pins unavailable"),
+                "generation": logs.get(
+                    "media_scheduler_segment_index_generation"
+                )
+                or _not_enough_data("segment-index generation unavailable"),
+            },
+            "capacity": {
+                "max_active": logs.get("media_resource_max_active")
+                or _not_enough_data("effective max_active unavailable"),
+                "cpu_thread_limit": logs.get("media_resource_cpu_thread_limit")
+                or _not_enough_data("CPU thread limit unavailable"),
+                "image_workers": logs.get("media_resource_image_workers")
+                or _not_enough_data("image worker count unavailable"),
+                "remux_workers": logs.get("media_resource_remux_workers")
+                or _not_enough_data("remux worker count unavailable"),
+                "finalizer_workers": logs.get("media_resource_finalizer_workers")
+                or _not_enough_data("finalizer worker count unavailable"),
+                "image_queue_capacity": logs.get(
+                    "media_resource_image_queue_capacity"
+                )
+                or _not_enough_data("image queue capacity unavailable"),
+                "remux_queue_capacity": logs.get(
+                    "media_resource_remux_queue_capacity"
+                )
+                or _not_enough_data("remux queue capacity unavailable"),
+                "finalizer_queue_capacity": logs.get(
+                    "media_resource_finalizer_queue_capacity"
+                )
+                or _not_enough_data("finalizer queue capacity unavailable"),
+                "source_limit": logs.get("media_resource_source_limit")
+                or _not_enough_data("source limit unavailable"),
             },
         },
         "cpu_percent": (
@@ -9703,6 +9964,7 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
             "queue_wait_ms_by_source",
             "queue_wait_ms_by_shard",
             "duplicate_materialization_count",
+            "db_index",
             "scheduler",
         ),
         "evidence_types": (

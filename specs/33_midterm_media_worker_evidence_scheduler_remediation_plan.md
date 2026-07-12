@@ -927,6 +927,19 @@ Acceptance token:
 PASS_MEDIA_WORKER_CAPACITY_AND_READY_POLICY_CALIBRATED
 ```
 
+Instrumentation checkpoint (2026-07-13): complete; capacity calibration is
+still open. The pressure harness now accepts an explicit shared WIP candidate,
+writes the complete Media Worker pressure environment to a retained Compose
+override, verifies the recreated container environment, and restores every
+overridden value afterward. Comparable runs fix CPU/ffmpeg threads at 4,
+image workers at 4, rolling remux workers at 1, configured finalizer workers at
+32, queue capacities at 4, Scheduler V2/DB pool/Segment Index enabled, and vary
+only `MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE`. Artifact schema v6 includes all
+three lane depths, oldest-ready age, WIP, pool, lease-heartbeat, segment-index,
+read-pin, DB-index subphase, sidecar-prune, and effective resource metrics. No
+Phase 6 acceptance token is claimed until the fixed-input 4/8/12 runs and the
+required repeat pass complete.
+
 ### Phase 7 - Remove Legacy And Misleading Contracts
 
 After two accepted 60-source runs and one restart-recovery soak:

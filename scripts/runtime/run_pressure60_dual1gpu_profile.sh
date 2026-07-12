@@ -48,6 +48,8 @@ Environment overrides:
   ADAFACE_ROI_REDIS=0   Set to 1 for aligned 112x112 Redis ROI AdaFace worker.
   ROI_BATCH_TIMEOUT_MS=<profile default>
                       AdaFace ROI batch16 aggregation wait (T4: 200ms).
+  MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=4
+                      Shared media-worker WIP candidate for Phase 6 A/B.
   DRY_RUN=1           Print the command without executing it.
 USAGE
 }
@@ -116,6 +118,7 @@ adaface_decoupled="${ADAFACE_DECOUPLED:-0}"
 adaface_sharded="${ADAFACE_SHARDED:-0}"
 adaface_roi_redis="${ADAFACE_ROI_REDIS:-${adaface_roi_redis_default}}"
 roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
+media_worker_materialization_max_active="${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-4}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -135,6 +138,7 @@ cmd=(
   --face-embedding-batch-size 16
   --max-parallel-streams 64
   --batched-push-timeout "${batch_timeout_us}"
+  --media-worker-materialization-max-active "${media_worker_materialization_max_active}"
   --savant-ablation-stage "${ablation_stage}"
   --savant-output-mode "${output_mode}"
   --cpu-isolation-profile "${cpu_profile}"
@@ -223,6 +227,7 @@ printf 'adaface_input_queue=%s\n' "${adaface_queue}"
 printf 'adaface_crop_resize=%s\n' "${adaface_crop}"
 printf 'adaface_pre_gate=%s\n' "${adaface_pre_gate}"
 printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
+printf 'media_worker_materialization_max_active=%s\n' "${media_worker_materialization_max_active}"
 printf 'adaface_decoupled_sharded=%s\n' "${adaface_sharded}"
 printf 'adaface_roi_redis=%s\n' "${adaface_roi_redis}"
 printf 'adaface_roi_batch_timeout_ms=%s\n' "${roi_batch_timeout_ms}"
