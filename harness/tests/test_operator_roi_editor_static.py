@@ -29,7 +29,7 @@ def test_operator_camera_page_embeds_roi_preview_editor() -> None:
     assert "高级 JSON" in html
     assert html.index('id="zones"') < html.index('id="zone-json"')
     assert "保存 ROI" in html
-    assert "operator-trajectory-ssd-cache-20260712" in html
+    assert "operator-trajectory-page-20260712" in html
 
 
 def test_operator_roi_editor_uses_camera_preview_and_existing_zone_api() -> None:

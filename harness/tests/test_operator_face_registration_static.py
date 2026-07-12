@@ -45,11 +45,12 @@ def test_operator_page_is_chinese_console_ui() -> None:
     assert "统一配置台" in html
     assert "运行概览" in html
     assert "摄像头管理" in html
+    assert "人员管理" in html
     assert "人脸轨迹" in html
-    assert "告警证据" in html
+    assert "证据管理" in html
     assert "报警机器时间" in html
     assert "人脸注册" in html
-    assert "一键找人" in html
+    assert "轨迹搜索" in html
     assert "人脸图片" in html
     assert "开始注册" in html
     assert "theme-toggle" in html
@@ -84,30 +85,45 @@ def test_operator_js_uses_real_camera_and_people_apis() -> None:
 def test_operator_separates_face_trajectory_from_evidence_viewer() -> None:
     html = _text(STATIC_ROOT / "index.html")
     operator_js = _text(STATIC_ROOT / "operator.js")
+    trajectory_js = _text(STATIC_ROOT / "trajectory.js")
     evidence_js = _text(STATIC_ROOT / "evidence.js")
+    css = _text(STATIC_ROOT / "style.css")
 
-    assert "find-person-dialog" in html
-    assert "image-preview-dialog" in html
-    assert "不生成证据录像" in html
+    assert 'data-view="trajectory"' in html
+    assert 'id="trajectory-view"' in html
+    assert 'id="trajectory-person-id"' in html
+    assert 'id="trajectory-start-time"' in html
+    assert 'id="trajectory-end-time"' in html
+    assert 'id="trajectory-camera-id"' in html
+    assert 'id="trajectory-inline-stage"' in html
+    assert "find-person-dialog" not in html
+    assert "image-preview-dialog" not in html
     assert 'data-event-category="identity"' in html
-    assert 'value="0.6"' in html
-    assert "`${API}/people/${encodeURIComponent(personId)}/find" in operator_js
-    assert 'params.set("include_unregistered_sources", "true")' in operator_js
+    assert '"trajectory"' in operator_js
     assert "window.operatorPeople" in operator_js
     assert "openPersonById" in operator_js
-    assert "`${API}/people/${encodeURIComponent(personId)}/trajectory" in operator_js
-    assert "selectedPersonRequestId" in operator_js
-    assert "data-image-preview-url" in operator_js
-    assert "bindImagePreviewButtons" in operator_js
-    assert "Number(Boolean(locationThumbnailUrl(right)))" in operator_js
-    assert "trajectory_thumbnail_url || location?.face_crop_url" in operator_js
-    assert "locationPreviewUrl" in operator_js
-    assert 'decoding="async"' in operator_js
+    assert "openFindPersonDialog" not in operator_js
+    assert "window.operatorTrajectory" in trajectory_js
+    assert "openTrajectoryForPerson" in trajectory_js
+    assert "start_ts_ms" in trajectory_js
+    assert "end_ts_ms" in trajectory_js
+    assert "camera_id" in trajectory_js
+    assert 'include_unregistered_sources: "true"' in trajectory_js
+    assert "TRAJECTORY_PAGE_SIZE = 50" in trajectory_js
+    assert "trajectory_thumbnail_url || row?.face_crop_url" in trajectory_js
+    assert "trajectoryPreviewUrl" in trajectory_js
+    assert 'decoding="async"' in trajectory_js
+    assert "modal" not in trajectory_js.lower()
+    assert ".trajectory-workspace" in css
+    assert ".trajectory-inline-stage" in css
+    assert ".trajectory-result-card.active" in css
+    assert ".image-preview-dialog" not in css
     assert 'params.set("event_category", "evidence")' in evidence_js
     assert 'EVIDENCE_VISIBLE_CATEGORIES = new Set(["all", "perimeter", "behavior", "crowd", "identity"])' in evidence_js
     assert "人脸轨迹命中" in evidence_js
     assert "查看此人轨迹" in evidence_js
     assert "openPersonTrajectoryFromBundle" in evidence_js
+    assert "window.operatorTrajectory.openForPerson" in evidence_js
     assert 'id === "filterPerson" && input.value.trim() && state.activeCategory === "all"' in evidence_js
 
 
@@ -215,7 +231,8 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=operator-trajectory-ssd-cache-20260712" in html
+    assert "operator.js?v=operator-trajectory-page-20260712" in html
+    assert "trajectory.js?v=trajectory-page-20260712" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js
@@ -271,6 +288,7 @@ def test_operator_portal_is_served_by_evidence_viewer_8090() -> None:
     viewer_main = _text(ROOT / "services" / "evidence-viewer" / "app" / "main.py")
     api_main = _text(ROOT / "services" / "api" / "app" / "main.py")
     assert "/static/operator.js" in html
+    assert "/static/trajectory.js" in html
     assert "/static/evidence.js" in html
     assert '@app.get("/operator")' in viewer_main
     assert "def operator_index" in viewer_main

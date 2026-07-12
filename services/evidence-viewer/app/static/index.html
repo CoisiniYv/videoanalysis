@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=face-trajectory-link-20260709" />
+    <link rel="stylesheet" href="/static/style.css?v=trajectory-page-20260712" />
   </head>
   <body>
     <div class="app-shell">
@@ -30,11 +30,15 @@
             <small>视频源配置</small>
           </button>
           <button class="top-tab" data-view="people">
+            <span>人员管理</span>
+            <small>人脸库与注册</small>
+          </button>
+          <button class="top-tab" data-view="trajectory">
             <span>人脸轨迹</span>
-            <small>人员查询</small>
+            <small>人员时空查询</small>
           </button>
           <button class="top-tab" data-view="evidence">
-            <span>告警证据</span>
+            <span>证据管理</span>
             <small>录像复核</small>
           </button>
           <button class="top-tab" data-view="runtime">
@@ -325,21 +329,88 @@
           <section class="pane people-detail">
             <div class="pane-title">
               <div>
-                <h2>人脸轨迹</h2>
-                <p>按人员查询最近位置和历史出现</p>
+                <h2>人员详情</h2>
+                <p>查看身份资料和已登记人脸图片</p>
               </div>
-              <button id="find-selected-person" type="button">一键找人</button>
+              <button id="find-selected-person" type="button">查看轨迹</button>
               <button id="preview-delete-selected-person" type="button" class="danger" disabled>删除当前人员</button>
             </div>
             <div id="person-profile" class="profile-card">选择人员后显示基本信息</div>
-            <div id="person-latest-location" class="profile-card">选择人员后可查看最近出现位置</div>
-            <div id="person-trajectory" class="profile-card person-trajectory">选择人员后自动加载最近轨迹</div>
             <textarea id="person-detail" class="internal-config" hidden readonly spellcheck="false" placeholder="选择或注册人员后显示详情"></textarea>
             <div id="gallery" class="gallery-grid"></div>
             <div class="sub-section">
               <h3>注册回执</h3>
               <div id="face-registration-summary" class="result-card">暂无注册结果</div>
               <textarea id="face-registration-result" class="internal-config" hidden readonly spellcheck="false" placeholder="暂无注册结果"></textarea>
+            </div>
+          </section>
+        </main>
+
+        <main id="trajectory-view" class="operator-view trajectory-workspace" hidden>
+          <section class="pane trajectory-filter-pane">
+            <div class="pane-title">
+              <div>
+                <h2>轨迹搜索</h2>
+                <p>按人员 ID、时间范围和摄像头查询</p>
+              </div>
+            </div>
+            <form id="trajectory-search-form" class="trajectory-search-form">
+              <label>人员 ID / 编号
+                <input id="trajectory-person-id" name="person_id" type="search" inputmode="numeric" list="trajectory-person-options" placeholder="系统 ID 或人员编号" autocomplete="off" required />
+                <datalist id="trajectory-person-options"></datalist>
+              </label>
+              <label>摄像头
+                <select id="trajectory-camera-id" name="camera_id">
+                  <option value="">全部摄像头</option>
+                </select>
+              </label>
+              <label>开始时间
+                <input id="trajectory-start-time" name="start_time" type="datetime-local" step="1" />
+              </label>
+              <label>结束时间
+                <input id="trajectory-end-time" name="end_time" type="datetime-local" step="1" />
+              </label>
+              <div class="trajectory-search-actions">
+                <button id="trajectory-search" type="submit" class="primary">查询轨迹</button>
+                <button id="trajectory-reset" type="button">重置</button>
+              </div>
+            </form>
+            <div id="trajectory-search-summary" class="result-card trajectory-search-summary">
+              输入人员 ID 后查询；图片来自长期媒体存储，SSD 仅作为读取缓存。
+            </div>
+          </section>
+
+          <section class="pane trajectory-list-pane">
+            <div class="pane-title">
+              <div>
+                <h2>轨迹列表</h2>
+                <p>按时间倒序展示，每页 50 条</p>
+              </div>
+              <button id="trajectory-refresh" type="button">刷新</button>
+            </div>
+            <div class="pagination-bar" aria-label="轨迹分页">
+              <button id="trajectory-previous" type="button" disabled>上一页</button>
+              <span id="trajectory-page-status">尚未查询</span>
+              <button id="trajectory-next" type="button" disabled>下一页</button>
+            </div>
+            <div id="trajectory-list" class="trajectory-result-list">
+              <div class="empty-state">请先按人员 ID 查询轨迹。</div>
+            </div>
+          </section>
+
+          <section class="pane trajectory-detail-pane">
+            <div class="pane-title">
+              <div>
+                <h2>轨迹画面</h2>
+                <p>选择左侧记录后在此查看，不再打开弹窗</p>
+              </div>
+            </div>
+            <div id="trajectory-inline-stage" class="trajectory-inline-stage">
+              <img id="trajectory-detail-image" alt="轨迹画面" hidden />
+              <div id="trajectory-detail-empty" class="trajectory-detail-empty">请选择一条轨迹记录</div>
+            </div>
+            <div id="trajectory-detail" class="profile-card trajectory-detail-card">
+              暂无选中的轨迹记录。
             </div>
           </section>
         </main>
@@ -759,43 +830,9 @@
         </div>
       </section>
     </div>
-    <div id="find-person-dialog" class="modal-backdrop" hidden>
-      <section class="find-person-dialog" role="dialog" aria-modal="true" aria-labelledby="find-person-dialog-title">
-        <div class="pane-title">
-          <div>
-            <h2 id="find-person-dialog-title">一键找人</h2>
-            <p id="find-person-dialog-subtitle">选择人员后查询最新摄像头和图片轨迹，不生成证据录像。</p>
-          </div>
-          <button id="find-person-dialog-close" type="button" aria-label="关闭">关闭</button>
-        </div>
-        <form id="find-person-form" class="find-person-form">
-          <label>最低相似度<input id="find-person-min-similarity" name="min_similarity" type="number" min="0" max="1" step="0.01" value="0.6" /></label>
-          <label>结果数量<input id="find-person-limit" name="limit" type="number" min="1" max="100" step="1" value="20" /></label>
-        </form>
-        <div class="find-person-actions">
-          <button id="run-find-person" type="button" class="primary">查询位置</button>
-          <button id="show-find-person-trajectory" type="button">查看完整轨迹</button>
-        </div>
-        <div id="find-person-latest" class="profile-card">选择人员后可查看最新位置。</div>
-        <div id="find-person-results" class="find-person-results"></div>
-      </section>
-    </div>
-    <div id="image-preview-dialog" class="modal-backdrop" hidden>
-      <section class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="image-preview-title">
-        <div class="pane-title">
-          <div>
-            <h2 id="image-preview-title">图像查看</h2>
-            <p id="image-preview-subtitle">人脸轨迹图片</p>
-          </div>
-          <button id="image-preview-close" type="button" aria-label="关闭">关闭</button>
-        </div>
-        <div class="image-preview-stage">
-          <img id="image-preview-img" alt="轨迹图像" />
-        </div>
-      </section>
-    </div>
-    <script src="/static/operator.js?v=operator-trajectory-ssd-cache-20260712"></script>
-    <script src="/static/evidence.js?v=evidence-face-trajectory-link-20260709"></script>
+    <script src="/static/operator.js?v=operator-trajectory-page-20260712"></script>
+    <script src="/static/trajectory.js?v=trajectory-page-20260712"></script>
+    <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712"></script>
     <script src="/static/maintenance.js?v=maintenance-execute-control-20260627"></script>
   </body>
 </html>

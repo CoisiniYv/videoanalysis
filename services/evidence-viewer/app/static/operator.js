@@ -101,8 +101,6 @@ const peopleEl = document.getElementById("people");
 const peopleSearchEl = document.getElementById("people-search");
 const faceRegistrationForm = document.getElementById("face-registration-form");
 const personProfileEl = document.getElementById("person-profile");
-const personLatestLocationEl = document.getElementById("person-latest-location");
-const personTrajectoryEl = document.getElementById("person-trajectory");
 const personDetailEl = document.getElementById("person-detail");
 const galleryEl = document.getElementById("gallery");
 const faceRegistrationSummaryEl = document.getElementById("face-registration-summary");
@@ -112,24 +110,10 @@ const appendSelectedPersonBtn = document.getElementById("append-selected-person"
 const registrationModeStatusEl = document.getElementById("registration-mode-status");
 const previewDeleteSelectedPersonBtn = document.getElementById("preview-delete-selected-person");
 const findSelectedPersonBtn = document.getElementById("find-selected-person");
-const findPersonDialogEl = document.getElementById("find-person-dialog");
-const findPersonDialogCloseBtn = document.getElementById("find-person-dialog-close");
-const findPersonFormEl = document.getElementById("find-person-form");
-const findPersonMinSimilarityEl = document.getElementById("find-person-min-similarity");
-const findPersonLimitEl = document.getElementById("find-person-limit");
-const runFindPersonBtn = document.getElementById("run-find-person");
-const showFindPersonTrajectoryBtn = document.getElementById("show-find-person-trajectory");
-const findPersonLatestEl = document.getElementById("find-person-latest");
-const findPersonResultsEl = document.getElementById("find-person-results");
-const imagePreviewDialogEl = document.getElementById("image-preview-dialog");
-const imagePreviewCloseBtn = document.getElementById("image-preview-close");
-const imagePreviewTitleEl = document.getElementById("image-preview-title");
-const imagePreviewSubtitleEl = document.getElementById("image-preview-subtitle");
-const imagePreviewImgEl = document.getElementById("image-preview-img");
 const THEME_STORAGE_KEY = "operator-theme";
 const ACTIVE_VIEW_STORAGE_KEY = "operator-active-view";
 const EVIDENCE_COUNT_STORAGE_KEY = "operator-evidence-count";
-const TOP_VIEWS = new Set(["cameras", "people", "evidence", "maintenance", "runtime"]);
+const TOP_VIEWS = new Set(["cameras", "people", "trajectory", "evidence", "maintenance", "runtime"]);
 
 /* ---- API URL display ---- */
 apiUrlEl.textContent = window.location.origin + API;
@@ -1793,34 +1777,6 @@ function formatAge(value) {
   return `${formatNumber(num / 60)}m`;
 }
 
-function formatPercent(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return "--";
-  return `${Math.round(num * 100)}%`;
-}
-
-function formatTime(value) {
-  if (value === undefined || value === null || value === "") return "";
-  const numeric = Number(value);
-  const date = Number.isFinite(numeric) && numeric > 946684800000
-    ? new Date(numeric)
-    : new Date(String(value));
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString();
-}
-
-function personLookupParams({ minSimilarity = 0.6, limit = 20 } = {}) {
-  const params = new URLSearchParams();
-  if (minSimilarity !== undefined && minSimilarity !== "") {
-    params.set("min_similarity", minSimilarity);
-  }
-  if (limit) {
-    params.set("limit", limit);
-  }
-  params.set("include_unregistered_sources", "true");
-  return params;
-}
-
 function cameraForSourceId(sourceId) {
   const id = String(sourceId || "");
   if (!id) return null;
@@ -2483,6 +2439,7 @@ function activateTopView(view, updateHash = false) {
   });
   document.getElementById("camera-view").hidden = normalized !== "cameras";
   document.getElementById("people-view").hidden = normalized !== "people";
+  document.getElementById("trajectory-view").hidden = normalized !== "trajectory";
   document.getElementById("runtime-view").hidden = normalized !== "runtime";
   document.getElementById("evidence-view").hidden = normalized !== "evidence";
   document.getElementById("maintenance-view").hidden = normalized !== "maintenance";
@@ -2491,6 +2448,9 @@ function activateTopView(view, updateHash = false) {
   }
   if (normalized === "people") {
     loadPeople().catch((e) => showError(e.message));
+  }
+  if (normalized === "trajectory" && window.operatorTrajectory) {
+    window.operatorTrajectory.init().catch((e) => showError(e.message));
   }
   if (normalized === "evidence" && window.operatorEvidence) {
     window.operatorEvidence.init().catch((e) => showError(e.message));
@@ -2637,8 +2597,6 @@ async function selectPerson(personId) {
   selectedPersonId = String(personId);
   selectedPerson = null;
   personDetailEl.value = "";
-  renderPersonLatestLocation(null);
-  renderPersonTrajectory([]);
   const data = await request(`${API}/people/${encodeURIComponent(personId)}`);
   if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
     return;
@@ -2663,11 +2621,7 @@ async function selectPerson(personId) {
   if (previewDeleteSelectedPersonBtn) {
     previewDeleteSelectedPersonBtn.disabled = false;
   }
-  await findSelectedPersonLatestLocation(personId, requestId);
-  if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
-    return;
-  }
-  setStatus(`人员 ${personId} 轨迹已加载`);
+  setStatus(`人员 ${personId} 已加载`);
 }
 
 function renderPersonProfile(person) {
@@ -2678,235 +2632,6 @@ function renderPersonProfile(person) {
     `<div class="muted">人员编号：${person.external_person_id || "未设置"}</div>` +
     `<div class="muted">状态：${person.is_active ? "有效" : "停用"}</div>` +
     `<div class="muted">${person.description || "暂无描述"}</div>`;
-}
-
-function locationThumbnailUrl(location) {
-  return location?.trajectory_thumbnail_url || location?.face_crop_url || location?.annotated_frame_url || location?.full_frame_url || "";
-}
-
-function locationPreviewUrl(location) {
-  return location?.annotated_frame_url || location?.full_frame_url || location?.face_crop_url || location?.trajectory_thumbnail_url || "";
-}
-
-function openImagePreview(imageUrl, title, subtitle) {
-  if (!imageUrl || !imagePreviewDialogEl || !imagePreviewImgEl) return;
-  imagePreviewImgEl.src = imageUrl;
-  imagePreviewImgEl.alt = title || "轨迹图像";
-  if (imagePreviewTitleEl) imagePreviewTitleEl.textContent = title || "图像查看";
-  if (imagePreviewSubtitleEl) imagePreviewSubtitleEl.textContent = subtitle || "人脸轨迹图片";
-  imagePreviewDialogEl.hidden = false;
-}
-
-function closeImagePreview() {
-  if (imagePreviewDialogEl) imagePreviewDialogEl.hidden = true;
-  if (imagePreviewImgEl) imagePreviewImgEl.removeAttribute("src");
-}
-
-function previewButtonHtml(thumbnailUrl, previewUrl, title, subtitle, className, altText) {
-  if (!thumbnailUrl) return "";
-  return (
-    `<button type="button" class="${className}" data-image-preview-url="${escapeHtml(previewUrl || thumbnailUrl)}" ` +
-      `data-image-preview-title="${escapeHtml(title || "图像查看")}" ` +
-      `data-image-preview-subtitle="${escapeHtml(subtitle || "人脸轨迹图片")}">` +
-      `<img src="${escapeHtml(thumbnailUrl)}" alt="${escapeHtml(altText || "轨迹图片")}" loading="lazy" decoding="async" />` +
-    `</button>`
-  );
-}
-
-function bindImagePreviewButtons(root) {
-  if (!root) return;
-  root.querySelectorAll("[data-image-preview-url]").forEach((button) => {
-    button.addEventListener("click", () => {
-      openImagePreview(
-        button.dataset.imagePreviewUrl,
-        button.dataset.imagePreviewTitle,
-        button.dataset.imagePreviewSubtitle
-      );
-    });
-  });
-}
-
-function trajectorySourceLabel(source) {
-  const labels = {
-    watchlist_event: "名单命中",
-    gallery_observation: "图库轨迹",
-    person_search_observation: "人脸观察",
-    live_search_hit: "一键找人"
-  };
-  return labels[source] || source || "轨迹";
-}
-
-function renderPersonLatestLocation(location) {
-  if (!personLatestLocationEl) return;
-  if (!selectedPersonId) {
-    personLatestLocationEl.textContent = "选择人员后可查看最近出现位置";
-    return;
-  }
-  if (!location) {
-    personLatestLocationEl.innerHTML =
-      `<strong>最近位置</strong>` +
-      `<div class="muted">暂无命中记录，点击“查找此人”刷新。</div>`;
-    return;
-  }
-  const cameraName = location.camera_name || location.source_id || location.camera_id || "未知摄像头";
-  const thumbnailUrl = locationThumbnailUrl(location);
-  const previewUrl = locationPreviewUrl(location);
-  const timeText = formatTime(location.event_ts_ms || location.event_created_at || location.observation_timestamp_ms);
-  personLatestLocationEl.innerHTML =
-    `<strong>最近位置：${escapeHtml(cameraName)}</strong>` +
-    `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
-    `<div class="muted">相似度：${escapeHtml(formatPercent(location.similarity))}</div>` +
-    previewButtonHtml(thumbnailUrl, previewUrl, `最近位置：${cameraName}`, timeText || "人脸轨迹图片", "image-preview-trigger gallery-preview-trigger", "最近命中图片");
-  bindImagePreviewButtons(personLatestLocationEl);
-}
-
-function renderPersonTrajectory(rows) {
-  if (!personTrajectoryEl) return;
-  const trajectory = Array.isArray(rows)
-    ? [...rows].sort((left, right) =>
-        Number(Boolean(locationThumbnailUrl(right))) - Number(Boolean(locationThumbnailUrl(left))))
-    : [];
-  if (!selectedPersonId) {
-    personTrajectoryEl.textContent = "选择人员后可查看最近轨迹";
-    return;
-  }
-  if (!trajectory.length) {
-    personTrajectoryEl.innerHTML =
-      `<strong>最近轨迹</strong>` +
-      `<div class="muted">暂无轨迹记录，点击“查找此人”刷新。</div>`;
-    return;
-  }
-  const items = trajectory.slice(0, 12).map((row) => {
-    const cameraName = row.camera_name || row.source_id || row.camera_id || "未知摄像头";
-    const timeText = formatTime(row.event_ts_ms || row.event_created_at || row.observation_timestamp_ms);
-    const thumbnailUrl = locationThumbnailUrl(row);
-    const previewUrl = locationPreviewUrl(row);
-    return (
-      `<div class="trajectory-row">` +
-        (thumbnailUrl
-          ? previewButtonHtml(thumbnailUrl, previewUrl, cameraName, timeText || "轨迹图片", "image-preview-trigger trajectory-preview-trigger", "轨迹图片")
-          : `<div class="trajectory-thumb-empty"></div>`) +
-        `<div>` +
-          `<strong>${escapeHtml(cameraName)}</strong>` +
-          `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
-          `<div class="muted">${escapeHtml(trajectorySourceLabel(row.trajectory_source))} | 相似度 ${escapeHtml(formatPercent(row.similarity))}</div>` +
-        `</div>` +
-      `</div>`
-    );
-  }).join("");
-  personTrajectoryEl.innerHTML =
-    `<strong>最近轨迹</strong>` +
-    `<div class="trajectory-list">${items}</div>`;
-  bindImagePreviewButtons(personTrajectoryEl);
-}
-
-async function findSelectedPersonLatestLocation(personId = selectedPersonId, requestId = selectedPersonRequestId) {
-  if (!selectedPersonId) return;
-  clearMessages();
-  if (findSelectedPersonBtn) findSelectedPersonBtn.disabled = true;
-  try {
-    const params = personLookupParams({ limit: 20, minSimilarity: 0.6 });
-    const data = await request(`${API}/people/${encodeURIComponent(personId)}/trajectory?${params.toString()}`);
-    if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
-      return;
-    }
-    renderPersonLatestLocation(data.latest_location || null);
-    renderPersonTrajectory(data.results || data.trajectory || []);
-    setStatus(data.latest_location ? "已刷新人脸轨迹" : "暂无最近位置");
-  } finally {
-    if (findSelectedPersonBtn) findSelectedPersonBtn.disabled = false;
-  }
-}
-
-function renderFindPersonLatest(location) {
-  if (!findPersonLatestEl) return;
-  if (!location) {
-    findPersonLatestEl.innerHTML =
-      `<strong>最新位置</strong>` +
-      `<div class="muted">暂未找到该人员的近期图片命中。</div>`;
-    return;
-  }
-  const cameraName = location.camera_name || location.source_id || location.camera_id || "未知摄像头";
-  const thumbnailUrl = locationThumbnailUrl(location);
-  const previewUrl = locationPreviewUrl(location);
-  const timeText = formatTime(location.event_ts_ms || location.event_created_at || location.observation_timestamp_ms);
-  findPersonLatestEl.innerHTML =
-    `<strong>最新位置：${escapeHtml(cameraName)}</strong>` +
-    `<div class="muted">${escapeHtml(timeText || "-")} | 相似度 ${escapeHtml(formatPercent(location.similarity))}</div>` +
-    previewButtonHtml(thumbnailUrl, previewUrl, `最新位置：${cameraName}`, timeText || "一键找人图片", "image-preview-trigger gallery-preview-trigger", "最新位置图片");
-  bindImagePreviewButtons(findPersonLatestEl);
-}
-
-function renderFindPersonResults(rows) {
-  if (!findPersonResultsEl) return;
-  const results = Array.isArray(rows) ? rows : [];
-  if (!results.length) {
-    findPersonResultsEl.innerHTML = `<div class="result-card">暂无找人结果。</div>`;
-    return;
-  }
-  findPersonResultsEl.innerHTML = results.map((row) => {
-    const cameraName = row.camera_name || row.source_id || row.camera_id || "未知摄像头";
-    const timeText = formatTime(row.event_ts_ms || row.event_created_at || row.observation_timestamp_ms);
-    const thumbnailUrl = locationThumbnailUrl(row);
-    const previewUrl = locationPreviewUrl(row);
-    return (
-      `<article class="find-person-result">` +
-        (thumbnailUrl
-          ? previewButtonHtml(thumbnailUrl, previewUrl, cameraName, timeText || "找人结果图片", "image-preview-trigger find-person-preview-trigger", "找人结果图片")
-          : `<div class="trajectory-thumb-empty"></div>`) +
-        `<div>` +
-          `<strong>${escapeHtml(cameraName)}</strong>` +
-          `<div class="muted">${escapeHtml(timeText || "-")}</div>` +
-          `<div class="muted">${escapeHtml(trajectorySourceLabel(row.trajectory_source))} | 相似度 ${escapeHtml(formatPercent(row.similarity))}</div>` +
-        `</div>` +
-      `</article>`
-    );
-  }).join("");
-  bindImagePreviewButtons(findPersonResultsEl);
-}
-
-async function runFindPerson() {
-  if (!selectedPersonId) {
-    showError("请先选择人员。");
-    return;
-  }
-  const personId = selectedPersonId;
-  const requestId = selectedPersonRequestId;
-  clearMessages();
-  if (runFindPersonBtn) runFindPersonBtn.disabled = true;
-  try {
-    const params = personLookupParams({
-      minSimilarity: findPersonMinSimilarityEl?.value,
-      limit: findPersonLimitEl?.value,
-    });
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    const data = await request(`${API}/people/${encodeURIComponent(personId)}/find${suffix}`);
-    if (requestId !== selectedPersonRequestId || String(personId) !== String(selectedPersonId)) {
-      return;
-    }
-    renderFindPersonLatest(data.latest_location || null);
-    renderFindPersonResults(data.results || []);
-    renderPersonLatestLocation(data.latest_location || null);
-    renderPersonTrajectory(data.results || []);
-    setStatus(data.latest_location ? "一键找人已返回最新位置" : "一键找人暂无结果");
-  } finally {
-    if (runFindPersonBtn) runFindPersonBtn.disabled = false;
-  }
-}
-
-function openFindPersonDialog() {
-  if (!selectedPersonId) {
-    showError("请先选择人员。");
-    return;
-  }
-  if (findPersonDialogEl) findPersonDialogEl.hidden = false;
-  renderFindPersonLatest(null);
-  renderFindPersonResults([]);
-  runFindPerson().catch((e) => showError(e.message));
-}
-
-function closeFindPersonDialog() {
-  if (findPersonDialogEl) findPersonDialogEl.hidden = true;
 }
 
 async function openPersonById(personId, options = {}) {
@@ -2921,8 +2646,8 @@ async function openPersonById(personId, options = {}) {
   activateTopView("people", true);
   try {
     await selectPerson(targetId);
-    if (options.openFindDialog) {
-      openFindPersonDialog();
+    if (options.openTrajectory && window.operatorTrajectory?.openForPerson) {
+      await window.operatorTrajectory.openForPerson(targetId);
     }
   } finally {
     pendingOpenPersonId = "";
@@ -2931,7 +2656,6 @@ async function openPersonById(personId, options = {}) {
 
 window.operatorPeople = {
   openPersonById,
-  openFindPersonDialog,
 };
 
 function selectedPersonDeleteRequest() {
@@ -3733,26 +3457,16 @@ peopleSearchEl.addEventListener("input", () => {
   loadPeople().catch((e) => showError(e.message));
 });
 findSelectedPersonBtn?.addEventListener("click", () => {
-  openFindPersonDialog();
-});
-findPersonDialogCloseBtn?.addEventListener("click", closeFindPersonDialog);
-findPersonDialogEl?.addEventListener("click", (event) => {
-  if (event.target === findPersonDialogEl) closeFindPersonDialog();
-});
-imagePreviewCloseBtn?.addEventListener("click", closeImagePreview);
-imagePreviewDialogEl?.addEventListener("click", (event) => {
-  if (event.target === imagePreviewDialogEl) closeImagePreview();
-});
-findPersonFormEl?.addEventListener("submit", (event) => {
-  event.preventDefault();
-  runFindPerson().catch((e) => showError(e.message));
-});
-runFindPersonBtn?.addEventListener("click", () => {
-  runFindPerson().catch((e) => showError(e.message));
-});
-showFindPersonTrajectoryBtn?.addEventListener("click", () => {
-  closeFindPersonDialog();
-  activateTopView("people", true);
+  if (!selectedPersonId) {
+    showError("请先选择人员。");
+    return;
+  }
+  if (!window.operatorTrajectory?.openForPerson) {
+    showError("轨迹页面尚未加载，请刷新页面后重试。");
+    return;
+  }
+  window.operatorTrajectory.openForPerson(selectedPersonId)
+    .catch((e) => showError(e.message));
 });
 
 document.getElementById("new-camera").addEventListener("click", () => {

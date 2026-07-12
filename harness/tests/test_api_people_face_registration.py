@@ -226,16 +226,53 @@ def test_people_find_returns_image_trajectory_without_evidence_video(client: Tes
 def test_people_trajectory_uses_persisted_hits_without_full_vector_search(
     client: TestClient,
 ) -> None:
-    resp = client.get("/api/v1/people/10/trajectory?limit=20&min_similarity=0.6")
+    resp = client.get(
+        "/api/v1/people/10/trajectory"
+        "?limit=20&offset=0&min_similarity=0.6&camera_id=cam-lab"
+        "&start_ts_ms=900000&end_ts_ms=1100000"
+    )
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["mode"] == "persisted_trajectory"
+    assert data["returned_count"] == 1
+    assert data["has_more"] is False
     assert data["trajectory"][0]["trajectory_thumbnail_url"] == (
         "/media/faces/reese-crop.jpg"
     )
-    assert (
-        FakePeopleRepository.trajectory_calls[-1]["include_observation_search"] is False
-    )
+    call = FakePeopleRepository.trajectory_calls[-1]
+    assert call["include_observation_search"] is False
+    assert call["camera_id"] == "cam-lab"
+    assert call["start_ts_ms"] == 900000
+    assert call["end_ts_ms"] == 1100000
+    assert call["limit"] == 21
+
+
+def test_people_trajectory_reports_has_more_without_returning_extra_row(
+    client: TestClient,
+) -> None:
+    class PagingPeopleRepository(FakePeopleRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            template = self.trajectory_rows[0]
+            self.trajectory_rows = [
+                {
+                    **template,
+                    "source_observation_id": f"face:lab:frame-{index}:0",
+                    "event_ts_ms": 1_000_000 + index,
+                }
+                for index in range(21)
+            ]
+
+    def _repo_override():
+        yield PagingPeopleRepository()
+
+    app.dependency_overrides[people_repo_dep] = _repo_override
+    resp = client.get("/api/v1/people/10/trajectory?limit=20&offset=0")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert len(data["trajectory"]) == 20
+    assert data["returned_count"] == 20
+    assert data["has_more"] is True
 
 
 def test_people_find_defaults_to_nonzero_similarity_threshold(client: TestClient) -> None:

@@ -341,9 +341,11 @@ def people_trajectory(
         end_ts_ms=end_ts_ms,
         include_unregistered_sources=include_unregistered_sources,
         include_observation_search=False,
-        limit=limit,
+        limit=limit + 1,
         offset=offset,
     )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
     trajectory = _locations_from_rows(person_id, rows)
     return _ok(
         {
@@ -351,6 +353,8 @@ def people_trajectory(
             "trajectory": trajectory,
             "limit": limit,
             "offset": offset,
+            "returned_count": len(trajectory),
+            "has_more": has_more,
             "mode": "persisted_trajectory",
         },
         request_id,

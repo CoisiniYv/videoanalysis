@@ -288,12 +288,12 @@ function openPersonTrajectoryFromBundle(bundle = {}) {
     addWarning("identity_bundle_missing_person_id");
     return false;
   }
-  if (!window.operatorPeople?.openPersonById) {
-    window.location.hash = "#people";
+  if (!window.operatorTrajectory?.openForPerson) {
+    window.location.hash = "#trajectory";
     addWarning("person_trajectory_bridge_unavailable");
     return false;
   }
-  window.operatorPeople.openPersonById(person.personId, { openFindDialog: true })
+  window.operatorTrajectory.openForPerson(person.personId)
     .catch(err => addWarning(`person_trajectory_open_failed:${err.message}`));
   return true;
 }
