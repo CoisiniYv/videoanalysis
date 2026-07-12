@@ -22,9 +22,16 @@ Implementation checkpoint (2026-07-12):
   `docs/code_review/clip_media_phase1_lifecycle_contract_2026-07-12.md`;
 - acceptance token: `PASS_CLIP_MEDIA_LIFECYCLE_OWNERSHIP_UNIFIED` together with
   Spec 33 token `PASS_EVIDENCE_MATERIALIZATION_STATE_CONTRACT_UNIFIED`;
-- Coordinator V2, the single-finalizer/outermost-permit boundary, atomic
-  artifact publication, long-lived pools/lanes, crash soak, pressure closure
-  and legacy removal remain unclaimed.
+- Spec 33 Phase 2 has completed the Media single-finalizer/outermost-permit
+  substep, fenced attempt-scoped publication, durable cleanup retry and common
+  finalizer-pending recovery. Its implementation proof is recorded in
+  `docs/code_review/clip_media_phase2_single_finalizer_boundary_2026-07-12.md`
+  with token `PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`;
+- this was an early Spec 34 Phase 4 substep under Spec 33 authority. It does not
+  complete or claim Spec 34 Phase 2 `PASS_CLIP_WORKER_PURE_PLAN_PARITY`;
+- Clip pure extraction, Coordinator V2, long-lived Media pools/lanes, complete
+  scheduler V2, segment index, crash soak, pressure closure and legacy removal
+  remain unclaimed.
 
 ## 0. 执行摘要
 
@@ -639,6 +646,13 @@ PASS_CLIP_WORKER_COORDINATOR_V2_RECOVERABLE
 并回写修订本计划，不得实现两套 scheduler 合同。
 
 Acceptance tokens 直接复用 Spec 33 Phase 2-5，不另造同义 token。
+
+Implementation checkpoint (2026-07-12): item 1 and the Phase 2 portion of
+items 2/7 are complete under token
+`PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`. Long-lived WIP transfer,
+executors, PostgreSQL pool, non-blocking lanes, segment index, full shutdown and
+performance gates remain pending; therefore Spec 34 Phase 4 as a whole is not
+complete.
 
 ### Phase 5 - Extract Remaining Media Responsibilities
 

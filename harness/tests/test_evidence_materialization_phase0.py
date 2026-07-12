@@ -397,6 +397,28 @@ def test_media_worker_materialization_pacer_limits_per_poll_and_records_sleep() 
     assert snapshot["deadline_guard_s"] == 60.0
 
 
+def test_materialization_permit_is_move_only_and_idempotently_released() -> None:
+    worker = _activate_media_worker()
+    guard = worker._MaterializationGuard(max_active=1)
+
+    held = worker._HeldMaterializationPermit.acquire(guard, required=True)
+    rejected = worker._HeldMaterializationPermit.acquire(guard, required=True)
+
+    assert held.acquired is True
+    assert rejected.acquired is False
+    assert guard.snapshot() == {"max_active": 1, "active": 1}
+    rejected.release()
+    assert guard.snapshot()["active"] == 1
+    held.release()
+    held.release()
+    assert held.released is True
+    assert guard.snapshot() == {"max_active": 1, "active": 0}
+
+    no_guard = worker._HeldMaterializationPermit.acquire(None, required=True)
+    assert no_guard.acquired is True
+    no_guard.release()
+
+
 def test_media_worker_materialization_sort_prioritizes_watchlist_and_deadline(
     monkeypatch,
 ) -> None:
@@ -570,6 +592,7 @@ def test_media_worker_finalizer_pool_schedules_different_sources(monkeypatch) ->
         midterm_sink_stability_checks=1,
         processed_state_path=None,
         sink_scan_max_metadata_files=None,
+        materialization_guard=worker._MaterializationGuard(4),
         materialization_timeout_s=180,
         materialization_max_backlog=0,
         materialization_max_per_poll=0,
@@ -644,6 +667,7 @@ def test_media_worker_finalizer_pool_keeps_same_source_serial(monkeypatch) -> No
         midterm_sink_stability_checks=1,
         processed_state_path=None,
         sink_scan_max_metadata_files=None,
+        materialization_guard=worker._MaterializationGuard(4),
         materialization_timeout_s=180,
         materialization_max_backlog=0,
         materialization_max_per_poll=0,
@@ -712,6 +736,7 @@ def test_media_worker_finalizer_pool_can_parallelize_same_source_fast_path(
         midterm_sink_stability_checks=1,
         processed_state_path=None,
         sink_scan_max_metadata_files=None,
+        materialization_guard=worker._MaterializationGuard(4),
         materialization_timeout_s=180,
         materialization_max_backlog=0,
         materialization_max_per_poll=0,
@@ -769,6 +794,7 @@ def test_media_worker_finalizer_pool_preserves_terminal_processed_state(
         midterm_sink_stability_checks=1,
         processed_state_path=None,
         sink_scan_max_metadata_files=None,
+        materialization_guard=worker._MaterializationGuard(4),
         materialization_timeout_s=180,
         materialization_max_backlog=0,
         materialization_max_per_poll=0,

@@ -486,6 +486,9 @@ def test_replay_first_topology_is_preserved() -> None:
         "MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"
     ] == "${MEDIA_WORKER_FINALIZER_SOURCE_SERIAL:-false}"
     assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED"
+    ] == "${MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED:-true}"
+    assert services["media-worker"]["environment"][
         "MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"
     ] == "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0}"
     assert services["media-worker"]["environment"][
@@ -937,6 +940,7 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
     assert env_file["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == "4"
     assert env_file["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == "false"
+    assert env_file["MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED"] == "true"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == "0"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S"] == "90"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
@@ -961,6 +965,9 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     )
     assert media_env["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == (
         "${MEDIA_WORKER_FINALIZER_SOURCE_SERIAL:-false}"
+    )
+    assert media_env["MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED"] == (
+        "${MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED:-true}"
     )
     assert media_env["MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S"] == (
         "${MEDIA_WORKER_MATERIALIZATION_THROTTLE_SLEEP_S:-0}"

@@ -313,6 +313,10 @@ def test_durable_handoff_survives_retry_and_fences_previous_owner(conn) -> None:
             """,
             {"event_id": event_id},
         )
+    recoverable = repository.recoverable_finalizer_handoffs(connection, limit=10)
+    assert len(recoverable) == 1
+    assert recoverable[0]["event_id"] == event_id
+    assert recoverable[0]["sink_output_path"] == "/tmp/phase1-attempt"
     reclaimed = repository.claim_finalizer_task(
         connection,
         event_id=event_id,
@@ -323,6 +327,7 @@ def test_durable_handoff_survives_retry_and_fences_previous_owner(conn) -> None:
     assert reclaimed["status"] == "claimed"
     winner = reclaimed["lease"]
     assert isinstance(winner, repository.MaterializationLease)
+    assert repository.recoverable_finalizer_handoffs(connection, limit=10) == []
     assert winner.generation > finalizer.generation
     assert repository.fail_rolling_task(
         connection,
@@ -544,6 +549,40 @@ def test_finalizer_completion_is_task_first_and_fenced(conn) -> None:
     event = _event(connection, event_id)
     assert event["media_status"] == "materialized"
     assert event["payload"]["media"]["materialization_phase"] == "terminal"
+
+    assert repository.record_cleanup_outcome(
+        connection,
+        event_id=event_id,
+        status="cleanup_pending",
+        sink_output_path="/tmp/finalizer-fence",
+        error="temporary_io_error:device busy",
+    ) is True
+    assert repository.pending_cleanup_tasks(connection, limit=10) == [
+        {
+            "event_id": event_id,
+            "sink_output_path": "/tmp/finalizer-fence",
+            "materialization_status": "materialized",
+            "attempt_count": 1,
+        }
+    ]
+    still_terminal = _task(connection, event_id)
+    assert still_terminal["materialization_status"] == "materialized"
+    assert still_terminal["cleanup_audit"]["sink_output"]["status"] == (
+        "cleanup_pending"
+    )
+
+    assert repository.record_cleanup_outcome(
+        connection,
+        event_id=event_id,
+        status="deleted",
+        sink_output_path="/tmp/finalizer-fence",
+        deleted_bytes=123,
+    ) is True
+    assert repository.pending_cleanup_tasks(connection, limit=10) == []
+    cleaned = _task(connection, event_id)
+    assert cleaned["materialization_status"] == "materialized"
+    assert cleaned["cleanup_audit"]["sink_output"]["status"] == "deleted"
+    assert cleaned["cleanup_audit"]["sink_output"]["attempt_count"] == 2
 
 
 def test_clip_transition_is_task_first_idempotent_and_replay_owned(conn) -> None:

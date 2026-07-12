@@ -953,6 +953,9 @@ def persist_finalizer_handoff(
     missing = sorted(required - set(handoff))
     if missing:
         raise ValueError(f"materialization handoff missing fields: {','.join(missing)}")
+    for field in ("attempt_token", "source_id", "runtime_epoch_id"):
+        if not str(handoff.get(field) or "").strip():
+            raise ValueError(f"materialization handoff has empty field: {field}")
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1334,6 +1337,170 @@ def complete_finalizer_task(
             },
         )
         return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def record_cleanup_outcome(
+    conn: psycopg.Connection,
+    *,
+    event_id: str,
+    status: str,
+    sink_output_path: str,
+    deleted_bytes: int = 0,
+    error: str = "",
+) -> bool:
+    """Persist one bounded cleanup attempt without changing terminal state."""
+    allowed = {"deleted", "disabled", "skipped", "missing", "cleanup_pending"}
+    if status not in allowed:
+        raise ValueError(f"invalid cleanup outcome: {status}")
+    terminal = sorted(
+        {
+            MaterializationStatus.MATERIALIZED.value,
+            MaterializationStatus.DEFERRED.value,
+            MaterializationStatus.FAILED.value,
+            MaterializationStatus.EXPIRED.value,
+            MaterializationStatus.SKIPPED.value,
+        }
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH recorded AS (
+                UPDATE evidence_tasks
+                SET cleanup_audit = COALESCE(cleanup_audit, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'sink_output',
+                            jsonb_strip_nulls(jsonb_build_object(
+                                'status', %(status)s::text,
+                                'path', NULLIF(%(sink_output_path)s::text, ''),
+                                'deleted_bytes', %(deleted_bytes)s::bigint,
+                                'error', NULLIF(%(error)s::text, ''),
+                                'attempt_count',
+                                    CASE
+                                        WHEN COALESCE(
+                                            cleanup_audit->'sink_output'
+                                                ->>'attempt_count',
+                                            ''
+                                        ) ~ '^[0-9]+$'
+                                            THEN (
+                                                cleanup_audit->'sink_output'
+                                                    ->>'attempt_count'
+                                            )::integer + 1
+                                        ELSE 1
+                                    END,
+                                'attempted_at', now()
+                            ))
+                        ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                  AND materialization_status = ANY(%(terminal_states)s)
+                RETURNING event_id
+            )
+            UPDATE events e
+            SET payload = COALESCE(e.payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'media',
+                        COALESCE(e.payload->'media', '{}'::jsonb)
+                        || jsonb_strip_nulls(jsonb_build_object(
+                            'sink_output_cleanup_status', %(status)s::text,
+                            'sink_output_cleanup_deleted_bytes',
+                                %(deleted_bytes)s::bigint,
+                            'sink_output_cleanup_error',
+                                NULLIF(%(error)s::text, ''),
+                            'sink_output_cleanup_at', now()
+                        ))
+                    ),
+                updated_at = now()
+            FROM recorded r
+            WHERE e.id = r.event_id
+            """,
+            {
+                "event_id": event_id,
+                "status": status,
+                "sink_output_path": sink_output_path,
+                "deleted_bytes": max(0, int(deleted_bytes or 0)),
+                "error": str(error or ""),
+                "terminal_states": terminal,
+            },
+        )
+        return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def pending_cleanup_tasks(
+    conn: psycopg.Connection,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return terminal sink cleanups that need an idempotent retry."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT event_id::text AS event_id,
+                   cleanup_audit->'sink_output'->>'path' AS sink_output_path,
+                   materialization_status,
+                   COALESCE(
+                       (cleanup_audit->'sink_output'->>'attempt_count')::integer,
+                       0
+                   ) AS attempt_count
+            FROM evidence_tasks
+            WHERE materialization_status = ANY(%(terminal_states)s)
+              AND cleanup_audit->'sink_output'->>'status' = 'cleanup_pending'
+              AND COALESCE(
+                    cleanup_audit->'sink_output'->>'path',
+                    ''
+                  ) <> ''
+            ORDER BY updated_at ASC
+            LIMIT %(limit)s
+            """,
+            {
+                "terminal_states": sorted(
+                    {
+                        MaterializationStatus.MATERIALIZED.value,
+                        MaterializationStatus.DEFERRED.value,
+                        MaterializationStatus.FAILED.value,
+                        MaterializationStatus.EXPIRED.value,
+                        MaterializationStatus.SKIPPED.value,
+                    }
+                ),
+                "limit": max(1, int(limit or 1)),
+            },
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def recoverable_finalizer_handoffs(
+    conn: psycopg.Connection,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return durable, unleased finalizer handoffs eligible for recovery."""
+    if not supports_lifecycle_v2(conn):
+        return []
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT event_id::text AS event_id,
+                   sink_output_path,
+                   materialization_handoff,
+                   source_id,
+                   runtime_epoch_id,
+                   materialization_lease_generation
+            FROM evidence_tasks
+            WHERE materialization_status = 'materializing'
+              AND materialization_phase = 'finalizer_pending'
+              AND materialization_handoff <> '{}'::jsonb
+              AND materialization_lease_token IS NULL
+              AND COALESCE(
+                    materialization_next_attempt_at,
+                    materialization_ready_at,
+                    now()
+                  ) <= now()
+              AND COALESCE(sink_output_path, '') <> ''
+            ORDER BY priority DESC, materialization_phase_updated_at ASC
+            LIMIT %(limit)s
+            """,
+            {"limit": max(1, int(limit or 1))},
+        )
+        return [dict(row) for row in cur.fetchall()]
 
 
 def _transition_event_ids(

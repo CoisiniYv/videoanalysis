@@ -2,7 +2,7 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 0-1 已完成，Phase 2-7 尚未执行
+Status: 执行中；Phase 0-2 已完成，Phase 3-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -25,8 +25,24 @@ Implementation checkpoint (2026-07-12):
   recovery tests, service recreate, Redis/DB and 8090 smoke are recorded in
   `docs/code_review/clip_media_phase1_lifecycle_contract_2026-07-12.md`;
 - acceptance token: `PASS_EVIDENCE_MATERIALIZATION_STATE_CONTRACT_UNIFIED`.
-  This does not claim the Phase 2 single-finalizer boundary: attempt-scoped
-  canonical publish and outermost permit release still belong to Phase 2.
+  Phase 1 does not by itself claim later scheduler tokens;
+- Phase 2 extracts one `_finalize_one()` boundary, moves WIP permit ownership
+  to its outermost `finally`, removes recursive sink scans and private guards
+  from the finalizer pool, and keeps the shared permit through terminal CAS,
+  DB index and bounded cleanup;
+- finalizer outputs are built under `.incoming/{event_id}/{generation-token}`,
+  fenced immediately before atomic canonical publish, and converged without
+  overwriting an already complete canonical bundle. Recovery validates source,
+  runtime epoch, attempt token, sink path and immutable file identity;
+- cleanup failure is persisted as `cleanup_pending` without reversing terminal
+  state, and both cleanup and durable `finalizer_pending` recovery run from the
+  common poll path. The temporary rollback flag is wired into effective
+  Compose config and really bypasses the V2 pool when disabled;
+- implementation and disposable-PostgreSQL proof are recorded in
+  `docs/code_review/clip_media_phase2_single_finalizer_boundary_2026-07-12.md`;
+- acceptance token: `PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`. This does
+  not claim long-lived executors, connection pooling, scheduler V2, segment
+  indexing, pressure closure or legacy removal.
 
 ## 0. 执行摘要
 
@@ -1065,13 +1081,21 @@ one change.
 Temporary flags may isolate rollback during canary:
 
 ```text
+MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED
 MEDIA_WORKER_SCHEDULER_V2_ENABLED
 MEDIA_WORKER_SEGMENT_INDEX_ENABLED
 MEDIA_WORKER_DB_POOL_ENABLED
 ```
 
-Initial repository defaults are all `false`; canary overrides are recorded in
-effective config. Valid combinations are:
+`MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED` is the Phase 2 runner bridge. It
+defaults to `true`; `false` selects legacy synchronous admission while the
+fenced lifecycle and durable recovery remain common. Its owner is
+`media-worker`, and it is removed together with the legacy runner in Phase 7.
+
+The later scheduler, DB-pool and segment-index flags initially default to
+`false`; the isolated Phase 2 finalizer boundary defaults to `true` as recorded
+above. Canary overrides are recorded in effective config. Valid combinations
+for the later three flags are:
 
 | V2 | DB pool | Segment index | Result |
 | --- | --- | --- | --- |
