@@ -144,6 +144,7 @@ class ReplayClient:
         stop_condition_mode: str = "frame_count",
         fallback_reason: str | None = None,
         fps: int = 30,
+        force_constant_cadence: bool | None = None,
         offset_seconds_override: float | None = None,
         duration_seconds_override: float | None = None,
         ts_sync: bool | None = None,
@@ -174,7 +175,11 @@ class ReplayClient:
             stop_condition_mode=stop_condition_mode,
             fallback_reason=fallback_reason,
             fps=fps,
-            force_constant_cadence=_env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True),
+            force_constant_cadence=(
+                _env_bool("REPLAY_FORCE_CONSTANT_CADENCE", True)
+                if force_constant_cadence is None
+                else bool(force_constant_cadence)
+            ),
             offset_seconds_override=offset_seconds_override,
             duration_seconds_override=duration_seconds_override,
             ts_sync=replay_ts_sync,

@@ -74,6 +74,9 @@ class Config:
     evidence_replay_slot_grace_s: float
     evidence_materialization_event_type_quotas: dict[str, int]
     evidence_materialization_pressure_level: str
+    replay_force_constant_cadence: bool = True
+    replay_ts_sync: bool = False
+    planner_shadow_enabled: bool = True
 
 
 def _csv_env(name: str, default: str = "") -> tuple[str, ...]:
@@ -327,4 +330,11 @@ def load_config() -> Config:
         )
         .strip()
         .lower(),
+        replay_force_constant_cadence=_bool_env(
+            "REPLAY_FORCE_CONSTANT_CADENCE", "true"
+        ),
+        replay_ts_sync=_bool_env("REPLAY_TS_SYNC", "false"),
+        planner_shadow_enabled=_bool_env(
+            "CLIP_WORKER_PLANNER_SHADOW_ENABLED", "true"
+        ),
     )

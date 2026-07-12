@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: 执行中；Phase 0-1 已完成，Phase 2-7 尚未执行
+Status: 执行中；Phase 0-2 已完成，Phase 3-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -27,11 +27,18 @@ Implementation checkpoint (2026-07-12):
   finalizer-pending recovery. Its implementation proof is recorded in
   `docs/code_review/clip_media_phase2_single_finalizer_boundary_2026-07-12.md`
   with token `PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`;
-- this was an early Spec 34 Phase 4 substep under Spec 33 authority. It does not
-  complete or claim Spec 34 Phase 2 `PASS_CLIP_WORKER_PURE_PLAN_PARITY`;
-- Clip pure extraction, Coordinator V2, long-lived Media pools/lanes, complete
-  scheduler V2, segment index, crash soak, pressure closure and legacy removal
-  remain unclaimed.
+- this was an early Spec 34 Phase 4 substep under Spec 33 authority;
+- Spec 34 Phase 2 now provides dependency-free frozen contracts, normalized
+  record requests, pure gate/window/anchor/label/payload planning, stable plan
+  hashes and a typed bounded proof-resolution port. Runtime shadow compares the
+  pure primary payload to the legacy oracle before admission and has exactly
+  one Replay `create_job` call site;
+- the Clip parity proof is recorded in
+  `docs/code_review/clip_media_phase2_clip_pure_plan_parity_2026-07-12.md` with
+  token `PASS_CLIP_WORKER_PURE_PLAN_PARITY`;
+- Coordinator V2, ACK/consumer/repository extraction, long-lived Media
+  pools/lanes, complete scheduler V2, segment index, crash soak, pressure
+  closure and legacy removal remain unclaimed.
 
 ## 0. 执行摘要
 
@@ -607,6 +614,16 @@ Acceptance token:
 PASS_CLIP_WORKER_PURE_PLAN_PARITY
 ```
 
+Implementation checkpoint (2026-07-12): complete. `contracts.py` owns the
+frozen request/proof/plan/gate contracts; `replay_planner.py` is dependency-free
+and owns normalized request, gate, requested-window, anchor, labels and primary
+Replay payload/hash decisions; `proof_resolver.py` owns the typed bounded port
+and lookup concurrency gate while the validated Redis frame-domain scan remains
+its legacy callable backend. Legacy pure helpers remain temporarily as test
+oracles only. The runtime planner shadow is pure and cannot issue a second
+Replay job. Proof and implementation details are recorded in
+`docs/code_review/clip_media_phase2_clip_pure_plan_parity_2026-07-12.md`.
+
 ### Phase 3 - Introduce Clip Coordinator V2
 
 1. 抽出 Redis consumer/reclaim/ACK adapter；
@@ -744,6 +761,7 @@ PASS_CLIP_MEDIA_LEGACY_ORCHESTRATORS_REMOVED
 至少更新并运行：
 
 ```text
+harness/tests/test_clip_worker_replay_planner.py
 harness/tests/test_clip_worker_queue_safety.py
 harness/tests/test_completion_aware_replay_admission.py
 harness/tests/test_midterm_replay_epoch_isolation.py
@@ -926,6 +944,7 @@ compose 行为。
 允许的临时 flags：
 
 ```text
+CLIP_WORKER_PLANNER_SHADOW_ENABLED
 CLIP_WORKER_COORDINATOR_V2_ENABLED
 MEDIA_WORKER_SCHEDULER_V2_ENABLED
 MEDIA_WORKER_DB_POOL_ENABLED
@@ -940,6 +959,10 @@ MEDIA_WORKER_SEGMENT_INDEX_ENABLED
 4. shadow 仅限纯 planner，不允许双 side effects；
 5. 每个 flag 有 owner、删除 phase 和最晚删除条件；
 6. Phase 7 后生产代码不得保留 legacy coordinator/scheduler。
+
+`CLIP_WORKER_PLANNER_SHADOW_ENABLED` 由 clip-worker 所有，Phase 2 默认开启，
+只比较纯 payload/hash，不创建 Replay job 或写 DB/Redis；Coordinator V2 接管
+planner 后与 legacy oracle 一起删除，最晚不得超过 Phase 7。
 
 部署顺序：
 

@@ -1,0 +1,8 @@
+{
+  "schema_version": "clip-replay-plan-hashes-v1",
+  "plan_hashes": {
+    "normal_full_window": "12f8f4a5a11cc20e3e1ec4a72f72f7697388b46c458e9515fcedea5be02c32a9",
+    "truncated_pre_window": "af613978aaf0b8fa9f41c7f6c754908e422e189ad70f42b69efc691736c4423e",
+    "cross_session_post_proof": "dc78083a994d2b5282f3b3bd4b9141590fb5b1d6d2ac5a8dd367344e21e0b2eb"
+  }
+}
