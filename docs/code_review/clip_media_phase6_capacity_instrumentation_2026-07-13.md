@@ -93,8 +93,8 @@ override mechanism, so a candidate cannot leak into daily runtime.
 Executed checks:
 
 ```text
-pressure harness focused tests:        149 passed
-Spec 33 + scheduler/index regression:  339 passed
+pressure harness focused tests:        150 passed
+Spec 33 + scheduler/index regression:  340 passed
 python py_compile:                      passed
 profile shell syntax:                   passed
 docker compose effective config:       passed
@@ -105,6 +105,9 @@ The test fixture exercises numeric V2 scheduler ticks, effective resource
 startup fields, DB-index subphase logs, the nested artifact mapping, fixed lane
 configuration, CLI/profile propagation, warmup preservation/formal-window
 fencing, deterministic republish hashing, and retained Compose override output.
+It also executes the pressure runner directly from the repository root, so the
+repository-owned lifecycle contract is importable without an ambient
+`PYTHONPATH`.
 The formal-window DB summary, event/cooldown summary, non-materialized detail,
 kept-evidence, covered-alias, lifecycle, and ready-to-claim SQL were also run
 read-only against the live PostgreSQL schema.

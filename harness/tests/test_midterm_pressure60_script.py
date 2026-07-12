@@ -101,6 +101,19 @@ def _config(module, **overrides):
     return module.PressureConfig(**values)
 
 
+def test_pressure_runner_is_directly_executable_from_repo_root() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        cwd=ROOT.parent,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    assert "Run a full midterm 60-source pressure test" in completed.stdout
+
+
 def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     completed = subprocess.run(
         ["bash", str(PROFILE_SCRIPT), "4fps-t4"],

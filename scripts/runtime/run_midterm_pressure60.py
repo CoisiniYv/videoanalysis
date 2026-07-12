@@ -37,6 +37,10 @@ import yaml
 from psycopg.rows import dict_row
 from redis import Redis
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from libs.evidence_lifecycle import (
     ACTIVE_COMPATIBILITY_TASK_STATUSES,
     ACTIVE_MATERIALIZATION_STATUSES,
