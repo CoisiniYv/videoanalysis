@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: 执行中；Phase 0-3 已完成，Phase 4-7 尚未完成
+Status: 执行中；Phase 0-3 已完成，Phase 4 部分完成，Phase 5-7 尚未完成
 
 Implementation checkpoint (2026-07-12):
 
@@ -57,6 +57,16 @@ Implementation checkpoint (2026-07-12):
 - this is the long-lived-resource substep of Spec 34 Phase 4. Non-blocking
   Scheduler V2 dispatch, segment index, full cross-worker soak, two 60-source
   closure runs and legacy removal remain unclaimed.
+- Spec 33 Phase 4 now provides the non-blocking image/remux/finalizer scheduler,
+  pre-claim bounded lane/source/permit reservation, durable submit retry and
+  flag-independent `finalizer_pending` recovery. Its retained mixed and
+  SIGKILL/restart canaries, 8090 proof and zero-residual audit are recorded in
+  `docs/code_review/clip_media_phase4b_media_scheduler_v2_2026-07-13.md` with
+  token `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`;
+- this completes only the Scheduler V2 substep of Spec 34 Phase 4. The
+  `RollingSegmentIndex`, capacity/performance gates, full cross-worker soak,
+  two 60-source closure runs and legacy removal remain unclaimed, so Spec 34
+  Phase 4 as a whole is not complete.
 
 ## 0. 执行摘要
 
@@ -721,16 +731,19 @@ PASS_CLIP_WORKER_COORDINATOR_V2_RECOVERABLE
 
 Acceptance tokens 直接复用 Spec 33 Phase 2-5，不另造同义 token。
 
-Implementation checkpoint (2026-07-12): item 1 and the Phase 2 portion of
+Implementation checkpoint (2026-07-13): item 1 and the Phase 2 portion of
 items 2/7 are complete under token
 `PASS_MEDIA_WORKER_SINGLE_FINALIZER_BOUNDARY`. The long-lived-resource portions
 of items 2-4/8 are complete under token
 `PASS_MEDIA_WORKER_LONG_LIVED_RESOURCE_BOUNDS`: WIP transfer, bounded lifetime
 executors/source caps, bounded PostgreSQL pool, heartbeat/attempt-age fencing,
 managed process groups and the shutdown state machine are verified.
-Non-blocking lane dispatch, the segment index, durable submit/restart recovery,
-capacity and performance gates remain pending; therefore Spec 34 Phase 4 as a
-whole is not complete.
+The Spec 33 Phase 4 portions of items 2-5/7/8 are complete under token
+`PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`: non-blocking three-lane
+dispatch, durable submit retry, common finalizer recovery and SIGKILL restart
+convergence are verified. Item 6, capacity/performance portions of item 8, and
+the two required 60-source closures remain pending; therefore Spec 34 Phase 4
+as a whole is not complete.
 
 ### Phase 5 - Extract Remaining Media Responsibilities
 

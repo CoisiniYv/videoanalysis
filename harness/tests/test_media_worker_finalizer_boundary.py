@@ -36,28 +36,29 @@ def _permit(worker: Any):
     return guard, permit
 
 
-def _finalize(worker: Any, permit: Any):
-    return worker._finalize_one(
-        object(),
-        event_id=EVENT_ID,
-        meta={"job_id": "job-1"},
-        meta_dir="/tmp/sink/event-1",
-        metadata_file="/tmp/sink/event-1/metadata.json",
-        sink_dir="/tmp/sink",
-        evidence_output_dir="/tmp/evidence",
-        finalizer_worker_id="finalizer-test",
-        source_id="source-1",
-        replay_shard_id="default",
-        phase_diagnostics={},
-        guardrails={},
-        permit=permit,
-        materialization_timeout_s=30,
-        cleanup_replay_sink_output_enabled=True,
-        cleanup_replay_sink_output_statuses=("ready",),
-        schedule_row={},
-        materialization_pacer=None,
-        scan_stats={},
-    )
+def _finalize(worker: Any, permit: Any, **overrides: Any):
+    values: dict[str, Any] = {
+        "event_id": EVENT_ID,
+        "meta": {"job_id": "job-1"},
+        "meta_dir": "/tmp/sink/event-1",
+        "metadata_file": "/tmp/sink/event-1/metadata.json",
+        "sink_dir": "/tmp/sink",
+        "evidence_output_dir": "/tmp/evidence",
+        "finalizer_worker_id": "finalizer-test",
+        "source_id": "source-1",
+        "replay_shard_id": "default",
+        "phase_diagnostics": {},
+        "guardrails": {},
+        "permit": permit,
+        "materialization_timeout_s": 30,
+        "cleanup_replay_sink_output_enabled": True,
+        "cleanup_replay_sink_output_statuses": ("ready",),
+        "schedule_row": {},
+        "materialization_pacer": None,
+        "scan_stats": {},
+    }
+    values.update(overrides)
+    return worker._finalize_one(object(), **values)
 
 
 @pytest.mark.parametrize(
@@ -134,6 +135,148 @@ def test_unexpected_exception_releases_permit(
 
     assert result.updated == 0
     assert permit.released is True
+    assert guard.snapshot()["active"] == 0
+
+
+def test_claimed_unexpected_exception_schedules_durable_retry_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    guard, permit = _permit(worker)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="token-1",
+        generation=1,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    retries: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        worker,
+        "_claim_media_finalization",
+        lambda *_a, **_k: {
+            "status": "claimed",
+            "claimed": True,
+            "lease": lease,
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "_set_event_evidence_state",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("projection down")),
+    )
+
+    def retry(_conn: object, observed_lease: object, **kwargs: Any) -> bool:
+        assert guard.snapshot()["active"] == 1
+        assert observed_lease == lease
+        retries.append(kwargs)
+        return True
+
+    monkeypatch.setattr(worker, "retry_finalizer_handoff", retry)
+
+    result = _finalize(worker, permit)
+
+    assert result.processed is False
+    assert result.terminal_committed is False
+    assert retries[0]["reason"].startswith(
+        "temporary_io_error:finalizer_unexpected_exception:RuntimeError"
+    )
+    assert permit.released is True
+    assert guard.snapshot()["active"] == 0
+
+
+def test_failed_terminal_write_returns_claim_to_durable_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    guard, permit = _permit(worker)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="token-1",
+        generation=1,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    retries: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        worker,
+        "_claim_media_finalization",
+        lambda *_a, **_k: {
+            "status": "claimed",
+            "claimed": True,
+            "lease": lease,
+        },
+    )
+    monkeypatch.setattr(worker, "_set_event_evidence_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_discard_finalizer_attempt", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        worker,
+        "_finalize_post_savant_evidence_bundle",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("bad media")),
+    )
+    monkeypatch.setattr(worker, "_mark_media_finalize_failed", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        worker,
+        "retry_finalizer_handoff",
+        lambda *_a, **kwargs: retries.append(kwargs) or True,
+    )
+
+    result = _finalize(worker, permit)
+
+    assert result.processed is False
+    assert result.terminal_committed is False
+    assert retries[0]["reason"].startswith(
+        "temporary_io_error:finalizer_terminal_write_failed:RuntimeError"
+    )
+    assert permit.released is True
+    assert guard.snapshot()["active"] == 0
+
+
+def test_force_requested_after_claim_fences_before_media_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    guard, permit = _permit(worker)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="token-1",
+        generation=1,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    controller = worker.ShutdownController(grace_seconds=30)
+    retries: list[dict[str, Any]] = []
+
+    def claim(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        controller.request(signal_number=15)
+        controller.request(signal_number=15)
+        return {"status": "claimed", "claimed": True, "lease": lease}
+
+    monkeypatch.setattr(worker, "_claim_media_finalization", claim)
+    monkeypatch.setattr(
+        worker,
+        "_set_event_evidence_state",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("forced claim entered media work")
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "retry_finalizer_handoff",
+        lambda *_a, **kwargs: retries.append(kwargs) or True,
+    )
+
+    result = _finalize(
+        worker,
+        permit,
+        shutdown_controller=controller,
+    )
+
+    assert result.claim_status == "shutdown_deferred"
+    assert result.processed is False
+    assert retries[0]["reason"] == (
+        "temporary_io_error:media_worker_shutdown_interrupted"
+    )
     assert guard.snapshot()["active"] == 0
 
 

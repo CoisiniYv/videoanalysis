@@ -2,7 +2,7 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 0-3 已完成，Phase 4-7 尚未执行
+Status: 执行中；Phase 0-4 已完成，Phase 5-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -58,6 +58,22 @@ Implementation checkpoint (2026-07-12):
 - acceptance token: `PASS_MEDIA_WORKER_LONG_LIVED_RESOURCE_BOUNDS`. This does
   not claim the Phase 4 non-blocking three-lane scheduler, segment index,
   capacity/pressure closure or legacy removal.
+- Phase 4 enables the non-blocking Scheduler V2 over separate bounded image,
+  remux and finalizer lanes. Scheduler ticks drain completed futures without
+  waiting, perform metadata-only discovery, and reserve lane/source/permit
+  capacity before claim;
+- ordinary exceptions, terminal-write failures, submit/discovery failures and
+  forced shutdown converge through fenced durable retry without leaking WIP,
+  lane/source reservations, heartbeats or DB checkouts;
+- retained mixed video/image/general/snapshot canaries and the `.490-.497`
+  `finalizer_pending` SIGKILL/restart group passed with one bundle per video,
+  visible DB-backed bbox/person context, zero active lease/Replay slot and zero
+  runtime residuals;
+- implementation and runtime proof are recorded in
+  `docs/code_review/clip_media_phase4b_media_scheduler_v2_2026-07-13.md`;
+- acceptance token: `PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER`.
+  This does not claim the Phase 5 segment index, Phase 6 capacity/readiness
+  calibration, two 60-source pressure gates or Phase 7 legacy removal.
 
 ## 0. 执行摘要
 
@@ -817,6 +833,17 @@ Acceptance token:
 PASS_MEDIA_WORKER_NONBLOCKING_THREE_LANE_SCHEDULER
 ```
 
+Implementation checkpoint (2026-07-13): complete. Scheduler V2 dispatches
+rolling images, snapshots and annotations to the bounded image lane, rolling
+video to the remux lane, and both durable handoff recovery and general Replay
+sink output to the bounded finalizer lane. The main poll does not run media
+work or wait for futures. Submit/discovery/job/shutdown failures release their
+exact ownership or first persist a fenced retry. A retained SIGKILL at durable
+`finalizer_pending` recovered eight unique bundles after lease expiry with no
+duplicate, lease, slot, permit, lane or pool residual. The proof is recorded in
+`docs/code_review/clip_media_phase4b_media_scheduler_v2_2026-07-13.md`. This
+checkpoint does not enable or claim the Phase 5 segment index.
+
 ### Phase 5 - Add Segment Index And Reduce Finalizer Work
 
 1. Replace per-poll recursive lookup with `RollingSegmentIndex`.
@@ -1114,10 +1141,10 @@ defaults to `true`; `false` selects legacy synchronous admission while the
 fenced lifecycle and durable recovery remain common. Its owner is
 `media-worker`, and it is removed together with the legacy runner in Phase 7.
 
-The later scheduler, DB-pool and segment-index flags initially default to
-`false`; the isolated Phase 2 finalizer boundary defaults to `true` as recorded
-above. Canary overrides are recorded in effective config. Valid combinations
-for the later three flags are:
+The isolated Phase 2 finalizer boundary defaults to `true`. At the accepted
+Phase 4 checkpoint Scheduler V2 and its required DB pool default to `true`,
+while the Phase 5 segment index remains `false`. Canary overrides are recorded
+in effective config. Valid combinations for the later three flags are:
 
 | V2 | DB pool | Segment index | Result |
 | --- | --- | --- | --- |
