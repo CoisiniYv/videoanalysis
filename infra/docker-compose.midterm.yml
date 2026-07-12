@@ -946,6 +946,7 @@ services:
       EVENT_BATCH_SIZE: "1"
     volumes:
       - ../services/event-worker:/app:rw
+      - ../libs:/app/libs:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -1162,6 +1163,7 @@ services:
       ALLOW_UNBOUNDED_KEYFRAME_FALLBACK: "false"
     volumes:
       - ../services/clip-worker:/app:rw
+      - ../libs:/app/libs:ro
       - ../infra/config:/app/infra/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -1464,6 +1466,7 @@ services:
       CAMERAS_CONFIG_PATH: /opt/savant/src/module/config/cameras.midterm.yml
     volumes:
       - ../services/media-worker:/app:rw
+      - ../libs:/app/libs:ro
       - ../modules/savant_security/config:/opt/savant/src/module/config:ro
       - /data/video-analytics/media:/media:rw
     extra_hosts:
