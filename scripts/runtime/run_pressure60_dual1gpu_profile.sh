@@ -22,7 +22,12 @@ Environment overrides:
   RTSP_REPUBLISH_MODE=copy
   RTSP_REPUBLISH_INPUT_OFFSET_S=0
   RTSP_REPUBLISH_INPUT_LOOP=0
+  RTSP_REPUBLISH_H264_REPEAT_HEADERS=1
   RTSP_REPUBLISH_WARMUP_S=10
+  RTSP_REPUBLISH_LOCAL_SERVER=1
+                      Use a run-scoped MediaMTX instead of shared external RTSP.
+  RTSP_REPUBLISH_LOCAL_SERVER_PORT=18554
+                      Host port mapped to the run-scoped MediaMTX.
   STREAMS=60          Override stream count for local smoke runs.
   DURATION_S=400      Override measured sampling duration.
   DRAIN_S=120         Override evidence drain duration.
@@ -135,7 +140,10 @@ rtsp_republish_input_uri="${RTSP_REPUBLISH_INPUT_URI:-}"
 rtsp_republish_mode="${RTSP_REPUBLISH_MODE:-copy}"
 rtsp_republish_input_offset_s="${RTSP_REPUBLISH_INPUT_OFFSET_S:-0}"
 rtsp_republish_input_loop="${RTSP_REPUBLISH_INPUT_LOOP:-0}"
+rtsp_republish_h264_repeat_headers="${RTSP_REPUBLISH_H264_REPEAT_HEADERS:-1}"
 rtsp_republish_warmup_s="${RTSP_REPUBLISH_WARMUP_S:-10}"
+rtsp_republish_local_server="${RTSP_REPUBLISH_LOCAL_SERVER:-1}"
+rtsp_republish_local_server_port="${RTSP_REPUBLISH_LOCAL_SERVER_PORT:-18554}"
 
 cmd=(
   "${python_cmd}" scripts/runtime/run_midterm_pressure60.py
@@ -169,6 +177,7 @@ cmd=(
   --pressure-source-visibility-stable-samples 2
   --pressure-source-visibility-restart-attempts 1
   --pressure-source-ffmpeg-timeout-ms 60000
+  --pressure-source-ffmpeg-init-timeout-ms 60000
   --pressure-source-start-stagger-s 0.5
 )
 
@@ -227,18 +236,33 @@ fi
 if [[ -n "${RTSP_URI:-}" ]]; then
   cmd+=(--rtsp-uri "${RTSP_URI}")
 fi
-if [[ -n "${rtsp_republish_output_base}" ]]; then
+if [[ -n "${rtsp_republish_output_base}" || "${rtsp_republish_local_server}" == "1" ]]; then
   cmd+=(
-    --rtsp-republish-output-base "${rtsp_republish_output_base}"
     --rtsp-republish-mode "${rtsp_republish_mode}"
     --rtsp-republish-input-offset-s "${rtsp_republish_input_offset_s}"
     --rtsp-republish-warmup-s "${rtsp_republish_warmup_s}"
+    --rtsp-republish-readiness-timeout-s 120
+    --rtsp-republish-readiness-parallelism 4
+    --rtsp-republish-readiness-restart-attempts 1
   )
+  if [[ "${rtsp_republish_local_server}" == "1" ]]; then
+    cmd+=(
+      --rtsp-republish-local-server
+      --rtsp-republish-local-server-image bluenviron/mediamtx:1.11.3
+      --rtsp-republish-local-server-network video-analytics-midterm_default
+      --rtsp-republish-local-server-host-port "${rtsp_republish_local_server_port}"
+    )
+  else
+    cmd+=(--rtsp-republish-output-base "${rtsp_republish_output_base}")
+  fi
   if [[ -n "${rtsp_republish_input_uri}" ]]; then
     cmd+=(--rtsp-republish-input-uri "${rtsp_republish_input_uri}")
   fi
   if [[ "${rtsp_republish_input_loop}" == "1" ]]; then
     cmd+=(--rtsp-republish-input-loop)
+  fi
+  if [[ "${rtsp_republish_h264_repeat_headers}" == "1" ]]; then
+    cmd+=(--rtsp-republish-h264-repeat-headers)
   fi
 fi
 

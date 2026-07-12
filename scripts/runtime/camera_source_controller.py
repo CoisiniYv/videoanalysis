@@ -181,6 +181,8 @@ def docker_run_command(
     image: str,
     rtsp_transport_params: str = DEFAULT_RTSP_TRANSPORT_PARAMS,
     ffmpeg_timeout_ms: int = 20000,
+    ffmpeg_init_timeout_ms: int = 0,
+    ffmpeg_sitecustomize: Optional[str] = None,
     extra_volumes: Optional[List[str]] = None,
 ) -> List[str]:
     """Construct ``docker run -d ...`` for *spec*."""
@@ -210,6 +212,14 @@ def docker_run_command(
             "-e", f"RTSP_URI={location}",
             "-e", f"RTSP_TRANSPORT={rtsp_transport_params or DEFAULT_RTSP_TRANSPORT_PARAMS}",
         ]
+        if ffmpeg_sitecustomize and int(ffmpeg_init_timeout_ms or 0) > 0:
+            entrypoint_index = cmd.index("--entrypoint")
+            cmd[entrypoint_index:entrypoint_index] = [
+                "-e",
+                f"FFMPEG_INIT_TIMEOUT_MS={max(1000, int(ffmpeg_init_timeout_ms))}",
+                "-v",
+                f"{ffmpeg_sitecustomize}:/opt/savant/sitecustomize.py:ro",
+            ]
     for vol in extra_volumes or []:
         cmd.extend(["-v", vol])
     cmd.append(image)
@@ -270,12 +280,21 @@ def cmd_start(
     if args.testvideo_mount:
         extra_volumes.append(args.testvideo_mount)
 
+    if args.ffmpeg_sitecustomize and not os.path.isfile(args.ffmpeg_sitecustomize):
+        log(
+            "ERROR: FFmpeg sitecustomize overlay not found: "
+            f"{args.ffmpeg_sitecustomize}"
+        )
+        return 7
+
     cmd = docker_run_command(
         spec,
         network=args.network,
         image=args.adapter_image,
         rtsp_transport_params=args.rtsp_transport_params,
         ffmpeg_timeout_ms=args.ffmpeg_timeout_ms,
+        ffmpeg_init_timeout_ms=args.ffmpeg_init_timeout_ms,
+        ffmpeg_sitecustomize=args.ffmpeg_sitecustomize,
         extra_volumes=extra_volumes,
     )
     log(f"START source_id={spec.source_id} container={spec.container_name}")
@@ -407,6 +426,23 @@ def main(
         type=int,
         default=int(os.environ.get("CAMERA_SOURCE_FFMPEG_TIMEOUT_MS", "20000")),
         help="FFMPEG_TIMEOUT_MS env passed to source adapters.",
+    )
+    common.add_argument(
+        "--ffmpeg-init-timeout-ms",
+        type=int,
+        default=int(os.environ.get("CAMERA_SOURCE_FFMPEG_INIT_TIMEOUT_MS", "0")),
+        help=(
+            "Optional ffmpeg_input constructor timeout. Effective only with "
+            "--ffmpeg-sitecustomize."
+        ),
+    )
+    common.add_argument(
+        "--ffmpeg-sitecustomize",
+        default=os.environ.get("CAMERA_SOURCE_FFMPEG_SITECUSTOMIZE") or None,
+        help=(
+            "Optional host path bind-mounted as /opt/savant/sitecustomize.py "
+            "to expose ffmpeg_input init_timeout_ms."
+        ),
     )
     common.add_argument(
         "--testvideo-mount",

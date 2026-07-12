@@ -19,11 +19,13 @@ import re
 import random
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -73,6 +75,9 @@ DEFAULT_PRESSURE_DURATION_S = 600
 DEFAULT_PRESSURE_DRAIN_S = 120
 ROLLING_CACHE_FULL_RATE_MIN_RATIO = 0.90
 SOURCE_CONTROLLER = Path("scripts/runtime/camera_source_controller.py")
+SOURCE_ADAPTER_SITECUSTOMIZE = (
+    REPO_ROOT / "scripts/runtime/source_adapter_overlay/sitecustomize.py"
+)
 DUAL_SHARD_PROFILE = "dual-4090-two-source"
 CUDA_MPS_CONTAINER = "video-analytics-midterm-cuda-mps-pressure"
 CUDA_MPS_IMAGE_DEFAULT = "ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1"
@@ -359,9 +364,18 @@ class PressureConfig:
     rtsp_republish_output_base: str
     rtsp_republish_input_uri: str
     rtsp_republish_mode: str
+    rtsp_republish_local_server: bool
+    rtsp_republish_local_server_image: str
+    rtsp_republish_local_server_network: str
+    rtsp_republish_local_server_gateway: str
+    rtsp_republish_local_server_host_port: int
     rtsp_republish_warmup_s: int
+    rtsp_republish_readiness_timeout_s: int
+    rtsp_republish_readiness_parallelism: int
+    rtsp_republish_readiness_restart_attempts: int
     rtsp_republish_input_offset_s: float
     rtsp_republish_input_loop: bool
+    rtsp_republish_h264_repeat_headers: bool
     max_send_failures: int
     max_exited_sources: int
     max_validate_seq_iq: int
@@ -383,6 +397,7 @@ class PressureConfig:
     pressure_source_visibility_stable_samples: int = 2
     pressure_source_visibility_restart_attempts: int = 1
     pressure_source_ffmpeg_timeout_ms: int = 60000
+    pressure_source_ffmpeg_init_timeout_ms: int = 60000
     pressure_source_start_stagger_s: float = 0.5
     savant_ablation_stage: str = "full-evidence"
     savant_output_mode: str = "copy"
@@ -687,6 +702,64 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rtsp-republish-h264-repeat-headers",
+        action="store_true",
+        help=(
+            "For fixed H.264 copy inputs, convert to Annex B and inject codec "
+            "extradata at keyframes so Savant parsers do not depend on RTSP SDP "
+            "parameter-set propagation."
+        ),
+    )
+    parser.add_argument(
+        "--rtsp-republish-local-server",
+        action="store_true",
+        help=(
+            "Start a run-scoped MediaMTX container and publish pressure paths "
+            "through the current Compose network gateway instead of a shared "
+            "external RTSP service."
+        ),
+    )
+    parser.add_argument(
+        "--rtsp-republish-local-server-image",
+        default="bluenviron/mediamtx:1.11.3",
+        help="Pinned MediaMTX image used by the run-scoped RTSP server.",
+    )
+    parser.add_argument(
+        "--rtsp-republish-local-server-network",
+        default="video-analytics-midterm_default",
+        help="Docker network whose gateway is reachable by pressure adapters.",
+    )
+    parser.add_argument(
+        "--rtsp-republish-local-server-host-port",
+        type=int,
+        default=18554,
+        help="Host RTSP port mapped to the run-scoped MediaMTX container.",
+    )
+    parser.add_argument(
+        "--rtsp-republish-readiness-timeout-s",
+        type=int,
+        default=120,
+        help=(
+            "Seconds to require every republished RTSP path to be readable by "
+            "ffprobe before source adapter containers are started."
+        ),
+    )
+    parser.add_argument(
+        "--rtsp-republish-readiness-parallelism",
+        type=int,
+        default=4,
+        help="Maximum concurrent RTSP readability probes.",
+    )
+    parser.add_argument(
+        "--rtsp-republish-readiness-restart-attempts",
+        type=int,
+        default=1,
+        help=(
+            "Targeted restart attempts for a publisher process whose RTSP path "
+            "remains unreadable even though the process is alive."
+        ),
+    )
+    parser.add_argument(
         "--rolling-cache-prefill-s",
         type=int,
         default=0,
@@ -769,6 +842,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "FFMPEG_TIMEOUT_MS for pressure source adapters. 60 parallel RTSP "
             "pulls can exceed the default 20s source startup budget."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-source-ffmpeg-init-timeout-ms",
+        type=int,
+        default=60000,
+        help=(
+            "ffmpeg_input constructor timeout for pressure source adapters. "
+            "Savant 0.6.0 otherwise keeps its independent 10s init default."
         ),
     )
     parser.add_argument(
@@ -940,6 +1022,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     artifact_dir = (args.artifact_root / run_id).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    local_rtsp_gateway = (
+        docker_network_gateway(args.rtsp_republish_local_server_network)
+        if args.rtsp_republish_local_server
+        else ""
+    )
+    rtsp_republish_output_base = args.rtsp_republish_output_base
+    if args.rtsp_republish_local_server:
+        rtsp_republish_output_base = (
+            f"rtsp://{local_rtsp_gateway}:"
+            f"{max(1, int(args.rtsp_republish_local_server_host_port))}"
+            "/pressure/{run_id}/{source_id}"
+        )
     cfg = PressureConfig(
         run_id=run_id,
         stream_count=args.streams,
@@ -988,12 +1082,39 @@ def main(argv: list[str] | None = None) -> int:
         replay_epoch_root=args.replay_epoch_root,
         force_runtime_restart=args.force_runtime_restart,
         no_quiesce_before_guard=args.no_quiesce_before_guard,
-        rtsp_republish_output_base=args.rtsp_republish_output_base,
+        rtsp_republish_output_base=rtsp_republish_output_base,
         rtsp_republish_input_uri=args.rtsp_republish_input_uri or args.rtsp_uri,
         rtsp_republish_mode=args.rtsp_republish_mode,
+        rtsp_republish_local_server=bool(args.rtsp_republish_local_server),
+        rtsp_republish_local_server_image=str(
+            args.rtsp_republish_local_server_image
+        ),
+        rtsp_republish_local_server_network=str(
+            args.rtsp_republish_local_server_network
+        ),
+        rtsp_republish_local_server_gateway=local_rtsp_gateway,
+        rtsp_republish_local_server_host_port=max(
+            1,
+            int(args.rtsp_republish_local_server_host_port),
+        ),
         rtsp_republish_warmup_s=args.rtsp_republish_warmup_s,
+        rtsp_republish_readiness_timeout_s=max(
+            0,
+            int(args.rtsp_republish_readiness_timeout_s or 0),
+        ),
+        rtsp_republish_readiness_parallelism=max(
+            1,
+            int(args.rtsp_republish_readiness_parallelism or 1),
+        ),
+        rtsp_republish_readiness_restart_attempts=max(
+            0,
+            int(args.rtsp_republish_readiness_restart_attempts or 0),
+        ),
         rtsp_republish_input_offset_s=max(0.0, float(args.rtsp_republish_input_offset_s or 0.0)),
         rtsp_republish_input_loop=bool(args.rtsp_republish_input_loop),
+        rtsp_republish_h264_repeat_headers=bool(
+            args.rtsp_republish_h264_repeat_headers
+        ),
         rolling_cache_prefill_s=max(0, int(args.rolling_cache_prefill_s or 0)),
         rolling_cache_postfill_s=max(0, int(args.rolling_cache_postfill_s or 0)),
         max_send_failures=args.max_send_failures,
@@ -1031,6 +1152,10 @@ def main(argv: list[str] | None = None) -> int:
         pressure_source_ffmpeg_timeout_ms=max(
             1000,
             int(args.pressure_source_ffmpeg_timeout_ms or 60000),
+        ),
+        pressure_source_ffmpeg_init_timeout_ms=max(
+            1000,
+            int(args.pressure_source_ffmpeg_init_timeout_ms or 60000),
         ),
         pressure_source_start_stagger_s=max(
             0.0,
@@ -1091,6 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
     original_cameras: list[dict[str, Any]] = []
     runtime_epoch_root: str | None = None
     rtsp_republishers: list[subprocess.Popen] = []
+    rtsp_republish_local_server: dict[str, Any] | None = None
     pressure_started_monotonic: float | None = None
     pressure_sources_path: Path | None = None
     started_at = datetime.now(timezone.utc)
@@ -1214,6 +1340,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         if cfg.cuda_mps:
             report["cuda_mps_start"] = start_cuda_mps(cfg)
+        rtsp_republish_local_server = start_rtsp_republish_local_server(cfg)
+        if rtsp_republish_local_server is not None:
+            report["rtsp_republish_local_server"] = rtsp_republish_local_server
         rtsp_republishers = start_rtsp_republishers(cfg)
         report["pressure_camera_provisioning"] = insert_pressure_cameras(conn, cfg)
         if cfg.dual_shard_same_gpu:
@@ -1391,6 +1520,11 @@ def main(argv: list[str] | None = None) -> int:
         stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
+        if rtsp_republish_local_server is not None:
+            report["rtsp_republish_local_server_stop"] = (
+                stop_rtsp_republish_local_server(cfg, rtsp_republish_local_server)
+            )
+            rtsp_republish_local_server = None
         if original_worker_cpu_isolation is not None:
             report["cpu_isolation_drain"] = apply_worker_cpu_isolation_for_drain(
                 cfg
@@ -1765,6 +1899,11 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             return 1
     finally:
+        if rtsp_republish_local_server is not None:
+            try:
+                stop_rtsp_republish_local_server(cfg, rtsp_republish_local_server)
+            except Exception:
+                pass
         if cfg.cuda_mps:
             try:
                 stop_cuda_mps(cfg)
@@ -4616,6 +4755,175 @@ def pressure_rtsp_uri(cfg: PressureConfig, *, index: int, source_id: str) -> str
     return f"{base}/{source_id}"
 
 
+def docker_network_gateway(network: str) -> str:
+    completed = subprocess.run(
+        [
+            "docker",
+            "network",
+            "inspect",
+            str(network),
+            "--format",
+            "{{(index .IPAM.Config 0).Gateway}}",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    gateway = completed.stdout.strip()
+    if completed.returncode != 0 or not gateway:
+        raise RuntimeError(
+            f"cannot resolve Docker network gateway for {network!r}: "
+            f"{(completed.stderr or completed.stdout).strip()}"
+        )
+    return gateway
+
+
+def pressure_rtsp_server_container_name(run_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(run_id)).strip("-.")
+    digest = hashlib.sha256(str(run_id).encode("utf-8")).hexdigest()[:8]
+    return f"video-analytics-pressure-rtsp-{safe[:40]}-{digest}"
+
+
+def start_rtsp_republish_local_server(
+    cfg: PressureConfig,
+) -> dict[str, Any] | None:
+    if not cfg.rtsp_republish_local_server:
+        return None
+    container_name = pressure_rtsp_server_container_name(cfg.run_id)
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        check=False,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    command = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        container_name,
+        "--network",
+        cfg.rtsp_republish_local_server_network,
+        "-p",
+        f"{cfg.rtsp_republish_local_server_host_port}:8554",
+        cfg.rtsp_republish_local_server_image,
+    ]
+    completed = run(
+        command,
+        cfg.artifact_dir / "rtsp_republish_local_server_start.log",
+    )
+    container_id = completed.stdout.strip()
+    try:
+        deadline = time.monotonic() + 15
+        last_error = ""
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(
+                    (
+                        cfg.rtsp_republish_local_server_gateway,
+                        cfg.rtsp_republish_local_server_host_port,
+                    ),
+                    timeout=1,
+                ):
+                    last_error = ""
+                    break
+            except OSError as exc:
+                last_error = str(exc)
+                time.sleep(0.25)
+        else:
+            raise RuntimeError(
+                "run-scoped MediaMTX did not become reachable: "
+                f"{last_error}"
+            )
+        image_inspect = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                cfg.rtsp_republish_local_server_image,
+                "--format",
+                "{{.Id}}",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        summary = {
+            "status": "ready",
+            "container_name": container_name,
+            "container_id": container_id,
+            "image": cfg.rtsp_republish_local_server_image,
+            "image_id": image_inspect.stdout.strip(),
+            "network": cfg.rtsp_republish_local_server_network,
+            "gateway": cfg.rtsp_republish_local_server_gateway,
+            "host_port": cfg.rtsp_republish_local_server_host_port,
+            "output_base": cfg.rtsp_republish_output_base,
+            "ready_at": datetime.now(timezone.utc).isoformat(),
+        }
+        write_json(
+            cfg.artifact_dir / "rtsp_republish_local_server.json",
+            summary,
+        )
+        return summary
+    except Exception:
+        with (cfg.artifact_dir / "rtsp_republish_local_server.log").open(
+            "w", encoding="utf-8"
+        ) as log_fh:
+            subprocess.run(
+                ["docker", "logs", "--tail", "10000", container_name],
+                check=False,
+                text=True,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+            )
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        raise
+
+
+def stop_rtsp_republish_local_server(
+    cfg: PressureConfig,
+    server: dict[str, Any],
+) -> dict[str, Any]:
+    container_name = str(server.get("container_name") or "")
+    log_path = cfg.artifact_dir / "rtsp_republish_local_server.log"
+    logs = subprocess.run(
+        ["docker", "logs", "--tail", "10000", container_name],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    write_text(log_path, logs.stdout or "")
+    removed = subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    summary = {
+        "status": "stopped" if removed.returncode == 0 else "stop_failed",
+        "container_name": container_name,
+        "returncode": removed.returncode,
+        "output": removed.stdout[-1000:],
+        "log_path": str(log_path),
+        "stopped_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json(
+        cfg.artifact_dir / "rtsp_republish_local_server_stop.json",
+        summary,
+    )
+    return summary
+
+
 def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
     if not cfg.rtsp_republish_output_base:
         return []
@@ -4641,6 +4949,7 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
             mode=cfg.rtsp_republish_mode,
             input_offset_s=cfg.rtsp_republish_input_offset_s,
             input_loop=cfg.rtsp_republish_input_loop,
+            h264_repeat_headers=cfg.rtsp_republish_h264_repeat_headers,
         )
         log_path = log_dir / f"{source_id}.log"
         log_fh = log_path.open("wb")
@@ -4680,7 +4989,295 @@ def start_rtsp_republishers(cfg: PressureConfig) -> list[subprocess.Popen]:
         write_json(cfg.artifact_dir / "rtsp_republish_start_failures.json", failed)
         stop_rtsp_republishers(processes, cfg)
         raise RuntimeError(f"rtsp republishers exited during warmup: {failed[:5]}")
+    try:
+        wait_for_rtsp_republish_readiness(cfg, manifest, processes)
+    except Exception:
+        # The caller cannot receive the local Popen list when this function
+        # raises. Stop it here so a failed preflight never leaks publishers.
+        stop_rtsp_republishers(processes, cfg)
+        raise
     return processes
+
+
+def probe_rtsp_republish_uri(
+    ffprobe: str,
+    *,
+    source_id: str,
+    uri: str,
+    timeout_s: int,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-rw_timeout",
+        str(max(1, int(timeout_s)) * 1_000_000),
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,width,height,avg_frame_rate",
+        "-of",
+        "json",
+        uri,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(2, int(timeout_s) + 2),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "source_id": source_id,
+            "ok": False,
+            "reason": "probe_timeout",
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "error": str(exc),
+        }
+    if completed.returncode != 0:
+        return {
+            "source_id": source_id,
+            "ok": False,
+            "reason": "ffprobe_failed",
+            "returncode": completed.returncode,
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "error": (completed.stderr or completed.stdout or "")[-1000:],
+        }
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return {
+            "source_id": source_id,
+            "ok": False,
+            "reason": "invalid_probe_json",
+            "elapsed_s": round(time.monotonic() - started, 3),
+            "error": str(exc),
+        }
+    streams = payload.get("streams") or []
+    if not streams:
+        return {
+            "source_id": source_id,
+            "ok": False,
+            "reason": "video_stream_missing",
+            "elapsed_s": round(time.monotonic() - started, 3),
+        }
+    stream = streams[0]
+    return {
+        "source_id": source_id,
+        "ok": True,
+        "reason": "readable",
+        "elapsed_s": round(time.monotonic() - started, 3),
+        "codec_name": stream.get("codec_name"),
+        "width": stream.get("width"),
+        "height": stream.get("height"),
+        "avg_frame_rate": stream.get("avg_frame_rate"),
+    }
+
+
+def wait_for_rtsp_republish_readiness(
+    cfg: PressureConfig,
+    manifest: list[dict[str, Any]],
+    processes: list[subprocess.Popen],
+) -> dict[str, Any]:
+    artifact_path = cfg.artifact_dir / "rtsp_republish_readiness.json"
+    if not manifest or cfg.rtsp_republish_readiness_timeout_s <= 0:
+        summary = {
+            "status": "skipped",
+            "reason": "disabled_or_no_republishers",
+            "expected_count": len(manifest),
+        }
+        write_json(artifact_path, summary)
+        return summary
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("RTSP readiness requested but host ffprobe is unavailable")
+
+    expected = {
+        str(item.get("source_id") or ""): str(item.get("output_uri") or "")
+        for item in manifest
+    }
+    pending = set(expected)
+    attempts = {source_id: 0 for source_id in expected}
+    restart_counts = {source_id: 0 for source_id in expected}
+    restart_history: list[dict[str, Any]] = []
+    last_results: dict[str, dict[str, Any]] = {}
+    snapshots: list[dict[str, Any]] = []
+    started_at = datetime.now(timezone.utc)
+    deadline = time.monotonic() + cfg.rtsp_republish_readiness_timeout_s
+
+    while pending:
+        exited = [
+            {"pid": proc.pid, "returncode": proc.poll()}
+            for proc in processes
+            if proc.poll() is not None
+        ]
+        if exited:
+            summary = {
+                "status": "failed",
+                "reason": "republisher_exited_during_readiness",
+                "started_at": started_at.isoformat(),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "expected_count": len(expected),
+                "ready_count": len(expected) - len(pending),
+                "missing_sources": sorted(pending),
+                "exited": exited,
+                "attempts": attempts,
+                "restart_history": restart_history,
+                "last_results": last_results,
+                "snapshots": snapshots,
+            }
+            write_json(artifact_path, summary)
+            raise RuntimeError(
+                f"rtsp republisher exited during readability gate: {exited[:5]}"
+            )
+
+        remaining_s = max(1, int(deadline - time.monotonic()))
+        probe_timeout_s = min(10, remaining_s)
+        probe_ids = sorted(pending)
+        with ThreadPoolExecutor(
+            max_workers=min(cfg.rtsp_republish_readiness_parallelism, len(probe_ids))
+        ) as executor:
+            futures = {
+                executor.submit(
+                    probe_rtsp_republish_uri,
+                    ffprobe,
+                    source_id=source_id,
+                    uri=expected[source_id],
+                    timeout_s=probe_timeout_s,
+                ): source_id
+                for source_id in probe_ids
+            }
+            for future in as_completed(futures):
+                source_id = futures[future]
+                attempts[source_id] += 1
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {
+                        "source_id": source_id,
+                        "ok": False,
+                        "reason": "probe_exception",
+                        "error": repr(exc),
+                    }
+                result["attempt"] = attempts[source_id]
+                last_results[source_id] = result
+                if result.get("ok"):
+                    pending.discard(source_id)
+
+        snapshots.append(
+            {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "ready_count": len(expected) - len(pending),
+                "missing_count": len(pending),
+                "missing_sources": sorted(pending),
+            }
+        )
+        restart_candidates = [
+            source_id
+            for source_id in sorted(pending)
+            if restart_counts[source_id]
+            < cfg.rtsp_republish_readiness_restart_attempts
+            and attempts[source_id] >= 2 * (restart_counts[source_id] + 1)
+        ]
+        if restart_candidates:
+            restarted = restart_rtsp_republishers_for_sources(
+                cfg,
+                manifest,
+                processes,
+                source_ids=restart_candidates,
+            )
+            restart_history.extend(restarted)
+            for source_id in restart_candidates:
+                restart_counts[source_id] += 1
+            time.sleep(min(3.0, max(0.0, deadline - time.monotonic())))
+        if not pending:
+            summary = {
+                "status": "ready",
+                "started_at": started_at.isoformat(),
+                "ready_at": datetime.now(timezone.utc).isoformat(),
+                "expected_count": len(expected),
+                "ready_count": len(expected),
+                "parallelism": cfg.rtsp_republish_readiness_parallelism,
+                "attempts": attempts,
+                "restart_history": restart_history,
+                "results": last_results,
+                "snapshots": snapshots,
+            }
+            write_json(artifact_path, summary)
+            return summary
+        if time.monotonic() >= deadline:
+            summary = {
+                "status": "failed",
+                "reason": "readiness_timeout",
+                "started_at": started_at.isoformat(),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "timeout_s": cfg.rtsp_republish_readiness_timeout_s,
+                "expected_count": len(expected),
+                "ready_count": len(expected) - len(pending),
+                "missing_sources": sorted(pending),
+                "attempts": attempts,
+                "restart_history": restart_history,
+                "last_results": last_results,
+                "snapshots": snapshots,
+            }
+            write_json(artifact_path, summary)
+            raise RuntimeError(
+                "rtsp republish readability gate failed: "
+                f"ready={len(expected) - len(pending)}/{len(expected)} "
+                f"missing={sorted(pending)}"
+            )
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+
+
+def restart_rtsp_republishers_for_sources(
+    cfg: PressureConfig,
+    manifest: list[dict[str, Any]],
+    processes: list[subprocess.Popen],
+    *,
+    source_ids: list[str],
+) -> list[dict[str, Any]]:
+    by_source = {
+        str(item.get("source_id") or ""): index
+        for index, item in enumerate(manifest)
+    }
+    restarted: list[dict[str, Any]] = []
+    for source_id in source_ids:
+        index = by_source[source_id]
+        old = processes[index]
+        _terminate_rtsp_republisher(old, timeout_s=5)
+        item = manifest[index]
+        log_path = Path(str(item.get("log_path") or ""))
+        with log_path.open("ab") as log_fh:
+            proc = subprocess.Popen(
+                list(item.get("command") or []),
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        processes[index] = proc
+        old_pid = int(item.get("pid") or 0)
+        item["pid"] = proc.pid
+        item["readiness_restart_count"] = int(
+            item.get("readiness_restart_count") or 0
+        ) + 1
+        history_item = {
+            "source_id": source_id,
+            "old_pid": old_pid,
+            "old_returncode": old.poll(),
+            "new_pid": proc.pid,
+            "restarted_at": datetime.now(timezone.utc).isoformat(),
+        }
+        item.setdefault("readiness_restart_history", []).append(history_item)
+        restarted.append(history_item)
+    write_json(cfg.artifact_dir / "rtsp_republish_manifest.json", manifest)
+    return restarted
 
 
 def rtsp_republish_input_identity(input_uri: str) -> dict[str, Any]:
@@ -4715,6 +5312,7 @@ def rtsp_republish_command(
     mode: str,
     input_offset_s: float = 0.0,
     input_loop: bool = False,
+    h264_repeat_headers: bool = False,
 ) -> list[str]:
     input_is_local_file = "://" not in input_uri or input_uri.startswith("file://")
     command = [
@@ -4758,6 +5356,13 @@ def rtsp_republish_command(
         )
     else:
         command.extend(["-c:v", "copy"])
+        if h264_repeat_headers:
+            command.extend(
+                [
+                    "-bsf:v",
+                    "h264_mp4toannexb,dump_extra=freq=keyframe",
+                ]
+            )
     command.extend(
         [
             "-avoid_negative_ts",
@@ -4780,6 +5385,30 @@ def _format_seconds(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
 
+def _terminate_rtsp_republisher(
+    proc: subprocess.Popen,
+    *,
+    timeout_s: float,
+) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=max(0.1, timeout_s))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def stop_rtsp_republishers(processes: list[subprocess.Popen], cfg: PressureConfig) -> None:
     if not processes:
         return
@@ -4790,14 +5419,20 @@ def stop_rtsp_republishers(processes: list[subprocess.Popen], cfg: PressureConfi
                 os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-    deadline = time.time() + 10
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and any(
+        proc.poll() is None for proc in processes
+    ):
+        time.sleep(0.1)
     for proc in processes:
-        while proc.poll() is None and time.time() < deadline:
-            time.sleep(0.1)
         if proc.poll() is None:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
                 pass
         stopped.append({"pid": proc.pid, "returncode": proc.poll()})
     write_json(cfg.artifact_dir / "rtsp_republish_stop.json", stopped)
@@ -5664,6 +6299,10 @@ def start_pressure_source_ids_from_manifest(
                 source_id,
                 "--ffmpeg-timeout-ms",
                 str(cfg.pressure_source_ffmpeg_timeout_ms),
+                "--ffmpeg-init-timeout-ms",
+                str(cfg.pressure_source_ffmpeg_init_timeout_ms),
+                "--ffmpeg-sitecustomize",
+                str(SOURCE_ADAPTER_SITECUSTOMIZE),
             ]
             completed = subprocess.run(
                 cmd,
@@ -5712,6 +6351,10 @@ def restart_pressure_source_ids_from_manifest(
                 source_id,
                 "--ffmpeg-timeout-ms",
                 str(cfg.pressure_source_ffmpeg_timeout_ms),
+                "--ffmpeg-init-timeout-ms",
+                str(cfg.pressure_source_ffmpeg_init_timeout_ms),
+                "--ffmpeg-sitecustomize",
+                str(SOURCE_ADAPTER_SITECUSTOMIZE),
             ]
             stop = subprocess.run(
                 stop_cmd,
@@ -5730,6 +6373,10 @@ def restart_pressure_source_ids_from_manifest(
                 source_id,
                 "--ffmpeg-timeout-ms",
                 str(cfg.pressure_source_ffmpeg_timeout_ms),
+                "--ffmpeg-init-timeout-ms",
+                str(cfg.pressure_source_ffmpeg_init_timeout_ms),
+                "--ffmpeg-sitecustomize",
+                str(SOURCE_ADAPTER_SITECUSTOMIZE),
             ]
             start = subprocess.run(
                 start_cmd,
@@ -5764,6 +6411,11 @@ def restart_pressure_source_ids_from_manifest(
 
 
 def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
+    # Capture adapter failures before the runtime apply removes disabled source
+    # containers.  On a visibility-gate failure these logs are the only direct
+    # proof that ffmpeg_input initialization, rather than the publisher or
+    # model chain, caused the restart storm.
+    source_logs = capture_pressure_source_logs(cfg, artifact_name="source_adapter_logs")
     with conn.transaction():
         conn.execute(
             "UPDATE cameras SET enabled=false, updated_at=now() WHERE source_id LIKE %s",
@@ -5774,7 +6426,6 @@ def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
         "runtime_sources_apply_stop_pressure_sources.json",
         raise_on_error=False,
     )
-    source_logs = capture_pressure_source_logs(cfg, artifact_name="source_adapter_logs")
     removed = remove_pressure_source_containers(cfg.run_id)
     stable_removal = remove_pressure_source_containers_until_stable(cfg.run_id)
     sources_apply_error = sources_apply.get("error")

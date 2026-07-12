@@ -942,6 +942,17 @@ required repeat pass complete. The fixed-input profile preserves warmup visual
 results and excludes them from formal gates with an event-time/creation-time
 cutoff; local republisher input bytes are SHA-256 identified in the artifact.
 
+Fixed-input ingress checkpoint (2026-07-13): the first candidate was rejected
+before sampling at 21/60 visible sources and is not a capacity result. The
+preflight now uses a run-scoped pinned MediaMTX, requires all per-source paths
+to be readable, applies the separate `ffmpeg_input` constructor timeout, repeats
+H.264 parameter sets at keyframes, retains adapter failure logs, and removes
+the temporary server on every exit path. Publisher-only probes reached 40/40
+and 60/60 with zero restart; a full-exporter smoke reached 20/20
+adapter/forwarder/Savant visibility with zero restart. Its separate steady-FPS
+gate remained below the unchanged minimum, so neither the Phase 6 token nor a
+capacity candidate is claimed.
+
 ### Phase 7 - Remove Legacy And Misleading Contracts
 
 After two accepted 60-source runs and one restart-recovery soak:

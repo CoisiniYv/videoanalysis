@@ -93,7 +93,7 @@ override mechanism, so a candidate cannot leak into daily runtime.
 Executed checks:
 
 ```text
-pressure harness focused tests:        151 passed
+pressure harness focused tests:        173 passed
 Spec 33 + scheduler/index regression:  341 passed
 python py_compile:                      passed
 profile shell syntax:                   passed
@@ -140,7 +140,64 @@ The formal-window DB summary, event/cooldown summary, non-materialized detail,
 kept-evidence, covered-alias, lifecycle, and ready-to-claim SQL were also run
 read-only against the live PostgreSQL schema.
 
-## 5. Remaining Phase 6 Work
+## 5. Fixed-Input RTSP Ingress Preflight Correction
+
+The first `max_active=4` attempt did not enter the 400 second sampling window:
+
+```text
+run_id: phase6_fixed60_8fps_5p5_maxactive4_20260712T191902Z
+forwarder visible: 21/60
+Savant visible:   21/60
+source restarts:  999 total
+```
+
+This was not a Media Worker capacity result. Two independent ingress faults
+were proven before changing the pressure profile:
+
+1. `FFMPEG_TIMEOUT_MS=60000` controlled `ffmpeg_src.video_frame()` only. The
+   pinned `ffmpeg_input 0.2.0` constructor retained an unexposed
+   `init_timeout_ms=10000`, so simultaneous RTSP initialization entered a
+   restart storm before the configured frame timeout applied.
+2. The shared RTSP service at `192.168.1.105:8554` could report live publisher
+   processes while individual paths were unreadable. A 20-path probe reached
+   only 19/20 without targeted restart, and a 40-path probe reached only 23/40
+   after one restart. PID liveness was therefore not a valid readiness gate.
+
+The pressure path now:
+
+- explicitly bind-mounts a narrow `sitecustomize.py` into pressure source
+  adapters and passes `FFMPEG_INIT_TIMEOUT_MS=60000` to the pinned
+  `FFMpegSource` constructor; normal 8090 camera adapters retain upstream
+  behaviour;
+- starts one run-scoped `bluenviron/mediamtx:1.11.3` container on the current
+  Compose network gateway instead of sharing the external RTSP service;
+- requires every republished path to pass bounded `ffprobe` readability before
+  starting adapters, with one targeted publisher restart and fail-closed
+  cleanup;
+- repeats H.264 SPS/PPS at each keyframe for the fixed MP4 copy fixture. Without
+  this, local MediaMTX exposed codec parameters in SDP but Savant stopped at
+  `PREROLLING`; with Annex-B `h264_mp4toannexb,dump_extra=freq=keyframe`, the
+  parser produces profile caps and enters `PLAYING`; and
+- captures adapter logs before disabling cameras can remove their containers.
+
+Retained preflight evidence:
+
+| Artifact | Result |
+|---|---:|
+| `phase6_ingress_publish20_20260713T0350CST` | external RTSP 19/20, one path unreadable |
+| `phase6_ingress_publish40_retry1_20260713T0407CST` | external RTSP 23/40 after 17 targeted restarts |
+| `phase6_ingress_localmtx40_20260713T0412CST` | local MediaMTX 40/40, zero restart |
+| `phase6_ingress_localmtx60_20260713T0414CST` | local MediaMTX 60/60, zero restart |
+| `phase6_ingress_managedmtx60_20260713T0423CST` | harness-managed MediaMTX 60/60, zero restart, server removed |
+| `phase6_h264_repeat_headers_20260713T0443CST` | one-source parser reached `PLAYING` |
+| `phase6_ingress_savant20_headers_20260713T0450CST` | adapters/forwarder/Savant 20/20, zero restart |
+
+The last 20-source full-exporter smoke failed only its separate steady-FPS
+gate (`~5.0fps` versus fixed `7.92fps`). That run proves ingress closure but is
+not a capacity pass. The model chain, model intervals, FPS and acceptance
+thresholds remain unchanged because they are outside this Goal's change scope.
+
+## 6. Remaining Phase 6 Work
 
 Run the fixed-input 60-source workload at `max_active=4`, `8`, and `12`, select
 the lowest candidate satisfying correctness, structural, CPU, connection, and

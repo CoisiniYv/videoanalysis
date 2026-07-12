@@ -178,6 +178,69 @@ def test_start_accepts_custom_ffmpeg_timeout(script_mod, sources_path):
     assert env_dict["FFMPEG_TIMEOUT_MS"] == "60000"
 
 
+def test_start_can_apply_separate_ffmpeg_init_timeout_overlay(
+    script_mod,
+    sources_path,
+    tmp_path,
+):
+    overlay = tmp_path / "sitecustomize.py"
+    overlay.write_text("# test overlay\n", encoding="utf-8")
+    runner = _FakeRunner(_ok(stdout="abc123def456"))
+    rc = script_mod.main(
+        [
+            "start",
+            "--sources",
+            sources_path,
+            "--source-id",
+            "primary_rtsp",
+            "--ffmpeg-timeout-ms",
+            "60000",
+            "--ffmpeg-init-timeout-ms",
+            "60000",
+            "--ffmpeg-sitecustomize",
+            str(overlay),
+        ],
+        runner=runner,
+        logger=lambda msg: None,
+    )
+    assert rc == 0
+    cmd = runner.calls[0]
+    env_pairs = [cmd[i + 1] for i, value in enumerate(cmd) if value == "-e"]
+    env_dict = dict(value.split("=", 1) for value in env_pairs)
+    assert env_dict["FFMPEG_TIMEOUT_MS"] == "60000"
+    assert env_dict["FFMPEG_INIT_TIMEOUT_MS"] == "60000"
+    assert (
+        f"{overlay}:/opt/savant/sitecustomize.py:ro" in cmd
+    )
+
+
+def test_start_rejects_missing_ffmpeg_init_timeout_overlay(
+    script_mod,
+    sources_path,
+    tmp_path,
+):
+    runner = _FakeRunner(_ok(stdout="should-not-run"))
+    logs: List[str] = []
+    rc = script_mod.main(
+        [
+            "start",
+            "--sources",
+            sources_path,
+            "--source-id",
+            "primary_rtsp",
+            "--ffmpeg-init-timeout-ms",
+            "60000",
+            "--ffmpeg-sitecustomize",
+            str(tmp_path / "missing.py"),
+        ],
+        runner=runner,
+        logger=logs.append,
+    )
+    assert rc == 7
+    assert runner.calls == []
+    assert any("overlay not found" in line for line in logs)
+
+
 # ===========================================================================
 # 3. stop uses the stable container name
 # ===========================================================================

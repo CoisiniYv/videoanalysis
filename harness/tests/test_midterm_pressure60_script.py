@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -67,9 +68,18 @@ def _config(module, **overrides):
         "rtsp_republish_output_base": "",
         "rtsp_republish_input_uri": "rtsp://camera/live",
         "rtsp_republish_mode": "copy",
+        "rtsp_republish_local_server": False,
+        "rtsp_republish_local_server_image": "bluenviron/mediamtx:1.11.3",
+        "rtsp_republish_local_server_network": "video-analytics-midterm_default",
+        "rtsp_republish_local_server_gateway": "",
+        "rtsp_republish_local_server_host_port": 18554,
         "rtsp_republish_warmup_s": 0,
+        "rtsp_republish_readiness_timeout_s": 120,
+        "rtsp_republish_readiness_parallelism": 4,
+        "rtsp_republish_readiness_restart_attempts": 1,
         "rtsp_republish_input_offset_s": 0.0,
         "rtsp_republish_input_loop": False,
+        "rtsp_republish_h264_repeat_headers": False,
         "max_send_failures": 0,
         "max_exited_sources": 0,
         "max_validate_seq_iq": 0,
@@ -97,6 +107,7 @@ def _config(module, **overrides):
         "pressure_source_visibility_stable_samples": 2,
         "pressure_source_visibility_restart_attempts": 1,
         "pressure_source_ffmpeg_timeout_ms": 60000,
+        "pressure_source_ffmpeg_init_timeout_ms": 60000,
         "pressure_source_start_stagger_s": 0.5,
     }
     values.update(overrides)
@@ -149,6 +160,21 @@ def test_initial_pressure_source_start_applies_configured_ffmpeg_timeout() -> No
 
     assert '"--ffmpeg-timeout-ms"' in function_source
     assert "str(cfg.pressure_source_ffmpeg_timeout_ms)" in function_source
+    assert '"--ffmpeg-init-timeout-ms"' in function_source
+    assert "str(cfg.pressure_source_ffmpeg_init_timeout_ms)" in function_source
+    assert '"--ffmpeg-sitecustomize"' in function_source
+    assert "str(SOURCE_ADAPTER_SITECUSTOMIZE)" in function_source
+
+
+def test_pressure_source_logs_are_captured_before_runtime_apply_removes_sources() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    function_start = source.index("def stop_pressure_sources(")
+    function_end = source.index("def capture_pressure_source_logs(")
+    function_source = source[function_start:function_end]
+
+    assert function_source.index("capture_pressure_source_logs(") < function_source.index(
+        "apply_sources_only("
+    )
 
 
 def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
@@ -194,7 +220,9 @@ def test_profile_propagates_deterministic_rtsp_republish_contract() -> None:
             "RTSP_REPUBLISH_MODE": "copy",
             "RTSP_REPUBLISH_INPUT_OFFSET_S": "0",
             "RTSP_REPUBLISH_INPUT_LOOP": "1",
+            "RTSP_REPUBLISH_H264_REPEAT_HEADERS": "1",
             "RTSP_REPUBLISH_WARMUP_S": "10",
+            "RTSP_REPUBLISH_LOCAL_SERVER": "0",
         },
         check=True,
         text=True,
@@ -208,7 +236,35 @@ def test_profile_propagates_deterministic_rtsp_republish_contract() -> None:
     assert "--rtsp-republish-mode copy" in output
     assert "--rtsp-republish-input-offset-s 0" in output
     assert "--rtsp-republish-input-loop" in output
+    assert "--rtsp-republish-h264-repeat-headers" in output
     assert "--rtsp-republish-warmup-s 10" in output
+    assert "--rtsp-republish-readiness-timeout-s 120" in output
+    assert "--rtsp-republish-readiness-parallelism 4" in output
+    assert "--rtsp-republish-readiness-restart-attempts 1" in output
+    assert "--rtsp-republish-local-server" not in output
+
+
+def test_profile_defaults_to_run_scoped_rtsp_server_for_fixed_input() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "fixed-input-local-server-dry-run",
+            "RTSP_REPUBLISH_INPUT_URI": "/data/fixture.mp4",
+            "RTSP_REPUBLISH_INPUT_LOOP": "1",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    output = completed.stdout
+    assert "--rtsp-republish-local-server" in output
+    assert "--rtsp-republish-local-server-image bluenviron/mediamtx:1.11.3" in output
+    assert "--rtsp-republish-local-server-host-port 18554" in output
+    assert "--rtsp-republish-output-base" not in output
 
 
 def test_rtsp_republish_input_identity_hashes_fixed_local_fixture(
@@ -483,6 +539,96 @@ def test_rtsp_republish_command_supports_deterministic_file_offset_and_loop() ->
     assert "copy" in command
 
 
+def test_rtsp_republish_readiness_requires_every_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        rtsp_republish_readiness_timeout_s=30,
+        rtsp_republish_readiness_parallelism=2,
+    )
+    manifest = [
+        {
+            "source_id": f"pressure_{index:02d}",
+            "output_uri": f"rtsp://127.0.0.1:8554/pressure/{index:02d}",
+        }
+        for index in range(3)
+    ]
+
+    class Process:
+        pid = 123
+
+        def poll(self):
+            return None
+
+    calls: list[str] = []
+
+    def probe(_ffprobe, *, source_id, uri, timeout_s):
+        calls.append(source_id)
+        return {
+            "source_id": source_id,
+            "ok": True,
+            "reason": "readable",
+            "elapsed_s": 0.01,
+            "codec_name": "h264",
+        }
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(module, "probe_rtsp_republish_uri", probe)
+
+    summary = module.wait_for_rtsp_republish_readiness(
+        cfg,
+        manifest,
+        [Process(), Process(), Process()],
+    )
+
+    assert summary["status"] == "ready"
+    assert summary["ready_count"] == 3
+    assert sorted(calls) == ["pressure_00", "pressure_01", "pressure_02"]
+    artifact = json.loads(
+        (tmp_path / "rtsp_republish_readiness.json").read_text(encoding="utf-8")
+    )
+    assert artifact["status"] == "ready"
+    assert artifact["expected_count"] == 3
+    assert all(attempt == 1 for attempt in artifact["attempts"].values())
+
+
+def test_rtsp_republish_readiness_fails_if_publisher_exits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        rtsp_republish_readiness_timeout_s=30,
+    )
+
+    class Process:
+        pid = 456
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    with pytest.raises(RuntimeError, match="republisher exited"):
+        module.wait_for_rtsp_republish_readiness(
+            cfg,
+            [{"source_id": "pressure_00", "output_uri": "rtsp://bad/path"}],
+            [Process()],
+        )
+
+    artifact = json.loads(
+        (tmp_path / "rtsp_republish_readiness.json").read_text(encoding="utf-8")
+    )
+    assert artifact["status"] == "failed"
+    assert artifact["reason"] == "republisher_exited_during_readiness"
+
+
 def test_rtsp_republish_transcode_uses_short_gop_for_rolling_segments() -> None:
     module = _load_module()
 
@@ -498,6 +644,23 @@ def test_rtsp_republish_transcode_uses_short_gop_for_rolling_segments() -> None:
     assert command[command.index("-keyint_min") + 1] == "8"
     assert command[command.index("-sc_threshold") + 1] == "0"
     assert command[command.index("-bf") + 1] == "0"
+
+
+def test_rtsp_republish_copy_can_repeat_h264_headers_for_savant_parser() -> None:
+    module = _load_module()
+
+    command = module.rtsp_republish_command(
+        ffmpeg="/usr/bin/ffmpeg",
+        input_uri="/data/video-analytics/pressure/input.mp4",
+        output_uri="rtsp://127.0.0.1:8554/pressure/out",
+        mode="copy",
+        h264_repeat_headers=True,
+    )
+
+    assert command[command.index("-bsf:v") + 1] == (
+        "h264_mp4toannexb,dump_extra=freq=keyframe"
+    )
+    assert command.index("-bsf:v") < command.index("-f")
 
 
 def test_pressure_runner_exposes_rolling_cache_canary_flags() -> None:
