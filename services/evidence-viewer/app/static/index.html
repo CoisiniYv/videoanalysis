@@ -420,18 +420,39 @@
             <div class="pane-title">
               <div>
                 <h2>运行总览</h2>
-                <p>集中查看推理链路、视频源、证据任务和管理服务状态。</p>
+                <p>先判断真实运行态和配置差异，再执行恢复或切换操作。</p>
               </div>
               <div class="button-group">
-                <button id="start-single-runtime" type="button" class="primary">启动单路链路</button>
-                <button id="stop-single-runtime" type="button" class="danger">停止单路链路</button>
-                <button id="restart-single-runtime" type="button">重启单路链路</button>
-                <button id="stop-dual-runtime" type="button">关闭双路扩展</button>
-                <button id="refresh-runtime-overview" type="button">刷新</button>
+                <button id="refresh-runtime-overview" type="button">刷新状态</button>
               </div>
             </div>
             <div id="runtime-health-summary" class="runtime-health-grid"></div>
+            <section id="runtime-decision-panel" class="runtime-decision-panel" aria-live="polite">
+              <div class="runtime-decision-header">
+                <div>
+                  <h3>建议下一步</h3>
+                  <p id="runtime-decision-copy">正在判断实际链路、视频源和保存的拓扑配置。</p>
+                </div>
+                <div class="button-group runtime-primary-actions">
+                  <button id="recover-runtime-sources" type="button" class="primary" hidden>恢复视频源</button>
+                  <button id="apply-saved-runtime-topology" type="button" hidden>应用已保存拓扑</button>
+                </div>
+              </div>
+              <div id="runtime-drift-summary" class="runtime-drift-summary">
+                正在加载运行态差异。
+              </div>
+            </section>
             <div id="runtime-control-status" class="result-card runtime-control-status">运行控制待刷新</div>
+            <details class="runtime-secondary-controls">
+              <summary>更多运行操作</summary>
+              <p>这些操作影响整条推理或录像链路。请先处理上方的运行态差异。</p>
+              <div class="button-group">
+                <button id="start-single-runtime" type="button">启动基础单路链路</button>
+                <button id="restart-single-runtime" type="button">重启基础单路链路</button>
+                <button id="stop-dual-runtime" type="button">停止双路扩展</button>
+                <button id="stop-single-runtime" type="button" class="danger">停止基础单路链路</button>
+              </div>
+            </details>
             <div id="runtime-supervisor-summary" class="result-card runtime-supervisor-summary"></div>
           </section>
 
@@ -439,108 +460,137 @@
             <div class="pane-title">
               <div>
                 <h2>推理性能</h2>
-                <p>配置采样限速、模型 batch、并行流和 Redis 写入参数。</p>
+                <p>先调整常用吞吐参数；高级队列参数默认收起，保存不会立即重启运行时。</p>
               </div>
               <div class="button-group">
-                <button id="save-runtime-performance" type="button">保存配置</button>
-                <button id="apply-runtime-performance" type="button" class="primary">保存并应用</button>
+                <button id="save-runtime-performance" type="button">保存草稿</button>
+                <button id="apply-runtime-performance" type="button" class="primary">确认并应用</button>
               </div>
             </div>
             <div id="runtime-performance-status" class="result-card runtime-performance-status">性能配置待刷新</div>
             <form id="runtime-performance-form" class="runtime-performance-form">
-              <label class="toggle-field">
-                <input name="forwarder_sampler_enabled" type="checkbox" />
-                <span>Forwarder 采样</span>
-              </label>
-              <label>采样最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-              <label>采样最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-              <label>转发队列上限<input name="forwarder_queue_max_size" type="number" min="1" max="20000" step="1" /></label>
-              <label>发送超时 ms<input name="forwarder_send_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-              <label>发送重试次数<input name="forwarder_send_retries" type="number" min="0" max="20" step="1" /></label>
-              <label>发送高水位<input name="forwarder_send_hwm" type="number" min="1" max="20000" step="1" /></label>
-              <label class="toggle-field">
-                <input name="ingress_fps_gate_enabled" type="checkbox" />
-                <span>Savant 入流限速</span>
-              </label>
-              <label>Savant 最大 FPS<input name="savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-              <label>Savant 最小 FPS<input name="savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-              <label>Savant batch<input name="savant_batch_size" type="number" min="1" max="128" step="1" /></label>
-              <label>姿态 batch<input name="pose_batch_size" type="number" min="1" max="128" step="1" /></label>
-              <label>人脸检测 batch<input name="face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
-              <label>AdaFace batch<input name="face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
-              <label>Savant 并行流上限<input name="max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
-              <label>姿态 interval<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
-              <label>人脸 interval<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
-              <label>AdaFace interval<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
-              <label>Savant Redis 超时 ms<input name="savant_redis_socket_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-              <label>Savant Redis 连接超时 ms<input name="savant_redis_connect_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-              <label>Savant Redis 队列上限<input name="savant_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
-              <label>Savant Redis 写入重试<input name="savant_redis_write_retries" type="number" min="0" max="100" step="1" /></label>
-              <label>Savant Redis 重试间隔 ms<input name="savant_redis_retry_sleep_ms" type="number" min="0" max="5000" step="10" /></label>
-              <label>Frame annotation 写入超时 ms<input name="frame_annotation_write_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-              <label>Frame annotation Redis 队列上限<input name="frame_annotation_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
-              <label>批量推送等待 us<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+              <fieldset class="runtime-config-group">
+                <legend>常用吞吐控制</legend>
+                <div class="runtime-config-fields">
+                  <label class="toggle-field">
+                    <input name="forwarder_sampler_enabled" type="checkbox" />
+                    <span>Forwarder 采样</span>
+                  </label>
+                  <label>采样最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                  <label>采样最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                  <label>转发队列上限<input name="forwarder_queue_max_size" type="number" min="1" max="20000" step="1" /></label>
+                  <label class="toggle-field">
+                    <input name="ingress_fps_gate_enabled" type="checkbox" />
+                    <span>Savant 入流限速</span>
+                  </label>
+                  <label>Savant 最大 FPS<input name="savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                  <label>Savant 最小 FPS<input name="savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                  <label>Savant 并行流上限<input name="max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
+                </div>
+              </fieldset>
+              <fieldset class="runtime-config-group">
+                <legend>模型 batch 与频率</legend>
+                <div class="runtime-config-fields">
+                  <label>Savant batch<input name="savant_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>姿态 batch<input name="pose_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>人脸检测 batch<input name="face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>AdaFace batch<input name="face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>姿态 interval<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>人脸 interval<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>AdaFace interval<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>批量推送等待 us<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                </div>
+              </fieldset>
+              <details class="runtime-advanced-details">
+                <summary>高级队列与 Redis 参数</summary>
+                <div class="runtime-config-fields runtime-advanced-fields">
+                  <label>发送超时 ms<input name="forwarder_send_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>发送重试次数<input name="forwarder_send_retries" type="number" min="0" max="20" step="1" /></label>
+                  <label>发送高水位<input name="forwarder_send_hwm" type="number" min="1" max="20000" step="1" /></label>
+                  <label>Savant Redis 超时 ms<input name="savant_redis_socket_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>Savant Redis 连接超时 ms<input name="savant_redis_connect_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>Savant Redis 队列上限<input name="savant_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
+                  <label>Savant Redis 写入重试<input name="savant_redis_write_retries" type="number" min="0" max="100" step="1" /></label>
+                  <label>Savant Redis 重试间隔 ms<input name="savant_redis_retry_sleep_ms" type="number" min="0" max="5000" step="10" /></label>
+                  <label>Frame annotation 写入超时 ms<input name="frame_annotation_write_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>Frame annotation Redis 队列上限<input name="frame_annotation_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
+                </div>
+              </details>
             </form>
-            <div id="runtime-performance-diff" class="runtime-table-wrap"></div>
+            <details class="runtime-config-diff">
+              <summary>保存配置与运行配置的差异</summary>
+              <div id="runtime-performance-diff" class="runtime-table-wrap"></div>
+            </details>
           </section>
 
           <section class="pane runtime-topology-pane">
             <div class="pane-title">
               <div>
                 <h2>推理拓扑</h2>
-                <p>按摄像头数量和 GPU 资源切换单分支或双分支运行方式。</p>
+                <p>保存的是目标拓扑；只有“确认并应用”后才会切换实际链路。</p>
               </div>
               <div class="button-group">
-                <button id="save-runtime-topology" type="button">保存拓扑</button>
-                <button id="apply-runtime-topology" type="button" class="primary">保存并应用</button>
+                <button id="save-runtime-topology" type="button">保存草稿</button>
+                <button id="apply-runtime-topology" type="button" class="primary">确认并应用</button>
               </div>
             </div>
             <div id="runtime-topology-status" class="result-card runtime-topology-status">拓扑配置待刷新</div>
             <form id="runtime-topology-form" class="runtime-topology-form">
-              <label>拓扑模式
-                <select name="topology_mode">
-                  <option value="auto">自动</option>
-                  <option value="single">单分支</option>
-                  <option value="dual_same_gpu">双分支同卡</option>
-                  <option value="dual_dual_gpu">双分支双卡</option>
-                </select>
-              </label>
-              <label>分片策略
-                <select name="shard_strategy">
-                  <option value="balanced">按数量均分</option>
-                  <option value="gpu_id">按摄像头 GPU</option>
-                  <option value="manual">手动覆盖</option>
-                </select>
-              </label>
-              <label>每分支目标路数<input name="streams_per_branch" type="number" min="1" max="120" step="1" /></label>
-              <fieldset>
-                <legend>分支 A</legend>
-                <label>GPU<input name="a.gpu_id" type="number" min="0" max="15" step="1" /></label>
-                <label>batch<input name="a.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>姿态 batch<input name="a.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>人脸 batch<input name="a.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>AdaFace batch<input name="a.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>并行流上限<input name="a.max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
-                <label>Forwarder FPS<input name="a.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                <label>Forwarder 最小 FPS<input name="a.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                <label>Savant FPS<input name="a.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                <label>Savant 最小 FPS<input name="a.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                <label>批量推送等待 us<input name="a.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
-              </fieldset>
-              <fieldset>
-                <legend>分支 B</legend>
-                <label>GPU<input name="b.gpu_id" type="number" min="0" max="15" step="1" /></label>
-                <label>batch<input name="b.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>姿态 batch<input name="b.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>人脸 batch<input name="b.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>AdaFace batch<input name="b.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
-                <label>并行流上限<input name="b.max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
-                <label>Forwarder FPS<input name="b.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                <label>Forwarder 最小 FPS<input name="b.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                <label>Savant FPS<input name="b.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                <label>Savant 最小 FPS<input name="b.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                <label>批量推送等待 us<input name="b.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
-              </fieldset>
+              <div class="runtime-config-fields runtime-topology-core">
+                <label>目标拓扑模式
+                  <select name="topology_mode">
+                    <option value="auto">自动</option>
+                    <option value="single">单分支</option>
+                    <option value="dual_same_gpu">双分支同卡</option>
+                    <option value="dual_dual_gpu">双分支双卡</option>
+                  </select>
+                </label>
+                <label>分片策略
+                  <select name="shard_strategy">
+                    <option value="balanced">按数量均分</option>
+                    <option value="gpu_id">按摄像头 GPU</option>
+                    <option value="manual">手动覆盖</option>
+                  </select>
+                </label>
+                <label>每分支目标路数<input name="streams_per_branch" type="number" min="1" max="120" step="1" /></label>
+              </div>
+              <details id="runtime-topology-branch-settings" class="runtime-advanced-details" open>
+                <summary>分支参数</summary>
+                <div class="runtime-topology-branches">
+                  <fieldset class="runtime-topology-branch" id="runtime-topology-branch-a">
+                    <legend>分支 A</legend>
+                    <div class="runtime-config-fields">
+                      <label>GPU<input name="a.gpu_id" type="number" min="0" max="15" step="1" /></label>
+                      <label>batch<input name="a.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>姿态 batch<input name="a.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸 batch<input name="a.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>AdaFace batch<input name="a.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>并行流上限<input name="a.max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
+                      <label>Forwarder FPS<input name="a.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>Forwarder 最小 FPS<input name="a.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>Savant FPS<input name="a.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>Savant 最小 FPS<input name="a.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>批量推送等待 us<input name="a.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                    </div>
+                  </fieldset>
+                  <fieldset class="runtime-topology-branch" id="runtime-topology-branch-b">
+                    <legend>分支 B</legend>
+                    <div class="runtime-config-fields">
+                      <label>GPU<input name="b.gpu_id" type="number" min="0" max="15" step="1" /></label>
+                      <label>batch<input name="b.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>姿态 batch<input name="b.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸 batch<input name="b.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>AdaFace batch<input name="b.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>并行流上限<input name="b.max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
+                      <label>Forwarder FPS<input name="b.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>Forwarder 最小 FPS<input name="b.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>Savant FPS<input name="b.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>Savant 最小 FPS<input name="b.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>批量推送等待 us<input name="b.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                    </div>
+                  </fieldset>
+                </div>
+              </details>
               <div id="runtime-topology-assignments" class="runtime-topology-assignments"></div>
             </form>
             <div id="runtime-topology-plan" class="runtime-table-wrap"></div>

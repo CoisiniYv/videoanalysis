@@ -21,6 +21,7 @@ from app.services.runtime_overview import (
     build_runtime_overview,
     parse_forwarder_metrics,
     parse_savant_metrics,
+    summarize_runtime_health,
 )
 
 
@@ -270,6 +271,48 @@ va_savant_last_frame_age_seconds{source_id="lab"} 0
     assert overview["metrics"]["sources_active"] == 1
     assert overview["health"]["source_count"] == 1
     assert "source_frame_age_high" not in overview["health"]["issues"]
+
+
+def test_runtime_health_uses_dynamic_source_convergence_as_the_primary_source_state() -> None:
+    health = summarize_runtime_health(
+        metrics={"available": False, "sources": [], "sources_active": None},
+        containers={
+            "fixed": {
+                "compose_source": {"present": True, "state": "exited"},
+                "savant": {"present": True, "state": "running"},
+            },
+            "dynamic_sources": [],
+        },
+        supervisor={
+            "enabled": True,
+            "savant_container_running": True,
+            "source_convergence": {
+                "healthy": False,
+                "source_states": [
+                    {
+                        "camera_id": "camera-lab",
+                        "source_id": "source_lab",
+                        "enabled": True,
+                        "compose_source": False,
+                        "dynamic_source": True,
+                        "actual_state": "exited",
+                        "running": False,
+                    }
+                ],
+            },
+        },
+    )
+
+    assert "compose_source_not_running" not in health["issues"]
+    assert "source_convergence_unhealthy" in health["issues"]
+    assert "no_active_sources" in health["issues"]
+    assert health["source_convergence"] == {
+        "known": True,
+        "healthy": False,
+        "enabled_count": 1,
+        "running_count": 0,
+        "stopped_source_ids": ["source_lab"],
+    }
 
 
 def test_runtime_overview_computes_short_window_restart_rate() -> None:

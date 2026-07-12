@@ -22,6 +22,9 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert 'id="runtime-evidence-table"' in html
     assert 'id="runtime-container-table"' in html
     assert 'id="runtime-control-status"' in html
+    assert 'id="runtime-decision-panel"' in html
+    assert 'id="recover-runtime-sources"' in html
+    assert 'id="apply-saved-runtime-topology"' in html
     assert 'id="runtime-performance-form"' in html
     assert 'id="runtime-performance-status"' in html
     assert 'id="runtime-performance-diff"' in html
@@ -32,10 +35,12 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert 'id="restart-single-runtime"' in html
     assert 'id="stop-dual-runtime"' in html
     assert "运行控制" in html
-    assert "启动单路链路" in html
-    assert "关闭双路扩展" in html
+    assert "建议下一步" in html
+    assert "启动基础单路链路" in html
+    assert "停止双路扩展" in html
     assert "推理性能" in html
-    assert "保存并应用" in html
+    assert "确认并应用" in html
+    assert "保存草稿" in html
     assert "Savant 最大 FPS" in html
     assert "转发队列上限" in html
     assert "发送超时 ms" in html
@@ -44,7 +49,7 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert "Savant Redis 超时 ms" in html
     assert "Savant Redis 写入重试" in html
     assert "Frame annotation 写入超时 ms" in html
-    assert "集中查看推理链路、视频源、证据任务和管理服务状态" in html
+    assert "先判断真实运行态和配置差异，再执行恢复或切换操作" in html
     assert "摄像头性能" in html
     assert "证据生成" in html
 
@@ -67,6 +72,10 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "runtime/control/dual/stop" in js
     assert "renderRuntimeOverview" in js
     assert "renderRuntimeControlStatus" in js
+    assert "renderRuntimeDecision" in js
+    assert "recoverRuntimeSources" in js
+    assert "applySavedRuntimeTopology" in js
+    assert "Promise.allSettled" in js
     assert "renderRuntimeForwarderTable" in js
     assert "renderRuntimeEvidenceTable" in js
     assert "waiting_proof" in js
@@ -81,6 +90,7 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "推理指标" in js
     assert "运行判断" in js
     assert "发送失败" in js
+    assert "累计发送失败" in js
     assert '"runtime"' in viewer_main
     assert "18080" not in js
     assert "savant-security:8080" not in js
@@ -104,6 +114,8 @@ def test_operator_runtime_overview_has_stable_table_styles() -> None:
     assert ".runtime-workspace" in css
     assert ".runtime-table" in css
     assert ".runtime-health-grid" in css
+    assert ".runtime-decision-panel" in css
+    assert ".runtime-drift-summary" in css
     assert ".runtime-performance-form" in css
     assert ".runtime-performance-table" in css
     assert ".runtime-evidence-pane" in css

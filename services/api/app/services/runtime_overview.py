@@ -621,7 +621,33 @@ def summarize_runtime_health(
     issues: list[str] = []
     if not metrics.get("available"):
         issues.append("savant_metrics_unavailable")
+    source_convergence = supervisor.get("source_convergence")
+    source_states = (
+        source_convergence.get("source_states")
+        if isinstance(source_convergence, dict)
+        and isinstance(source_convergence.get("source_states"), list)
+        else []
+    )
+    enabled_source_states = [
+        row for row in source_states
+        if isinstance(row, dict) and bool(row.get("enabled", True))
+    ]
+    running_source_states = [
+        row for row in enabled_source_states
+        if row.get("running") is True or row.get("actual_state") == "running"
+    ]
+    dynamic_sources_expected = any(
+        row.get("dynamic_source") is True for row in enabled_source_states
+    )
+    compose_source_expected = any(
+        row.get("compose_source") is True for row in enabled_source_states
+    )
     for role, row in (containers.get("fixed") or {}).items():
+        # In the controller-managed dynamic-source route, the legacy compose
+        # source is intentionally stopped. Its state must not hide the actual
+        # per-camera convergence result or make the health headline misleading.
+        if role == "compose_source" and dynamic_sources_expected and not compose_source_expected:
+            continue
         if row.get("present") and row.get("state") != "running":
             issues.append(f"{role}_not_running")
     source_rows = metrics.get("sources") or []
@@ -635,17 +661,45 @@ def summarize_runtime_health(
         issues.append("source_frame_age_high")
     if supervisor.get("enabled") and not supervisor.get("savant_container_running", True):
         issues.append("savant_container_not_running")
+    convergence_healthy = source_convergence.get("healthy") if isinstance(source_convergence, dict) else None
+    if convergence_healthy is False:
+        issues.append("source_convergence_unhealthy")
+    if enabled_source_states:
+        if not running_source_states:
+            issues.append("no_active_sources")
+        elif len(running_source_states) < len(enabled_source_states):
+            issues.append("source_count_mismatch")
     restart_count_high, restart_rate_high = _restart_warning_containers(containers)
     if restart_count_high:
         issues.append("container_restart_count_high")
     if restart_rate_high:
         issues.append("container_restart_rate_high")
     active_source_count = _float_or_none(metrics.get("sources_active"))
+    if active_source_count is not None and enabled_source_states:
+        if active_source_count == 0 and "no_active_sources" not in issues:
+            issues.append("no_active_sources")
+        elif (
+            active_source_count > 0
+            and active_source_count != len(enabled_source_states)
+            and "source_count_mismatch" not in issues
+        ):
+            issues.append("source_count_mismatch")
     return {
         "ok": not issues,
         "issues": issues,
         "source_count": int(active_source_count) if active_source_count is not None else len(source_rows),
         "stale_sources": stale_sources,
+        "source_convergence": {
+            "known": isinstance(source_convergence, dict),
+            "healthy": convergence_healthy,
+            "enabled_count": len(enabled_source_states),
+            "running_count": len(running_source_states),
+            "stopped_source_ids": [
+                str(row.get("source_id") or row.get("camera_id") or "")
+                for row in enabled_source_states
+                if row not in running_source_states
+            ],
+        },
         "restart_count_high_containers": restart_count_high,
         "restart_rate_high_containers": restart_rate_high,
     }
