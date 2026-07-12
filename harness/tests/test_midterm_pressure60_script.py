@@ -546,7 +546,7 @@ def test_pressure_visibility_waits_for_decoupled_eligible_sources(
     assert ready["adaface_central_visible_count"] == 1
 
 
-def test_prepare_pressure_sampling_window_preserves_visibility_warmup_rows(
+def test_prepare_pressure_sampling_window_clears_warmup_evidence_but_keeps_trajectories(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -561,20 +561,25 @@ def test_prepare_pressure_sampling_window_preserves_visibility_warmup_rows(
 
     monkeypatch.setattr(
         module,
-        "preserve_pressure_warmup_rows",
-        lambda _conn, _cfg: calls.append("preserved") or {"event_rows_preserved": 3},
+        "clear_pressure_warmup_rows",
+        lambda _conn, _cfg: calls.append("cleared")
+        or {
+            "event_rows_deleted": 3,
+            "face_observation_rows_deleted": 0,
+        },
     )
     monkeypatch.setattr(module.time, "time", lambda: 1234.0)
 
     started = module.prepare_pressure_sampling_window(object(), cfg, pressure_started_monotonic=99.0)
 
     assert started == 1234.0
-    assert calls == ["preserved"]
+    assert calls == ["cleared"]
     summary = json.loads((tmp_path / "rolling_cache_prefill_summary.json").read_text())
-    assert summary["cleanup"]["event_rows_preserved"] == 3
+    assert summary["cleanup"]["event_rows_deleted"] == 3
+    assert summary["cleanup"]["face_observation_rows_deleted"] == 0
 
 
-def test_prepare_pressure_sampling_window_only_discards_warmup_when_explicit(
+def test_prepare_pressure_sampling_window_cleanup_does_not_depend_on_result_retention(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -591,6 +596,220 @@ def test_prepare_pressure_sampling_window_only_discards_warmup_when_explicit(
     module.prepare_pressure_sampling_window(object(), cfg)
 
     assert calls == ["discarded"]
+
+
+def test_clear_pressure_warmup_rows_deletes_only_events_and_evidence(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, evidence_root=tmp_path / "evidence")
+    event_dir = cfg.evidence_root / "event-1"
+    event_dir.mkdir(parents=True)
+    (event_dir / "raw_clip.mov").write_bytes(b"mov")
+
+    class FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Result:
+        def __init__(self, *, rows=None, row=None, rowcount=0):
+            self._rows = rows or []
+            self._row = row
+            self.rowcount = rowcount
+
+        def fetchall(self):
+            return self._rows
+
+        def fetchone(self):
+            return self._row
+
+    class FakeConn:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def transaction(self):
+            return FakeTx()
+
+        def execute(self, query, _params):
+            compact = " ".join(query.split())
+            self.queries.append(compact)
+            if compact.startswith("SELECT id::text FROM events"):
+                return Result(rows=[{"id": "event-1"}])
+            if compact.startswith("SELECT (SELECT count(*) FROM face_observations"):
+                return Result(
+                    row={"face_observations": 12, "person_observations": 34}
+                )
+            if compact.startswith("DELETE FROM events"):
+                return Result(rowcount=1)
+            raise AssertionError(compact)
+
+    conn = FakeConn()
+    summary = module.clear_pressure_warmup_rows(conn, cfg)
+
+    assert summary["event_rows_deleted"] == 1
+    assert summary["face_observation_rows_deleted"] == 0
+    assert summary["person_observation_rows_deleted"] == 0
+    assert summary["face_observation_rows_preserved"] == 12
+    assert summary["person_observation_rows_preserved"] == 34
+    assert summary["evidence_dirs_removed"] == 1
+    assert not event_dir.exists()
+    assert not any("DELETE FROM face_observations" in query for query in conn.queries)
+    assert not any(
+        "DELETE FROM person_bbox_observations" in query for query in conn.queries
+    )
+
+
+def test_evidence_reset_quiesces_even_when_force_restart_is_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        clear_existing_evidence=True,
+        force_runtime_restart=True,
+    )
+    calls: list[str] = []
+    before = {"active_count": 2, "blocking_count": 2, "tasks": []}
+    after = {"active_count": 0, "blocking_count": 0, "tasks": []}
+    monkeypatch.setattr(module, "active_evidence_tasks", lambda _conn: before)
+    monkeypatch.setattr(
+        module,
+        "quiesce_existing_sources",
+        lambda _conn, _cfg: calls.append("quiesced"),
+    )
+    monkeypatch.setattr(
+        module,
+        "wait_for_evidence_guard_clear",
+        lambda _conn, _cfg: calls.append("waited") or after,
+    )
+
+    report = {"steps": []}
+    result = module.prepare_evidence_guard(object(), cfg, report)
+
+    assert result == after
+    assert calls == ["quiesced", "waited"]
+    assert report["steps"] == [
+        {"name": "existing_sources_quiesced_before_evidence_reset"}
+    ]
+
+
+def test_pressure_camera_name_is_readable_and_one_based() -> None:
+    module = _load_module()
+
+    assert module.pressure_camera_name(0) == "压力摄像头 01"
+    assert module.pressure_camera_name(39) == "压力摄像头 40"
+
+
+def test_clear_existing_evidence_preserves_observations_and_trajectory_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    evidence_root = tmp_path / "evidence"
+    (evidence_root / "event-1").mkdir(parents=True)
+    (evidence_root / "event-1" / "raw_clip.mov").write_bytes(b"mov")
+    rolling_root = tmp_path / "rolling-cache"
+    materialized_root = tmp_path / "rolling-materialized"
+    (rolling_root / "source-1").mkdir(parents=True)
+    (materialized_root / "event-1").mkdir(parents=True)
+    trajectory = tmp_path / "face_trajectories" / "2026" / "07" / "12" / "face.jpg"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_bytes(b"jpeg")
+
+    class FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Result:
+        rowcount = 7
+
+    class FakeConn:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def transaction(self):
+            return FakeTx()
+
+        def execute(self, query):
+            self.queries.append(query)
+            return Result()
+
+    counts = [
+        {
+            "events": 7,
+            "evidence_tasks": 7,
+            "face_observations": 123,
+            "person_bbox_observations": 456,
+        },
+        {
+            "events": 0,
+            "evidence_tasks": 0,
+            "face_observations": 123,
+            "person_bbox_observations": 456,
+        },
+    ]
+    monkeypatch.setattr(module, "evidence_database_counts", lambda _conn: counts.pop(0))
+    monkeypatch.setattr(module, "pressure_rolling_cache_root_host", lambda: rolling_root)
+    monkeypatch.setattr(
+        module,
+        "pressure_rolling_cache_materialized_root_host",
+        lambda: materialized_root,
+    )
+
+    conn = FakeConn()
+    summary = module.clear_existing_evidence_state(
+        conn,
+        evidence_root=evidence_root,
+    )
+
+    assert conn.queries == ["DELETE FROM events"]
+    assert summary["deleted_events"] == 7
+    assert summary["deleted_face_observations"] == 0
+    assert summary["deleted_person_bbox_observations"] == 0
+    assert summary["database_counts_after"]["face_observations"] == 123
+    assert summary["database_counts_after"]["person_bbox_observations"] == 456
+    assert list(evidence_root.iterdir()) == []
+    assert list(rolling_root.iterdir()) == []
+    assert list(materialized_root.iterdir()) == []
+    assert trajectory.read_bytes() == b"jpeg"
+
+
+def test_t4_profile_supports_uniform_5s_window_and_evidence_only_reset() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "4fps-t4"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "pressure40-contract",
+            "STREAMS": "40",
+            "DURATION_S": "600",
+            "DRAIN_S": "120",
+            "EVIDENCE_GROUP_SIZE": "40",
+            "EVIDENCE_POLICY_GROUPS": "5:5",
+            "CLEAR_EXISTING_EVIDENCE": "1",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    output = completed.stdout
+    assert "streams=40" in output
+    assert "duration_s=600" in output
+    assert "drain_s=120" in output
+    assert "evidence_group_size=40" in output
+    assert "evidence_policy_groups=5:5" in output
+    assert "clear_existing_evidence=1" in output
+    assert "--clear-existing-evidence" in output
 
 
 def test_decoupled_adaface_postfill_keeps_sources_alive_for_visibility(

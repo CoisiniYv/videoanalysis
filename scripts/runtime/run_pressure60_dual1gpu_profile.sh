@@ -18,6 +18,12 @@ Environment overrides:
   STREAMS=60          Override stream count for local smoke runs.
   DURATION_S=400      Override measured sampling duration.
   DRAIN_S=120         Override evidence drain duration.
+  EVIDENCE_GROUP_SIZE=20
+                      Number of cameras assigned to each evidence window group.
+  EVIDENCE_POLICY_GROUPS=5:5,10:10,15:15
+                      Evidence pre:post windows; use 5:5 for one uniform window.
+  CLEAR_EXISTING_EVIDENCE=0
+                      Set to 1 to clear events/evidence but preserve trajectories.
   ABLATION_STAGE=full-evidence
                       pose-only|pose-tracker-rules|pose-face|
                       pose-face-adaface|full-exporter|full-evidence.
@@ -91,6 +97,9 @@ python_cmd="${PYTHON_CMD:-python3}"
 streams="${STREAMS:-60}"
 duration_s="${DURATION_S:-400}"
 drain_s="${DRAIN_S:-120}"
+evidence_group_size="${EVIDENCE_GROUP_SIZE:-20}"
+evidence_policy_groups="${EVIDENCE_POLICY_GROUPS:-5:5,10:10,15:15}"
+clear_existing_evidence="${CLEAR_EXISTING_EVIDENCE:-0}"
 ablation_stage="${ABLATION_STAGE:-full-evidence}"
 output_mode="${OUTPUT_MODE:-${output_mode_default}}"
 batch_timeout_us="${BATCH_TIMEOUT_US:-${batch_timeout_default_us}}"
@@ -118,8 +127,8 @@ cmd=(
   --sample-interval-s 30
   --drain-s "${drain_s}"
   --guard-wait-s 1200
-  --evidence-group-size 20
-  --evidence-policy-groups 5:5,10:10,15:15
+  --evidence-group-size "${evidence_group_size}"
+  --evidence-policy-groups "${evidence_policy_groups}"
   --batch-size 4
   --pose-batch-size 4
   --face-detector-batch-size 4
@@ -152,6 +161,10 @@ if [[ "${ablation_stage}" == "full-evidence" ]]; then
   )
 else
   cmd+=(--keep-evidence 0)
+fi
+
+if [[ "${clear_existing_evidence}" == "1" ]]; then
+  cmd+=(--clear-existing-evidence)
 fi
 
 if [[ "${cuda_mps}" == "1" ]]; then
@@ -196,6 +209,7 @@ printf 'fps=%s\n' "${fps}"
 printf 'min_fps=%s\n' "${min_fps}"
 printf 'streams=%s\n' "${streams}"
 printf 'duration_s=%s\n' "${duration_s}"
+printf 'drain_s=%s\n' "${drain_s}"
 printf 'savant_ablation_stage=%s\n' "${ablation_stage}"
 printf 'savant_output_mode=%s\n' "${output_mode}"
 printf 'batched_push_timeout_us=%s\n' "${batch_timeout_us}"
@@ -215,7 +229,9 @@ printf 'adaface_roi_batch_timeout_ms=%s\n' "${roi_batch_timeout_ms}"
 printf 'dual_shard_same_gpu=true\n'
 printf 'dual_shard_gpu=%s\n' "${gpu_id}"
 printf 'visual_results_retained=true\n'
-printf 'evidence_policy_groups=5:5,10:10,15:15\n'
+printf 'evidence_group_size=%s\n' "${evidence_group_size}"
+printf 'evidence_policy_groups=%s\n' "${evidence_policy_groups}"
+printf 'clear_existing_evidence=%s\n' "${clear_existing_evidence}"
 if [[ "${ablation_stage}" == "full-evidence" ]]; then
   printf 'rolling_cache_prefill_s=25\n'
   printf 'rolling_cache_postfill_s=25\n'

@@ -703,9 +703,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--clear-existing-evidence",
         action="store_true",
         help=(
-            "Destructive isolation option: delete all existing evidence, events, "
-            "face trajectories, and person observations before the run. Disabled "
-            "by default so operator-visible history survives pressure runs."
+            "Destructive evidence reset: delete all existing events and their "
+            "database/filesystem evidence before the run. Face/person observations, "
+            "registered people, and trajectory images are always preserved."
         ),
     )
     parser.add_argument(
@@ -1082,13 +1082,6 @@ def main(argv: list[str] | None = None) -> int:
         write_json(cfg.artifact_dir / "performance_before.json", original_perf)
         write_json(cfg.artifact_dir / "topology_before.json", original_topology)
 
-        if cfg.clear_existing_evidence:
-            report["initial_evidence_cleanup"] = clear_existing_evidence_state(conn)
-            write_json(
-                cfg.artifact_dir / "initial_evidence_cleanup.json",
-                report["initial_evidence_cleanup"],
-            )
-
         active = prepare_evidence_guard(conn, cfg, report)
         if active["blocking_count"] and not cfg.force_runtime_restart:
             report["status"] = "blocked_active_evidence"
@@ -1101,6 +1094,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"details={cfg.artifact_dir / 'active_evidence_guard_snapshots.json'}"
             )
             return 2
+
+        if cfg.clear_existing_evidence:
+            report["initial_evidence_cleanup"] = clear_existing_evidence_state(
+                conn,
+                evidence_root=cfg.evidence_root,
+            )
+            write_json(
+                cfg.artifact_dir / "initial_evidence_cleanup.json",
+                report["initial_evidence_cleanup"],
+            )
 
         if cfg.dual_shard_same_gpu:
             if not cfg.dual_shard_api:
@@ -1922,6 +1925,15 @@ def prepare_evidence_guard(conn, cfg: PressureConfig, report: dict[str, Any]) ->
     before = active_evidence_tasks(conn)
     write_json(cfg.artifact_dir / "active_evidence_before.json", before)
     report["active_evidence_before"] = before
+    if cfg.clear_existing_evidence:
+        # A destructive evidence reset must first stop producers. This is also
+        # required with --force-runtime-restart; otherwise new events can race
+        # the DELETE and make the advertised clean baseline non-deterministic.
+        quiesce_existing_sources(conn, cfg)
+        report["steps"].append(
+            {"name": "existing_sources_quiesced_before_evidence_reset"}
+        )
+        return wait_for_evidence_guard_clear(conn, cfg)
     if cfg.force_runtime_restart:
         return before
     if not cfg.no_quiesce_before_guard:
@@ -4158,6 +4170,13 @@ def configure_clip_worker_for_topology_shards(
     return summary
 
 
+def pressure_camera_name(index: int) -> str:
+    """Return the 1-based, operator-facing name used throughout 8090."""
+    if index < 0:
+        raise ValueError("pressure camera index must be non-negative")
+    return f"压力摄像头 {index + 1:02d}"
+
+
 def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
     with conn.transaction():
         conn.execute("UPDATE cameras SET enabled=false, updated_at=now()")
@@ -4165,7 +4184,7 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
             camera_id = str(uuid.uuid4())
             source_id = f"{cfg.run_id}_{index:02d}"
             zone_id = f"{source_id}_full_frame"
-            camera_name = f"pressure {index:02d}"
+            camera_name = pressure_camera_name(index)
             rtsp_uri = pressure_rtsp_uri(cfg, index=index, source_id=source_id)
             evidence_policy = evidence_policy_for_index(cfg, index)
             watchlist_evidence_policy = face_image_evidence_policy()
@@ -4890,11 +4909,11 @@ def prepare_pressure_sampling_window(
     started_at = datetime.now(timezone.utc)
     if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
         time.sleep(cfg.rolling_cache_prefill_s)
-    cleanup = (
-        clear_pressure_warmup_rows(conn, cfg)
-        if cfg.discard_pressure_results
-        else preserve_pressure_warmup_rows(conn, cfg)
-    )
+    # Visibility and rolling-cache prefill happen before the measured window.
+    # Always remove their event/evidence rows so startup-boundary tasks cannot
+    # expire inside the formal result set. Trajectory observations are retained
+    # by clear_pressure_warmup_rows and remain visible to operators.
+    cleanup = clear_pressure_warmup_rows(conn, cfg)
     sampling_started_monotonic = time.time()
     summary = {
         "status": "completed",
@@ -4941,53 +4960,34 @@ def clear_pressure_warmup_rows(conn, cfg: PressureConfig) -> dict[str, Any]:
             removed_dirs += 1
         if error:
             remove_failures.append({"event_id": event_id, "error": error})
+    preserved = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM face_observations
+             WHERE source_id = ANY(%(source_ids)s)) AS face_observations,
+          (SELECT count(*) FROM person_bbox_observations
+             WHERE source_id = ANY(%(source_ids)s)) AS person_observations
+        """,
+        {"source_ids": source_ids},
+    ).fetchone() or {}
     with conn.transaction():
-        face_deleted = conn.execute(
-            "DELETE FROM face_observations WHERE source_id = ANY(%(source_ids)s)",
-            {"source_ids": source_ids},
-        ).rowcount
-        person_deleted = conn.execute(
-            "DELETE FROM person_bbox_observations WHERE source_id = ANY(%(source_ids)s)",
-            {"source_ids": source_ids},
-        ).rowcount
         event_deleted = conn.execute(
             "DELETE FROM events WHERE source_id = ANY(%(source_ids)s)",
             {"source_ids": source_ids},
         ).rowcount
     return {
         "event_rows_deleted": event_deleted or 0,
-        "face_observation_rows_deleted": face_deleted or 0,
-        "person_observation_rows_deleted": person_deleted or 0,
+        "face_observation_rows_deleted": 0,
+        "person_observation_rows_deleted": 0,
+        "face_observation_rows_preserved": int(
+            preserved.get("face_observations") or 0
+        ),
+        "person_observation_rows_preserved": int(
+            preserved.get("person_observations") or 0
+        ),
         "evidence_dirs_removed": removed_dirs,
         "evidence_dir_remove_failures": len(remove_failures),
         "evidence_dir_remove_failure_samples": remove_failures[:20],
-    }
-
-
-def preserve_pressure_warmup_rows(conn, cfg: PressureConfig) -> dict[str, Any]:
-    """Record warmup output without deleting operator-visible history."""
-    source_ids = pressure_source_ids(cfg)
-    row = conn.execute(
-        """
-        SELECT
-          (SELECT count(*) FROM events WHERE source_id = ANY(%(source_ids)s)) AS events,
-          (SELECT count(*) FROM face_observations WHERE source_id = ANY(%(source_ids)s))
-            AS face_observations,
-          (SELECT count(*) FROM person_bbox_observations WHERE source_id = ANY(%(source_ids)s))
-            AS person_observations
-        """,
-        {"source_ids": source_ids},
-    ).fetchone() or {}
-    return {
-        "status": "preserved",
-        "reason": "visual_results_retained",
-        "event_rows_preserved": int(row.get("events") or 0),
-        "face_observation_rows_preserved": int(row.get("face_observations") or 0),
-        "person_observation_rows_preserved": int(row.get("person_observations") or 0),
-        "event_rows_deleted": 0,
-        "face_observation_rows_deleted": 0,
-        "person_observation_rows_deleted": 0,
-        "evidence_dirs_removed": 0,
     }
 
 
@@ -8017,10 +8017,33 @@ def resolve_container_bind_source(
     return None
 
 
-def clear_existing_evidence_state(conn) -> dict[str, Any]:
-    """Start pressure runs from a clean evidence/event/cache footprint."""
+def evidence_database_counts(conn) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM events) AS events,
+          (SELECT count(*) FROM evidence_tasks) AS evidence_tasks,
+          (SELECT count(*) FROM evidence_bundles) AS evidence_bundles,
+          (SELECT count(*) FROM evidence_artifacts) AS evidence_artifacts,
+          (SELECT count(*) FROM evidence_frame_timeline) AS evidence_frame_timeline,
+          (SELECT count(*) FROM evidence_overlay_segments) AS evidence_overlay_segments,
+          (SELECT count(*) FROM evidence_event_links) AS evidence_event_links,
+          (SELECT count(*) FROM face_observations) AS face_observations,
+          (SELECT count(*) FROM person_bbox_observations)
+            AS person_bbox_observations
+        """
+    ).fetchone() or {}
+    return {key: int(value or 0) for key, value in row.items()}
+
+
+def clear_existing_evidence_state(
+    conn,
+    *,
+    evidence_root: Path = Path("/data/video-analytics/media/evidence"),
+) -> dict[str, Any]:
+    """Clear evidence while preserving observations, people, and trajectories."""
     cleanup: dict[str, Any] = {}
-    evidence_root = Path("/data/video-analytics/media/evidence")
+    cleanup["database_counts_before"] = evidence_database_counts(conn)
     removed_evidence_dirs = 0
     if evidence_root.exists():
         for child in list(evidence_root.iterdir()):
@@ -8049,13 +8072,11 @@ def clear_existing_evidence_state(conn) -> dict[str, Any]:
         root.mkdir(parents=True, exist_ok=True)
 
     with conn.transaction():
-        cleanup["deleted_face_observations"] = conn.execute(
-            "DELETE FROM face_observations"
-        ).rowcount
-        cleanup["deleted_person_bbox_observations"] = conn.execute(
-            "DELETE FROM person_bbox_observations"
-        ).rowcount
         cleanup["deleted_events"] = conn.execute("DELETE FROM events").rowcount
+    cleanup["deleted_face_observations"] = 0
+    cleanup["deleted_person_bbox_observations"] = 0
+    cleanup["database_counts_after"] = evidence_database_counts(conn)
+    cleanup["trajectory_data_preserved"] = True
     return cleanup
 
 
