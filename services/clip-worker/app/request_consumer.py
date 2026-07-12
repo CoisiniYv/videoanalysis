@@ -28,6 +28,7 @@ class ConsumerSettings:
     read_count: int = 10
     pending_claim_min_idle_ms: int = 5000
     pending_claim_count: int = 10
+    quarantine_maxlen: int = 10000
 
 
 class RequestConsumer:
@@ -131,6 +132,45 @@ class RequestConsumer:
             delivery.message_id,
         )
         return bool(result is None or int(result) >= 0)
+
+    def quarantine(self, delivery: DeliveryEnvelope, *, reason: str) -> bool:
+        """Durably isolate an invalid delivery before the Coordinator ACKs it."""
+        fields = {
+            _decode_text(key): _decode_text(value)
+            for key, value in delivery.fields
+        }
+        try:
+            message_id = self.client.xadd(
+                f"{delivery.stream}.dead_letter",
+                {
+                    "source_stream": delivery.stream,
+                    "source_group": delivery.group,
+                    "source_message_id": delivery.message_id,
+                    "consumer": delivery.consumer,
+                    "reason": reason,
+                    "delivery_count": str(delivery.delivery_count),
+                    "reclaimed": "true" if delivery.reclaimed else "false",
+                    "fields_json": json.dumps(
+                        fields,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                },
+                maxlen=max(1, int(self.settings.quarantine_maxlen)),
+                approximate=True,
+            )
+            return bool(message_id)
+        except Exception:
+            logger.exception(
+                "clip_consumer_quarantine_failed stream=%s group=%s "
+                "message_id=%s reason=%s",
+                delivery.stream,
+                delivery.group,
+                delivery.message_id,
+                reason,
+            )
+            return False
 
     def diagnostics(self) -> dict[str, object]:
         diagnostics: dict[str, object] = {"pending": None, "lag": None}

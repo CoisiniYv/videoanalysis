@@ -23,6 +23,7 @@ class ReplaySlotReservation:
     replay_job_id: str = ""
     resulting_stream_id: str = ""
     plan_hash: str = ""
+    slot_status: str = ""
 
     def counts_dict(self) -> dict[str, int]:
         return dict(self.counts)
@@ -88,7 +89,12 @@ class ReplayAdmissionRepository:
             values,
         )
 
-    def mark_submitting(self, reservation: ReplaySlotReservation) -> bool:
+    def mark_submitting(
+        self,
+        reservation: ReplaySlotReservation,
+        *,
+        replay_job_request: dict | None = None,
+    ) -> bool:
         if not reservation.acquired:
             return False
         return repository.mark_replay_create_started(
@@ -98,6 +104,7 @@ class ReplayAdmissionRepository:
             slot_token=reservation.token,
             slot_generation=reservation.generation,
             plan_hash=reservation.plan_hash,
+            replay_job_request=replay_job_request,
         )
 
     def commit_handoff(
@@ -126,6 +133,44 @@ class ReplayAdmissionRepository:
             replay_shard=replay_shard,
         )
 
+    def mark_uncertain(
+        self,
+        reservation: ReplaySlotReservation,
+        *,
+        reason: str,
+    ) -> bool:
+        if not reservation.acquired:
+            return False
+        return repository.mark_replay_create_uncertain(
+            self.connection,
+            event_id=reservation.event_id,
+            owner=reservation.owner,
+            slot_token=reservation.token,
+            slot_generation=reservation.generation,
+            reason=reason,
+        )
+
+    def abort_permanent(
+        self,
+        reservation: ReplaySlotReservation,
+        *,
+        reason: str,
+        diagnostics: dict | None = None,
+    ) -> bool:
+        """Atomically terminal-fail a definitively rejected Replay create."""
+        if not reservation.acquired:
+            return False
+        return repository.abort_fenced_replay_create(
+            self.connection,
+            event_id=reservation.event_id,
+            owner=reservation.owner,
+            slot_token=reservation.token,
+            slot_generation=reservation.generation,
+            plan_hash=reservation.plan_hash,
+            reason=reason,
+            diagnostics=diagnostics,
+        )
+
     def load(self, event_id: str) -> ReplaySlotReservation | None:
         result = repository.get_replay_slot_state(
             self.connection,
@@ -145,6 +190,7 @@ class ReplayAdmissionRepository:
             "replay_job_id": result.get("replay_job_id"),
             "resulting_stream_id": result.get("replay_resulting_stream_id"),
             "plan_hash": result.get("replay_plan_hash"),
+            "slot_status": result.get("replay_slot_status"),
         }
         return self._reservation_from_result({"event_id": event_id}, values)
 
@@ -173,6 +219,11 @@ class ReplayAdmissionRepository:
             replay_job_id=str(result.get("replay_job_id") or ""),
             resulting_stream_id=str(result.get("resulting_stream_id") or ""),
             plan_hash=str(result.get("plan_hash") or kwargs.get("plan_hash") or ""),
+            slot_status=str(
+                result.get("slot_status")
+                or result.get("replay_slot_status")
+                or ("active" if result.get("acquired") else "")
+            ),
         )
 
     def record_job(

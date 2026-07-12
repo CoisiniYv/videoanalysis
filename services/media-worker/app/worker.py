@@ -2622,6 +2622,7 @@ def _release_replay_slot_for_sink_stable(
     *,
     event_id: str,
     phase_diagnostics: dict[str, object],
+    sink_metadata: dict | None = None,
 ) -> bool:
     """Release completion-aware Replay admission once sink video is stable."""
     if not event_id:
@@ -2633,6 +2634,137 @@ def _release_replay_slot_for_sink_stable(
     cursor_factory = getattr(pg_conn, "cursor", None)
     if not callable(cursor_factory):
         return False
+    metadata = sink_metadata if isinstance(sink_metadata, dict) else {}
+    labels = _metadata_labels(metadata)
+    slot_token = str(labels.get("replay_slot_token") or "")
+    replay_job_id = str(
+        metadata.get("replay_job_id")
+        or metadata.get("job_id")
+        or labels.get("replay_job_id")
+        or ""
+    )
+    configuration = metadata.get("configuration")
+    configuration = configuration if isinstance(configuration, dict) else {}
+    resulting_stream_id = str(
+        metadata.get("resulting_stream_id")
+        or configuration.get("resulting_stream_id")
+        or labels.get("resulting_stream_id")
+        or ""
+    )
+    slot_identity_source = "sink_metadata" if slot_token else "legacy"
+    sink_receipt_recovery = False
+    if metadata and not slot_token:
+        try:
+            with cursor_factory() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        et.replay_slot_token,
+                        et.replay_job_id,
+                        et.replay_resulting_stream_id,
+                        et.replay_create_state,
+                        e.payload->'media'->'replay_job_request'
+                            AS planned_replay_job_request
+                    FROM evidence_tasks et
+                    JOIN events e ON e.id = et.event_id
+                    WHERE et.event_id = %(event_id)s::uuid
+                      AND et.replay_slot_status = 'active'
+                    """,
+                    {"event_id": event_id},
+                )
+                identity = cur.fetchone()
+            if isinstance(identity, dict):
+                slot_token = str(identity.get("replay_slot_token") or "")
+                replay_job_id = replay_job_id or str(
+                    identity.get("replay_job_id") or ""
+                )
+                resulting_stream_id = resulting_stream_id or str(
+                    identity.get("replay_resulting_stream_id") or ""
+                )
+                create_state = str(identity.get("replay_create_state") or "")
+                planned_request = identity.get("planned_replay_job_request")
+            elif identity is not None:
+                slot_token = str(identity[0] or "") if len(identity) > 0 else ""
+                replay_job_id = replay_job_id or (
+                    str(identity[1] or "") if len(identity) > 1 else ""
+                )
+                resulting_stream_id = resulting_stream_id or (
+                    str(identity[2] or "") if len(identity) > 2 else ""
+                )
+                create_state = (
+                    str(identity[3] or "") if len(identity) > 3 else ""
+                )
+                planned_request = identity[4] if len(identity) > 4 else None
+            else:
+                create_state = ""
+                planned_request = None
+            if slot_token and create_state != "committed":
+                planned_request = (
+                    planned_request if isinstance(planned_request, dict) else {}
+                )
+                planned_configuration = planned_request.get("configuration")
+                planned_configuration = (
+                    planned_configuration
+                    if isinstance(planned_configuration, dict)
+                    else {}
+                )
+                planned_labels = planned_configuration.get("labels")
+                planned_labels = (
+                    planned_labels if isinstance(planned_labels, dict) else {}
+                )
+                planned_token = str(
+                    planned_labels.get("replay_slot_token") or ""
+                )
+                planned_stream_id = str(
+                    planned_configuration.get("resulting_stream_id") or ""
+                )
+                sink_stream_id = str(
+                    metadata.get("source_id")
+                    or metadata.get("resulting_stream_id")
+                    or ""
+                )
+                planned_epoch = str(
+                    planned_labels.get("runtime_epoch_id") or ""
+                )
+                sink_path_epoch = _runtime_epoch_from_path(
+                    str(metadata.get("_meta_dir") or "")
+                )
+                current_epoch = _current_runtime_epoch_id(
+                    str(metadata.get("_meta_dir") or "")
+                )
+                sink_receipt_recovery = bool(
+                    create_state in {"submitting", "uncertain"}
+                    and planned_token
+                    and planned_token == slot_token
+                    and planned_stream_id
+                    and sink_stream_id == planned_stream_id
+                    and planned_epoch
+                    and sink_path_epoch == planned_epoch
+                    and current_epoch == planned_epoch
+                    and str(planned_labels.get("event_id") or "") == event_id
+                )
+                if not sink_receipt_recovery:
+                    logger.warning(
+                        "replay_slot_release_fence_rejected event_id=%s "
+                        "reason=unverified_sink_receipt create_state=%s "
+                        "planned_stream_id=%s sink_stream_id=%s",
+                        event_id,
+                        create_state,
+                        planned_stream_id,
+                        sink_stream_id,
+                    )
+                    return False
+                resulting_stream_id = planned_stream_id
+                slot_identity_source = "planned_request_sink_receipt"
+            if slot_token:
+                if not sink_receipt_recovery:
+                    slot_identity_source = "db_handoff"
+        except Exception:
+            logger.exception(
+                "replay_slot_release_identity_lookup_failed event_id=%s",
+                event_id,
+            )
+            return False
     try:
         with cursor_factory() as cur:
             cur.execute(
@@ -2641,7 +2773,38 @@ def _release_replay_slot_for_sink_stable(
                     UPDATE evidence_tasks
                     SET replay_slot_status = 'released',
                         replay_slot_released_at = now(),
-                        replay_slot_release_reason = 'sink_video_stable',
+                        replay_slot_release_reason = CASE
+                            WHEN %(sink_receipt_recovery)s::boolean
+                                THEN 'sink_video_stable_after_uncertain_create'
+                            ELSE 'sink_video_stable'
+                        END,
+                        replay_create_state = CASE
+                            WHEN %(sink_receipt_recovery)s::boolean
+                                THEN 'sink_confirmed'
+                            ELSE replay_create_state
+                        END,
+                        replay_resulting_stream_id = COALESCE(
+                            replay_resulting_stream_id,
+                            NULLIF(%(resulting_stream_id)s::text, '')
+                        ),
+                        materialization_handoff = CASE
+                            WHEN %(sink_receipt_recovery)s::boolean THEN
+                                jsonb_strip_nulls(jsonb_build_object(
+                                    'kind', 'replay_sink_receipt',
+                                    'event_id', event_id::text,
+                                    'resulting_stream_id',
+                                        NULLIF(
+                                            %(resulting_stream_id)s::text,
+                                            ''
+                                        ),
+                                    'slot_token', replay_slot_token,
+                                    'slot_owner', replay_slot_owner,
+                                    'slot_generation', replay_slot_generation,
+                                    'plan_hash', replay_plan_hash,
+                                    'confirmed_at', now()
+                                ))
+                            ELSE materialization_handoff
+                        END,
                         replay_slot_active_age_s = EXTRACT(
                             EPOCH FROM (now() - replay_slot_acquired_at)
                         ),
@@ -2652,9 +2815,16 @@ def _release_replay_slot_for_sink_stable(
                         materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
                             || jsonb_build_object(
                                 'replay_slot',
-                                jsonb_strip_nulls(jsonb_build_object(
+                                COALESCE(
+                                    materialization_audit->'replay_slot',
+                                    '{}'::jsonb
+                                ) || jsonb_strip_nulls(jsonb_build_object(
                                     'status', 'released',
-                                    'release_reason', 'sink_video_stable',
+                                    'release_reason', CASE
+                                        WHEN %(sink_receipt_recovery)s::boolean
+                                            THEN 'sink_video_stable_after_uncertain_create'
+                                        ELSE 'sink_video_stable'
+                                    END,
                                     'released_at', now(),
                                     'active_age_s', EXTRACT(
                                         EPOCH FROM (now() - replay_slot_acquired_at)
@@ -2662,16 +2832,69 @@ def _release_replay_slot_for_sink_stable(
                                     'sink_video_to_stable_ms',
                                         %(sink_video_to_stable_ms)s::int,
                                     'replay_job_id', replay_job_id,
-                                    'resulting_stream_id', replay_resulting_stream_id
+                                    'resulting_stream_id', COALESCE(
+                                        replay_resulting_stream_id,
+                                        NULLIF(
+                                            %(resulting_stream_id)s::text,
+                                            ''
+                                        )
+                                    ),
+                                    'identity_source', CASE
+                                        WHEN %(sink_receipt_recovery)s::boolean
+                                            THEN 'planned_request_sink_receipt'
+                                        ELSE 'durable_replay_handoff'
+                                    END
                                 ))
                             ),
                         updated_at = now()
                     WHERE event_id = %(event_id)s::uuid
                       AND replay_slot_status = 'active'
+                      AND (
+                          COALESCE(replay_slot_token, '') = ''
+                          OR (
+                              replay_slot_token = NULLIF(
+                                  %(replay_slot_token)s::text,
+                                  ''
+                              )
+                              AND (
+                                  (
+                                      replay_create_state = 'committed'
+                                      AND replay_job_id IS NOT NULL
+                                      AND (
+                                          NULLIF(
+                                              %(replay_job_id)s::text,
+                                              ''
+                                          ) IS NULL
+                                          OR replay_job_id =
+                                              %(replay_job_id)s::text
+                                      )
+                                      AND (
+                                          NULLIF(
+                                              %(resulting_stream_id)s::text,
+                                              ''
+                                          ) IS NULL
+                                          OR replay_resulting_stream_id =
+                                              %(resulting_stream_id)s::text
+                                      )
+                                  )
+                                  OR (
+                                      %(sink_receipt_recovery)s::boolean
+                                      AND replay_create_state IN (
+                                          'submitting', 'uncertain'
+                                      )
+                                      AND replay_job_id IS NULL
+                                      AND replay_plan_hash IS NOT NULL
+                                      AND replay_resulting_stream_id IS NULL
+                                  )
+                              )
+                          )
+                      )
                     RETURNING event_id,
                               replay_job_id,
                               replay_resulting_stream_id,
-                              replay_slot_active_age_s
+                              replay_slot_active_age_s,
+                              replay_create_state,
+                              replay_slot_release_reason
                 )
                 UPDATE events e
                 SET payload = COALESCE(e.payload, '{}'::jsonb)
@@ -2681,7 +2904,15 @@ def _release_replay_slot_for_sink_stable(
                             || jsonb_strip_nulls(jsonb_build_object(
                                 'replay_slot_status', 'released',
                                 'replay_slot_released_at', now(),
-                                'replay_slot_release_reason', 'sink_video_stable',
+                                'replay_slot_release_reason',
+                                    released.replay_slot_release_reason,
+                                'replay_create_state',
+                                    released.replay_create_state,
+                                'replay_submission_recovery', CASE
+                                    WHEN %(sink_receipt_recovery)s::boolean
+                                        THEN 'sink_output_receipt'
+                                    ELSE NULL
+                                END,
                                 'replay_slot_active_age_s',
                                     released.replay_slot_active_age_s,
                                 'sink_video_to_stable_ms',
@@ -2698,14 +2929,23 @@ def _release_replay_slot_for_sink_stable(
                 {
                     "event_id": event_id,
                     "sink_video_to_stable_ms": sink_video_to_stable_ms,
+                    "replay_slot_token": slot_token,
+                    "replay_job_id": replay_job_id,
+                    "resulting_stream_id": resulting_stream_id,
+                    "sink_receipt_recovery": sink_receipt_recovery,
                 },
             )
             released = bool(getattr(cur, "rowcount", 0) or 0)
             if released:
                 logger.info(
-                    "replay_slot_released event_id=%s release_reason=sink_video_stable "
+                    "replay_slot_released event_id=%s release_reason=%s "
                     "sink_video_to_stable_ms=%s",
                     event_id,
+                    (
+                        "sink_video_stable_after_uncertain_create"
+                        if sink_receipt_recovery
+                        else "sink_video_stable"
+                    ),
                     sink_video_to_stable_ms,
                 )
             else:
@@ -2716,6 +2956,17 @@ def _release_replay_slot_for_sink_stable(
                     event_id,
                     sink_video_to_stable_ms,
                 )
+            logger.info(
+                "replay_slot_release_fence event_id=%s result=%s "
+                "identity_source=%s slot_token_present=%s replay_job_id=%s "
+                "resulting_stream_id=%s",
+                event_id,
+                "released" if released else "noop",
+                slot_identity_source,
+                bool(slot_token),
+                replay_job_id,
+                resulting_stream_id,
+            )
             return released
     except Exception:
         logger.exception("release_replay_slot_for_sink_stable failed event_id=%s", event_id)
@@ -6007,6 +6258,7 @@ def _process_sink_output(
                     pg_conn,
                     event_id=event_id,
                     phase_diagnostics=phase_diagnostics,
+                    sink_metadata=meta,
                 )
         elif finalizer_enabled and candidate_dirs is not None:
             try:
@@ -6038,6 +6290,7 @@ def _process_sink_output(
                     pg_conn,
                     event_id=event_id,
                     phase_diagnostics=phase_diagnostics,
+                    sink_metadata=meta,
                 )
             ready, reason = _sink_output_ready_for_finalizer(
                 video_file=video_file,
@@ -6054,6 +6307,7 @@ def _process_sink_output(
                 pg_conn,
                 event_id=event_id,
                 phase_diagnostics=phase_diagnostics,
+                sink_metadata=meta,
             )
 
         if finalizer_enabled:
@@ -7240,6 +7494,7 @@ def _process_sink_output_with_finalizer_pool(
                     pg_conn,
                     event_id=event_id,
                     phase_diagnostics=phase_diagnostics,
+                    sink_metadata=meta,
                 )
         elif candidate_dirs is not None:
             try:
@@ -7271,6 +7526,7 @@ def _process_sink_output_with_finalizer_pool(
                     pg_conn,
                     event_id=event_id,
                     phase_diagnostics=phase_diagnostics,
+                    sink_metadata=meta,
                 )
             ready, reason = _sink_output_ready_for_finalizer(
                 video_file=video_file,
@@ -7288,6 +7544,7 @@ def _process_sink_output_with_finalizer_pool(
                     pg_conn,
                     event_id=event_id,
                     phase_diagnostics=phase_diagnostics,
+                    sink_metadata=meta,
                 )
 
         if not ready:

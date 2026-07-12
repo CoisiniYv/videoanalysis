@@ -1180,49 +1180,81 @@ def mark_replay_create_started(
     slot_token: str,
     slot_generation: int,
     plan_hash: str,
+    replay_job_request: dict | None = None,
 ) -> bool:
-    """Persist the external-side-effect boundary before calling Replay."""
+    """Persist the immutable request before the external Replay side effect.
+
+    The planned request is not a success claim.  It lets Media Worker verify a
+    deterministic sink receipt if Clip Worker dies after Replay accepts the
+    request but before the job handoff transaction.
+    """
+    params = {
+        "event_id": event_id,
+        "owner": owner,
+        "slot_token": slot_token,
+        "slot_generation": max(_safe_int(slot_generation), 0),
+        "plan_hash": plan_hash,
+        "replay_job_request": json.dumps(replay_job_request or {}),
+    }
     try:
         with pg_conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE evidence_tasks
-                SET replay_create_state = 'submitting',
-                    replay_create_started_at = COALESCE(
-                        replay_create_started_at,
-                        now()
-                    ),
-                    materialization_audit = COALESCE(
-                        materialization_audit,
-                        '{}'::jsonb
-                    ) || jsonb_build_object(
-                        'replay_create',
-                        jsonb_build_object(
-                            'state', 'submitting',
-                            'started_at', now(),
-                            'owner', %(owner)s::text,
-                            'token', %(slot_token)s::text,
-                            'generation', %(slot_generation)s::bigint,
-                            'plan_hash', %(plan_hash)s::text
+                WITH started AS (
+                    UPDATE evidence_tasks
+                    SET replay_create_state = 'submitting',
+                        replay_create_started_at = COALESCE(
+                            replay_create_started_at,
+                            now()
+                        ),
+                        materialization_audit = COALESCE(
+                            materialization_audit,
+                            '{}'::jsonb
+                        ) || jsonb_build_object(
+                            'replay_create',
+                            jsonb_build_object(
+                                'state', 'submitting',
+                                'started_at', now(),
+                                'owner', %(owner)s::text,
+                                'token', %(slot_token)s::text,
+                                'generation', %(slot_generation)s::bigint,
+                                'plan_hash', %(plan_hash)s::text,
+                                'planned_request',
+                                    %(replay_job_request)s::jsonb
+                            )
+                        ),
+                        updated_at = now()
+                    WHERE event_id = %(event_id)s::uuid
+                      AND replay_slot_status = 'active'
+                      AND replay_slot_owner = %(owner)s
+                      AND replay_slot_token = %(slot_token)s
+                      AND replay_slot_generation = %(slot_generation)s
+                      AND replay_plan_hash = %(plan_hash)s
+                      AND replay_job_id IS NULL
+                      AND replay_create_state IN ('reserved', 'submitting')
+                    RETURNING event_id
+                )
+                UPDATE events e
+                SET payload = COALESCE(e.payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'media',
+                        COALESCE(e.payload->'media', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'replay_job_request',
+                                %(replay_job_request)s::jsonb,
+                            'replay_create_state', 'submitting',
+                            'replay_plan_hash', %(plan_hash)s::text,
+                            'replay_slot_owner', %(owner)s::text,
+                            'replay_slot_token', %(slot_token)s::text,
+                            'replay_slot_generation',
+                                %(slot_generation)s::bigint
                         )
                     ),
                     updated_at = now()
-                WHERE event_id = %(event_id)s::uuid
-                  AND replay_slot_status = 'active'
-                  AND replay_slot_owner = %(owner)s
-                  AND replay_slot_token = %(slot_token)s
-                  AND replay_slot_generation = %(slot_generation)s
-                  AND replay_plan_hash = %(plan_hash)s
-                  AND replay_job_id IS NULL
-                  AND replay_create_state IN ('reserved', 'submitting')
+                FROM started
+                WHERE e.id = started.event_id
                 """,
-                {
-                    "event_id": event_id,
-                    "owner": owner,
-                    "slot_token": slot_token,
-                    "slot_generation": max(_safe_int(slot_generation), 0),
-                    "plan_hash": plan_hash,
-                },
+                params,
             )
             return bool(getattr(cur, "rowcount", 0) or 0)
     except Exception:
@@ -1232,6 +1264,225 @@ def mark_replay_create_started(
             owner,
         )
         return False
+
+
+def mark_replay_create_uncertain(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    owner: str,
+    slot_token: str,
+    slot_generation: int,
+    reason: str,
+) -> bool:
+    """Keep an ambiguous external create active without allowing a retry."""
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE evidence_tasks
+                SET replay_create_state = 'uncertain',
+                    error_message = NULLIF(%(reason)s::text, ''),
+                    materialization_audit = COALESCE(
+                        materialization_audit,
+                        '{}'::jsonb
+                    ) || jsonb_build_object(
+                        'replay_create',
+                        COALESCE(
+                            materialization_audit->'replay_create',
+                            '{}'::jsonb
+                        ) || jsonb_build_object(
+                            'state', 'uncertain',
+                            'reason', %(reason)s::text,
+                            'uncertain_at', now(),
+                            'owner', %(owner)s::text,
+                            'token', %(slot_token)s::text,
+                            'generation', %(slot_generation)s::bigint
+                        )
+                    ),
+                    updated_at = now()
+                WHERE event_id = %(event_id)s::uuid
+                  AND replay_slot_status = 'active'
+                  AND replay_slot_owner = %(owner)s
+                  AND replay_slot_token = %(slot_token)s
+                  AND replay_slot_generation = %(slot_generation)s
+                  AND replay_job_id IS NULL
+                  AND replay_create_state IN ('submitting', 'uncertain')
+                """,
+                {
+                    "event_id": event_id,
+                    "owner": owner,
+                    "slot_token": slot_token,
+                    "slot_generation": max(_safe_int(slot_generation), 0),
+                    "reason": reason,
+                },
+            )
+            return bool(getattr(cur, "rowcount", 0) or 0)
+    except Exception:
+        logger.exception(
+            "mark_replay_create_uncertain failed event_id=%s owner=%s",
+            event_id,
+            owner,
+        )
+        return False
+
+
+def abort_fenced_replay_create(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    owner: str,
+    slot_token: str,
+    slot_generation: int,
+    plan_hash: str,
+    reason: str,
+    diagnostics: dict | None = None,
+) -> bool:
+    """Terminal-fail one definitive Replay rejection under the slot fence.
+
+    A non-retryable Replay 4xx proves that no job was created.  Task terminal
+    state, slot release, create state, and the event projection therefore move
+    in one SQL statement before the Redis delivery may be acknowledged.
+    """
+    if not event_id or not owner or not slot_token or not plan_hash:
+        return False
+    params = {
+        "event_id": event_id,
+        "owner": owner,
+        "slot_token": slot_token,
+        "slot_generation": max(_safe_int(slot_generation), 0),
+        "plan_hash": plan_hash,
+        "reason": reason or "Replay request permanently rejected",
+        "reason_code": "replay_permanent_rejected",
+        "diagnostics": json.dumps(diagnostics or {}),
+    }
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH aborted_task AS (
+                    UPDATE evidence_tasks et
+                    SET status = 'materialization_failed',
+                        materialization_status = 'materialization_failed',
+                        materialization_phase = 'terminal',
+                        materialization_phase_updated_at = now(),
+                        materialization_owner = 'terminal',
+                        materialization_next_attempt_at = NULL,
+                        materialization_retry_reason = NULL,
+                        materialization_defer_reason = NULL,
+                        materialization_failure_reason = %(reason_code)s,
+                        materialization_expired_reason = NULL,
+                        materialization_lease_owner = NULL,
+                        materialization_lease_token = NULL,
+                        materialization_lease_expires_at = NULL,
+                        materialization_lease_heartbeat_at = NULL,
+                        materialization_handoff = '{}'::jsonb,
+                        replay_slot_status = 'released',
+                        replay_slot_released_at = now(),
+                        replay_slot_release_reason = %(reason_code)s,
+                        replay_slot_active_age_s = EXTRACT(
+                            EPOCH FROM (now() - replay_slot_acquired_at)
+                        ),
+                        replay_create_state = 'aborted',
+                        error_message = %(reason)s,
+                        materialization_audit = COALESCE(
+                            materialization_audit,
+                            '{}'::jsonb
+                        ) || jsonb_build_object(
+                            'replay_create',
+                            COALESCE(
+                                materialization_audit->'replay_create',
+                                '{}'::jsonb
+                            ) || jsonb_build_object(
+                                'state', 'aborted',
+                                'reason', %(reason)s,
+                                'aborted_at', now(),
+                                'owner', %(owner)s,
+                                'token', %(slot_token)s,
+                                'generation', %(slot_generation)s::bigint,
+                                'plan_hash', %(plan_hash)s
+                            ),
+                            'replay_slot',
+                            COALESCE(
+                                materialization_audit->'replay_slot',
+                                '{}'::jsonb
+                            ) || jsonb_build_object(
+                                'status', 'released',
+                                'release_reason', %(reason_code)s,
+                                'released_at', now(),
+                                'active_age_s', EXTRACT(
+                                    EPOCH FROM (now() - replay_slot_acquired_at)
+                                )
+                            )
+                        ),
+                        updated_at = now()
+                    WHERE et.event_id = %(event_id)s::uuid
+                      AND et.replay_slot_status = 'active'
+                      AND et.replay_slot_owner = %(owner)s
+                      AND et.replay_slot_token = %(slot_token)s
+                      AND et.replay_slot_generation = %(slot_generation)s
+                      AND et.replay_plan_hash = %(plan_hash)s
+                      AND et.replay_job_id IS NULL
+                      AND et.replay_create_state = 'submitting'
+                    RETURNING
+                        et.event_id,
+                        et.replay_slot_active_age_s
+                ),
+                aborted_event AS (
+                    UPDATE events e
+                    SET payload = COALESCE(e.payload, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'media',
+                            COALESCE(e.payload->'media', '{}'::jsonb)
+                            || jsonb_build_object(
+                                'clip_status', 'failed',
+                                'evidence_state', 'materialization_failed',
+                                'evidence_reason', %(reason_code)s,
+                                'materialization_status',
+                                    'materialization_failed',
+                                'materialization_phase', 'terminal',
+                                'materialization_owner', 'terminal',
+                                'replay_create_state', 'aborted',
+                                'replay_slot_status', 'released',
+                                'replay_slot_release_reason', %(reason_code)s,
+                                'replay_slot_owner', %(owner)s,
+                                'replay_slot_token', %(slot_token)s,
+                                'replay_slot_generation',
+                                    %(slot_generation)s::bigint,
+                                'replay_plan_hash', %(plan_hash)s,
+                                'replay_slot_released_at', now(),
+                                'replay_slot_active_age_s',
+                                    aborted_task.replay_slot_active_age_s,
+                                'error', %(reason)s,
+                                'evidence_diagnostics',
+                                    %(diagnostics)s::jsonb
+                            )
+                        ),
+                        media_status = 'failed',
+                        updated_at = now()
+                    FROM aborted_task
+                    WHERE e.id = aborted_task.event_id
+                    RETURNING e.id
+                )
+                SELECT
+                    EXISTS (SELECT 1 FROM aborted_task) AS task_updated,
+                    EXISTS (SELECT 1 FROM aborted_event) AS event_updated
+                """,
+                params,
+            )
+            row = cur.fetchone()
+    except Exception:
+        logger.exception(
+            "abort_fenced_replay_create failed event_id=%s owner=%s",
+            event_id,
+            owner,
+        )
+        return False
+    if row is None:
+        return False
+    if isinstance(row, dict):
+        return bool(row.get("task_updated") and row.get("event_updated"))
+    return bool(len(row) > 1 and row[0] and row[1])
 
 
 def commit_replay_job_handoff(

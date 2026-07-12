@@ -46,6 +46,7 @@ class FakeRedis:
         self.pending_counts: dict[str, int] = {}
         self.acked: list[str] = []
         self.group_created = False
+        self.quarantined: list[tuple[str, dict[str, str]]] = []
 
     def xgroup_create(self, *_args: Any, **_kwargs: Any) -> None:
         self.group_created = True
@@ -69,6 +70,10 @@ class FakeRedis:
     def xack(self, _stream: str, _group: str, message_id: str) -> int:
         self.acked.append(str(message_id))
         return 1
+
+    def xadd(self, stream: str, fields: dict[str, str], **_kwargs: Any) -> str:
+        self.quarantined.append((stream, fields))
+        return "10-0"
 
     def xpending(self, *_args: Any, **_kwargs: Any):
         return {"pending": len(self.pending_entries)}
@@ -183,6 +188,29 @@ def test_unexpected_processor_exception_is_never_acked() -> None:
     assert fake.acked == []
 
 
+def test_malformed_delivery_is_quarantined_before_the_only_ack() -> None:
+    contracts, coordinator, _state, _admission, _consumer_module = _activate()
+    fake = FakeRedis()
+    consumer = _consumer(fake)
+    outcome = contracts.ProcessingOutcome(
+        code=contracts.ProcessingCode.MALFORMED,
+        ack_disposition=contracts.AckDisposition.ACK,
+        durable=False,
+        reason="invalid_json",
+    )
+
+    result = coordinator.ClipCoordinator(
+        consumer,
+        lambda _delivery: outcome,
+    ).process_one(_delivery(contracts))
+
+    assert result.durable is True
+    assert result.ack_performed is True
+    assert fake.quarantined[0][0] == "security.record_requests.dead_letter"
+    assert fake.quarantined[0][1]["reason"] == "invalid_json"
+    assert fake.acked == ["1-0"]
+
+
 class CrashAt:
     def __init__(self, coordinator, point) -> None:
         self.coordinator = coordinator
@@ -215,6 +243,50 @@ def test_ack_crash_points_preserve_expected_pending_state(point: str) -> None:
         instance.process_one(_delivery(contracts))
 
     assert fake.acked == ([] if point == "before_ack" else ["1-0"])
+
+
+def test_runtime_crash_injector_is_opt_in_and_fires_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    contracts, coordinator, _state, _admission, _consumer_module = _activate()
+    marker = tmp_path / "after-commit.once"
+    monkeypatch.setenv(
+        "CLIP_WORKER_CRASH_INJECT_POINT",
+        "after_durable_commit",
+    )
+    monkeypatch.setenv("CLIP_WORKER_CRASH_INJECT_MARKER", str(marker))
+
+    class ExitInjected(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        coordinator.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(ExitInjected(str(code))),
+    )
+    injector = coordinator.RuntimeOnceCrashInjector.from_env()
+    delivery = _delivery(contracts)
+    outcome = contracts.ProcessingOutcome(
+        code=contracts.ProcessingCode.REPLAY_CREATED,
+        ack_disposition=contracts.AckDisposition.ACK,
+        durable=True,
+        event_id="event-1",
+        replay_job_id="job-1",
+    )
+
+    with pytest.raises(ExitInjected, match="91"):
+        injector.hit(
+            contracts.CrashPoint.AFTER_DURABLE_COMMIT,
+            delivery=delivery,
+            outcome=outcome,
+        )
+    assert "event_id=event-1" in marker.read_text(encoding="utf-8")
+    injector.hit(
+        contracts.CrashPoint.AFTER_DURABLE_COMMIT,
+        delivery=delivery,
+        outcome=outcome,
+    )
 
 
 def test_coordinator_tick_reclaims_before_reading_new() -> None:
@@ -322,7 +394,28 @@ def test_coordinator_has_no_transport_sql_or_replay_side_effect_calls() -> None:
     assert "UPDATE " not in source
 
 
-def test_v2_flag_defaults_off_and_fails_closed_until_processor_is_installed() -> None:
+def test_v2_processor_and_executor_have_no_redis_ack_or_inline_sql() -> None:
+    for relative in ("request_processor.py", "replay_executor.py"):
+        source = (CLIP_ROOT / "app" / relative).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert "xack" not in calls, relative
+        assert "xreadgroup" not in calls, relative
+        assert "cursor" not in calls, relative
+        assert "SELECT " not in source, relative
+        assert "UPDATE " not in source, relative
+    executor_source = (
+        CLIP_ROOT / "app" / "replay_executor.py"
+    ).read_text(encoding="utf-8")
+    assert "create_job(" not in executor_source
+    assert "commit_handoff(" in executor_source
+
+
+def test_v2_flag_defaults_off_and_routes_to_the_installed_processor() -> None:
     helpers_path = ROOT / "harness" / "tests" / "test_clip_worker_queue_safety.py"
     spec = __import__("importlib.util").util.spec_from_file_location(
         "phase3_clip_helpers",
@@ -335,9 +428,13 @@ def test_v2_flag_defaults_off_and_fails_closed_until_processor_is_installed() ->
     helpers._activate()
     import app.worker as worker
 
+    default_config = helpers._clip_config(pending_claim_count=0)
     config = helpers._clip_config(
         coordinator_v2_enabled=True,
         pending_claim_count=0,
     )
-    with pytest.raises(RuntimeError, match="requires the Phase 3 processor"):
-        worker.run_worker(config, object(), object())
+    assert default_config.coordinator_v2_enabled is False
+    assert config.coordinator_v2_enabled is True
+    source = (CLIP_ROOT / "app" / "worker.py").read_text(encoding="utf-8")
+    assert "_run_worker_v2(cfg, redis_client, pg_conn)" in source
+    assert "requires the Phase 3 processor" not in source

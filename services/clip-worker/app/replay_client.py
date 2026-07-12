@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -9,6 +10,12 @@ from uuid import UUID
 from typing import Any, Dict, Optional
 
 import httpx
+
+from app.contracts import (
+    ReplayPlan,
+    ReplaySubmission,
+    ReplaySubmissionCode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +329,151 @@ class ReplayClient:
         resp.raise_for_status()
         data = resp.json()
         return data.get("new_job") or data.get("job_id") or data.get("id")
+
+    def submit_plan(self, plan: ReplayPlan) -> ReplaySubmission:
+        """Submit one immutable V2 plan and retain an explicit uncertainty type."""
+        payload = plan.payload()
+        resulting_stream_id = str(
+            payload.get("configuration", {}).get("resulting_stream_id") or ""
+        )
+        request_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            job_id = self._submit_job_payload(payload)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            code = (
+                ReplaySubmissionCode.PERMANENT_REJECTED
+                if 400 <= status < 500 and status not in {408, 409, 425, 429}
+                else ReplaySubmissionCode.UNCERTAIN
+            )
+            return ReplaySubmission(
+                code=code,
+                resulting_stream_id=resulting_stream_id,
+                request_json=request_json,
+                reason=f"Replay HTTP status {status}",
+            )
+        except Exception as exc:
+            return ReplaySubmission(
+                code=ReplaySubmissionCode.UNCERTAIN,
+                resulting_stream_id=resulting_stream_id,
+                request_json=request_json,
+                reason=f"{type(exc).__name__}:{exc}",
+            )
+        if not job_id:
+            return ReplaySubmission(
+                code=ReplaySubmissionCode.UNCERTAIN,
+                resulting_stream_id=resulting_stream_id,
+                request_json=request_json,
+                reason="Replay accepted request without a job identifier",
+            )
+        return ReplaySubmission(
+            code=ReplaySubmissionCode.CREATED,
+            job_id=str(job_id),
+            resulting_stream_id=resulting_stream_id,
+            request_json=request_json,
+        )
+
+    def recover_submission(
+        self,
+        *,
+        slot_token: str,
+        resulting_stream_id: str,
+    ) -> ReplaySubmission | None:
+        """Find an active Replay job for one logical slot without creating it."""
+        try:
+            response = httpx.get(
+                f"{self._base_url}/api/v1/job",
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            logger.exception(
+                "Replay job recovery query failed slot_token=%s stream=%s",
+                slot_token,
+                resulting_stream_id,
+            )
+            return None
+        jobs = payload.get("jobs") if isinstance(payload, dict) else payload
+        if not isinstance(jobs, list):
+            return None
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            labels = _nested_job_labels(job)
+            candidate_token = str(labels.get("replay_slot_token") or "")
+            candidate_stream = _nested_resulting_stream_id(job)
+            if slot_token and candidate_token == slot_token:
+                matched = True
+            else:
+                matched = bool(
+                    resulting_stream_id
+                    and candidate_stream == resulting_stream_id
+                )
+            if not matched:
+                continue
+            job_id = _nested_job_id(job)
+            if not job_id:
+                continue
+            return ReplaySubmission(
+                code=ReplaySubmissionCode.CREATED,
+                job_id=job_id,
+                resulting_stream_id=candidate_stream or resulting_stream_id,
+                request_json=json.dumps(
+                    job,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                reason="recovered_active_replay_job",
+            )
+        return None
+
+
+def _nested_job_labels(job: Dict[str, Any]) -> Dict[str, Any]:
+    direct = job.get("labels")
+    if isinstance(direct, dict):
+        return direct
+    configuration = job.get("configuration")
+    if isinstance(configuration, dict):
+        labels = configuration.get("labels")
+        if isinstance(labels, dict):
+            return labels
+    request = job.get("request") or job.get("job")
+    if isinstance(request, dict):
+        return _nested_job_labels(request)
+    return {}
+
+
+def _nested_resulting_stream_id(job: Dict[str, Any]) -> str:
+    direct = str(job.get("resulting_stream_id") or "")
+    if direct:
+        return direct
+    configuration = job.get("configuration")
+    if isinstance(configuration, dict):
+        value = str(configuration.get("resulting_stream_id") or "")
+        if value:
+            return value
+    request = job.get("request") or job.get("job")
+    if isinstance(request, dict):
+        return _nested_resulting_stream_id(request)
+    return ""
+
+
+def _nested_job_id(job: Dict[str, Any]) -> str:
+    for key in ("new_job", "job_id", "id", "name"):
+        value = str(job.get(key) or "")
+        if value:
+            return value
+    request = job.get("job")
+    if isinstance(request, dict):
+        return _nested_job_id(request)
+    return ""
 
 
 def _select_keyframe_uuid(

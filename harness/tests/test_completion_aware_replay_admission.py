@@ -671,5 +671,95 @@ def test_media_worker_releases_slot_on_sink_video_stable() -> None:
     sql = conn.cursor_obj.calls[0][0]
     params = conn.cursor_obj.calls[0][1]
     assert "replay_slot_status = 'released'" in sql
-    assert "replay_slot_release_reason = 'sink_video_stable'" in sql
+    assert "replay_slot_release_reason = CASE" in sql
+    assert "ELSE 'sink_video_stable'" in sql
     assert params["sink_video_to_stable_ms"] == 31000
+
+
+def test_media_worker_v2_release_is_fenced_by_token_job_and_stream() -> None:
+    _activate_media()
+    from app import worker
+
+    conn = _Conn()
+    assert worker._release_replay_slot_for_sink_stable(
+        conn,
+        event_id="00000000-0000-4000-8000-000000000208",
+        phase_diagnostics={
+            "sink_video_first_seen_at": "1970-01-01T00:00:10+00:00",
+            "sink_video_stable_at": "1970-01-01T00:00:41+00:00",
+        },
+        sink_metadata={
+            "replay_job_id": "job-208",
+            "configuration": {
+                "resulting_stream_id": "replay-event-208",
+                "labels": {"replay_slot_token": "slot-token-208"},
+            },
+        },
+    )
+
+    sql = conn.cursor_obj.calls[0][0]
+    params = conn.cursor_obj.calls[0][1]
+    assert "replay_slot_token = NULLIF" in sql
+    assert "replay_create_state = 'committed'" in sql
+    assert "OR replay_job_id =" in sql
+    assert "%(replay_job_id)s::text" in sql
+    assert "replay_resulting_stream_id =" in sql
+    assert params["replay_slot_token"] == "slot-token-208"
+    assert params["replay_job_id"] == "job-208"
+    assert params["resulting_stream_id"] == "replay-event-208"
+
+
+def test_media_worker_recovers_uncertain_create_from_verified_sink_receipt(
+    monkeypatch,
+) -> None:
+    _activate_media()
+    from app import worker
+
+    event_id = "00000000-0000-4000-8000-000000000209"
+    epoch = "midterm-epoch-209"
+    stream_id = f"replay-{epoch}-event-{event_id}"
+    token = "slot-token-209"
+    conn = _Conn(
+        rows=[
+            {
+                "replay_slot_token": token,
+                "replay_job_id": None,
+                "replay_resulting_stream_id": None,
+                "replay_create_state": "submitting",
+                "planned_replay_job_request": {
+                    "configuration": {
+                        "resulting_stream_id": stream_id,
+                        "labels": {
+                            "event_id": event_id,
+                            "runtime_epoch_id": epoch,
+                            "replay_slot_token": token,
+                        },
+                    }
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(worker, "_current_runtime_epoch_id", lambda _path: epoch)
+
+    assert worker._release_replay_slot_for_sink_stable(
+        conn,
+        event_id=event_id,
+        phase_diagnostics={
+            "sink_video_first_seen_at": "1970-01-01T00:00:10+00:00",
+            "sink_video_stable_at": "1970-01-01T00:00:11+00:00",
+        },
+        sink_metadata={
+            "source_id": stream_id,
+            "_meta_dir": f"/media/midterm/epochs/{epoch}/{stream_id}%/clip%",
+        },
+    )
+
+    assert len(conn.cursor_obj.calls) == 2
+    release_sql, params = conn.cursor_obj.calls[1]
+    assert "replay_create_state IN" in release_sql
+    assert "'submitting', 'uncertain'" in release_sql
+    assert "THEN 'sink_confirmed'" in release_sql
+    assert "'replay_sink_receipt'" in release_sql
+    assert params["sink_receipt_recovery"] is True
+    assert params["replay_slot_token"] == token
+    assert params["resulting_stream_id"] == stream_id

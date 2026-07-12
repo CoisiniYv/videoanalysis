@@ -91,6 +91,7 @@ REPLAY_LABEL_FIELDS = (
     "consumer_resolved_shard_id",
     "shard_mapping_version",
     "stream_session_id",
+    "replay_slot_token",
 )
 
 
@@ -140,6 +141,13 @@ def keyframe_from_request(req: Mapping[str, Any]) -> tuple[str | None, str]:
 
 def request_identity(req: Mapping[str, Any]) -> str:
     return f"{req.get('source_event_id', '')}:{req.get('strategy', '')}"
+
+
+def logical_replay_slot_token(event_id: str) -> str:
+    """Return the stable logical token used across Redis pending reclaim."""
+    return hashlib.sha256(
+        f"video-analytics:replay-slot:{event_id}".encode("utf-8")
+    ).hexdigest()
 
 
 def is_post_savant_media_request(req: Mapping[str, Any]) -> bool:

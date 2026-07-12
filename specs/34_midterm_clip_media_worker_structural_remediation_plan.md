@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: 执行中；Phase 0-2 已完成，Phase 3-7 尚未执行
+Status: 执行中；Phase 0-3 已完成，Phase 4-7 尚未完成
 
 Implementation checkpoint (2026-07-12):
 
@@ -36,9 +36,21 @@ Implementation checkpoint (2026-07-12):
 - the Clip parity proof is recorded in
   `docs/code_review/clip_media_phase2_clip_pure_plan_parity_2026-07-12.md` with
   token `PASS_CLIP_WORKER_PURE_PLAN_PARITY`;
-- Coordinator V2, ACK/consumer/repository extraction, long-lived Media
-  pools/lanes, complete scheduler V2, segment index, crash soak, pressure
-  closure and legacy removal remain unclaimed.
+- Spec 34 Phase 3 now has the complete one-message processor, centralized ACK,
+  malformed-request quarantine, typed Replay submission, recoverable
+  owner/token/generation fencing, deterministic planned-request persistence,
+  and a strictly verified Media sink-receipt bridge for the response-before-DB
+  crash window;
+- one-source, simultaneous two-source, after-durable-commit crash, and
+  after-Replay-response crash canaries passed with zero duplicate job/bundle,
+  zero pending/lag, and zero active slot; Coordinator V2 is now the tracked
+  default and the runtime crash injector is empty;
+- the implementation and artifact proof are recorded in
+  `docs/code_review/clip_media_phase3c_coordinator_v2_recoverable_2026-07-12.md`
+  with token `PASS_CLIP_WORKER_COORDINATOR_V2_RECOVERABLE`;
+- long-lived Media pools/lanes, complete Scheduler V2, segment index, full
+  cross-worker soak, two 60-source closure runs and legacy removal remain
+  unclaimed.
 
 ## 0. 执行摘要
 
@@ -663,9 +675,21 @@ idempotence application against PostgreSQL 16, and a rollback-only real-DB test
 proved that the pre-takeover owner cannot commit while the new generation can.
 The pre-migration runtime DB backup and verification are recorded in
 `docs/code_review/clip_media_phase3b_replay_slot_fencing_2026-07-12.md`.
-Coordinator V2 is still disabled: the one-message business processor, Replay
-uncertain-response recovery, centralized outcome mapping and runtime canaries
-remain before the Phase 3 acceptance token can be claimed.
+Implementation checkpoint (Phase 3C, 2026-07-12): the full one-message
+processor, centralized outcome/ACK mapping, dead-letter-before-ACK behavior,
+typed Replay submission, permanent-rejection terminal transaction, and reclaim
+path are active. Reclaimed active slots bypass new-request scheduling gates and
+recover by token/resulting-stream without a second Replay create. The immutable
+planned request is durable before Replay submission; if the process dies after
+the response but before the normal handoff, Media Worker may accept actual sink
+output only when event, token, resulting stream, epoch and sink path all match,
+then records an honest `replay_sink_receipt`/`sink_confirmed` handoff without
+inventing the unavailable Replay job ID. One-source, two-source and two crash
+boundaries converged with zero duplicate, pending, lag or active slot. Runtime
+artifact and detailed proof are recorded in
+`docs/code_review/clip_media_phase3c_coordinator_v2_recoverable_2026-07-12.md`.
+Coordinator V2 is now the tracked default; crash injection remains opt-in and
+empty in normal runtime. Phase 3 is complete.
 
 Acceptance token:
 

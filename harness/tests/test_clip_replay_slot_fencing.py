@@ -185,12 +185,20 @@ def test_replay_create_and_handoff_writes_are_fenced_and_atomic() -> None:
         slot_token="slot-token-1",
         slot_generation=1,
         plan_hash="plan-1",
+        replay_job_request={
+            "configuration": {
+                "resulting_stream_id": "replay-event-303",
+                "labels": {"replay_slot_token": "slot-token-1"},
+            }
+        },
     )
     started_sql = started.cursor_obj.calls[0][0]
     assert "replay_create_state = 'submitting'" in started_sql
     assert "replay_slot_owner = %(owner)s" in started_sql
     assert "replay_slot_token = %(slot_token)s" in started_sql
     assert "replay_slot_generation = %(slot_generation)s" in started_sql
+    assert "'planned_request'" in started_sql
+    assert "'replay_job_request'" in started_sql
 
     committed = _Connection(
         rows=[{"task_updated": True, "event_updated": True}]
@@ -220,6 +228,36 @@ def test_replay_create_and_handoff_writes_are_fenced_and_atomic() -> None:
     assert params["replay_job_id"] == "job-1"
 
 
+def test_permanent_replay_rejection_aborts_task_event_and_slot_atomically() -> None:
+    repository, _adapter = _activate()
+    connection = _Connection(
+        rows=[{"task_updated": True, "event_updated": True}]
+    )
+
+    assert repository.abort_fenced_replay_create(
+        connection,
+        event_id="00000000-0000-4000-8000-000000000304",
+        owner="clip-a",
+        slot_token="slot-token-1",
+        slot_generation=1,
+        plan_hash="plan-1",
+        reason="Replay HTTP status 400",
+        diagnostics={"replay_submission_code": "permanent_rejected"},
+    )
+
+    sql, params = connection.cursor_obj.calls[0]
+    assert "WITH aborted_task AS" in sql
+    assert "aborted_event AS" in sql
+    assert "materialization_status = 'materialization_failed'" in sql
+    assert "replay_create_state = 'aborted'" in sql
+    assert "replay_slot_status = 'released'" in sql
+    assert "et.replay_slot_owner = %(owner)s" in sql
+    assert "et.replay_slot_token = %(slot_token)s" in sql
+    assert "et.replay_slot_generation = %(slot_generation)s" in sql
+    assert "et.replay_plan_hash = %(plan_hash)s" in sql
+    assert params["reason_code"] == "replay_permanent_rejected"
+
+
 def test_named_adapter_never_drops_the_fence(monkeypatch) -> None:
     _repository, adapter_module = _activate()
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -247,7 +285,10 @@ def test_named_adapter_never_drops_the_fence(monkeypatch) -> None:
         plan_hash="plan-1",
     )
     assert reservation and reservation.acquired
-    assert admission.mark_submitting(reservation)
+    assert admission.mark_submitting(
+        reservation,
+        replay_job_request={"configuration": {}},
+    )
     assert admission.commit_handoff(
         reservation,
         replay_job_id="job-1",

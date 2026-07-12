@@ -57,3 +57,11 @@ class EvidenceStateRepository:
             "materialization_deferred",
             **kwargs,
         )
+
+    def mark_skipped(self, event_id: str, **kwargs: Any) -> bool:
+        return repository.update_clip_status(
+            self.connection,
+            event_id,
+            "skipped_by_poc_limit",
+            **kwargs,
+        )

@@ -31,6 +31,12 @@ class ProcessingCode(str, Enum):
     UNEXPECTED_FAILURE = "unexpected_failure"
 
 
+class ReplaySubmissionCode(str, Enum):
+    CREATED = "created"
+    PERMANENT_REJECTED = "permanent_rejected"
+    UNCERTAIN = "uncertain"
+
+
 class CrashPoint(str, Enum):
     BEFORE_REPLAY_CREATE = "before_replay_create"
     AFTER_REPLAY_RESPONSE = "after_replay_response"
@@ -73,6 +79,21 @@ class ProcessingOutcome:
 
     def with_ack_performed(self, value: bool) -> "ProcessingOutcome":
         return replace(self, ack_performed=bool(value))
+
+
+@dataclass(frozen=True)
+class ReplaySubmission:
+    code: ReplaySubmissionCode
+    job_id: str = ""
+    resulting_stream_id: str = ""
+    request_json: str = "{}"
+    reason: str = ""
+
+    def request(self) -> dict[str, Any]:
+        value = json.loads(self.request_json)
+        if not isinstance(value, dict):
+            raise ValueError("Replay submission request is not an object")
+        return value
 
 
 @dataclass(frozen=True)

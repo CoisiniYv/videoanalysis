@@ -848,12 +848,24 @@ def test_midterm_replay_uses_constant_cadence_by_default() -> None:
         "${CLIP_WORKER_PLANNER_SHADOW_ENABLED:-true}"
     )
     assert clip_env["CLIP_WORKER_COORDINATOR_V2_ENABLED"] == (
-        "${CLIP_WORKER_COORDINATOR_V2_ENABLED:-false}"
+        "${CLIP_WORKER_COORDINATOR_V2_ENABLED:-true}"
+    )
+    assert clip_env["CLIP_WORKER_CRASH_INJECT_POINT"] == (
+        "${CLIP_WORKER_CRASH_INJECT_POINT:-}"
+    )
+    assert clip_env["CLIP_WORKER_CRASH_INJECT_MARKER"] == (
+        "${CLIP_WORKER_CRASH_INJECT_MARKER:-}"
+    )
+    assert clip_env["CLIP_WORKER_CRASH_INJECT_EXIT_CODE"] == (
+        "${CLIP_WORKER_CRASH_INJECT_EXIT_CODE:-91}"
     )
     assert clip_env["REPLAY_TS_SYNC"] == "${REPLAY_TS_SYNC:-false}"
     assert env_file["REPLAY_FORCE_CONSTANT_CADENCE"] == "true"
     assert env_file["CLIP_WORKER_PLANNER_SHADOW_ENABLED"] == "true"
-    assert env_file["CLIP_WORKER_COORDINATOR_V2_ENABLED"] == "false"
+    assert env_file["CLIP_WORKER_COORDINATOR_V2_ENABLED"] == "true"
+    assert env_file["CLIP_WORKER_CRASH_INJECT_POINT"] == ""
+    assert env_file["CLIP_WORKER_CRASH_INJECT_MARKER"] == ""
+    assert env_file["CLIP_WORKER_CRASH_INJECT_EXIT_CODE"] == "91"
     assert env_file["REPLAY_TS_SYNC"] == "false"
 
 

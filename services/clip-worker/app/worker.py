@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from collections.abc import Callable
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, replace
@@ -17,6 +18,7 @@ import psycopg
 from redis import Redis
 
 from app.config import Config, load_config
+from app.coordinator import ClipCoordinator, RuntimeOnceCrashInjector
 from app.contracts import (
     ActiveReplayJob,
     ClipGateContext,
@@ -33,6 +35,10 @@ from app.proof_resolver import (
     BoundedProofResolver,
     proof_lookup_concurrency_gate as _proof_lookup_concurrency_gate,
 )
+from app.evidence_state_repository import EvidenceStateRepository
+from app.replay_admission_repository import ReplayAdmissionRepository
+from app.request_consumer import ConsumerSettings, RequestConsumer
+from app.request_processor import ClipRequestProcessorV2
 from app.replay_client import ReplayClient, _uuid7_timestamp_ms, build_job_payload
 from app.replay_planner import (
     apply_replay_anchor_to_request as plan_replay_anchor_request,
@@ -3274,9 +3280,8 @@ def run_worker(
     cfg: Config, redis_client: Redis, pg_conn: psycopg.Connection
 ) -> None:
     if cfg.coordinator_v2_enabled:
-        raise RuntimeError(
-            "CLIP_WORKER_COORDINATOR_V2_ENABLED requires the Phase 3 processor"
-        )
+        _run_worker_v2(cfg, redis_client, pg_conn)
+        return
     stream = cfg.record_request_stream
     group = cfg.consumer_group
     consumer = cfg.consumer_name
@@ -4586,3 +4591,118 @@ def run_worker(
             time.sleep(1)
 
     logger.info("clip-worker stopped: total_processed=%d", total_processed)
+
+
+def _run_worker_v2(
+    cfg: Config,
+    redis_client: Redis,
+    pg_conn: psycopg.Connection,
+) -> None:
+    """Composition root and bounded main loop for Clip Coordinator V2."""
+    consumer = RequestConsumer(
+        redis_client,
+        ConsumerSettings(
+            stream=cfg.record_request_stream,
+            group=cfg.consumer_group,
+            consumer=cfg.consumer_name,
+            poll_timeout_ms=cfg.poll_timeout_ms,
+            read_count=10,
+            pending_claim_min_idle_ms=cfg.pending_claim_min_idle_ms,
+            pending_claim_count=cfg.pending_claim_count,
+        ),
+    )
+    consumer.ensure_group()
+    crash_injector = RuntimeOnceCrashInjector.from_env()
+    legacy_module = sys.modules.get(__name__) or SimpleNamespace(**globals())
+    processor = ClipRequestProcessorV2(
+        cfg=cfg,
+        redis_client=redis_client,
+        consumer=consumer,
+        evidence_state=EvidenceStateRepository(pg_conn),
+        replay_admission=ReplayAdmissionRepository(pg_conn),
+        legacy=legacy_module,
+        crash_injector=crash_injector,
+    )
+    coordinator = ClipCoordinator(
+        consumer,
+        processor,
+        crash_injector=crash_injector,
+    )
+    total_processed = 0
+    last_pending_claim_at = 0.0
+    last_expire_check_at = 0.0
+    last_report = time.monotonic()
+    logger.info(
+        "clip-worker coordinator-v2 started stream=%s group=%s consumer=%s "
+        "pending_claim_min_idle_ms=%s pending_claim_count=%s "
+        "planner_shadow_enabled=%s",
+        cfg.record_request_stream,
+        cfg.consumer_group,
+        cfg.consumer_name,
+        cfg.pending_claim_min_idle_ms,
+        cfg.pending_claim_count,
+        cfg.planner_shadow_enabled,
+    )
+    while not shutdown_requested:
+        try:
+            now = time.monotonic()
+            if now - last_expire_check_at >= 30.0 or cfg.run_once:
+                expired = expire_materialization_deadlines(pg_conn)
+                if expired:
+                    logger.info(
+                        "clip_worker_materialization_expired count=%s",
+                        expired,
+                    )
+                last_expire_check_at = now
+            reclaim = bool(
+                cfg.pending_claim_count > 0
+                and now - last_pending_claim_at
+                >= max(0.0, cfg.pending_claim_interval_s)
+            )
+            outcomes = coordinator.tick(reclaim=reclaim)
+            if reclaim:
+                last_pending_claim_at = now
+            total_processed += len(outcomes)
+            for outcome in outcomes:
+                logger.info(
+                    "clip_coordinator_v2_outcome message_processed=true "
+                    "event_id=%s request_id=%s code=%s durable=%s ack=%s "
+                    "reason=%s replay_job_id=%s slot_token=%s",
+                    outcome.event_id,
+                    outcome.request_id,
+                    outcome.code.value,
+                    outcome.durable,
+                    outcome.ack_performed,
+                    outcome.reason,
+                    outcome.replay_job_id,
+                    outcome.slot_token,
+                )
+            now = time.monotonic()
+            if now - last_report >= 60.0:
+                diagnostics = consumer.diagnostics()
+                logger.info(
+                    "clip-worker coordinator-v2 summary: total_processed=%d "
+                    "redis_pending=%s redis_lag=%s",
+                    total_processed,
+                    diagnostics.get("pending"),
+                    diagnostics.get("lag"),
+                )
+                last_report = now
+            if cfg.run_once:
+                logger.info(
+                    "clip-worker coordinator-v2 run_once completed: "
+                    "total_processed=%d jobs_created=%d",
+                    total_processed,
+                    processor.jobs_created,
+                )
+                break
+        except Exception:
+            logger.exception("coordinator-v2 loop error, sleeping 1s")
+            if cfg.run_once:
+                raise
+            time.sleep(1)
+    logger.info(
+        "clip-worker coordinator-v2 stopped: total_processed=%d jobs_created=%d",
+        total_processed,
+        processor.jobs_created,
+    )
