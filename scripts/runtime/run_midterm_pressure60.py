@@ -1175,7 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
         if cfg.cuda_mps:
             report["cuda_mps_start"] = start_cuda_mps(cfg)
         rtsp_republishers = start_rtsp_republishers(cfg)
-        insert_pressure_cameras(conn, cfg)
+        report["pressure_camera_provisioning"] = insert_pressure_cameras(conn, cfg)
         if cfg.dual_shard_same_gpu:
             if cfg.dual_shard_api:
                 start_dual_shard_runtime(cfg)
@@ -1976,7 +1976,7 @@ def wait_for_evidence_guard_clear(conn, cfg: PressureConfig) -> dict[str, Any]:
 
 def fetch_cameras(conn) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT id, name, source_id, enabled, rtsp_url FROM cameras ORDER BY name"
+        "SELECT id, name, source_id, site_id, enabled, rtsp_url FROM cameras ORDER BY name"
     ).fetchall()
     return [_row_json(row) for row in rows]
 
@@ -4173,14 +4173,97 @@ def pressure_camera_name(index: int) -> str:
     return f"压力摄像头 {index + 1:02d}"
 
 
-def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
+def pressure_camera_location(index: int) -> str:
+    """Return the stable database slot for one reusable pressure camera."""
+    if index < 0:
+        raise ValueError("pressure camera index must be non-negative")
+    return f"pressure-{index:02d}"
+
+
+def _ensure_pressure_rule(
+    conn,
+    *,
+    camera_id: str,
+    zone_id: str | None,
+    rule_type: str,
+    algorithm_id: str,
+    rule_id: str,
+    config: dict[str, Any],
+    evidence_policy: dict[str, Any],
+) -> None:
+    """Update an existing pressure rule in place, or create it once."""
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM camera_rules
+        WHERE camera_id=%s
+          AND (rule_id=%s OR algorithm_id=%s OR rule_type=%s)
+        ORDER BY
+            CASE WHEN rule_id=%s THEN 0 WHEN algorithm_id=%s THEN 1 ELSE 2 END,
+            id
+        LIMIT 1
+        FOR UPDATE
+        """,
+        (camera_id, rule_id, algorithm_id, rule_type, rule_id, algorithm_id),
+    ).fetchone()
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO camera_rules (
+                camera_id, zone_id, rule_type, config, enabled,
+                rule_id, algorithm_id, evidence_policy
+            )
+            VALUES (%s, %s, %s, %s::jsonb, true, %s, %s, %s::jsonb)
+            """,
+            (
+                camera_id,
+                zone_id,
+                rule_type,
+                json.dumps(config),
+                rule_id,
+                algorithm_id,
+                json.dumps(evidence_policy),
+            ),
+        )
+        return
+
+    row = _row_json(existing)
+    conn.execute(
+        """
+        UPDATE camera_rules
+        SET zone_id=%s, rule_type=%s, config=%s::jsonb, enabled=true,
+            rule_id=%s, algorithm_id=%s, evidence_policy=%s::jsonb,
+            updated_at=now()
+        WHERE id=%s
+        """,
+        (
+            zone_id,
+            rule_type,
+            json.dumps(config),
+            rule_id,
+            algorithm_id,
+            json.dumps(evidence_policy),
+            row["id"],
+        ),
+    )
+
+
+def insert_pressure_cameras(conn, cfg: PressureConfig) -> dict[str, Any]:
+    """Enable stable pressure-camera slots, creating only missing slots.
+
+    A source ID remains scoped to the current run so events and artifacts are
+    attributable to that run.  The camera row itself is instead identified by
+    the stable ``site_id=pressure`` and ``location=pressure-NN`` slot.
+    """
+    created: list[str] = []
+    reused: list[str] = []
     with conn.transaction():
         conn.execute("UPDATE cameras SET enabled=false, updated_at=now()")
         for index in range(cfg.stream_count):
-            camera_id = str(uuid.uuid4())
             source_id = f"{cfg.run_id}_{index:02d}"
-            zone_id = f"{source_id}_full_frame"
             camera_name = pressure_camera_name(index)
+            location = pressure_camera_location(index)
+            zone_id = f"{location}_full_frame"
             rtsp_uri = pressure_rtsp_uri(cfg, index=index, source_id=source_id)
             evidence_policy = evidence_policy_for_index(cfg, index)
             watchlist_evidence_policy = face_image_evidence_policy()
@@ -4200,23 +4283,56 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                 "store_suppressed_events": True,
             }
             points = [[0.0, 0.0], [1920.0, 0.0], [1920.0, 1080.0], [0.0, 1080.0]]
-            conn.execute(
+            existing = conn.execute(
                 """
-                INSERT INTO cameras (
-                    id, source_id, name, rtsp_url, site_id, location, gpu_id,
-                    enabled, input_type, rtsp_transport, fps_policy, alert_policy
-                )
-                VALUES (%s, %s, %s, %s, 'pressure', %s, 0, true, 'rtsp', 'tcp', '{}'::jsonb, %s::jsonb)
+                SELECT id
+                FROM cameras
+                WHERE site_id='pressure' AND location=%s
+                ORDER BY updated_at DESC, created_at DESC, id
+                LIMIT 1
+                FOR UPDATE
                 """,
-                (
-                    str(camera_id),
-                    source_id,
-                    camera_name,
-                    rtsp_uri,
-                    f"pressure-{index:02d}",
-                    json.dumps(alert_policy),
-                ),
-            )
+                (location,),
+            ).fetchone()
+            if existing is None:
+                camera_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO cameras (
+                        id, source_id, name, rtsp_url, site_id, location, gpu_id,
+                        enabled, input_type, rtsp_transport, fps_policy, alert_policy
+                    )
+                    VALUES (%s, %s, %s, %s, 'pressure', %s, 0, true, 'rtsp', 'tcp', '{}'::jsonb, %s::jsonb)
+                    """,
+                    (
+                        camera_id,
+                        source_id,
+                        camera_name,
+                        rtsp_uri,
+                        location,
+                        json.dumps(alert_policy),
+                    ),
+                )
+                created.append(camera_id)
+            else:
+                camera_id = str(_row_json(existing)["id"])
+                conn.execute(
+                    """
+                    UPDATE cameras
+                    SET source_id=%s, name=%s, rtsp_url=%s, gpu_id=0, enabled=true,
+                        input_type='rtsp', rtsp_transport='tcp', fps_policy='{}'::jsonb,
+                        alert_policy=%s::jsonb, updated_at=now()
+                    WHERE id=%s
+                    """,
+                    (
+                        source_id,
+                        camera_name,
+                        rtsp_uri,
+                        json.dumps(alert_policy),
+                        camera_id,
+                    ),
+                )
+                reused.append(camera_id)
             conn.execute(
                 """
                 INSERT INTO camera_zones (
@@ -4224,6 +4340,11 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                     coordinate_space, points, enabled, payload
                 )
                 VALUES (%s, %s, %s, 'polygon', 'pixel', %s::jsonb, true, '{}'::jsonb)
+                ON CONFLICT (camera_id, zone_name) DO UPDATE
+                SET zone_id=EXCLUDED.zone_id, zone_type=EXCLUDED.zone_type,
+                    coordinate_space=EXCLUDED.coordinate_space,
+                    points=EXCLUDED.points, enabled=true,
+                    payload=EXCLUDED.payload, updated_at=now()
                 """,
                 (camera_id, zone_id, "full frame", json.dumps(points)),
             )
@@ -4251,31 +4372,34 @@ def insert_pressure_cameras(conn, cfg: PressureConfig) -> None:
                 "target_names": ["Reese", "Finch"],
                 "target_external_person_ids": ["demo:midterm:reese", "demo:midterm:finch"],
             }
-            conn.execute(
-                """
-                INSERT INTO camera_rules (camera_id, zone_id, rule_type, config, enabled, rule_id, algorithm_id, evidence_policy)
-                VALUES (%s, %s, 'intrusion', %s::jsonb, true, %s, 'behavior.intrusion', %s::jsonb)
-                """,
-                (
-                    camera_id,
-                    zone_id,
-                    json.dumps(intrusion_config),
-                    f"{source_id}_intrusion",
-                    json.dumps(evidence_policy),
-                ),
+            _ensure_pressure_rule(
+                conn,
+                camera_id=camera_id,
+                zone_id=zone_id,
+                rule_type="intrusion",
+                algorithm_id="behavior.intrusion",
+                rule_id=f"{location}_intrusion",
+                config=intrusion_config,
+                evidence_policy=evidence_policy,
             )
-            conn.execute(
-                """
-                INSERT INTO camera_rules (camera_id, zone_id, rule_type, config, enabled, rule_id, algorithm_id, evidence_policy)
-                VALUES (%s, NULL, 'face.watchlist', %s::jsonb, true, %s, 'face.watchlist', %s::jsonb)
-                """,
-                (
-                    camera_id,
-                    json.dumps(watchlist_config),
-                    f"{source_id}_watchlist",
-                    json.dumps(watchlist_evidence_policy),
-                ),
+            _ensure_pressure_rule(
+                conn,
+                camera_id=camera_id,
+                zone_id=None,
+                rule_type="face.watchlist",
+                algorithm_id="face.watchlist",
+                rule_id=f"{location}_watchlist",
+                config=watchlist_config,
+                evidence_policy=watchlist_evidence_policy,
             )
+    return {
+        "camera_slots_requested": cfg.stream_count,
+        "created_count": len(created),
+        "reused_count": len(reused),
+        "created_camera_ids": created,
+        "reused_camera_ids": reused,
+        "source_ids": pressure_source_ids(cfg),
+    }
 
 
 def sync_module_config_snapshot(cfg: PressureConfig) -> dict[str, Any]:
@@ -7987,17 +8111,14 @@ def cleanup_pressure_data(
             "DELETE FROM events WHERE source_id LIKE %s AND NOT (id = ANY(%s::uuid[]))",
             (prefix, list(keep_event_ids)),
         ).rowcount
-        cleanup["deleted_rules"] = conn.execute(
-            "DELETE FROM camera_rules WHERE camera_id IN (SELECT id FROM cameras WHERE source_id LIKE %s)",
+        cleanup["disabled_cameras"] = conn.execute(
+            "UPDATE cameras SET enabled=false, updated_at=now() WHERE source_id LIKE %s",
             (prefix,),
         ).rowcount
-        cleanup["deleted_zones"] = conn.execute(
-            "DELETE FROM camera_zones WHERE camera_id IN (SELECT id FROM cameras WHERE source_id LIKE %s)",
-            (prefix,),
-        ).rowcount
-        cleanup["deleted_cameras"] = conn.execute(
-            "DELETE FROM cameras WHERE source_id LIKE %s", (prefix,)
-        ).rowcount
+        cleanup["deleted_rules"] = 0
+        cleanup["deleted_zones"] = 0
+        cleanup["deleted_cameras"] = 0
+        cleanup["camera_configs_retained"] = True
     cleanup["runtime_sources_apply_after_camera_cleanup"] = apply_sources_only(
         cfg,
         "runtime_sources_apply_after_pressure_cleanup.json",
@@ -8452,13 +8573,20 @@ def cleanup_after_aborted_run(
 
 
 def _is_pressure_source_id(source_id: str) -> bool:
-    return bool(re.match(r"^rc\d+_", str(source_id or "")))
+    return bool(re.match(r"^(?:rc\d+_|pressure\d*_)", str(source_id or "")))
+
+
+def _is_pressure_camera(camera: dict[str, Any]) -> bool:
+    return (
+        str(camera.get("site_id") or "") == "pressure"
+        or _is_pressure_source_id(str(camera.get("source_id") or ""))
+    )
 
 
 def restore_cameras(conn, cameras: list[dict[str, Any]]) -> None:
     with conn.transaction():
         for camera in cameras:
-            if _is_pressure_source_id(str(camera.get("source_id") or "")):
+            if _is_pressure_camera(camera):
                 continue
             conn.execute(
                 "UPDATE cameras SET enabled=%s, updated_at=now() WHERE id=%s",

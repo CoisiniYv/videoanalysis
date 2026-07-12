@@ -164,6 +164,12 @@ def test_restore_cameras_does_not_reenable_stale_pressure_sources() -> None:
                 "source_id": "rc400_rawtap_fix_20260706T173642Z_00",
                 "enabled": True,
             },
+            {
+                "id": "reusable-pressure-slot",
+                "source_id": "pressure60_previous_00",
+                "site_id": "pressure",
+                "enabled": True,
+            },
         ],
     )
 
@@ -175,7 +181,98 @@ def test_restore_cameras_does_not_reenable_stale_pressure_sources() -> None:
     ]
 
 
-def test_pressure_cleanup_syncs_runtime_sources_after_camera_deletes() -> None:
+def test_pressure_camera_provisioning_reuses_stable_slots_without_reinserting() -> None:
+    module = _load_module()
+    cfg = _config(module, stream_count=1)
+
+    class FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Result:
+        def __init__(self, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def transaction(self):
+            return FakeTx()
+
+        def execute(self, query, params=None):
+            self.calls.append((query, params))
+            if "site_id='pressure' AND location=%s" in query:
+                return Result({"id": "reusable-pressure-slot"})
+            if "FROM camera_rules" in query:
+                return Result({"id": 11})
+            return Result()
+
+    conn = FakeConn()
+    summary = module.insert_pressure_cameras(conn, cfg)
+    queries = [" ".join(query.split()) for query, _params in conn.calls]
+
+    assert module.pressure_camera_location(0) == "pressure-00"
+    assert summary["created_count"] == 0
+    assert summary["reused_count"] == 1
+    assert not any("INSERT INTO cameras" in query for query in queries)
+    assert any("UPDATE cameras SET source_id=%s" in query for query in queries)
+    assert any("ON CONFLICT (camera_id, zone_name)" in query for query in queries)
+    assert sum("UPDATE camera_rules" in query for query in queries) == 2
+
+
+def test_pressure_camera_provisioning_creates_only_missing_slots() -> None:
+    module = _load_module()
+    cfg = _config(module, stream_count=1)
+
+    class FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Result:
+        def fetchone(self):
+            return None
+
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def transaction(self):
+            return FakeTx()
+
+        def execute(self, query, params=None):
+            self.calls.append((query, params))
+            return Result()
+
+    conn = FakeConn()
+    summary = module.insert_pressure_cameras(conn, cfg)
+    queries = [" ".join(query.split()) for query, _params in conn.calls]
+
+    assert summary["created_count"] == 1
+    assert summary["reused_count"] == 0
+    assert sum("INSERT INTO cameras" in query for query in queries) == 1
+
+
+def test_discard_pressure_cleanup_disables_and_retains_camera_configs() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    cleanup_source = source[source.index("def cleanup_pressure_data(") : source.index("def cleanup_pressure_runtime_only(")]
+
+    assert "UPDATE cameras SET enabled=false" in cleanup_source
+    assert "DELETE FROM cameras WHERE source_id LIKE %s" not in cleanup_source
+    assert "DELETE FROM camera_rules WHERE camera_id IN" not in cleanup_source
+    assert "DELETE FROM camera_zones WHERE camera_id IN" not in cleanup_source
+
+
+def test_pressure_cleanup_syncs_runtime_sources_after_camera_disable() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert "runtime_sources_apply_after_pressure_cleanup.json" in source
