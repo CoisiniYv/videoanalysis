@@ -10,6 +10,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT.parent / "services" / "media-worker" / "app" / "evidence_db_index.py"
+PHASE0_MEDIA_GOLDEN = (
+    ROOT / "fixtures" / "clip_media_phase0" / "media_bundle_golden.json"
+)
 
 
 def _load_module():
@@ -135,9 +138,12 @@ def test_expanded_db_rows_do_not_publish_pruned_sidecar_artifacts(
     tmp_path: Path,
 ) -> None:
     module = _load_module()
+    golden = json.loads(PHASE0_MEDIA_GOLDEN.read_text(encoding="utf-8"))
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    (bundle / "raw_clip.mov").write_bytes(b"video")
+    (bundle / "raw_clip.mov").write_bytes(
+        golden["raw_clip_bytes_utf8"].encode("utf-8")
+    )
     (bundle / "metadata.json").write_text(
         json.dumps({"event": {"event_id": "11111111-1111-4111-8111-111111111111"}}),
         encoding="utf-8",
@@ -164,6 +170,7 @@ def test_expanded_db_rows_do_not_publish_pruned_sidecar_artifacts(
         conn,
         event_id="11111111-1111-4111-8111-111111111111",
         bundle_dir=bundle,
+        compute_sha256=True,
         include_timeline=True,
         include_overlays=True,
     )
@@ -173,7 +180,13 @@ def test_expanded_db_rows_do_not_publish_pruned_sidecar_artifacts(
         for query, params in conn.cursor_obj.executions
         if "INSERT INTO evidence_artifacts" in query
     ]
-    assert artifact_types == ["raw_clip"]
-    assert result["artifacts"] == 1
-    assert result["timeline_rows"] == 1
-    assert result["overlay_rows"] == 1
+    assert artifact_types == golden["artifact_types"]
+    assert result["artifacts"] == golden["artifact_count"]
+    assert result["timeline_rows"] == golden["timeline_rows"]
+    assert result["overlay_rows"] == golden["overlay_rows"]
+    raw_artifact_params = next(
+        params
+        for query, params in conn.cursor_obj.executions
+        if "INSERT INTO evidence_artifacts" in query
+    )
+    assert raw_artifact_params["sha256"] == golden["raw_clip_sha256"]

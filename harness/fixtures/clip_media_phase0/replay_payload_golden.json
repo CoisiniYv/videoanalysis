@@ -1,0 +1,96 @@
+{
+  "schema_version": "replay-payload-golden-v1",
+  "scenarios": [
+    {
+      "name": "normal_full_window",
+      "arguments": {
+        "source_id": "source-1",
+        "keyframe_uuid": "start-keyframe",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+        "sink_endpoint": "dealer+connect:tcp://video-file-sink:6666",
+        "labels": {
+          "event_id": "11111111-1111-4111-8111-111111111111",
+          "runtime_epoch_id": "epoch-1",
+          "stream_session_id": "session-1",
+          "frame_domain_session_policy": "strict_single_session",
+          "pre_window_policy": "full_requested_window"
+        },
+        "stop_condition_mode": "ts_delta_sec",
+        "fps": 30
+      },
+      "expected_paths": {
+        "configuration.stored_stream_id": "source-1",
+        "configuration.resulting_stream_id": "replay-epoch-1-event-11111111-1111-4111-8111-111111111111",
+        "configuration.ts_sync": false,
+        "configuration.max_delivery_duration.secs": 30,
+        "configuration.ts_discrepancy_fix_duration.nanos": 33333333,
+        "stop_condition.ts_delta_sec.max_delta_sec": 10.0,
+        "anchor_keyframe": "start-keyframe",
+        "offset.seconds": 5.0,
+        "sink.options.send_retries": 5,
+        "sink.options.send_hwm": 10000
+      }
+    },
+    {
+      "name": "truncated_pre_window",
+      "arguments": {
+        "source_id": "source-1",
+        "keyframe_uuid": "current-session-keyframe",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+        "sink_endpoint": "dealer+connect:tcp://video-file-sink:6666",
+        "labels": {
+          "event_id": "22222222-2222-4222-8222-222222222222",
+          "runtime_epoch_id": "epoch-1",
+          "stream_session_id": "session-2",
+          "original_requested_start_pts": "5000000000",
+          "effective_start_pts": "9250000000",
+          "requested_end_pts": "15000000000",
+          "pre_window_truncated": "true",
+          "pre_window_policy": "truncated_to_current_session",
+          "frame_domain_session_policy": "strict_single_session"
+        },
+        "stop_condition_mode": "ts_delta_sec",
+        "fps": 30,
+        "offset_seconds_override": 0.0,
+        "duration_seconds_override": 16.75
+      },
+      "expected_paths": {
+        "configuration.resulting_stream_id": "replay-epoch-1-event-22222222-2222-4222-8222-222222222222",
+        "stop_condition.ts_delta_sec.max_delta_sec": 16.75,
+        "offset.seconds": 0.0,
+        "configuration.labels.pre_window_truncated": "true",
+        "configuration.labels.effective_start_pts": "9250000000"
+      }
+    },
+    {
+      "name": "cross_session_post_proof",
+      "arguments": {
+        "source_id": "source-1",
+        "keyframe_uuid": "start-keyframe",
+        "pre_seconds": 5,
+        "post_seconds": 5,
+        "sink_endpoint": "dealer+connect:tcp://video-file-sink:6666",
+        "labels": {
+          "event_id": "33333333-3333-4333-8333-333333333333",
+          "runtime_epoch_id": "epoch-1",
+          "stream_session_id": "session-1",
+          "start_window_stream_session_id": "session-1",
+          "post_window_stream_session_id": "session-2",
+          "post_window_cross_session_proof_used": "true",
+          "frame_domain_session_policy": "post_window_cross_session_pts_verified"
+        },
+        "stop_condition_mode": "ts_delta_sec",
+        "fps": 30
+      },
+      "expected_paths": {
+        "configuration.labels.start_window_stream_session_id": "session-1",
+        "configuration.labels.post_window_stream_session_id": "session-2",
+        "configuration.labels.post_window_cross_session_proof_used": "true",
+        "configuration.labels.frame_domain_session_policy": "post_window_cross_session_pts_verified",
+        "stop_condition.ts_delta_sec.max_delta_sec": 10.0
+      }
+    }
+  ]
+}

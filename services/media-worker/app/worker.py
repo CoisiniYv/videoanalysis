@@ -24,6 +24,10 @@ from app.annotated_snapshot import generate_annotated_snapshot
 from app.config import Config, load_config
 from app.evidence_db_index import upsert_evidence_bundle_index
 from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
+from app.legacy_observability import (
+    guard_failure_attribution,
+    materialization_correlation,
+)
 from app.post_savant_evidence_bundle import (
     EVIDENCE_TOPOLOGY as POST_SAVANT_REPLAY_EVIDENCE_TOPOLOGY,
     RAW_CLIP_FILE,
@@ -2733,6 +2737,8 @@ def _post_savant_materialization_metrics(
     finished_at: datetime,
     finalization_duration_ms: int,
     finalization_process_cpu_seconds: float | None = None,
+    finalization_thread_cpu_seconds: float | None = None,
+    job_probe_metrics: dict[str, int] | None = None,
     materialization_guardrails: dict | None = None,
     phase_diagnostics: dict | None = None,
 ) -> dict:
@@ -2749,7 +2755,7 @@ def _post_savant_materialization_metrics(
         started_at=started_at,
     )
     return {
-        "measurement_schema_version": "phase0-materialization-v1",
+        "measurement_schema_version": "phase0-materialization-v2",
         "materialization_mode": (
             video_crop.get("materialization_mode")
             or ("baseline_crop" if video_crop.get("crop_video_to_time_window") else "copy")
@@ -2783,6 +2789,17 @@ def _post_savant_materialization_metrics(
         "ffmpeg_elapsed_ms": video_crop.get("ffmpeg_elapsed_ms"),
         "ffmpeg_child_cpu_seconds": video_crop.get("ffmpeg_child_cpu_seconds"),
         "finalization_process_cpu_seconds": finalization_process_cpu_seconds,
+        "finalization_process_cpu_seconds_scope": (
+            "legacy_process_wide_delta_not_job_attributable"
+        ),
+        "finalization_thread_cpu_seconds": finalization_thread_cpu_seconds,
+        "job_probe_metrics_scope": "thread_local_job_delta",
+        "job_probe_metrics": dict(job_probe_metrics or {}),
+        **dict(job_probe_metrics or {}),
+        "correlation": materialization_correlation(
+            event_context,
+            phase_diagnostics=phase_diagnostics,
+        ),
         "ffmpeg_stderr_bytes": video_crop.get("ffmpeg_stderr_bytes"),
         "decoded_frame_count": video_crop.get("decoded_frame_count"),
         "decoded_frame_count_probe_elapsed_ms": video_crop.get(
@@ -3163,6 +3180,19 @@ def _summary_clip_status(summary: dict) -> str:
     return BUNDLE_STATUS_GENERATED_ANNOTATION_FAILED
 
 
+def _evidence_reason_for_bundle(clip_status: str, bundle: dict | None) -> str:
+    """Keep the legacy clip status while attributing the actual failed guard."""
+
+    if _evidence_state_for_clip_status(clip_status) == "materialized":
+        return ""
+    if clip_status != BUNDLE_STATUS_DURATION_GUARD_FAILED or not bundle:
+        return clip_status
+    attribution = bundle.get("materialization_guard_attribution")
+    if not isinstance(attribution, dict):
+        return clip_status
+    return str(attribution.get("primary_reason") or clip_status)
+
+
 def _path_for_metadata(value: object) -> str:
     if value is None:
         return ""
@@ -3453,9 +3483,6 @@ def _apply_post_savant_failure_status(
         summary["epoch_guard_reason"] = "missing_or_mismatched_runtime_epoch"
     if duration_guard:
         _merge_post_savant_duration_guard(summary, duration_guard)
-        summary["duration_guard_reason"] = (
-            duration_guard.get("duration_guard_reason") or reason
-        )
     if reason == "sink_window_guard_failed":
         summary["sink_window_guard_failed"] = True
     return summary
@@ -4114,6 +4141,9 @@ def _finalize_post_savant_evidence_bundle(
     """Package post-Savant sink output as a production evidence bundle."""
     finalize_started = time.monotonic()
     finalization_process_cpu_started = time.process_time()
+    finalization_thread_cpu_started = (
+        time.thread_time() if hasattr(time, "thread_time") else None
+    )
     materialization_started_at = datetime.now(timezone.utc)
     probe_before = _probe_metrics_snapshot()
     metadata_rows_loaded = 0
@@ -4647,12 +4677,21 @@ def _finalize_post_savant_evidence_bundle(
         )
         result = _without_published_raw_clip(result)
     result.summary["clip_status"] = _summary_clip_status(result.summary)
+    result.summary["materialization_guard_attribution"] = (
+        guard_failure_attribution(result.summary)
+    )
     materialization_finished_at = datetime.now(timezone.utc)
     finalization_duration_ms = int((time.monotonic() - finalize_started) * 1000)
     finalization_process_cpu_seconds = round(
         max(0.0, time.process_time() - finalization_process_cpu_started),
         6,
     )
+    finalization_thread_cpu_seconds = (
+        round(max(0.0, time.thread_time() - finalization_thread_cpu_started), 6)
+        if finalization_thread_cpu_started is not None
+        else None
+    )
+    job_probe_metrics = _probe_metrics_delta(probe_before)
     result.summary["materialization_metrics"] = _post_savant_materialization_metrics(
         summary=result.summary,
         event_context=event_context,
@@ -4660,6 +4699,8 @@ def _finalize_post_savant_evidence_bundle(
         finished_at=materialization_finished_at,
         finalization_duration_ms=finalization_duration_ms,
         finalization_process_cpu_seconds=finalization_process_cpu_seconds,
+        finalization_thread_cpu_seconds=finalization_thread_cpu_seconds,
+        job_probe_metrics=job_probe_metrics,
         materialization_guardrails=materialization_guardrails,
         phase_diagnostics=phase_diagnostics,
     )
@@ -4668,7 +4709,7 @@ def _finalize_post_savant_evidence_bundle(
         "metadata_rows_loaded": metadata_rows_loaded,
         "sink_metadata_rows_for_guard": len(sink_window_rows),
         "decoded_frame_count_duration_ms": decoded_frame_count_duration_ms,
-        **_probe_metrics_delta(probe_before),
+        **job_probe_metrics,
     }
     _rewrite_post_savant_summary_files(result)
     business_metadata = _build_event_metadata(
@@ -4704,6 +4745,13 @@ def _finalize_post_savant_evidence_bundle(
         "duration_guard_status": summary.get("duration_guard_status"),
         "duration_guard_failed": bool(summary.get("duration_guard_failed")),
         "max_allowed_duration_seconds": summary.get("max_allowed_duration_seconds"),
+        "sink_window_guard_status": summary.get("sink_window_guard_status"),
+        "sink_window_guard_failed": bool(summary.get("sink_window_guard_failed")),
+        "sink_window_guard_reason": summary.get("sink_window_guard_reason", ""),
+        "materialization_guard_attribution": summary.get(
+            "materialization_guard_attribution"
+        )
+        or {},
         "runtime_epoch_id": summary.get("runtime_epoch_id", ""),
         "epoch_guard_status": summary.get("epoch_guard_status"),
         "epoch_guard_failed": bool(summary.get("epoch_guard_failed")),
@@ -5313,8 +5361,12 @@ def _process_sink_output(
         )
         if not isinstance(materialization_metrics, dict):
             materialization_metrics = {}
+        correlation = materialization_metrics.get("correlation")
+        correlation = correlation if isinstance(correlation, dict) else {}
         logger.info(
             "media_event_finalized event_id=%s meta_dir=%s "
+            "request_id=%s attempt_id=%s lease_token=%s replay_job_id=%s "
+            "runtime_epoch_id=%s "
             "worker_id=%s source_id=%s replay_shard_id=%s "
             "claim_status=%s claim_wait_ms=%s "
             "finalization_duration_ms=%s scan_duration_ms=%s "
@@ -5332,6 +5384,11 @@ def _process_sink_output(
             "imageio_ffmpeg_fallback_count=%s imageio_ffmpeg_fallback_duration_ms=%s",
             event_id,
             meta_dir,
+            correlation.get("request_id"),
+            correlation.get("attempt_id"),
+            correlation.get("lease_token"),
+            correlation.get("replay_job_id"),
+            correlation.get("runtime_epoch_id"),
             finalizer_worker_id,
             source_id,
             replay_shard_id,
@@ -5494,6 +5551,14 @@ def _process_sink_output(
                                             %(duration_guard_failed)s::boolean,
                                         'max_allowed_duration_seconds',
                                             %(max_allowed_duration_seconds)s::float,
+                                        'sink_window_guard_status',
+                                            %(sink_window_guard_status)s::text,
+                                        'sink_window_guard_failed',
+                                            %(sink_window_guard_failed)s::boolean,
+                                        'sink_window_guard_reason',
+                                            %(sink_window_guard_reason)s::text,
+                                        'materialization_guard_attribution',
+                                            %(materialization_guard_attribution)s::jsonb,
                                         'runtime_epoch_id',
                                             %(runtime_epoch_id)s::text,
                                         'epoch_guard_status',
@@ -5575,6 +5640,18 @@ def _process_sink_output(
                             "max_allowed_duration_seconds": bundle.get(
                                 "max_allowed_duration_seconds"
                             ),
+                            "sink_window_guard_status": bundle.get(
+                                "sink_window_guard_status"
+                            ),
+                            "sink_window_guard_failed": bool(
+                                bundle.get("sink_window_guard_failed")
+                            ),
+                            "sink_window_guard_reason": bundle.get(
+                                "sink_window_guard_reason", ""
+                            ),
+                            "materialization_guard_attribution": json.dumps(
+                                bundle.get("materialization_guard_attribution") or {}
+                            ),
                             "runtime_epoch_id": bundle.get("runtime_epoch_id", ""),
                             "epoch_guard_status": bundle.get("epoch_guard_status"),
                             "epoch_guard_failed": bool(
@@ -5587,8 +5664,9 @@ def _process_sink_output(
                     )
                 if cur.rowcount and cur.rowcount > 0:
                     evidence_state = _evidence_state_for_clip_status(clip_status)
-                    evidence_reason = (
-                        "" if evidence_state == "materialized" else clip_status
+                    evidence_reason = _evidence_reason_for_bundle(
+                        clip_status,
+                        bundle if isinstance(bundle, dict) else None,
                     )
                     cur.execute(
                         """
@@ -7260,6 +7338,12 @@ class _RollingCacheMaterializationRunner:
     def close(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "active": len(self._futures),
+            "capacity": self.max_workers,
+        }
+
     def process(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
         updated = _expire_overdue_rolling_cache_tasks(pg_conn, cfg)
         updated += self._drain_completed(pg_conn, cfg)
@@ -8479,9 +8563,19 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
 
     next_rolling_cache_poll_at = 0.0
     next_general_poll_at = 0.0
+    last_scheduler_tick_started_at: float | None = None
+    scheduler_tick_sequence = 0
     try:
         while not shutdown_requested:
-            now_monotonic = time.monotonic()
+            tick_started_at = time.monotonic()
+            tick_gap_ms = (
+                int((tick_started_at - last_scheduler_tick_started_at) * 1000)
+                if last_scheduler_tick_started_at is not None
+                else None
+            )
+            last_scheduler_tick_started_at = tick_started_at
+            scheduler_tick_sequence += 1
+            now_monotonic = tick_started_at
             rolling_cache_due = (
                 cfg.rolling_cache_enabled
                 and cfg.rolling_cache_materialization_enabled
@@ -8575,6 +8669,35 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         )
             except Exception:
                 logger.exception("media worker loop error")
+
+            tick_duration_ms = int((time.monotonic() - tick_started_at) * 1000)
+            permit_snapshot = materialization_guard.snapshot()
+            remux_snapshot = (
+                rolling_cache_runner.snapshot()
+                if rolling_cache_runner is not None
+                else {"active": 0, "capacity": 0}
+            )
+            logger.info(
+                "media_scheduler_tick schema_version=phase0-scheduler-v1 "
+                "scheduler_mode=legacy sequence=%s tick_duration_ms=%s "
+                "tick_gap_ms=%s rolling_due=%s general_due=%s "
+                "oldest_ready_age_ms=unavailable "
+                "image_lane_depth=unavailable remux_lane_depth=%s "
+                "finalizer_lane_depth=unavailable "
+                "permit_active=%s permit_limit=%s "
+                "db_pool_in_use=unavailable db_pool_limit=unavailable "
+                "segment_index_mode=legacy_recursive_scan "
+                "segment_index_hits=unavailable segment_index_misses=unavailable "
+                "segment_index_fallback_scans=unavailable",
+                scheduler_tick_sequence,
+                tick_duration_ms,
+                tick_gap_ms if tick_gap_ms is not None else "unavailable",
+                rolling_cache_due,
+                general_due,
+                remux_snapshot["active"],
+                permit_snapshot["active"],
+                permit_snapshot["max_active"],
+            )
 
             now_monotonic = time.monotonic()
             next_due_at = next_general_poll_at

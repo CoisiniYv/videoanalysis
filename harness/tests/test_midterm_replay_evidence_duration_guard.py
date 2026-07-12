@@ -254,7 +254,7 @@ def test_sink_metadata_pts_gap_fails_closed_even_when_duration_is_valid(
     assert metadata["status"]["clip_status"] == "duration_guard_failed"
 
 
-def test_rolling_cache_finalizer_records_probed_raw_clip_duration(
+def test_rolling_cache_finalizer_reuses_materializer_output_duration(
     monkeypatch, tmp_path: Path
 ) -> None:
     sink_dir = tmp_path / "sink" / f"rolling-cache-event-{EVENT_ID}"
@@ -312,14 +312,25 @@ def test_rolling_cache_finalizer_records_probed_raw_clip_duration(
     assert not raw_clip.exists()
     assert bundle["raw_clip"] == ""
     assert bundle["clip_status"] == "duration_guard_failed"
-    assert summary["raw_clip_duration"] == 8.75
+    assert summary["raw_clip_duration"] == 10.0
+    assert summary["materialization_metrics"]["ffprobe_invocation_count"] == 0
     assert summary["expected_duration_seconds"] == 10.0
-    assert summary["duration_guard_status"] == "failed"
-    assert summary["duration_guard_failed"] is True
-    assert summary["duration_guard_reason"] == "raw_clip_duration_below_expected_minus_slack"
+    assert summary["duration_guard_status"] == "passed"
+    assert summary["duration_guard_failed"] is False
+    assert summary["duration_guard_reason"] == ""
     assert summary["min_allowed_duration_seconds"] == 9.0
+    assert summary["sink_window_guard_status"] == "failed"
+    assert summary["materialization_guard_attribution"]["primary_category"] == (
+        "sink_window"
+    )
+    assert summary["materialization_guard_attribution"]["primary_reason"] == (
+        "sink_metadata_pts_gap_exceeds_limit"
+    )
+    assert worker._evidence_reason_for_bundle(bundle["clip_status"], bundle) == (
+        "sink_metadata_pts_gap_exceeds_limit"
+    )
     assert summary["raw_clip_path"] is None
-    assert metadata["media"]["raw_clip_duration"] == 8.75
+    assert metadata["media"]["raw_clip_duration"] == 10.0
     assert metadata["media"]["raw_clip_path"] == ""
     assert metadata["status"]["clip_status"] == "duration_guard_failed"
 

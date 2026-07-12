@@ -1,0 +1,124 @@
+{
+  "schema_version": "clip-media-legacy-baseline-v1",
+  "acceptance_token": "PASS_CLIP_MEDIA_LEGACY_BEHAVIOR_BASELINE_FROZEN",
+  "source_revision": "5314d0baaf8d4a4e1e4873a644513ac15dede379",
+  "clip_scenarios": [
+    {
+      "name": "malformed_request",
+      "nodeid": "harness/tests/test_clip_media_legacy_behavior_baseline.py::test_malformed_request_is_acked_without_side_effect",
+      "ack": true,
+      "replay_jobs": 0,
+      "terminal_effect": "none"
+    },
+    {
+      "name": "normal_full_window",
+      "nodeid": "harness/tests/test_clip_worker_queue_safety.py::test_post_savant_frame_proof_succeeds_after_local_poll",
+      "ack": true,
+      "replay_jobs": 1,
+      "terminal_effect": "replay_job_created"
+    },
+    {
+      "name": "truncated_pre_window",
+      "nodeid": "harness/tests/test_clip_worker_queue_safety.py::test_post_savant_truncated_pre_window_can_create_job",
+      "ack": true,
+      "replay_jobs": 1,
+      "terminal_effect": "replay_job_created"
+    },
+    {
+      "name": "cross_session_post_proof",
+      "nodeid": "harness/tests/test_clip_worker_queue_safety.py::test_post_savant_cross_session_post_window_proof_can_create_job",
+      "ack": true,
+      "replay_jobs": 1,
+      "terminal_effect": "replay_job_created"
+    },
+    {
+      "name": "missing_proof_retryable",
+      "nodeid": "harness/tests/test_clip_worker_queue_safety.py::test_post_savant_missing_frame_proof_defers_with_diagnostics",
+      "ack": false,
+      "replay_jobs": 0,
+      "terminal_effect": "waiting_proof"
+    },
+    {
+      "name": "duplicate_terminal_target",
+      "nodeid": "harness/tests/test_clip_worker_queue_safety.py::test_terminal_pending_entry_is_acked_without_replay",
+      "ack": true,
+      "replay_jobs": 0,
+      "terminal_effect": "idempotent_noop"
+    },
+    {
+      "name": "priority_capacity_full",
+      "nodeid": "harness/tests/test_clip_worker_queue_safety.py::test_priority_event_does_not_bypass_hard_replay_concurrency",
+      "ack": false,
+      "replay_jobs": 0,
+      "terminal_effect": "pending"
+    },
+    {
+      "name": "replay_transport_exception",
+      "nodeid": "harness/tests/test_completion_aware_replay_admission.py::test_replay_job_creation_exception_releases_reserved_slot",
+      "ack": true,
+      "replay_jobs": 0,
+      "terminal_effect": "failed_and_slot_released"
+    },
+    {
+      "name": "replay_permanent_empty_response",
+      "nodeid": "harness/tests/test_clip_media_legacy_behavior_baseline.py::test_replay_empty_response_releases_slot_and_acks",
+      "ack": true,
+      "replay_jobs": 0,
+      "terminal_effect": "failed_and_slot_released"
+    }
+  ],
+  "media_scenarios": [
+    {
+      "name": "raw_replay_sink",
+      "nodeid": "harness/tests/test_midterm_replay_evidence_duration_guard.py::test_post_savant_final_duration_guard_removes_overlong_raw_clip",
+      "outcome": "guarded_bundle"
+    },
+    {
+      "name": "rolling_video",
+      "nodeid": "harness/tests/test_rolling_cache_materialization.py::test_materialize_window_writes_sink_like_metadata_and_concat_command",
+      "outcome": "sink_compatible_materialization"
+    },
+    {
+      "name": "watchlist_image",
+      "nodeid": "harness/tests/test_evidence_materialization_phase2plus.py::test_media_worker_materializes_watchlist_image_from_rolling_cache",
+      "outcome": "image_ready"
+    },
+    {
+      "name": "duplicate_terminal",
+      "nodeid": "harness/tests/test_evidence_materialization_phase0.py::test_media_worker_finalizer_pool_preserves_terminal_processed_state",
+      "outcome": "one_terminal_effect"
+    },
+    {
+      "name": "corrupt_input",
+      "nodeid": "harness/tests/test_midterm_replay_evidence_duration_guard.py::test_time_domain_crop_failure_does_not_publish_source_replay_output",
+      "outcome": "failed_without_raw_publish"
+    },
+    {
+      "name": "late_annotation",
+      "nodeid": "harness/tests/test_media_worker_perf_safety.py::test_late_annotation_retry_uses_unbounded_stream_id_lookback",
+      "outcome": "annotation_retry"
+    },
+    {
+      "name": "epoch_mismatch",
+      "nodeid": "harness/tests/test_midterm_replay_epoch_isolation.py::test_media_worker_epoch_mismatch_fails_closed",
+      "outcome": "failed_closed"
+    }
+  ],
+  "legacy_source_inventory": {
+    "clip_direct_xack_calls": 16,
+    "media_thread_pool_executor_calls": 3,
+    "media_rolling_expiry_call_sites": 2,
+    "media_process_sink_output_call_sites": 3
+  },
+  "reference_artifact": {
+    "run_id": "pressure60_8p1_dual1gpu_5s5s_yolob4_ada16_drain120_20260710T054418Z",
+    "report_sha256": "ca443a48f87584d56be54a09f0a34859ba2ff32ead6ff16d5266340e3d6ccb08",
+    "run_config_sha256": "61ae4843d7573d434743997f1fdd554e0546a8b753073dedbc21e21726617f36",
+    "behavior_video_count": 252,
+    "watchlist_image_count": 119,
+    "playable_or_ready_count": 371,
+    "timeline_ok_count": 252,
+    "annotation_ok_count": 252,
+    "annotation_record_count": 11550
+  }
+}

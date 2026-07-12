@@ -18,6 +18,7 @@ import psycopg
 from redis import Redis
 
 from app.config import Config, load_config
+from app.legacy_observability import request_correlation, with_replay_job
 from app.replay_client import ReplayClient, _uuid7_timestamp_ms
 from app.replay_shards import ReplayShard, ReplayShardConfigError
 from app.repository import (
@@ -3275,6 +3276,14 @@ def run_worker(
                         "redis_delivery_retry_count": retry_count,
                         "record_request_batch_size": record_request_batch_size,
                     }
+                    phase_diagnostics["correlation"] = request_correlation(
+                        req,
+                        event_id=event_id,
+                        request_id=request_id,
+                        delivery_id=_message_id_text(msg_id),
+                        retry_count=retry_count,
+                        consumer=consumer,
+                    )
                     proof_wait_diagnostics: dict[str, object] = {}
                     now_monotonic = time.monotonic()
                     active_jobs = [
@@ -4142,6 +4151,10 @@ def run_worker(
                                 "replay_active_source_count"
                             ],
                         }
+                        replay_job_diagnostics["correlation"] = with_replay_job(
+                            phase_diagnostics["correlation"],
+                            replay_job_id=job_id,
+                        )
                         logger.info(
                             "replay_job_created job_id=%s request_id=%s event_id=%s",
                             job_id,

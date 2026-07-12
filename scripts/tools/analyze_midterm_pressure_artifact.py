@@ -133,6 +133,34 @@ def _shard_id_from_evidence(evidence: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _evidence_types_from_downstream(downstream: dict[str, Any]) -> dict[str, Any]:
+    explicit = downstream.get("evidence_types")
+    if isinstance(explicit, dict) and explicit:
+        return explicit
+    postgresql = downstream.get("postgresql")
+    postgresql = postgresql if isinstance(postgresql, dict) else {}
+    run_summary = postgresql.get("run_summary")
+    run_summary = run_summary if isinstance(run_summary, dict) else {}
+    behavior_video = int(run_summary.get("behavior_video_playable_bundles") or 0)
+    watchlist_image = int(
+        run_summary.get("watchlist_image_ready_bundles")
+        or run_summary.get("face_image_ready_bundles")
+        or 0
+    )
+    if behavior_video or watchlist_image:
+        return {
+            "schema_version": "evidence-type-counts-v1-derived-legacy",
+            "behavior_video": {"playable_bundle_count": behavior_video},
+            "watchlist_image": {"ready_bundle_count": watchlist_image},
+            "playable_or_ready_total": behavior_video + watchlist_image,
+            "count_source": "postgresql.run_summary",
+        }
+    return {
+        "status": "not_enough_data",
+        "reason": "explicit evidence type counts unavailable",
+    }
+
+
 def _distribution_by_key(
     items: list[dict[str, Any]],
     field: str,
@@ -347,6 +375,11 @@ def analyze_artifact(artifact_dir: Path) -> dict[str, Any]:
             }
             for field in MEDIA_LATENCY_FIELDS
         },
+        "media_scheduler": media_worker.get("scheduler") or {
+            "status": "not_enough_data",
+            "reason": "phase0 scheduler metrics unavailable",
+        },
+        "evidence_types": _evidence_types_from_downstream(downstream),
         "source_evidence_counts": dict(sorted(evidence_counts.items())),
         "source_to_shard_from_kept_evidence": dict(sorted(source_to_shard.items())),
     }

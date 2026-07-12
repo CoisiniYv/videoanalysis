@@ -80,6 +80,10 @@ def _write_artifact(tmp_path: Path) -> Path:
             },
         },
         "media_worker": {
+            "scheduler": {
+                "schema_version": "phase0-scheduler-v1",
+                "poll_duration_ms": {"status": "measured", "count": 2, "p95": 1200},
+            },
             "queue_wait_ms": {
                 "status": "measured",
                 "count": 4,
@@ -127,6 +131,11 @@ def _write_artifact(tmp_path: Path) -> Path:
                 "max": 70,
             },
         },
+        "evidence_types": {
+            "behavior_video": {"playable_bundle_count": 1},
+            "watchlist_image": {"ready_bundle_count": 1},
+            "playable_or_ready_total": 2,
+        },
     }
     clip_logs = "\n".join(
         [
@@ -173,6 +182,8 @@ def test_analyze_artifact_reports_source_shard_distribution_and_counts(tmp_path:
     assert summary["source_to_shard_from_kept_evidence"]["source-b"] == "replay-b"
     assert summary["clip_worker"]["log_counts"]["clip_worker_queued"] == 1
     assert summary["clip_worker"]["log_counts"]["replay_slot_terminal_state"] == 1
+    assert summary["media_scheduler"]["schema_version"] == "phase0-scheduler-v1"
+    assert summary["evidence_types"]["playable_or_ready_total"] == 2
     assert summary["diagnosis"]["diagnosis"] == "global_or_shard_outlet_bottleneck_likely"
 
 
@@ -197,3 +208,34 @@ def test_analyze_artifact_falls_back_to_clip_log_phase_metrics(tmp_path: Path) -
 
     assert summary["clip_worker"]["record_request_pending_ms"]["overall"]["count"] == 1
     assert summary["clip_worker"]["record_request_pending_ms"]["overall"]["max"] == 1000
+
+
+def test_analyze_artifact_derives_explicit_evidence_types_from_legacy_summary(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    artifact_dir = tmp_path / "pressure60_legacy_types"
+    artifact_dir.mkdir()
+    (artifact_dir / "report.json").write_text(
+        json.dumps({"kept_evidence": []}),
+        encoding="utf-8",
+    )
+    (artifact_dir / "downstream_observability_summary.json").write_text(
+        json.dumps(
+            {
+                "postgresql": {
+                    "run_summary": {
+                        "behavior_video_playable_bundles": 252,
+                        "face_image_ready_bundles": 119,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = module.analyze_artifact(artifact_dir)
+
+    assert summary["evidence_types"]["behavior_video"]["playable_bundle_count"] == 252
+    assert summary["evidence_types"]["watchlist_image"]["ready_bundle_count"] == 119
+    assert summary["evidence_types"]["playable_or_ready_total"] == 371

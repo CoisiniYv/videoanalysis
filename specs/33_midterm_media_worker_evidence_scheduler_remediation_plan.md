@@ -2,7 +2,18 @@
 
 Date: 2026-07-10
 
-Status: 已完成设计，尚未执行
+Status: 执行中；Phase 0 已完成，Phase 1-7 尚未执行
+
+Implementation checkpoint (2026-07-12):
+
+- Phase 0 now emits job-local probe/correlation fields, legacy scheduler poll
+  metrics and explicit behavior-video/watchlist-image counts while preserving
+  the existing scheduling path;
+- the trusted baseline and hashes are recorded in
+  `docs/code_review/clip_media_phase0_legacy_behavior_baseline_2026-07-12.md`;
+- acceptance token: `PASS_MEDIA_WORKER_SCHEDULER_BASELINE_TRUSTED` is satisfied
+  only as the Spec 33 Phase 0 observability/baseline gate; no later scheduler
+  acceptance token is claimed.
 
 ## 0. 执行摘要
 

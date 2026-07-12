@@ -174,7 +174,7 @@ SECURITY_STREAMS = [
     "security.record_requests",
     "security.alerts",
 ]
-DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 4
+DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 5
 DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "redis",
     "postgresql",
@@ -182,6 +182,7 @@ DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "event_worker",
     "face_worker",
     "media_worker",
+    "evidence_types",
     "phase_latency_ms",
     "replay_admission",
     "replay_topology",
@@ -7005,6 +7006,31 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             text,
             "finalizer_pool_wait_ms",
         )
+        media_scheduler_tick_duration_ms = _log_metric_numbers_for_lines(
+            text,
+            marker="media_scheduler_tick",
+            field="tick_duration_ms",
+        )
+        media_scheduler_tick_gap_ms = _log_metric_numbers_for_lines(
+            text,
+            marker="media_scheduler_tick",
+            field="tick_gap_ms",
+        )
+        media_scheduler_remux_lane_depth = _log_metric_numbers_for_lines(
+            text,
+            marker="media_scheduler_tick",
+            field="remux_lane_depth",
+        )
+        media_scheduler_permit_active = _log_metric_numbers_for_lines(
+            text,
+            marker="media_scheduler_tick",
+            field="permit_active",
+        )
+        media_scheduler_permit_limit = _log_metric_numbers_for_lines(
+            text,
+            marker="media_scheduler_tick",
+            field="permit_limit",
+        )
         media_throttle_sleep_s = _extract_metric_numbers(text, "throttle_sleep_s")
         media_deadline_slack_s = _extract_metric_numbers(text, "deadline_slack_s")
         clip_record_request_pending_ms = _extract_metric_ints(
@@ -7162,6 +7188,31 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "media_finalizer_pool_wait_ms": _numeric_distribution(
                 media_finalizer_pool_wait_ms
+            ),
+            "media_scheduler_tick_duration_ms": _numeric_distribution(
+                media_scheduler_tick_duration_ms
+            ),
+            "media_scheduler_tick_gap_ms": _numeric_distribution(
+                media_scheduler_tick_gap_ms
+            ),
+            "media_scheduler_remux_lane_depth": _numeric_distribution(
+                media_scheduler_remux_lane_depth
+            ),
+            "media_scheduler_permit_active": _numeric_distribution(
+                media_scheduler_permit_active
+            ),
+            "media_scheduler_permit_limit": _numeric_distribution(
+                media_scheduler_permit_limit
+            ),
+            "media_scheduler_modes": _log_field_counts(
+                text,
+                marker="media_scheduler_tick",
+                field="scheduler_mode",
+            ),
+            "media_segment_index_modes": _log_field_counts(
+                text,
+                marker="media_scheduler_tick",
+                field="segment_index_mode",
             ),
             "clip_record_request_pending_ms": _numeric_distribution(
                 clip_record_request_pending_ms
@@ -8488,7 +8539,7 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
     row = conn.execute(
         """
         WITH run_events AS (
-          SELECT id, status
+          SELECT id, status, event_type
           FROM events
           WHERE source_id LIKE %(prefix)s
         ),
@@ -8522,6 +8573,16 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
           JOIN run_events re ON re.id = eb.event_id
           WHERE COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
              OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+        ),
+        parent_watchlist_image_ready_events AS (
+          SELECT DISTINCT eb.event_id
+          FROM evidence_bundles eb
+          JOIN run_events re ON re.id = eb.event_id
+          WHERE re.event_type = 'watchlist_hit'
+            AND (
+              COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+              OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+            )
         ),
         covered_events_distinct AS (
           SELECT DISTINCT l.event_id
@@ -8592,6 +8653,7 @@ def db_summary(conn, run_id: str) -> dict[str, Any]:
           (SELECT count(*) FROM parent_playable_events) AS playable_bundles,
           (SELECT count(*) FROM parent_video_playable_events) AS behavior_video_playable_bundles,
           (SELECT count(*) FROM parent_image_ready_events) AS face_image_ready_bundles,
+          (SELECT count(*) FROM parent_watchlist_image_ready_events) AS watchlist_image_ready_bundles,
           (SELECT count(*) FROM covered_events_distinct) AS covered_events,
           (SELECT count(*) FROM covered_playable_events_distinct) AS covered_playable_events,
           (
@@ -8726,6 +8788,31 @@ def non_materialized_task_details(conn, run_id: str) -> list[dict[str, Any]]:
     return [_row_json(row) for row in rows]
 
 
+def evidence_type_observability_summary(run_summary: dict[str, Any]) -> dict[str, Any]:
+    """Expose the fixed video/image product split as an explicit contract."""
+
+    behavior_video = _safe_int(
+        run_summary.get("behavior_video_playable_bundles")
+    )
+    watchlist_image = _safe_int(
+        run_summary.get("watchlist_image_ready_bundles")
+    )
+    all_image = _safe_int(run_summary.get("face_image_ready_bundles"))
+    return {
+        "schema_version": "evidence-type-counts-v1",
+        "behavior_video": {
+            "event_policy": "behavior_video_5_plus_5",
+            "playable_bundle_count": behavior_video,
+        },
+        "watchlist_image": {
+            "event_policy": "watchlist_image_only",
+            "ready_bundle_count": watchlist_image,
+        },
+        "other_image_ready_bundle_count": max(0, all_image - watchlist_image),
+        "playable_or_ready_total": behavior_video + all_image,
+    }
+
+
 def collect_downstream_observability(
     cfg: PressureConfig,
     conn,
@@ -8736,15 +8823,19 @@ def collect_downstream_observability(
 ) -> dict[str, Any]:
     replay_topology = replay_topology_summary()
     video_file_sink = video_file_sink_observability_summary(diagnostics)
+    postgresql = postgres_observability_summary(conn, cfg.run_id)
+    run_summary = postgresql.get("run_summary")
+    run_summary = run_summary if isinstance(run_summary, dict) else {}
     summary = {
         "schema_version": DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "redis": redis_observability_summary(redis_client),
-        "postgresql": postgres_observability_summary(conn, cfg.run_id),
+        "postgresql": postgresql,
         "qdrant": qdrant_observability_summary(conn, diagnostics),
         "event_worker": event_worker_observability_summary(diagnostics),
         "face_worker": face_worker_observability_summary(diagnostics),
         "media_worker": media_worker_observability_summary(diagnostics),
+        "evidence_types": evidence_type_observability_summary(run_summary),
         "phase_latency_ms": evidence_phase_latency_summary(diagnostics),
         "replay_admission": replay_admission_observability_summary(diagnostics),
         "replay_topology": replay_topology,
@@ -9055,6 +9146,48 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         or _not_enough_data("finalizer start readiness logs unavailable"),
         "finalizer_pool_wait_ms": logs.get("media_finalizer_pool_wait_ms")
         or _not_enough_data("finalizer pool wait logs unavailable"),
+        "scheduler": {
+            "schema_version": "phase0-scheduler-v1",
+            "modes": logs.get("media_scheduler_modes") or {},
+            "poll_duration_ms": logs.get("media_scheduler_tick_duration_ms")
+            or _not_enough_data("scheduler tick logs unavailable"),
+            "poll_gap_ms": logs.get("media_scheduler_tick_gap_ms")
+            or _not_enough_data("scheduler tick logs unavailable"),
+            "oldest_ready_age_ms": _not_enough_data(
+                "legacy scheduler does not emit oldest-ready age"
+            ),
+            "lanes": {
+                "image_depth": _not_enough_data(
+                    "legacy image work executes inline"
+                ),
+                "remux_depth": logs.get("media_scheduler_remux_lane_depth")
+                or _not_enough_data("rolling remux lane unavailable"),
+                "finalizer_depth": _not_enough_data(
+                    "legacy finalizer uses synchronous batches"
+                ),
+            },
+            "work_budget": {
+                "active": logs.get("media_scheduler_permit_active")
+                or _not_enough_data("legacy permit logs unavailable"),
+                "limit": logs.get("media_scheduler_permit_limit")
+                or _not_enough_data("legacy permit logs unavailable"),
+            },
+            "db_pool": _not_enough_data(
+                "legacy scheduler has no bounded PostgreSQL pool"
+            ),
+            "segment_index": {
+                "modes": logs.get("media_segment_index_modes") or {},
+                "hits": _not_enough_data(
+                    "legacy recursive scan has no segment-index hits"
+                ),
+                "misses": _not_enough_data(
+                    "legacy recursive scan has no segment-index misses"
+                ),
+                "fallback_scans": _not_enough_data(
+                    "legacy scan is the only lookup path"
+                ),
+            },
+        },
         "cpu_percent": (
             (diagnostics.get("sample_summary") or {})
             .get("max_worker_cpu_percent", {})
@@ -9452,6 +9585,12 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
             "queue_wait_ms_by_source",
             "queue_wait_ms_by_shard",
             "duplicate_materialization_count",
+            "scheduler",
+        ),
+        "evidence_types": (
+            "behavior_video",
+            "watchlist_image",
+            "playable_or_ready_total",
         ),
         "phase_latency_ms": ("clip_worker", "media_worker"),
         "replay_admission": (

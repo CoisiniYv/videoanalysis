@@ -2,7 +2,16 @@
 
 Date: 2026-07-12
 
-Status: 已完成设计，尚未执行
+Status: 执行中；Phase 0 已完成，Phase 1-7 尚未执行
+
+Implementation checkpoint (2026-07-12):
+
+- Phase 0 baseline, branch inventory, golden fixtures, correlation fields and
+  artifact schema are recorded in
+  `docs/code_review/clip_media_phase0_legacy_behavior_baseline_2026-07-12.md`;
+- acceptance token: `PASS_CLIP_MEDIA_LEGACY_BEHAVIOR_BASELINE_FROZEN`;
+- this checkpoint does not claim lifecycle ownership, Coordinator V2, Media
+  Scheduler V2, crash recovery, pressure closure, or legacy removal.
 
 ## 0. 执行摘要
 

@@ -1,0 +1,11 @@
+{
+  "schema_version": "media-bundle-golden-v1",
+  "event_id": "11111111-1111-4111-8111-111111111111",
+  "raw_clip_bytes_utf8": "video",
+  "raw_clip_sha256": "0cab1c9617404faf2b24e221e189ca5945813e14d3f766345b09ca13bbe28ffc",
+  "artifact_types": ["raw_clip"],
+  "artifact_count": 1,
+  "timeline_rows": 1,
+  "overlay_rows": 1,
+  "annotation_records": 1
+}

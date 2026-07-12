@@ -287,6 +287,13 @@ def test_media_worker_phase0_materialization_metrics_flow_to_metadata(
     assert metrics["lifecycle_elapsed_ms"] is not None
     assert metrics["lifecycle_elapsed_ms"] >= metrics["queue_wait_ms"]
     assert metrics["finalization_process_cpu_seconds"] is not None
+    assert metrics["measurement_schema_version"] == "phase0-materialization-v2"
+    assert metrics["finalization_process_cpu_seconds_scope"] == (
+        "legacy_process_wide_delta_not_job_attributable"
+    )
+    assert metrics["finalization_thread_cpu_seconds"] is not None
+    assert metrics["job_probe_metrics_scope"] == "thread_local_job_delta"
+    assert metrics["correlation"]["event_id"] == event_id
 
 
 def test_media_worker_phase1a_guard_defers_when_concurrency_full() -> None:

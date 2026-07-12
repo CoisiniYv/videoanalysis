@@ -4361,6 +4361,12 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "queue_wait_ms_by_source": {},
             "queue_wait_ms_by_shard": {},
             "duplicate_materialization_count": 0,
+            "scheduler": module._not_enough_data("synthetic"),
+        },
+        "evidence_types": {
+            "behavior_video": {"playable_bundle_count": 0},
+            "watchlist_image": {"ready_bundle_count": 0},
+            "playable_or_ready_total": 0,
         },
         "phase_latency_ms": {"clip_worker": {}, "media_worker": {}},
         "replay_admission": {
@@ -4387,6 +4393,23 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
     }
 
     assert module.validate_downstream_observability_schema(summary) is True
+
+
+def test_evidence_type_observability_separates_behavior_video_and_watchlist_image() -> None:
+    module = _load_module()
+
+    summary = module.evidence_type_observability_summary(
+        {
+            "behavior_video_playable_bundles": 252,
+            "face_image_ready_bundles": 124,
+            "watchlist_image_ready_bundles": 119,
+        }
+    )
+
+    assert summary["behavior_video"]["playable_bundle_count"] == 252
+    assert summary["watchlist_image"]["ready_bundle_count"] == 119
+    assert summary["other_image_ready_bundle_count"] == 5
+    assert summary["playable_or_ready_total"] == 376
 
 
 def test_qdrant_outbox_summary_uses_valid_aggregate_filters() -> None:
@@ -4511,6 +4534,24 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "media_finalization_claim_busy event_id=e4",
                 "replay_slot_released event_id=e2 "
                 "release_reason=sink_video_stable sink_video_to_stable_ms=31000",
+                "media_scheduler_tick schema_version=phase0-scheduler-v1 "
+                "scheduler_mode=legacy sequence=1 tick_duration_ms=1200 "
+                "tick_gap_ms=unavailable rolling_due=True general_due=True "
+                "oldest_ready_age_ms=unavailable image_lane_depth=unavailable "
+                "remux_lane_depth=3 finalizer_lane_depth=unavailable "
+                "permit_active=2 permit_limit=4 db_pool_in_use=unavailable "
+                "db_pool_limit=unavailable segment_index_mode=legacy_recursive_scan "
+                "segment_index_hits=unavailable segment_index_misses=unavailable "
+                "segment_index_fallback_scans=unavailable",
+                "media_scheduler_tick schema_version=phase0-scheduler-v1 "
+                "scheduler_mode=legacy sequence=2 tick_duration_ms=200 "
+                "tick_gap_ms=1300 rolling_due=True general_due=True "
+                "oldest_ready_age_ms=unavailable image_lane_depth=unavailable "
+                "remux_lane_depth=1 finalizer_lane_depth=unavailable "
+                "permit_active=1 permit_limit=4 db_pool_in_use=unavailable "
+                "db_pool_limit=unavailable segment_index_mode=legacy_recursive_scan "
+                "segment_index_hits=unavailable segment_index_misses=unavailable "
+                "segment_index_fallback_scans=unavailable",
             ]
         ),
         encoding="utf-8",
@@ -4596,6 +4637,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     )
     assert summary["media_worker"]["media_throttle_sleep_s"]["max"] == 2.0
     assert summary["media_worker"]["media_deadline_slack_s"]["min"] == 45.0
+    assert summary["media_worker"]["media_scheduler_tick_duration_ms"]["p50"] == 700.0
+    assert summary["media_worker"]["media_scheduler_tick_gap_ms"]["max"] == 1300.0
+    assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 3.0
+    assert summary["media_worker"]["media_scheduler_permit_active"]["max"] == 2.0
+    assert summary["media_worker"]["media_scheduler_modes"] == {"legacy": 2}
+    assert summary["media_worker"]["media_segment_index_modes"] == {
+        "legacy_recursive_scan": 2
+    }
     sink_summary = summary["video_file_sink"]
     assert sink_summary["instances"]["video-file-sink-a"]["new_writer_count"] == 1
     assert sink_summary["instances"]["video-file-sink-b"]["resident_writer_max"] == 47
