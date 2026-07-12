@@ -141,6 +141,16 @@ def test_pressure_runner_sql_placeholder_styles_match_parameter_types() -> None:
     assert issues == []
 
 
+def test_initial_pressure_source_start_applies_configured_ffmpeg_timeout() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    function_start = source.index("def start_pressure_source_ids_from_manifest(")
+    function_end = source.index("def restart_pressure_source_ids_from_manifest(")
+    function_source = source[function_start:function_end]
+
+    assert '"--ffmpeg-timeout-ms"' in function_source
+    assert "str(cfg.pressure_source_ffmpeg_timeout_ms)" in function_source
+
+
 def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     completed = subprocess.run(
         ["bash", str(PROFILE_SCRIPT), "4fps-t4"],

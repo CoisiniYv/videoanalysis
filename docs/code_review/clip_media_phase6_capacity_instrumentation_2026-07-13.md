@@ -122,6 +122,20 @@ now passes a mapping, and a whole-file AST contract rejects named placeholders
 with sequence parameters or positional placeholders with mapping parameters.
 A live two-source transaction then completed camera/zone/rule provisioning and
 dual-shard source-plan generation before rolling back all DB changes.
+
+The first 60-source visibility attempt showed that only the visibility-restart
+path passed the configured 60000ms source FFmpeg timeout; initial source starts
+silently used the controller's 20000ms default. Initial and restart paths now
+use the same configured timeout. The contaminated warmup run was interrupted
+and is not a capacity result.
+
+That interruption also exposed a runtime epoch-barrier terminal contradiction:
+the API marked an active task failed but retained `remux_running`, lease fields,
+handoff/claim ownership, and an active Replay slot if present. Forced epoch
+terminalization now atomically writes phase `terminal`, clears retry, lease,
+handoff and claim ownership, releases/defences any active Replay slot, and
+projects the terminal phase into the event payload. The retained failed event
+and all visual observations remain; only stale ownership fields are repaired.
 The formal-window DB summary, event/cooldown summary, non-materialized detail,
 kept-evidence, covered-alias, lifecycle, and ready-to-claim SQL were also run
 read-only against the live PostgreSQL schema.

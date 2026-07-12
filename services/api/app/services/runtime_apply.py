@@ -1280,6 +1280,32 @@ def _force_finalize_epoch_blocking_tasks(
                     UPDATE evidence_tasks et
                     SET status = 'failed',
                         materialization_status = 'materialization_failed',
+                        materialization_phase = 'terminal',
+                        materialization_phase_updated_at = now(),
+                        materialization_next_attempt_at = NULL,
+                        materialization_retry_reason = NULL,
+                        materialization_lease_owner = NULL,
+                        materialization_lease_token = NULL,
+                        materialization_lease_expires_at = NULL,
+                        materialization_lease_heartbeat_at = NULL,
+                        materialization_handoff = '{}'::jsonb,
+                        claimed_by = NULL,
+                        claimed_at = NULL,
+                        replay_slot_status = CASE
+                            WHEN et.replay_slot_status = 'active' THEN 'released'
+                            ELSE et.replay_slot_status
+                        END,
+                        replay_slot_released_at = CASE
+                            WHEN et.replay_slot_status = 'active' THEN now()
+                            ELSE et.replay_slot_released_at
+                        END,
+                        replay_slot_release_reason = CASE
+                            WHEN et.replay_slot_status = 'active'
+                                THEN %(reason)s::text
+                            ELSE et.replay_slot_release_reason
+                        END,
+                        replay_slot_owner = NULL,
+                        replay_slot_token = NULL,
                         materialization_defer_reason = CASE
                             WHEN COALESCE(et.materialization_defer_reason, '') = ''
                                 THEN %(reason)s::text
@@ -1326,6 +1352,7 @@ def _force_finalize_epoch_blocking_tasks(
                                 'evidence_state', 'failed',
                                 'evidence_reason', %(reason)s::text,
                                 'materialization_status', 'materialization_failed',
+                                'materialization_phase', 'terminal',
                                 'materialization_reason', %(reason)s::text,
                                 'evidence_state_updated_at', now()
                             ))

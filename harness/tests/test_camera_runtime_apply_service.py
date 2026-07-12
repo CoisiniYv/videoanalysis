@@ -692,6 +692,14 @@ def test_force_epoch_barrier_uses_single_conditional_update(monkeypatch) -> None
     assert updated == 3
     assert "UPDATE evidence_tasks et" in fake_conn.cursor_obj.sql
     assert "materialization_status = 'materialization_failed'" in fake_conn.cursor_obj.sql
+    assert "materialization_phase = 'terminal'" in fake_conn.cursor_obj.sql
+    assert "materialization_lease_owner = NULL" in fake_conn.cursor_obj.sql
+    assert "materialization_lease_token = NULL" in fake_conn.cursor_obj.sql
+    assert "materialization_lease_expires_at = NULL" in fake_conn.cursor_obj.sql
+    assert "materialization_handoff = '{}'::jsonb" in fake_conn.cursor_obj.sql
+    assert "replay_slot_status = CASE" in fake_conn.cursor_obj.sql
+    assert "replay_slot_owner = NULL" in fake_conn.cursor_obj.sql
+    assert "'materialization_phase', 'terminal'" in fake_conn.cursor_obj.sql
     assert "SELECT" not in fake_conn.cursor_obj.sql
     assert fake_conn.cursor_obj.params["reason"] == "epoch_superseded_incomplete"
 

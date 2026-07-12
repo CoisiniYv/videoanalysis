@@ -5662,6 +5662,8 @@ def start_pressure_source_ids_from_manifest(
                 str(sources_path),
                 "--source-id",
                 source_id,
+                "--ffmpeg-timeout-ms",
+                str(cfg.pressure_source_ffmpeg_timeout_ms),
             ]
             completed = subprocess.run(
                 cmd,
