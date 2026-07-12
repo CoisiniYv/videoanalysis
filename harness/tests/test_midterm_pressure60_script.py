@@ -1687,6 +1687,16 @@ def test_stop_pressure_sources_tolerates_runtime_apply_error_when_direct_removal
     )
     monkeypatch.setattr(
         module,
+        "inspect_pressure_source_containers",
+        lambda _run_id: {
+            "total": 1,
+            "running": 1,
+            "restart_count_total": 0,
+            "items": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
         "remove_pressure_source_containers",
         lambda _run_id: {"removed": ["video-analytics-source-test_00"]},
     )
@@ -1696,7 +1706,7 @@ def test_stop_pressure_sources_tolerates_runtime_apply_error_when_direct_removal
         lambda _run_id: {"stable": True, "running": 0, "total": 0},
     )
 
-    module.stop_pressure_sources(_Conn(), cfg)
+    returned = module.stop_pressure_sources(_Conn(), cfg)
 
     assert calls["db_updated"] is True
     assert calls["artifact_name"] == "runtime_sources_apply_stop_pressure_sources.json"
@@ -1706,6 +1716,10 @@ def test_stop_pressure_sources_tolerates_runtime_apply_error_when_direct_removal
     )
     assert summary["sources_apply_error_ignored"] is True
     assert summary["stable_source_container_removal"]["stable"] is True
+    assert summary["source_containers_before_stop"]["restart_count_total"] == 0
+    assert returned == summary
+    retained = json.loads((tmp_path / "source_containers_before_stop.json").read_text())
+    assert retained["total"] == 1
 
 
 def test_rtsp_republishers_stopped_by_runner_are_not_counted_exited(

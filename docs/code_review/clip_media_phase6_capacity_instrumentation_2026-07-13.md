@@ -179,6 +179,9 @@ The pressure path now:
   `PREROLLING`; with Annex-B `h264_mp4toannexb,dump_extra=freq=keyframe`, the
   parser produces profile caps and enters `PLAYING`; and
 - captures adapter logs before disabling cameras can remove their containers.
+  Successful runs also write `source_containers_before_stop.json`, preserving
+  the pre-cleanup running/restart snapshot instead of reporting only the
+  expected post-cleanup zero-container state.
 
 Retained preflight evidence:
 
@@ -191,11 +194,13 @@ Retained preflight evidence:
 | `phase6_ingress_managedmtx60_20260713T0423CST` | harness-managed MediaMTX 60/60, zero restart, server removed |
 | `phase6_h264_repeat_headers_20260713T0443CST` | one-source parser reached `PLAYING` |
 | `phase6_ingress_savant20_headers_20260713T0450CST` | adapters/forwarder/Savant 20/20, zero restart |
+| `phase6_ingress_pose60_b650952_20260713T0500CST` | adapters/forwarder/Savant 60/60, zero visibility restart |
 
-The last 20-source full-exporter smoke failed only its separate steady-FPS
-gate (`~5.0fps` versus fixed `7.92fps`). That run proves ingress closure but is
-not a capacity pass. The model chain, model intervals, FPS and acceptance
-thresholds remain unchanged because they are outside this Goal's change scope.
+The 20-source full-exporter and 60-source pose-only smokes failed only their
+separate steady-FPS gates (both about `5.0fps` versus fixed `7.92fps`). These
+runs prove ingress closure but are not capacity passes. The model chain, model
+intervals, FPS and acceptance thresholds remain unchanged because they are
+outside this Goal's change scope.
 
 ## 6. Remaining Phase 6 Work
 

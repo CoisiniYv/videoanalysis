@@ -949,9 +949,10 @@ to be readable, applies the separate `ffmpeg_input` constructor timeout, repeats
 H.264 parameter sets at keyframes, retains adapter failure logs, and removes
 the temporary server on every exit path. Publisher-only probes reached 40/40
 and 60/60 with zero restart; a full-exporter smoke reached 20/20
-adapter/forwarder/Savant visibility with zero restart. Its separate steady-FPS
-gate remained below the unchanged minimum, so neither the Phase 6 token nor a
-capacity candidate is claimed.
+adapter/forwarder/Savant visibility with zero restart, and the 60-source
+pose-only closure reached 60/60 without a visibility restart. Their separate
+steady-FPS gates remained below the unchanged minimum, so neither the Phase 6
+token nor a capacity candidate is claimed.
 
 ### Phase 7 - Remove Legacy And Misleading Contracts
 

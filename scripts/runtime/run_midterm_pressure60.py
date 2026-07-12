@@ -1517,7 +1517,7 @@ def main(argv: list[str] | None = None) -> int:
         report["rolling_cache_postfill"] = rolling_cache_postfill_after_sampling(cfg)
         if cfg.adaface_roi_redis:
             report["adaface_roi_worker"] = collect_adaface_roi_worker_metrics(cfg)
-        stop_pressure_sources(conn, cfg)
+        report["pressure_source_stop"] = stop_pressure_sources(conn, cfg)
         stop_rtsp_republishers(rtsp_republishers, cfg)
         rtsp_republishers = []
         if rtsp_republish_local_server is not None:
@@ -6410,11 +6410,16 @@ def restart_pressure_source_ids_from_manifest(
     return summary
 
 
-def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
+def stop_pressure_sources(conn, cfg: PressureConfig) -> dict[str, Any]:
     # Capture adapter failures before the runtime apply removes disabled source
     # containers.  On a visibility-gate failure these logs are the only direct
     # proof that ffmpeg_input initialization, rather than the publisher or
     # model chain, caused the restart storm.
+    source_containers = inspect_pressure_source_containers(cfg.run_id)
+    write_json(
+        cfg.artifact_dir / "source_containers_before_stop.json",
+        source_containers,
+    )
     source_logs = capture_pressure_source_logs(cfg, artifact_name="source_adapter_logs")
     with conn.transaction():
         conn.execute(
@@ -6429,26 +6434,29 @@ def stop_pressure_sources(conn, cfg: PressureConfig) -> None:
     removed = remove_pressure_source_containers(cfg.run_id)
     stable_removal = remove_pressure_source_containers_until_stable(cfg.run_id)
     sources_apply_error = sources_apply.get("error")
+    summary = {
+        "direct_source_container_stop": True,
+        "reason": "preserve_current_runtime_epoch_until_evidence_drain",
+        "dual_shard_same_gpu": bool(cfg.dual_shard_same_gpu),
+        "source_containers_before_stop": source_containers,
+        "sources_apply": sources_apply,
+        "sources_apply_error_ignored": bool(
+            sources_apply_error and stable_removal.get("stable")
+        ),
+        "source_logs": source_logs,
+        "removed_source_containers": removed,
+        "stable_source_container_removal": stable_removal,
+    }
     write_json(
         cfg.artifact_dir / "runtime_sources_apply_stop_pressure.json",
-        {
-            "direct_source_container_stop": True,
-            "reason": "preserve_current_runtime_epoch_until_evidence_drain",
-            "dual_shard_same_gpu": bool(cfg.dual_shard_same_gpu),
-            "sources_apply": sources_apply,
-            "sources_apply_error_ignored": bool(
-                sources_apply_error and stable_removal.get("stable")
-            ),
-            "source_logs": source_logs,
-            "removed_source_containers": removed,
-            "stable_source_container_removal": stable_removal,
-        },
+        summary,
     )
     if not stable_removal.get("stable"):
         raise RuntimeError(
             "pressure sources did not stay removed before evidence drain; "
             f"summary={stable_removal}"
         )
+    return summary
 
 
 def capture_pressure_source_logs(
