@@ -3759,7 +3759,10 @@ def start_rolling_cache_sinks_for_pressure(
         profiles = ["rolling-cache"]
         services = ["rolling-cache-sink"]
         dependency_services = ["replay-raw-fanout"]
-    input_fps_probe = probe_video_input_fps(cfg.rtsp_uri)
+    # The rolling sinks consume the per-source republish output.  When the
+    # pressure profile uses a fixed fixture, that output inherits the fixture
+    # cadence rather than the unrelated shared/default RTSP URI cadence.
+    input_fps_probe = probe_video_input_fps(cfg.rtsp_republish_input_uri)
     rolling_cache_input_fps = (
         float(input_fps_probe.get("fps") or 0.0)
         or _fps_to_float(os.environ.get("ROLLING_CACHE_FPS", ""))
@@ -5854,13 +5857,17 @@ def pressure_warmup_rows_snapshot(conn, cfg: PressureConfig) -> dict[str, Any]:
     }
 
 
-def _formal_pressure_event_predicate(alias: str) -> str:
+def _formal_pressure_event_predicate(
+    alias: str,
+    *,
+    bounded_end: bool = False,
+) -> str:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
         raise ValueError(f"invalid SQL alias: {alias!r}")
     # Epoch-ms event timestamps are authoritative. Stream-relative or missing
     # timestamps fall back to the DB creation clock so delayed warmup inserts
     # still cannot enter the measured result set.
-    return f"""
+    start_predicate = f"""
       (
         %(sampling_start_event_ts_ms)s <= 0
         OR (
@@ -5871,6 +5878,28 @@ def _formal_pressure_event_predicate(alias: str) -> str:
           COALESCE({alias}.event_ts_ms, 0) < 946684800000
           AND {alias}.created_at >= to_timestamp(
             %(sampling_start_event_ts_ms)s / 1000.0
+          )
+        )
+      )
+    """
+    if not bounded_end:
+        return start_predicate
+    # A retained postfill bundle remains visible to operators, but events whose
+    # authoritative event clock is beyond the sampling cutoff must not extend
+    # formal pressure-window statistics.  Non-epoch timestamps use the same DB
+    # clock fallback as the lower fence.
+    return f"""
+      ({start_predicate})
+      AND (
+        %(sampling_end_event_ts_ms)s <= 0
+        OR (
+          {alias}.event_ts_ms >= 946684800000
+          AND {alias}.event_ts_ms <= %(sampling_end_event_ts_ms)s
+        )
+        OR (
+          COALESCE({alias}.event_ts_ms, 0) < 946684800000
+          AND {alias}.created_at <= to_timestamp(
+            %(sampling_end_event_ts_ms)s / 1000.0
           )
         )
       )
@@ -6061,6 +6090,7 @@ def clear_pressure_post_sample_rows(
         cfg.run_id,
         cooldown_s=cfg.pressure_algorithm_cooldown_s,
         sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+        sampling_end_event_ts_ms=int(cutoff_created_at.timestamp() * 1000),
     )
     summary = {
         "status": "completed",
@@ -6180,6 +6210,7 @@ def prune_pressure_post_sample_nonplayable_rows(
             cfg.run_id,
             cooldown_s=cfg.pressure_algorithm_cooldown_s,
             sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=cutoff_event_ts_ms,
         ),
     }
     write_json(cfg.artifact_dir / "pressure_post_sample_cleanup.json", summary)
@@ -6657,6 +6688,7 @@ def db_pressure_event_ingest_summary(
     *,
     cooldown_s: int = PRESSURE_COOLDOWN_SECONDS,
     sampling_start_event_ts_ms: int = 0,
+    sampling_end_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     row = conn.execute(
@@ -6679,14 +6711,20 @@ def db_pressure_event_ingest_summary(
           ) AS max_created_minus_event_ts_s
         FROM events e
         WHERE source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("e")}
+          AND {_formal_pressure_event_predicate("e", bounded_end=True)}
         """,
         {
             "prefix": prefix,
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchone()
     summary = _row_json(row)
+    summary["formal_sampling_window"] = {
+        "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
+        "end_bounded": sampling_end_event_ts_ms > 0,
+    }
     cooldown_s = max(1, int(cooldown_s or PRESSURE_COOLDOWN_SECONDS))
     summary[f"cooldown_algorithm_{cooldown_s}s"] = (
         db_pressure_algorithm_cooldown_summary(
@@ -6696,6 +6734,7 @@ def db_pressure_event_ingest_summary(
             grace_ms=PRESSURE_COOLDOWN_GRACE_MS,
             event_types=PRESSURE_COOLDOWN_EVENT_TYPES,
             sampling_start_event_ts_ms=sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=sampling_end_event_ts_ms,
         )
     )
     return summary
@@ -6709,6 +6748,7 @@ def db_pressure_algorithm_cooldown_summary(
     grace_ms: int,
     event_types: tuple[str, ...],
     sampling_start_event_ts_ms: int = 0,
+    sampling_end_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     threshold_ms = max(0, cooldown_s * 1000 - max(0, grace_ms))
@@ -6725,7 +6765,7 @@ def db_pressure_algorithm_cooldown_summary(
             ) AS prev_event_ts_ms
           FROM events e
           WHERE source_id LIKE %(prefix)s
-            AND {_formal_pressure_event_predicate("e")}
+            AND {_formal_pressure_event_predicate("e", bounded_end=True)}
             AND status = 'new'
             AND event_type = ANY(%(event_types)s)
             AND event_ts_ms IS NOT NULL
@@ -6748,6 +6788,7 @@ def db_pressure_algorithm_cooldown_summary(
             "event_types": list(event_types),
             "threshold_ms": threshold_ms,
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchone()
     source_count = conn.execute(
@@ -6755,11 +6796,12 @@ def db_pressure_algorithm_cooldown_summary(
         SELECT count(DISTINCT source_id) AS source_count
         FROM events e
         WHERE source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("e")}
+          AND {_formal_pressure_event_predicate("e", bounded_end=True)}
         """,
         {
             "prefix": prefix,
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchone()
     type_rows = conn.execute(
@@ -6767,7 +6809,7 @@ def db_pressure_algorithm_cooldown_summary(
         SELECT event_type, count(*) AS count
         FROM events e
         WHERE source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("e")}
+          AND {_formal_pressure_event_predicate("e", bounded_end=True)}
           AND status = 'new'
           AND event_type = ANY(%(event_types)s)
         GROUP BY event_type
@@ -6777,6 +6819,7 @@ def db_pressure_algorithm_cooldown_summary(
             "prefix": prefix,
             "event_types": list(event_types),
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchall()
     summary = _row_json(rows)
@@ -6786,6 +6829,7 @@ def db_pressure_algorithm_cooldown_summary(
             conn,
             run_id,
             sampling_start_event_ts_ms=sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=sampling_end_event_ts_ms,
         )
     )
     windows_per_source_type = int(span_s // max(cooldown_s, 1)) + 1 if source_total else 0
@@ -6812,17 +6856,19 @@ def db_pressure_event_span_seconds(
     run_id: str,
     *,
     sampling_start_event_ts_ms: int = 0,
+    sampling_end_event_ts_ms: int = 0,
 ) -> float:
     row = conn.execute(
         f"""
         SELECT COALESCE((max(event_ts_ms) - min(event_ts_ms)) / 1000.0, 0) AS span_s
         FROM events e
         WHERE source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("e")}
+          AND {_formal_pressure_event_predicate("e", bounded_end=True)}
         """,
         {
             "prefix": f"{run_id}_%",
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchone()
     try:

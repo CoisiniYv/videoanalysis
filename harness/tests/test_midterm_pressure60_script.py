@@ -1795,6 +1795,10 @@ def test_formal_pressure_window_fences_warmup_by_event_or_creation_time() -> Non
     assert "e.event_ts_ms >= %(sampling_start_event_ts_ms)s" in predicate
     assert "e.created_at >= to_timestamp" in predicate
 
+    bounded = module._formal_pressure_event_predicate("e", bounded_end=True)
+    assert "e.event_ts_ms <= %(sampling_end_event_ts_ms)s" in bounded
+    assert "e.created_at <= to_timestamp" in bounded
+
 
 def test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata(
     tmp_path: Path,
@@ -4628,11 +4632,13 @@ def test_postfill_prune_keeps_bundles_and_trajectory_observations(
                 )
             raise AssertionError(compact)
 
-    monkeypatch.setattr(
-        module,
-        "db_pressure_event_ingest_summary",
-        lambda *_args, **_kwargs: {"events": 1323},
-    )
+    ingest_calls: list[dict[str, object]] = []
+
+    def fake_ingest(*_args, **kwargs):
+        ingest_calls.append(kwargs)
+        return {"events": 1323}
+
+    monkeypatch.setattr(module, "db_pressure_event_ingest_summary", fake_ingest)
     conn = FakeConn()
     summary = module.prune_pressure_post_sample_nonplayable_rows(conn, cfg, cutoff)
 
@@ -4643,6 +4649,15 @@ def test_postfill_prune_keeps_bundles_and_trajectory_observations(
     assert summary["person_observation_rows_preserved"] == 3812
     assert summary["face_observation_rows_deleted"] == 0
     assert summary["person_observation_rows_deleted"] == 0
+    assert ingest_calls == [
+        {
+            "cooldown_s": cfg.pressure_algorithm_cooldown_s,
+            "sampling_start_event_ts_ms": cfg.pressure_sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": int(
+                datetime.fromisoformat(cutoff["created_at_cutoff"]).timestamp() * 1000
+            ),
+        }
+    ]
     assert not any("DELETE FROM face_observations" in query for query in conn.queries)
     assert not any(
         "DELETE FROM person_bbox_observations" in query for query in conn.queries
@@ -4709,8 +4724,11 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         artifact_dir=tmp_path,
         dual_shard_same_gpu=True,
         rolling_cache_evidence=True,
+        rtsp_uri="rtsp://shared.example/live/24fps",
+        rtsp_republish_input_uri="/fixtures/fixed-8fps.mp4",
     )
     calls = []
+    probed_uris = []
 
     def fake_run(command, log_path, env=None, **kwargs):
         calls.append({"command": command, "log_path": log_path, "env": env or {}, "kwargs": kwargs})
@@ -4724,7 +4742,8 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     monkeypatch.setattr(
         module,
         "probe_video_input_fps",
-        lambda uri: {"status": "measured", "fps": 23.976, "rate": "24000/1001", "uri": uri},
+        lambda uri: probed_uris.append(uri)
+        or {"status": "measured", "fps": 8.0, "rate": "8/1", "uri": uri},
     )
 
     summary = module.start_rolling_cache_sinks_for_pressure(
@@ -4733,10 +4752,11 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     )
 
     assert calls
+    assert probed_uris == ["/fixtures/fixed-8fps.mp4"]
     assert calls[0]["env"]["ROLLING_CACHE_RUNTIME_EPOCH_ID"] == "midterm-epoch-123"
-    assert calls[0]["env"]["ROLLING_CACHE_FPS"] == "23.976"
+    assert calls[0]["env"]["ROLLING_CACHE_FPS"] == "8"
     assert summary["runtime_epoch_id"] == "midterm-epoch-123"
-    assert summary["rolling_cache_expected_raw_fps"] == 23.976
+    assert summary["rolling_cache_expected_raw_fps"] == 8.0
     assert summary["dependency_services"] == [
         "replay-raw-fanout-a",
         "replay-raw-fanout-b",

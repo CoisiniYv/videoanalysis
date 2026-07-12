@@ -954,6 +954,20 @@ pose-only closure reached 60/60 without a visibility restart. Their separate
 steady-FPS gates remained below the unchanged minimum, so neither the Phase 6
 token nor a capacity candidate is claimed.
 
+Fixed-input candidate checkpoint (2026-07-13): the corrected 60-source ingress
+completed `max_active=4` with 60/60 visibility and zero source restart. An
+upper-bounded sampling-window recomputation found 548 formal evidence tasks;
+356 expired and no intrusion video bundle completed. The retained artifact has
+three additional playable postfill tasks, for 551 tasks and 195 image bundles.
+Observed WIP peaked at 3 of 4 while the remux lane stayed at depth 1 and oldest
+ready age reached 304 seconds, identifying service-rate/retention failure rather
+than shared-WIP saturation. The candidate is rejected. Artifact audit also
+corrected two harness-only gates: rolling raw FPS is now probed from the actual
+fixed republish input, and retained postfill events are excluded from formal
+observed-window statistics by an upper event-time/creation-time sampling fence.
+These corrections do not waive or alter the expiry, FPS, queue, duration,
+annotation, or correctness gates. Candidates 8 and 12 remain required.
+
 ### Phase 7 - Remove Legacy And Misleading Contracts
 
 After two accepted 60-source runs and one restart-recovery soak:

@@ -202,7 +202,49 @@ runs prove ingress closure but are not capacity passes. The model chain, model
 intervals, FPS and acceptance thresholds remain unchanged because they are
 outside this Goal's change scope.
 
-## 6. Remaining Phase 6 Work
+## 6. Fixed-Input `max_active=4` Result
+
+The corrected ingress path completed the first comparable capacity candidate:
+
+```text
+run_id: phase6_fixed60_8fps_5p5_maxactive4_0312216_20260713T0520CST
+artifact: /data/video-analytics/artifacts/phase6_fixed60_8fps_5p5_maxactive4_0312216_20260713T0520CST
+visibility: 60/60, zero source restart
+formal bounded evidence tasks: 548
+retained evidence tasks (including playable postfill): 551
+playable retained bundles: 195/195
+materialization expired: 356
+WIP active p50/p95/max: 1/3/3 (limit 4)
+remux depth p50/p95/max: 1/1/1
+oldest ready p50/p95/max: 224s/286s/304s
+```
+
+This candidate fails Phase 6. Its retained 195 watchlist image bundles (192 in
+the bounded sampling window and three playable postfill results) are all
+playable and visible through the 8090 DB-backed path, but no intrusion video
+completed before 300-second rolling retention expired. Redis lag/pending and
+DB pool timeout/error/lost-connection counts were zero. The measured topology
+therefore did not saturate shared WIP; the fixed single remux lane plus coverage
+retry service rate remained below event arrival rate. `max_active=4` cannot be
+selected from this result.
+
+Two harness-only reporting defects were found while auditing the artifact:
+
+- rolling-cache raw FPS was probed from the unrelated default `rtsp_uri`
+  (23.976fps), not the fixed republish input (8fps), although 1,620 measured
+  segments had p50 8.085fps across 60/60 sources; and
+- the observed-window summary had only a lower sampling fence, so retained
+  playable postfill events extended the measured span to about 548 seconds.
+
+The harness now probes `rtsp_republish_input_uri` and applies both sampling
+start and sampling-end event-time fences (with DB creation-time fallback) to
+the post-cleanup formal ingest/cooldown summary. This preserves postfill
+evidence and trajectories for operator use while excluding them from formal
+window gates. A read-only live recomputation returned 1,534 total rows, 548 new
+events/tasks, and a 407.183-second event-time span instead of the contaminated
+548-second span. Neither correction changes the real 356-expiry failure.
+
+## 7. Remaining Phase 6 Work
 
 Run the fixed-input 60-source workload at `max_active=4`, `8`, and `12`, select
 the lowest candidate satisfying correctness, structural, CPU, connection, and
