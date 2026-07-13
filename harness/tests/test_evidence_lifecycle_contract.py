@@ -64,12 +64,15 @@ def test_compatibility_projection_does_not_create_second_state_authority() -> No
 
 def test_reason_taxonomy_separates_retryable_and_terminal_outcomes() -> None:
     coverage = classify_reason("post_gap_ns=3000000000 coverage miss")
+    event_frame_tail = classify_reason("rolling_cache_event_frame_not_covered")
     capacity = classify_reason("materialization_concurrency_limit_exceeded")
     invalid = classify_reason("rolling_cache_missing_event_frame_pts")
     covered = classify_reason("covered_by_existing_evidence")
     unknown = classify_reason("legacy operator decision with no known prefix")
 
     assert coverage.code == "coverage_not_complete"
+    assert event_frame_tail.code == "coverage_not_complete"
+    assert event_frame_tail.retryable is True
     assert coverage.error_class is EvidenceErrorClass.NOT_READY
     assert coverage.retryable is True
     assert capacity.code == "capacity_unavailable"

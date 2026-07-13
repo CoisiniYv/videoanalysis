@@ -231,6 +231,7 @@ _REASON_RULES: Final = (
             "pre_gap_ns=",
             "post_gap_ns=",
             "window_not_covered",
+            "event_frame_not_covered",
         ),
     ),
     (

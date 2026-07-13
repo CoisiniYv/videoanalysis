@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -95,9 +96,8 @@ from app.rolling_cache import (
     RollingSegment,
     find_segments,
     materialize_window,
-    overlapping_segments,
 )
-from app.segment_index import RollingSegmentIndex
+from app.segment_index import RollingSegmentIndex, SegmentPinRetryableError
 from app.snapshot import generate_snapshot
 from app.subprocess_control import run_managed_subprocess, set_active_process_registry
 
@@ -115,6 +115,10 @@ DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
 DEFAULT_MEDIA_WORKER_STATE_PATH = (
     "/media/replay-sink-output/midterm/.media-worker.processed.json"
 )
+
+
+class ImageExtractionRetryableError(RuntimeError):
+    """A stable segment was temporarily unable to yield the requested frame."""
 DEFAULT_SINK_SCAN_MAX_METADATA_FILES = 20000
 DEFAULT_MEDIA_PROBE_TIMEOUT_S = 30.0
 DEFAULT_MEDIA_DECODE_TIMEOUT_S = 120.0
@@ -9389,6 +9393,14 @@ def _process_rolling_cache_tasks(
                 )
                 if _persist_rolling_cache_handoff_metadata(pg_conn, cfg, metadata):
                     metadata_overrides.append(metadata)
+            except SegmentPinRetryableError as exc:
+                _defer_rolling_cache_task_safely(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=f"temporary_io_error:{exc}",
+                    retry_after_s=1.0,
+                    lease=lease,
+                )
             except RollingCacheCoverageMiss as exc:
                 _defer_rolling_cache_task(
                     pg_conn,
@@ -9442,6 +9454,14 @@ def _process_rolling_cache_tasks(
                         metadata,
                     ):
                         metadata_overrides.append(metadata)
+                except SegmentPinRetryableError as exc:
+                    _defer_rolling_cache_task_safely(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=f"temporary_io_error:{exc}",
+                        retry_after_s=1.0,
+                        lease=lease,
+                    )
                 except RollingCacheCoverageMiss as exc:
                     _defer_rolling_cache_task_safely(
                         pg_conn,
@@ -9544,19 +9564,23 @@ def _process_rolling_cache_image_tasks(
                 _runtime_epoch_from_event_context(event_context)
                 or _current_runtime_epoch_id(cfg.sink_output_dir)
             )
-            segments = _find_rolling_segments(
-                cfg=cfg,
-                source_id=source_id,
-                runtime_epoch_id=runtime_epoch_id,
-                segment_index=segment_index,
-                segment_cache=segment_cache,
-            )
-            pin_context = (
-                segment_index.pin_segments(segments)
+            segment_context = (
+                segment_index.pin_source_segments(
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
+                )
                 if segment_index is not None
-                else nullcontext()
+                else nullcontext(
+                    _find_rolling_segments(
+                        cfg=cfg,
+                        source_id=source_id,
+                        runtime_epoch_id=runtime_epoch_id,
+                        segment_index=None,
+                        segment_cache=segment_cache,
+                    )
+                )
             )
-            with pin_context:
+            with segment_context as segments:
                 result = _materialize_face_image_from_rolling_cache(
                     cfg=cfg,
                     row=row,
@@ -9577,25 +9601,38 @@ def _process_rolling_cache_image_tasks(
                 lease=lease,
             ):
                 updated += 1
+        except SegmentPinRetryableError as exc:
+            _defer_rolling_cache_task_safely(
+                pg_conn,
+                event_id=event_id,
+                reason=f"temporary_io_error:{exc}",
+                retry_after_s=1.0,
+                lease=lease,
+            )
+        except ImageExtractionRetryableError as exc:
+            _defer_rolling_cache_task_safely(
+                pg_conn,
+                event_id=event_id,
+                reason=f"temporary_io_error:{exc}",
+                retry_after_s=1.0,
+                lease=lease,
+            )
         except RollingCacheCoverageMiss as exc:
-            if (
-                runtime_resources is not None
-                and runtime_resources.shutdown.force_requested
-            ):
-                _defer_rolling_cache_task_safely(
-                    pg_conn,
-                    event_id=event_id,
-                    reason="temporary_io_error:media_worker_shutdown_interrupted",
-                    retry_after_s=1.0,
-                    lease=lease,
+            reason = (
+                "temporary_io_error:media_worker_shutdown_interrupted"
+                if (
+                    runtime_resources is not None
+                    and runtime_resources.shutdown.force_requested
                 )
-            else:
-                _mark_image_evidence_failed(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=str(exc) or "face_image_frame_not_found",
-                    lease=lease,
-                )
+                else str(exc) or "face_image_frame_not_found"
+            )
+            _defer_rolling_cache_task_safely(
+                pg_conn,
+                event_id=event_id,
+                reason=reason,
+                retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+                lease=lease,
+            )
         except Exception as exc:
             logger.exception("rolling_cache_image_materialization_failed event_id=%s", event_id)
             if (
@@ -9658,18 +9695,22 @@ def _run_rolling_image_job_v2(
             _runtime_epoch_from_event_context(event_context)
             or _current_runtime_epoch_id(cfg.sink_output_dir)
         )
-        segments = _find_rolling_segments(
-            cfg=cfg,
-            source_id=source_id,
-            runtime_epoch_id=runtime_epoch_id,
-            segment_index=segment_index,
-        )
-        pin_context = (
-            segment_index.pin_segments(segments)
+        segment_context = (
+            segment_index.pin_source_segments(
+                source_id=source_id,
+                runtime_epoch_id=runtime_epoch_id,
+            )
             if segment_index is not None
-            else nullcontext()
+            else nullcontext(
+                _find_rolling_segments(
+                    cfg=cfg,
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
+                    segment_index=None,
+                )
+            )
         )
-        with pin_context:
+        with segment_context as segments:
             result = _materialize_face_image_from_rolling_cache(
                 cfg=cfg,
                 row=row,
@@ -9707,24 +9748,39 @@ def _run_rolling_image_job_v2(
             "updated": 1 if updated else 0,
             "status": "materialized" if updated else "stale_fence",
         }
+    except SegmentPinRetryableError as exc:
+        reason = f"temporary_io_error:{exc}"
+        _defer_rolling_cache_task(
+            conn,
+            event_id=event_id,
+            reason=reason,
+            retry_after_s=1.0,
+            lease=lease,
+        )
+        return {"updated": 0, "status": reason}
+    except ImageExtractionRetryableError as exc:
+        reason = f"temporary_io_error:{exc}"
+        _defer_rolling_cache_task(
+            conn,
+            event_id=event_id,
+            reason=reason,
+            retry_after_s=1.0,
+            lease=lease,
+        )
+        return {"updated": 0, "status": reason}
     except RollingCacheCoverageMiss as exc:
-        if runtime_resources.shutdown.force_requested:
-            reason = "temporary_io_error:media_worker_shutdown_interrupted"
-            _defer_rolling_cache_task(
-                conn,
-                event_id=event_id,
-                reason=reason,
-                retry_after_s=1.0,
-                lease=lease,
-            )
-        else:
-            reason = str(exc) or "face_image_frame_not_found"
-            _mark_image_evidence_failed(
-                conn,
-                event_id=event_id,
-                reason=reason,
-                lease=lease,
-            )
+        reason = (
+            "temporary_io_error:media_worker_shutdown_interrupted"
+            if runtime_resources.shutdown.force_requested
+            else str(exc) or "face_image_frame_not_found"
+        )
+        _defer_rolling_cache_task(
+            conn,
+            event_id=event_id,
+            reason=reason,
+            retry_after_s=_rolling_cache_coverage_retry_after_s(exc),
+            lease=lease,
+        )
         return {"updated": 0, "status": reason}
     except Exception as exc:
         logger.exception(
@@ -10452,37 +10508,117 @@ def _extract_full_frame_image(
     offset_s: float,
 ) -> None:
     ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
-    command = [
-        ffmpeg_bin,
-        "-hide_banner",
-        "-y",
-        "-i",
-        str(video_path),
-        "-ss",
-        f"{max(0.0, offset_s):.6f}",
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        str(output_path),
-    ]
+    requested_offset = max(0.0, float(offset_s))
+    candidate_offsets: list[float] = []
+    for backoff_s in (0.0, 0.001, 0.01, 0.125, 0.25):
+        candidate = round(max(0.0, requested_offset - backoff_s), 6)
+        if candidate not in candidate_offsets:
+            candidate_offsets.append(candidate)
+    last_detail = "face_image_full_frame_missing"
+
+    def attempt_extract(candidate_offset: float, attempt: int) -> bool:
+        nonlocal last_detail
+        output_path.unlink(missing_ok=True)
+        command = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(video_path),
+            "-ss",
+            f"{candidate_offset:.6f}",
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(output_path),
+        ]
+        started = time.monotonic()
+        proc = run_managed_subprocess(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_media_probe_timeout_s(),
+            check=False,
+        )
+        _record_probe_metric("ffmpeg", time.monotonic() - started)
+        if proc.returncode == 0 and output_path.is_file() and output_path.stat().st_size > 0:
+            if attempt > 1:
+                logger.info(
+                    "face_image_seek_backoff_applied video_path=%s "
+                    "requested_offset_s=%.6f selected_offset_s=%.6f attempt=%d",
+                    video_path,
+                    requested_offset,
+                    candidate_offset,
+                    attempt,
+                )
+            return True
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[-500:]
+        last_detail = (
+            f"face_image_ffmpeg_failed:{detail}"
+            if proc.returncode != 0
+            else "face_image_full_frame_missing"
+        )
+        return False
+
+    for attempt, candidate_offset in enumerate(candidate_offsets, start=1):
+        if attempt_extract(candidate_offset, attempt):
+            return
+
+    safe_stream_offset = _probe_last_safe_video_offset(video_path)
+    if (
+        safe_stream_offset is not None
+        and safe_stream_offset not in candidate_offsets
+        and attempt_extract(safe_stream_offset, len(candidate_offsets) + 1)
+    ):
+        return
+    output_path.unlink(missing_ok=True)
+    raise ImageExtractionRetryableError(
+        f"face_image_seek_retry_exhausted:{last_detail}"
+    )
+
+
+def _probe_last_safe_video_offset(video_path: Path) -> float | None:
+    """Return the final decodable stream offset, excluding one frame interval."""
+
+    ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
     started = time.monotonic()
     proc = run_managed_subprocess(
-        command,
+        [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,avg_frame_rate",
+            "-of",
+            "json",
+            str(video_path),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         timeout=_media_probe_timeout_s(),
         check=False,
     )
-    _record_probe_metric("ffmpeg", time.monotonic() - started)
+    _record_probe_metric("ffprobe", time.monotonic() - started)
     if proc.returncode != 0:
-        raise RuntimeError(
-            "face_image_ffmpeg_failed:"
-            + " ".join((proc.stderr or proc.stdout or "").split())[-500:]
-        )
-    if not output_path.is_file() or output_path.stat().st_size <= 0:
-        raise RuntimeError("face_image_full_frame_missing")
+        return None
+    try:
+        streams = json.loads(proc.stdout or "{}").get("streams") or []
+        stream = streams[0] if streams else {}
+        duration_s = float(stream.get("duration"))
+        rate_text = str(stream.get("avg_frame_rate") or "")
+        numerator_text, denominator_text = rate_text.split("/", 1)
+        fps = float(numerator_text) / float(denominator_text)
+        if not math.isfinite(duration_s) or duration_s <= 0:
+            return None
+        frame_interval_s = 1.0 / fps if math.isfinite(fps) and fps > 0 else 0.25
+        return round(max(0.0, duration_s - max(frame_interval_s, 0.001)), 6)
+    except (AttributeError, IndexError, TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 def _face_bbox_from_event(event_context: dict) -> dict | None:
@@ -11257,6 +11393,14 @@ class _RollingCacheMaterializationRunner:
                     if work_permit is not None:
                         transferred_work_permits[event_id] = work_permit
                         work_permit = None
+            except SegmentPinRetryableError as exc:
+                _defer_rolling_cache_task_safely(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=f"temporary_io_error:{exc}",
+                    retry_after_s=1.0,
+                    lease=lease,
+                )
             except RollingCacheCoverageMiss as exc:
                 _defer_rolling_cache_task(
                     pg_conn,
@@ -11426,17 +11570,15 @@ def _materialize_rolling_cache_job(
         if isinstance(job.get("segments"), list)
         else None
     )
-    selected_for_pin = overlapping_segments(
-        segments or (),
-        requested_start_pts=requested_start_pts,
-        requested_end_pts=requested_end_pts,
-    )
-    pin_context = (
-        segment_index.pin_segments(selected_for_pin)
+    segment_context = (
+        segment_index.pin_source_segments(
+            source_id=str(job.get("source_id") or ""),
+            runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
+        )
         if segment_index is not None
-        else nullcontext()
+        else nullcontext(segments or [])
     )
-    with pin_context:
+    with segment_context as selected_segments:
         materialized = materialize_window(
             root=root,
             output_root=output_root,
@@ -11446,7 +11588,7 @@ def _materialize_rolling_cache_job(
             requested_end_pts=requested_end_pts,
             runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
             labels=job.get("labels") if isinstance(job.get("labels"), dict) else {},
-            segments=segments,
+            segments=selected_segments,
             row_loader=(
                 segment_index.rows_for_segment
                 if segment_index is not None

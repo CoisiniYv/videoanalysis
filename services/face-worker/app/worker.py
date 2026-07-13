@@ -790,12 +790,109 @@ def _handle_observation(
         return "duplicate", obs.get("source_observation_id", "")
 
 
+def _process_batch_pipelined(
+    messages: list[tuple[str, dict[bytes, bytes]]],
+    repo: FaceObservationRepository,
+    consumer: RedisStreamConsumer,
+    watchlist_emitter: WatchlistMatchEmitter | None = None,
+) -> tuple[int, int, int, int, int]:
+    """Persist and ACK valid observations in bounded network batches."""
+
+    skipped = 0
+    parsed: list[tuple[str, dict]] = []
+    for msg_id, fields in messages:
+        obs = _parse_observation(fields)
+        if obs is None:
+            consumer.ack(msg_id)
+            continue
+        embed_err = _validate_embedding(obs, msg_id)
+        if embed_err:
+            logger.error(
+                "msg_id=%s embedding invalid, left pending: %s", msg_id, embed_err
+            )
+            skipped += 1
+            continue
+        parsed.append((msg_id, obs))
+
+    if not parsed:
+        return 0, 0, skipped, 0, 0
+
+    persist_started = time.perf_counter()
+    try:
+        results = repo.insert_observations([obs for _msg_id, obs in parsed])
+    except Exception:
+        logger.exception("face observation batch insert failed count=%d", len(parsed))
+        return 0, 0, skipped, len(parsed), 0
+    if len(results) != len(parsed):
+        logger.error(
+            "face observation batch result mismatch submitted=%d returned=%d",
+            len(parsed),
+            len(results),
+        )
+        return 0, 0, skipped, len(parsed), 0
+
+    inserted_rows: list[dict] = []
+    inserted = 0
+    duplicates = 0
+    ack_ids: list[str] = []
+    for (msg_id, obs), result in zip(parsed, results):
+        ack_ids.append(msg_id)
+        if result is None:
+            duplicates += 1
+        else:
+            inserted += 1
+            inserted_rows.append(obs)
+
+    ack_many = getattr(consumer, "ack_many", None)
+    if callable(ack_many):
+        acked = int(ack_many(ack_ids))
+        if acked != len(ack_ids):
+            logger.error(
+                "face observation batch ack incomplete submitted=%d acked=%d",
+                len(ack_ids),
+                acked,
+            )
+    else:
+        for msg_id in ack_ids:
+            if not consumer.ack(msg_id):
+                logger.error("ack failed for msg_id=%s", msg_id)
+
+    watchlist_emitted = 0
+    if watchlist_emitter is not None:
+        for obs in inserted_rows:
+            try:
+                watchlist_emitted += watchlist_emitter.emit_for_observation(obs)
+            except Exception:
+                logger.exception(
+                    "watchlist emit failed source_observation_id=%s",
+                    obs.get("source_observation_id"),
+                )
+    elapsed_ms = int(round((time.perf_counter() - persist_started) * 1000))
+    logger.info(
+        "face_observation_batch_completed submitted=%d inserted=%d duplicates=%d "
+        "watchlist_emitted=%d elapsed_ms=%d",
+        len(parsed),
+        inserted,
+        duplicates,
+        watchlist_emitted,
+        elapsed_ms,
+    )
+    return inserted, duplicates, skipped, 0, watchlist_emitted
+
+
 def _process_batch(
     messages: list[tuple[str, dict[bytes, bytes]]],
     repo: FaceObservationRepository,
     consumer: RedisStreamConsumer,
     watchlist_emitter: WatchlistMatchEmitter | None = None,
 ) -> tuple[int, int, int, int, int]:
+    if callable(getattr(type(repo), "insert_observations", None)):
+        return _process_batch_pipelined(
+            messages,
+            repo,
+            consumer,
+            watchlist_emitter,
+        )
     inserted = 0
     duplicates = 0
     skipped = 0

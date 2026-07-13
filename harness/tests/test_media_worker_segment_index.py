@@ -7,7 +7,10 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -345,6 +348,150 @@ def test_maintenance_honors_active_pin_then_advances_generation(tmp_path: Path) 
     assert deleted["retention_deleted"] == 1
     assert deleted["generation"] == 1
     assert not segments[0].directory.exists()
+
+
+def test_source_refresh_and_pin_publication_are_atomic_against_retention(
+    tmp_path: Path,
+) -> None:
+    maintenance = _maintenance()
+    root = tmp_path / "cache"
+    directory = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+        mtime_s=10.0,
+    )
+    index = _index(root, read_pin_ttl_s=100.0)
+    cleanup_started = threading.Event()
+    cleanup_finished = threading.Event()
+    cleanup_result: dict[str, object] = {}
+    cleanup_thread: threading.Thread | None = None
+    original_find = index.find_segments
+
+    def cleanup() -> None:
+        cleanup_started.set()
+        cleanup_result.update(
+            maintenance.cleanup_once(
+                root,
+                retention_s=5.0,
+                max_bytes=0,
+                read_pin_ttl_s=100.0,
+                stability_age_s=0.0,
+                now_s=20.0,
+            )
+        )
+        cleanup_finished.set()
+
+    def find_then_start_cleanup(**kwargs):
+        nonlocal cleanup_thread
+        segments = original_find(**kwargs)
+        cleanup_thread = threading.Thread(target=cleanup)
+        cleanup_thread.start()
+        assert cleanup_started.wait(timeout=1.0)
+        assert not cleanup_finished.wait(timeout=0.05)
+        return segments
+
+    index.find_segments = find_then_start_cleanup
+    with index.pin_source_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    ) as pinned_segments:
+        assert [segment.directory for segment in pinned_segments] == [directory]
+        assert cleanup_thread is not None
+        cleanup_thread.join(timeout=2.0)
+        assert not cleanup_thread.is_alive()
+        assert cleanup_result["retention_deleted"] == 0
+        assert cleanup_result["skipped_pinned"] == 1
+        assert directory.exists()
+
+    deleted = maintenance.cleanup_once(
+        root,
+        retention_s=5.0,
+        max_bytes=0,
+        read_pin_ttl_s=100.0,
+        stability_age_s=0.0,
+        now_s=20.0,
+    )
+    assert deleted["retention_deleted"] == 1
+    assert not directory.exists()
+
+
+def test_source_pin_reports_concurrent_writer_change_as_retryable(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    directory = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(root)
+    original_find = index.find_segments
+
+    def find_then_grow_video(**kwargs):
+        segments = original_find(**kwargs)
+        with (directory / "video.mov").open("ab") as video:
+            video.write(b"writer-grew-current-segment")
+        return segments
+
+    index.find_segments = find_then_grow_video
+    from app.segment_index import SegmentPinRetryableError
+
+    with pytest.raises(SegmentPinRetryableError, match="identity changed"):
+        with index.pin_source_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+        ):
+            raise AssertionError("pin should not activate for a changed segment")
+
+
+def test_image_lane_defers_retryable_segment_pin_failures() -> None:
+    source = (MEDIA_WORKER_ROOT / "app" / "worker.py").read_text(encoding="utf-8")
+    legacy = source.split("def _process_rolling_cache_image_tasks", 1)[1]
+    legacy = legacy.split("class _ImageFlightV2", 1)[0]
+    v2 = source.split("def _run_rolling_image_job_v2", 1)[1]
+    v2 = v2.split("def _run_snapshot_job_v2", 1)[0]
+
+    for path in (legacy, v2):
+        retryable = path.index("except SegmentPinRetryableError as exc:")
+        extraction_retryable = path.index("except ImageExtractionRetryableError as exc:")
+        coverage_retryable = path.index("except RollingCacheCoverageMiss as exc:")
+        assert retryable < extraction_retryable < coverage_retryable
+        assert "temporary_io_error:{exc}" in path[retryable:coverage_retryable]
+        assert "_defer_rolling_cache_task" in path[retryable:coverage_retryable]
+        coverage_body = path[coverage_retryable:]
+        assert "_rolling_cache_coverage_retry_after_s(exc)" in coverage_body
+        assert "_defer_rolling_cache_task" in coverage_body
+        assert "_mark_image_evidence_failed" not in coverage_body.split(
+            "except Exception as exc:", 1
+        )[0]
+
+
+def test_video_lane_defers_retryable_segment_pin_failures() -> None:
+    source = (MEDIA_WORKER_ROOT / "app" / "worker.py").read_text(encoding="utf-8")
+    video_lane = source.split("def _process_rolling_cache_tasks", 1)[1]
+    video_lane = video_lane.split("def _process_rolling_cache_image_tasks", 1)[0]
+
+    assert video_lane.count("except SegmentPinRetryableError as exc:") == 2
+    assert video_lane.count('reason=f"temporary_io_error:{exc}"') == 2
+    for section in video_lane.split("except SegmentPinRetryableError as exc:")[1:]:
+        before_coverage = section.split("except RollingCacheCoverageMiss as exc:", 1)[0]
+        assert "_defer_rolling_cache_task_safely" in before_coverage
+        assert "retry_after_s=1.0" in before_coverage
+
+    scheduler_v2 = source.split("def _drain_completed", 1)[1]
+    scheduler_v2 = scheduler_v2.split("def shutdown", 1)[0]
+    pin_retry = scheduler_v2.index("except SegmentPinRetryableError as exc:")
+    coverage_retry = scheduler_v2.index("except RollingCacheCoverageMiss as exc:")
+    assert pin_retry < coverage_retry
+    assert "_defer_rolling_cache_task_safely" in scheduler_v2[
+        pin_retry:coverage_retry
+    ]
+    assert 'reason=f"temporary_io_error:{exc}"' in scheduler_v2[
+        pin_retry:coverage_retry
+    ]
 
 
 def test_expired_sigkill_pin_does_not_block_retention(tmp_path: Path) -> None:

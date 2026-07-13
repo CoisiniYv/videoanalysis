@@ -692,7 +692,12 @@ def fail_rolling_task(
     *,
     reason: str,
 ) -> bool:
-    reason_code = classify_reason(reason).code
+    classification = classify_reason(reason)
+    reason_code = (
+        classification.code
+        if classification.code != "unknown"
+        else str(reason or MaterializationStatus.FAILED.value)
+    )
     params = {
         "event_id": lease.event_id,
         "owner": lease.owner,

@@ -83,6 +83,41 @@ def _to_jsonb(val):
     return json.dumps(val, ensure_ascii=False)
 
 
+def _observation_params(data: Dict[str, Any]) -> dict[str, Any]:
+    embedding_vector = [float(x) for x in data["embedding"]]
+    payload = data.get("payload", {})
+    payload_copy = dict(payload) if isinstance(payload, dict) else {}
+    return {
+        "source_observation_id": data["source_observation_id"],
+        "camera_id": data.get("camera_id", ""),
+        "source_id": data.get("source_id", ""),
+        "track_id": str(data.get("track_id", "")),
+        "timestamp_ms": int(data.get("timestamp_ms", 0)),
+        "captured_at": data.get("captured_at"),
+        "frame_num": data.get("frame_num"),
+        "person_bbox": _to_jsonb(data.get("person_bbox")),
+        "face_bbox": _to_jsonb(data.get("face_bbox")),
+        "landmarks": _to_jsonb(data.get("landmarks")),
+        "face_confidence": float(data.get("face_confidence", 0.0)),
+        "quality": float(data.get("quality", 0.0)),
+        "detector_model": data.get("detector_model", "yolov8_face"),
+        "embedding_model": data.get("embedding_model", "adaface"),
+        "model_version": data.get("model_version"),
+        "embedding_dim": int(data.get("embedding_dim", 512)),
+        "embedding": embedding_vector,
+        "embedding_norm": float(data.get("embedding_norm", 0.0)),
+        "reid_throttle_key": data.get("reid_throttle_key", ""),
+        "association_score": float(data.get("association_score", 0.0))
+        if data.get("association_score") is not None
+        else None,
+        "association_method": data.get("association_method"),
+        "camera_config_resolved": payload_copy.pop("camera_config_resolved", False),
+        "snapshot_path": data.get("snapshot_path"),
+        "crop_path": data.get("crop_path"),
+        "payload": json.dumps(payload_copy, ensure_ascii=False),
+    }
+
+
 class FaceObservationRepository:
     """Idempotent face observation store backed by PostgreSQL + pgvector."""
 
@@ -99,47 +134,29 @@ class FaceObservationRepository:
         Returns the UUID of the new row if inserted, or None if a duplicate
         ``source_observation_id`` was skipped.
         """
-        embedding = data["embedding"]
-        embedding_vector = [float(x) for x in embedding]
-
-        # Build payload with metadata only (no embedding duplication)
-        payload = data.get("payload", {})
-        if isinstance(payload, dict):
-            payload_copy = dict(payload)
-        else:
-            payload_copy = {}
-
-        params = {
-            "source_observation_id": data["source_observation_id"],
-            "camera_id": data.get("camera_id", ""),
-            "source_id": data.get("source_id", ""),
-            "track_id": str(data.get("track_id", "")),
-            "timestamp_ms": int(data.get("timestamp_ms", 0)),
-            "captured_at": data.get("captured_at"),
-            "frame_num": data.get("frame_num"),
-            "person_bbox": _to_jsonb(data.get("person_bbox")),
-            "face_bbox": _to_jsonb(data.get("face_bbox")),
-            "landmarks": _to_jsonb(data.get("landmarks")),
-            "face_confidence": float(data.get("face_confidence", 0.0)),
-            "quality": float(data.get("quality", 0.0)),
-            "detector_model": data.get("detector_model", "yolov8_face"),
-            "embedding_model": data.get("embedding_model", "adaface"),
-            "model_version": data.get("model_version"),
-            "embedding_dim": int(data.get("embedding_dim", 512)),
-            "embedding": embedding_vector,
-            "embedding_norm": float(data.get("embedding_norm", 0.0)),
-            "reid_throttle_key": data.get("reid_throttle_key", ""),
-            "association_score": float(data.get("association_score", 0.0))
-            if data.get("association_score") is not None
-            else None,
-            "association_method": data.get("association_method"),
-            "camera_config_resolved": payload_copy.pop("camera_config_resolved", False),
-            "snapshot_path": data.get("snapshot_path"),
-            "crop_path": data.get("crop_path"),
-            "payload": json.dumps(payload_copy, ensure_ascii=False),
-        }
-
         with self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(_INSERT_SQL, params)
+            cur.execute(_INSERT_SQL, _observation_params(data))
             row = cur.fetchone()
             return str(row["id"]) if row else None
+
+    def insert_observations(self, rows: list[Dict[str, Any]]) -> list[str | None]:
+        """Persist one Redis batch in one transaction and one pipeline flush."""
+
+        if not rows:
+            return []
+        cursors = []
+        try:
+            with self._conn.transaction():
+                with self._conn.pipeline():
+                    for data in rows:
+                        cur = self._conn.cursor(row_factory=dict_row)
+                        cur.execute(_INSERT_SQL, _observation_params(data))
+                        cursors.append(cur)
+                results: list[str | None] = []
+                for cur in cursors:
+                    row = cur.fetchone()
+                    results.append(str(row["id"]) if row else None)
+                return results
+        finally:
+            for cur in cursors:
+                cur.close()

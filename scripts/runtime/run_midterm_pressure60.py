@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -419,6 +419,7 @@ class PressureConfig:
     media_worker_rolling_remux_workers: int = 1
     preserve_warmup_results: bool = False
     pressure_sampling_start_event_ts_ms: int = 0
+    pressure_sampling_end_event_ts_ms: int = 0
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1456,11 +1457,11 @@ def main(argv: list[str] | None = None) -> int:
                 shard_plan = write_dual_shard_pressure_sources(conn, cfg)
                 start_dual_shard_runtime(cfg)
                 pressure_sources_path = Path(str(shard_plan["sources_path"]))
-                pressure_started_monotonic = time.time()
-                start_pressure_sources_from_manifest(
-                    cfg,
-                    sources_path=pressure_sources_path,
-                )
+                # The rolling sink must be attached before any pressure source
+                # can emit an evidence-producing frame. Otherwise the first
+                # uncovered task for each source retries at the head of that
+                # source's FIFO and can starve later, fully covered tasks until
+                # the uncovered task expires.
                 if cfg.rolling_cache_evidence:
                     report["rolling_cache_sinks_pressure"] = (
                         start_rolling_cache_sinks_for_pressure(
@@ -1468,6 +1469,11 @@ def main(argv: list[str] | None = None) -> int:
                             runtime_epoch_id=current_runtime_epoch_id(),
                         )
                     )
+                pressure_started_monotonic = time.time()
+                start_pressure_sources_from_manifest(
+                    cfg,
+                    sources_path=pressure_sources_path,
+                )
                 report["steps"].append(
                     {
                         "name": "dual_shard_same_gpu_started",
@@ -1501,11 +1507,19 @@ def main(argv: list[str] | None = None) -> int:
             sources_path=pressure_sources_path,
         )
 
+        after_prefill = None
+        if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
+            after_prefill = lambda: activate_rolling_cache_evidence_after_prefill(cfg)
         sampling_window = prepare_pressure_sampling_window(
             conn,
             cfg,
             pressure_started_monotonic=pressure_started_monotonic,
+            after_prefill=after_prefill,
         )
+        if sampling_window.get("after_prefill") is not None:
+            report["rolling_cache_evidence_after_prefill"] = sampling_window[
+                "after_prefill"
+            ]
         cfg = replace(
             cfg,
             pressure_sampling_start_event_ts_ms=int(
@@ -1521,6 +1535,19 @@ def main(argv: list[str] | None = None) -> int:
                 sampling_window["sampling_started_monotonic"]
             ),
         )
+        sampling_ended_at = datetime.fromisoformat(
+            str(report["pressure_sampling_window"]["ended_at"]).replace(
+                "Z", "+00:00"
+            )
+        )
+        cfg = replace(
+            cfg,
+            pressure_sampling_end_event_ts_ms=int(
+                sampling_ended_at.timestamp() * 1000
+            ),
+        )
+        report["config"] = _jsonable_config(cfg)
+        write_json(cfg.artifact_dir / "run_config.json", report["config"])
         report["pressure_sampling_cutoff"] = pressure_event_sampling_cutoff(conn, cfg)
         if cfg.rolling_cache_evidence:
             # Rolling-cache source directories can disappear on EOS. Capture
@@ -1539,6 +1566,18 @@ def main(argv: list[str] | None = None) -> int:
                 report["rolling_cache_segment_visibility"],
             )
         report["rolling_cache_postfill"] = rolling_cache_postfill_after_sampling(cfg)
+        if cfg.rolling_cache_evidence:
+            postfill_ended_at = datetime.fromisoformat(
+                str(report["rolling_cache_postfill"]["ended_at"]).replace(
+                    "Z", "+00:00"
+                )
+            )
+            report["rolling_cache_evidence_after_postfill"] = (
+                close_rolling_cache_evidence_after_postfill(
+                    cfg,
+                    event_not_after_ts_ms=int(postfill_ended_at.timestamp() * 1000),
+                )
+            )
         if cfg.adaface_roi_redis:
             report["adaface_roi_worker"] = collect_adaface_roi_worker_metrics(cfg)
         report["pressure_source_stop"] = stop_pressure_sources(conn, cfg)
@@ -1564,11 +1603,48 @@ def main(argv: list[str] | None = None) -> int:
                 "reason": "non_evidence_savant_ablation",
                 "stage": cfg.savant_ablation_stage,
             }
+        if cfg.rolling_cache_evidence:
+            # Source containers disappear without necessarily closing the
+            # sink's current chunk. Stop the pressure sinks only after Savant
+            # and the event consumers are quiescent so their final chunk is
+            # finalized before image/video drain retries inspect it.
+            report["rolling_cache_sinks_flush_after_source_stop"] = (
+                stop_rolling_cache_sinks_after_pressure(
+                    cfg,
+                    artifact_name=(
+                        "compose_flush_rolling_cache_sinks_after_source_stop.log"
+                    ),
+                )
+            )
         if cfg.discard_pressure_results:
             report["pressure_post_sample_cleanup"] = clear_pressure_post_sample_rows(
                 conn,
                 cfg,
                 report["pressure_sampling_cutoff"],
+            )
+        elif cfg.keep_evidence < 0:
+            report["pressure_post_sample_cleanup"] = {
+                "status": "skipped",
+                "reason": "keep_all_evidence_and_trajectory_rows",
+                "event_rows_deleted": 0,
+                "face_observation_rows_deleted": 0,
+                "person_observation_rows_deleted": 0,
+                "evidence_dirs_removed": 0,
+                "post_cleanup_db_ingest": db_pressure_event_ingest_summary(
+                    conn,
+                    cfg.run_id,
+                    cooldown_s=cfg.pressure_algorithm_cooldown_s,
+                    sampling_start_event_ts_ms=(
+                        cfg.pressure_sampling_start_event_ts_ms
+                    ),
+                    sampling_end_event_ts_ms=(
+                        cfg.pressure_sampling_end_event_ts_ms
+                    ),
+                ),
+            }
+            write_json(
+                cfg.artifact_dir / "pressure_post_sample_cleanup.json",
+                report["pressure_post_sample_cleanup"],
             )
         else:
             report["pressure_post_sample_cleanup"] = (
@@ -1598,12 +1674,14 @@ def main(argv: list[str] | None = None) -> int:
             conn,
             cfg.run_id,
             sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
         )
         write_json(cfg.artifact_dir / "db_summary_before_cleanup.json", report["db_summary_before_cleanup"])
         report["non_materialized_task_details"] = non_materialized_task_details(
             conn,
             cfg.run_id,
             sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
         )
         write_json(
             cfg.artifact_dir / "non_materialized_task_details.json",
@@ -1672,6 +1750,10 @@ def main(argv: list[str] | None = None) -> int:
             report["cleanup"] = cleanup_pressure_runtime_only(conn, redis_client, cfg)
         restore_cameras(conn, original_cameras)
         restore_runtime(cfg, original_perf)
+        if cfg.rolling_cache_evidence:
+            report["evidence_task_gate_cleanup"] = (
+                clear_pressure_evidence_task_gate(redis_client, cfg)
+            )
         if cfg.cuda_mps:
             report["cuda_mps_stop"] = read_cuda_mps_stop_summary(cfg)
         if original_clip_worker_replay_shards is not None:
@@ -1765,6 +1847,7 @@ def main(argv: list[str] | None = None) -> int:
             conn,
             cfg.run_id,
             sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
         )
         report["runtime_after_restore"] = api_json(cfg.api_base, "GET", "/runtime/overview")["data"]
         report["status"] = "passed" if not report["failure_reasons"] else "failed_pressure_gates"
@@ -1923,6 +2006,11 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             return 1
     finally:
+        if cfg.rolling_cache_evidence:
+            try:
+                clear_pressure_evidence_task_gate(redis_client, cfg)
+            except Exception:
+                pass
         if rtsp_republish_local_server is not None:
             try:
                 stop_rtsp_republish_local_server(cfg, rtsp_republish_local_server)
@@ -3651,10 +3739,22 @@ def event_worker_evidence_env_snapshot() -> dict[str, str]:
         "EVIDENCE_EVENT_COVERAGE_EVENT_TYPES",
         "EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS",
         "EVIDENCE_TASK_CREATION_ENABLED",
+        "EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS",
+        "EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS",
+        "EVIDENCE_TASK_GATE_REDIS_KEY",
     )
     result = {key: env.get(key, "") for key in keys}
     result["EVIDENCE_TASK_CREATION_ENABLED"] = env.get(
         "EVIDENCE_TASK_CREATION_ENABLED", "true"
+    )
+    result["EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS"] = env.get(
+        "EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS", "0"
+    )
+    result["EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS"] = env.get(
+        "EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS", "0"
+    )
+    result["EVIDENCE_TASK_GATE_REDIS_KEY"] = env.get(
+        "EVIDENCE_TASK_GATE_REDIS_KEY", ""
     )
     return result
 
@@ -3956,7 +4056,7 @@ def stop_rolling_cache_sinks_after_pressure(
         "video-analytics-midterm-rolling-cache-sink-b",
     ]
     run(
-        ["docker", "stop", *containers],
+        ["docker", "stop", "--time", "30", *containers],
         cfg.artifact_dir / artifact_name,
         check=False,
     )
@@ -3968,9 +4068,14 @@ def stop_rolling_cache_sinks_after_pressure(
     return summary
 
 
-def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[str, Any] | None:
-    if not cfg.rolling_cache_evidence:
-        return None
+def rolling_cache_event_worker_values(
+    cfg: PressureConfig,
+    *,
+    task_creation_enabled: bool,
+    task_event_not_before_ts_ms: int = 0,
+) -> dict[str, str]:
+    """Build the complete event-worker override for one rolling-cache phase."""
+
     max_policy_window_s = max(
         1,
         max(
@@ -3992,6 +4097,14 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
             "intrusion,watchlist_hit,live_search_hit"
         ),
         "EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS": str(max_policy_window_s),
+        "EVIDENCE_TASK_CREATION_ENABLED": (
+            "true" if task_creation_enabled else "false"
+        ),
+        "EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS": str(
+            max(0, int(task_event_not_before_ts_ms))
+        ),
+        "EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS": "0",
+        "EVIDENCE_TASK_GATE_REDIS_KEY": pressure_evidence_task_gate_key(cfg),
         # Pressure runs need the same cooldown semantics as the generated
         # camera policies: one 30s budget per camera and algorithm, not one
         # shared budget per camera across intrusion/watchlist events.
@@ -4012,6 +4125,125 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
                 "RECORDING_COOLDOWN_SECONDS": "0",
             }
         )
+    return event_values
+
+
+def activate_rolling_cache_evidence_after_prefill(
+    cfg: PressureConfig,
+) -> dict[str, Any]:
+    """Enable tasks after prefill without restarting the event consumer."""
+
+    cutoff_ts_ms = int(time.time() * 1000)
+    key = pressure_evidence_task_gate_key(cfg)
+    payload = {
+        "schema_version": "evidence-task-gate-v1",
+        "enabled": True,
+        "event_not_before_ts_ms": cutoff_ts_ms,
+        "event_not_after_ts_ms": 0,
+        "run_id": cfg.run_id,
+        "activated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    ttl_s = max(
+        3600,
+        cfg.duration_s
+        + cfg.drain_s
+        + cfg.guard_wait_s
+        + cfg.rolling_cache_prefill_s
+        + cfg.rolling_cache_postfill_s
+        + 600,
+    )
+    redis_client = Redis.from_url(cfg.redis_url, decode_responses=True)
+    redis_client.set(key, json.dumps(payload), ex=ttl_s)
+    return {
+        "status": "activated",
+        "activation_mode": "redis_dynamic_gate",
+        "activated_at": payload["activated_at"],
+        "event_not_before_ts_ms": cutoff_ts_ms,
+        "redis_key": key,
+        "ttl_s": ttl_s,
+        "event_worker_recreated": False,
+    }
+
+
+def close_rolling_cache_evidence_after_postfill(
+    cfg: PressureConfig,
+    *,
+    event_not_after_ts_ms: int,
+) -> dict[str, Any]:
+    """Fence evidence admission at the retained rolling-cache tail.
+
+    Events emitted later by already-buffered Savant frames remain persisted as
+    events/trajectories, but do not create tasks for frame timestamps beyond
+    the point through which sources and rolling sinks were intentionally kept
+    alive.
+    """
+
+    key = pressure_evidence_task_gate_key(cfg)
+    redis_client = Redis.from_url(cfg.redis_url, decode_responses=True)
+    raw = redis_client.get(key)
+    try:
+        payload = json.loads(raw) if raw else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.update(
+        {
+            "schema_version": "evidence-task-gate-v1",
+            "enabled": True,
+            "event_not_after_ts_ms": max(0, int(event_not_after_ts_ms)),
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": cfg.run_id,
+        }
+    )
+    ttl_s = max(
+        3600,
+        cfg.drain_s + cfg.guard_wait_s + 600,
+    )
+    redis_client.set(key, json.dumps(payload), ex=ttl_s)
+    return {
+        "status": "closed",
+        "activation_mode": "redis_dynamic_gate",
+        "event_not_before_ts_ms": int(
+            payload.get("event_not_before_ts_ms") or 0
+        ),
+        "event_not_after_ts_ms": max(0, int(event_not_after_ts_ms)),
+        "redis_key": key,
+        "ttl_s": ttl_s,
+        "event_worker_recreated": False,
+    }
+
+
+def pressure_evidence_task_gate_key(cfg: PressureConfig) -> str:
+    return f"video_analytics:pressure:{cfg.run_id}:evidence_task_gate"
+
+
+def clear_pressure_evidence_task_gate(
+    redis_client: Redis,
+    cfg: PressureConfig,
+) -> dict[str, Any]:
+    key = pressure_evidence_task_gate_key(cfg)
+    try:
+        deleted = int(redis_client.delete(key) or 0)
+        return {"status": "cleared", "redis_key": key, "deleted": deleted}
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "redis_key": key,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+
+
+def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[str, Any] | None:
+    if not cfg.rolling_cache_evidence:
+        return None
+    event_values = rolling_cache_event_worker_values(
+        cfg,
+        # A source has no pre-window on its first frames. Keep events and
+        # trajectories during prefill, but do not create source-head evidence
+        # tasks that can never satisfy the configured pre window.
+        task_creation_enabled=cfg.rolling_cache_prefill_s <= 0,
+    )
     media_values = {
         # The Phase 6 4/8/12 matrix keeps the remux candidate at one and changes
         # only shared WIP.  A non-default value is a separately labeled remux
@@ -5500,24 +5732,38 @@ def sample_runtime(
     sampling_started_wall = datetime.now(timezone.utc)
     end_at = (pressure_started_monotonic or time.time()) + cfg.duration_s
     index = 0
-    while True:
-        now = time.time()
-        if cfg.dual_shard_same_gpu:
-            overview = dual_shard_runtime_overview(cfg)
-        else:
-            overview = api_json(cfg.api_base, "GET", "/runtime/overview", timeout_s=10)["data"]
-        if isinstance(overview, dict):
-            overview["_pressure_sample_observed_at"] = datetime.now(timezone.utc).isoformat()
-        write_json(samples_dir / f"runtime_{index:03d}.json", overview)
-        write_text(samples_dir / f"gpu_{index:03d}.csv", nvidia_smi_csv())
-        if cfg.cuda_mps:
-            write_json(samples_dir / f"mps_{index:03d}.json", cuda_mps_status(cfg))
-        write_json(samples_dir / f"docker_stats_{index:03d}.json", docker_stats_json(cfg))
-        write_json(samples_dir / f"db_{index:03d}.json", db_summary_connect(cfg))
-        if now >= end_at:
-            break
-        index += 1
-        time.sleep(max(1, min(cfg.sample_interval_s, end_at - now)))
+    sample_redis_client = Redis.from_url(cfg.redis_url, decode_responses=False)
+    try:
+        while True:
+            now = time.time()
+            if cfg.dual_shard_same_gpu:
+                overview = dual_shard_runtime_overview(cfg)
+            else:
+                overview = api_json(
+                    cfg.api_base, "GET", "/runtime/overview", timeout_s=10
+                )["data"]
+            if isinstance(overview, dict):
+                overview["_pressure_sample_observed_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
+            write_json(samples_dir / f"runtime_{index:03d}.json", overview)
+            write_text(samples_dir / f"gpu_{index:03d}.csv", nvidia_smi_csv())
+            if cfg.cuda_mps:
+                write_json(samples_dir / f"mps_{index:03d}.json", cuda_mps_status(cfg))
+            write_json(
+                samples_dir / f"docker_stats_{index:03d}.json",
+                docker_stats_json(cfg),
+            )
+            write_json(samples_dir / f"db_{index:03d}.json", db_summary_connect(cfg))
+            redis_sample = redis_observability_summary(sample_redis_client)
+            redis_sample["observed_at"] = datetime.now(timezone.utc).isoformat()
+            write_json(samples_dir / f"redis_{index:03d}.json", redis_sample)
+            if now >= end_at:
+                break
+            index += 1
+            time.sleep(max(1, min(cfg.sample_interval_s, end_at - now)))
+    finally:
+        sample_redis_client.close()
     capture_runtime_logs_since_start(cfg, started_at)
     summary = {
         "status": "completed",
@@ -5817,10 +6063,12 @@ def prepare_pressure_sampling_window(
     cfg: PressureConfig,
     *,
     pressure_started_monotonic: float | None = None,
+    after_prefill: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc)
     if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
         time.sleep(cfg.rolling_cache_prefill_s)
+    after_prefill_result = after_prefill() if after_prefill is not None else None
     # Visibility and rolling-cache prefill happen before the measured window.
     # Production-facing runs retain those visual results and fence formal
     # queries by the sampling start. The destructive legacy isolation remains
@@ -5841,6 +6089,7 @@ def prepare_pressure_sampling_window(
         "sampling_started_at": sampling_started_at.isoformat(),
         "sampling_start_event_ts_ms": int(sampling_started_at.timestamp() * 1000),
         "warmup_results_preserved": bool(cfg.preserve_warmup_results),
+        "after_prefill": after_prefill_result,
         "cleanup": cleanup,
     }
     write_json(cfg.artifact_dir / "rolling_cache_prefill_summary.json", summary)
@@ -6947,6 +7196,15 @@ def _summary_materialization_expired_count(summary: dict[str, Any]) -> int:
     )
 
 
+def _summary_materialization_failed_count(summary: dict[str, Any]) -> int:
+    return sum(
+        int(row.get("count") or 0)
+        for row in summary.get("task_statuses") or []
+        if isinstance(row, dict)
+        and row.get("materialization_status") == "materialization_failed"
+    )
+
+
 def collect_pressure_diagnostics(cfg: PressureConfig) -> dict[str, Any]:
     source_containers = inspect_pressure_source_containers(cfg.run_id)
     save_pressure_source_logs(cfg, source_containers)
@@ -7394,6 +7652,7 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             )
             or []
         )
+    redis_lag = summarize_pressure_redis_samples(cfg)
     summary = {
         "sample_count": len(rows),
         "max_queue_depth": max_queue_depth,
@@ -7530,9 +7789,64 @@ def summarize_runtime_samples(cfg: PressureConfig) -> dict[str, Any]:
             key: round(value, 3) for key, value in max_worker_cpu_percent.items()
         },
         "stable_samples": stable_samples,
+        "redis_consumer_lag": redis_lag,
         "samples": rows,
     }
     write_json(cfg.artifact_dir / "sample_summary.json", summary)
+    return summary
+
+
+def summarize_pressure_redis_samples(cfg: PressureConfig) -> dict[str, Any]:
+    """Summarize in-window consumer lag instead of only the post-drain zero."""
+
+    wanted = {
+        "security.events": "event-workers-midterm",
+        "security.face_observations": "face-worker-midterm",
+        "security.person_observations": "person-observation-workers-midterm",
+    }
+    summary: dict[str, Any] = {
+        "sample_count": 0,
+        "streams": {
+            stream: {
+                "group": group,
+                "max_lag": 0,
+                "max_pending": 0,
+                "final_lag": 0,
+                "final_pending": 0,
+                "measured_samples": 0,
+            }
+            for stream, group in wanted.items()
+        },
+    }
+    samples_dir = cfg.artifact_dir / "samples"
+    for path in sorted(samples_dir.glob("redis_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        summary["sample_count"] += 1
+        streams = payload.get("streams") or {}
+        for stream, group_name in wanted.items():
+            stream_row = streams.get(stream) or {}
+            groups = stream_row.get("consumer_groups") or []
+            group = next(
+                (
+                    item
+                    for item in groups
+                    if isinstance(item, dict) and item.get("name") == group_name
+                ),
+                None,
+            )
+            if group is None:
+                continue
+            lag = max(0, _safe_int(group.get("lag")))
+            pending = max(0, _safe_int(group.get("pending")))
+            target = summary["streams"][stream]
+            target["max_lag"] = max(target["max_lag"], lag)
+            target["max_pending"] = max(target["max_pending"], pending)
+            target["final_lag"] = lag
+            target["final_pending"] = pending
+            target["measured_samples"] += 1
     return summary
 
 
@@ -8494,6 +8808,9 @@ def pressure_failure_reasons(
         expired_count = _summary_materialization_expired_count(db_before_cleanup)
         if expired_count:
             reasons.append("materialization_expired_present")
+        failed_count = _summary_materialization_failed_count(db_before_cleanup)
+        if failed_count:
+            reasons.append("materialization_failed_present")
     if int(source_summary.get("exited") or 0) > cfg.max_exited_sources:
         reasons.append("source_containers_exited")
     if int(source_summary.get("restart_count_total") or 0) > 0:
@@ -9025,8 +9342,18 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
                 eb.raw_clip_uri IS NOT NULL
                 AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
               )
-              OR COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
-              OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+              OR (
+                COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+                AND EXISTS (
+                  SELECT 1
+                  FROM evidence_artifacts image_artifact
+                  WHERE image_artifact.event_id = eb.event_id
+                    AND image_artifact.artifact_type IN (
+                      'face_crop', 'full_frame', 'annotated_frame'
+                    )
+                    AND COALESCE(image_artifact.uri, '') <> ''
+                )
+              )
           )
         ORDER BY random()
         {limit_sql}
@@ -9044,13 +9371,13 @@ def select_kept_evidence(conn, cfg: PressureConfig) -> list[dict[str, Any]]:
             if raw_clip_path and raw_clip_path.is_file()
             else None
         )
-        item["image_evidence"] = (
-            item.get("playback_kind") == "image"
-            or item.get("media_status") == "image_ready"
-        )
         item["image_artifact_exists"] = any(
             bool(str(item.get(key) or "").strip())
             for key in ("face_crop_uri", "full_frame_uri", "annotated_frame_uri")
+        )
+        item["image_evidence"] = (
+            item.get("media_status") == "image_ready"
+            and item["image_artifact_exists"]
         )
         camera_metadata = item.get("camera_metadata")
         if isinstance(camera_metadata, dict):
@@ -9731,6 +10058,7 @@ def db_summary(
     run_id: str,
     *,
     sampling_start_event_ts_ms: int = 0,
+    sampling_end_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
     prefix = f"{run_id}_%"
     row = conn.execute(
@@ -9739,14 +10067,14 @@ def db_summary(
           SELECT id, status, event_type
           FROM events e
           WHERE source_id LIKE %(prefix)s
-            AND {_formal_pressure_event_predicate("e")}
+            AND {_formal_pressure_event_predicate("e", bounded_end=True)}
         ),
         run_tasks AS (
           SELECT event_id, materialization_status, status,
                  materialization_defer_reason, materialization_ready_at
           FROM evidence_tasks et
           WHERE source_id LIKE %(prefix)s
-            AND {_formal_pressure_event_predicate("et")}
+            AND {_formal_pressure_event_predicate("et", bounded_end=True)}
         ),
         parent_playable_events AS (
           SELECT DISTINCT eb.event_id
@@ -9756,8 +10084,18 @@ def db_summary(
               eb.raw_clip_uri IS NOT NULL
               AND COALESCE(eb.raw_clip_size_bytes, 0) > 0
             )
-             OR COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
-             OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+             OR (
+               COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+               AND EXISTS (
+                 SELECT 1
+                 FROM evidence_artifacts image_artifact
+                 WHERE image_artifact.event_id = eb.event_id
+                   AND image_artifact.artifact_type IN (
+                     'face_crop', 'full_frame', 'annotated_frame'
+                   )
+                   AND COALESCE(image_artifact.uri, '') <> ''
+               )
+             )
         ),
         parent_video_playable_events AS (
           SELECT DISTINCT eb.event_id
@@ -9771,16 +10109,30 @@ def db_summary(
           FROM evidence_bundles eb
           JOIN run_events re ON re.id = eb.event_id
           WHERE COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
-             OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+            AND EXISTS (
+              SELECT 1
+              FROM evidence_artifacts image_artifact
+              WHERE image_artifact.event_id = eb.event_id
+                AND image_artifact.artifact_type IN (
+                  'face_crop', 'full_frame', 'annotated_frame'
+                )
+                AND COALESCE(image_artifact.uri, '') <> ''
+            )
         ),
         parent_watchlist_image_ready_events AS (
           SELECT DISTINCT eb.event_id
           FROM evidence_bundles eb
           JOIN run_events re ON re.id = eb.event_id
           WHERE re.event_type = 'watchlist_hit'
-            AND (
-              COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
-              OR COALESCE(eb.summary->>'playback_kind', '') = 'image'
+            AND COALESCE(eb.media_status, eb.evidence_state, '') = 'image_ready'
+            AND EXISTS (
+              SELECT 1
+              FROM evidence_artifacts image_artifact
+              WHERE image_artifact.event_id = eb.event_id
+                AND image_artifact.artifact_type IN (
+                  'face_crop', 'full_frame', 'annotated_frame'
+                )
+                AND COALESCE(image_artifact.uri, '') <> ''
             )
         ),
         covered_events_distinct AS (
@@ -9912,6 +10264,7 @@ def db_summary(
             "prefix": prefix,
             "active_materialization_states": sorted(ACTIVE_MATERIALIZATION_STATES),
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchone()
     statuses = conn.execute(
@@ -9919,13 +10272,14 @@ def db_summary(
         SELECT et.status, et.materialization_status, count(*) AS count
         FROM evidence_tasks et
         WHERE source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("et")}
+          AND {_formal_pressure_event_predicate("et", bounded_end=True)}
         GROUP BY status, materialization_status
         ORDER BY count DESC
         """,
         {
             "prefix": prefix,
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchall()
     event_types = conn.execute(
@@ -9933,13 +10287,14 @@ def db_summary(
         SELECT event_type, count(*) AS count
         FROM events e
         WHERE source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("e")}
+          AND {_formal_pressure_event_predicate("e", bounded_end=True)}
         GROUP BY event_type
         ORDER BY count DESC
         """,
         {
             "prefix": prefix,
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchall()
     data = _row_json(row)
@@ -9974,6 +10329,7 @@ def non_materialized_task_details(
     run_id: str,
     *,
     sampling_start_event_ts_ms: int = 0,
+    sampling_end_event_ts_ms: int = 0,
 ) -> list[dict[str, Any]]:
     prefix = f"{run_id}_%"
     rows = conn.execute(
@@ -9992,6 +10348,14 @@ def non_materialized_task_details(
           et.materialization_defer_reason,
           et.materialization_failure_reason,
           et.materialization_expired_reason,
+          COALESCE(
+            NULLIF(et.materialization_failure_reason, ''),
+            NULLIF(et.materialization_expired_reason, ''),
+            NULLIF(e.payload->'media'->>'evidence_reason', ''),
+            NULLIF(e.payload->'media'->>'materialization_reason', ''),
+            NULLIF(et.error_message, ''),
+            'unknown'
+          ) AS materialization_effective_reason,
           et.runtime_epoch_id,
           et.materialization_ready_at,
           et.materialization_deadline_at,
@@ -10009,13 +10373,14 @@ def non_materialized_task_details(
         LEFT JOIN events e ON e.id = et.event_id
         LEFT JOIN evidence_event_links l ON l.event_id = et.event_id
         WHERE et.source_id LIKE %(prefix)s
-          AND {_formal_pressure_event_predicate("et")}
+          AND {_formal_pressure_event_predicate("et", bounded_end=True)}
           AND COALESCE(et.materialization_status, '') <> 'materialized'
         ORDER BY et.created_at, et.source_id, et.event_type
         """,
         {
             "prefix": prefix,
             "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+            "sampling_end_event_ts_ms": sampling_end_event_ts_ms,
         },
     ).fetchall()
     return [_row_json(row) for row in rows]
@@ -10060,6 +10425,7 @@ def collect_downstream_observability(
         conn,
         cfg.run_id,
         sampling_start_event_ts_ms=cfg.pressure_sampling_start_event_ts_ms,
+        sampling_end_event_ts_ms=cfg.pressure_sampling_end_event_ts_ms,
     )
     run_summary = postgresql.get("run_summary")
     run_summary = run_summary if isinstance(run_summary, dict) else {}
@@ -10116,14 +10482,23 @@ def postgres_observability_summary(
     run_id: str,
     *,
     sampling_start_event_ts_ms: int = 0,
+    sampling_end_event_ts_ms: int = 0,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "run_summary": db_summary(
             conn,
             run_id,
             sampling_start_event_ts_ms=sampling_start_event_ts_ms,
+            sampling_end_event_ts_ms=sampling_end_event_ts_ms,
         )
     }
+    summary["event_task_ingest_latency_seconds"] = (
+        event_task_ingest_latency_summary(
+            conn,
+            run_id,
+            sampling_start_event_ts_ms=sampling_start_event_ts_ms,
+        )
+    )
     tables = [
         "events",
         "evidence_tasks",
@@ -10239,6 +10614,78 @@ def postgres_observability_summary(
             f"rolling_cache_ready_schedule_query_failed:{type(exc).__name__}"
         )
     return summary
+
+
+def event_task_ingest_latency_summary(
+    conn,
+    run_id: str,
+    *,
+    sampling_start_event_ts_ms: int = 0,
+) -> dict[str, Any]:
+    """Split upstream event lag from the event-row to task-row transition."""
+
+    rows = conn.execute(
+        f"""
+        SELECT
+          e.event_type,
+          count(*) AS event_count,
+          count(et.task_id) AS task_count,
+          count(*) - count(et.task_id) AS event_without_task_count,
+          percentile_cont(0.50) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (
+              e.created_at - to_timestamp(e.event_ts_ms / 1000.0)
+            ))
+          ) AS event_timestamp_to_event_row_p50,
+          percentile_cont(0.95) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (
+              e.created_at - to_timestamp(e.event_ts_ms / 1000.0)
+            ))
+          ) AS event_timestamp_to_event_row_p95,
+          max(EXTRACT(EPOCH FROM (
+            e.created_at - to_timestamp(e.event_ts_ms / 1000.0)
+          ))) AS event_timestamp_to_event_row_max,
+          percentile_cont(0.50) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (et.created_at - e.created_at))
+          ) FILTER (WHERE et.created_at IS NOT NULL)
+            AS event_row_to_task_row_p50,
+          percentile_cont(0.95) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (et.created_at - e.created_at))
+          ) FILTER (WHERE et.created_at IS NOT NULL)
+            AS event_row_to_task_row_p95,
+          max(EXTRACT(EPOCH FROM (et.created_at - e.created_at)))
+            FILTER (WHERE et.created_at IS NOT NULL)
+            AS event_row_to_task_row_max,
+          min(EXTRACT(EPOCH FROM (
+            et.materialization_deadline_at - et.created_at
+          ))) FILTER (WHERE et.materialization_deadline_at IS NOT NULL)
+            AS task_deadline_slack_at_creation_min,
+          percentile_cont(0.50) WITHIN GROUP (
+            ORDER BY EXTRACT(EPOCH FROM (
+              et.materialization_deadline_at - et.created_at
+            ))
+          ) FILTER (WHERE et.materialization_deadline_at IS NOT NULL)
+            AS task_deadline_slack_at_creation_p50
+        FROM events e
+        LEFT JOIN evidence_tasks et ON et.event_id = e.id
+        WHERE e.source_id LIKE %(prefix)s
+          AND {_formal_pressure_event_predicate("e")}
+        GROUP BY e.event_type
+        ORDER BY e.event_type
+        """,
+        {
+            "prefix": f"{run_id}_%",
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
+    ).fetchall()
+    event_types = {
+        str(row["event_type"]): _row_json(row)
+        for row in rows
+        if row.get("event_type")
+    }
+    return {
+        "status": "measured" if event_types else "not_enough_data",
+        "event_types": event_types,
+    }
 
 
 def qdrant_observability_summary(conn, diagnostics: dict[str, Any]) -> dict[str, Any]:

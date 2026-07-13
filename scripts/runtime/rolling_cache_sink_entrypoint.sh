@@ -60,7 +60,10 @@ PY
 )"
 fi
 
-export DIR_LOCATION="${CACHE_ROOT}/${NAMESPACE}/epochs/${EPOCH_ID}/%source_id%/%src_filename%/"
+# Savant 0.6.0 tokens are prefix tokens (``%source_id``, ``%src_filename``),
+# not printf-style tokens with a closing percent. A trailing percent becomes a
+# literal path character and breaks exact source-id lookup in Media Worker.
+export DIR_LOCATION="${CACHE_ROOT}/${NAMESPACE}/epochs/${EPOCH_ID}/%source_id/%src_filename/"
 export CHUNK_SIZE="${SEGMENT_FRAMES}"
 export METADATA_JSON_FORMAT="${METADATA_JSON_FORMAT:-native}"
 

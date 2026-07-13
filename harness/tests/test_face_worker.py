@@ -1022,6 +1022,48 @@ class TestInvalidEmbeddingSkip:
         assert watchlist_emitted == 0
         consumer.ack.assert_called_once_with("msg-3")
 
+    def test_real_repository_contract_uses_batch_insert_and_batch_ack(self):
+        class BatchRepo:
+            def __init__(self):
+                self.rows = []
+
+            def insert_observations(self, rows):
+                self.rows = list(rows)
+                return ["uuid-1", None]
+
+        class BatchConsumer:
+            def __init__(self):
+                self.acked = []
+
+            def ack_many(self, msg_ids):
+                self.acked.extend(msg_ids)
+                return len(msg_ids)
+
+            def ack(self, msg_id):
+                self.acked.append(msg_id)
+                return True
+
+        repo = BatchRepo()
+        consumer = BatchConsumer()
+        first = _make_obs_dict(source_observation_id="face:batch:1")
+        second = _make_obs_dict(source_observation_id="face:batch:2")
+
+        result = _process_batch(
+            [
+                ("msg-batch-1", _make_redis_fields(first)),
+                ("msg-batch-2", _make_redis_fields(second)),
+            ],
+            repo,
+            consumer,
+        )
+
+        assert result == (1, 1, 0, 0, 0)
+        assert [row["source_observation_id"] for row in repo.rows] == [
+            "face:batch:1",
+            "face:batch:2",
+        ]
+        assert consumer.acked == ["msg-batch-1", "msg-batch-2"]
+
 
 # ── Insert outcome classification ────────────────────────────────────────────
 

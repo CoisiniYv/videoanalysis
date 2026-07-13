@@ -85,5 +85,7 @@ print(epoch_id)
 PY
 )"
 
-export DIR_LOCATION="${EPOCH_ROOT}/epochs/${EPOCH_ID}/%source_id%/%src_filename%/"
+# Savant replaces the prefix tokens themselves; a closing percent is retained
+# literally in the directory name and violates the Replay/source-id contract.
+export DIR_LOCATION="${EPOCH_ROOT}/epochs/${EPOCH_ID}/%source_id/%src_filename/"
 exec python /opt/savant/adapters/gst/sinks/video_files.py

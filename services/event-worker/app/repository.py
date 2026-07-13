@@ -1066,7 +1066,11 @@ class EventRepository:
                     END,
             """
 
-        with self._conn.cursor(row_factory=dict_row) as cur:
+        # Task, bundle, optional artifacts, and the event compatibility
+        # projection are one image-evidence state transition. Autocommit would
+        # otherwise retain a partial task/bundle when the final projection
+        # fails.
+        with self._conn.transaction(), self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"""
                 INSERT INTO evidence_tasks (
@@ -1163,9 +1167,9 @@ class EventRepository:
                     false, %(summary)s::jsonb, %(materialization)s::jsonb
                 )
                 ON CONFLICT (event_id) DO UPDATE SET
-                    media_status = %(image_status)s,
-                    evidence_state = %(image_status)s,
-                    evidence_reason = %(image_reason)s,
+                    media_status = %(image_status)s::text,
+                    evidence_state = %(image_status)s::text,
+                    evidence_reason = %(image_reason)s::text,
                     raw_clip_uri = NULL,
                     annotation_status = 'not_required',
                     matched_objects = 1,
@@ -1247,13 +1251,13 @@ class EventRepository:
                             'media',
                             COALESCE(payload->'media', '{}'::jsonb)
                             || jsonb_build_object(
-                                'media_status', %(image_status)s,
-                                'snapshot_status', %(image_status)s,
+                                'media_status', %(image_status)s::text,
+                                'snapshot_status', %(image_status)s::text,
                                 'clip_status', 'not_required',
-                                'metadata_status', %(image_status)s,
-                                'evidence_state', %(image_status)s,
-                                'evidence_reason', %(image_reason)s,
-                                'materialization_status', %(task_status)s,
+                                'metadata_status', %(image_status)s::text,
+                                'evidence_state', %(image_status)s::text,
+                                'evidence_reason', %(image_reason)s::text,
+                                'materialization_status', %(task_status)s::text,
                                 'playback_kind', 'image',
                                 'evidence_mode', 'image_only',
                                 'clip_required', false,

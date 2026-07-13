@@ -24,6 +24,7 @@ from app.worker import (
     RecordingPolicyState,
     _apply_default_evidence_policy,
     _apply_recording_window,
+    _effective_evidence_task_gate,
     _handle_event,
     _requires_evidence,
 )
@@ -110,6 +111,49 @@ class _Publisher:
         return "1-0"
 
 
+class _GateRedis:
+    def __init__(self, payload: bytes | None) -> None:
+        self.payload = payload
+        self.keys: list[str] = []
+
+    def get(self, key: str) -> bytes | None:
+        self.keys.append(key)
+        return self.payload
+
+
+def test_event_worker_runtime_gate_overrides_static_prefill_state() -> None:
+    redis = _GateRedis(
+        b'{"enabled":true,"event_not_before_ts_ms":1765000010123}'
+    )
+
+    enabled, cutoff, upper_cutoff = _effective_evidence_task_gate(
+        redis,  # type: ignore[arg-type]
+        configured_enabled=False,
+        configured_not_before_ts_ms=0,
+        configured_not_after_ts_ms=0,
+        redis_key="pressure:run-1:evidence-task-gate",
+    )
+
+    assert enabled is True
+    assert cutoff == 1_765_000_010_123
+    assert upper_cutoff == 0
+    assert redis.keys == ["pressure:run-1:evidence-task-gate"]
+
+
+def test_event_worker_runtime_gate_falls_back_when_document_is_absent() -> None:
+    enabled, cutoff, upper_cutoff = _effective_evidence_task_gate(
+        _GateRedis(None),  # type: ignore[arg-type]
+        configured_enabled=False,
+        configured_not_before_ts_ms=123,
+        configured_not_after_ts_ms=456,
+        redis_key="pressure:run-1:evidence-task-gate",
+    )
+
+    assert enabled is False
+    assert cutoff == 123
+    assert upper_cutoff == 456
+
+
 def test_explicit_false_evidence_policy_disables_legacy_intrusion_default() -> None:
     event = {
         "event_type": "intrusion",
@@ -171,6 +215,49 @@ def test_event_worker_can_persist_event_without_creating_evidence_task() -> None
     assert inserted is True
     assert repo.evidence_task_creations == 0
     assert consumer.acked == ["1-0"]
+
+
+def test_event_worker_task_cutoff_uses_event_timestamp_not_consumer_time() -> None:
+    cutoff_ms = 1_765_000_010_000
+    repo = _Repo()
+    consumer = _Consumer()
+
+    old_event = {
+        "event_type": "intrusion",
+        "source_event_id": "pressure:intrusion:before-cutoff",
+        "camera_id": "pressure-camera",
+        "source_id": "pressure-source",
+        "event_ts_ms": cutoff_ms - 1,
+        "snapshot_required": True,
+        "clip_required": True,
+        "evidence_policy": {"snapshot_required": True, "clip_required": True},
+    }
+    current_event = {
+        **old_event,
+        "source_event_id": "pressure:intrusion:at-cutoff",
+        "event_ts_ms": cutoff_ms,
+    }
+
+    first_inserted, _ = _handle_event(
+        old_event,
+        "1-0",
+        repo,
+        consumer,
+        evidence_task_event_not_before_ts_ms=cutoff_ms,
+    )
+    second_inserted, _ = _handle_event(
+        current_event,
+        "2-0",
+        repo,
+        consumer,
+        evidence_task_event_not_before_ts_ms=cutoff_ms,
+    )
+
+    assert first_inserted is True
+    assert second_inserted is True
+    assert len(repo.inserted_events) == 2
+    assert repo.evidence_task_creations == 1
+    assert consumer.acked == ["1-0", "2-0"]
 
 
 def test_recording_window_preserves_rule_policy_over_env_defaults() -> None:

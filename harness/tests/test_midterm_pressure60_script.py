@@ -787,16 +787,17 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     cfg = _config(
         module,
         rolling_cache_evidence=True,
+        rolling_cache_prefill_s=25,
         media_worker_materialization_max_active=8,
         media_worker_rolling_remux_workers=4,
     )
     captured: dict[str, dict[str, str]] = {}
 
-    monkeypatch.setattr(
-        module,
-        "configure_event_worker_evidence_admission",
-        lambda _cfg, *, values, artifact_name: {"requested": values},
-    )
+    def capture_event(_cfg, *, values, artifact_name):
+        captured[artifact_name] = dict(values)
+        return {"requested": values}
+
+    monkeypatch.setattr(module, "configure_event_worker_evidence_admission", capture_event)
 
     def capture_media(_cfg, *, values, artifact_name):
         captured[artifact_name] = dict(values)
@@ -816,6 +817,85 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_SCHEDULER_V2_ENABLED"] == "true"
     assert values["MEDIA_WORKER_DB_POOL_ENABLED"] == "true"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ENABLED"] == "true"
+    event_values = captured["compose_recreate_event_worker_rolling_cache.log"]
+    assert event_values["EVIDENCE_TASK_CREATION_ENABLED"] == "false"
+    assert event_values["EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS"] == "0"
+
+
+def test_rolling_cache_prefill_activation_fences_delayed_event_deliveries(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, rolling_cache_evidence=True, rolling_cache_prefill_s=25)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(module.time, "time", lambda: 1_765_000_010.123)
+
+    class FakeRedis:
+        def set(self, key, value, *, ex):
+            captured["key"] = key
+            captured["value"] = value
+            captured["ttl"] = ex
+            return True
+
+    monkeypatch.setattr(
+        module.Redis,
+        "from_url",
+        lambda *_args, **_kwargs: FakeRedis(),
+    )
+
+    result = module.activate_rolling_cache_evidence_after_prefill(cfg)
+
+    assert result["status"] == "activated"
+    assert result["activation_mode"] == "redis_dynamic_gate"
+    assert result["event_worker_recreated"] is False
+    assert result["event_not_before_ts_ms"] == 1_765_000_010_123
+    assert captured["key"] == (
+        f"video_analytics:pressure:{cfg.run_id}:evidence_task_gate"
+    )
+    payload = json.loads(str(captured["value"]))
+    assert payload["enabled"] is True
+    assert payload["event_not_before_ts_ms"] == 1_765_000_010_123
+    assert payload["event_not_after_ts_ms"] == 0
+    assert int(captured["ttl"]) >= 3600
+
+
+def test_rolling_cache_postfill_closes_dynamic_task_gate(monkeypatch) -> None:
+    module = _load_module()
+    cfg = _config(module, rolling_cache_evidence=True)
+    captured: dict[str, object] = {}
+
+    class FakeRedis:
+        def get(self, _key):
+            return json.dumps(
+                {
+                    "enabled": True,
+                    "event_not_before_ts_ms": 100,
+                    "event_not_after_ts_ms": 0,
+                }
+            )
+
+        def set(self, key, value, *, ex):
+            captured.update(key=key, value=value, ttl=ex)
+            return True
+
+    monkeypatch.setattr(
+        module.Redis,
+        "from_url",
+        lambda *_args, **_kwargs: FakeRedis(),
+    )
+
+    result = module.close_rolling_cache_evidence_after_postfill(
+        cfg,
+        event_not_after_ts_ms=456,
+    )
+
+    assert result["status"] == "closed"
+    assert result["event_worker_recreated"] is False
+    assert result["event_not_before_ts_ms"] == 100
+    assert result["event_not_after_ts_ms"] == 456
+    payload = json.loads(str(captured["value"]))
+    assert payload["event_not_after_ts_ms"] == 456
+    assert int(captured["ttl"]) >= 3600
 
 
 def test_media_worker_pressure_config_writes_auditable_compose_override(
@@ -1069,10 +1149,15 @@ def test_prepare_pressure_sampling_window_preserves_warmup_visual_results(
     )
     monkeypatch.setattr(module.time, "time", lambda: 1234.0)
 
-    window = module.prepare_pressure_sampling_window(object(), cfg)
+    window = module.prepare_pressure_sampling_window(
+        object(),
+        cfg,
+        after_prefill=lambda: calls.append("activated") or {"status": "activated"},
+    )
 
-    assert calls == ["preserved"]
+    assert calls == ["activated", "preserved"]
     assert window["warmup_results_preserved"] is True
+    assert window["after_prefill"] == {"status": "activated"}
     assert window["cleanup"]["event_rows_deleted"] == 0
     assert window["cleanup"]["evidence_dirs_removed"] == 0
     assert window["sampling_start_event_ts_ms"] > 0
@@ -1807,6 +1892,130 @@ def test_formal_pressure_window_fences_warmup_by_event_or_creation_time() -> Non
     bounded = module._formal_pressure_event_predicate("e", bounded_end=True)
     assert "e.event_ts_ms <= %(sampling_end_event_ts_ms)s" in bounded
     assert "e.created_at <= to_timestamp" in bounded
+
+
+def test_non_materialized_details_preserve_specific_effective_reason() -> None:
+    module = _load_module()
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "task_id": "task-1",
+                    "materialization_failure_reason": "unknown",
+                    "materialization_effective_reason": (
+                        "face_image_no_rolling_cache_segments"
+                    ),
+                }
+            ]
+
+    class _Conn:
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
+            return _Rows()
+
+    conn = _Conn()
+    rows = module.non_materialized_task_details(conn, "reason_run")
+
+    assert rows[0]["materialization_effective_reason"] == (
+        "face_image_no_rolling_cache_segments"
+    )
+    assert "AS materialization_effective_reason" in conn.sql
+    assert "e.payload->'media'->>'evidence_reason'" in conn.sql
+
+
+def test_pressure_redis_samples_preserve_in_window_event_lag(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    for index, event_lag, face_lag, person_lag in (
+        (0, 7, 13, 11),
+        (1, 2, 23, 19),
+    ):
+        (samples / f"redis_{index:03d}.json").write_text(
+            json.dumps(
+                {
+                    "streams": {
+                        "security.events": {
+                            "consumer_groups": [
+                                {
+                                    "name": "event-workers-midterm",
+                                    "lag": event_lag,
+                                    "pending": index,
+                                }
+                            ]
+                        },
+                        "security.face_observations": {
+                            "consumer_groups": [
+                                {
+                                    "name": "face-worker-midterm",
+                                    "lag": face_lag,
+                                    "pending": index + 2,
+                                }
+                            ]
+                        },
+                        "security.person_observations": {
+                            "consumer_groups": [
+                                {
+                                    "name": "person-observation-workers-midterm",
+                                    "lag": person_lag,
+                                    "pending": index + 1,
+                                }
+                            ]
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    summary = module.summarize_pressure_redis_samples(cfg)
+
+    assert summary["sample_count"] == 2
+    assert summary["streams"]["security.events"]["max_lag"] == 7
+    assert summary["streams"]["security.events"]["final_lag"] == 2
+    assert summary["streams"]["security.face_observations"]["max_lag"] == 23
+    assert summary["streams"]["security.face_observations"]["final_lag"] == 23
+    assert summary["streams"]["security.person_observations"]["max_lag"] == 19
+
+
+def test_event_task_latency_summary_separates_upstream_and_persistence_delay() -> None:
+    module = _load_module()
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "event_type": "intrusion",
+                    "event_count": 4,
+                    "task_count": 2,
+                    "event_timestamp_to_event_row_p95": 120.0,
+                    "event_row_to_task_row_p95": 0.02,
+                    "task_deadline_slack_at_creation_min": -1.0,
+                }
+            ]
+
+    class _Conn:
+        def execute(self, sql, params):
+            self.sql = sql
+            self.params = params
+            return _Rows()
+
+    conn = _Conn()
+    summary = module.event_task_ingest_latency_summary(
+        conn,
+        "latency_run",
+        sampling_start_event_ts_ms=123,
+    )
+
+    intrusion = summary["event_types"]["intrusion"]
+    assert summary["status"] == "measured"
+    assert intrusion["event_timestamp_to_event_row_p95"] == 120.0
+    assert intrusion["event_row_to_task_row_p95"] == 0.02
+    assert "LEFT JOIN evidence_tasks" in conn.sql
+    assert conn.params["sampling_start_event_ts_ms"] == 123
 
 
 def test_rolling_cache_cleanup_removes_orphan_materialized_dirs_by_metadata(
@@ -3145,11 +3354,15 @@ def test_keep_all_evidence_run_requires_every_event_accounted_for() -> None:
         [],
         diagnostics,
         db_before_cleanup={
-            "events": 4,
+            "events": 5,
             "playable_bundles": 3,
             "task_statuses": [
                 {
                     "materialization_status": "materialization_expired",
+                    "count": 1,
+                },
+                {
+                    "materialization_status": "materialization_failed",
                     "count": 1,
                 }
             ],
@@ -3158,6 +3371,7 @@ def test_keep_all_evidence_run_requires_every_event_accounted_for() -> None:
 
     assert "event_outcomes_unaccounted" in reasons
     assert "materialization_expired_present" in reasons
+    assert "materialization_failed_present" in reasons
 
 
 def test_pressure_run_fails_when_observed_window_exceeds_duration() -> None:
@@ -4688,6 +4902,21 @@ def test_pressure_runner_starts_rolling_cache_sinks_after_runtime_epoch_changes(
     assert stop_sink_index < single_restart_index
     assert dual_apply_index < dual_sink_index
     assert single_restart_index < single_sink_index
+
+
+def test_dual_compose_pressure_starts_rolling_sinks_before_sources() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    compose_branch = source.index("module_config = sync_module_config_snapshot(cfg)")
+    runtime_index = source.index("start_dual_shard_runtime(cfg)", compose_branch)
+    sink_index = source.index(
+        'report["rolling_cache_sinks_pressure"]', runtime_index
+    )
+    source_index = source.index(
+        "start_pressure_sources_from_manifest(", sink_index
+    )
+
+    assert runtime_index < sink_index < source_index
 
 
 def test_stop_rolling_cache_sinks_before_pressure_reconfigure_stops_dual_sinks(

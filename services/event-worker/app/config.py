@@ -30,6 +30,9 @@ class Config:
     record_request_dedupe_ttl_seconds: int
     rolling_cache_suppress_record_requests: bool
     evidence_task_creation_enabled: bool
+    evidence_task_event_not_before_ts_ms: int
+    evidence_task_event_not_after_ts_ms: int
+    evidence_task_gate_redis_key: str
     person_observation_stream: str
     person_observation_consumer_group: str
     person_observation_consumer_name: str
@@ -61,7 +64,7 @@ def load_config() -> Config:
         consumer_group=os.getenv("CONSUMER_GROUP", "event-workers"),
         consumer_name=consumer_name,
         poll_timeout_ms=int(os.getenv("POLL_TIMEOUT_MS", "5000")),
-        batch_size=int(os.getenv("EVENT_BATCH_SIZE", "10")),
+        batch_size=max(1, int(os.getenv("EVENT_BATCH_SIZE", "100"))),
         default_replay_source_id=os.getenv("DEFAULT_REPLAY_SOURCE_ID", ""),
         recording_event_types=_csv_env("RECORDING_EVENT_TYPES"),
         recording_source_id=os.getenv("RECORDING_SOURCE_ID", ""),
@@ -96,6 +99,15 @@ def load_config() -> Config:
             "EVIDENCE_TASK_CREATION_ENABLED", "true"
         ).strip().lower()
         in ("true", "1", "yes", "on"),
+        evidence_task_event_not_before_ts_ms=max(
+            0, int(os.getenv("EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS", "0"))
+        ),
+        evidence_task_event_not_after_ts_ms=max(
+            0, int(os.getenv("EVIDENCE_TASK_EVENT_NOT_AFTER_TS_MS", "0"))
+        ),
+        evidence_task_gate_redis_key=os.getenv(
+            "EVIDENCE_TASK_GATE_REDIS_KEY", ""
+        ).strip(),
         person_observation_stream=os.getenv(
             "PERSON_OBSERVATION_STREAM", "security.person_observations"
         ),

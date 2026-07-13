@@ -978,7 +978,64 @@ restored `--media-worker-rolling-remux-workers` parameter solely for a separatel
 labeled remux-lane experiment. This does not retroactively change the matrix or
 claim `PASS_MEDIA_WORKER_CAPACITY_AND_READY_POLICY_CALIBRATED`. Fixture bytes
 were fixed, but event mix still showed that publisher-to-sampling phase must be
-frozen before a deterministic scheduler regression decision.
+frozen before the required repeat runs.
+
+Bounded remux-lane checkpoint (2026-07-13): a separately labeled
+`max_active=8`, remux-workers=4 canary proved that the configured lane change
+was effective: observed remux depth p95/p99/max was 0/1/4 and shared WIP peaked
+at 7. It nevertheless produced zero video bundles. Of 267 formal events, 195
+intrusion tasks expired as `business_deadline_expired`; the other 78 terminal
+failures were watchlist image tasks whose event media records
+`face_image_no_rolling_cache_segments`, not remux failures. Event ingestion was
+already too late for the retained media window: the maximum event-timestamp to
+DB-created-at delay was 344.776 seconds, oldest-ready p95/max was
+284.518/331.014 seconds, and finalizer depth stayed zero. Therefore remux
+concurrency is not the next tuning axis. Phase 6 must first split and correct
+event timestamp to event insertion to evidence-task creation/readiness delay,
+and the harness must preserve the concrete image failure reason instead of
+reporting it as `unknown`. No further remux increase, grace calibration, or
+Phase 6 acceptance token is allowed until a fixed-phase short canary produces
+nonzero video. Fixture phase must remain frozen before a deterministic
+scheduler regression decision.
+
+Event-gate and read-pin closure checkpoint (2026-07-13): the late intrusion
+tasks were traced to a pressure prefill Event Worker recreate that left the
+consumer unavailable for about five minutes. Prefill activation now uses a
+run-scoped Redis gate with lower event-time fencing and no consumer recreate.
+Postfill writes an upper event-time fence: later buffered Savant deliveries are
+retained as events/trajectories but cannot create tasks outside retained rolling
+coverage. The key has TTL and explicit restore cleanup. Keep-all pressure runs
+now delete zero event, face-observation, person-observation, or evidence rows;
+formal reports use bounded start/end event-time predicates instead of deleting
+postfill results.
+
+The same checkpoint closed three evidence correctness gaps. Image readiness now
+requires both `image_ready` DB state and a real image artifact, so
+`playback_kind=image` cannot hide `image_missing`. Segment identity changes are
+fenced retries in image, compatibility video, and Scheduler V2 video lanes.
+`rolling_cache_event_frame_not_covered` is classified as retryable
+`coverage_not_complete`. Pressure rolling sinks are gracefully stopped after
+source/event quiescence so the current tail chunk is finalized before drain.
+
+The retained short structural proof is:
+
+```text
+/data/video-analytics/artifacts/phase6_v2pinfinal_canary60_8fps_5p5_ma8_r4_20260713T1140CST
+```
+
+It produced 102/102 materialized tasks with zero failed, expired, or pending:
+85 behavior videos and 17 watchlist images. All 85 videos passed 5+5 duration,
+timeline, and annotation validation. The 8090 DB-backed audit passed 102/102
+details, 85/85 timelines, and 85/85 annotations with zero missing bbox,
+person-context, or fallback. The formal window was 73/73 materialized. The
+postfill fence retained 95 later events while creating zero out-of-tail tasks,
+and the preservation audit recorded zero deletions. Redis event/face/person
+consumer lag and pending were zero.
+
+This does not issue `PASS_MEDIA_WORKER_CAPACITY_AND_READY_POLICY_CALIBRATED`.
+The run was only a 60-second canary and still failed the separate local 8fps
+throughput gate at 5.247fps versus 7.92fps. Production T4 4fps validation and
+two comparable 400-second plus 120-second-drain passes remain mandatory.
 
 ### Phase 7 - Remove Legacy And Misleading Contracts
 

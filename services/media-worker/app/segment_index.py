@@ -9,18 +9,23 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from app.post_savant_metadata_annotation_builder import load_native_metadata
-from app.rolling_cache import RollingSegment, VIDEO_NAMES
+from app.rolling_cache import RollingCacheCoverageMiss, RollingSegment, VIDEO_NAMES
 
 
 GENERATION_FILE = ".rolling-cache-generation"
 READ_PIN_DIR = ".read-pins"
 MUTATION_LOCK_FILE = ".rolling-cache-mutation.lock"
 READ_PIN_SCHEMA_VERSION = "rolling-segment-read-pin-v1"
+
+
+class SegmentPinRetryableError(RollingCacheCoverageMiss):
+    """A segment changed while an atomic read pin was being published."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,18 @@ class SegmentReadPin:
 
     def __enter__(self) -> "SegmentReadPin":
         self.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.root / MUTATION_LOCK_FILE
+        with lock_path.open("a+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+            try:
+                self._activate_locked()
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        return self
+
+    def _activate_locked(self) -> None:
+        """Publish this marker while the caller holds the mutation lock."""
+
         pin_dir = self.root / READ_PIN_DIR
         pin_dir.mkdir(parents=True, exist_ok=True)
         relative_segments: list[str] = []
@@ -119,35 +136,30 @@ class SegmentReadPin:
             "expires_at_epoch_s": now + self.ttl_s,
             "segments": sorted(set(relative_segments)),
         }
-        lock_path = self.root / MUTATION_LOCK_FILE
-        with lock_path.open("a+", encoding="utf-8") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
-            temp_path = pin_dir / f".{self.token}.{os.getpid()}.tmp"
-            try:
-                for segment in self.segments:
-                    try:
-                        metadata_stat = segment.metadata_path.stat()
-                        video_stat = segment.video_path.stat()
-                    except OSError as exc:
-                        raise FileNotFoundError(
-                            f"segment disappeared before read pin: {segment.directory}"
-                        ) from exc
-                    if metadata_stat.st_size <= 0 or video_stat.st_size != segment.size_bytes:
-                        raise RuntimeError(
-                            f"segment identity changed before read pin: {segment.directory}"
-                        )
-                temp_path.write_text(
-                    json.dumps(payload, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-                os.replace(temp_path, self.marker_path)
-            finally:
-                temp_path.unlink(missing_ok=True)
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        temp_path = pin_dir / f".{self.token}.{os.getpid()}.tmp"
+        try:
+            for segment in self.segments:
+                try:
+                    metadata_stat = segment.metadata_path.stat()
+                    video_stat = segment.video_path.stat()
+                except OSError as exc:
+                    raise SegmentPinRetryableError(
+                        f"segment disappeared before read pin: {segment.directory}"
+                    ) from exc
+                if metadata_stat.st_size <= 0 or video_stat.st_size != segment.size_bytes:
+                    raise SegmentPinRetryableError(
+                        f"segment identity changed before read pin: {segment.directory}"
+                    )
+            temp_path.write_text(
+                json.dumps(payload, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temp_path, self.marker_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         self._active = True
         if self._on_open is not None:
             self._on_open(self.token)
-        return self
 
     def __exit__(self, *_exc: object) -> None:
         if not self._active:
@@ -326,6 +338,43 @@ class RollingSegmentIndex:
             on_open=self._pin_opened,
             on_close=self._pin_closed,
         )
+
+    @contextmanager
+    def pin_source_segments(
+        self,
+        *,
+        source_id: str,
+        runtime_epoch_id: str,
+        ttl_s: float | None = None,
+    ) -> Iterator[list[RollingSegment]]:
+        """Atomically refresh, select, and pin one source/epoch snapshot.
+
+        Retention takes the same mutation lock exclusively. Holding it shared
+        across catalog refresh and marker publication closes the otherwise
+        observable gap where cleanup could delete a segment returned by
+        ``find_segments()`` before ``SegmentReadPin.__enter__()`` published its
+        marker.
+        """
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.root / MUTATION_LOCK_FILE
+        pin: SegmentReadPin | None = None
+        with lock_path.open("a+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+            try:
+                segments = self.find_segments(
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
+                )
+                pin = self.pin_segments(segments, ttl_s=ttl_s)
+                pin._activate_locked()
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        try:
+            yield segments
+        finally:
+            if pin is not None:
+                pin.__exit__(None, None, None)
 
     def force_reconcile(self, *, source_id: str, runtime_epoch_id: str) -> None:
         key = (source_id, runtime_epoch_id)

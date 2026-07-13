@@ -57,6 +57,75 @@ class RecordingPolicyState:
     last_recorded_event_type: dict[str, str] = field(default_factory=dict)
 
 
+def _effective_evidence_task_gate(
+    redis_client: Redis,
+    *,
+    configured_enabled: bool,
+    configured_not_before_ts_ms: int,
+    configured_not_after_ts_ms: int,
+    redis_key: str,
+) -> tuple[bool, int, int]:
+    """Resolve a runtime gate without restarting the event consumer.
+
+    Pressure prefill used to recreate event-worker merely to switch task
+    creation on. Under a busy person-observation stream that restart took
+    minutes and let event deliveries age past the rolling-cache deadline. A
+    run-scoped Redis document changes only the evidence-task gate while the
+    consumer and its pending state stay live.
+    """
+
+    fallback = (
+        bool(configured_enabled),
+        max(0, int(configured_not_before_ts_ms or 0)),
+        max(0, int(configured_not_after_ts_ms or 0)),
+    )
+    if not redis_key:
+        return fallback
+    try:
+        raw = redis_client.get(redis_key)
+    except Exception:
+        logger.exception("evidence task gate read failed key=%s", redis_key)
+        return fallback
+    if raw in (None, b"", ""):
+        return fallback
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("invalid evidence task gate JSON key=%s", redis_key)
+        return fallback
+    if not isinstance(payload, dict):
+        logger.warning("invalid evidence task gate document key=%s", redis_key)
+        return fallback
+    enabled_raw = payload.get("enabled", fallback[0])
+    if isinstance(enabled_raw, str):
+        enabled = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        enabled = bool(enabled_raw)
+    try:
+        cutoff = max(
+            0,
+            int(
+                payload.get(
+                    "event_not_before_ts_ms",
+                    fallback[1],
+                )
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        logger.warning("invalid evidence task gate cutoff key=%s", redis_key)
+        return fallback
+    try:
+        upper_cutoff = max(
+            0,
+            int(payload.get("event_not_after_ts_ms", fallback[2]) or 0),
+        )
+    except (TypeError, ValueError):
+        logger.warning("invalid evidence task gate upper cutoff key=%s", redis_key)
+        return fallback
+    return enabled, cutoff, upper_cutoff
+
+
 def request_shutdown(signum: int, _frame: object) -> None:
     global shutdown_requested
     logger.info("shutdown requested by signal=%s", signum)
@@ -293,6 +362,8 @@ def _handle_event(
     runtime_epoch_id: str = "",
     rolling_cache_suppress_record_requests: bool = False,
     evidence_task_creation_enabled: bool = True,
+    evidence_task_event_not_before_ts_ms: int = 0,
+    evidence_task_event_not_after_ts_ms: int = 0,
 ) -> tuple[bool, str | None]:
     """Process a single event: insert into DB, publish alert + record request, then ACK.
 
@@ -349,6 +420,20 @@ def _handle_event(
                 source_event_id,
             )
 
+    event_ts_ms = int(event.get("event_ts_ms") or event.get("start_ts_ms") or 0)
+    evidence_task_time_eligible = (
+        event_ts_ms <= 0
+        or (
+            (
+                evidence_task_event_not_before_ts_ms <= 0
+                or event_ts_ms >= evidence_task_event_not_before_ts_ms
+            )
+            and (
+                evidence_task_event_not_after_ts_ms <= 0
+                or event_ts_ms <= evidence_task_event_not_after_ts_ms
+            )
+        )
+    )
     evidence_task_status: str | None = None
     if (
         newly_inserted
@@ -356,6 +441,7 @@ def _handle_event(
         and event_id
         and _requires_evidence(event)
         and evidence_task_creation_enabled
+        and evidence_task_time_eligible
     ):
         if hasattr(repo, "create_evidence_task"):
             try:
@@ -370,6 +456,23 @@ def _handle_event(
             logger.debug(
                 "evidence_task skipped: repository has no create_evidence_task"
             )
+    elif (
+        newly_inserted
+        and not alert_policy_decision.suppressed
+        and event_id
+        and _requires_evidence(event)
+        and evidence_task_creation_enabled
+        and not evidence_task_time_eligible
+    ):
+        logger.info(
+            "evidence_task skipped: event outside runtime gate "
+            "source_event_id=%s event_ts_ms=%d not_before_ts_ms=%d "
+            "not_after_ts_ms=%d",
+            source_event_id,
+            event_ts_ms,
+            evidence_task_event_not_before_ts_ms,
+            evidence_task_event_not_after_ts_ms,
+        )
 
     # Record request — idempotent: check DB clip_status before publishing
     if record_publisher is not None and not alert_policy_decision.suppressed:
@@ -671,6 +774,8 @@ def _process_batch(
     runtime_epoch_id: str = "",
     rolling_cache_suppress_record_requests: bool = False,
     evidence_task_creation_enabled: bool = True,
+    evidence_task_event_not_before_ts_ms: int = 0,
+    evidence_task_event_not_after_ts_ms: int = 0,
 ) -> tuple[int, int]:
     inserted = 0
     duplicates = 0
@@ -702,6 +807,12 @@ def _process_batch(
                 rolling_cache_suppress_record_requests
             ),
             evidence_task_creation_enabled=evidence_task_creation_enabled,
+            evidence_task_event_not_before_ts_ms=(
+                evidence_task_event_not_before_ts_ms
+            ),
+            evidence_task_event_not_after_ts_ms=(
+                evidence_task_event_not_after_ts_ms
+            ),
         )
         if new:
             inserted += 1
@@ -820,7 +931,11 @@ def run_worker(
         "recording_post_seconds=%s record_request_dedupe_ttl_seconds=%s "
         "person_observation_enabled=%s "
         "person_observation_stream=%s person_observation_group=%s "
-        "person_observation_start_id=%s person_observation_batch_size=%s",
+        "person_observation_start_id=%s person_observation_batch_size=%s "
+        "event_batch_size=%s scheduling=events_first_bounded "
+        "evidence_task_event_not_before_ts_ms=%s "
+        "evidence_task_event_not_after_ts_ms=%s "
+        "evidence_task_gate_redis_key=%s",
         cfg.event_stream,
         cfg.consumer_group,
         cfg.consumer_name,
@@ -841,6 +956,10 @@ def run_worker(
         cfg.person_observation_consumer_group,
         cfg.person_observation_consumer_start_id,
         cfg.person_observation_batch_size,
+        cfg.batch_size,
+        cfg.evidence_task_event_not_before_ts_ms,
+        cfg.evidence_task_event_not_after_ts_ms,
+        cfg.evidence_task_gate_redis_key,
     )
 
     total_inserted = 0
@@ -851,8 +970,84 @@ def run_worker(
     total_person_failed = 0
     last_report = time.monotonic()
 
+    def process_event_messages(
+        messages: list[tuple[str, dict[bytes, bytes]]],
+        *,
+        batch_kind: str,
+    ) -> None:
+        """Process one bounded event batch before observation maintenance work."""
+
+        nonlocal total_inserted, total_duplicates
+        runtime_epoch_id = _current_runtime_epoch_id(redis_client)
+        (
+            evidence_task_creation_enabled,
+            evidence_task_event_not_before_ts_ms,
+            evidence_task_event_not_after_ts_ms,
+        ) = _effective_evidence_task_gate(
+            redis_client,
+            configured_enabled=cfg.evidence_task_creation_enabled,
+            configured_not_before_ts_ms=(
+                cfg.evidence_task_event_not_before_ts_ms
+            ),
+            configured_not_after_ts_ms=cfg.evidence_task_event_not_after_ts_ms,
+            redis_key=cfg.evidence_task_gate_redis_key,
+        )
+        inserted, duplicates = _process_batch(
+            messages,
+            repo,
+            consumer,
+            alert_publisher,
+            record_publisher,
+            alert_policy_service=alert_policy_service,
+            recording_state=recording_state,
+            recording_event_types=cfg.recording_event_types,
+            recording_source_id=cfg.recording_source_id,
+            recording_max_requests_per_run=cfg.recording_max_requests_per_run,
+            recording_cooldown_seconds=cfg.recording_cooldown_seconds,
+            recording_cooldown_scope=cfg.recording_cooldown_scope,
+            recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
+            recording_pre_seconds=cfg.recording_pre_seconds,
+            recording_post_seconds=cfg.recording_post_seconds,
+            runtime_epoch_id=runtime_epoch_id,
+            rolling_cache_suppress_record_requests=(
+                cfg.rolling_cache_suppress_record_requests
+            ),
+            evidence_task_creation_enabled=evidence_task_creation_enabled,
+            evidence_task_event_not_before_ts_ms=(
+                evidence_task_event_not_before_ts_ms
+            ),
+            evidence_task_event_not_after_ts_ms=(
+                evidence_task_event_not_after_ts_ms
+            ),
+        )
+        total_inserted += inserted
+        total_duplicates += duplicates
+        if batch_kind == "pending" and (inserted or duplicates):
+            logger.info(
+                "pending batch: inserted=%d duplicates=%d",
+                inserted,
+                duplicates,
+            )
+
     while not shutdown_requested:
         try:
+            did_work = False
+
+            # Events create operator-visible alerts and evidence tasks with a
+            # finite rolling-cache deadline. Always give both recovered and new
+            # event deliveries one bounded turn before the high-rate trajectory
+            # observation stream. The former order processed up to 100 person
+            # rows before reading only one event and produced multi-minute lag.
+            pending = consumer.read_pending(count=cfg.batch_size)
+            if pending:
+                process_event_messages(pending, batch_kind="pending")
+                did_work = True
+
+            new_msgs = consumer.read_new(count=cfg.batch_size, block_ms=1)
+            if new_msgs:
+                process_event_messages(new_msgs, batch_kind="new")
+                did_work = True
+
             if person_consumer is not None:
                 person_pending = person_consumer.read_pending(
                     count=cfg.person_observation_batch_size
@@ -867,6 +1062,7 @@ def run_worker(
                     total_person_duplicates += pdup
                     total_person_skipped += pskip
                     total_person_failed += pfail
+                    did_work = True
                     if pins or pdup or pskip or pfail:
                         logger.info(
                             "person observation pending batch: inserted=%d "
@@ -890,6 +1086,7 @@ def run_worker(
                     total_person_duplicates += pdup
                     total_person_skipped += pskip
                     total_person_failed += pfail
+                    did_work = True
                     logger.info(
                         "person observation new batch: inserted=%d duplicates=%d "
                         "skipped=%d failed=%d",
@@ -899,71 +1096,18 @@ def run_worker(
                         pfail,
                     )
 
-            # 1. Process pending messages (recovery)
-            pending = consumer.read_pending(count=cfg.batch_size)
-            if pending:
-                runtime_epoch_id = _current_runtime_epoch_id(redis_client)
-                ins, dup = _process_batch(
-                    pending,
-                    repo,
-                    consumer,
-                    alert_publisher,
-                    record_publisher,
-                    alert_policy_service=alert_policy_service,
-                    recording_state=recording_state,
-                    recording_event_types=cfg.recording_event_types,
-                    recording_source_id=cfg.recording_source_id,
-                    recording_max_requests_per_run=cfg.recording_max_requests_per_run,
-                    recording_cooldown_seconds=cfg.recording_cooldown_seconds,
-                    recording_cooldown_scope=cfg.recording_cooldown_scope,
-                    recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
-                    recording_pre_seconds=cfg.recording_pre_seconds,
-                    recording_post_seconds=cfg.recording_post_seconds,
-                    runtime_epoch_id=runtime_epoch_id,
-                    rolling_cache_suppress_record_requests=(
-                        cfg.rolling_cache_suppress_record_requests
-                    ),
-                    evidence_task_creation_enabled=cfg.evidence_task_creation_enabled,
+            # Block only when neither stream had work. This retains an idle
+            # sleep without allowing a continuously busy observation stream to
+            # postpone the next event poll.
+            if not did_work:
+                idle_events = consumer.read_new(
+                    count=cfg.batch_size,
+                    block_ms=cfg.poll_timeout_ms,
                 )
-                total_inserted += ins
-                total_duplicates += dup
-                if ins or dup:
-                    logger.info(
-                        "pending batch: inserted=%d duplicates=%d", ins, dup
-                    )
+                if idle_events:
+                    process_event_messages(idle_events, batch_kind="new")
 
-            # 2. Read new messages
-            new_msgs = consumer.read_new(
-                count=cfg.batch_size, block_ms=cfg.poll_timeout_ms
-            )
-            if new_msgs:
-                runtime_epoch_id = _current_runtime_epoch_id(redis_client)
-                ins, dup = _process_batch(
-                    new_msgs,
-                    repo,
-                    consumer,
-                    alert_publisher,
-                    record_publisher,
-                    alert_policy_service=alert_policy_service,
-                    recording_state=recording_state,
-                    recording_event_types=cfg.recording_event_types,
-                    recording_source_id=cfg.recording_source_id,
-                    recording_max_requests_per_run=cfg.recording_max_requests_per_run,
-                    recording_cooldown_seconds=cfg.recording_cooldown_seconds,
-                    recording_cooldown_scope=cfg.recording_cooldown_scope,
-                    recording_cooldown_grace_ms=cfg.recording_cooldown_grace_ms,
-                    recording_pre_seconds=cfg.recording_pre_seconds,
-                    recording_post_seconds=cfg.recording_post_seconds,
-                    runtime_epoch_id=runtime_epoch_id,
-                    rolling_cache_suppress_record_requests=(
-                        cfg.rolling_cache_suppress_record_requests
-                    ),
-                    evidence_task_creation_enabled=cfg.evidence_task_creation_enabled,
-                )
-                total_inserted += ins
-                total_duplicates += dup
-
-            # 3. Periodic summary
+            # Periodic summary
             now = time.monotonic()
             if now - last_report >= 60:
                 logger.info(

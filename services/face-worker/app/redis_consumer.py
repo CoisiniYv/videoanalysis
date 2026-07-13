@@ -132,6 +132,17 @@ class RedisStreamConsumer:
             messages.append((msg_id.decode(), fields))
         return messages
 
+    def ack_many(self, msg_ids: list[str]) -> int:
+        """ACK a completed persistence batch with one Redis round trip."""
+
+        if not msg_ids:
+            return 0
+        try:
+            return int(self._client.xack(self._stream, self._group, *msg_ids))
+        except Exception:
+            logger.exception("batch ack failed count=%d", len(msg_ids))
+            return 0
+
     def ack(self, msg_id: str) -> bool:
         """Acknowledge *msg_id* in the consumer group. Returns True on success."""
         try:

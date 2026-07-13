@@ -246,6 +246,26 @@ def test_fenced_claim_retry_and_stale_owner_are_independent_of_ready_time(conn) 
     assert terminal["materialization_status"] == "materialization_failed"
     assert terminal["materialization_phase"] == "terminal"
     assert terminal["materialization_lease_token"] is None
+    assert terminal["materialization_failure_reason"] == "stable_metadata_invalid"
+
+    unknown_reason_event_id = _seed_task(connection, created_events)
+    unknown_reason_lease = repository.claim_rolling_task(
+        connection,
+        event_id=unknown_reason_event_id,
+        worker_id="worker-image",
+        phase="image_running",
+        lease_seconds=30,
+    )
+    assert unknown_reason_lease is not None
+    assert repository.fail_rolling_task(
+        connection,
+        unknown_reason_lease,
+        reason="face_image_no_rolling_cache_segments",
+    ) is True
+    unknown_reason_terminal = _task(connection, unknown_reason_event_id)
+    assert unknown_reason_terminal["materialization_failure_reason"] == (
+        "face_image_no_rolling_cache_segments"
+    )
 
 
 def test_durable_handoff_survives_retry_and_fences_previous_owner(conn) -> None:

@@ -343,6 +343,74 @@ def test_media_worker_materializes_watchlist_image_from_rolling_cache(
     assert result["source_observation_id"] == "face:camera-1:7:10000"
 
 
+def test_media_worker_image_extract_backs_off_from_segment_end(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _activate(MEDIA_WORKER_DIR)
+    from app import worker
+
+    video_path = tmp_path / "video.mov"
+    output_path = tmp_path / "frame.jpg"
+    video_path.write_bytes(b"video")
+    offsets: list[float] = []
+
+    def fake_run(command, **_kwargs):
+        offset = float(command[command.index("-ss") + 1])
+        offsets.append(offset)
+        if len(offsets) == 2:
+            output_path.write_bytes(b"jpeg")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(worker, "run_managed_subprocess", fake_run)
+    monkeypatch.setattr(worker, "_record_probe_metric", lambda *_args: None)
+
+    worker._extract_full_frame_image(video_path, output_path, offset_s=2.0)
+
+    assert offsets == [2.0, 1.999]
+    assert output_path.read_bytes() == b"jpeg"
+
+
+def test_media_worker_image_extract_uses_stream_safe_offset_after_tail_gap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    _activate(MEDIA_WORKER_DIR)
+    from app import worker
+
+    video_path = tmp_path / "video.mov"
+    output_path = tmp_path / "frame.jpg"
+    video_path.write_bytes(b"video")
+    ffmpeg_offsets: list[float] = []
+    ffprobe_calls = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal ffprobe_calls
+        if "-show_entries" in command:
+            ffprobe_calls += 1
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"streams": [{"duration": "1.500", "avg_frame_rate": "8/1"}]}
+                ),
+                stderr="",
+            )
+        offset = float(command[command.index("-ss") + 1])
+        ffmpeg_offsets.append(offset)
+        if offset == 1.375:
+            output_path.write_bytes(b"safe-jpeg")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(worker, "run_managed_subprocess", fake_run)
+    monkeypatch.setattr(worker, "_record_probe_metric", lambda *_args: None)
+
+    worker._extract_full_frame_image(video_path, output_path, offset_s=2.0)
+
+    assert ffprobe_calls == 1
+    assert ffmpeg_offsets[-1] == 1.375
+    assert output_path.read_bytes() == b"safe-jpeg"
+
+
 def test_media_worker_watchlist_image_uses_nearest_cache_frame_for_small_gap(
     tmp_path: Path,
 ) -> None:

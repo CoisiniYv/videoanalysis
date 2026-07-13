@@ -444,6 +444,9 @@ def test_replay_first_topology_is_preserved() -> None:
     assert 'DIR_LOCATION="${EPOCH_ROOT}/epochs/${EPOCH_ID}' in _text(
         VIDEO_FILE_SINK_ENTRYPOINT
     )
+    assert "/%source_id/%src_filename/" in _text(VIDEO_FILE_SINK_ENTRYPOINT)
+    assert "%source_id%" not in _text(VIDEO_FILE_SINK_ENTRYPOINT)
+    assert "%src_filename%" not in _text(VIDEO_FILE_SINK_ENTRYPOINT)
     assert "VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH" in _text(VIDEO_FILE_SINK_ENTRYPOINT)
     assert services["replay-service"]["environment"]["RUST_LOG"] == "${RUST_LOG:-info}"
     assert services["media-worker"]["environment"]["RUNTIME_EPOCH_STATE_PATH"] == (
@@ -1056,6 +1059,9 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
     assert "ROLLING_CACHE_RETENTION_SECONDS" in entrypoint
     assert "[rolling-cache-maintenance]" in entrypoint
     assert "/opt/rolling-cache-maintenance.py" in entrypoint
+    assert "/%source_id/%src_filename/" in entrypoint
+    assert "%source_id%" not in entrypoint
+    assert "%src_filename%" not in entrypoint
     assert services["rolling-cache-sink"]["environment"][
         "ROLLING_CACHE_MAINTENANCE_OWNER"
     ] == "true"
