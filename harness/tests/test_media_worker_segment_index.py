@@ -366,17 +366,30 @@ def test_periodic_reconcile_recovers_unjournaled_publish_and_retention_delete(
             allow_fallback=False,
         )
     ] == ["0001"]
+    manifest_parses_before = int(index.snapshot()["manifest_parses"])
 
-    # Simulate a sink crash after the atomic directory rename but before its
-    # best-effort publication-journal append, followed by retention deleting a
-    # cataloged leaf. The directory remains the source of truth at reconcile.
-    _write_segment(
+    # A periodic audit must consume the valid journal tail before enumerating
+    # membership. That makes the journal-covered leaf known without parsing
+    # its manifest during the audit. The unjournaled leaf simulates a sink
+    # crash after atomic rename but before the best-effort journal append and
+    # must still be recovered from the filesystem source of truth.
+    journaled = _write_segment(
         root,
         epoch="epoch-a",
         source_id="camera-01",
         name="0002",
         pts_values=[3, 4],
     )
+    _append_publication_record(journaled)
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0003",
+        pts_values=[5, 6],
+    )
+    # Retention deletion must still prune an older journal/catalog entry in
+    # the same membership audit.
     shutil.rmtree(first)
     (root / ".rolling-cache-generation").write_text("1\n", encoding="utf-8")
     clock[0] = 20.0
@@ -387,8 +400,13 @@ def test_periodic_reconcile_recovers_unjournaled_publish_and_retention_delete(
         allow_fallback=False,
     )
 
-    assert [segment.segment_id for segment in segments] == ["0002"]
-    assert int(index.snapshot()["reconciliations"]) == 1
+    assert [segment.segment_id for segment in segments] == ["0002", "0003"]
+    snapshot = index.snapshot()
+    assert int(snapshot["reconciliations"]) == 1
+    assert int(snapshot["publication_records"]) == 1
+    assert int(snapshot["publication_errors"]) == 0
+    assert int(snapshot["manifest_parses"]) == manifest_parses_before + 1
+    assert int(snapshot["full_row_parses"]) == 0
 
 
 def test_corrupt_publication_record_falls_back_to_membership_reconcile(
