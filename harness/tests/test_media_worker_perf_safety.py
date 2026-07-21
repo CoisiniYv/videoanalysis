@@ -319,12 +319,16 @@ def test_finalizer_metrics_flatten_segment_index_count_fields() -> None:
             "segment_index_pinned_segments": 5,
             "segment_index_stat_calls": 12,
             "segment_index_pin_publish_ms": 3.5,
+            "segment_index_publication_records": 2,
+            "segment_index_publication_read_ms": 1.5,
         },
     )
 
     assert metrics["segment_index_pinned_segments"] == 5
     assert metrics["segment_index_stat_calls"] == 12
     assert metrics["segment_index_pin_publish_ms"] == 3.5
+    assert metrics["segment_index_publication_records"] == 2
+    assert metrics["segment_index_publication_read_ms"] == 1.5
 
 
 def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:

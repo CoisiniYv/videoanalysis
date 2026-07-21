@@ -212,6 +212,52 @@ def test_atomic_publication_appends_identity_fenced_discovery_record(
         }
 
 
+def test_committed_segment_survives_publication_journal_append_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(11)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 10})
+    import publishing
+
+    def fail_append(**_kwargs) -> None:
+        raise OSError("injected-journal-failure")
+
+    monkeypatch.setattr(publishing, "_append_publication_record", fail_append)
+
+    final_dir = publisher.publish(fragment)
+
+    assert final_dir.is_dir()
+    assert (final_dir / "segment_manifest.json").is_file()
+    assert not (final_dir.parent / ".segment-publications.jsonl").exists()
+
+
+def test_publication_journal_rotation_is_bounded_and_keeps_current_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import publishing
+
+    monkeypatch.setattr(publishing, "SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES", 1)
+    publisher = _publisher(tmp_path)
+    final_dirs = []
+    for fragment_id in (12, 13):
+        fragment = publisher.prepare(fragment_id)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append(
+            {"source_id": "camera-01", "pts": fragment_id}
+        )
+        final_dirs.append(publisher.publish(fragment))
+
+    journal_path = final_dirs[-1].parent / ".segment-publications.jsonl"
+    records = [json.loads(line) for line in journal_path.read_text().splitlines()]
+    assert [record["segment_id"] for record in records] == [
+        "s0123456789abcdef-00000013"
+    ]
+
+
 def test_fragment_ledger_assigns_boundary_frames_to_new_fragment(
     tmp_path: Path,
 ) -> None:

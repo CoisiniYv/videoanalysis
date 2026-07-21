@@ -391,6 +391,98 @@ def test_periodic_reconcile_recovers_unjournaled_publish_and_retention_delete(
     assert int(index.snapshot()["reconciliations"]) == 1
 
 
+def test_corrupt_publication_record_falls_back_to_membership_reconcile(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    journal_path = _append_publication_record(first)
+    index = _index(root)
+    assert len(
+        index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            allow_fallback=False,
+        )
+    ) == 1
+
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[3, 4],
+    )
+    with journal_path.open("ab") as handle:
+        handle.write(b'{"schema_version":"truncated"}\n')
+    diagnostics = index.new_operation_diagnostics()
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+        diagnostics=diagnostics,
+    )
+
+    assert [segment.segment_id for segment in segments] == ["0001", "0002"]
+    assert diagnostics["segment_index_publication_errors"] == 1
+    assert diagnostics["segment_index_publication_reconciles"] == 1
+
+
+def test_publication_journal_rotation_reconciles_without_losing_segment(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    journal_path = _append_publication_record(first)
+    index = _index(root)
+    assert len(
+        index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            allow_fallback=False,
+        )
+    ) == 1
+
+    second = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[3, 4],
+    )
+    _append_publication_record(second)
+    last_record = journal_path.read_bytes().splitlines(keepends=True)[-1]
+    replacement = journal_path.with_suffix(".replacement")
+    replacement.write_bytes(last_record)
+    os.replace(replacement, journal_path)
+    diagnostics = index.new_operation_diagnostics()
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+        diagnostics=diagnostics,
+    )
+
+    assert [segment.segment_id for segment in segments] == ["0001", "0002"]
+    assert diagnostics["segment_index_publication_records"] == 1
+    assert diagnostics["segment_index_publication_errors"] == 1
+    assert diagnostics["segment_index_publication_reconciles"] == 1
+
+
 def test_changed_parent_reuses_known_immutable_leaf_membership(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

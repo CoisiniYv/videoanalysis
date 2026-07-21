@@ -6462,7 +6462,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_manifest_parse_ms=0 segment_index_sort_ms=10 "
                 "segment_index_mutation_lock_wait_ms=2 "
                 "segment_index_pin_publish_ms=4 segment_index_pin_release_ms=1 "
+                "segment_index_publication_read_ms=6 "
                 "segment_index_pinned_segments=4 "
+                "segment_index_publication_records=2 "
+                "segment_index_publication_bytes=1000 "
+                "segment_index_publication_errors=0 "
+                "segment_index_publication_reconciles=0 "
                 "handoff_to_finalizer_admission_ms=3 "
                 "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
@@ -6488,7 +6493,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_manifest_parse_ms=0 segment_index_sort_ms=12 "
                 "segment_index_mutation_lock_wait_ms=3 "
                 "segment_index_pin_publish_ms=5 segment_index_pin_release_ms=2 "
+                "segment_index_publication_read_ms=8 "
                 "segment_index_pinned_segments=6 "
+                "segment_index_publication_records=3 "
+                "segment_index_publication_bytes=1500 "
+                "segment_index_publication_errors=0 "
+                "segment_index_publication_reconciles=0 "
                 "handoff_to_finalizer_admission_ms=5 "
                 "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
@@ -6523,7 +6533,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=2 segment_index_read_pins_created=4 "
                 "segment_index_read_pins_released=2 segment_index_generation=3 "
-                "segment_index_io_slot_wait_ms_total=1200.5",
+                "segment_index_io_slot_wait_ms_total=1200.5 "
+                "segment_index_publication_read_ms_total=20 "
+                "segment_index_publication_records=10 "
+                "segment_index_publication_bytes=5000 "
+                "segment_index_publication_errors=0 "
+                "segment_index_publication_reconciles=0",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=2 tick_duration_ms=200 "
                 "tick_gap_ms=1300 rolling_due=True general_due=True "
@@ -6554,7 +6569,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=0 segment_index_read_pins_created=4 "
                 "segment_index_read_pins_released=4 segment_index_generation=3 "
-                "segment_index_io_slot_wait_ms_total=1800.5",
+                "segment_index_io_slot_wait_ms_total=1800.5 "
+                "segment_index_publication_read_ms_total=30 "
+                "segment_index_publication_records=15 "
+                "segment_index_publication_bytes=7500 "
+                "segment_index_publication_errors=0 "
+                "segment_index_publication_reconciles=0",
                 "rolling_cache_finalizer_v2_admitted candidates=3 admitted=2",
                 "rolling_cache_finalizer_v2_admitted candidates=2 admitted=2",
                 "rolling_lifecycle_recovery ready_deadline_expired=0 "
@@ -6663,6 +6683,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         == 350.0
     )
     assert (
+        summary["media_worker"]["media_segment_index_publication_read_ms"]["p50"]
+        == 7.0
+    )
+    assert (
+        summary["media_worker"]["media_segment_index_publication_records"]["max"]
+        == 3.0
+    )
+    assert (
         summary["media_worker"]["media_handoff_to_finalizer_admission_ms"]["max"]
         == 5.0
     )
@@ -6718,6 +6746,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         ]["max"]
         == 1800.5
     )
+    assert (
+        summary["media_worker"][
+            "media_scheduler_segment_index_publication_records"
+        ]["max"]
+        == 15.0
+    )
     assert summary["media_worker"]["media_resource_max_active"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_cpu_thread_limit"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_remux_workers"]["max"] == 1.0
@@ -6744,6 +6778,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert observable["segment_index_job"]["io_slot_wait_ms"]["p50"] == 200.5
     assert observable["segment_index_job"]["lock_wait_ms"]["p50"] == 500.5
     assert observable["segment_index_job"]["pinned_segments"]["p50"] == 5.0
+    assert observable["segment_index_job"]["publication_records"]["max"] == 3.0
     assert observable["scheduler"]["finalizer_admission"]["candidate_total"] == 5
     assert (
         observable["scheduler"]["finalizer_admission"]["immediate_admission_gap"]
@@ -6755,6 +6790,10 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert (
         observable["scheduler"]["segment_index"]["io_slot_wait_ms_total"]["max"]
         == 1800.5
+    )
+    assert (
+        observable["scheduler"]["segment_index"]["publication_records"]["max"]
+        == 15.0
     )
     assert observable["scheduler"]["capacity"]["remux_workers"]["max"] == 1.0
     assert (
