@@ -6454,7 +6454,10 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_ffprobe_ready_to_finalizer_start_ms=3 "
                 "finalizer_pool_wait_ms=4 "
                 "ready_to_remux_claim_ms=12 remux_ms=800 remux_exec_ms=800 "
-                "remux_total_ms=1800 segment_index_io_slot_wait_ms=100.5 "
+                "remux_total_ms=1800 remux_metadata_publish_ms=200 "
+                "remux_metadata_bytes=10000 remux_metadata_reload_ms=100 "
+                "remux_handoff_build_ms=50 remux_unattributed_ms=25 "
+                "segment_index_io_slot_wait_ms=100.5 "
                 "segment_index_lock_wait_ms=400.5 "
                 "segment_index_lock_hold_ms=700.5 segment_index_refresh_ms=650 "
                 "segment_index_rebuild_ms=0 segment_index_stat_ms=200 "
@@ -6485,7 +6488,10 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_ffprobe_ready_to_finalizer_start_ms=4 "
                 "finalizer_pool_wait_ms=6 "
                 "ready_to_remux_claim_ms=22 remux_ms=900 remux_exec_ms=900 "
-                "remux_total_ms=2100 segment_index_io_slot_wait_ms=300.5 "
+                "remux_total_ms=2100 remux_metadata_publish_ms=300 "
+                "remux_metadata_bytes=15000 remux_metadata_reload_ms=150 "
+                "remux_handoff_build_ms=60 remux_unattributed_ms=35 "
+                "segment_index_io_slot_wait_ms=300.5 "
                 "segment_index_lock_wait_ms=600.5 "
                 "segment_index_lock_hold_ms=800.5 segment_index_refresh_ms=750 "
                 "segment_index_rebuild_ms=0 segment_index_stat_ms=250 "
@@ -6670,6 +6676,11 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_remux_ms"]["max"] == 900.0
     assert summary["media_worker"]["media_remux_exec_ms"]["max"] == 900.0
     assert summary["media_worker"]["media_remux_total_ms"]["max"] == 2100.0
+    assert summary["media_worker"]["media_remux_metadata_publish_ms"]["p50"] == 250.0
+    assert summary["media_worker"]["media_remux_metadata_bytes"]["max"] == 15000.0
+    assert summary["media_worker"]["media_remux_metadata_reload_ms"]["p50"] == 125.0
+    assert summary["media_worker"]["media_remux_handoff_build_ms"]["max"] == 60.0
+    assert summary["media_worker"]["media_remux_unattributed_ms"]["max"] == 35.0
     assert (
         summary["media_worker"]["media_segment_index_io_slot_wait_ms"]["p50"]
         == 200.5
@@ -6775,6 +6786,11 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert observable["scheduler"]["schema_version"] == "phase6-capacity-v3"
     assert observable["scheduler"]["cycle"]["work_ms"]["max"] == 1195.0
     assert observable["remux_total_ms"]["max"] == 2100.0
+    assert observable["remux_metadata_publish_ms"]["p50"] == 250.0
+    assert observable["remux_metadata_bytes"]["max"] == 15000.0
+    assert observable["remux_metadata_reload_ms"]["p50"] == 125.0
+    assert observable["remux_handoff_build_ms"]["max"] == 60.0
+    assert observable["remux_unattributed_ms"]["max"] == 35.0
     assert observable["segment_index_job"]["io_slot_wait_ms"]["p50"] == 200.5
     assert observable["segment_index_job"]["lock_wait_ms"]["p50"] == 500.5
     assert observable["segment_index_job"]["pinned_segments"]["p50"] == 5.0

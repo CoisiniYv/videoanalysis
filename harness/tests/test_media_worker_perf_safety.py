@@ -105,9 +105,11 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
         segment_ids=("segment-1",),
         immutable_probe={"status": "ready"},
         materialization_ms=17,
+        metadata_publish_ms=23,
+        metadata_bytes=456,
     )
     monkeypatch.setattr(worker, "materialize_window", lambda **_kwargs: materialized)
-    monotonic_values = iter((10.0, 10.123))
+    monotonic_values = iter((10.0, 10.020, 10.025, 10.030, 10.040, 10.123))
     monkeypatch.setattr(worker.time, "monotonic", lambda: next(monotonic_values))
     lease = worker.MaterializationLease(
         event_id=EVENT_ID,
@@ -137,8 +139,17 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
     assert handoff["remux_ms"] == 17
     assert handoff["remux_exec_ms"] == 17
     assert handoff["remux_total_ms"] == 123
+    assert handoff["remux_metadata_publish_ms"] == 23
+    assert handoff["remux_metadata_bytes"] == 456
+    assert handoff["remux_metadata_reload_ms"] == 5
+    assert handoff["remux_handoff_build_ms"] == 10
+    assert handoff["remux_unattributed_ms"] == 36.5
     assert handoff["segment_index_lock_wait_ms"] == 31.5
     assert phase["remux_total_ms"] == 123
+    assert phase["remux_metadata_publish_ms"] == 23
+    assert phase["remux_metadata_reload_ms"] == 5
+    assert phase["remux_handoff_build_ms"] == 10
+    assert phase["remux_unattributed_ms"] == 36.5
     assert phase["segment_index_lock_hold_ms"] == 42.5
 
 
@@ -349,6 +360,11 @@ def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
             "remux_ms": 17,
             "remux_exec_ms": 17,
             "remux_total_ms": 123,
+            "remux_metadata_publish_ms": 23,
+            "remux_metadata_bytes": 456,
+            "remux_metadata_reload_ms": 5,
+            "remux_handoff_build_ms": 10,
+            "remux_unattributed_ms": 36.5,
             "segment_index_lock_wait_ms": 31.5,
             "segment_index_lock_hold_ms": 42.5,
             "segment_index_pinned_segments": 5,
@@ -366,6 +382,11 @@ def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
     )
 
     assert "remux_total_ms=123" in caplog.text
+    assert "remux_metadata_publish_ms=23" in caplog.text
+    assert "remux_metadata_bytes=456" in caplog.text
+    assert "remux_metadata_reload_ms=5" in caplog.text
+    assert "remux_handoff_build_ms=10" in caplog.text
+    assert "remux_unattributed_ms=36.5" in caplog.text
     assert "segment_index_lock_wait_ms=31.5" in caplog.text
     assert "segment_index_lock_hold_ms=42.5" in caplog.text
     assert "segment_index_pinned_segments=5" in caplog.text

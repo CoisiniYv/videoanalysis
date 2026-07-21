@@ -271,6 +271,8 @@ def test_materialize_window_writes_sink_like_metadata_and_concat_command(tmp_pat
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert result.video_path.read_bytes() == b"joined-video"
     assert result.segment_ids == ("0001", "0002")
+    assert result.metadata_publish_ms >= 0
+    assert result.metadata_bytes == result.metadata_path.stat().st_size
     assert metadata["labels"]["materialization_mode"] == "rolling_cache_copy"
     assert metadata["labels"]["canonical_clip"] == "true"
     assert metadata["labels"]["time_domain_crop_applied"] == "true"
