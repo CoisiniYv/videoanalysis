@@ -502,6 +502,39 @@ def test_source_window_pin_falls_back_to_full_catalog_for_legacy_bounds(
         assert int(diagnostics["segment_index_pinned_segments"]) == 3
 
 
+@pytest.mark.parametrize(
+    ("requested_start_pts", "requested_end_pts"),
+    [(250, 250), (450, 350), (1_000, 1_100)],
+)
+def test_source_window_pin_falls_back_for_invalid_or_unmatched_windows(
+    tmp_path: Path,
+    requested_start_pts: int,
+    requested_end_pts: int,
+) -> None:
+    root = tmp_path / "cache"
+    for sequence in range(3):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"{sequence:04d}",
+            pts_values=[sequence * 100, sequence * 100 + 99],
+        )
+    index = _index(root)
+
+    with index.pin_source_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        requested_source_start_pts=requested_start_pts,
+        requested_source_end_pts=requested_end_pts,
+    ) as segments:
+        assert [segment.segment_id for segment in segments] == [
+            "0000",
+            "0001",
+            "0002",
+        ]
+
+
 def test_index_io_admission_bounds_concurrent_discovery_and_pin(
     tmp_path: Path,
 ) -> None:

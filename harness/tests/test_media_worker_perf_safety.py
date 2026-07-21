@@ -142,6 +142,169 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
     assert phase["segment_index_lock_hold_ms"] == 42.5
 
 
+def test_remux_job_bounded_pin_preserves_dual_clock_materialization(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    root = tmp_path / "rolling"
+    output_root = tmp_path / "materialized"
+    source_id = "source-1"
+    source_base = 1_700_000_000_000_000_000
+    mux_base = 100_000_000_000
+    segment_duration = 4_000_000_000
+    frame_step = 500_000_000
+    event_source_pts = source_base + 22_000_000_000
+    event_mux_pts = mux_base + 22_000_000_000
+    event_uuid = "dual-clock-event-frame"
+
+    for sequence in range(10):
+        segment_id = f"{sequence:04d}"
+        directory = (
+            root
+            / "midterm"
+            / "epochs"
+            / CURRENT_EPOCH
+            / source_id
+            / "segments"
+            / segment_id
+        )
+        directory.mkdir(parents=True)
+        video_path = directory / "video.mov"
+        metadata_path = directory / "metadata.json"
+        video_path.write_bytes(b"v" * 2048)
+        source_start = source_base + sequence * segment_duration
+        mux_start = mux_base + sequence * segment_duration
+        rows = []
+        for offset in range(0, segment_duration + 1, frame_step):
+            source_pts = source_start + offset
+            mux_pts = mux_start + offset
+            rows.append(
+                {
+                    "type": "VideoFrame",
+                    "source_id": source_id,
+                    "pts": source_pts,
+                    "rolling_cache_mux_pts": mux_pts,
+                    "uuid": (
+                        event_uuid
+                        if source_pts == event_source_pts
+                        else f"{segment_id}-{offset}"
+                    ),
+                    "objects": [],
+                }
+            )
+        metadata_path.write_text(
+            json.dumps({"frames": rows}),
+            encoding="utf-8",
+        )
+        (directory / "segment_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "rolling-segment-manifest-v1",
+                    "segment_id": segment_id,
+                    "source_id": source_id,
+                    "runtime_epoch_id": CURRENT_EPOCH,
+                    "video_file": video_path.name,
+                    "metadata_file": metadata_path.name,
+                    "first_pts": mux_start,
+                    "last_pts": mux_start + segment_duration,
+                    "frame_count": len(rows),
+                    "source_first_pts": source_start,
+                    "source_last_pts": source_start + segment_duration,
+                    "video_size_bytes": video_path.stat().st_size,
+                    "metadata_size_bytes": metadata_path.stat().st_size,
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    segment_index = worker.RollingSegmentIndex(
+        root,
+        refresh_interval_s=0.0,
+        reconcile_interval_s=10_000.0,
+        stability_age_s=0.0,
+        row_cache_max_entries=8,
+        min_video_bytes=1,
+    )
+    original_materialize_window = worker.materialize_window
+    observed: dict[str, object] = {}
+
+    def materialize_with_test_runner(**kwargs: Any):
+        selected_segments = list(kwargs["segments"])
+        observed["pinned_ids"] = [segment.segment_id for segment in selected_segments]
+        marker_paths = list((root / ".read-pins").glob("*.json"))
+        assert len(marker_paths) == 1
+        marker = json.loads(marker_paths[0].read_text(encoding="utf-8"))
+        observed["marker_ids"] = [Path(path).name for path in marker["segments"]]
+
+        def write_output(command: list[str], _log_path: Path) -> None:
+            Path(command[-1]).write_bytes(b"materialized-video")
+
+        return original_materialize_window(
+            **kwargs,
+            command_runner=write_output,
+            duration_probe=lambda _path: 10.0,
+            frame_rate_probe=lambda _path: 24.0,
+        )
+
+    monkeypatch.setattr(worker, "materialize_window", materialize_with_test_runner)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="worker-1",
+        token="lease-1",
+        generation=1,
+        phase="remux_running",
+        schema_v2=True,
+    )
+
+    result = worker._materialize_rolling_cache_job(
+        root=str(root),
+        output_root=str(output_root),
+        job={
+            "event_id": EVENT_ID,
+            "source_id": source_id,
+            "runtime_epoch_id": CURRENT_EPOCH,
+            "requested_start_pts": event_source_pts - 5_000_000_000,
+            "requested_end_pts": event_source_pts + 5_000_000_000,
+            "labels": {
+                "event_frame_pts": event_source_pts,
+                "event_frame_uuid": event_uuid,
+            },
+            "lease": lease,
+        },
+        segment_index=segment_index,
+    )
+
+    assert observed == {
+        "pinned_ids": ["0003", "0004", "0005", "0006", "0007"],
+        "marker_ids": ["0003", "0004", "0005", "0006", "0007"],
+    }
+    assert list((root / ".read-pins").glob("*.json")) == []
+    assert result["_lifecycle_handoff"]["selected_segment_ids"] == [
+        "0004",
+        "0005",
+        "0006",
+    ]
+    assert result["_lifecycle_handoff"]["segment_index_pinned_segments"] == 5
+    assert result["rolling_cache"]["requested_start_pts"] == (
+        event_source_pts - 5_000_000_000
+    )
+    assert result["rolling_cache"]["requested_end_pts"] == (
+        event_source_pts + 5_000_000_000
+    )
+    assert result["rolling_cache"]["mux_requested_start_pts"] == (
+        event_mux_pts - 5_000_000_000
+    )
+    assert result["rolling_cache"]["mux_requested_end_pts"] == (
+        event_mux_pts + 5_000_000_000
+    )
+    assert result["rolling_cache"]["mux_event_pts"] == event_mux_pts
+    assert {row["uuid"] for row in result["frames"]} >= {event_uuid}
+    assert int(segment_index.snapshot()["full_row_parses"]) == 3
+
+
 def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
     worker = _activate("media-worker", "app.worker")
     caplog.set_level("INFO", logger="app.worker")
