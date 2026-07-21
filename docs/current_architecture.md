@@ -5,6 +5,7 @@
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
 exact-lease 修复 `2a57f20`，当前容量观测 checkpoint `70d4e75`。
+selected-identity 结构 checkpoint 为 `72413a2`。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -283,6 +284,17 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   `_catalog_segment_identities()` 在 catalog lock 内扫描/resolve 全 retention catalog，只为取
   已选 5-6 leaf 的 identities；下一唯一变量是 selected-leaf direct lookup，metadata 格式和容量
   暂不同时改变。该轮 ready/media/lifecycle p95 仍为 28.29s/48.47s/48.66s，r3840 禁止；
+- `e88a4ed`/`72413a2` 已把 `_catalog_segment_identities()` 改为只 direct lookup 已选
+  manifest key。真实容器 `segment_index_selected_identity_smoke_20260721T232129Z` 在 128
+  leaf 中取 6 个 identity 时证明零 catalog value scan、恰好 6 次 resolve，并通过 5 段 pin、
+  123+5 retention 删除和零 marker/full-row-parse residual。对应 exact r300
+  `pressure60_8p1_selidentity_ioadm3_b10m_r300_20260721T232319Z` 的 60/60、8.0482 FPS、
+  971/971 正式任务、1,011 retained bundle、视频/8090/annotation/person/fence/residual 均通过；
+  lock-hold p95 从 3.067s 降到 63ms，说明结构修复生效。但 ready/media/lifecycle/DB lifecycle
+  p95 仍为 54.82s/74.66s/74.90s/77.23s，metadata visibility p95=13.83s，正式尾部
+  97 active/60 ready，严格门失败且 r3840 禁止。当前下一单变量是 normal success path 复用
+  内存中的 exact selected metadata 构造 handoff，去掉对刚原子写入文件的 immediate reload；
+  recovery 仍读 durable file，on-disk pretty JSON 与容量参数本轮不变；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

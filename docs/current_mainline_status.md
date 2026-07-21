@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `307a9c4`、最新观测提交 `70d4e75`，尚未合入或声明为 60 路默认容量；
+  `72413a2`、最新观测提交 `70d4e75`，尚未合入或声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -26,7 +26,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership、per-catalog singleflight、crash-safe publication journal 与 journal-first reconcile | journal/corruption/rotation/crash/deletion/pin 单测和真实容器 smoke 通过；`307a9c4` 同口径 width-three r300 容量/visibility 仍失败 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership、per-catalog singleflight、crash-safe publication journal、journal-first reconcile 与 selected-identity direct lookup | journal/corruption/rotation/crash/deletion/pin/selected-identity 单测和真实容器 smoke 通过；`72413a2` 同口径 width-three r300 容量/visibility 仍失败 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -185,17 +185,36 @@ job 相关系数为 0.972。下一变量收窄为 `_catalog_segment_identities()
 direct lookup，避免在 catalog lock 内 scan/resolve 全 retention catalog；metadata 格式和容量
 本轮不同时改变。
 
+`e88a4ed`/`72413a2` 已先红后绿实现该 direct lookup。真实容器
+`segment_index_selected_identity_smoke_20260721T232129Z` 在 128 leaf catalog 中取 6 个 identity
+时保持零全表 value visit、6 次 resolve，且 bounded pin、123+5 retention 删除、marker/full-row
+residual 全通过。exact r300
+`pressure60_8p1_selidentity_ioadm3_b10m_r300_20260721T232319Z` 保持 width 3、Candidate B
+`20/12/8` 与 `8/4/8`、600s/120s、300s disk-backed retention 和固定 fixture/hash。输入 60/60、
+8.0482 FPS，971/971 正式任务与 1,011 retained 全 materialized；视频、8090、timeline、annotation/
+bbox/person-context、person persistence、exact lease 和末态 residual 全通过。该实现把 lock-hold p95
+从 3.067s 降到 63ms、unattributed p95 从 3.334s 降到 1.926s，证明结构变量真实生效；但
+ready/media/lifecycle/DB lifecycle p95 仍为 54.82s/74.66s/74.90s/77.23s，oldest-ready p95
+62.77s、metadata visibility p95 13.83s，正式尾部 97 active/60 ready，依赖 drain，故 r300
+严格门仍失败且 r3840 禁止。harness declared failure 仍含 `adaface_roi_watchlist_events_zero`，
+不能代替独立容量判定。
+
+当前剩余可直接归因的 normal-path 同步 round trip 是约 238KB metadata 的 pretty publish/reload，
+p95 1.201s/0.988s，handoff-build 仅 58ms。下一单变量先以红测要求 normal success path 直接复用
+内存中的 exact selected metadata 构造 immutable handoff，禁止立即重读刚发布的文件；crash recovery
+继续读 durable file，on-disk pretty JSON、WIP/remux/finalizer、width、retention 和 deadline 不变。
+
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3 和 Candidate B 其余参数不变；把 sink 原子发布、retention generation 与
-  index discovery 的 journal/reconciliation 正确性合同保持不变；下一变量仅为 selected-leaf
-  identity direct lookup，红测必须证明路径工作量不随 retained catalog width 增长；
+- 保持 width 3 和 Candidate B 其余参数不变；保留 sink 原子发布、journal/reconciliation、pin/
+  identity 与 recovery 合同；下一变量仅为 normal-path metadata immediate reload removal，先以红测
+  证明 handoff 使用 exact in-memory selected metadata，recovery 仍读取 durable file；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
-- 最新 r300 的 finalizer/process-pool wait p95 已回到 4.823s/2.758s；index discovery
-  门未通过前不把 finalizer 作为下一调参轴，也不与 index 结构变量混在同一候选；
+- 最新 r300 的 finalizer-pool/finalization p95 为 4.022s/5.862s；不把 finalizer 或容量扩张
+  与 metadata reload 结构变量混在同一候选；
 - 完成真实混合 RTSP 的断流、重连和长 soak；
 - 完成 event/person/face/media worker restart/recovery soak；
 - 继续观察生产 T4 84–85°C、70W power cap 和 evidence 波峰排队。

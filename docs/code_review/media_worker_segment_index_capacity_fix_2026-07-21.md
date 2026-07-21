@@ -3,11 +3,11 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. The crash-recoverable segment-publication journal and the
-journal-first periodic reconciliation order both passed deterministic and
-real-container correctness proofs, but their unchanged width-three r300
-repeats still failed the strict capacity and visibility gates. Neither the two
-retention short gates nor the two one-hour acceptance runs have passed yet.
+completion claim. Direct selected-leaf identity lookup passed deterministic
+and real-container correctness proofs and reduced segment-index lock-hold p95
+from 3.067s to 63ms, but its unchanged width-three r300 still failed the strict
+capacity and visibility gates. Neither the two retention short gates nor the
+two one-hour acceptance runs have passed yet.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -54,6 +54,8 @@ retention short gates nor the two one-hour acceptance runs have passed yet.
 | `307a9c4` | journal-first periodic reconciliation | Consumes and validates the journal tail before membership enumeration without weakening corruption, rotation, deletion, pin or identity recovery |
 | `7e238a8` | remux metadata-gap red tests | Requires metadata publish time/bytes, immediate reload, handoff build, residual, finalizer log and pressure-artifact aggregation |
 | `70d4e75` | instrumentation-only remux attribution | Carries the new metrics through materialization, durable handoff/recovery, finalization logs and retained pressure summaries without changing scheduling or serialization |
+| `e88a4ed` | selected-identity complexity red test | Requires six selected leaves to cause six direct lookups and zero retained-catalog value iteration |
+| `72413a2` | direct selected pin identity lookup | Resolves only the already-selected manifest keys under the short catalog lock while preserving missing-entry retry and exact identity fences |
 
 ## Measurement rounds
 
@@ -824,6 +826,51 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   publication. Metadata serialization, WIP/remux/finalizer sizes, width three,
   retention and deadlines remain unchanged for its r300 comparison.
 
+### Round 17: direct selected-identity lookup
+
+- Tests-only `e88a4ed` first exposed the retained-width defect: asking for six
+  selected identities visited all 128 catalog values. `72413a2` replaces that
+  scan with direct manifest-key lookups while preserving the retry-on-missing
+  contract and the metadata/video inode, size and mtime identity fence.
+- Focused index/sink/rolling tests passed 138, pressure harness/analyzer 201,
+  and lifecycle/scheduler/finalizer tests passed 154 with one environment
+  skip. Fresh PostgreSQL migrations 001-032 passed all eight real contracts;
+  Ruff, compile, Compose rendering and diff checks also passed.
+- Bind-mounted smoke:
+  `/data/video-analytics/artifacts/segment_index_selected_identity_smoke_20260721T232129Z`.
+  A 128-leaf catalog returned six selected identities with zero catalog-wide
+  value visits and exactly six directory resolves. It pinned IDs 0061-0065,
+  deleted 123 unpinned leaves while skipping five pins, deleted those five
+  after release, and left zero marker or full-row-parse residual.
+- Exact unchanged r300 artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_selidentity_ioadm3_b10m_r300_20260721T232319Z`.
+  It retained Candidate B WIP/remux/max-per-poll `20/12/8`, finalizer
+  threads/processes/queue `8/4/8`, width three, 600s/120s, disk-backed cache,
+  300s retention and the fixed fixture SHA256. Input passed at 60/60 and
+  8.0482 FPS with zero send/queue/raw loss. All 971 formal and 1,011 retained
+  tasks materialized; 1,011/1,011 retained bundles passed duration/FPS and
+  every 8090/timeline/annotation/bbox/person-context check. Person persistence
+  passed at 102,431 stored versus 102,430 exported with measured loss zero.
+  Expiry, recovery, retry failure, claim-busy, duplicate, finalizer failure and
+  final task/lease/lane/finalizer-pending residuals were zero. The harness's
+  declared `adaface_roi_watchlist_events_zero` failure does not replace the
+  independent media-capacity verdict.
+- The behavior fix is dynamically proved: segment-index lock-hold p95 fell
+  from 3.067s to 63ms, and remux unattributed p95 fell from 3.334s to 1.926s.
+  It was nevertheless insufficient and this run varied worse at the queue
+  level: ready-to-remux/media queue/lifecycle/DB lifecycle p95 were
+  `54.823/74.657/74.899/77.233s`, oldest-ready p95 was 62.774s and metadata
+  visibility p95 was 13.831s. The formal tail retained 97 active/60 ready and
+  relied on drain. WIP/remux/finalizer depth p95 was `20/12/11`.
+- The remaining measured synchronous round trip is now the narrowest safe
+  variable. The approximately 238KB pretty metadata publish/reload costs
+  `1.201/0.988s` p95; handoff build is only 58ms p95. The next red contract
+  must prove the normal success path builds its immutable handoff from the
+  exact selected metadata already held in memory, without immediately parsing
+  the file it just atomically wrote. Crash recovery must continue reading the
+  durable file, and the on-disk pretty JSON format, metadata contents,
+  capacities, retention and deadlines remain unchanged for attribution.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -837,12 +884,13 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Add a deterministic red test requiring `_catalog_segment_identities()` to
-   visit/resolve only selected pin leaves, independent of retained catalog
-   width, while preserving missing-entry and exact identity behavior.
-2. Implement only that direct selected-entry lookup. Keep the measured metadata
-   publish/reload format, filesystem/journal/pin/identity/lease fences and
-   PostgreSQL durable-queue semantics unchanged for attribution.
+1. Add a deterministic red test requiring the normal materialization path to
+   reuse its exact in-memory selected metadata when building the immutable
+   handoff, without an immediate read/parse of the newly published file.
+2. Implement only that normal-path reload removal. Keep crash recovery reading
+   the durable metadata file and keep its pretty JSON bytes, filesystem/
+   journal/pin/identity/lease fences, capacities and PostgreSQL queue semantics
+   unchanged for attribution.
 3. Repeat focused tests, fresh PostgreSQL and a bind-mounted representative
    smoke, then the exact width-three r300 gate. Only a full strict pass permits
    r3840; watchlist-zero is not a substitute for latency/visibility gates.
