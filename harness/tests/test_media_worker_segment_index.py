@@ -824,9 +824,9 @@ def test_catalog_refresh_publishes_copy_on_write_version(tmp_path: Path) -> None
     assert catalog.version > version_before
 
 
-def test_concurrent_same_catalog_publish_uses_version_check(tmp_path: Path) -> None:
+def test_stale_catalog_publish_is_rejected_by_version_check(tmp_path: Path) -> None:
     root = tmp_path / "cache"
-    first = _write_segment(
+    _write_segment(
         root,
         epoch="epoch-a",
         source_id="camera-01",
@@ -835,7 +835,41 @@ def test_concurrent_same_catalog_publish_uses_version_check(tmp_path: Path) -> N
     )
     index = _index(root)
     index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
-    _write_segment(
+    catalog = index._catalogs[("camera-01", "epoch-a")]
+    first, first_version = index._copy_catalog(catalog)
+    stale, stale_version = index._copy_catalog(catalog)
+
+    assert first_version == stale_version
+    assert index._publish_catalog(
+        catalog,
+        first,
+        expected_version=first_version,
+    )
+    assert not index._publish_catalog(
+        catalog,
+        stale,
+        expected_version=stale_version,
+    )
+    assert int(index.snapshot()["catalog_publish_conflicts"]) == 1
+
+
+def test_concurrent_same_catalog_refresh_is_singleflight(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    clock = [0.0]
+    index = _index(
+        root,
+        refresh_interval_s=0.5,
+        monotonic=lambda: clock[0],
+    )
+    index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
+    new_directory = _write_segment(
         root,
         epoch="epoch-a",
         source_id="camera-01",
@@ -848,33 +882,64 @@ def test_concurrent_same_catalog_publish_uses_version_check(tmp_path: Path) -> N
         parent,
         ns=(parent_stat.st_atime_ns, parent_stat.st_mtime_ns + 1_000_000_000),
     )
-    publish_barrier = threading.Barrier(2)
-    original_publish = index._publish_catalog
+    clock[0] = 1.0
+    refreshes_before = int(index.snapshot()["refreshes"])
+    parses_before = int(index.snapshot()["manifest_parses"])
+    new_manifest = (new_directory / "segment_manifest.json").resolve(strict=False)
+    parse_entered = threading.Event()
+    duplicate_parse = threading.Event()
+    allow_parse = threading.Event()
+    parse_lock = threading.Lock()
+    parse_calls = 0
+    original_parse = index._parse_manifest
 
-    def synchronized_publish(*args, **kwargs):
-        publish_barrier.wait(timeout=2.0)
-        return original_publish(*args, **kwargs)
+    def slow_parse(path: Path):
+        nonlocal parse_calls
+        if path == new_manifest:
+            with parse_lock:
+                parse_calls += 1
+                if parse_calls > 1:
+                    duplicate_parse.set()
+            parse_entered.set()
+            assert allow_parse.wait(timeout=2.0)
+        return original_parse(path)
 
-    index._publish_catalog = synchronized_publish
+    index._parse_manifest = slow_parse
     results: list[list[str]] = []
+    errors: list[BaseException] = []
 
     def lookup() -> None:
-        segments = index.find_segments(
-            source_id="camera-01",
-            runtime_epoch_id="epoch-a",
-            allow_fallback=False,
-        )
-        results.append([segment.segment_id for segment in segments])
+        try:
+            segments = index.find_segments(
+                source_id="camera-01",
+                runtime_epoch_id="epoch-a",
+                allow_fallback=False,
+            )
+            results.append([segment.segment_id for segment in segments])
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            errors.append(exc)
 
-    threads = [threading.Thread(target=lookup) for _ in range(2)]
-    for thread in threads:
-        thread.start()
+    first_thread = threading.Thread(target=lookup)
+    second_thread = threading.Thread(target=lookup)
+    first_thread.start()
+    assert parse_entered.wait(timeout=1.0)
+    second_thread.start()
+    duplicate_observed = duplicate_parse.wait(timeout=0.2)
+    clock[0] = 2.0
+    allow_parse.set()
+    threads = (first_thread, second_thread)
     for thread in threads:
         thread.join(timeout=2.0)
         assert not thread.is_alive()
 
+    assert errors == []
+    assert not duplicate_observed
+    assert parse_calls == 1
     assert sorted(results) == [["0001", "0002"], ["0001", "0002"]]
-    assert int(index.snapshot()["catalog_publish_conflicts"]) == 1
+    snapshot = index.snapshot()
+    assert int(snapshot["refreshes"]) == refreshes_before + 1
+    assert int(snapshot["manifest_parses"]) == parses_before + 1
+    assert int(snapshot["catalog_publish_conflicts"]) == 0
 
 
 def test_parsed_row_cache_is_bounded_by_entries_and_bytes(tmp_path: Path) -> None:
