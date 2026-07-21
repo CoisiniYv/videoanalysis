@@ -68,6 +68,8 @@ class RollingMaterializationResult:
     actual_end_pts: int
     selected_frame_count: int
     materialization_ms: int
+    metadata_publish_ms: int
+    metadata_bytes: int
     ffmpeg_command: tuple[str, ...]
     immutable_probe: dict[str, Any]
 
@@ -376,6 +378,7 @@ def materialize_window(
         "identity": output_identity,
         "observed_at_epoch_ns": time.time_ns(),
     }
+    metadata_publish_started = time.monotonic()
     label_doc = {
         **{str(k): str(v) for k, v in (labels or {}).items() if v is not None},
         "event_id": event_id,
@@ -453,6 +456,10 @@ def materialize_window(
         "frames": selected_rows,
     }
     _write_json(metadata_path, metadata)
+    metadata_publish_ms = int(
+        round((time.monotonic() - metadata_publish_started) * 1000)
+    )
+    metadata_bytes = int(metadata_path.stat().st_size)
     return RollingMaterializationResult(
         sink_dir=sink_dir,
         video_path=video_path,
@@ -464,6 +471,8 @@ def materialize_window(
         actual_end_pts=original_requested_end_pts,
         selected_frame_count=len(selected_rows),
         materialization_ms=materialization_ms,
+        metadata_publish_ms=metadata_publish_ms,
+        metadata_bytes=metadata_bytes,
         ffmpeg_command=tuple(executed_command),
         immutable_probe=immutable_probe,
     )

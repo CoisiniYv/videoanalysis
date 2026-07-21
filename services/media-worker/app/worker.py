@@ -154,6 +154,13 @@ SEGMENT_INDEX_JOB_METRIC_FIELDS = (
     "segment_index_publication_errors",
     "segment_index_publication_reconciles",
 )
+REMUX_JOB_METRIC_FIELDS = (
+    "remux_metadata_publish_ms",
+    "remux_metadata_bytes",
+    "remux_metadata_reload_ms",
+    "remux_handoff_build_ms",
+    "remux_unattributed_ms",
+)
 
 
 class ImageExtractionRetryableError(RuntimeError):
@@ -3348,6 +3355,10 @@ def _post_savant_phase_latency_metrics(
         "remux_total_ms": phase.get("remux_total_ms"),
         **{
             name: phase.get(name)
+            for name in REMUX_JOB_METRIC_FIELDS
+        },
+        **{
+            name: phase.get(name)
             for name in SEGMENT_INDEX_JOB_METRIC_FIELDS
         },
         "handoff_to_finalizer_admission_ms": phase.get(
@@ -3429,6 +3440,7 @@ def _post_savant_materialization_metrics(
             if (
                 key.endswith("_ms")
                 or key.startswith("replay_active_")
+                or key in REMUX_JOB_METRIC_FIELDS
                 or key in SEGMENT_INDEX_JOB_METRIC_FIELDS
             )
         },
@@ -5993,6 +6005,10 @@ def _recoverable_finalizer_metadata(
             "remux_total_ms": handoff.get("remux_total_ms"),
             **{
                 name: handoff.get(name)
+                for name in REMUX_JOB_METRIC_FIELDS
+            },
+            **{
+                name: handoff.get(name)
                 for name in SEGMENT_INDEX_JOB_METRIC_FIELDS
             },
         }
@@ -6036,6 +6052,9 @@ def _log_finalize_one_metrics(
         "sink_ffprobe_ready_to_finalizer_start_ms=%s finalizer_pool_wait_ms=%s "
         "ready_to_remux_claim_ms=%s remux_ms=%s remux_exec_ms=%s "
         "remux_total_ms=%s "
+        "remux_metadata_publish_ms=%s remux_metadata_bytes=%s "
+        "remux_metadata_reload_ms=%s remux_handoff_build_ms=%s "
+        "remux_unattributed_ms=%s "
         "segment_index_io_slot_wait_ms=%s "
         "segment_index_lock_wait_ms=%s segment_index_lock_hold_ms=%s "
         "segment_index_refresh_ms=%s segment_index_rebuild_ms=%s "
@@ -6085,6 +6104,11 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("remux_ms"),
         materialization_metrics.get("remux_exec_ms"),
         materialization_metrics.get("remux_total_ms"),
+        materialization_metrics.get("remux_metadata_publish_ms"),
+        materialization_metrics.get("remux_metadata_bytes"),
+        materialization_metrics.get("remux_metadata_reload_ms"),
+        materialization_metrics.get("remux_handoff_build_ms"),
+        materialization_metrics.get("remux_unattributed_ms"),
         materialization_metrics.get("segment_index_io_slot_wait_ms"),
         materialization_metrics.get("segment_index_lock_wait_ms"),
         materialization_metrics.get("segment_index_lock_hold_ms"),
@@ -12317,12 +12341,17 @@ def _materialize_rolling_cache_job(
                 else None
             ),
         )
+    metadata_reload_started_at = time.monotonic()
     metadata = _load_scan_metadata_payload(materialized.metadata_path)
+    metadata_reload_ms = int(
+        round((time.monotonic() - metadata_reload_started_at) * 1000)
+    )
     if metadata is None:
         raise RuntimeError("rolling_cache_materialized_metadata_unreadable")
     lease = job.get("lease")
     if not isinstance(lease, MaterializationLease):
         raise RuntimeError("rolling_cache_materialization_missing_lease")
+    handoff_build_started_at = time.monotonic()
     try:
         identity = materialized.video_path.stat()
     except OSError as exc:
@@ -12354,10 +12383,53 @@ def _materialize_rolling_cache_job(
         "remux_claimed_at": job.get("remux_claimed_at"),
         "remux_ms": materialized.materialization_ms,
         "remux_exec_ms": materialized.materialization_ms,
+        "remux_metadata_publish_ms": materialized.metadata_publish_ms,
+        "remux_metadata_bytes": materialized.metadata_bytes,
+        "remux_metadata_reload_ms": metadata_reload_ms,
         **index_diagnostics,
     }
+    handoff_build_ms = int(
+        round((time.monotonic() - handoff_build_started_at) * 1000)
+    )
+    handoff["remux_handoff_build_ms"] = handoff_build_ms
     handoff["remux_total_ms"] = int(
         round((time.monotonic() - remux_total_started_at) * 1000)
+    )
+    refresh_or_rebuild_ms = max(
+        _to_float(index_diagnostics.get("segment_index_refresh_ms")) or 0.0,
+        _to_float(index_diagnostics.get("segment_index_rebuild_ms")) or 0.0,
+    )
+    accounted_ms = sum(
+        (
+            float(materialized.materialization_ms),
+            float(materialized.metadata_publish_ms),
+            float(metadata_reload_ms),
+            float(handoff_build_ms),
+            _to_float(
+                index_diagnostics.get("segment_index_io_slot_wait_ms")
+            )
+            or 0.0,
+            _to_float(index_diagnostics.get("segment_index_lock_wait_ms"))
+            or 0.0,
+            refresh_or_rebuild_ms,
+            _to_float(index_diagnostics.get("segment_index_sort_ms")) or 0.0,
+            _to_float(
+                index_diagnostics.get("segment_index_mutation_lock_wait_ms")
+            )
+            or 0.0,
+            _to_float(
+                index_diagnostics.get("segment_index_pin_publish_ms")
+            )
+            or 0.0,
+            _to_float(
+                index_diagnostics.get("segment_index_pin_release_ms")
+            )
+            or 0.0,
+        )
+    )
+    handoff["remux_unattributed_ms"] = round(
+        max(0.0, float(handoff["remux_total_ms"]) - accounted_ms),
+        3,
     )
     observed_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -12383,6 +12455,10 @@ def _materialize_rolling_cache_job(
             "remux_ms": materialized.materialization_ms,
             "remux_exec_ms": materialized.materialization_ms,
             "remux_total_ms": handoff["remux_total_ms"],
+            **{
+                name: handoff.get(name)
+                for name in REMUX_JOB_METRIC_FIELDS
+            },
             **index_diagnostics,
             "rolling_cache_segment_ids": list(materialized.segment_ids),
         },

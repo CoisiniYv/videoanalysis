@@ -10029,6 +10029,20 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         media_remux_ms = _extract_metric_ints(text, "remux_ms")
         media_remux_exec_ms = _extract_metric_numbers(text, "remux_exec_ms")
         media_remux_total_ms = _extract_metric_numbers(text, "remux_total_ms")
+        media_remux_job_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_event_finalized",
+                field=field,
+            )
+            for field in (
+                "remux_metadata_publish_ms",
+                "remux_metadata_bytes",
+                "remux_metadata_reload_ms",
+                "remux_handoff_build_ms",
+                "remux_unattributed_ms",
+            )
+        }
         media_segment_index_job_metrics = {
             field: _log_metric_numbers_for_lines(
                 text,
@@ -10404,6 +10418,10 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "media_remux_ms": _numeric_distribution(media_remux_ms),
             "media_remux_exec_ms": _numeric_distribution(media_remux_exec_ms),
             "media_remux_total_ms": _numeric_distribution(media_remux_total_ms),
+            **{
+                f"media_{field}": _numeric_distribution(values)
+                for field, values in media_remux_job_metrics.items()
+            },
             **{
                 f"media_{field}": _numeric_distribution(values)
                 for field, values in media_segment_index_job_metrics.items()
@@ -12957,6 +12975,18 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         or _not_enough_data("post-pin remux timing logs unavailable"),
         "remux_total_ms": logs.get("media_remux_total_ms")
         or _not_enough_data("pre-pin-to-handoff timing logs unavailable"),
+        "remux_metadata_publish_ms": logs.get(
+            "media_remux_metadata_publish_ms"
+        )
+        or _not_enough_data("rolling metadata publish timing unavailable"),
+        "remux_metadata_bytes": logs.get("media_remux_metadata_bytes")
+        or _not_enough_data("rolling metadata byte count unavailable"),
+        "remux_metadata_reload_ms": logs.get("media_remux_metadata_reload_ms")
+        or _not_enough_data("rolling metadata reload timing unavailable"),
+        "remux_handoff_build_ms": logs.get("media_remux_handoff_build_ms")
+        or _not_enough_data("rolling handoff build timing unavailable"),
+        "remux_unattributed_ms": logs.get("media_remux_unattributed_ms")
+        or _not_enough_data("rolling remux unattributed timing unavailable"),
         "segment_index_job": {
             name: logs.get(f"media_segment_index_{name}")
             or _not_enough_data(f"segment-index job {name} unavailable")
@@ -13401,6 +13431,24 @@ def evidence_phase_latency_summary(diagnostics: dict[str, Any]) -> dict[str, Any
             or _not_enough_data("post-pin remux timing logs unavailable"),
             "remux_total_ms": media_logs.get("media_remux_total_ms")
             or _not_enough_data("pre-pin-to-handoff timing logs unavailable"),
+            "remux_metadata_publish_ms": media_logs.get(
+                "media_remux_metadata_publish_ms"
+            )
+            or _not_enough_data("rolling metadata publish timing unavailable"),
+            "remux_metadata_bytes": media_logs.get("media_remux_metadata_bytes")
+            or _not_enough_data("rolling metadata byte count unavailable"),
+            "remux_metadata_reload_ms": media_logs.get(
+                "media_remux_metadata_reload_ms"
+            )
+            or _not_enough_data("rolling metadata reload timing unavailable"),
+            "remux_handoff_build_ms": media_logs.get(
+                "media_remux_handoff_build_ms"
+            )
+            or _not_enough_data("rolling handoff build timing unavailable"),
+            "remux_unattributed_ms": media_logs.get(
+                "media_remux_unattributed_ms"
+            )
+            or _not_enough_data("rolling remux unattributed timing unavailable"),
             "segment_index_job": {
                 name: media_logs.get(f"media_segment_index_{name}")
                 or _not_enough_data(f"segment-index job {name} unavailable")
