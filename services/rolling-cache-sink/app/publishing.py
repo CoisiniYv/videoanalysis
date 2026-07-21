@@ -13,6 +13,10 @@ from typing import Any, Callable
 from config import safe_component
 
 
+SEGMENT_MANIFEST_FILE = "segment_manifest.json"
+SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
+
+
 @dataclass
 class Fragment:
     segment_id: str
@@ -49,6 +53,8 @@ class AtomicSegmentPublisher:
         self._staging_root = epoch_root / ".rolling-cache-staging" / source / session
         self._segments_root = epoch_root / source / "segments"
         self._session_id = session
+        self._runtime_epoch_id = epoch
+        self._source_id = source
 
     def prepare(self, fragment_id: int) -> Fragment:
         segment_id = f"{self._session_id}-{int(fragment_id):08d}"
@@ -67,16 +73,55 @@ class AtomicSegmentPublisher:
     def publish(self, fragment: Fragment) -> Path:
         if not fragment.video_path.is_file() or fragment.video_path.stat().st_size <= 0:
             raise RuntimeError(f"rolling_segment_video_missing:{fragment.segment_id}")
-        if not any(_row_pts(row) is not None for row in fragment.rows):
+        pts_values = [
+            pts
+            for pts in (_row_pts(row) for row in fragment.rows)
+            if pts is not None
+        ]
+        if not pts_values:
             raise RuntimeError(
                 f"rolling_segment_metadata_has_no_pts:{fragment.segment_id}"
             )
+        source_pts_values = [
+            pts
+            for pts in (_source_row_pts(row) for row in fragment.rows)
+            if pts is not None
+        ]
 
         metadata_path = fragment.staging_dir / "metadata.json"
         with metadata_path.open("x", encoding="utf-8") as handle:
             for row in fragment.rows:
                 handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
                 handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        video_size_bytes = fragment.video_path.stat().st_size
+        metadata_size_bytes = metadata_path.stat().st_size
+        manifest = {
+            "schema_version": SEGMENT_MANIFEST_SCHEMA_VERSION,
+            "segment_id": fragment.segment_id,
+            "source_id": self._source_id,
+            "runtime_epoch_id": self._runtime_epoch_id,
+            "video_file": fragment.video_path.name,
+            "metadata_file": metadata_path.name,
+            "first_pts": min(pts_values),
+            "last_pts": max(pts_values),
+            "frame_count": len(pts_values),
+            "source_first_pts": (
+                min(source_pts_values) if source_pts_values else None
+            ),
+            "source_last_pts": (
+                max(source_pts_values) if source_pts_values else None
+            ),
+            "video_size_bytes": video_size_bytes,
+            "metadata_size_bytes": metadata_size_bytes,
+        }
+        manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
+        with manifest_path.open("x", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(manifest, separators=(",", ":"), ensure_ascii=False)
+            )
+            handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         _fsync_directory(fragment.staging_dir)
@@ -233,6 +278,16 @@ class FragmentLedger:
 
 
 def _row_pts(row: dict[str, Any]) -> int | None:
+    value = row.get("rolling_cache_mux_pts")
+    if value is None:
+        value = row.get("pts", row.get("frame_pts"))
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_row_pts(row: dict[str, Any]) -> int | None:
     value = row.get("pts", row.get("frame_pts"))
     try:
         return int(value) if value is not None else None

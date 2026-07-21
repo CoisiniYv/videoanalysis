@@ -22,6 +22,9 @@ GENERATION_FILE = ".rolling-cache-generation"
 READ_PIN_DIR = ".read-pins"
 MUTATION_LOCK_FILE = ".rolling-cache-mutation.lock"
 READ_PIN_SCHEMA_VERSION = "rolling-segment-read-pin-v1"
+SEGMENT_MANIFEST_FILE = "segment_manifest.json"
+SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
+MAX_SEGMENT_MANIFEST_BYTES = 64 * 1024
 
 _OPERATION_TIMING_FIELDS = (
     "lock_wait_ms",
@@ -81,8 +84,25 @@ class FileIdentity:
 @dataclass(frozen=True)
 class _IndexedSegment:
     segment: RollingSegment
+    manifest_identity: FileIdentity
     metadata_identity: FileIdentity
     video_identity: FileIdentity
+
+
+@dataclass(frozen=True)
+class _SegmentManifest:
+    segment_id: str
+    source_id: str
+    runtime_epoch_id: str
+    video_file: str
+    metadata_file: str
+    first_pts: int
+    last_pts: int
+    frame_count: int
+    source_first_pts: int | None
+    source_last_pts: int | None
+    video_size_bytes: int
+    metadata_size_bytes: int
 
 
 @dataclass
@@ -93,10 +113,7 @@ class _Catalog:
     version: int = 0
     entries: dict[Path, _IndexedSegment] = field(default_factory=dict)
     pending: set[Path] = field(default_factory=set)
-    failed_identities: dict[
-        Path,
-        tuple[FileIdentity, FileIdentity],
-    ] = field(default_factory=dict)
+    failed_identities: dict[Path, FileIdentity] = field(default_factory=dict)
     containers: dict[Path, int] = field(default_factory=dict)
     initialized: bool = False
     generation: int = 0
@@ -503,26 +520,11 @@ class RollingSegmentIndex:
             except Exception:
                 if not allow_fallback:
                     raise
-                from app.rolling_cache import find_segments as legacy_find_segments
-
                 self._increment_stat("fallback_scans")
-                legacy_segments = legacy_find_segments(
-                    self.root,
+                return self._fallback_manifest_scan(
                     source_id=source_id,
                     runtime_epoch_id=runtime_epoch_id,
                 )
-                allowed_roots = self._candidate_source_roots(
-                    source_id=source_id,
-                    runtime_epoch_id=runtime_epoch_id,
-                )
-                return [
-                    segment
-                    for segment in legacy_segments
-                    if any(
-                        self._is_relative_to(segment.directory, root)
-                        for root in allowed_roots
-                    )
-                ]
 
     def rows_for_segment(self, segment: RollingSegment) -> list[dict]:
         metadata_path = segment.metadata_path.resolve(strict=False)
@@ -663,7 +665,10 @@ class RollingSegmentIndex:
                         raise RuntimeError("rolling_segment_index_scan_overflow")
                     if is_dir:
                         containers[path] = self._directory_mtime(path)
-                    elif path.name == "metadata.json" and "materialized" not in path.parts:
+                    elif (
+                        path.name == SEGMENT_MANIFEST_FILE
+                        and "materialized" not in path.parts
+                    ):
                         candidates.add(path.resolve(strict=False))
             self._record_count("scanned_known", len(candidates))
             previous = set(catalog.entries)
@@ -717,9 +722,12 @@ class RollingSegmentIndex:
                 if current_mtime == 0:
                     continue
                 catalog.containers[container] = current_mtime
-                metadata_path = container / "metadata.json"
-                if metadata_path.exists():
-                    self._refresh_candidate(catalog, metadata_path.resolve(strict=False))
+                manifest_path = container / SEGMENT_MANIFEST_FILE
+                if manifest_path.exists():
+                    self._refresh_candidate(
+                        catalog,
+                        manifest_path.resolve(strict=False),
+                    )
                 try:
                     children = list(os.scandir(container))
                 except OSError:
@@ -746,26 +754,90 @@ class RollingSegmentIndex:
             catalog.root_generation = self._read_root_generation()
             catalog.last_refresh_at = now
 
-    def _refresh_candidate(self, catalog: _Catalog, metadata_path: Path) -> None:
+    def _refresh_candidate(self, catalog: _Catalog, manifest_path: Path) -> None:
+        try:
+            manifest_identity = self._file_identity(manifest_path)
+        except OSError:
+            catalog.pending.discard(manifest_path)
+            catalog.failed_identities.pop(manifest_path, None)
+            self._remove_entry(catalog, manifest_path)
+            return
+        if (
+            manifest_identity.size <= 0
+            or manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
+            or not self._is_stable(manifest_identity)
+        ):
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities.pop(manifest_path, None)
+            self._remove_entry(catalog, manifest_path)
+            return
+        if catalog.failed_identities.get(manifest_path) == manifest_identity:
+            catalog.pending.add(manifest_path)
+            self._remove_entry(catalog, manifest_path)
+            return
+
+        existing = catalog.entries.get(manifest_path)
+        if existing is not None and existing.manifest_identity == manifest_identity:
+            metadata_path = existing.segment.metadata_path
+            video_path = existing.segment.video_path
+            try:
+                metadata_identity = self._file_identity(metadata_path)
+                video_identity = self._file_identity(video_path)
+            except OSError:
+                catalog.pending.add(manifest_path)
+                self._remove_entry(catalog, manifest_path)
+                return
+            if (
+                existing.metadata_identity == metadata_identity
+                and existing.video_identity == video_identity
+            ):
+                catalog.pending.discard(manifest_path)
+                catalog.failed_identities.pop(manifest_path, None)
+                return
+            # Published segment directories are immutable. A payload identity
+            # change without a new manifest is never accepted as the same
+            # catalog entry.
+            self._increment_stat("parse_errors")
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities[manifest_path] = manifest_identity
+            self._remove_entry(catalog, manifest_path)
+            return
+
+        self._record_count("new_or_changed")
+        try:
+            manifest = self._parse_manifest(manifest_path)
+        except Exception:
+            self._increment_stat("parse_errors")
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities[manifest_path] = manifest_identity
+            self._remove_entry(catalog, manifest_path)
+            return
+        if (
+            manifest.segment_id != manifest_path.parent.name
+            or manifest.source_id != catalog.source_id
+            or manifest.runtime_epoch_id != catalog.runtime_epoch_id
+            or self._runtime_epoch_from_path(manifest_path)
+            != catalog.runtime_epoch_id
+        ):
+            self._increment_stat("parse_errors")
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities[manifest_path] = manifest_identity
+            self._remove_entry(catalog, manifest_path)
+            return
+
+        metadata_path = (manifest_path.parent / manifest.metadata_file).resolve(
+            strict=False
+        )
+        video_path = (manifest_path.parent / manifest.video_file).resolve(
+            strict=False
+        )
         try:
             metadata_identity = self._file_identity(metadata_path)
-        except OSError:
-            catalog.pending.discard(metadata_path)
-            catalog.failed_identities.pop(metadata_path, None)
-            self._remove_entry(catalog, metadata_path)
-            return
-        video_path = self._find_video(metadata_path.parent)
-        if video_path is None:
-            catalog.pending.add(metadata_path)
-            catalog.failed_identities.pop(metadata_path, None)
-            self._remove_entry(catalog, metadata_path)
-            return
-        try:
             video_identity = self._file_identity(video_path)
         except OSError:
-            catalog.pending.add(metadata_path)
-            catalog.failed_identities.pop(metadata_path, None)
-            self._remove_entry(catalog, metadata_path)
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities.pop(manifest_path, None)
+            self._remove_entry(catalog, manifest_path)
             return
         if (
             metadata_identity.size <= 0
@@ -773,101 +845,51 @@ class RollingSegmentIndex:
             or not self._is_stable(metadata_identity)
             or not self._is_stable(video_identity)
         ):
-            catalog.pending.add(metadata_path)
-            catalog.failed_identities.pop(metadata_path, None)
-            self._remove_entry(catalog, metadata_path)
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities.pop(manifest_path, None)
+            self._remove_entry(catalog, manifest_path)
+            return
+        if (
+            manifest.metadata_size_bytes != metadata_identity.size
+            or manifest.video_size_bytes != video_identity.size
+        ):
+            self._increment_stat("parse_errors")
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities[manifest_path] = manifest_identity
+            self._remove_entry(catalog, manifest_path)
             return
 
-        existing = catalog.entries.get(metadata_path)
-        if (
-            existing is not None
-            and existing.metadata_identity == metadata_identity
-            and existing.video_identity == video_identity
-        ):
-            catalog.pending.discard(metadata_path)
-            catalog.failed_identities.pop(metadata_path, None)
-            return
-        failed_identity = (metadata_identity, video_identity)
-        if catalog.failed_identities.get(metadata_path) == failed_identity:
-            catalog.pending.add(metadata_path)
-            self._remove_entry(catalog, metadata_path)
-            return
-        self._record_count("new_or_changed")
-        cache_key = (str(metadata_path), metadata_identity)
-        with self._locked(self._row_cache_lock):
-            cached = self._row_cache.get(cache_key)
-            if cached is not None:
-                self._row_cache.move_to_end(cache_key)
-                parsed = list(cached.rows)
-            else:
-                parsed = None
-        if parsed is not None:
-            self._increment_stat("row_cache_hits")
-            self._record_count("row_cache_hits")
-        else:
-            self._increment_stat("row_cache_misses")
-            self._record_count("row_cache_misses")
-            try:
-                parsed = self._parse_rows(metadata_path)
-            except Exception:
-                self._increment_stat("parse_errors")
-                catalog.pending.add(metadata_path)
-                catalog.failed_identities[metadata_path] = failed_identity
-                self._remove_entry(catalog, metadata_path)
-                return
-            self._remember_rows(metadata_path, metadata_identity, parsed)
-        pts_values = [
-            pts
-            for pts in (self._row_pts(row) for row in parsed)
-            if pts is not None
-        ]
-        if not pts_values:
-            self._increment_stat("parse_errors")
-            catalog.pending.add(metadata_path)
-            catalog.failed_identities[metadata_path] = failed_identity
-            self._remove_entry(catalog, metadata_path)
-            return
-        source_pts_values = [
-            pts
-            for pts in (self._source_row_pts(row) for row in parsed)
-            if pts is not None
-        ]
-        actual_epoch = self._runtime_epoch_from_path(metadata_path)
-        if actual_epoch and actual_epoch != catalog.runtime_epoch_id:
-            catalog.pending.discard(metadata_path)
-            catalog.failed_identities.pop(metadata_path, None)
-            self._remove_entry(catalog, metadata_path)
-            return
         segment = RollingSegment(
-            segment_id=metadata_path.parent.name,
-            source_id=catalog.source_id,
-            runtime_epoch_id=catalog.runtime_epoch_id,
-            directory=metadata_path.parent,
+            segment_id=manifest.segment_id,
+            source_id=manifest.source_id,
+            runtime_epoch_id=manifest.runtime_epoch_id,
+            directory=manifest_path.parent,
             video_path=video_path,
             metadata_path=metadata_path,
-            first_pts=int(min(pts_values)),
-            last_pts=int(max(pts_values)),
-            frame_count=len(pts_values),
+            first_pts=manifest.first_pts,
+            last_pts=manifest.last_pts,
+            frame_count=manifest.frame_count,
             size_bytes=video_identity.size,
-            source_first_pts=(
-                int(min(source_pts_values)) if source_pts_values else None
-            ),
-            source_last_pts=(
-                int(max(source_pts_values)) if source_pts_values else None
-            ),
+            source_first_pts=manifest.source_first_pts,
+            source_last_pts=manifest.source_last_pts,
         )
-        catalog.entries[metadata_path] = _IndexedSegment(
+        catalog.entries[manifest_path] = _IndexedSegment(
             segment=segment,
+            manifest_identity=manifest_identity,
             metadata_identity=metadata_identity,
             video_identity=video_identity,
         )
-        catalog.pending.discard(metadata_path)
-        catalog.failed_identities.pop(metadata_path, None)
+        catalog.pending.discard(manifest_path)
+        catalog.failed_identities.pop(manifest_path, None)
 
-    def _remove_entry(self, catalog: _Catalog, metadata_path: Path) -> None:
-        if catalog.entries.pop(metadata_path, None) is not None:
+    def _remove_entry(self, catalog: _Catalog, manifest_path: Path) -> None:
+        removed = catalog.entries.pop(manifest_path, None)
+        if removed is not None:
             self._increment_stat("stale_entries")
-        metadata_text = str(metadata_path)
+            metadata_path = removed.segment.metadata_path
+        else:
+            metadata_path = manifest_path.parent / "metadata.json"
+        metadata_text = str(metadata_path.resolve(strict=False))
         with self._locked(self._row_cache_lock):
             for key in tuple(self._row_cache):
                 if key[0] != metadata_text:
@@ -879,6 +901,84 @@ class RollingSegmentIndex:
         with self._metrics_lock:
             self._row_cache_entry_count = cache_entries
             self._row_cache_bytes = cache_bytes
+
+    def _parse_manifest(self, manifest_path: Path) -> _SegmentManifest:
+        self._record_count("manifest_parses")
+        with self._timed("manifest_parse_ms"):
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("rolling_segment_manifest_not_object")
+        if payload.get("schema_version") != SEGMENT_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("rolling_segment_manifest_schema_invalid")
+
+        def required_text(name: str) -> str:
+            value = payload.get(name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"rolling_segment_manifest_{name}_invalid")
+            return value
+
+        def required_int(name: str, *, minimum: int | None = None) -> int:
+            value = payload.get(name)
+            if isinstance(value, bool):
+                raise ValueError(f"rolling_segment_manifest_{name}_invalid")
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"rolling_segment_manifest_{name}_invalid"
+                ) from exc
+            if minimum is not None and parsed < minimum:
+                raise ValueError(f"rolling_segment_manifest_{name}_invalid")
+            return parsed
+
+        def optional_int(name: str) -> int | None:
+            value = payload.get(name)
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                raise ValueError(f"rolling_segment_manifest_{name}_invalid")
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"rolling_segment_manifest_{name}_invalid"
+                ) from exc
+
+        video_file = required_text("video_file")
+        metadata_file = required_text("metadata_file")
+        if video_file not in VIDEO_NAMES or Path(video_file).name != video_file:
+            raise ValueError("rolling_segment_manifest_video_file_invalid")
+        if metadata_file != "metadata.json":
+            raise ValueError("rolling_segment_manifest_metadata_file_invalid")
+        first_pts = required_int("first_pts")
+        last_pts = required_int("last_pts")
+        frame_count = required_int("frame_count", minimum=1)
+        if last_pts < first_pts:
+            raise ValueError("rolling_segment_manifest_pts_bounds_invalid")
+        source_first_pts = optional_int("source_first_pts")
+        source_last_pts = optional_int("source_last_pts")
+        if (source_first_pts is None) != (source_last_pts is None):
+            raise ValueError("rolling_segment_manifest_source_bounds_incomplete")
+        if (
+            source_first_pts is not None
+            and source_last_pts is not None
+            and source_last_pts < source_first_pts
+        ):
+            raise ValueError("rolling_segment_manifest_source_bounds_invalid")
+        return _SegmentManifest(
+            segment_id=required_text("segment_id"),
+            source_id=required_text("source_id"),
+            runtime_epoch_id=required_text("runtime_epoch_id"),
+            video_file=video_file,
+            metadata_file=metadata_file,
+            first_pts=first_pts,
+            last_pts=last_pts,
+            frame_count=frame_count,
+            source_first_pts=source_first_pts,
+            source_last_pts=source_last_pts,
+            video_size_bytes=required_int("video_size_bytes", minimum=1),
+            metadata_size_bytes=required_int("metadata_size_bytes", minimum=1),
+        )
 
     def _parse_rows(self, metadata_path: Path) -> list[dict]:
         self._record_count("full_row_parses")
@@ -955,6 +1055,38 @@ class RollingSegmentIndex:
         with self._metrics_lock:
             self._active_pins.discard(token)
             self._stats["read_pins_released"] += 1
+
+    def _fallback_manifest_scan(
+        self,
+        *,
+        source_id: str,
+        runtime_epoch_id: str,
+    ) -> list[RollingSegment]:
+        catalog = _Catalog(
+            source_id=source_id,
+            runtime_epoch_id=runtime_epoch_id,
+        )
+        for source_root in self._candidate_source_roots(
+            source_id=source_id,
+            runtime_epoch_id=runtime_epoch_id,
+        ):
+            if not source_root.exists():
+                continue
+            for manifest_path in source_root.rglob(SEGMENT_MANIFEST_FILE):
+                if "materialized" in manifest_path.parts:
+                    continue
+                self._refresh_candidate(
+                    catalog,
+                    manifest_path.resolve(strict=False),
+                )
+        return sorted(
+            (entry.segment for entry in catalog.entries.values()),
+            key=lambda segment: (
+                segment.first_pts,
+                segment.last_pts,
+                str(segment.metadata_path),
+            ),
+        )
 
     def _candidate_source_roots(
         self,
