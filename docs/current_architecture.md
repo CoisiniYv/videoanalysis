@@ -2,8 +2,9 @@
 
 更新时间：2026-07-22
 
-适用范围：分支 `feat/roi-adaface-redis-20260711`；产品 checkpoint
-`fd39fdb`，exact-lease 修复 `2a57f20`，Candidate C 结论文档基线 `cb0595e`。
+适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
+`codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
+exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `1ec97fc`。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -221,8 +222,17 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   manifest read pin 缩到 source-window overlap 加两侧 guard；legacy/无效/无 overlap
   仍保守 pin 全 catalog。`segment_index_window_pin_smoke_20260721T192612Z` 在真实
   bind-mounted media-worker 中证明 10 个 segment 只 pin 5 个、实际 remux 3 个，双时间域、
-  retention marker、identity fence 和日志指标均通过；width-three r300 尚未复测，不能据此
-  声明容量通过；
+  retention marker、identity fence 和日志指标均通过；
+- bounded-pin width-three r300 已保留在
+  `pressure60_8p1_pinwin_ioadm3_b10m_r300_20260721T192945Z`。输入、973/973 正式任务、
+  1,010/1,010 retained video、annotation/person persistence、exact-lease 与 residual 全通过；
+  pin-publication p95 从 1.934s 降到 0.073s，但 ready/media/lifecycle p95 仍为
+  28.57s/48.69s/48.96s，metadata visibility p95=10.27s，所以 r300 严格容量门失败，
+  r3840 仍不允许；
+- 最新 `1ec97fc` 复用已知 immutable leaf membership，避免每次 parent 变化时重新 resolve/
+  probe 全部已知 manifest；32+1 的测试只探测新 leaf。`0bc6c82` 同时修复 finalizer
+  flattening 丢失 pinned-segment 等 count metric。两项仍需真实容器 smoke 和相同
+  width-three r300 动态验证，不能写成容量已改善；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

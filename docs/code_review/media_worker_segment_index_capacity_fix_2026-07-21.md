@@ -3,8 +3,10 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. Neither the two retention short gates nor the two one-hour
-acceptance runs have passed yet.
+completion claim. The source-window-bounded pin improved the width-three r300
+comparison, but the strict r300 capacity and visibility gates still failed.
+Neither the two retention short gates nor the two one-hour acceptance runs have
+passed yet.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -39,6 +41,9 @@ acceptance runs have passed yet.
 | `3f3abd9` | artifact-audited index I/O pressure override | Exposes the isolated discovery-through-pin admission width without changing remux, WIP, or finalizer capacity |
 | `2a55ce1` | bounded-pin correctness tests | Proves the real worker/index/materializer preserves dual source/mux clocks, invalid/unmatched windows fall back conservatively, and selected leaves remain retention-fenced |
 | `b7068b0` | source-window-bounded read-pin publication | Pins only source-window overlap plus one guard leaf on each side for complete modern manifests; mixed/legacy catalogs retain full-catalog pins |
+| `6eb297b` | bounded-pin runtime proof documentation | Records the real container identity/retention/legacy smoke without claiming capacity |
+| `ab5b7ad`, `0bc6c82` | finalizer count-metric preservation | Keeps segment-index count fields, including pinned-segment cardinality, when remux diagnostics are flattened into finalizer metrics |
+| `db19d1f`, `1ec97fc` | changed-parent immutable membership reuse | A changed source parent probes only new/pending manifest leaves instead of resolving and probing every already cataloged immutable leaf |
 
 ## Measurement rounds
 
@@ -409,6 +414,71 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
 - Pressure result: pending. This smoke establishes correctness and expected pin
   cardinality only; it does not claim the r300 capacity gate.
 
+### Round 9: bounded-pin width-three r300 result
+
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pinwin_ioadm3_b10m_r300_20260721T192945Z`.
+  The effective configuration retained the fixed Candidate B dimensions: WIP
+  20, remux 12, max-per-poll 8, finalizer threads/processes/queue `8/4/8`,
+  width-three index I/O admission, 600s sample, 120s drain, and 300s retention.
+  The fixture SHA256 remained
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`.
+- Input and correctness passed: 60/60 sources sustained 8.0469 FPS with zero
+  sampling-window Savant send failure, forwarder queue-full, raw drop, or raw
+  send failure. All 973 formal tasks and all 1,010 retained tasks materialized.
+  All retained videos passed window, duration, frame-rate, 8090 detail,
+  timeline, annotation, bbox, and person-context checks. Person persistence
+  passed with 100,974 stored rows versus 100,968 exports over 60 sources and
+  zero measured loss; final Redis lag/pending was zero.
+- Fences remained closed: candidates/immediate-admitted were `1010/1010`;
+  attempt-zero expiry, handoff recovery, retry failure, claim-busy, duplicate,
+  finalizer failure, and active task/lease/WIP/lane/finalizer-pending residuals
+  were zero. The harness's only declared failure was the unchanged
+  `adaface_roi_watchlist_events_zero` business gate; that does not waive the
+  stricter media-capacity targets below.
+- The bounded pin was materially effective. Pin-publication p95 fell from
+  1.934s in the earlier width-three comparison to 0.073s. Ready-to-remux p95
+  improved from 37.205s to 28.567s, scheduler oldest-ready p95 from 44.209s to
+  37.020s, media queue p95 from 57.800s to 48.689s, and lifecycle p95 from
+  58.305s to 48.965s. Media-worker peak CPU was 288.21%, about 80.5% below the
+  original 1,475.75% baseline.
+- Capacity and visibility still failed. The closure targets are 5s ready,
+  10s media queue, 30s lifecycle, and 2s metadata visibility; observed metadata
+  visibility p95 was 10.266s. Slot wait p95 remained 4.454s and pre-pin-through-
+  handoff p95 was 6.990s while actual ffmpeg/remux p95 was only 0.894s.
+  Refresh became the dominant measured index subphase at 3.009s p95; manifest
+  parse, stat, and selected full-row parse p95 were only 0.120s, 0.098s, and
+  0.046s respectively. Therefore r3840 remains prohibited.
+- The artifact could not aggregate `segment_index_pinned_segments`: finalizer
+  metric flattening retained `*_ms` fields but dropped segment-index count
+  fields. `ab5b7ad` first captured the regression and `0bc6c82` fixes it. This
+  was an observability defect, not evidence that the bounded pin was absent;
+  the earlier real-container smoke and production log formatter already
+  proved the five-leaf marker.
+- Cleanup restored zero enabled pressure cameras, active tasks, leases,
+  finalizer-pending rows, source/ffmpeg/MediaMTX processes, and the daily Redis,
+  PostgreSQL, disabled-materialization, 300s-retention, width-two state. The
+  media-worker remained stable with restart count zero and the root filesystem
+  retained about 244GB free.
+
+### Round 10: changed-parent immutable-leaf probe bound
+
+- Hypothesis from Round 9: each atomic new segment changes the source segments
+  parent. Refresh already knows immutable membership, but still resolved every
+  retained child path and called `is_file()` on every known manifest before it
+  could discover the one new leaf. That retention-width filesystem work is a
+  plausible cause of the remaining 3.009s refresh p95.
+- Unique implementation variable: `1ec97fc`. A resolved, non-symlink-following
+  `scandir` parent now reuses catalog membership for known non-pending manifest
+  leaves and probes only new or pending leaves. The existing COW version check,
+  deletion membership audit, pending retry, exact identity check at read-pin,
+  mutation flock, and retention fence remain unchanged.
+- Red-to-green proof: `db19d1f` builds 32 known leaves, changes the parent by
+  adding leaf 33, and asserts that refresh probes only the new manifest while
+  returning all 33 catalog entries. This is a deterministic unit proof only;
+  the required bind-mounted changed-parent/count-metric smoke and unchanged
+  width-three r300 comparison are still pending.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -422,13 +492,18 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Repeat the unchanged width-three r300 gate with `b7068b0`; Candidate B WIP,
+1. Recreate only media-worker with the explicit Compose-network PostgreSQL URL,
+   then run a bind-mounted smoke proving 32 known plus one new leaf probes only
+   the new manifest and finalizer output retains
+   `segment_index_pinned_segments=5`; repeat the legacy, identity, marker, and
+   retention checks.
+2. Repeat the unchanged width-three r300 gate at `1ec97fc`; Candidate B WIP,
    remux, max-per-poll, finalizer dimensions, fixture hash and all other inputs
-   remain fixed.
-2. Use the retained `segment_index_pinned_segments` distribution together with
-   refresh/pin timing to decide whether pin publication was actually removed as
-   the service-rate constraint; do not infer capacity from the smoke alone.
-3. Only if the structural width-three r300 gate passes every input, capacity,
-   correctness, annotation, visibility, and residual gate, run r3840.
+   remain fixed. Compare refresh, slot wait, pinned-segment distribution,
+   ready/media/lifecycle, service rate, and visibility against Round 9.
+3. Only if that r300 gate passes every input, capacity, correctness, annotation,
+   visibility, and residual gate, run r3840. Do not increase admission width or
+   use the harness's watchlist-only failure list as a substitute for the strict
+   latency gates.
 4. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.
