@@ -386,6 +386,7 @@ def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> Non
         assert len(index.rows_for_segment(segments[0])) == 2
 
     expected_timings = {
+        "segment_index_io_slot_wait_ms",
         "segment_index_lock_wait_ms",
         "segment_index_lock_hold_ms",
         "segment_index_refresh_ms",
@@ -416,6 +417,79 @@ def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> Non
     assert int(snapshot["full_row_parses"]) >= 1
     assert int(snapshot["manifest_parses"]) >= 1
     assert int(snapshot["stat_calls"]) >= 2
+
+
+def test_index_io_admission_bounds_concurrent_discovery_and_pin(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    source_ids = ["camera-a", "camera-b", "camera-c"]
+    for sequence, source_id in enumerate(source_ids):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id=source_id,
+            name="0001",
+            pts_values=[sequence * 2 + 1, sequence * 2 + 2],
+        )
+    index = _index(root, io_concurrency=2)
+    original_rebuild = index._rebuild
+    allow_rebuild = threading.Event()
+    two_entered = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    peak = 0
+    diagnostics = {
+        source_id: index.new_operation_diagnostics() for source_id in source_ids
+    }
+    errors: list[BaseException] = []
+
+    def slow_rebuild(*args, **kwargs):
+        nonlocal active, peak
+        with state_lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_entered.set()
+        try:
+            assert allow_rebuild.wait(timeout=2.0)
+            return original_rebuild(*args, **kwargs)
+        finally:
+            with state_lock:
+                active -= 1
+
+    index._rebuild = slow_rebuild
+
+    def pin(source_id: str) -> None:
+        try:
+            with index.pin_source_segments(
+                source_id=source_id,
+                runtime_epoch_id="epoch-a",
+                diagnostics=diagnostics[source_id],
+            ):
+                pass
+        except BaseException as exc:  # retain thread failures for the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=pin, args=(source_id,)) for source_id in source_ids]
+    for thread in threads:
+        thread.start()
+    assert two_entered.wait(timeout=1.0)
+    time.sleep(0.03)
+    with state_lock:
+        assert active == 2
+        assert peak == 2
+    allow_rebuild.set()
+    for thread in threads:
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+    assert errors == []
+    assert peak == 2
+    assert max(
+        float(item["segment_index_io_slot_wait_ms"])
+        for item in diagnostics.values()
+    ) >= 20.0
 
 
 def test_operation_diagnostics_measure_global_lock_contention(tmp_path: Path) -> None:

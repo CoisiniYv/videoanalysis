@@ -1167,6 +1167,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S"] == "60"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES"] == "2048"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES"] == "268435456"
+    assert values["MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY"] == "2"
     assert values["MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED"] == "false"
     assert values["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == "4"
     event_values = captured["compose_recreate_event_worker_rolling_cache.log"]
@@ -6416,7 +6417,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_ffprobe_ready_to_finalizer_start_ms=3 "
                 "finalizer_pool_wait_ms=4 "
                 "ready_to_remux_claim_ms=12 remux_ms=800 remux_exec_ms=800 "
-                "remux_total_ms=1800 segment_index_lock_wait_ms=400.5 "
+                "remux_total_ms=1800 segment_index_io_slot_wait_ms=100.5 "
+                "segment_index_lock_wait_ms=400.5 "
                 "segment_index_lock_hold_ms=700.5 segment_index_refresh_ms=650 "
                 "segment_index_rebuild_ms=0 segment_index_stat_ms=200 "
                 "segment_index_full_row_parse_ms=300 "
@@ -6440,7 +6442,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_ffprobe_ready_to_finalizer_start_ms=4 "
                 "finalizer_pool_wait_ms=6 "
                 "ready_to_remux_claim_ms=22 remux_ms=900 remux_exec_ms=900 "
-                "remux_total_ms=2100 segment_index_lock_wait_ms=600.5 "
+                "remux_total_ms=2100 segment_index_io_slot_wait_ms=300.5 "
+                "segment_index_lock_wait_ms=600.5 "
                 "segment_index_lock_hold_ms=800.5 segment_index_refresh_ms=750 "
                 "segment_index_rebuild_ms=0 segment_index_stat_ms=250 "
                 "segment_index_full_row_parse_ms=350 "
@@ -6480,7 +6483,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_fallback_scans=0 segment_index_row_cache_entries=7 "
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=2 segment_index_read_pins_created=4 "
-                "segment_index_read_pins_released=2 segment_index_generation=3",
+                "segment_index_read_pins_released=2 segment_index_generation=3 "
+                "segment_index_io_slot_wait_ms_total=1200.5",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=2 tick_duration_ms=200 "
                 "tick_gap_ms=1300 rolling_due=True general_due=True "
@@ -6510,7 +6514,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_fallback_scans=0 segment_index_row_cache_entries=8 "
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=0 segment_index_read_pins_created=4 "
-                "segment_index_read_pins_released=4 segment_index_generation=3",
+                "segment_index_read_pins_released=4 segment_index_generation=3 "
+                "segment_index_io_slot_wait_ms_total=1800.5",
                 "rolling_cache_finalizer_v2_admitted candidates=3 admitted=2",
                 "rolling_cache_finalizer_v2_admitted candidates=2 admitted=2",
                 "rolling_lifecycle_recovery ready_deadline_expired=0 "
@@ -6526,7 +6531,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_effective=True lanes_effective=True "
                 "max_active=4 image_workers=4 remux_workers=1 finalizer_workers=4 "
                 "image_queue_capacity=4 remux_queue_capacity=4 "
-                "finalizer_queue_capacity=4 source_limit=4 shutdown_grace_s=45",
+                "finalizer_queue_capacity=4 source_limit=4 "
+                "segment_index_io_concurrency=2 shutdown_grace_s=45",
                 "evidence_db_index_upserted event_id=e1 "
                 "expanded_rows_enabled=True duration_ms=40 sidecar_ms=8 "
                 "bundle_ms=2 artifact_ms=3 timeline_ms=17 overlay_ms=10 result={}",
@@ -6606,6 +6612,10 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_remux_exec_ms"]["max"] == 900.0
     assert summary["media_worker"]["media_remux_total_ms"]["max"] == 2100.0
     assert (
+        summary["media_worker"]["media_segment_index_io_slot_wait_ms"]["p50"]
+        == 200.5
+    )
+    assert (
         summary["media_worker"]["media_segment_index_lock_wait_ms"]["p50"]
         == 500.5
     )
@@ -6663,9 +6673,21 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_scheduler_segment_index_parses"]["max"] == 9.0
     assert summary["media_worker"]["media_scheduler_segment_index_fallback_scans"]["max"] == 0.0
     assert summary["media_worker"]["media_scheduler_segment_index_active_read_pins"]["max"] == 2.0
+    assert (
+        summary["media_worker"][
+            "media_scheduler_segment_index_io_slot_wait_ms_total"
+        ]["max"]
+        == 1800.5
+    )
     assert summary["media_worker"]["media_resource_max_active"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_cpu_thread_limit"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_remux_workers"]["max"] == 1.0
+    assert (
+        summary["media_worker"]["media_resource_segment_index_io_concurrency"][
+            "max"
+        ]
+        == 2.0
+    )
     assert summary["media_worker"]["media_db_index_duration_ms"]["p50"] == 50.0
     assert summary["media_worker"]["media_db_index_sidecar_ms"]["max"] == 10.0
     assert summary["media_worker"]["media_db_index_timeline_ms"]["max"] == 25.0
@@ -6680,6 +6702,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert observable["scheduler"]["schema_version"] == "phase6-capacity-v3"
     assert observable["scheduler"]["cycle"]["work_ms"]["max"] == 1195.0
     assert observable["remux_total_ms"]["max"] == 2100.0
+    assert observable["segment_index_job"]["io_slot_wait_ms"]["p50"] == 200.5
     assert observable["segment_index_job"]["lock_wait_ms"]["p50"] == 500.5
     assert observable["scheduler"]["finalizer_admission"]["candidate_total"] == 5
     assert (
@@ -6689,7 +6712,17 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert observable["scheduler"]["durable_finalizer_queue"]["total_last"] == 0.0
     assert observable["scheduler"]["db_pool"]["limit"]["max"] == 4.0
     assert observable["scheduler"]["segment_index"]["parses"]["max"] == 9.0
+    assert (
+        observable["scheduler"]["segment_index"]["io_slot_wait_ms_total"]["max"]
+        == 1800.5
+    )
     assert observable["scheduler"]["capacity"]["remux_workers"]["max"] == 1.0
+    assert (
+        observable["scheduler"]["capacity"]["segment_index_io_concurrency"][
+            "max"
+        ]
+        == 2.0
+    )
     assert observable["db_index"]["overlay_ms"]["max"] == 16.0
     sink_summary = summary["video_file_sink"]
     assert sink_summary["instances"]["video-file-sink-a"]["new_writer_count"] == 1

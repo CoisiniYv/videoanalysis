@@ -1949,6 +1949,17 @@ def test_rolling_cache_uses_independent_ready_poll_interval(monkeypatch: Any) ->
     assert "future.done()" in worker_source
 
 
+def test_segment_index_io_concurrency_is_configurable_and_bounded(
+    monkeypatch: Any,
+) -> None:
+    config = _activate("media-worker", "app.config")
+
+    monkeypatch.setenv("MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY", "0")
+    cfg = config.load_config()
+
+    assert cfg.media_worker_segment_index_io_concurrency == 1
+
+
 def test_rolling_cache_runtime_errors_are_terminal_not_deferred() -> None:
     source = (REPO_ROOT / "services" / "media-worker" / "app" / "worker.py").read_text(
         encoding="utf-8"
