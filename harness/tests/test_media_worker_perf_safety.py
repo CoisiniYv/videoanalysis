@@ -153,6 +153,82 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
     assert phase["segment_index_lock_hold_ms"] == 42.5
 
 
+def test_remux_job_reuses_published_metadata_without_immediate_reload(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    sink_dir = tmp_path / "materialized" / EVENT_ID
+    sink_dir.mkdir(parents=True)
+    metadata_path = sink_dir / "metadata.json"
+    video_path = sink_dir / "video.mov"
+    metadata_payload = {
+        "event_id": EVENT_ID,
+        "source_id": "source-1",
+        "labels": {"event_id": EVENT_ID, "camera_name": "Camera 1"},
+        "frames": [
+            {
+                "type": "VideoFrame",
+                "source_id": "source-1",
+                "pts": 123,
+                "uuid": "frame-1",
+                "objects": [],
+            }
+        ],
+    }
+    metadata_path.write_text(
+        json.dumps(metadata_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    published_bytes = metadata_path.read_bytes()
+    video_path.write_bytes(b"video")
+    materialized = SimpleNamespace(
+        metadata_path=metadata_path,
+        metadata_payload=metadata_payload,
+        video_path=video_path,
+        sink_dir=sink_dir,
+        segment_ids=("segment-1",),
+        immutable_probe={"status": "ready"},
+        materialization_ms=17,
+        metadata_publish_ms=23,
+        metadata_bytes=len(published_bytes),
+    )
+    monkeypatch.setattr(worker, "materialize_window", lambda **_kwargs: materialized)
+
+    def reject_immediate_reload(path: Path) -> dict | None:
+        raise AssertionError(f"normal path reloaded freshly published metadata: {path}")
+
+    monkeypatch.setattr(worker, "_load_scan_metadata_payload", reject_immediate_reload)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="worker-1",
+        token="lease-1",
+        generation=1,
+        phase="remux_running",
+        schema_v2=True,
+    )
+
+    result = worker._materialize_rolling_cache_job(
+        root=str(tmp_path / "rolling"),
+        output_root=str(tmp_path / "materialized"),
+        job={
+            "event_id": EVENT_ID,
+            "source_id": "source-1",
+            "runtime_epoch_id": CURRENT_EPOCH,
+            "requested_start_pts": 1,
+            "requested_end_pts": 2,
+            "lease": lease,
+        },
+    )
+
+    assert result["event_id"] == EVENT_ID
+    assert result["labels"] == metadata_payload["labels"]
+    assert result["frames"] == metadata_payload["frames"]
+    assert result["_lifecycle_handoff"]["remux_metadata_reload_ms"] == 0
+    assert result["_finalizer_phase"]["remux_metadata_reload_ms"] == 0
+    assert metadata_path.read_bytes() == published_bytes
+
+
 def test_remux_job_bounded_pin_preserves_dual_clock_materialization(
     monkeypatch: Any,
     tmp_path: Path,
