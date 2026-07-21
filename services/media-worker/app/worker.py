@@ -3421,7 +3421,11 @@ def _post_savant_materialization_metrics(
         **{
             key: value
             for key, value in phase_latency_ms.items()
-            if key.endswith("_ms") or key.startswith("replay_active_")
+            if (
+                key.endswith("_ms")
+                or key.startswith("replay_active_")
+                or key in SEGMENT_INDEX_JOB_METRIC_FIELDS
+            )
         },
         "input_bytes": video_crop.get("input_bytes"),
         "input_duration_seconds": video_crop.get("input_duration_seconds"),
