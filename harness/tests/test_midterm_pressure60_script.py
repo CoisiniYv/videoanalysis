@@ -329,6 +329,8 @@ def test_4090_stress_profile_defaults_to_validated_local_pipeline() -> None:
 
     output = completed.stdout
     assert "duration_s=600" in output
+    assert "pressure_rolling_cache_retention_s=0" in output
+    assert "--pressure-rolling-cache-retention-s 0" in output
     assert "pressure_algorithm_cooldown_s=30" in output
     assert "pressure_source_start_stagger_s=0.53" in output
     assert "evidence_policy_groups=5:5" in output
@@ -552,6 +554,25 @@ def test_profile_propagates_pressure_algorithm_cooldown() -> None:
     output = completed.stdout
     assert "pressure_algorithm_cooldown_s=30" in output
     assert "--pressure-algorithm-cooldown-s 30" in output
+
+
+def test_profile_propagates_pressure_rolling_cache_retention() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "retention-dry-run",
+            "PRESSURE_ROLLING_CACHE_RETENTION_S": "3840",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert "pressure_rolling_cache_retention_s=3840" in completed.stdout
+    assert "--pressure-rolling-cache-retention-s 3840" in completed.stdout
 
 
 def test_profile_defaults_to_run_scoped_rtsp_server_for_fixed_input() -> None:
@@ -5968,6 +5989,26 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         "replay-raw-fanout-b",
     ]
     assert summary["missing_dependencies"] == []
+
+
+def test_pressure_rolling_cache_retention_supports_controlled_override() -> None:
+    module = _load_module()
+
+    daily = _config(
+        module,
+        duration_s=600,
+        drain_s=120,
+        pressure_rolling_cache_retention_s=300,
+    )
+    endurance = _config(
+        module,
+        duration_s=600,
+        drain_s=120,
+        pressure_rolling_cache_retention_s=3840,
+    )
+
+    assert module.pressure_rolling_cache_retention_seconds(daily) == 300
+    assert module.pressure_rolling_cache_retention_seconds(endurance) == 3840
 
 
 def test_start_rolling_cache_sinks_fails_when_dual_raw_fanout_missing(
