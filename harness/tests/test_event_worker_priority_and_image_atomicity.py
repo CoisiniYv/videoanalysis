@@ -63,6 +63,20 @@ def test_midterm_person_observations_have_a_dedicated_worker() -> None:
     assert "AlertPolicyService" not in source
 
 
+def test_high_rate_observation_workers_bound_docker_json_logs() -> None:
+    compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+    expected = {
+        "driver": "json-file",
+        "options": {
+            "max-size": "${MIDTERM_HIGH_RATE_LOG_MAX_SIZE:-50m}",
+            "max-file": "${MIDTERM_HIGH_RATE_LOG_MAX_FILE:-3}",
+        },
+    }
+
+    for service_name in ("person-observation-worker", "face-worker"):
+        assert compose["services"][service_name]["logging"] == expected
+
+
 def test_image_evidence_write_is_atomic_and_json_parameters_are_typed() -> None:
     source = REPOSITORY_PATH.read_text(encoding="utf-8")
     image_path = source.split("def _create_image_only_evidence_task", 1)[1]
