@@ -12274,6 +12274,8 @@ def _materialize_rolling_cache_job(
         segment_index.pin_source_segments(
             source_id=str(job.get("source_id") or ""),
             runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
+            requested_source_start_pts=requested_start_pts,
+            requested_source_end_pts=requested_end_pts,
             diagnostics=index_diagnostics,
         )
         if segment_index is not None

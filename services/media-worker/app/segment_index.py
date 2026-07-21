@@ -626,12 +626,62 @@ class RollingSegmentIndex:
                 if indexed.segment.directory.resolve(strict=False) in wanted
             }
 
+    @staticmethod
+    def _source_window_candidates(
+        segments: Iterable[RollingSegment],
+        *,
+        requested_start_pts: int | None,
+        requested_end_pts: int | None,
+    ) -> list[RollingSegment]:
+        """Return a conservative source-clock subset for read-pin publication.
+
+        Modern manifests carry immutable source-clock bounds. A 5+5 evidence
+        request only needs the overlapping leaves plus one guard leaf on each
+        side; pinning the full retention catalog adds no safety because the
+        materializer never reads those unrelated leaves. Mixed/legacy catalogs
+        retain the full-catalog behavior so missing bounds cannot narrow
+        coverage accidentally.
+        """
+
+        segment_list = list(segments)
+        if (
+            requested_start_pts is None
+            or requested_end_pts is None
+            or requested_end_pts <= requested_start_pts
+        ):
+            return segment_list
+        bounded: list[tuple[int, int, int, RollingSegment]] = []
+        for sequence, segment in enumerate(segment_list):
+            first = segment.source_first_pts
+            last = segment.source_last_pts
+            if first is None or last is None:
+                return segment_list
+            low, high = sorted((int(first), int(last)))
+            bounded.append((low, high, sequence, segment))
+        bounded.sort(key=lambda item: (item[0], item[1], item[2]))
+        overlapping = [
+            index
+            for index, (low, high, _sequence, _segment) in enumerate(bounded)
+            if high >= requested_start_pts and low <= requested_end_pts
+        ]
+        if not overlapping:
+            return segment_list
+        first_index = max(0, min(overlapping) - 1)
+        last_index = min(len(bounded), max(overlapping) + 2)
+        selected = {
+            item[3]
+            for item in bounded[first_index:last_index]
+        }
+        return [segment for segment in segment_list if segment in selected]
+
     @contextmanager
     def pin_source_segments(
         self,
         *,
         source_id: str,
         runtime_epoch_id: str,
+        requested_source_start_pts: int | None = None,
+        requested_source_end_pts: int | None = None,
         ttl_s: float | None = None,
         diagnostics: dict[str, float | int] | None = None,
     ) -> Iterator[list[RollingSegment]]:
@@ -666,6 +716,11 @@ class RollingSegmentIndex:
                         segments = self.find_segments(
                             source_id=source_id,
                             runtime_epoch_id=runtime_epoch_id,
+                        )
+                        segments = self._source_window_candidates(
+                            segments,
+                            requested_start_pts=requested_source_start_pts,
+                            requested_end_pts=requested_source_end_pts,
                         )
                         expected_identities = self._catalog_segment_identities(
                             source_id=source_id,
