@@ -9,6 +9,7 @@ import shutil
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,54 @@ def _write_manifest(
     return manifest
 
 
+def _identity_payload(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _append_publication_record(directory: Path) -> Path:
+    manifest_path = directory / "segment_manifest.json"
+    metadata_path = directory / "metadata.json"
+    video_path = directory / "video.mov"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = {
+        "schema_version": "rolling-segment-publication-v1",
+        "source_id": manifest["source_id"],
+        "runtime_epoch_id": manifest["runtime_epoch_id"],
+        "segment_id": manifest["segment_id"],
+        "manifest": manifest,
+        "identities": {
+            "manifest": _identity_payload(manifest_path),
+            "metadata": _identity_payload(metadata_path),
+            "video": _identity_payload(video_path),
+        },
+    }
+    encoded = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    record["crc32"] = f"{zlib.crc32(encoded) & 0xFFFFFFFF:08x}"
+    journal_path = directory.parent / ".segment-publications.jsonl"
+    with journal_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                record,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+        handle.write("\n")
+    return journal_path
+
+
 def _index(root: Path, **overrides):
     _activate()
     from app.segment_index import RollingSegmentIndex
@@ -231,6 +280,115 @@ def test_incremental_refresh_parses_only_new_or_changed_manifests(tmp_path: Path
     assert int(index.snapshot()["manifest_parses"]) == initial_manifest_parses + 1
     assert int(index.snapshot()["full_row_parses"]) == 0
     assert int(index.snapshot()["refreshes"]) >= 2
+
+
+def test_publication_journal_discovers_new_segment_without_directory_enumeration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    _append_publication_record(first)
+    index = _index(root)
+    assert [
+        segment.segment_id
+        for segment in index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            allow_fallback=False,
+        )
+    ] == ["0001"]
+    manifest_parses_before = int(index.snapshot()["manifest_parses"])
+
+    second = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[3, 4],
+    )
+    _append_publication_record(second)
+    segments_dir = second.parent.resolve(strict=False)
+    _activate()
+    import app.segment_index as segment_index
+
+    real_scandir = segment_index.os.scandir
+
+    def reject_retention_directory_scan(path):
+        if Path(path).resolve(strict=False) == segments_dir:
+            raise AssertionError("steady refresh enumerated retained segment leaves")
+        return real_scandir(path)
+
+    monkeypatch.setattr(segment_index.os, "scandir", reject_retention_directory_scan)
+    diagnostics = index.new_operation_diagnostics()
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+        diagnostics=diagnostics,
+    )
+
+    assert [segment.segment_id for segment in segments] == ["0001", "0002"]
+    assert int(index.snapshot()["manifest_parses"]) == manifest_parses_before
+    assert diagnostics["segment_index_publication_records"] == 1
+
+
+def test_periodic_reconcile_recovers_unjournaled_publish_and_retention_delete(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    clock = [0.0]
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    _append_publication_record(first)
+    index = _index(
+        root,
+        refresh_interval_s=0.5,
+        reconcile_interval_s=10.0,
+        monotonic=lambda: clock[0],
+    )
+    assert [
+        segment.segment_id
+        for segment in index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            allow_fallback=False,
+        )
+    ] == ["0001"]
+
+    # Simulate a sink crash after the atomic directory rename but before its
+    # best-effort publication-journal append, followed by retention deleting a
+    # cataloged leaf. The directory remains the source of truth at reconcile.
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[3, 4],
+    )
+    shutil.rmtree(first)
+    (root / ".rolling-cache-generation").write_text("1\n", encoding="utf-8")
+    clock[0] = 20.0
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+    )
+
+    assert [segment.segment_id for segment in segments] == ["0002"]
+    assert int(index.snapshot()["reconciliations"]) == 1
 
 
 def test_changed_parent_reuses_known_immutable_leaf_membership(

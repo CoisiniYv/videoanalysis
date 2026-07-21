@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -152,6 +153,63 @@ def test_compact_manifest_is_published_with_the_atomic_segment_rename(
     assert observed["source_first_pts"] == 10
     assert observed["source_last_pts"] == 20
     assert observed["frame_count"] == 2
+
+
+def test_atomic_publication_appends_identity_fenced_discovery_record(
+    tmp_path: Path,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(10)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {
+                "source_id": "camera-01",
+                "pts": 10,
+                "rolling_cache_mux_pts": 100,
+            },
+            {
+                "source_id": "camera-01",
+                "pts": 20,
+                "rolling_cache_mux_pts": 200,
+            },
+        ]
+    )
+
+    final_dir = publisher.publish(fragment)
+
+    journal_path = final_dir.parent / ".segment-publications.jsonl"
+    records = journal_path.read_text(encoding="utf-8").splitlines()
+    assert len(records) == 1
+    record = json.loads(records[0])
+    checksum = record.pop("crc32")
+    encoded = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    assert checksum == f"{zlib.crc32(encoded) & 0xFFFFFFFF:08x}"
+    assert record["schema_version"] == "rolling-segment-publication-v1"
+    assert record["source_id"] == "camera-01"
+    assert record["runtime_epoch_id"] == "epoch-a"
+    assert record["segment_id"] == fragment.segment_id
+    assert record["manifest"] == json.loads(
+        (final_dir / "segment_manifest.json").read_text(encoding="utf-8")
+    )
+    assert set(record["identities"]) == {"manifest", "metadata", "video"}
+    for name, filename in (
+        ("manifest", "segment_manifest.json"),
+        ("metadata", "metadata.json"),
+        ("video", "video.mov"),
+    ):
+        stat = (final_dir / filename).stat()
+        assert record["identities"][name] == {
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
 
 
 def test_fragment_ledger_assigns_boundary_frames_to_new_fragment(
