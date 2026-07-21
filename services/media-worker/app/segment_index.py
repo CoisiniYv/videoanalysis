@@ -115,6 +115,11 @@ class _SegmentManifest:
 class _Catalog:
     source_id: str
     runtime_epoch_id: str
+    # Serializes filesystem refresh/pin preparation for one source/epoch only.
+    # It is acquired before the process-wide I/O admission slot, so duplicate
+    # same-source callers cannot occupy every slot while repeating one COW
+    # refresh. Other source catalogs remain independent.
+    io_gate: threading.RLock = field(default_factory=threading.RLock, repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     version: int = 0
     entries: dict[Path, _IndexedSegment] = field(default_factory=dict)
@@ -416,6 +421,21 @@ class RollingSegmentIndex:
         with self._metrics_lock:
             self._stats[name] += int(count)
 
+    @contextmanager
+    def _catalog_singleflight(self, catalog: _Catalog) -> Iterator[None]:
+        """Coalesce same-source refresh work without blocking other catalogs."""
+
+        wait_started_at = self._timer()
+        catalog.io_gate.acquire()
+        self._record_timing(
+            "lock_wait_ms",
+            (self._timer() - wait_started_at) * 1000.0,
+        )
+        try:
+            yield
+        finally:
+            catalog.io_gate.release()
+
     def _get_or_create_catalog(
         self,
         key: tuple[str, str],
@@ -515,48 +535,66 @@ class RollingSegmentIndex:
             return []
         key = (source_id, runtime_epoch_id)
         with self._diagnostic_scope(diagnostics):
-            try:
-                now = self._monotonic()
-                root_generation = self._read_root_generation()
-                catalog, _created = self._get_or_create_catalog(key)
-                candidate, version = self._copy_catalog(catalog)
-                changed = False
-                if not candidate.initialized:
-                    self._rebuild(candidate, now=now, initial=True)
-                    changed = True
-                elif now >= candidate.next_reconcile_at:
-                    self._refresh(candidate, now=now, reconcile=True)
-                    changed = True
-                elif (
-                    root_generation != candidate.root_generation
-                    or now - candidate.last_refresh_at >= self.refresh_interval_s
-                ):
-                    self._refresh(candidate, now=now)
-                    changed = True
-                if changed and not self._publish_catalog(
-                    catalog,
-                    candidate,
-                    expected_version=version,
-                ):
-                    candidate, _version = self._copy_catalog(catalog)
-                segments = [entry.segment for entry in candidate.entries.values()]
-                with self._timed("sort_ms"):
-                    return sorted(
-                        segments,
-                        key=lambda segment: (
-                            segment.first_pts,
-                            segment.last_pts,
-                            str(segment.metadata_path),
-                        ),
-                    )
-            except Exception:
-                if not allow_fallback:
-                    raise
-                self._increment_stat("fallback_scans")
-                return self._fallback_manifest_scan(
+            catalog, _created = self._get_or_create_catalog(key)
+            with self._catalog_singleflight(catalog):
+                return self._find_segments_in_catalog(
+                    catalog=catalog,
                     source_id=source_id,
                     runtime_epoch_id=runtime_epoch_id,
+                    allow_fallback=allow_fallback,
                 )
+
+    def _find_segments_in_catalog(
+        self,
+        *,
+        catalog: _Catalog,
+        source_id: str,
+        runtime_epoch_id: str,
+        allow_fallback: bool,
+    ) -> list[RollingSegment]:
+        """Refresh and read a catalog while its per-source gate is held."""
+
+        try:
+            now = self._monotonic()
+            root_generation = self._read_root_generation()
+            candidate, version = self._copy_catalog(catalog)
+            changed = False
+            if not candidate.initialized:
+                self._rebuild(candidate, now=now, initial=True)
+                changed = True
+            elif now >= candidate.next_reconcile_at:
+                self._refresh(candidate, now=now, reconcile=True)
+                changed = True
+            elif (
+                root_generation != candidate.root_generation
+                or now - candidate.last_refresh_at >= self.refresh_interval_s
+            ):
+                self._refresh(candidate, now=now)
+                changed = True
+            if changed and not self._publish_catalog(
+                catalog,
+                candidate,
+                expected_version=version,
+            ):
+                candidate, _version = self._copy_catalog(catalog)
+            segments = [entry.segment for entry in candidate.entries.values()]
+            with self._timed("sort_ms"):
+                return sorted(
+                    segments,
+                    key=lambda segment: (
+                        segment.first_pts,
+                        segment.last_pts,
+                        str(segment.metadata_path),
+                    ),
+                )
+        except Exception:
+            if not allow_fallback:
+                raise
+            self._increment_stat("fallback_scans")
+            return self._fallback_manifest_scan(
+                source_id=source_id,
+                runtime_epoch_id=runtime_epoch_id,
+            )
 
     def rows_for_segment(self, segment: RollingSegment) -> list[dict]:
         metadata_path = segment.metadata_path.resolve(strict=False)
@@ -698,47 +736,57 @@ class RollingSegmentIndex:
             self.root.mkdir(parents=True, exist_ok=True)
             lock_path = self.root / MUTATION_LOCK_FILE
             pin: SegmentReadPin | None = None
-            io_wait_started_at = self._timer()
-            self._io_slots.acquire()
-            self._record_timing(
-                "io_slot_wait_ms",
-                (self._timer() - io_wait_started_at) * 1000.0,
+            catalog, _created = self._get_or_create_catalog(
+                (source_id, runtime_epoch_id)
             )
-            try:
-                with lock_path.open("a+", encoding="utf-8") as lock_fh:
-                    mutation_wait_started_at = self._timer()
-                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
-                    self._record_timing(
-                        "mutation_lock_wait_ms",
-                        (self._timer() - mutation_wait_started_at) * 1000.0,
-                    )
-                    try:
-                        segments = self.find_segments(
-                            source_id=source_id,
-                            runtime_epoch_id=runtime_epoch_id,
+            with self._catalog_singleflight(catalog):
+                io_wait_started_at = self._timer()
+                self._io_slots.acquire()
+                self._record_timing(
+                    "io_slot_wait_ms",
+                    (self._timer() - io_wait_started_at) * 1000.0,
+                )
+                try:
+                    with lock_path.open("a+", encoding="utf-8") as lock_fh:
+                        mutation_wait_started_at = self._timer()
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+                        self._record_timing(
+                            "mutation_lock_wait_ms",
+                            (self._timer() - mutation_wait_started_at) * 1000.0,
                         )
-                        segments = self._source_window_candidates(
-                            segments,
-                            requested_start_pts=requested_source_start_pts,
-                            requested_end_pts=requested_source_end_pts,
-                        )
-                        expected_identities = self._catalog_segment_identities(
-                            source_id=source_id,
-                            runtime_epoch_id=runtime_epoch_id,
-                            segments=segments,
-                        )
-                        pin = self.pin_segments(
-                            segments,
-                            ttl_s=ttl_s,
-                            _expected_identities=expected_identities,
-                        )
-                        self._record_count("pinned_segments", len(segments))
-                        with self._timed("pin_publish_ms"):
-                            pin._activate_locked()
-                    finally:
-                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-            finally:
-                self._io_slots.release()
+                        try:
+                            # Keep the public lookup seam inside the atomic
+                            # refresh-to-pin boundary. Besides preserving
+                            # compatibility, retention/identity tests inject a
+                            # writer precisely after this lookup. ``io_gate``
+                            # is an RLock, so the nested same-catalog
+                            # singleflight acquisition is reentrant.
+                            segments = self.find_segments(
+                                source_id=source_id,
+                                runtime_epoch_id=runtime_epoch_id,
+                            )
+                            segments = self._source_window_candidates(
+                                segments,
+                                requested_start_pts=requested_source_start_pts,
+                                requested_end_pts=requested_source_end_pts,
+                            )
+                            expected_identities = self._catalog_segment_identities(
+                                source_id=source_id,
+                                runtime_epoch_id=runtime_epoch_id,
+                                segments=segments,
+                            )
+                            pin = self.pin_segments(
+                                segments,
+                                ttl_s=ttl_s,
+                                _expected_identities=expected_identities,
+                            )
+                            self._record_count("pinned_segments", len(segments))
+                            with self._timed("pin_publish_ms"):
+                                pin._activate_locked()
+                        finally:
+                            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                finally:
+                    self._io_slots.release()
             try:
                 yield segments
             finally:
@@ -749,19 +797,20 @@ class RollingSegmentIndex:
     def force_reconcile(self, *, source_id: str, runtime_epoch_id: str) -> None:
         key = (source_id, runtime_epoch_id)
         catalog, _created = self._get_or_create_catalog(key)
-        for _attempt in range(3):
-            candidate, version = self._copy_catalog(catalog)
-            self._rebuild(
-                candidate,
-                now=self._monotonic(),
-                initial=not candidate.initialized,
-            )
-            if self._publish_catalog(
-                catalog,
-                candidate,
-                expected_version=version,
-            ):
-                return
+        with self._catalog_singleflight(catalog):
+            for _attempt in range(3):
+                candidate, version = self._copy_catalog(catalog)
+                self._rebuild(
+                    candidate,
+                    now=self._monotonic(),
+                    initial=not candidate.initialized,
+                )
+                if self._publish_catalog(
+                    catalog,
+                    candidate,
+                    expected_version=version,
+                ):
+                    return
         raise RuntimeError("rolling_segment_index_publish_conflict")
 
     def snapshot(self) -> dict[str, int | float | str]:
@@ -831,9 +880,10 @@ class RollingSegmentIndex:
             catalog.initialized = True
             catalog.generation += 1
             catalog.root_generation = self._read_root_generation()
-            catalog.last_refresh_at = now
-            catalog.last_reconcile_at = now
-            catalog.next_reconcile_at = now + (
+            completed_at = max(float(now), self._monotonic())
+            catalog.last_refresh_at = completed_at
+            catalog.last_reconcile_at = completed_at
+            catalog.next_reconcile_at = completed_at + (
                 self._initial_reconcile_delay(catalog)
                 if initial
                 else self.reconcile_interval_s
@@ -974,10 +1024,11 @@ class RollingSegmentIndex:
             # Membership comparison on changed discovery parents has already
             # removed deleted immutable leaves, so acknowledge that generation.
             catalog.root_generation = self._read_root_generation()
-            catalog.last_refresh_at = now
+            completed_at = max(float(now), self._monotonic())
+            catalog.last_refresh_at = completed_at
             if reconcile:
-                catalog.last_reconcile_at = now
-                catalog.next_reconcile_at = now + self.reconcile_interval_s
+                catalog.last_reconcile_at = completed_at
+                catalog.next_reconcile_at = completed_at + self.reconcile_interval_s
 
     def _refresh_candidate(self, catalog: _Catalog, manifest_path: Path) -> None:
         try:
