@@ -144,6 +144,7 @@ SEGMENT_INDEX_JOB_METRIC_FIELDS = (
     "segment_index_manifest_parses",
     "segment_index_scanned_known",
     "segment_index_new_or_changed",
+    "segment_index_pinned_segments",
     "segment_index_row_cache_hits",
     "segment_index_row_cache_misses",
     "segment_index_row_cache_evictions",
@@ -6033,6 +6034,7 @@ def _log_finalize_one_metrics(
         "segment_index_manifest_parse_ms=%s segment_index_sort_ms=%s "
         "segment_index_mutation_lock_wait_ms=%s "
         "segment_index_pin_publish_ms=%s segment_index_pin_release_ms=%s "
+        "segment_index_pinned_segments=%s "
         "handoff_to_finalizer_admission_ms=%s "
         "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
         "metadata_files_visited=%s ffprobe_invocations=%s "
@@ -6081,6 +6083,7 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("segment_index_mutation_lock_wait_ms"),
         materialization_metrics.get("segment_index_pin_publish_ms"),
         materialization_metrics.get("segment_index_pin_release_ms"),
+        materialization_metrics.get("segment_index_pinned_segments"),
         materialization_metrics.get("handoff_to_finalizer_admission_ms"),
         (throttle_decision or {}).get("sleep_s"),
         (throttle_decision or {}).get("reason"),

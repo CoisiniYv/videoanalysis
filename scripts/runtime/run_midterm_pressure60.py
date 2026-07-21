@@ -10044,6 +10044,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_mutation_lock_wait_ms",
                 "segment_index_pin_publish_ms",
                 "segment_index_pin_release_ms",
+                "segment_index_pinned_segments",
             )
         }
         media_handoff_to_finalizer_admission_ms = _extract_metric_ints(
@@ -12958,6 +12959,7 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                 "mutation_lock_wait_ms",
                 "pin_publish_ms",
                 "pin_release_ms",
+                "pinned_segments",
             )
         },
         "handoff_to_finalizer_admission_ms": logs.get(
@@ -13366,6 +13368,7 @@ def evidence_phase_latency_summary(diagnostics: dict[str, Any]) -> dict[str, Any
                     "mutation_lock_wait_ms",
                     "pin_publish_ms",
                     "pin_release_ms",
+                    "pinned_segments",
                 )
             },
             "handoff_to_finalizer_admission_ms": media_logs.get(

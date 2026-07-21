@@ -47,6 +47,7 @@ _OPERATION_COUNT_FIELDS = (
     "manifest_parses",
     "scanned_known",
     "new_or_changed",
+    "pinned_segments",
     "row_cache_hits",
     "row_cache_misses",
     "row_cache_evictions",
@@ -676,6 +677,7 @@ class RollingSegmentIndex:
                             ttl_s=ttl_s,
                             _expected_identities=expected_identities,
                         )
+                        self._record_count("pinned_segments", len(segments))
                         with self._timed("pin_publish_ms"):
                             pin._activate_locked()
                     finally:
