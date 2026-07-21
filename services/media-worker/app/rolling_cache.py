@@ -61,6 +61,7 @@ class RollingMaterializationResult:
     sink_dir: Path
     video_path: Path
     metadata_path: Path
+    metadata_payload: dict[str, Any]
     segment_ids: tuple[str, ...]
     requested_start_pts: int
     requested_end_pts: int
@@ -464,6 +465,7 @@ def materialize_window(
         sink_dir=sink_dir,
         video_path=video_path,
         metadata_path=metadata_path,
+        metadata_payload=metadata,
         segment_ids=tuple(segment.segment_id for segment in selected),
         requested_start_pts=original_requested_start_pts,
         requested_end_pts=original_requested_end_pts,

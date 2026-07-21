@@ -12341,13 +12341,13 @@ def _materialize_rolling_cache_job(
                 else None
             ),
         )
-    metadata_reload_started_at = time.monotonic()
-    metadata = _load_scan_metadata_payload(materialized.metadata_path)
-    metadata_reload_ms = int(
-        round((time.monotonic() - metadata_reload_started_at) * 1000)
-    )
-    if metadata is None:
+    # materialize_window() just atomically published this exact JSON document.
+    # Keep the durable file as the recovery authority, but do not synchronously
+    # parse it again on the normal success path merely to build the handoff.
+    metadata = materialized.metadata_payload
+    if not isinstance(metadata, dict):
         raise RuntimeError("rolling_cache_materialized_metadata_unreadable")
+    metadata_reload_ms = 0
     lease = job.get("lease")
     if not isinstance(lease, MaterializationLease):
         raise RuntimeError("rolling_cache_materialization_missing_lease")

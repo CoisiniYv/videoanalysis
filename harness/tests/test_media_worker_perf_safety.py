@@ -100,6 +100,7 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
 
     materialized = SimpleNamespace(
         metadata_path=metadata_path,
+        metadata_payload={"event_id": EVENT_ID, "source_id": "source-1"},
         video_path=video_path,
         sink_dir=sink_dir,
         segment_ids=("segment-1",),
@@ -109,7 +110,7 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
         metadata_bytes=456,
     )
     monkeypatch.setattr(worker, "materialize_window", lambda **_kwargs: materialized)
-    monotonic_values = iter((10.0, 10.020, 10.025, 10.030, 10.040, 10.123))
+    monotonic_values = iter((10.0, 10.020, 10.030, 10.118))
     monkeypatch.setattr(worker.time, "monotonic", lambda: next(monotonic_values))
     lease = worker.MaterializationLease(
         event_id=EVENT_ID,
@@ -138,16 +139,16 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
     phase = result["_finalizer_phase"]
     assert handoff["remux_ms"] == 17
     assert handoff["remux_exec_ms"] == 17
-    assert handoff["remux_total_ms"] == 123
+    assert handoff["remux_total_ms"] == 118
     assert handoff["remux_metadata_publish_ms"] == 23
     assert handoff["remux_metadata_bytes"] == 456
-    assert handoff["remux_metadata_reload_ms"] == 5
+    assert handoff["remux_metadata_reload_ms"] == 0
     assert handoff["remux_handoff_build_ms"] == 10
     assert handoff["remux_unattributed_ms"] == 36.5
     assert handoff["segment_index_lock_wait_ms"] == 31.5
-    assert phase["remux_total_ms"] == 123
+    assert phase["remux_total_ms"] == 118
     assert phase["remux_metadata_publish_ms"] == 23
-    assert phase["remux_metadata_reload_ms"] == 5
+    assert phase["remux_metadata_reload_ms"] == 0
     assert phase["remux_handoff_build_ms"] == 10
     assert phase["remux_unattributed_ms"] == 36.5
     assert phase["segment_index_lock_hold_ms"] == 42.5
