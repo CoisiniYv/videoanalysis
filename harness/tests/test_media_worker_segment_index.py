@@ -451,7 +451,7 @@ def test_source_window_pin_publishes_only_bounded_segment_subset(
         marker_paths = list((root / ".read-pins").glob("*.json"))
         assert len(marker_paths) == 1
         marker = json.loads(marker_paths[0].read_text(encoding="utf-8"))
-        assert [Path(path).parent.name for path in marker["segments"]] == [
+        assert [Path(path).name for path in marker["segments"]] == [
             "0001",
             "0002",
             "0003",
