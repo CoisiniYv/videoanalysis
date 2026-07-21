@@ -6462,6 +6462,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_manifest_parse_ms=0 segment_index_sort_ms=10 "
                 "segment_index_mutation_lock_wait_ms=2 "
                 "segment_index_pin_publish_ms=4 segment_index_pin_release_ms=1 "
+                "segment_index_pinned_segments=4 "
                 "handoff_to_finalizer_admission_ms=3 "
                 "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
@@ -6487,6 +6488,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_manifest_parse_ms=0 segment_index_sort_ms=12 "
                 "segment_index_mutation_lock_wait_ms=3 "
                 "segment_index_pin_publish_ms=5 segment_index_pin_release_ms=2 "
+                "segment_index_pinned_segments=6 "
                 "handoff_to_finalizer_admission_ms=5 "
                 "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
@@ -6741,6 +6743,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert observable["remux_total_ms"]["max"] == 2100.0
     assert observable["segment_index_job"]["io_slot_wait_ms"]["p50"] == 200.5
     assert observable["segment_index_job"]["lock_wait_ms"]["p50"] == 500.5
+    assert observable["segment_index_job"]["pinned_segments"]["p50"] == 5.0
     assert observable["scheduler"]["finalizer_admission"]["candidate_total"] == 5
     assert (
         observable["scheduler"]["finalizer_admission"]["immediate_admission_gap"]

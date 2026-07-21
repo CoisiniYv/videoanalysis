@@ -419,6 +419,89 @@ def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> Non
     assert int(snapshot["stat_calls"]) >= 2
 
 
+def test_source_window_pin_publishes_only_bounded_segment_subset(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    for sequence in range(8):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"{sequence:04d}",
+            pts_values=[sequence * 100, sequence * 100 + 99],
+        )
+    index = _index(root)
+    diagnostics = index.new_operation_diagnostics()
+
+    with index.pin_source_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        requested_source_start_pts=250,
+        requested_source_end_pts=450,
+        diagnostics=diagnostics,
+    ) as segments:
+        assert [segment.segment_id for segment in segments] == [
+            "0001",
+            "0002",
+            "0003",
+            "0004",
+            "0005",
+        ]
+        marker_paths = list((root / ".read-pins").glob("*.json"))
+        assert len(marker_paths) == 1
+        marker = json.loads(marker_paths[0].read_text(encoding="utf-8"))
+        assert [Path(path).parent.name for path in marker["segments"]] == [
+            "0001",
+            "0002",
+            "0003",
+            "0004",
+            "0005",
+        ]
+        assert int(diagnostics["segment_index_pinned_segments"]) == 5
+
+    assert list((root / ".read-pins").glob("*.json")) == []
+
+
+def test_source_window_pin_falls_back_to_full_catalog_for_legacy_bounds(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    for sequence in range(3):
+        directory = _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"{sequence:04d}",
+            pts_values=[sequence * 100, sequence * 100 + 99],
+        )
+        if sequence == 1:
+            manifest_path = directory / "segment_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("source_first_pts")
+            manifest.pop("source_last_pts")
+            manifest_path.write_text(
+                json.dumps(manifest, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+    index = _index(root)
+    diagnostics = index.new_operation_diagnostics()
+
+    with index.pin_source_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        requested_source_start_pts=100,
+        requested_source_end_pts=199,
+        diagnostics=diagnostics,
+    ) as segments:
+        assert [segment.segment_id for segment in segments] == [
+            "0000",
+            "0001",
+            "0002",
+        ]
+        assert int(diagnostics["segment_index_pinned_segments"]) == 3
+
+
 def test_index_io_admission_bounds_concurrent_discovery_and_pin(
     tmp_path: Path,
 ) -> None:

@@ -90,6 +90,8 @@ def test_remux_job_preserves_pre_pin_and_index_diagnostics(
         @contextmanager
         def pin_source_segments(self, **kwargs: Any):
             assert kwargs["diagnostics"] == diagnostics
+            assert kwargs["requested_source_start_pts"] == 1
+            assert kwargs["requested_source_end_pts"] == 2
             yield []
 
         @staticmethod
@@ -160,6 +162,7 @@ def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
             "remux_total_ms": 123,
             "segment_index_lock_wait_ms": 31.5,
             "segment_index_lock_hold_ms": 42.5,
+            "segment_index_pinned_segments": 5,
         },
         throttle_decision=None,
         probe_delta={
@@ -176,6 +179,7 @@ def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
     assert "remux_total_ms=123" in caplog.text
     assert "segment_index_lock_wait_ms=31.5" in caplog.text
     assert "segment_index_lock_hold_ms=42.5" in caplog.text
+    assert "segment_index_pinned_segments=5" in caplog.text
 
 
 def test_processed_sink_dirs_survive_restart(tmp_path: Path) -> None:
