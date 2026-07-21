@@ -667,11 +667,13 @@ class RollingSegmentIndex:
         runtime_epoch_id: str,
         segments: Iterable[RollingSegment],
     ) -> dict[Path, tuple[FileIdentity, FileIdentity]]:
-        wanted = {
-            segment.directory.resolve(strict=False)
-            for segment in segments
-        }
-        if not wanted:
+        selected_directories = tuple(
+            dict.fromkeys(
+                segment.directory.resolve(strict=False)
+                for segment in segments
+            )
+        )
+        if not selected_directories:
             return {}
         with self._locked(self._map_lock):
             catalog = self._catalogs.get((source_id, runtime_epoch_id))
@@ -679,12 +681,17 @@ class RollingSegmentIndex:
             return {}
         with self._locked(catalog.lock):
             return {
-                indexed.segment.directory.resolve(strict=False): (
+                directory: (
                     indexed.metadata_identity,
                     indexed.video_identity,
                 )
-                for indexed in catalog.entries.values()
-                if indexed.segment.directory.resolve(strict=False) in wanted
+                for directory in selected_directories
+                if (
+                    indexed := catalog.entries.get(
+                        directory / SEGMENT_MANIFEST_FILE
+                    )
+                )
+                is not None
             }
 
     @staticmethod
