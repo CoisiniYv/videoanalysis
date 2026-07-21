@@ -126,6 +126,27 @@ DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
 DEFAULT_MEDIA_WORKER_STATE_PATH = (
     "/media/replay-sink-output/midterm/.media-worker.processed.json"
 )
+SEGMENT_INDEX_JOB_METRIC_FIELDS = (
+    "segment_index_lock_wait_ms",
+    "segment_index_lock_hold_ms",
+    "segment_index_refresh_ms",
+    "segment_index_rebuild_ms",
+    "segment_index_stat_ms",
+    "segment_index_full_row_parse_ms",
+    "segment_index_manifest_parse_ms",
+    "segment_index_sort_ms",
+    "segment_index_mutation_lock_wait_ms",
+    "segment_index_pin_publish_ms",
+    "segment_index_pin_release_ms",
+    "segment_index_stat_calls",
+    "segment_index_full_row_parses",
+    "segment_index_manifest_parses",
+    "segment_index_scanned_known",
+    "segment_index_new_or_changed",
+    "segment_index_row_cache_hits",
+    "segment_index_row_cache_misses",
+    "segment_index_row_cache_evictions",
+)
 
 
 class ImageExtractionRetryableError(RuntimeError):
@@ -3316,6 +3337,12 @@ def _post_savant_phase_latency_metrics(
         "finalizer_started_at": finalizer_started_at,
         "ready_to_remux_claim_ms": phase.get("ready_to_remux_claim_ms"),
         "remux_ms": phase.get("remux_ms"),
+        "remux_exec_ms": phase.get("remux_exec_ms"),
+        "remux_total_ms": phase.get("remux_total_ms"),
+        **{
+            name: phase.get(name)
+            for name in SEGMENT_INDEX_JOB_METRIC_FIELDS
+        },
         "handoff_to_finalizer_admission_ms": phase.get(
             "handoff_to_finalizer_admission_ms"
         ),
@@ -5951,6 +5978,12 @@ def _recoverable_finalizer_metadata(
             ),
             "remux_claimed_at": handoff.get("remux_claimed_at"),
             "remux_ms": handoff.get("remux_ms"),
+            "remux_exec_ms": handoff.get("remux_exec_ms"),
+            "remux_total_ms": handoff.get("remux_total_ms"),
+            **{
+                name: handoff.get(name)
+                for name in SEGMENT_INDEX_JOB_METRIC_FIELDS
+            },
         }
         labels = metadata.get("labels")
         if isinstance(labels, dict):
@@ -5990,7 +6023,14 @@ def _log_finalize_one_metrics(
         "sink_metadata_to_video_ms=%s sink_video_to_stable_ms=%s "
         "sink_stable_to_ffprobe_ready_ms=%s "
         "sink_ffprobe_ready_to_finalizer_start_ms=%s finalizer_pool_wait_ms=%s "
-        "ready_to_remux_claim_ms=%s remux_ms=%s "
+        "ready_to_remux_claim_ms=%s remux_ms=%s remux_exec_ms=%s "
+        "remux_total_ms=%s "
+        "segment_index_lock_wait_ms=%s segment_index_lock_hold_ms=%s "
+        "segment_index_refresh_ms=%s segment_index_rebuild_ms=%s "
+        "segment_index_stat_ms=%s segment_index_full_row_parse_ms=%s "
+        "segment_index_manifest_parse_ms=%s segment_index_sort_ms=%s "
+        "segment_index_mutation_lock_wait_ms=%s "
+        "segment_index_pin_publish_ms=%s segment_index_pin_release_ms=%s "
         "handoff_to_finalizer_admission_ms=%s "
         "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
         "metadata_files_visited=%s ffprobe_invocations=%s "
@@ -6025,6 +6065,19 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("finalizer_pool_wait_ms"),
         materialization_metrics.get("ready_to_remux_claim_ms"),
         materialization_metrics.get("remux_ms"),
+        materialization_metrics.get("remux_exec_ms"),
+        materialization_metrics.get("remux_total_ms"),
+        materialization_metrics.get("segment_index_lock_wait_ms"),
+        materialization_metrics.get("segment_index_lock_hold_ms"),
+        materialization_metrics.get("segment_index_refresh_ms"),
+        materialization_metrics.get("segment_index_rebuild_ms"),
+        materialization_metrics.get("segment_index_stat_ms"),
+        materialization_metrics.get("segment_index_full_row_parse_ms"),
+        materialization_metrics.get("segment_index_manifest_parse_ms"),
+        materialization_metrics.get("segment_index_sort_ms"),
+        materialization_metrics.get("segment_index_mutation_lock_wait_ms"),
+        materialization_metrics.get("segment_index_pin_publish_ms"),
+        materialization_metrics.get("segment_index_pin_release_ms"),
         materialization_metrics.get("handoff_to_finalizer_admission_ms"),
         (throttle_decision or {}).get("sleep_s"),
         (throttle_decision or {}).get("reason"),
@@ -12197,6 +12250,7 @@ def _materialize_rolling_cache_job(
     job: dict[str, object],
     segment_index: RollingSegmentIndex | None = None,
 ) -> dict:
+    remux_total_started_at = time.monotonic()
     event_id = str(job.get("event_id") or "")
     requested_start_pts = int(job.get("requested_start_pts") or 0)
     requested_end_pts = int(job.get("requested_end_pts") or 0)
@@ -12205,10 +12259,16 @@ def _materialize_rolling_cache_job(
         if isinstance(job.get("segments"), list)
         else None
     )
+    index_diagnostics = (
+        segment_index.new_operation_diagnostics()
+        if segment_index is not None
+        else {}
+    )
     segment_context = (
         segment_index.pin_source_segments(
             source_id=str(job.get("source_id") or ""),
             runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
+            diagnostics=index_diagnostics,
         )
         if segment_index is not None
         else nullcontext(segments or [])
@@ -12266,7 +12326,12 @@ def _materialize_rolling_cache_job(
         "ready_to_remux_claim_ms": job.get("ready_to_remux_claim_ms"),
         "remux_claimed_at": job.get("remux_claimed_at"),
         "remux_ms": materialized.materialization_ms,
+        "remux_exec_ms": materialized.materialization_ms,
+        **index_diagnostics,
     }
+    handoff["remux_total_ms"] = int(
+        round((time.monotonic() - remux_total_started_at) * 1000)
+    )
     observed_at = datetime.now(timezone.utc).isoformat()
     return {
         **metadata,
@@ -12289,6 +12354,9 @@ def _materialize_rolling_cache_job(
             "ready_to_remux_claim_ms": job.get("ready_to_remux_claim_ms"),
             "remux_claimed_at": job.get("remux_claimed_at"),
             "remux_ms": materialized.materialization_ms,
+            "remux_exec_ms": materialized.materialization_ms,
+            "remux_total_ms": handoff["remux_total_ms"],
+            **index_diagnostics,
             "rolling_cache_segment_ids": list(materialized.segment_ids),
         },
     }
@@ -13365,6 +13433,52 @@ def _process_configured_sink_output(
     )
 
 
+def _scheduler_cycle_observability(
+    *,
+    tick_gap_ms: int | None,
+    tick_body_ms: int,
+    snapshot_ms: int,
+    logging_ms: int,
+    planned_sleep_ms: int,
+    actual_sleep_ms: int,
+) -> dict[str, int | str]:
+    """Reconcile the previous scheduler cycle against its start-to-start gap."""
+
+    if tick_gap_ms is None:
+        return {
+            name: "unavailable"
+            for name in (
+                "cycle_body_ms",
+                "cycle_snapshot_ms",
+                "cycle_logging_ms",
+                "cycle_planned_sleep_ms",
+                "cycle_actual_sleep_ms",
+                "cycle_accounted_ms",
+                "cycle_work_ms",
+                "cycle_total_ms",
+                "cycle_unattributed_ms",
+            )
+        }
+    body_ms = max(0, int(tick_body_ms))
+    snapshot_ms = max(0, int(snapshot_ms))
+    logging_ms = max(0, int(logging_ms))
+    planned_sleep_ms = max(0, int(planned_sleep_ms))
+    actual_sleep_ms = max(0, int(actual_sleep_ms))
+    total_ms = max(0, int(tick_gap_ms))
+    accounted_ms = body_ms + snapshot_ms + logging_ms + actual_sleep_ms
+    return {
+        "cycle_body_ms": body_ms,
+        "cycle_snapshot_ms": snapshot_ms,
+        "cycle_logging_ms": logging_ms,
+        "cycle_planned_sleep_ms": planned_sleep_ms,
+        "cycle_actual_sleep_ms": actual_sleep_ms,
+        "cycle_accounted_ms": accounted_ms,
+        "cycle_work_ms": max(0, total_ms - actual_sleep_ms),
+        "cycle_total_ms": total_ms,
+        "cycle_unattributed_ms": max(0, total_ms - accounted_ms),
+    }
+
+
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     global _active_materialization_resources
     if (
@@ -13619,6 +13733,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     finalizer_pending_snapshot = FinalizerPendingMetrics()
     last_scheduler_tick_started_at: float | None = None
     scheduler_tick_sequence = 0
+    previous_tick_body_ms = 0
+    previous_snapshot_ms = 0
+    previous_logging_ms = 0
+    previous_planned_sleep_ms = 0
+    previous_actual_sleep_ms = 0
     try:
         while not shutdown_requested:
             tick_started_at = time.monotonic()
@@ -13629,6 +13748,14 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             )
             last_scheduler_tick_started_at = tick_started_at
             scheduler_tick_sequence += 1
+            completed_cycle = _scheduler_cycle_observability(
+                tick_gap_ms=tick_gap_ms,
+                tick_body_ms=previous_tick_body_ms,
+                snapshot_ms=previous_snapshot_ms,
+                logging_ms=previous_logging_ms,
+                planned_sleep_ms=previous_planned_sleep_ms,
+                actual_sleep_ms=previous_actual_sleep_ms,
+            )
             now_monotonic = tick_started_at
             rolling_cache_due = (
                 cfg.rolling_cache_enabled
@@ -13980,6 +14107,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 logger.exception("media worker loop error")
 
             tick_duration_ms = int((time.monotonic() - tick_started_at) * 1000)
+            snapshot_started_at = time.monotonic()
             permit_snapshot = materialization_guard.snapshot()
             resource_snapshot = runtime_resources.snapshot()
             segment_index_snapshot = (
@@ -14028,10 +14156,17 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         )
                     ),
                 )
+            snapshot_ms = int((time.monotonic() - snapshot_started_at) * 1000)
+            logging_started_at = time.monotonic()
             logger.info(
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=%s sequence=%s tick_duration_ms=%s "
-                "tick_gap_ms=%s recovery_due=%s rolling_due=%s general_due=%s "
+                "tick_gap_ms=%s completed_cycle_sequence=%s "
+                "cycle_body_ms=%s cycle_snapshot_ms=%s cycle_logging_ms=%s "
+                "cycle_planned_sleep_ms=%s cycle_actual_sleep_ms=%s "
+                "cycle_accounted_ms=%s cycle_work_ms=%s cycle_total_ms=%s "
+                "cycle_unattributed_ms=%s "
+                "recovery_due=%s rolling_due=%s general_due=%s "
                 "cleanup_recovery_due=%s cleanup_rows_scanned=%s "
                 "cleanup_recovered=%s cleanup_retry_pending=%s "
                 "oldest_ready_age_ms=%s "
@@ -14062,11 +14197,41 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "segment_index_active_read_pins=%s "
                 "segment_index_read_pins_created=%s "
                 "segment_index_read_pins_released=%s "
-                "segment_index_generation=%s",
+                "segment_index_generation=%s "
+                "segment_index_lock_wait_ms_total=%s "
+                "segment_index_lock_hold_ms_total=%s "
+                "segment_index_refresh_ms_total=%s "
+                "segment_index_rebuild_ms_total=%s "
+                "segment_index_stat_ms_total=%s "
+                "segment_index_full_row_parse_ms_total=%s "
+                "segment_index_manifest_parse_ms_total=%s "
+                "segment_index_sort_ms_total=%s "
+                "segment_index_mutation_lock_wait_ms_total=%s "
+                "segment_index_pin_publish_ms_total=%s "
+                "segment_index_pin_release_ms_total=%s "
+                "segment_index_stat_calls=%s "
+                "segment_index_full_row_parses=%s "
+                "segment_index_manifest_parses=%s "
+                "segment_index_scanned_known=%s "
+                "segment_index_new_or_changed=%s",
                 "v2" if scheduler_v2_enabled else "legacy",
                 scheduler_tick_sequence,
                 tick_duration_ms,
                 tick_gap_ms if tick_gap_ms is not None else "unavailable",
+                (
+                    scheduler_tick_sequence - 1
+                    if tick_gap_ms is not None
+                    else "unavailable"
+                ),
+                completed_cycle["cycle_body_ms"],
+                completed_cycle["cycle_snapshot_ms"],
+                completed_cycle["cycle_logging_ms"],
+                completed_cycle["cycle_planned_sleep_ms"],
+                completed_cycle["cycle_actual_sleep_ms"],
+                completed_cycle["cycle_accounted_ms"],
+                completed_cycle["cycle_work_ms"],
+                completed_cycle["cycle_total_ms"],
+                completed_cycle["cycle_unattributed_ms"],
                 lifecycle_recovery_due,
                 rolling_cache_due,
                 general_due,
@@ -14139,14 +14304,48 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 segment_index_snapshot.get("read_pins_created", "unavailable"),
                 segment_index_snapshot.get("read_pins_released", "unavailable"),
                 segment_index_snapshot.get("generation", "unavailable"),
+                segment_index_snapshot.get("lock_wait_ms_total", "unavailable"),
+                segment_index_snapshot.get("lock_hold_ms_total", "unavailable"),
+                segment_index_snapshot.get("refresh_ms_total", "unavailable"),
+                segment_index_snapshot.get("rebuild_ms_total", "unavailable"),
+                segment_index_snapshot.get("stat_ms_total", "unavailable"),
+                segment_index_snapshot.get(
+                    "full_row_parse_ms_total",
+                    "unavailable",
+                ),
+                segment_index_snapshot.get(
+                    "manifest_parse_ms_total",
+                    "unavailable",
+                ),
+                segment_index_snapshot.get("sort_ms_total", "unavailable"),
+                segment_index_snapshot.get(
+                    "mutation_lock_wait_ms_total",
+                    "unavailable",
+                ),
+                segment_index_snapshot.get("pin_publish_ms_total", "unavailable"),
+                segment_index_snapshot.get("pin_release_ms_total", "unavailable"),
+                segment_index_snapshot.get("stat_calls", "unavailable"),
+                segment_index_snapshot.get("full_row_parses", "unavailable"),
+                segment_index_snapshot.get("manifest_parses", "unavailable"),
+                segment_index_snapshot.get("scanned_known", "unavailable"),
+                segment_index_snapshot.get("new_or_changed", "unavailable"),
             )
+            logging_ms = int((time.monotonic() - logging_started_at) * 1000)
 
             now_monotonic = time.monotonic()
             next_due_at = next_general_poll_at
             if cfg.rolling_cache_enabled and cfg.rolling_cache_materialization_enabled:
                 next_due_at = min(next_due_at, next_rolling_cache_poll_at)
             sleep_s = max(0.1, min(1.0, next_due_at - now_monotonic))
+            planned_sleep_ms = int(sleep_s * 1000)
+            sleep_started_at = time.monotonic()
             time.sleep(sleep_s)
+            actual_sleep_ms = int((time.monotonic() - sleep_started_at) * 1000)
+            previous_tick_body_ms = tick_duration_ms
+            previous_snapshot_ms = snapshot_ms
+            previous_logging_ms = logging_ms
+            previous_planned_sleep_ms = planned_sleep_ms
+            previous_actual_sleep_ms = actual_sleep_ms
     finally:
         runtime_resources.shutdown.begin_draining()
         while True:

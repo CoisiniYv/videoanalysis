@@ -223,7 +223,7 @@ SECURITY_STREAMS = [
     "security.record_requests",
     "security.alerts",
 ]
-DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 6
+DOWNSTREAM_OBSERVABILITY_SCHEMA_VERSION = 7
 DOWNSTREAM_OBSERVABILITY_REQUIRED_SECTIONS = (
     "redis",
     "postgresql",
@@ -9965,6 +9965,24 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "ready_to_remux_claim_ms",
         )
         media_remux_ms = _extract_metric_ints(text, "remux_ms")
+        media_remux_exec_ms = _extract_metric_numbers(text, "remux_exec_ms")
+        media_remux_total_ms = _extract_metric_numbers(text, "remux_total_ms")
+        media_segment_index_job_metrics = {
+            field: _extract_metric_numbers(text, field)
+            for field in (
+                "segment_index_lock_wait_ms",
+                "segment_index_lock_hold_ms",
+                "segment_index_refresh_ms",
+                "segment_index_rebuild_ms",
+                "segment_index_stat_ms",
+                "segment_index_full_row_parse_ms",
+                "segment_index_manifest_parse_ms",
+                "segment_index_sort_ms",
+                "segment_index_mutation_lock_wait_ms",
+                "segment_index_pin_publish_ms",
+                "segment_index_pin_release_ms",
+            )
+        }
         media_handoff_to_finalizer_admission_ms = _extract_metric_ints(
             text,
             "handoff_to_finalizer_admission_ms",
@@ -9994,6 +10012,24 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             marker="media_scheduler_tick",
             field="tick_gap_ms",
         )
+        media_scheduler_cycle_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_scheduler_tick",
+                field=field,
+            )
+            for field in (
+                "cycle_body_ms",
+                "cycle_snapshot_ms",
+                "cycle_logging_ms",
+                "cycle_planned_sleep_ms",
+                "cycle_actual_sleep_ms",
+                "cycle_accounted_ms",
+                "cycle_work_ms",
+                "cycle_total_ms",
+                "cycle_unattributed_ms",
+            )
+        }
         media_scheduler_remux_lane_depth = _log_metric_numbers_for_lines(
             text,
             marker="media_scheduler_tick",
@@ -10053,6 +10089,22 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_read_pins_created",
                 "segment_index_read_pins_released",
                 "segment_index_generation",
+                "segment_index_lock_wait_ms_total",
+                "segment_index_lock_hold_ms_total",
+                "segment_index_refresh_ms_total",
+                "segment_index_rebuild_ms_total",
+                "segment_index_stat_ms_total",
+                "segment_index_full_row_parse_ms_total",
+                "segment_index_manifest_parse_ms_total",
+                "segment_index_sort_ms_total",
+                "segment_index_mutation_lock_wait_ms_total",
+                "segment_index_pin_publish_ms_total",
+                "segment_index_pin_release_ms_total",
+                "segment_index_stat_calls",
+                "segment_index_full_row_parses",
+                "segment_index_manifest_parses",
+                "segment_index_scanned_known",
+                "segment_index_new_or_changed",
             )
         }
         media_resource_capacity_metrics = {
@@ -10266,6 +10318,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 media_ready_to_remux_claim_ms
             ),
             "media_remux_ms": _numeric_distribution(media_remux_ms),
+            "media_remux_exec_ms": _numeric_distribution(media_remux_exec_ms),
+            "media_remux_total_ms": _numeric_distribution(media_remux_total_ms),
+            **{
+                f"media_{field}": _numeric_distribution(values)
+                for field, values in media_segment_index_job_metrics.items()
+            },
             "media_handoff_to_finalizer_admission_ms": _numeric_distribution(
                 media_handoff_to_finalizer_admission_ms
             ),
@@ -10282,6 +10340,10 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             "media_scheduler_tick_gap_ms": _numeric_distribution(
                 media_scheduler_tick_gap_ms
             ),
+            **{
+                f"media_scheduler_{field}": _numeric_distribution(values)
+                for field, values in media_scheduler_cycle_metrics.items()
+            },
             "media_scheduler_remux_lane_depth": _numeric_distribution(
                 media_scheduler_remux_lane_depth
             ),
@@ -12807,6 +12869,27 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         or _not_enough_data("ready-to-remux claim logs unavailable"),
         "remux_ms": logs.get("media_remux_ms")
         or _not_enough_data("remux timing logs unavailable"),
+        "remux_exec_ms": logs.get("media_remux_exec_ms")
+        or _not_enough_data("post-pin remux timing logs unavailable"),
+        "remux_total_ms": logs.get("media_remux_total_ms")
+        or _not_enough_data("pre-pin-to-handoff timing logs unavailable"),
+        "segment_index_job": {
+            name: logs.get(f"media_segment_index_{name}")
+            or _not_enough_data(f"segment-index job {name} unavailable")
+            for name in (
+                "lock_wait_ms",
+                "lock_hold_ms",
+                "refresh_ms",
+                "rebuild_ms",
+                "stat_ms",
+                "full_row_parse_ms",
+                "manifest_parse_ms",
+                "sort_ms",
+                "mutation_lock_wait_ms",
+                "pin_publish_ms",
+                "pin_release_ms",
+            )
+        },
         "handoff_to_finalizer_admission_ms": logs.get(
             "media_handoff_to_finalizer_admission_ms"
         )
@@ -12828,12 +12911,27 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
             or _not_enough_data("sidecar prune timing logs unavailable"),
         },
         "scheduler": {
-            "schema_version": "phase6-capacity-v2",
+            "schema_version": "phase6-capacity-v3",
             "modes": logs.get("media_scheduler_modes") or {},
             "poll_duration_ms": logs.get("media_scheduler_tick_duration_ms")
             or _not_enough_data("scheduler tick logs unavailable"),
             "poll_gap_ms": logs.get("media_scheduler_tick_gap_ms")
             or _not_enough_data("scheduler tick logs unavailable"),
+            "cycle": {
+                name: logs.get(f"media_scheduler_cycle_{name}")
+                or _not_enough_data(f"scheduler cycle {name} unavailable")
+                for name in (
+                    "body_ms",
+                    "snapshot_ms",
+                    "logging_ms",
+                    "planned_sleep_ms",
+                    "actual_sleep_ms",
+                    "accounted_ms",
+                    "work_ms",
+                    "total_ms",
+                    "unattributed_ms",
+                )
+            },
             "oldest_ready_age_ms": logs.get(
                 "media_scheduler_oldest_ready_age_ms"
             )
@@ -12994,6 +13092,46 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "media_scheduler_segment_index_generation"
                 )
                 or _not_enough_data("segment-index generation unavailable"),
+                "lock_wait_ms_total": logs.get(
+                    "media_scheduler_segment_index_lock_wait_ms_total"
+                )
+                or _not_enough_data("segment-index lock wait total unavailable"),
+                "lock_hold_ms_total": logs.get(
+                    "media_scheduler_segment_index_lock_hold_ms_total"
+                )
+                or _not_enough_data("segment-index lock hold total unavailable"),
+                "refresh_ms_total": logs.get(
+                    "media_scheduler_segment_index_refresh_ms_total"
+                )
+                or _not_enough_data("segment-index refresh total unavailable"),
+                "rebuild_ms_total": logs.get(
+                    "media_scheduler_segment_index_rebuild_ms_total"
+                )
+                or _not_enough_data("segment-index rebuild total unavailable"),
+                "stat_ms_total": logs.get(
+                    "media_scheduler_segment_index_stat_ms_total"
+                )
+                or _not_enough_data("segment-index stat total unavailable"),
+                "full_row_parse_ms_total": logs.get(
+                    "media_scheduler_segment_index_full_row_parse_ms_total"
+                )
+                or _not_enough_data("segment-index full-row parse total unavailable"),
+                "manifest_parse_ms_total": logs.get(
+                    "media_scheduler_segment_index_manifest_parse_ms_total"
+                )
+                or _not_enough_data("segment-index manifest parse total unavailable"),
+                "sort_ms_total": logs.get(
+                    "media_scheduler_segment_index_sort_ms_total"
+                )
+                or _not_enough_data("segment-index sort total unavailable"),
+                "scanned_known": logs.get(
+                    "media_scheduler_segment_index_scanned_known"
+                )
+                or _not_enough_data("segment-index scanned-known count unavailable"),
+                "new_or_changed": logs.get(
+                    "media_scheduler_segment_index_new_or_changed"
+                )
+                or _not_enough_data("segment-index changed count unavailable"),
             },
             "capacity": {
                 "max_active": logs.get("media_resource_max_active")
@@ -13112,6 +13250,27 @@ def evidence_phase_latency_summary(diagnostics: dict[str, Any]) -> dict[str, Any
             or _not_enough_data("ready-to-remux claim logs unavailable"),
             "remux_ms": media_logs.get("media_remux_ms")
             or _not_enough_data("remux timing logs unavailable"),
+            "remux_exec_ms": media_logs.get("media_remux_exec_ms")
+            or _not_enough_data("post-pin remux timing logs unavailable"),
+            "remux_total_ms": media_logs.get("media_remux_total_ms")
+            or _not_enough_data("pre-pin-to-handoff timing logs unavailable"),
+            "segment_index_job": {
+                name: media_logs.get(f"media_segment_index_{name}")
+                or _not_enough_data(f"segment-index job {name} unavailable")
+                for name in (
+                    "lock_wait_ms",
+                    "lock_hold_ms",
+                    "refresh_ms",
+                    "rebuild_ms",
+                    "stat_ms",
+                    "full_row_parse_ms",
+                    "manifest_parse_ms",
+                    "sort_ms",
+                    "mutation_lock_wait_ms",
+                    "pin_publish_ms",
+                    "pin_release_ms",
+                )
+            },
             "handoff_to_finalizer_admission_ms": media_logs.get(
                 "media_handoff_to_finalizer_admission_ms"
             )
@@ -13430,6 +13589,9 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
             "finalizer_pool_wait_ms",
             "ready_to_remux_claim_ms",
             "remux_ms",
+            "remux_exec_ms",
+            "remux_total_ms",
+            "segment_index_job",
             "handoff_to_finalizer_admission_ms",
             "queue_wait_ms_by_source",
             "queue_wait_ms_by_shard",

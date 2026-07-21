@@ -23,6 +23,30 @@ READ_PIN_DIR = ".read-pins"
 MUTATION_LOCK_FILE = ".rolling-cache-mutation.lock"
 READ_PIN_SCHEMA_VERSION = "rolling-segment-read-pin-v1"
 
+_OPERATION_TIMING_FIELDS = (
+    "lock_wait_ms",
+    "lock_hold_ms",
+    "refresh_ms",
+    "rebuild_ms",
+    "stat_ms",
+    "full_row_parse_ms",
+    "manifest_parse_ms",
+    "sort_ms",
+    "mutation_lock_wait_ms",
+    "pin_publish_ms",
+    "pin_release_ms",
+)
+_OPERATION_COUNT_FIELDS = (
+    "stat_calls",
+    "full_row_parses",
+    "manifest_parses",
+    "scanned_known",
+    "new_or_changed",
+    "row_cache_hits",
+    "row_cache_misses",
+    "row_cache_evictions",
+)
+
 
 class SegmentPinRetryableError(RollingCacheCoverageMiss):
     """A segment changed while an atomic read pin was being published."""
@@ -201,6 +225,7 @@ class RollingSegmentIndex:
         read_pin_ttl_s: float = 600.0,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        timer: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.root = Path(root).resolve(strict=False)
         self.refresh_interval_s = max(0.0, float(refresh_interval_s))
@@ -217,7 +242,10 @@ class RollingSegmentIndex:
         self.read_pin_ttl_s = max(1.0, float(read_pin_ttl_s))
         self._monotonic = monotonic
         self._wall_clock = wall_clock
+        self._timer = timer
         self._lock = threading.RLock()
+        self._metrics_lock = threading.Lock()
+        self._diagnostic_local = threading.local()
         self._catalogs: OrderedDict[tuple[str, str], _Catalog] = OrderedDict()
         self._row_cache: OrderedDict[
             tuple[str, FileIdentity], tuple[dict, ...]
@@ -240,6 +268,79 @@ class RollingSegmentIndex:
             "read_pins_created": 0,
             "read_pins_released": 0,
         }
+        self._timing_totals = {name: 0.0 for name in _OPERATION_TIMING_FIELDS}
+        self._timing_maxima = {name: 0.0 for name in _OPERATION_TIMING_FIELDS}
+        self._operation_counts = {name: 0 for name in _OPERATION_COUNT_FIELDS}
+
+    @staticmethod
+    def new_operation_diagnostics() -> dict[str, float | int]:
+        """Return one job-local timing document populated with stable zeroes."""
+
+        return {
+            **{f"segment_index_{name}": 0.0 for name in _OPERATION_TIMING_FIELDS},
+            **{f"segment_index_{name}": 0 for name in _OPERATION_COUNT_FIELDS},
+        }
+
+    @contextmanager
+    def _diagnostic_scope(
+        self,
+        diagnostics: dict[str, float | int] | None,
+    ) -> Iterator[None]:
+        if diagnostics is None:
+            yield
+            return
+        previous = getattr(self._diagnostic_local, "current", None)
+        self._diagnostic_local.current = diagnostics
+        try:
+            yield
+        finally:
+            self._diagnostic_local.current = previous
+
+    def _record_timing(self, name: str, elapsed_ms: float) -> None:
+        elapsed_ms = max(0.0, float(elapsed_ms))
+        diagnostics = getattr(self._diagnostic_local, "current", None)
+        if isinstance(diagnostics, dict):
+            key = f"segment_index_{name}"
+            diagnostics[key] = float(diagnostics.get(key) or 0.0) + elapsed_ms
+        with self._metrics_lock:
+            self._timing_totals[name] += elapsed_ms
+            self._timing_maxima[name] = max(
+                self._timing_maxima[name],
+                elapsed_ms,
+            )
+
+    def _record_count(self, name: str, count: int = 1) -> None:
+        count = max(0, int(count))
+        diagnostics = getattr(self._diagnostic_local, "current", None)
+        if isinstance(diagnostics, dict):
+            key = f"segment_index_{name}"
+            diagnostics[key] = int(diagnostics.get(key) or 0) + count
+        with self._metrics_lock:
+            self._operation_counts[name] += count
+
+    @contextmanager
+    def _timed(self, name: str) -> Iterator[None]:
+        started_at = self._timer()
+        try:
+            yield
+        finally:
+            self._record_timing(name, (self._timer() - started_at) * 1000.0)
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        wait_started_at = self._timer()
+        self._lock.acquire()
+        self._record_timing(
+            "lock_wait_ms",
+            (self._timer() - wait_started_at) * 1000.0,
+        )
+        hold_started_at = self._timer()
+        try:
+            yield
+        finally:
+            hold_ms = (self._timer() - hold_started_at) * 1000.0
+            self._lock.release()
+            self._record_timing("lock_hold_ms", hold_ms)
 
     def find_segments(
         self,
@@ -247,79 +348,84 @@ class RollingSegmentIndex:
         source_id: str,
         runtime_epoch_id: str,
         allow_fallback: bool = True,
+        diagnostics: dict[str, float | int] | None = None,
     ) -> list[RollingSegment]:
         if not source_id or not runtime_epoch_id:
             return []
         key = (source_id, runtime_epoch_id)
-        try:
-            with self._lock:
-                now = self._monotonic()
-                catalog = self._catalogs.get(key)
-                if catalog is None:
-                    self._stats["misses"] += 1
-                    catalog = _Catalog(
-                        source_id=source_id,
-                        runtime_epoch_id=runtime_epoch_id,
-                    )
-                    self._catalogs[key] = catalog
-                    self._evict_catalogs()
-                    self._rebuild(catalog, now=now, initial=True)
-                else:
-                    self._stats["hits"] += 1
-                    self._catalogs.move_to_end(key)
-                    root_generation = self._read_root_generation()
-                    if now - catalog.last_reconcile_at >= self.reconcile_interval_s:
-                        self._rebuild(catalog, now=now, initial=False)
-                    elif (
-                        root_generation != catalog.root_generation
-                        or now - catalog.last_refresh_at >= self.refresh_interval_s
-                    ):
-                        self._refresh(catalog, now=now)
-                segments = [entry.segment for entry in catalog.entries.values()]
-                return sorted(
-                    segments,
-                    key=lambda segment: (
-                        segment.first_pts,
-                        segment.last_pts,
-                        str(segment.metadata_path),
-                    ),
-                )
-        except Exception:
-            if not allow_fallback:
-                raise
-            from app.rolling_cache import find_segments as legacy_find_segments
+        with self._diagnostic_scope(diagnostics):
+            try:
+                with self._locked():
+                    now = self._monotonic()
+                    catalog = self._catalogs.get(key)
+                    if catalog is None:
+                        self._stats["misses"] += 1
+                        catalog = _Catalog(
+                            source_id=source_id,
+                            runtime_epoch_id=runtime_epoch_id,
+                        )
+                        self._catalogs[key] = catalog
+                        self._evict_catalogs()
+                        self._rebuild(catalog, now=now, initial=True)
+                    else:
+                        self._stats["hits"] += 1
+                        self._catalogs.move_to_end(key)
+                        root_generation = self._read_root_generation()
+                        if now - catalog.last_reconcile_at >= self.reconcile_interval_s:
+                            self._rebuild(catalog, now=now, initial=False)
+                        elif (
+                            root_generation != catalog.root_generation
+                            or now - catalog.last_refresh_at >= self.refresh_interval_s
+                        ):
+                            self._refresh(catalog, now=now)
+                    segments = [entry.segment for entry in catalog.entries.values()]
+                    with self._timed("sort_ms"):
+                        return sorted(
+                            segments,
+                            key=lambda segment: (
+                                segment.first_pts,
+                                segment.last_pts,
+                                str(segment.metadata_path),
+                            ),
+                        )
+            except Exception:
+                if not allow_fallback:
+                    raise
+                from app.rolling_cache import find_segments as legacy_find_segments
 
-            with self._lock:
-                self._stats["fallback_scans"] += 1
-            legacy_segments = legacy_find_segments(
-                self.root,
-                source_id=source_id,
-                runtime_epoch_id=runtime_epoch_id,
-            )
-            allowed_roots = self._candidate_source_roots(
-                source_id=source_id,
-                runtime_epoch_id=runtime_epoch_id,
-            )
-            return [
-                segment
-                for segment in legacy_segments
-                if any(
-                    self._is_relative_to(segment.directory, root)
-                    for root in allowed_roots
+                with self._locked():
+                    self._stats["fallback_scans"] += 1
+                legacy_segments = legacy_find_segments(
+                    self.root,
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
                 )
-            ]
+                allowed_roots = self._candidate_source_roots(
+                    source_id=source_id,
+                    runtime_epoch_id=runtime_epoch_id,
+                )
+                return [
+                    segment
+                    for segment in legacy_segments
+                    if any(
+                        self._is_relative_to(segment.directory, root)
+                        for root in allowed_roots
+                    )
+                ]
 
     def rows_for_segment(self, segment: RollingSegment) -> list[dict]:
         metadata_path = segment.metadata_path.resolve(strict=False)
-        with self._lock:
-            identity = FileIdentity.from_path(metadata_path)
+        with self._locked():
+            identity = self._file_identity(metadata_path)
             key = (str(metadata_path), identity)
             rows = self._row_cache.get(key)
             if rows is not None:
                 self._stats["row_cache_hits"] += 1
+                self._record_count("row_cache_hits")
                 self._row_cache.move_to_end(key)
                 return list(rows)
             self._stats["row_cache_misses"] += 1
+            self._record_count("row_cache_misses")
             parsed = self._parse_rows(metadata_path)
             self._remember_rows(metadata_path, identity, parsed)
             return list(parsed)
@@ -345,6 +451,7 @@ class RollingSegmentIndex:
         source_id: str,
         runtime_epoch_id: str,
         ttl_s: float | None = None,
+        diagnostics: dict[str, float | int] | None = None,
     ) -> Iterator[list[RollingSegment]]:
         """Atomically refresh, select, and pin one source/epoch snapshot.
 
@@ -355,38 +462,46 @@ class RollingSegmentIndex:
         marker.
         """
 
-        self.root.mkdir(parents=True, exist_ok=True)
-        lock_path = self.root / MUTATION_LOCK_FILE
-        pin: SegmentReadPin | None = None
-        with lock_path.open("a+", encoding="utf-8") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
-            try:
-                segments = self.find_segments(
-                    source_id=source_id,
-                    runtime_epoch_id=runtime_epoch_id,
+        with self._diagnostic_scope(diagnostics):
+            self.root.mkdir(parents=True, exist_ok=True)
+            lock_path = self.root / MUTATION_LOCK_FILE
+            pin: SegmentReadPin | None = None
+            with lock_path.open("a+", encoding="utf-8") as lock_fh:
+                mutation_wait_started_at = self._timer()
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+                self._record_timing(
+                    "mutation_lock_wait_ms",
+                    (self._timer() - mutation_wait_started_at) * 1000.0,
                 )
-                pin = self.pin_segments(segments, ttl_s=ttl_s)
-                pin._activate_locked()
+                try:
+                    segments = self.find_segments(
+                        source_id=source_id,
+                        runtime_epoch_id=runtime_epoch_id,
+                    )
+                    pin = self.pin_segments(segments, ttl_s=ttl_s)
+                    with self._timed("pin_publish_ms"):
+                        pin._activate_locked()
+                finally:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            try:
+                yield segments
             finally:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-        try:
-            yield segments
-        finally:
-            if pin is not None:
-                pin.__exit__(None, None, None)
+                if pin is not None:
+                    with self._timed("pin_release_ms"):
+                        pin.__exit__(None, None, None)
 
     def force_reconcile(self, *, source_id: str, runtime_epoch_id: str) -> None:
         key = (source_id, runtime_epoch_id)
-        with self._lock:
+        with self._locked():
             catalog = self._catalogs.get(key)
             if catalog is None:
                 catalog = _Catalog(source_id=source_id, runtime_epoch_id=runtime_epoch_id)
                 self._catalogs[key] = catalog
             self._rebuild(catalog, now=self._monotonic(), initial=not catalog.initialized)
 
-    def snapshot(self) -> dict[str, int | str]:
-        with self._lock:
-            return {
+    def snapshot(self) -> dict[str, int | float | str]:
+        with self._locked():
+            snapshot: dict[str, int | float | str] = {
                 "mode": "incremental",
                 **self._stats,
                 "catalogs": len(self._catalogs),
@@ -396,104 +511,123 @@ class RollingSegmentIndex:
                 "active_read_pins": len(self._active_pins),
                 "generation": sum(catalog.generation for catalog in self._catalogs.values()),
             }
+        with self._metrics_lock:
+            snapshot.update(
+                {
+                    **{
+                        f"{name}_total": total
+                        for name, total in self._timing_totals.items()
+                    },
+                    **{
+                        f"{name}_max": value
+                        for name, value in self._timing_maxima.items()
+                    },
+                    **self._operation_counts,
+                }
+            )
+        return snapshot
 
     def _rebuild(self, catalog: _Catalog, *, now: float, initial: bool) -> None:
-        candidates: set[Path] = set()
-        containers: dict[Path, int] = {}
-        visited = 0
-        for source_root in self._candidate_source_roots(
-            source_id=catalog.source_id,
-            runtime_epoch_id=catalog.runtime_epoch_id,
-        ):
-            if not source_root.exists():
-                continue
-            for path, is_dir in self._walk(source_root):
-                visited += 1
-                if visited > self.max_scan_entries:
-                    raise RuntimeError("rolling_segment_index_scan_overflow")
-                if is_dir:
-                    containers[path] = self._directory_mtime(path)
-                elif path.name == "metadata.json" and "materialized" not in path.parts:
-                    candidates.add(path.resolve(strict=False))
-        previous = set(catalog.entries)
-        catalog.containers = containers
-        catalog.pending = set()
-        catalog.failed_identities = {}
-        for metadata_path in candidates:
-            self._refresh_candidate(catalog, metadata_path)
-        missing = previous - candidates
-        for metadata_path in missing:
-            self._remove_entry(catalog, metadata_path)
-        catalog.initialized = True
-        catalog.generation += 1
-        catalog.root_generation = self._read_root_generation()
-        catalog.last_refresh_at = now
-        catalog.last_reconcile_at = now
-        self._stats["initial_scans" if initial else "reconciliations"] += 1
+        with self._timed("rebuild_ms"):
+            candidates: set[Path] = set()
+            containers: dict[Path, int] = {}
+            visited = 0
+            for source_root in self._candidate_source_roots(
+                source_id=catalog.source_id,
+                runtime_epoch_id=catalog.runtime_epoch_id,
+            ):
+                if not source_root.exists():
+                    continue
+                for path, is_dir in self._walk(source_root):
+                    visited += 1
+                    if visited > self.max_scan_entries:
+                        raise RuntimeError("rolling_segment_index_scan_overflow")
+                    if is_dir:
+                        containers[path] = self._directory_mtime(path)
+                    elif path.name == "metadata.json" and "materialized" not in path.parts:
+                        candidates.add(path.resolve(strict=False))
+            self._record_count("scanned_known", len(candidates))
+            previous = set(catalog.entries)
+            catalog.containers = containers
+            catalog.pending = set()
+            catalog.failed_identities = {}
+            for metadata_path in candidates:
+                self._refresh_candidate(catalog, metadata_path)
+            missing = previous - candidates
+            for metadata_path in missing:
+                self._remove_entry(catalog, metadata_path)
+            catalog.initialized = True
+            catalog.generation += 1
+            catalog.root_generation = self._read_root_generation()
+            catalog.last_refresh_at = now
+            catalog.last_reconcile_at = now
+            self._stats["initial_scans" if initial else "reconciliations"] += 1
 
     def _refresh(self, catalog: _Catalog, *, now: float) -> None:
-        self._stats["refreshes"] += 1
-        known_candidates = set(catalog.entries) | set(catalog.pending)
-        for metadata_path in tuple(known_candidates):
-            self._refresh_candidate(catalog, metadata_path)
+        with self._timed("refresh_ms"):
+            self._stats["refreshes"] += 1
+            known_candidates = set(catalog.entries) | set(catalog.pending)
+            self._record_count("scanned_known", len(known_candidates))
+            for metadata_path in tuple(known_candidates):
+                self._refresh_candidate(catalog, metadata_path)
 
-        queue: list[Path] = []
-        known_roots = self._candidate_source_roots(
-            source_id=catalog.source_id,
-            runtime_epoch_id=catalog.runtime_epoch_id,
-        )
-        for source_root in known_roots:
-            if source_root.exists() and source_root not in catalog.containers:
-                queue.append(source_root)
-        for container, previous_mtime in tuple(catalog.containers.items()):
-            current_mtime = self._directory_mtime(container)
-            if current_mtime == 0:
-                catalog.containers.pop(container, None)
-                continue
-            if current_mtime != previous_mtime:
-                queue.append(container)
-
-        visited = 0
-        queued = set(queue)
-        while queue:
-            container = queue.pop(0)
-            queued.discard(container)
-            current_mtime = self._directory_mtime(container)
-            if current_mtime == 0:
-                continue
-            catalog.containers[container] = current_mtime
-            metadata_path = container / "metadata.json"
-            if metadata_path.exists():
-                self._refresh_candidate(catalog, metadata_path.resolve(strict=False))
-            try:
-                children = list(os.scandir(container))
-            except OSError:
-                catalog.containers[container] = -1
-                continue
-            for child in children:
-                visited += 1
-                if visited > self.max_scan_entries:
-                    self._rebuild(catalog, now=now, initial=False)
-                    return
-                if not child.is_dir(follow_symlinks=False):
+            queue: list[Path] = []
+            known_roots = self._candidate_source_roots(
+                source_id=catalog.source_id,
+                runtime_epoch_id=catalog.runtime_epoch_id,
+            )
+            for source_root in known_roots:
+                if source_root.exists() and source_root not in catalog.containers:
+                    queue.append(source_root)
+            for container, previous_mtime in tuple(catalog.containers.items()):
+                current_mtime = self._directory_mtime(container)
+                if current_mtime == 0:
+                    catalog.containers.pop(container, None)
                     continue
-                child_path = Path(child.path).resolve(strict=False)
-                if child_path not in catalog.containers:
-                    catalog.containers[child_path] = self._directory_mtime(child_path)
-                    if child_path not in queued:
-                        queue.append(child_path)
-                        queued.add(child_path)
-        # Retention advances one root-wide generation after deleting segments.
-        # Incremental refresh has already revalidated every known metadata path
-        # and walked changed containers, so acknowledge that generation here;
-        # otherwise every lookup would repeat the same refresh until the next
-        # full reconcile.
-        catalog.root_generation = self._read_root_generation()
-        catalog.last_refresh_at = now
+                if current_mtime != previous_mtime:
+                    queue.append(container)
+
+            visited = 0
+            queued = set(queue)
+            while queue:
+                container = queue.pop(0)
+                queued.discard(container)
+                current_mtime = self._directory_mtime(container)
+                if current_mtime == 0:
+                    continue
+                catalog.containers[container] = current_mtime
+                metadata_path = container / "metadata.json"
+                if metadata_path.exists():
+                    self._refresh_candidate(catalog, metadata_path.resolve(strict=False))
+                try:
+                    children = list(os.scandir(container))
+                except OSError:
+                    catalog.containers[container] = -1
+                    continue
+                for child in children:
+                    visited += 1
+                    if visited > self.max_scan_entries:
+                        self._rebuild(catalog, now=now, initial=False)
+                        return
+                    if not child.is_dir(follow_symlinks=False):
+                        continue
+                    child_path = Path(child.path).resolve(strict=False)
+                    if child_path not in catalog.containers:
+                        catalog.containers[child_path] = self._directory_mtime(child_path)
+                        if child_path not in queued:
+                            queue.append(child_path)
+                            queued.add(child_path)
+            # Retention advances one root-wide generation after deleting segments.
+            # Incremental refresh has already revalidated every known metadata path
+            # and walked changed containers, so acknowledge that generation here;
+            # otherwise every lookup would repeat the same refresh until the next
+            # full reconcile.
+            catalog.root_generation = self._read_root_generation()
+            catalog.last_refresh_at = now
 
     def _refresh_candidate(self, catalog: _Catalog, metadata_path: Path) -> None:
         try:
-            metadata_identity = FileIdentity.from_path(metadata_path)
+            metadata_identity = self._file_identity(metadata_path)
         except OSError:
             catalog.pending.discard(metadata_path)
             catalog.failed_identities.pop(metadata_path, None)
@@ -506,7 +640,7 @@ class RollingSegmentIndex:
             self._remove_entry(catalog, metadata_path)
             return
         try:
-            video_identity = FileIdentity.from_path(video_path)
+            video_identity = self._file_identity(video_path)
         except OSError:
             catalog.pending.add(metadata_path)
             catalog.failed_identities.pop(metadata_path, None)
@@ -537,14 +671,17 @@ class RollingSegmentIndex:
             catalog.pending.add(metadata_path)
             self._remove_entry(catalog, metadata_path)
             return
+        self._record_count("new_or_changed")
         cache_key = (str(metadata_path), metadata_identity)
         rows = self._row_cache.get(cache_key)
         if rows is not None:
             self._stats["row_cache_hits"] += 1
+            self._record_count("row_cache_hits")
             self._row_cache.move_to_end(cache_key)
             parsed = list(rows)
         else:
             self._stats["row_cache_misses"] += 1
+            self._record_count("row_cache_misses")
             try:
                 parsed = self._parse_rows(metadata_path)
             except Exception:
@@ -611,7 +748,13 @@ class RollingSegmentIndex:
                 self._row_cache.pop(key, None)
 
     def _parse_rows(self, metadata_path: Path) -> list[dict]:
-        rows = [row for row in load_native_metadata(metadata_path) if isinstance(row, dict)]
+        self._record_count("full_row_parses")
+        with self._timed("full_row_parse_ms"):
+            rows = [
+                row
+                for row in load_native_metadata(metadata_path)
+                if isinstance(row, dict)
+            ]
         self._stats["metadata_parses"] += 1
         return rows
 
@@ -627,6 +770,7 @@ class RollingSegmentIndex:
         while len(self._row_cache) > self.row_cache_max_entries:
             self._row_cache.popitem(last=False)
             self._stats["row_cache_evictions"] += 1
+            self._record_count("row_cache_evictions")
 
     def _evict_catalogs(self) -> None:
         while len(self._catalogs) > self.max_catalogs:
@@ -634,12 +778,12 @@ class RollingSegmentIndex:
             self._stats["catalog_evictions"] += 1
 
     def _pin_opened(self, token: str) -> None:
-        with self._lock:
+        with self._locked():
             self._active_pins.add(token)
             self._stats["read_pins_created"] += 1
 
     def _pin_closed(self, token: str) -> None:
-        with self._lock:
+        with self._locked():
             self._active_pins.discard(token)
             self._stats["read_pins_released"] += 1
 
@@ -707,24 +851,32 @@ class RollingSegmentIndex:
                     continue
         return None
 
+    def _file_identity(self, path: Path) -> FileIdentity:
+        self._record_count("stat_calls")
+        with self._timed("stat_ms"):
+            return FileIdentity.from_path(path)
+
     def _is_stable(self, identity: FileIdentity) -> bool:
         modified_at = identity.mtime_ns / 1_000_000_000.0
         return self._wall_clock() - modified_at >= self.stability_age_s
 
     def _read_root_generation(self) -> tuple[int, int]:
         path = self.root / GENERATION_FILE
+        self._record_count("stat_calls")
         try:
-            stat = path.stat()
-            text = path.read_text(encoding="utf-8").strip()
+            with self._timed("stat_ms"):
+                stat = path.stat()
+                text = path.read_text(encoding="utf-8").strip()
             generation = int(text or 0)
             return generation, int(stat.st_mtime_ns)
         except (OSError, ValueError):
             return 0, 0
 
-    @staticmethod
-    def _directory_mtime(path: Path) -> int:
+    def _directory_mtime(self, path: Path) -> int:
+        self._record_count("stat_calls")
         try:
-            return int(path.stat().st_mtime_ns)
+            with self._timed("stat_ms"):
+                return int(path.stat().st_mtime_ns)
         except OSError:
             return 0
 
