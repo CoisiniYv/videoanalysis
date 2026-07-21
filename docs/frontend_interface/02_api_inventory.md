@@ -1,5 +1,7 @@
 # Operator API 清单
 
+更新时间：2026-07-20。基线为当前工作区；接口实现优先于本文。
+
 本清单由当前 FastAPI `app.openapi()`、router decorators 和前端请求代码交叉提取。
 
 符号：
@@ -183,6 +185,7 @@ Router：`services/api/app/routers/evidence.py`
 | 状态 | Method | Path | 参数 | 用途 |
 | --- | --- | --- | --- | --- |
 | 使用 | GET | `/api/v1/evidence/health` | 无 | 验证 DB index path |
+| 可用 | GET | `/api/v1/evidence` | 与 bundles 相同 | bundle 列表短路径 alias |
 | 使用 | GET | `/api/v1/evidence/bundles` | filters + limit/offset | 列表和分页 |
 | 使用 | GET | `/api/v1/evidence/bundles/{event_id}` | path | manifest/detail |
 | 使用 | GET | `/api/v1/evidence/bundles/{event_id}/annotations` | `include_records=true` | overlay records |
@@ -241,6 +244,7 @@ Router：`services/api/app/routers/runtime.py`
 | 状态 | Method | Path | 参数/Body | 用途 |
 | --- | --- | --- | --- | --- |
 | 使用 | GET | `/api/v1/runtime/overview` | 无 | 总览、source、forwarder、evidence、container |
+| 使用 | GET | `/api/v1/runtime/latency` | 无 | annotation、DB、A/B source/queue 的在线延迟摘要 |
 | 使用 | GET | `/api/v1/runtime/control` | 无 | 控制状态 |
 | 使用 | POST | `/api/v1/runtime/control/single/start` | 无 | 启动单路 |
 | 使用 | POST | `/api/v1/runtime/control/single/stop` | 无 | 停止单路 |
@@ -251,10 +255,20 @@ Router：`services/api/app/routers/runtime.py`
 | 使用 | POST | `/api/v1/runtime/performance-config/apply` | `force=false` | 应用性能配置 |
 | 使用 | GET | `/api/v1/runtime/topology-config` | 无 | 拓扑配置和值 |
 | 使用 | PUT | `/api/v1/runtime/topology-config` | topology JSON | 保存，不应用 |
-| 使用 | POST | `/api/v1/runtime/topology-config/apply` | `force=false` | 应用拓扑 |
+| 使用 | POST | `/api/v1/runtime/topology-config/apply` | 可选 camera selection body；`force=false` | 同步应用拓扑，高级兼容入口 |
+| 使用 | POST | `/api/v1/runtime/topology-config/apply-async` | `{source_ids, disable_unselected}`；`force=false` | 快速启动的后台应用入口 |
+| 使用 | GET | `/api/v1/runtime/topology-config/apply-status` | 无 | 恢复/轮询后台启动进度 |
 
 `force=true` 会绕过 active evidence 保护语义，当前 UI 不主动发送 force；不要把它作为
 普通重试按钮。
+
+命名预设的快速启动顺序是：先 `PUT topology-config` 保存服务端 preset 和分片策略，
+再 `POST apply-async` 原子应用所选 source。apply-status 的状态文件可跨浏览器刷新读取，
+但执行线程不跨 API 进程重启存活。
+
+`/runtime/latency` 当前返回 `status`、annotation media/write age、event/bundle DB lag、
+active evidence 摘要、A/B queue/source age 和 10s/60s 阈值。它是在线 UI 信号，不是
+pressure acceptance artifact。
 
 ## 8. 存储维护接口
 
@@ -310,3 +324,8 @@ upgrade 转发。因此不能假设 `ws://host:8090/api/v1/ws/alerts` 已可用�
 
 当前 `evidence.js` 不使用 `/api/bundles`。新增功能应保持 `/api/v1/evidence` 为唯一证据
 查询合同，除非任务明确是维护兼容路径。
+
+## 11. 不存在的 8090 路径
+
+8090 当前不代理 FastAPI `/docs` 或 `/openapi.json`。交互式文档只在内部 `api:8000`
+存在，不应写成客户/操作员入口。

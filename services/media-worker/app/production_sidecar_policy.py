@@ -17,9 +17,10 @@ DEFAULT_SIDECAR_CONFIG = {
     "require_trigger_face": True,
     "write_mode": "sidecar_only",
     "fail_open": True,
-    "lookback_count": 10000,
-    "range_count": 2000,
-    "max_scan": 20000,
+    "lookback_count": 500,
+    "range_count": 250,
+    "max_scan": 500,
+    "scan_hard_limit": 500,
     "range_cache_bucket_ms": 0,
     "range_cache_ttl_s": 0.0,
     "range_cache_max_entries": 0,
@@ -118,6 +119,10 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
                 source.get("FRAME_CACHE_SIDECAR_MAX_SCAN"),
                 int(config["max_scan"]),
             ),
+            "scan_hard_limit": _positive_int(
+                source.get("FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT"),
+                int(config["scan_hard_limit"]),
+            ),
             "range_cache_bucket_ms": _positive_int(
                 source.get("FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS"),
                 int(config.get("range_cache_bucket_ms") or 0),
@@ -202,6 +207,9 @@ def load_frame_cache_sidecar_config(env: dict[str, str] | None = None) -> dict[s
             ),
         }
     )
+    scan_hard_limit = int(config["scan_hard_limit"])
+    for key in ("lookback_count", "range_count", "max_scan"):
+        config[key] = min(int(config[key]), scan_hard_limit)
     config["production_replacement"] = config["write_mode"] != "sidecar_only"
     return config
 

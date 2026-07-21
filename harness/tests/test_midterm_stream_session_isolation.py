@@ -215,6 +215,7 @@ def test_media_worker_frame_cache_sidecar_filters_stream_session() -> None:
         event={
             "source_id": "primary_rtsp",
             "camera_id": "primary_rtsp",
+            "created_at": "2026-06-12T01:00:00Z",
             "frame_uuid": "current-session",
             "frame_pts": 100_000_000_000,
             "payload": {

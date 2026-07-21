@@ -27,6 +27,7 @@ from app.routers.evidence import (  # noqa: E402
     _resolve_artifact_path,
     evidence_bundle_annotations,
     evidence_bundle_sink_metadata,
+    router as evidence_router,
 )
 
 
@@ -73,6 +74,13 @@ class _Conn:
         return cursor
 
 
+def test_evidence_bundle_list_supports_frontend_root_alias() -> None:
+    paths = {route.path for route in evidence_router.routes}
+
+    assert "/api/v1/evidence" in paths
+    assert "/api/v1/evidence/bundles" in paths
+
+
 def test_evidence_bundle_list_query_is_database_backed() -> None:
     conn = _Conn()
     rows, total = EventRepository(conn).list_evidence_bundle_summaries(
@@ -92,6 +100,8 @@ def test_evidence_bundle_list_query_is_database_backed() -> None:
     assert total == 1
     assert rows == [{"event_id": "11111111-1111-4111-8111-111111111111", "source_event_id": "source-event-1"}]
     assert "FROM evidence_bundles eb" in data_sql
+    assert "WITH page AS MATERIALIZED" in data_sql
+    assert data_sql.index("WITH page AS MATERIALIZED") < data_sql.index("overlay_artifact")
     assert "LEFT JOIN LATERAL" in data_sql
     assert "LEFT JOIN cameras c" in data_sql
     assert "COALESCE(eb.camera_name, c.name) AS camera_name" in data_sql
@@ -115,6 +125,18 @@ def test_evidence_bundle_list_query_is_database_backed() -> None:
         "intrusion",
         "wall_climb_suspicious",
     ]
+
+
+def test_evidence_bundle_count_skips_camera_join_without_camera_name_filter() -> None:
+    conn = _Conn()
+
+    EventRepository(conn).list_evidence_bundle_summaries(
+        event_category="evidence",
+        limit=10,
+    )
+
+    assert "LEFT JOIN cameras c" not in conn.cursors[0].query
+    assert "WITH page AS MATERIALIZED" in conn.cursors[1].query
 
 
 def test_evidence_category_excludes_face_lookup_events_by_default() -> None:

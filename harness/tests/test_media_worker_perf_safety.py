@@ -142,6 +142,25 @@ def test_frame_cache_dropped_debug_sidecar_is_opt_in() -> None:
     )
 
 
+def test_frame_cache_scan_defaults_and_legacy_overrides_are_capped() -> None:
+    policy = _activate("media-worker", "app.production_sidecar_policy")
+
+    defaults = policy.load_frame_cache_sidecar_config({})
+    overridden = policy.load_frame_cache_sidecar_config(
+        {
+            "FRAME_CACHE_SIDECAR_LOOKBACK_COUNT": "10000",
+            "FRAME_CACHE_SIDECAR_RANGE_COUNT": "10000",
+            "FRAME_CACHE_SIDECAR_MAX_SCAN": "20000",
+        }
+    )
+
+    assert defaults["scan_hard_limit"] == 500
+    assert defaults["max_scan"] <= 500
+    assert overridden["lookback_count"] == 500
+    assert overridden["range_count"] == 500
+    assert overridden["max_scan"] == 500
+
+
 def test_success_prune_removes_frame_cache_dropped_debug_sidecar(tmp_path: Path) -> None:
     worker = _activate("media-worker", "app.worker")
     bundle_dir = tmp_path / "bundle"
@@ -173,6 +192,98 @@ def test_evidence_db_index_expanded_rows_can_be_disabled(monkeypatch: Any) -> No
 
     monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
     assert worker._evidence_db_index_expanded_rows_enabled() is True
+
+
+def test_materialized_bundle_indexes_in_memory_rows_without_sidecar_files(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "raw_clip.mov").write_bytes(b"video")
+    bundle = {
+        "evidence_dir": str(bundle_dir),
+        "_db_metadata": {"event": {"event_id": EVENT_ID}},
+        "_db_summary": {"production_ready": True},
+        "_db_sidecar_summary": {
+            "production_ready": True,
+            "annotation_lines": 1,
+        },
+        "_db_timeline_rows": [
+            {"clip_frame_index": 0, "frame_uuid": "frame-1", "frame_pts": 100}
+        ],
+        "_db_overlay_rows": [
+            {
+                "clip_frame_index": 0,
+                "frame_uuid": "frame-1",
+                "frame_pts": 100,
+                "objects": [{"object_type": "person"}],
+            }
+        ],
+    }
+    captured: dict[str, Any] = {}
+
+    def fake_upsert(_conn: object, **kwargs: Any) -> dict[str, int]:
+        captured.update(kwargs)
+        return {
+            "sidecar_build_ms": 0,
+            "db_bundle_index_ms": 0,
+            "db_artifact_index_ms": 0,
+            "db_timeline_index_ms": 0,
+            "db_overlay_index_ms": 0,
+        }
+
+    monkeypatch.setattr(worker, "upsert_evidence_bundle_index", fake_upsert)
+    monkeypatch.setattr(worker, "_upsert_covered_event_aliases", lambda *_a, **_k: 0)
+    monkeypatch.setattr(worker, "_set_event_db_index_status", lambda *_a, **_k: None)
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+
+    assert worker._index_finalized_bundle(
+        object(),
+        event_id=EVENT_ID,
+        evidence_state="materialized",
+        bundle=bundle,
+    ) is True
+    assert captured["timeline_rows"] == bundle["_db_timeline_rows"]
+    assert captured["overlay_rows"] == bundle["_db_overlay_rows"]
+    assert not (bundle_dir / "annotations.frame_cache.identity.jsonl").exists()
+    assert not (bundle_dir / "summary.frame_cache.identity.json").exists()
+    assert (bundle_dir / "raw_clip.mov").is_file()
+
+
+def test_db_index_failure_persists_in_memory_annotation_diagnostics(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    (bundle_dir / "raw_clip.mov").write_bytes(b"video")
+    bundle = {
+        "evidence_dir": str(bundle_dir),
+        "_db_sidecar_summary": {"production_ready": True},
+        "_db_overlay_rows": [
+            {"clip_frame_index": 0, "objects": [{"object_type": "person"}]}
+        ],
+    }
+    monkeypatch.setattr(
+        worker,
+        "upsert_evidence_bundle_index",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("db unavailable")),
+    )
+    monkeypatch.setattr(worker, "_set_event_db_index_status", lambda *_a, **_k: None)
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+
+    assert worker._index_finalized_bundle(
+        object(),
+        event_id=EVENT_ID,
+        evidence_state="materialized",
+        bundle=bundle,
+    ) is False
+    assert (bundle_dir / "annotations.frame_cache.identity.jsonl").is_file()
+    assert (bundle_dir / "summary.frame_cache.identity.json").is_file()
+    assert (bundle_dir / "raw_clip.mov").is_file()
 
 
 def test_rolling_cache_finalizer_uses_metadata_frame_count_and_duration(
@@ -404,13 +515,32 @@ def test_rolling_cache_candidates_do_not_claim_before_ready_at() -> None:
     )
 
     assert worker._rolling_cache_candidate_tasks(conn, cfg) == []
-    assert "rolling_cache_ready_at <= now()" in conn.cursor_obj.sql
-    assert "et.materialization_ready_at <= now()" in conn.cursor_obj.sql
+    video_sql = conn.cursor_obj.sql
+    assert "rolling_cache_ready_at <= now()" in video_sql
+    assert "et.materialization_ready_at <= now()" in video_sql
+    assert "et.materialization_next_attempt_at" in video_sql
+    assert "et.materialization_owner" in video_sql
+    assert "to_jsonb(et)" not in video_sql
+    assert "et.created_at AS task_created_at" in video_sql
+    assert "materialization_due_at ASC" in video_sql
+    assert "rolling_cache_ready_at ASC" in video_sql
+    assert "task_created_at ASC" in video_sql
     assert "segment_ready_delay_s" not in conn.cursor_obj.params
     assert worker.ROLLING_CACHE_TASK_STATUSES == (
         "manifest_ready",
         "materialization_pending",
     )
+
+    image_conn = _Conn()
+    assert worker._rolling_cache_image_candidate_tasks(image_conn, cfg) == []
+    image_sql = image_conn.cursor_obj.sql
+    assert "et.materialization_next_attempt_at" in image_sql
+    assert "et.materialization_owner" in image_sql
+    assert "to_jsonb(et)" not in image_sql
+    assert "et.created_at AS task_created_at" in image_sql
+    assert "materialization_due_at ASC" in image_sql
+    assert "rolling_cache_ready_at ASC" in image_sql
+    assert "task_created_at ASC" in image_sql
 
 
 def test_rolling_cache_coverage_miss_uses_pending_not_terminal_deferred() -> None:
@@ -748,7 +878,9 @@ def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> 
         }
     ]
     assert summary["bounded_range_used"] is True
-    assert summary["read_mode"] == "bounded_stream_id_range"
+    assert summary["read_mode"] == "bounded_producer_write_time"
+    assert summary["retrieval_time_domain"] == "producer_write_time"
+    assert summary["retrieval_anchor_source"] == "event.created_at"
     assert summary["range_max"] != "+"
     assert summary["range_min"] != "-"
     assert summary["stream_session_filter_mode"] == "strict"
@@ -759,7 +891,163 @@ def test_frame_cache_reader_uses_bounded_stream_range_and_filters_identity() -> 
     assert summary["messages_retained"] == 1
     assert summary["pages_read"] == 1
     assert summary["entries_scanned_total"] == 4
-    assert summary["stop_reason"] == "range_exhausted"
+    assert summary["configured_max_scan"] == 20000
+    assert summary["max_scan"] == 500
+    assert summary["scan_limit_clamped"] is True
+    assert summary["stop_reason"] == "event_window_satisfied"
+
+
+def test_frame_cache_anchor_requires_exact_media_identity_when_available() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    source_observation_id = "face:source-1:7:100000"
+    mismatched = _frame_annotation("other-frame", frame_pts=99_000_000_000)
+    mismatched["objects"] = [
+        {"source_observation_id": source_observation_id}
+    ]
+
+    assert writer._frame_annotation_anchor_found(
+        [mismatched],
+        anchor={
+            "frame_uuid": "event-frame",
+            "frame_pts": 100_000_000_000,
+            "source_observation_id": source_observation_id,
+        },
+    ) is False
+
+
+def test_frame_cache_reader_without_retrieval_anchor_does_not_query_redis() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    class FakeRedis:
+        def xrevrange(self, *_args: object, **_kwargs: object) -> list[object]:
+            raise AssertionError("Redis must not be queried without a bounded anchor")
+
+    messages, summary = writer._read_frame_annotations(
+        redis_client=FakeRedis(),
+        config={"range_count": 500, "max_scan": 500},
+        event={
+            "event_type": "intrusion",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "event-frame",
+            "frame_pts": 100_000_000_000,
+        },
+    )
+
+    assert messages == []
+    assert summary["read_mode"] == "missing_retrieval_anchor"
+    assert summary["stop_reason"] == "missing_retrieval_anchor"
+    assert summary["entries_scanned_total"] == 0
+
+
+def test_frame_cache_writer_does_not_build_from_non_exact_media_anchor(
+    tmp_path: Path,
+) -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    source_observation_id = "face:source-1:7:100000"
+    mismatched = _frame_annotation("other-frame", frame_pts=99_000_000_000)
+    mismatched["objects"] = [
+        {"source_observation_id": source_observation_id}
+    ]
+
+    class FakeRedis:
+        def xrevrange(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> list[tuple[str, dict[str, str]]]:
+            return [("1781226000000-0", {"data": json.dumps(mismatched)})]
+
+    summary, result = writer.write_frame_cache_identity_sidecar(
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "event-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {
+                "runtime_epoch_id": CURRENT_EPOCH,
+                "stream_session_id": "session-1",
+                "source_observation_id": source_observation_id,
+            },
+        },
+        evidence_dir=str(tmp_path),
+        raw_clip_path=None,
+        metadata_path=None,
+        redis_client=FakeRedis(),
+        config={
+            "enabled": True,
+            "event_types": {"intrusion"},
+            "write_mode": "sidecar_only",
+            "require_trigger_face": False,
+            "fail_open": False,
+            "range_count": 10,
+            "max_scan": 10,
+            "annotations_filename": "annotations.frame_cache.identity.jsonl",
+            "summary_filename": "summary.frame_cache.identity.json",
+        },
+    )
+
+    assert result["written"] is True
+    assert summary["annotation_status"] == "missing_frame_metadata"
+    assert summary["frame_cache_reader_summary"]["messages_retained"] == 1
+    assert summary["frame_cache_reader_summary"]["messages_eligible_for_build"] == 0
+    assert summary["frame_cache_reader_summary"]["media_anchor_exact_match_found"] is False
+    assert Path(result["annotations_path"]).read_text(encoding="utf-8") == ""
+
+
+def test_frame_cache_writer_can_return_rows_without_persisting_sidecars(
+    tmp_path: Path,
+) -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    message = _frame_annotation("event-frame", frame_pts=100_000_000_000)
+
+    class FakeRedis:
+        def xrevrange(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> list[tuple[str, dict[str, str]]]:
+            return [("1781226000000-0", {"data": json.dumps(message)})]
+
+    summary, result = writer.write_frame_cache_identity_sidecar(
+        event={
+            "event_id": EVENT_ID,
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "event-frame",
+            "frame_pts": 100_000_000_000,
+        },
+        evidence_dir=str(tmp_path),
+        raw_clip_path=None,
+        metadata_path=None,
+        redis_client=FakeRedis(),
+        config={
+            "enabled": True,
+            "event_types": {"intrusion"},
+            "write_mode": "sidecar_only",
+            "require_trigger_face": False,
+            "fail_open": False,
+            "range_count": 10,
+            "max_scan": 10,
+            "persist_sidecar_files": False,
+            "annotations_filename": "annotations.frame_cache.identity.jsonl",
+            "summary_filename": "summary.frame_cache.identity.json",
+        },
+    )
+
+    assert summary["frame_cache_reader_summary"]["media_anchor_exact_match_found"] is True
+    assert result["written"] is False
+    assert result["in_memory"] is True
+    assert isinstance(result["annotations"], list)
+    assert result["annotations_path"] is None
+    assert result["summary_path"] is None
+    assert not (tmp_path / "annotations.frame_cache.identity.jsonl").exists()
+    assert not (tmp_path / "summary.frame_cache.identity.json").exists()
 
 
 def test_frame_cache_reader_paginates_bounded_range_until_source_anchor() -> None:
@@ -871,6 +1159,110 @@ def test_frame_cache_reader_paginates_bounded_range_until_source_anchor() -> Non
     assert summary["messages_retained"] == 3
     assert summary["anchor_found"] is True
     assert summary["stop_reason"] == "event_window_satisfied"
+
+
+def test_frame_cache_reader_prefers_event_stream_id_over_created_at() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+    stream_ms = 1_781_226_100_000
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.call: dict[str, object] = {}
+
+        def xrevrange(
+            self,
+            name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            self.call = {"name": name, "max": max, "min": min, "count": count}
+            return [
+                (
+                    f"{stream_ms}-1",
+                    {"data": json.dumps(_frame_annotation("anchor-frame"))},
+                )
+            ]
+
+    redis = FakeRedis()
+    messages, summary = writer._read_frame_annotations(
+        redis_client=redis,
+        config={"range_count": 20, "max_scan": 20},
+        event={
+            "event_redis_stream_id": f"{stream_ms}-77",
+            "created_at": "2026-06-12T02:00:00Z",
+            "event_ts_ms": stream_ms - 100_000,
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "anchor-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {
+                "runtime_epoch_id": CURRENT_EPOCH,
+                "stream_session_id": "session-1",
+            },
+        },
+    )
+
+    assert [message["frame_uuid"] for message in messages] == ["anchor-frame"]
+    assert summary["retrieval_anchor_epoch_ms"] == stream_ms
+    assert summary["retrieval_anchor_source"] == "event.event_redis_stream_id"
+    assert summary["retrieval_time_domain"] == "producer_write_time"
+    assert redis.call["max"] == summary["range_max"]
+    assert redis.call["min"] == summary["range_min"]
+
+
+def test_frame_cache_reader_never_scans_more_than_default_hard_limit() -> None:
+    writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.counts: list[int | None] = []
+
+        def xrevrange(
+            self,
+            _name: str,
+            max: str = "+",
+            min: str = "-",
+            count: int | None = None,
+        ) -> list[tuple[str, dict[str, str]]]:
+            _ = (max, min)
+            self.counts.append(count)
+            return [
+                (
+                    f"1781226000000-{index}",
+                    {
+                        "data": json.dumps(
+                            _frame_annotation(
+                                f"wrong-source-{index}",
+                                source_id="source-2",
+                            )
+                        )
+                    },
+                )
+                for index in range(int(count or 0))
+            ]
+
+    redis = FakeRedis()
+    messages, summary = writer._read_frame_annotations(
+        redis_client=redis,
+        config={"range_count": 10000, "max_scan": 20000},
+        event={
+            "event_type": "intrusion",
+            "created_at": "2026-06-12T01:00:00Z",
+            "source_id": "source-1",
+            "camera_id": "camera-1",
+            "frame_uuid": "anchor-frame",
+            "frame_pts": 100_000_000_000,
+            "payload": {"runtime_epoch_id": CURRENT_EPOCH},
+        },
+    )
+
+    assert messages == []
+    assert redis.counts == [500]
+    assert summary["entries_scanned_total"] == 500
+    assert summary["max_scan"] == 500
+    assert summary["scan_hard_limit"] == 500
+    assert summary["stop_reason"] == "max_scan_reached"
 
 
 def test_frame_cache_reader_reuses_bucketed_range_cache() -> None:
@@ -1180,7 +1572,7 @@ def test_frame_cache_anchor_lag_is_measured_from_latest_exported_pts() -> None:
     assert lag == 7.5
 
 
-def test_frame_cache_sidecar_retries_when_exporter_is_behind(
+def test_frame_cache_sidecar_bypasses_stale_range_before_sleeping(
     monkeypatch: Any,
 ) -> None:
     worker = _activate("media-worker", "app.worker")
@@ -1220,20 +1612,76 @@ def test_frame_cache_sidecar_retries_when_exporter_is_behind(
     )
 
     assert len(calls) == 2
-    assert sleeps == [12.0]
+    assert sleeps == []
     assert summary["annotation_status"] == "complete"
-    assert summary["annotation_anchor_wait"]["attempts"] == 1
+    assert summary["annotation_anchor_wait"]["attempts"] == 0
     assert summary["annotation_anchor_wait"]["initial_lag_s"] == 8.0
     assert summary["annotation_anchor_wait"]["range_cache_bypassed_for_retry"] is True
+    assert summary["annotation_anchor_wait"]["cache_bypass_retries"] == 1
     assert isinstance(summary["sidecar_build_ms"], int)
     assert summary["sidecar_build_ms"] >= 0
     assert calls[0]["config"]["range_cache_ttl_s"] == 900.0
     assert calls[1]["config"]["range_cache_ttl_s"] == 0.0
     assert calls[1]["config"]["range_cache_max_entries"] == 0
-    assert calls[1]["config"]["stream_id_range_unbounded"] is True
+    assert "stream_id_range_unbounded" not in calls[1]["config"]
+    assert summary["annotation_anchor_wait"]["bounded_retry_only"] is True
+    assert summary["annotation_anchor_wait"]["unbounded_retry_used"] is False
+    assert summary["annotation_anchor_wait"]["retry_count"] == 1
+    assert len(summary["annotation_anchor_wait"]["scan_attempts"]) == 2
 
 
-def test_late_annotation_retry_uses_unbounded_stream_id_lookback() -> None:
+def test_frame_cache_sidecar_polls_actual_exporter_lag_in_bounded_steps(
+    monkeypatch: Any,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    calls = []
+    sleeps = []
+
+    def fake_writer(**kwargs):
+        calls.append(kwargs)
+        if len(calls) <= 2:
+            return (
+                {
+                    "annotation_status": "missing_frame_metadata",
+                    "trigger_face_row_frame_pts": 20_000_000_000,
+                    "frame_cache_reader_summary": {
+                        "latest_frame_pts": 12_000_000_000
+                    },
+                },
+                {"annotations_path": "annotations.jsonl"},
+            )
+        return (
+            {
+                "annotation_status": "complete",
+                "trigger_face_row_frame_pts": 20_000_000_000,
+                "frame_cache_reader_summary": {
+                    "latest_frame_pts": 20_000_000_000
+                },
+            },
+            {"annotations_path": "annotations.jsonl"},
+        )
+
+    monkeypatch.setattr(worker, "write_frame_cache_identity_sidecar", fake_writer)
+    monkeypatch.setattr(worker.time, "sleep", sleeps.append)
+    monkeypatch.setenv("FRAME_CACHE_ANCHOR_WAIT_MAX_S", "30")
+    monkeypatch.setenv("FRAME_CACHE_ANCHOR_POLL_MAX_S", "5")
+
+    summary, _ = worker._write_frame_cache_sidecar_after_anchor(
+        event={"event_id": EVENT_ID, "source_id": "source-1"},
+        config={"range_cache_ttl_s": 0.0, "range_cache_max_entries": 0},
+    )
+
+    assert len(calls) == 3
+    assert sleeps == [5.0, 5.0]
+    assert summary["annotation_status"] == "complete"
+    assert summary["annotation_anchor_wait"]["attempts"] == 2
+    assert summary["annotation_anchor_wait"]["cache_bypass_retries"] == 0
+    assert summary["annotation_anchor_wait"]["poll_max_s"] == 5.0
+    assert summary["annotation_anchor_wait"]["retry_count"] == 2
+    assert summary["annotation_anchor_wait"]["max_retries"] == 2
+
+
+def test_late_annotation_retry_request_is_forced_to_bounded_range() -> None:
     writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
 
     range_max, range_min, mode = writer._frame_cache_stream_range(
@@ -1241,8 +1689,9 @@ def test_late_annotation_retry_uses_unbounded_stream_id_lookback() -> None:
         {"stream_id_range_unbounded": True},
     )
 
-    assert (range_max, range_min) == ("+", "-")
-    assert mode == "late_annotation_retry_lookback"
+    assert range_max not in {"", "+"}
+    assert range_min not in {"", "-"}
+    assert mode == "bounded_media_time_fallback"
 
 
 def test_person_bbox_db_recovery_uses_exact_timeline_pts() -> None:

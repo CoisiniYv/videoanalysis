@@ -8,11 +8,15 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+import psycopg
+
+from app.config import get_settings
 from app.services.runtime_apply import (
     DockerSocketClient,
     RuntimeApplyBlockedError,
     RuntimeApplyError,
     check_runtime_restart_evidence_guard,
+    _discover_source_adapter_containers,
 )
 
 
@@ -45,6 +49,8 @@ DEFAULT_SINGLE_STOP_CONTAINERS = (
     "video-analytics-midterm-video-file-sink",
 )
 DEFAULT_DUAL_CONTAINERS = (
+    "video-analytics-midterm-replay-raw-fanout-a",
+    "video-analytics-midterm-replay-raw-fanout-b",
     "video-analytics-midterm-analysis-forwarder-a",
     "video-analytics-midterm-analysis-forwarder-b",
     "video-analytics-midterm-replay-a",
@@ -53,6 +59,8 @@ DEFAULT_DUAL_CONTAINERS = (
     "video-analytics-midterm-savant-b",
     "video-analytics-midterm-video-file-sink-a",
     "video-analytics-midterm-video-file-sink-b",
+    "video-analytics-midterm-adaface-roi-worker",
+    "video-analytics-midterm-cuda-mps-operator",
 )
 
 
@@ -178,12 +186,45 @@ def stop_dual_runtime(
 ) -> dict[str, Any]:
     cfg = config or config_from_env()
     client = docker_client or DockerSocketClient(cfg.docker_socket)
-    actions = [_container_action(client, name, "stop") for name in cfg.dual_containers]
+    source_containers = tuple(_discover_source_adapter_containers(client))
+    actions = [
+        _container_action(client, name, "stop") for name in source_containers
+    ]
+    actions.extend(
+        _container_action(client, name, "stop") for name in cfg.dual_containers
+    )
+    disabled_camera_count = _disable_all_cameras()
     return {
         "runtime_action": "dual_stop",
+        "stop_mode": "capture_and_inference",
+        "disabled_camera_count": disabled_camera_count,
+        "source_containers_stopped": list(source_containers),
+        "drain_workers_left_running": [
+            "video-analytics-midterm-event-worker",
+            "video-analytics-midterm-media-worker",
+            "video-analytics-midterm-rolling-cache-sink-a",
+            "video-analytics-midterm-rolling-cache-sink-b",
+        ],
         "actions": actions,
         "status": runtime_control_status(config=cfg, docker_client=client),
     }
+
+
+def _disable_all_cameras() -> int:
+    conn = psycopg.connect(get_settings().database_url)
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE cameras
+                    SET enabled = FALSE, updated_at = now()
+                    WHERE enabled
+                    """
+                )
+                return int(cur.rowcount or 0)
+    finally:
+        conn.close()
 
 
 def _container_action(client: DockerSocketClient, container_name: str, action: str) -> dict[str, Any]:

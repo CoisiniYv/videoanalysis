@@ -1,273 +1,160 @@
 # Midterm Deployment Quick Reference
 
-## One-Click Scripts
+更新时间：2026-07-20
 
-Three convenience scripts for managing the midterm deployment:
-
-### 1. Start Deployment
+## 整栈命令
 
 ```bash
 bash scripts/midterm_start.sh
-```
-
-**What it does:**
-- Checks prerequisites (Docker, Docker Compose, curl, `ss`, NVIDIA visibility)
-- Creates required runtime directories under `/data/video-analytics`
-- Validates required model assets and YOLOv8-Face stable symlinks
-- Validates compose config with `infra/env/midterm.env`
-- Builds `face-worker` first, then builds the remaining service images
-- Starts all services
-- Waits for the 8090 portal health check and API proxy readiness
-- Displays service status
-
-**After success:**
-- Operator portal: http://127.0.0.1:8090/operator
-- API health: http://127.0.0.1:8090/health
-- Runtime overview: http://127.0.0.1:8090/api/v1/runtime/overview
-
-After startup, use the 8090 operator portal for camera, people/face, evidence,
-storage maintenance, and controlled runtime management. Do not expose the
-internal API service on host port 8000.
-
-### 2. Stop Deployment
-
-```bash
-bash scripts/midterm_stop.sh [OPTIONS]
-```
-
-**Options:**
-- (no options): Stop containers only, preserve volumes/images
-- `-v, --volumes`: Remove volumes (WARNING: deletes Redis/Replay data)
-- `-i, --images`: Remove built images
-- `-a, --all`: Remove both volumes and images
-- `-h, --help`: Show help
-
-**Default behavior:** Graceful shutdown, preserves data for next restart.
-
-**Full cleanup example:**
-```bash
-bash scripts/midterm_stop.sh --all
-```
-
-### 3. Health Check
-
-```bash
 bash scripts/midterm_health.sh
+bash scripts/runtime/doctor_midterm.sh
+bash scripts/midterm_stop.sh
 ```
 
-**Checks performed:**
-- ✓ Container status (12 default services)
-- ✓ Port availability (6396, 8090, 8098, 18080, 18081)
-- ✓ Redis connectivity and streams
-- ✓ Database connectivity (via API)
-- ✓ API endpoints (/health, /runtime/overview, /cameras, /people, /events)
-- ✓ Camera configuration status
-- ✓ Face gallery registration status
-- ✓ Runtime metrics (Savant FPS, Replay status)
-- ✓ GPU availability and utilization
-- ✓ Disk space usage
+`midterm_start.sh` 还会准备快速盘、Savant B 模型 cache，并预创建 8090 管理的双分支
+容器。基础启动完成后，在 8090 选择 40/60 路并启动完整链路。
 
-**Output:** Color-coded pass/warn/fail summary with actionable info.
+`midterm_health.sh` 的固定服务表仍偏向旧单分支：未列出
+`person-observation-worker`，并期待 legacy `source-adapter`。请结合 8090 overview/latency。
 
-## Quick Management Commands
+## 入口
 
-### Check what's running:
+- 操作台：`http://127.0.0.1:8090/operator`
+- 8090 health：`http://127.0.0.1:8090/health`
+- Runtime overview：`http://127.0.0.1:8090/api/v1/runtime/overview`
+- Runtime latency：`http://127.0.0.1:8090/api/v1/runtime/latency`
+- Evidence DB health：`http://127.0.0.1:8090/api/v1/evidence/health`
+
+8090 不代理 FastAPI `/docs`。API 清单见
+`docs/frontend_interface/02_api_inventory.md`。
+
+## Compose 查看命令
+
+为了与启动脚本的存储挂载一致：
+
 ```bash
-docker compose -f infra/docker-compose.midterm.yml ps
+docker compose \
+  --env-file infra/env/midterm.env \
+  -f infra/docker-compose.midterm.yml \
+  -f infra/midterm-storage.override.yml ps
 ```
 
-### View logs:
+查看单个基础服务日志：
+
 ```bash
-# All services
-docker compose -f infra/docker-compose.midterm.yml logs -f
-
-# Specific service
-docker compose -f infra/docker-compose.midterm.yml logs -f savant-security
-docker compose -f infra/docker-compose.midterm.yml logs -f api
-docker compose -f infra/docker-compose.midterm.yml logs -f event-worker
+docker compose \
+  --env-file infra/env/midterm.env \
+  -f infra/docker-compose.midterm.yml \
+  -f infra/midterm-storage.override.yml logs -f api
 ```
 
-### Restart single service (no rebuild):
+双分支容器由 8090/Docker Engine 管理时，也可以直接按容器名查看：
+
 ```bash
-docker compose -f infra/docker-compose.midterm.yml up -d --no-build --force-recreate --no-deps <service>
+docker logs --tail 200 video-analytics-midterm-savant-a
+docker logs --tail 200 video-analytics-midterm-rolling-cache-sink-a
+docker logs --tail 200 video-analytics-midterm-person-observation-worker
 ```
 
-### Restart after code change:
-```bash
-# Only if Dockerfile/requirements/base image changed
-docker compose -f infra/docker-compose.midterm.yml up -d --build <service>
-```
+## 常用 API
 
-## API Endpoints for Camera/People Management
+### 摄像头
 
-### Camera Management
-
-**List cameras:**
 ```bash
 curl --noproxy '*' http://127.0.0.1:8090/api/v1/cameras | jq
 ```
 
-**Add camera:**
+新增摄像头建议默认不加入当前运行：
+
 ```bash
 curl --noproxy '*' -X POST http://127.0.0.1:8090/api/v1/cameras \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Camera 1",
-    "rtsp_url": "rtsp://192.168.1.100:554/stream",
-    "enabled": true
-  }' | jq
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Camera 1","rtsp_url":"rtsp://host/stream","enabled":false}' | jq
 ```
 
-**Get camera config:**
-```bash
-curl --noproxy '*' http://127.0.0.1:8090/api/v1/cameras/1/config | jq
-```
+### 人员/人脸
 
-### People/Face Management
-
-**List registered people:**
 ```bash
 curl --noproxy '*' http://127.0.0.1:8090/api/v1/people | jq
+
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:8090/api/v1/people/register-face \
+  -F 'image=@/path/to/photo.jpg' \
+  -F 'name=John Doe' \
+  -F 'external_person_id=employee_001' | jq
 ```
 
-**Register face:**
-```bash
-curl --noproxy '*' -X POST http://127.0.0.1:8090/api/v1/people/register-face \
-  -F "image=@/path/to/photo.jpg" \
-  -F "full_name=John Doe" \
-  -F "external_person_id=employee_001" | jq
-```
+批量注册使用 `/api/v1/people/register-faces`，重复传 `images` 字段。
 
-**Get person details:**
-```bash
-curl --noproxy '*' http://127.0.0.1:8090/api/v1/people/1 | jq
-```
+### Evidence
 
-### Events and Evidence
-
-**List recent events:**
 ```bash
-curl --noproxy '*' 'http://127.0.0.1:8090/api/v1/events?limit=10' | jq
-```
-
-**Get evidence bundle:**
-```bash
+curl --noproxy '*' 'http://127.0.0.1:8090/api/v1/evidence/bundles?limit=10' | jq
 curl --noproxy '*' http://127.0.0.1:8090/api/v1/evidence/bundles/<event_id> | jq
 ```
 
-## Troubleshooting
-
-### Port conflicts
-If startup fails with port conflicts:
-```bash
-# Check what's using the ports
-ss -ltnp | grep -E ':(6396|8090|8098|18080|18081)'
-
-# Stop old deployment
-bash scripts/midterm_stop.sh
-```
-
-### Savant not processing frames
-```bash
-# Check Savant logs
-docker compose -f infra/docker-compose.midterm.yml logs -f savant-security
-
-# Check supervisor status
-docker compose -f infra/docker-compose.midterm.yml logs -f api | grep -i savant
-
-# Trigger recovery
-curl --noproxy '*' -X POST http://127.0.0.1:8090/api/v1/maintenance/savant/recover
-```
-
-### No cameras showing
-```bash
-# Check if cameras are configured in database
-curl --noproxy '*' http://127.0.0.1:8090/api/v1/cameras | jq '.data | length'
-
-# Check if runtime config applied
-docker compose -f infra/docker-compose.midterm.yml logs api | grep -i "runtime apply"
-```
-
-### Face recognition not working
-```bash
-# Check gallery status
-curl --noproxy '*' http://127.0.0.1:8090/api/v1/people | jq '.data | length'
-
-# Check face worker logs
-docker compose -f infra/docker-compose.midterm.yml logs -f face-worker
-
-# Check if face models loaded
-docker compose -f infra/docker-compose.midterm.yml logs api | grep -i "adaface\|yolov8"
-```
-
-## Typical Workflow
-
-### First-time setup:
-```bash
-# 1. Start everything
-bash scripts/midterm_start.sh
-
-# 2. Check health
-bash scripts/midterm_health.sh
-
-# 3. Add camera via operator portal (http://127.0.0.1:8090/operator)
-#    or via API
-
-# 4. Register people for face recognition
-```
-
-### Daily operation:
-```bash
-# Morning: Start
-bash scripts/midterm_start.sh
-
-# Check if everything healthy
-bash scripts/midterm_health.sh
-
-# Evening: Stop (preserve data)
-bash scripts/midterm_stop.sh
-```
-
-### After code changes:
-```bash
-# 1. Stop services
-bash scripts/midterm_stop.sh
-
-# 2. Commit changes
-git add -A && git commit -m "..."
-
-# 3. Restart (will rebuild changed services)
-bash scripts/midterm_start.sh
-
-# 4. Verify
-bash scripts/midterm_health.sh
-```
-
-## Migration Package Prep
-
-Before creating migration package (see `docs/midterm_migration_runbook_2026-06-23.md`):
+### Runtime
 
 ```bash
-# 1. Ensure clean state
-git status --short
-
-# 2. Commit all changes or stash
-git add -A && git commit -m "Migration candidate: ..."
-
-# 3. Run health check
-bash scripts/midterm_health.sh
-
-# 4. Create package
-export MIGRATION_ID=midterm-migration-$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p /data/video-analytics/artifacts/migrations/$MIGRATION_ID
-
-# ... follow runbook Section 4
+curl --noproxy '*' http://127.0.0.1:8090/api/v1/runtime/topology-config | jq
+curl --noproxy '*' http://127.0.0.1:8090/api/v1/runtime/topology-config/apply-status | jq
+curl --noproxy '*' http://127.0.0.1:8090/api/v1/runtime/latency | jq
 ```
 
-## Quick Links
+普通操作员应使用 8090 快速启动器，不直接拼 apply body。
 
-- **Operator Portal:** http://127.0.0.1:8090/operator
-- **API Docs:** http://127.0.0.1:8090/docs
-- **Health:** http://127.0.0.1:8090/health
-- **Runtime Overview:** http://127.0.0.1:8090/api/v1/runtime/overview
-- **Evidence Viewer:** http://127.0.0.1:8098/
+### Savant supervisor
+
+```bash
+curl --noproxy '*' http://127.0.0.1:8090/api/v1/cameras/runtime/supervisor | jq
+curl --noproxy '*' -X POST \
+  http://127.0.0.1:8090/api/v1/cameras/runtime/supervisor/recover | jq
+```
+
+## 端口
+
+| 端口 | 用途 |
+| ---: | --- |
+| 8090 | 操作台、API/media proxy |
+| 6396 | Redis |
+| 8098 | 基础 Replay API |
+| 18080 | 基础 Savant metrics |
+| 18081 | 基础 analysis-forwarder metrics |
+| 18184 | 基础 raw fanout metrics |
+| 18180/18181 | A/B Savant metrics |
+| 18185/18186 | A/B raw fanout metrics |
+| 18187 | ROI AdaFace metrics |
+
+## 快速排障顺序
+
+### 完整启动失败
+
+1. `apply-status` phase/error/details；
+2. selected source 数是否精确为 40/60；
+3. A/B、ROI、rolling、MPS 预创建容器是否存在；
+4. Savant B 模型 cache 是否完整；
+5. active evidence guard；
+6. dynamic source/RTSP 是否收敛。
+
+### 有推理、无 evidence
+
+完整预设 `security.record_requests=0` 可以正常。依次检查 event、task gate、rolling
+segment coverage、media task phase/lease、finalizer handoff、DB index 和媒体文件。
+
+### 无人员轨迹
+
+检查 `security.person_observations` 的
+`person-observation-workers-midterm` group lag/pending，以及独立 person worker 日志。
+
+### 无人脸命中
+
+检查 ROI worker pending/lag、face observations、face-worker、图库注册和当前 effective
+vector backend。默认是 pgvector；不要假设 Qdrant 已启用。
+
+## 关键文档
+
+- `docs/current_architecture.md`
+- `docs/current_mainline_status.md`
+- `docs/midterm_deployment.md`
+- `docs/midterm_web_operator_guide.md`
+- `docs/frontend_interface/02_api_inventory.md`

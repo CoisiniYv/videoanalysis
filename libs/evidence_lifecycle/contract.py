@@ -8,10 +8,23 @@ reports.  It must not import Redis, psycopg, HTTP clients or subprocess.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:  # Python 3.7-3.10 host-side pressure harness compatibility.
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        """Small stdlib-compatible fallback for enum.StrEnum."""
+
+        def __str__(self) -> str:
+            return str(self.value)
+
 import hashlib
 import math
-from typing import Final
+try:
+    from typing import Final
+except ImportError:  # Final is typing-only and was added in Python 3.8.
+    Final = object
 
 
 MATERIALIZATION_STATE_CONTRACT_VERSION: Final = "evidence-materialization-v2"
@@ -228,6 +241,10 @@ _REASON_RULES: Final = (
         (
             "coverage_not_complete",
             "coverage_miss",
+            "requested_window_internal_gap",
+            "internal_gap_ns=",
+            "rolling_cache_output_duration_short",
+            "rolling_cache_output_frame_rate_low",
             "pre_gap_ns=",
             "post_gap_ns=",
             "window_not_covered",
@@ -292,7 +309,7 @@ _REASON_RULES: Final = (
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ReasonClassification:
     code: str
     error_class: EvidenceErrorClass

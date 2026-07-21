@@ -76,6 +76,14 @@ class RecoveryResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FinalizerPendingMetrics:
+    total: int = 0
+    unleased: int = 0
+    leased: int = 0
+    oldest_age_ms: int = 0
+
+
 def clear_schema_capability_cache() -> None:
     _SCHEMA_CAPABILITY_CACHE.clear()
 
@@ -504,8 +512,18 @@ def retry_finalizer_handoff(
             reason=reason,
             retry_hint_s=retry_hint_s,
         )
+    # Capacity rejection is normal bounded-queue backpressure, not a failing
+    # media attempt.  Reusing the attempt generation here can expand a busy
+    # finalizer retry to ten seconds even though a slot normally opens on the
+    # next scheduler tick.  Keep capacity retries short and jittered while
+    # retaining exponential backoff for dependency failures.
+    delay_attempt = (
+        1
+        if classification.code == "capacity_unavailable"
+        else max(1, lease.generation)
+    )
     delay_s = retry_delay_seconds(
-        max(1, lease.generation),
+        delay_attempt,
         retry_hint_s=retry_hint_s,
         jitter_key=lease.event_id,
     )
@@ -516,7 +534,11 @@ def retry_finalizer_handoff(
             SET status = 'finalizing',
                 materialization_status = 'materializing',
                 materialization_phase = 'finalizer_pending',
-                materialization_phase_updated_at = now(),
+                materialization_phase_updated_at = CASE
+                    WHEN materialization_phase = 'finalizer_pending'
+                        THEN materialization_phase_updated_at
+                    ELSE now()
+                END,
                 materialization_owner = 'media_finalizer',
                 materialization_next_attempt_at =
                     now() + %(delay_s)s::double precision * interval '1 second',
@@ -561,6 +583,109 @@ def retry_finalizer_handoff(
         _project_event(
             conn,
             event_id=lease.event_id,
+            materialization_status=MaterializationStatus.RUNNING.value,
+            phase=MaterializationPhase.FINALIZER_PENDING.value,
+            reason=classification.code,
+        )
+    return changed
+
+
+def retry_unclaimed_finalizer_handoff(
+    conn: psycopg.Connection,
+    *,
+    event_id: str,
+    reason: str,
+    retry_hint_s: float = 0.0,
+) -> bool:
+    """Delay an unleased durable handoff without demoting its lifecycle phase.
+
+    A recovered ``finalizer_pending`` row is already the PostgreSQL-backed
+    admission queue.  Generic unclaimed retry would move it to
+    ``waiting_ready`` and make it invisible to handoff recovery, so this
+    transition deliberately preserves both the phase and immutable handoff.
+    """
+    classification = classify_reason(reason)
+    if not classification.retryable:
+        return fail_unclaimed_task(conn, event_id=event_id, reason=reason)
+    if not supports_lifecycle_v2(conn):
+        return schedule_unclaimed_retry(
+            conn,
+            event_id=event_id,
+            reason=reason,
+            retry_hint_s=retry_hint_s,
+        )
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT materialization_attempt_count
+            FROM evidence_tasks
+            WHERE event_id = %(event_id)s::uuid
+              AND materialization_status = 'materializing'
+              AND materialization_phase = 'finalizer_pending'
+              AND materialization_handoff <> '{}'::jsonb
+              AND materialization_lease_token IS NULL
+            """,
+            {"event_id": event_id},
+        )
+        row = cur.fetchone()
+    if not row:
+        return False
+    attempt = int(row.get("materialization_attempt_count") or 1)
+    delay_attempt = (
+        1 if classification.code == "capacity_unavailable" else max(1, attempt)
+    )
+    delay_s = retry_delay_seconds(
+        delay_attempt,
+        retry_hint_s=retry_hint_s,
+        jitter_key=event_id,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET status = 'finalizing',
+                materialization_status = 'materializing',
+                materialization_phase = 'finalizer_pending',
+                -- Capacity retries are queue polling, not a new handoff.  Keep
+                -- the original queue-entry timestamp so oldest_handoff_age_ms
+                -- cannot be reset indefinitely by repeated admission misses.
+                materialization_phase_updated_at = materialization_phase_updated_at,
+                materialization_owner = 'media_finalizer',
+                materialization_next_attempt_at =
+                    now() + %(delay_s)s::double precision * interval '1 second',
+                materialization_retry_reason = %(reason_code)s,
+                materialization_defer_reason = NULL,
+                error_message = %(reason_code)s,
+                materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'lifecycle_v2_finalizer_retry',
+                        jsonb_build_object(
+                            'reason_code', %(reason_code)s::text,
+                            'detail', %(reason_detail)s::text,
+                            'delay_s', %(delay_s)s::double precision,
+                            'scheduled_at', now(),
+                            'lease_state', 'unclaimed'
+                        )
+                    ),
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND materialization_status = 'materializing'
+              AND materialization_phase = 'finalizer_pending'
+              AND materialization_handoff <> '{}'::jsonb
+              AND materialization_lease_token IS NULL
+            """,
+            {
+                "event_id": event_id,
+                "reason_code": classification.code,
+                "reason_detail": str(reason or ""),
+                "delay_s": delay_s,
+            },
+        )
+        changed = bool(cur.rowcount and cur.rowcount > 0)
+    if changed:
+        _project_event(
+            conn,
+            event_id=event_id,
             materialization_status=MaterializationStatus.RUNNING.value,
             phase=MaterializationPhase.FINALIZER_PENDING.value,
             reason=classification.code,
@@ -1488,7 +1613,9 @@ def recoverable_finalizer_handoffs(
                    materialization_handoff,
                    source_id,
                    runtime_epoch_id,
-                   materialization_lease_generation
+                   materialization_lease_generation,
+                   materialization_audit->'lifecycle_v2_handoff'
+                       ->>'persisted_at' AS handoff_persisted_at
             FROM evidence_tasks
             WHERE materialization_status = 'materializing'
               AND materialization_phase = 'finalizer_pending'
@@ -1506,6 +1633,47 @@ def recoverable_finalizer_handoffs(
             {"limit": max(1, int(limit or 1))},
         )
         return [dict(row) for row in cur.fetchall()]
+
+
+def finalizer_pending_metrics(
+    conn: psycopg.Connection,
+) -> FinalizerPendingMetrics:
+    """Return the durable finalizer queue depth and oldest handoff age."""
+    if not supports_lifecycle_v2(conn):
+        return FinalizerPendingMetrics()
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT count(*)::bigint AS total,
+                   count(*) FILTER (
+                       WHERE materialization_lease_token IS NULL
+                   )::bigint AS unleased,
+                   count(*) FILTER (
+                       WHERE materialization_lease_token IS NOT NULL
+                   )::bigint AS leased,
+                   COALESCE(
+                       floor(
+                           extract(
+                               epoch FROM (
+                                   now() - min(materialization_phase_updated_at)
+                               )
+                           ) * 1000
+                       ),
+                       0
+                   )::bigint AS oldest_age_ms
+            FROM evidence_tasks
+            WHERE materialization_status = 'materializing'
+              AND materialization_phase = 'finalizer_pending'
+              AND materialization_handoff <> '{}'::jsonb
+            """
+        )
+        row = cur.fetchone() or {}
+    return FinalizerPendingMetrics(
+        total=max(0, int(row.get("total") or 0)),
+        unleased=max(0, int(row.get("unleased") or 0)),
+        leased=max(0, int(row.get("leased") or 0)),
+        oldest_age_ms=max(0, int(row.get("oldest_age_ms") or 0)),
+    )
 
 
 def _transition_event_ids(

@@ -32,7 +32,7 @@ parameters:
   face_nms_iou_threshold: ${oc.decode:${oc.env:FACE_NMS_IOU_THRESHOLD, 0.5}}
   face_min_width: ${oc.decode:${oc.env:FACE_MIN_WIDTH, 40}}
   face_min_height: ${oc.decode:${oc.env:FACE_MIN_HEIGHT, 40}}
-  max_same_source_frames: 1
+  max_same_source_frames: ${oc.decode:${oc.env:MAX_SAME_SOURCE_FRAMES, 1}}
   batched_push_timeout: ${oc.decode:${oc.env:BATCHED_PUSH_TIMEOUT, 40000}}
   queue_maxsize: 10
   telemetry:

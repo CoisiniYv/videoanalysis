@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import socket
@@ -191,12 +192,24 @@ def operator_index() -> FileResponse:
 async def operator_api_proxy(path: str, request: Request) -> Response:
     target = _operator_proxy_url(path)
     body = await request.body()
-    return _proxy_request(request.method, target, request, body)
+    return await asyncio.to_thread(
+        _proxy_request,
+        request.method,
+        target,
+        request,
+        body,
+    )
 
 
 @app.api_route("/media/{path:path}", methods=["GET", "HEAD", "OPTIONS"])
 async def operator_media_proxy(path: str, request: Request) -> Response:
-    return _proxy_request(request.method, _media_proxy_url(path), request, b"")
+    return await asyncio.to_thread(
+        _proxy_request,
+        request.method,
+        _media_proxy_url(path),
+        request,
+        b"",
+    )
 
 
 @app.get("/health")

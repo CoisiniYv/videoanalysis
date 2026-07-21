@@ -10,7 +10,14 @@ STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 [[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
-ALL_PROFILES=(local-postgres dual-replay-shards dual-4090-two-source)
+ALL_PROFILES=(
+    local-postgres
+    dual-replay-shards
+    dual-4090-two-source
+    rolling-cache-dual
+    roi-adaface
+    operator-dual-runtime
+)
 
 for profile in "${ALL_PROFILES[@]}"; do
     COMPOSE_ARGS+=(--profile "$profile")

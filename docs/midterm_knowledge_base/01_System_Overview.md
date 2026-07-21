@@ -1,7 +1,7 @@
 ---
 type: architecture-note
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - architecture
   - midterm
@@ -11,76 +11,75 @@ tags:
 
 ## 系统定位
 
-Midterm 是一套实时视频分析和证据生成系统。用户入口集中在 8090 操作台，后台由 Docker Compose
-编排 Replay、Savant/DeepStream、Redis workers、PostgreSQL 和 evidence 服务。
+Midterm 接入 RTSP，执行 Pose/Face/行为分析，持久化人体和人脸轨迹，并生成可播放、
+可审计的告警 evidence。浏览器入口集中在 8090，后台由 Compose、动态 source、
+PostgreSQL、Redis 和 GPU workers 组成。
 
-核心目标：
-
-- 接入 RTSP 摄像头；
-- 按可配置 FPS 抽样推理；
-- 执行入侵、人脸 watchlist 命中等算法；
-- 生成可播放、可审计 evidence；
-- 在 8090 页面完成摄像头、ROI、规则、人员、人脸库、运行拓扑和性能参数管理。
-
-## 主链路
+## 控制面
 
 ```text
-RTSP source
-  -> Replay storage
-  -> analysis-forwarder sampled branch
-  -> Savant / DeepStream inference
-  -> Redis Streams
-  -> event-worker / face-worker
-  -> PostgreSQL / Qdrant / pgvector rollback
-  -> clip-worker Replay job
-  -> video-file-sink raw clip
-  -> media-worker evidence indexing/finalization
-  -> 8090 operator / evidence APIs
+Browser :8090
+  -> evidence-viewer
+  -> api:8000
+  -> PostgreSQL config/state
+  -> generated snapshots
+  -> Docker Engine API
 ```
 
-相关细节：
+8090 负责摄像头、ROI/规则、人员注册、轨迹、evidence、运行预设、延迟和存储维护。
+API 8000 不对客户直接发布。
 
-- [[02_Runtime_Data_Flow|运行时数据流]]
-- [[03_Module_Map|模块地图]]
-- [[05_Evidence_Chain|证据链]]
+## 完整双分支数据面
 
-## Source of truth
+```text
+RTSP -> Replay A/B -> replay-raw-fanout A/B
+  |-> sampled Savant A/B -> Redis events/person/face ROI/annotations
+  `-> full-rate rolling-cache-sink A/B
 
-PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事实源。
-Qdrant 是注册人脸图库的可重建派生索引，只服务在线 gallery/watchlist 查询；它不是人员图库事实源，
-也不改变 evidence 存储方式。
+Redis -> event/person/face workers -> PostgreSQL
+PostgreSQL tasks + rolling segments -> media-worker -> evidence -> 8090
+```
 
-生成文件只作为运行时快照：
+关键边界：
 
-- `modules/savant_security/config/cameras.midterm.yml`
-- `infra/generated/sources.generated.yml`
-- `/data/video-analytics/media/.runtime/replay_shards.topology.json`
+- Replay 接收全率源并提供原始 fanout；
+- 分析 sampler 只影响 Savant cadence；
+- rolling-cache 直接接 sampler 之前的全率编码帧；
+- 完整预设使用 rolling materialization，不发布 per-event Replay request；
+- `clip-worker/video-file-sink` 保留给单分支和兼容路径；
+- 证据约 24 FPS，分析为 4/8 FPS；
+- Savant 原始 PTS/UUID 与 rolling mux PTS 是两个不能混用的时间域。
 
-不要只凭 YAML diff 判断配置漂移。8090 和 API 应从 DB 读取并导出运行时快照。
+## 事实源
+
+| 内容 | 事实源 |
+| --- | --- |
+| 摄像头、ROI、规则 | PostgreSQL |
+| 人员和注册图库 | PostgreSQL |
+| 事件、任务、evidence 索引 | PostgreSQL |
+| 在线消息 | Redis Streams |
+| 运行配置 | DB 导出快照 + 当前容器环境 |
+| 原始/最终媒体 | Replay/rolling/evidence 文件系统 |
+
+`cameras.midterm.yml`、`sources.generated.yml` 和 topology JSON 是运行快照，不是人工
+配置真相。
 
 ## 当前能力边界
 
-已证明：
+已验证：
 
-- 60 路 3 FPS 下游证据链，50/50 playable；
-- 单 4090 同卡双分支 60 路 4 FPS retained evidence；
-- 单 4090 同卡双分支 60 路 8 FPS retained evidence；
-- face-worker 注册图库查询 Qdrant authoritative cutover，60 路 8 FPS 压测 fallback=0；
-- 5000 人 x 4 张图，即 20,000 向量 Qdrant gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms；
-- 8090 可管理性能配置和拓扑配置；
-- clean-machine 离线迁移包支持 Docker images。
+- T4 40 路、4 FPS、双分支、ROI AdaFace、5+5 evidence；
+- 同生产链约 4 小时无 failed/expired/fallback；
+- DB-backed timeline/annotation/bbox/person context；
+- 独立人体轨迹 consumer 40/60 路覆盖；
+- 8090 后台启动和状态恢复显示。
 
-未证明：
+仍需验证：
 
-- 真实 RTSP 混合输入长时间稳定性；
-- T4 / 弱卡 / 双 GPU 生产 profile；
-- 60 路 16 FPS 推理吞吐；
-- 50k/100k 级别图库、真实 RTSP 长时间 soak 下的 face-worker 端到端 ACK/匹配延迟；
-- Savant 模型阶段级 latency。
+- 最新双时间域 revision 的 4090 60 路、8 FPS；
+- 混合真实摄像头断流/重连与长 soak；
+- worker/API 重启恢复；
+- T4 散热整改后的扩容；
+- 鉴权、RBAC 与 8090 WebSocket 代理。
 
-## 设计偏好
-
-- 8090 是管理入口，API 8000 仅在 compose 网络内使用。
-- Evidence metadata 走 PostgreSQL，`raw_clip.mov` 仍保留在文件系统。
-- 对事件风暴采用 admission/backpressure，优先保证 retained evidence 可完成，而不是全量物化所有事件。
-- 运行时重启必须受 evidence guard 约束，避免中断正在生成的证据。
+完整说明见 `docs/current_architecture.md`。

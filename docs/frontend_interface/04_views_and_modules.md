@@ -325,6 +325,8 @@ DOM root：`runtime-view`
 
 ```text
 runtime-overview-pane
+runtime-latency-pane
+runtime-quick-start
 runtime-performance-pane
 runtime-topology-pane
 runtime-source-pane
@@ -339,9 +341,11 @@ runtime-container-pane
 
 ```text
 /runtime/overview
+/runtime/latency
 /runtime/control
 /runtime/performance-config
 /runtime/topology-config
+/runtime/topology-config/apply-status
 ```
 
 任一配置子请求失败时应展示具体错误，不得把整个 overview 的旧值清空后伪装健康。
@@ -361,6 +365,35 @@ PUT save
 
 Runtime guard 返回 active evidence details 时，`apiErrorMessage()` 会翻译为“仍有 N 个
 证据任务在生成中”。新实现不得吞掉 `error.details`。
+
+### 6.4 完整链路快速启动
+
+快速启动从服务端 `profile_presets` 读取 T4 40 路和 4090 60 路参数，前端只管理：
+
+```text
+profile
+source_ids
+balanced/manual shard strategy
+manual_assignments
+disable_unselected
+```
+
+所选数量必须精确等于 preset 的 `expected_source_count`。提交顺序：
+
+```text
+PUT /runtime/topology-config
+  -> POST /runtime/topology-config/apply-async
+  -> GET /runtime/topology-config/apply-status (poll)
+```
+
+任务 running 时按钮禁用。页面刷新后从 apply-status 恢复进度；API 重启时后端会把
+残留 running 状态转成 failed，前端不得继续显示“后台仍在运行”。
+
+### 6.5 实时延迟
+
+Runtime view 打开时每 5 秒静默刷新 `/runtime/latency`，也支持手动刷新。页面分别显示
+画面/annotation、event/bundle DB lag、active task 和 A/B source/queue，不得把一个
+总颜色替代具体数值。
 
 ## 7. 存储维护页面
 

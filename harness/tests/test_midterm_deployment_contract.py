@@ -117,6 +117,21 @@ def test_midterm_deployment_files_exist() -> None:
         assert doc.exists()
 
 
+def test_savant_mux_allows_single_source_bs4_without_changing_dense_shards() -> None:
+    services = _compose()["services"]
+
+    assert (
+        services["savant-security"]["environment"]["MAX_SAME_SOURCE_FRAMES"]
+        == "${SAVANT_SINGLE_MAX_SAME_SOURCE_FRAMES:-4}"
+    )
+    for service in ("savant-a", "savant-b"):
+        assert (
+            services[service]["environment"]["MAX_SAME_SOURCE_FRAMES"]
+            == "${SAVANT_DUAL_MAX_SAME_SOURCE_FRAMES:-1}"
+        )
+    assert "${oc.env:MAX_SAME_SOURCE_FRAMES, 1}" in _text(SAVANT_MODULE)
+
+
 def test_midterm_one_click_startup_scripts_are_the_customer_entrypoint() -> None:
     start = _text(MIDTERM_START)
     stop = _text(MIDTERM_STOP)
@@ -170,6 +185,7 @@ def test_midterm_clean_machine_migration_scripts_exclude_old_runtime_data() -> N
     assert "contains_docker_images=$INCLUDE_IMAGES" in package
     assert "docker save -o" in package
     assert "ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0" in package
+    assert "video-analytics-midterm-rolling-cache-sink:latest" in package
     assert "contains_postgres_dump=false" in package
     assert "contains_redis_state=false" in package
     assert "contains_media_evidence=false" in package
@@ -242,6 +258,7 @@ def test_runtime_doctor_is_midterm_named() -> None:
     runtime_scripts = sorted(path.name for path in (ROOT / "scripts" / "runtime").glob("*.sh"))
     assert runtime_scripts == [
         "doctor_midterm.sh",
+        "precreate_operator_dual_runtime.sh",
         "prepare_dual_4090_savant_b_model_cache.sh",
         "rolling_cache_sink_entrypoint.sh",
         "run_pressure60_dual1gpu_profile.sh",
@@ -342,10 +359,12 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["replay-a"]["profiles"] == [
         "dual-replay-shards",
         "dual-4090-two-source",
+        "operator-dual-runtime",
     ]
     assert services["replay-b"]["profiles"] == [
         "dual-replay-shards",
         "dual-4090-two-source",
+        "operator-dual-runtime",
     ]
     assert services["replay-a"]["volumes"][0] == (
         "../modules/savant_replay/config.midterm.replay-a.json:/opt/etc/config.json:ro"
@@ -416,7 +435,11 @@ def test_replay_first_topology_is_preserved() -> None:
         ("video-file-sink-b", "video-file-sink-b.startup"),
     ):
         sink = services[service_name]
-        assert sink["profiles"] == ["dual-replay-shards", "dual-4090-two-source"]
+        assert sink["profiles"] == [
+            "dual-replay-shards",
+            "dual-4090-two-source",
+            "operator-dual-runtime",
+        ]
         assert sink["environment"]["ZMQ_ENDPOINT"] == "router+bind:tcp://0.0.0.0:6666"
         assert sink["environment"]["VIDEO_FILE_SINK_REUSE_CURRENT_EPOCH"] == "true"
         assert sink["environment"]["VIDEO_FILE_SINK_CREATED_BY"] == created_by
@@ -482,6 +505,9 @@ def test_replay_first_topology_is_preserved() -> None:
     assert services["media-worker"]["environment"]["MEDIA_WORKER_FINALIZER_WORKERS"] == (
         "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
     )
+    assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"
+    ] == "${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-0}"
     assert services["media-worker"]["environment"][
         "MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"
     ] == "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
@@ -961,6 +987,7 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_BACKLOG"] == "200"
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
     assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
+    assert env_file["MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"] == "0"
     assert env_file["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == "4"
     assert env_file["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == "false"
     assert env_file["MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED"] == "true"
@@ -1054,14 +1081,22 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
         "sub+connect:tcp://replay-raw-fanout-b:5560"
     )
     entrypoint = _text(ROOT / "scripts" / "runtime" / "rolling_cache_sink_entrypoint.sh")
-    assert "ROLLING_CACHE_SEGMENT_FRAMES" in entrypoint
-    assert "ROLLING_CACHE_FPS" in entrypoint
+    sink_source = _text(
+        ROOT / "services" / "rolling-cache-sink" / "app" / "gst_sink.py"
+    )
+    assert "ROLLING_CACHE_SEGMENT_FRAMES" not in entrypoint
+    assert "CHUNK_SIZE" not in entrypoint
+    assert "video_files.py" not in entrypoint
+    assert "/opt/rolling-cache-sink/app/main.py" in entrypoint
+    assert "splitmuxsink name=segmenter" in sink_source
+    assert "async-finalize=true" in sink_source
+    # The dedicated sink preserves upstream access units; injecting codec
+    # headers at every IDR can create an extra header buffer and skew the
+    # fixed-cadence mux clock.
+    assert "h264parse name=parser config-interval=0" in sink_source
     assert "ROLLING_CACHE_RETENTION_SECONDS" in entrypoint
     assert "[rolling-cache-maintenance]" in entrypoint
     assert "/opt/rolling-cache-maintenance.py" in entrypoint
-    assert "/%source_id/%src_filename/" in entrypoint
-    assert "%source_id%" not in entrypoint
-    assert "%src_filename%" not in entrypoint
     assert services["rolling-cache-sink"]["environment"][
         "ROLLING_CACHE_MAINTENANCE_OWNER"
     ] == "true"
@@ -1077,13 +1112,18 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
         "rolling-cache-sink-b",
     ):
         service = services[service_name]
+        assert service["image"] == "video-analytics-midterm-rolling-cache-sink:latest"
+        assert service["build"]["context"] == ".."
+        assert service["build"]["dockerfile"] == (
+            "services/rolling-cache-sink/Dockerfile"
+        )
+        assert service["pids_limit"] == "${ROLLING_CACHE_SINK_PIDS_LIMIT:-2048}"
         assert any(
             str(volume).endswith(
                 "rolling_cache_maintenance.py:/opt/rolling-cache-maintenance.py:ro"
             )
             for volume in service["volumes"]
         )
-    assert 'export CHUNK_SIZE="${SEGMENT_FRAMES}"' in entrypoint
 
 
 def test_midterm_evidence_version_is_project_named() -> None:
@@ -1115,6 +1155,9 @@ def test_midterm_media_worker_perf_controls_are_wired() -> None:
     )
     assert media_env["FRAME_CACHE_SIDECAR_MAX_SCAN"] == (
         "${FRAME_CACHE_SIDECAR_MAX_SCAN:-20000}"
+    )
+    assert media_env["FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT"] == (
+        "${FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT:-500}"
     )
     assert media_env["FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE"] == (
         "${FRAME_CACHE_SIDECAR_STREAM_SESSION_FILTER_MODE:-event_window}"

@@ -268,13 +268,12 @@ class RollingSegmentIndex:
                     self._stats["hits"] += 1
                     self._catalogs.move_to_end(key)
                     root_generation = self._read_root_generation()
-                    if (
-                        root_generation != catalog.root_generation
-                        or now - catalog.last_reconcile_at
-                        >= self.reconcile_interval_s
-                    ):
+                    if now - catalog.last_reconcile_at >= self.reconcile_interval_s:
                         self._rebuild(catalog, now=now, initial=False)
-                    elif now - catalog.last_refresh_at >= self.refresh_interval_s:
+                    elif (
+                        root_generation != catalog.root_generation
+                        or now - catalog.last_refresh_at >= self.refresh_interval_s
+                    ):
                         self._refresh(catalog, now=now)
                 segments = [entry.segment for entry in catalog.entries.values()]
                 return sorted(
@@ -484,6 +483,12 @@ class RollingSegmentIndex:
                     if child_path not in queued:
                         queue.append(child_path)
                         queued.add(child_path)
+        # Retention advances one root-wide generation after deleting segments.
+        # Incremental refresh has already revalidated every known metadata path
+        # and walked changed containers, so acknowledge that generation here;
+        # otherwise every lookup would repeat the same refresh until the next
+        # full reconcile.
+        catalog.root_generation = self._read_root_generation()
         catalog.last_refresh_at = now
 
     def _refresh_candidate(self, catalog: _Catalog, metadata_path: Path) -> None:
@@ -560,6 +565,11 @@ class RollingSegmentIndex:
             catalog.failed_identities[metadata_path] = failed_identity
             self._remove_entry(catalog, metadata_path)
             return
+        source_pts_values = [
+            pts
+            for pts in (self._source_row_pts(row) for row in parsed)
+            if pts is not None
+        ]
         actual_epoch = self._runtime_epoch_from_path(metadata_path)
         if actual_epoch and actual_epoch != catalog.runtime_epoch_id:
             catalog.pending.discard(metadata_path)
@@ -577,6 +587,12 @@ class RollingSegmentIndex:
             last_pts=int(max(pts_values)),
             frame_count=len(pts_values),
             size_bytes=video_identity.size,
+            source_first_pts=(
+                int(min(source_pts_values)) if source_pts_values else None
+            ),
+            source_last_pts=(
+                int(max(source_pts_values)) if source_pts_values else None
+            ),
         )
         catalog.entries[metadata_path] = _IndexedSegment(
             segment=segment,
@@ -722,10 +738,22 @@ class RollingSegmentIndex:
 
     @staticmethod
     def _row_pts(row: dict) -> int | None:
-        value = row.get("pts")
+        value = row.get("rolling_cache_mux_pts")
+        if value is None:
+            value = row.get("pts")
         if value is None:
             value = row.get("frame_pts")
         try:
             return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _source_row_pts(row: dict) -> int | None:
+        value = row.get("pts")
+        if value is None:
+            value = row.get("frame_pts")
+        try:
+            return int(value) if value is not None else None
         except (TypeError, ValueError):
             return None

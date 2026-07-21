@@ -2,7 +2,22 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 0-5 已完成，Phase 6-7 尚未执行
+Status: 执行中；Phase 4 正确性门于 2026-07-21 重新打开，Phase 6 容量校准进行中，Phase 7 尚未执行
+
+Corrective checkpoint (2026-07-21): the 2026-07-20 one-hour local
+60-source/8fps run invalidated the earlier assumption that every durable remux
+handoff either entered the finalizer lane or was immediately returned to
+PostgreSQL. Of 5,144 handoff candidates, 5,072 were immediately admitted; the
+72-item gap exactly matched `handoff_recovered=72`. The Phase 4 correctness
+gate is therefore reopened until admission rejection performs an exact
+owner/token/generation CAS that preserves `finalizer_pending` and the immutable
+handoff, clears the lease, applies short jitter, and releases WIP only after
+the fenced transition attempt. This does not weaken the recovery query's
+`lease_token IS NULL` fence. The same run had 733 expired tasks with
+`materialization_attempt_count=0`, so Phase 6 must separately increase and
+calibrate remux/shared-WIP throughput; adding finalizer workers alone is not an
+accepted remediation. Design and validation evidence is recorded in
+`docs/code_review/media_worker_finalizer_admission_fenced_retry_2026-07-21.md`.
 
 Implementation checkpoint (2026-07-12):
 
@@ -867,6 +882,20 @@ expiry to one generation-2 terminal bundle with DB-backed timeline/bbox and
 zero runtime residual. Evidence is retained under
 `/data/video-analytics/artifacts/clip_media_phase4b_flag_independent_recovery_20260712T171945Z`.
 
+Corrective gate reopening (2026-07-21): the earlier checkpoint covered crash
+recovery but missed ordinary capacity rejection after remux had already
+persisted a handoff. The 2026-07-20 one-hour run proved a 72-item exact gap
+between remux handoff candidates and immediate finalizer admission, followed by
+72 lease-expiry recoveries. Phase 4 is reopened until every unsubmitted
+transfer in a batch, including items after a lane-full `break`, performs an
+exact fenced retry before WIP release; accepted in-memory queue items must keep
+the transferred lease heartbeat active until executor start. PostgreSQL
+`finalizer_pending` remains the durable queue, and recovered unleased handoffs
+remain in that phase when capacity is still unavailable. The new correctness
+gate requires zero normal-pressure lease-expiry handoff recovery, zero fenced
+retry failure, fully accounted candidate/admission gaps, no duplicate bundle,
+and zero lease/WIP/lane/pending residual.
+
 ### Phase 5 - Add Segment Index And Reduce Finalizer Work
 
 1. Replace per-poll recursive lookup with `RollingSegmentIndex`.
@@ -1036,6 +1065,17 @@ This does not issue `PASS_MEDIA_WORKER_CAPACITY_AND_READY_POLICY_CALIBRATED`.
 The run was only a 60-second canary and still failed the separate local 8fps
 throughput gate at 5.247fps versus 7.92fps. Production T4 4fps validation and
 two comparable 400-second plus 120-second-drain passes remain mandatory.
+
+2026-07-21 local one-hour checkpoint: a later fixed-input single-GPU,
+dual-branch 60-source run sustained 8.0246 fps but materialized 5,057/5,790
+formal tasks. Successful finalization itself stayed fast (p50 1.46s, p95
+2.68s); remux was full in about 41.1% of samples, shared WIP in 23.4%, and the
+finalizer lane in only 5.4%. All 733 expired rows had attempt count zero. After
+the reopened Phase 4 gate is repaired, the first separately labeled capacity
+candidate is WIP=20, remux=12, finalizer threads=8, finalizer queue=8, rolling
+max-per-poll=8, while finalizer process workers remain 4 pending a corrected
+process-pool wait measurement. A large in-memory queue is explicitly rejected:
+PostgreSQL owns durable waiting and deadline/fairness ordering.
 
 ### Phase 7 - Remove Legacy And Misleading Contracts
 

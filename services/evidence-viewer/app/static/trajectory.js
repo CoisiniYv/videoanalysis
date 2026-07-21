@@ -124,7 +124,7 @@ function resolveTrajectoryPersonId(rawValue) {
   const matched = trajectoryPersonByInput(value);
   if (matched) return String(matched.person_id);
   if (/^[1-9]\d*$/.test(value)) return value;
-  throw new Error("请输入有效的系统人员 ID，或从人员编号候选项中选择。");
+  throw new Error("请输入有效的人员编号，或从候选项中选择。");
 }
 
 function trajectoryPersonLabel(personId) {
@@ -146,7 +146,7 @@ function renderTrajectoryLookupOptions() {
       );
       if (externalId) {
         options.push(
-          `<option value="${trajectoryEscapeHtml(externalId)}" label="${trajectoryEscapeHtml(`${name} / 系统 ID ${personId}`)}"></option>`
+          `<option value="${trajectoryEscapeHtml(externalId)}" label="${trajectoryEscapeHtml(`${name} / 人员编号 ${externalId}`)}"></option>`
         );
       }
     }
@@ -263,7 +263,7 @@ function renderTrajectoryDetail(row, index) {
     trajectoryDom.detail.innerHTML =
       `<h3>${trajectoryEscapeHtml(personName)}</h3>` +
       `<dl class="trajectory-detail-grid">` +
-        `<dt>系统人员 ID</dt><dd>${trajectoryEscapeHtml(row.person_id || trajectoryState.personId || "--")}</dd>` +
+        `<dt>系统编号</dt><dd>${trajectoryEscapeHtml(row.person_id || trajectoryState.personId || "--")}</dd>` +
         `<dt>人员编号</dt><dd>${trajectoryEscapeHtml(row.external_person_id || "--")}</dd>` +
         `<dt>摄像头</dt><dd>${trajectoryEscapeHtml(trajectoryCameraName(row))}</dd>` +
         `<dt>出现时间</dt><dd>${trajectoryEscapeHtml(trajectoryFormatTime(trajectoryTimestamp(row)))}</dd>` +
@@ -377,7 +377,7 @@ function resetTrajectoryPage() {
   trajectoryState.hasMore = false;
   trajectoryDom.form?.reset();
   if (trajectoryDom.list) {
-    trajectoryDom.list.innerHTML = `<div class="empty-state">请先按人员 ID 查询轨迹。</div>`;
+    trajectoryDom.list.innerHTML = `<div class="empty-state">请先按人员编号查询轨迹。</div>`;
   }
   if (trajectoryDom.pageStatus) trajectoryDom.pageStatus.textContent = "尚未查询";
   if (trajectoryDom.previous) trajectoryDom.previous.disabled = true;
@@ -385,7 +385,7 @@ function resetTrajectoryPage() {
   if (trajectoryDom.search) trajectoryDom.search.disabled = false;
   if (trajectoryDom.refresh) trajectoryDom.refresh.disabled = false;
   if (trajectoryDom.summary) {
-    trajectoryDom.summary.textContent = "输入人员 ID 后查询；图片来自长期媒体存储，SSD 仅作为读取缓存。";
+    trajectoryDom.summary.textContent = "输入人员编号后查询，系统会按时间倒序显示轨迹画面。";
   }
   clearTrajectoryDetail();
 }
@@ -442,7 +442,7 @@ async function initTrajectoryPage() {
 
 async function openTrajectoryForPerson(personId, options = {}) {
   const targetId = String(personId || "").trim();
-  if (!targetId) throw new Error("未找到可查询的人员 ID。");
+  if (!targetId) throw new Error("未找到可查询的人员编号。");
   if (typeof activateTopView === "function") activateTopView("trajectory", true);
   await initTrajectoryPage();
   trajectoryDom.personId.value = targetId;

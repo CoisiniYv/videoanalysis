@@ -1,339 +1,204 @@
 # Midterm Deployment
 
-Date: 2026-06-11
+更新时间：2026-07-20
 
-This is the active project-machine deployment entrypoint.
+## 1. 支持的入口
 
-## Files
-
-| Purpose | File |
-|---|---|
-| Compose | `infra/docker-compose.midterm.yml` |
-| Env | `infra/env/midterm.env` |
-| Replay config | `modules/savant_replay/config.midterm.json` |
-| Analysis-forwarder | `services/analysis-forwarder/` |
-| Camera config | `modules/savant_security/config/cameras.midterm.yml` |
-| Savant module | `modules/savant_security/module.yml` |
-| Savant v0.6.0 patch overlay | `modules/savant_security/savant_patches/` |
-| Savant supervisor | `services/api/app/services/savant_supervisor.py` |
-
-Do not deploy from archived historical compose files.
-
-## Start
+只使用：
 
 ```bash
 bash scripts/midterm_start.sh
 ```
 
-`scripts/midterm_start.sh` is the supported whole-stack startup entrypoint for
-fresh target machines. It validates the compose/env files, prepares required
-runtime directories under `/data/video-analytics`, checks the required model
-assets, builds `face-worker` before the API image that inherits from it, starts
-the stack, then waits for the 8090 portal and API proxy.
+不要把裸 `docker compose -f infra/docker-compose.midterm.yml up` 当成等价入口：它不会
+完整表达存储 override、B 分支模型缓存准备和 8090 双分支容器预创建流程。
 
-After startup, customer/operator management stays on:
+部署文件：
 
-```text
-http://127.0.0.1:8090/operator
-```
+| 用途 | 文件 |
+| --- | --- |
+| 主 Compose | `infra/docker-compose.midterm.yml` |
+| 环境默认值 | `infra/env/midterm.env` |
+| 快速盘/轨迹挂载 | `infra/midterm-storage.override.yml` |
+| 8090 单卡双分支预创建 | `infra/operator-dual-runtime.override.yml` |
+| Replay | `modules/savant_replay/config.midterm*.json` |
+| Savant | `modules/savant_security/module.yml` |
+| Camera 导出快照 | `modules/savant_security/config/cameras.midterm.yml` |
 
-Use 8090 for cameras, people/face registration, evidence review, storage
-maintenance, and controlled runtime restart/apply actions. Do not expose the
-internal API service on host port 8000.
+历史 `archive/phase-only/` 不是部署入口。
 
-Lightweight pre-deploy check:
+## 2. 启动脚本做什么
 
-```bash
-bash scripts/smoke/current/check_midterm_deployment.sh
-```
+`midterm_start.sh` 按顺序：
 
-Read-only deployment doctor:
+1. 检查 Docker、Compose、GPU 和关键文件；
+2. 创建 `/data/video-analytics`、`/tmp/video-analytics-mps` 和快速盘目录；
+3. 验证 YOLO/AdaFace 模型；
+4. 构建 face-worker，再构建复用其运行层的 API 和其他服务；
+5. 构建完整预设使用的 ROI AdaFace 与 rolling-cache sink 镜像；
+6. 启动无 profile 的基础服务；
+7. 为 Savant B 准备独立可写 engine cache
+   `/data/video-analytics/models-savant-b`；
+8. 使用 `operator-dual-runtime` profile 将 A/B、MPS、ROI、rolling 等容器
+   `--no-start` 预创建；
+9. 等待 8090 和 API proxy。
 
-```bash
-bash scripts/runtime/doctor_midterm.sh
-```
+预创建过程不会主动切换到双分支；8090 是后续 start/stop owner。若容器已经运行，
+预创建脚本不会为了检查而中断它。
 
-The stack uses these default host ports:
+## 3. 数据目录
 
-- Redis: `6396`
-- Replay API: `8098`
-- Savant metrics: `18080`
-- Analysis-forwarder metrics: `18081`
-- Operator portal / evidence viewer: `8090`
-- Internal API service: compose network port `8000`; not published to host and
-  reached through the 8090 portal proxy.
-
-The internal API service is built with `services/api/Dockerfile.face-runtime`.
-It inherits from `video-analytics-midterm-face-worker:latest`, so face
-registration can reuse the existing ONNX Runtime/OpenCV/Numpy image layer
-instead of reinstalling ORT during API builds. On a fresh deployment machine,
-build or provide `video-analytics-midterm-face-worker:latest` before building
-the internal API image.
-
-The 8090 operator portal, internal API proxy, face-registration runtime, and
-evidence identity semantics are documented in
-`docs/midterm_operator_portal_runtime_design.md`.
-The current implementation boundary for 8090 algorithm switches and evidence
-window fields is documented in
-`docs/midterm_operator_algorithm_controls_runtime_status.md`.
-The current `/data/video-analytics` directory inventory and cleanup record is
-documented in `docs/midterm_data_directory_inventory.md`.
-The 2026-06-10 Replay `routing_id` mismatch incident and recovery procedure are
-documented in `docs/midterm_replay_routing_id_recovery.md`.
-
-## Savant Source-Reset Hardening
-
-The midterm Savant image is pinned to
-`ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1`. That framework version
-can remove a source registry entry after non-monotonous PTS resets while stale
-buffers for the same source remain queued in muxer or nvinfer stages. Without a
-guard, those buffers can raise `KeyError` inside Savant framework code and move
-the module to STOPPED while the Docker container remains Up.
-
-To prevent that failure mode, `savant-security` runs
-`modules/savant_security/savant_patches/apply_patches.py` before starting
-`python -m savant.entrypoint`. The patch is md5-pinned to the current v0.6.0
-framework files and fails loud by default on mismatch. It only changes stale
-source-buffer handling from fatal `KeyError` to warning plus frame skip or
-late-EOS ignore.
-
-The API service behind the 8090 management plane owns the recovery supervisor.
-It reads `/opt/savant/status.txt` through the Docker Engine API and checks
-`security.frame_annotations` through Redis; if Savant is STOPPING/STOPPED or
-annotations stall while sources are running, it restarts Savant, waits for
-module `running`, then restarts both the compose primary adapter and dynamic
-`video-analytics-source-*` adapters. It does not restart Replay by default,
-unless `SAVANT_SUPERVISOR_RESTART_REPLAY=true` is set.
-
-The reviewed `savant-crash-fix-20260611.zip` proposed a standalone watchdog
-container based on `docker:27-cli`. That image is not required in the current
-deployment. The standalone service has been removed; the API process reuses the
-existing Docker socket mount and Docker Engine client already needed for camera
-runtime apply. 8090 remains the operator-facing surface through the evidence
-viewer proxy.
-
-Supervisor routes exposed through 8090:
-
-- `GET /api/v1/cameras/runtime/supervisor`
-- `POST /api/v1/cameras/runtime/supervisor/recover`
-
-## Applying Camera Runtime Changes
-
-The 8090 camera page writes camera, zone, and algorithm-rule records to the
-internal API database. The page exposes per-rule enable/disable controls and the
-rule-level evidence window (`pre_seconds` / `post_seconds`). Event recording is
-not restricted to `primary_rtsp`; any configured source that reaches Savant and
-emits a clip-required event can publish a record request.
-
-Current support is intentionally uneven across visible algorithm switches. Treat
-`behavior.intrusion` as the end-to-end implemented behavior evidence path. Some
-behavior switches are config/export only or event-capable without default Replay
-evidence parity, and face algorithm switches are not yet true per-camera runtime
-gates. Keep `docs/midterm_operator_algorithm_controls_runtime_status.md` in sync
-when changing this boundary.
-
-The 8090 page's runtime apply action exports `cameras.midterm.yml`, stops source
-adapters and workers, recreates the Replay sink epoch, restarts Replay and
-Savant, restores workers, then starts enabled source adapters last. The default midterm
-recording window is `pre_seconds=5` and `post_seconds=5`; changing those values
-in the operator page writes them to the rule evidence policy before applying the
-runtime.
-
-The legacy primary stream is represented in the database as a UUID camera row
-with `source_id: primary_rtsp`. Keep `primary_rtsp` as the source id because it
-is what the compose-managed adapter and Savant source mapping use; do not use it
-as the database primary key. The operator smoke camera is test data and is
-created disabled by default so normal runtime exports exclude its fake RTSP URL.
-
-For a new RTSP camera to participate in inference, apply the runtime in this
-order:
-
-1. Add or update the camera from the 8090 operator portal.
-2. Add at least one zone and one enabled algorithm rule when event/evidence
-   output is expected. For alerting rules, set the rule evidence window on the
-   8090 page; those values are carried into the record request. A camera with no
-   enabled rules can still feed lower-level detections, but it will not produce
-   rule events.
-3. Use the 8090 page's `应用运行时` button, or save the camera/zone/rule and let
-   the page auto-apply runtime changes. The runtime apply endpoint remains
-   behind the 8090 evidence-viewer proxy; the API service is still only exposed
-   inside the compose network on port 8000.
-
-The runtime apply operation writes both generated config files, stops all
-source-adapter containers first, recreates dynamic RTSP source-adapter
-containers for non-primary sources, restarts Replay, analysis-forwarder, and
-Savant, restores workers, then starts enabled sources last. This ordering clears
-Replay's ZeroMQ routing identity cache and prevents the source adapters from
-continuing to send frames through stale connections. When the operation
-recreates `video-file-sink`, it
-must also preserve the Docker network alias `video-file-sink`, because
-clip-worker Replay jobs use
-`dealer+connect:tcp://video-file-sink:6666` as their sink URL. A manually
-recreated sink container without that alias will keep listening on port 6666
-but Replay will not resolve the peer, so no raw clip or evidence bundle will be
-written. The official `video-file-sink` native metadata does not preserve
-Replay labels, so media-worker treats `sink_metadata_runtime_epoch_id` as
-optional evidence: it fails only when the field is present and mismatched, while
-event payload, record request, Replay labels, sink path, and current epoch remain
-required. The config export part can be run manually with:
-
-```bash
-python scripts/config/export_runtime_configs.py \
-  --api-base-url http://localhost:8090 \
-  --module-config-output modules/savant_security/config/cameras.midterm.yml \
-  --sources-output infra/generated/sources.generated.yml \
-  --zmq-endpoint dealer+connect:tcp://replay-service:5555
-```
-
-The explicit `--zmq-endpoint dealer+connect:tcp://replay-service:5555` keeps
-the midterm replay-first ingest path:
+默认慢盘/持久数据根：
 
 ```text
-RTSP adapter -> replay-service -> analysis-forwarder -> savant-security
+/data/video-analytics
+  models/
+  models-savant-b/
+  media/evidence/
+  media/.runtime/
+  replay-midterm*/
+  artifacts/
 ```
 
-The adapter still sends full-rate frames to Replay. Replay stores the full-rate
-stream and sends its analysis `out_stream` to `analysis-forwarder`. The
-forwarder samples/drops only the analysis branch, then writes accepted frames to
-Savant. Evidence Replay jobs still read from Replay and write to
-`video-file-sink`; they do not use the sampled forwarder output.
+默认快速盘根：
 
-The Savant service must not set a single-source `SOURCE_ID` filter. The
-compose-managed primary adapter still uses `SOURCE_ID=primary_rtsp`, but Savant
-itself accepts all replay-service sources and resolves each one through
-`cameras.midterm.yml`. `MAX_PARALLEL_STREAMS` must be at least the number of
-simultaneous RTSP sources you expect to infer with headroom; the midterm default
-is configurable as `${MAX_PARALLEL_STREAMS:-4}`.
-Dynamic RTSP adapters started by `scripts/runtime/camera_source_controller.py`
-use `EOS_ON_START=false` and do not set `USE_ABSOLUTE_TIMESTAMPS`. In the
-midterm replay-first path, an EOS-on-start closes the new source before frames
-arrive, and absolute PTS can make replay defer forwarding live RTSP frames to
-Savant.
-
-4. If you are applying manually instead of using 8090 runtime apply, do not only
-   restart Savant. Use the 8090 controlled restart endpoint, which keeps the
-   8090 management plane online while restarting the controlled runtime:
-
-```bash
-curl --noproxy '*' -X POST http://0.0.0.0:8090/api/v1/cameras/runtime/restart
+```text
+/home/user/video-analytics-fast
+  rolling-cache/
+  rolling-cache-materialized/
+  face_trajectory_cache/
 ```
 
-This controlled restart is required in the current implementation because
-Replay holds source-adapter ROUTER/DEALER connection identity, and the behavior
-rule, face, and frame-annotation runtime load camera mapping at process startup.
-Restarting is not a replacement for exporting the config; if
-`cameras.midterm.yml` does not contain the new `source_id`, Savant will still
-not route that source as a configured camera.
+可通过 `VIDEO_ANALYTICS_DATA_ROOT`、`VIDEO_ANALYTICS_FAST_ROOT` 及 storage override
+中的 host-root 环境变量调整。最终 evidence 仍写入持久 `/data`；rolling 在线窗口和
+中间物化使用快速盘。
 
-5. Start the RTSP source adapter for the new source:
+## 4. 数据库与迁移
 
-```bash
-python scripts/runtime/camera_source_controller.py start \
-  --sources infra/generated/sources.generated.yml \
-  --source-id <source_id> \
-  --network video-analytics-midterm_default
-```
-
-6. Verify the adapter and Savant logs:
-
-```bash
-python scripts/runtime/camera_source_controller.py status \
-  --sources infra/generated/sources.generated.yml \
-  --source-id <source_id>
-
-docker logs --tail 200 video-analytics-midterm-savant | rg '<source_id>|unknown_source|behavior_rules_init'
-```
-
-Expected signs:
-
-- `behavior_rules_init` lists the new source in `sources=[...]`.
-- Recent Savant logs include `source_id=<source_id>`.
-- There is no `savant_security_behavior_rules_unknown_source` for the new
-  source.
-
-If `GET /api/v1/cameras/config/export` fails, fix that API/export error before
-starting the adapter. Starting an adapter without a matching exported runtime
-config can deliver frames, but the configured camera/rule pipeline will not be
-correct.
-
-Workers use the existing host PostgreSQL by default:
+默认连接宿主 PostgreSQL：
 
 ```text
 postgresql://video:video@host.docker.internal:5432/video_analytics
 ```
 
-Use the `local-postgres` compose profile only when you explicitly want the
-stack-local PostgreSQL on host port `5439`.
+`local-postgres` profile 才会启用 Compose PostgreSQL 和宿主 5439。
 
-## Evidence Policy
+部署前按顺序应用 `db/migrations/*.sql`。注意：
 
-The evidence path is replay-first:
+- 029/030 建立 evidence materialization lifecycle 和索引；
+- 031 建立 Replay create fencing；
+- 032 使用 `CREATE INDEX CONCURRENTLY`，不能放在事务中，必须以 autocommit 在非
+  压力窗口执行；
+- migration 完成不等于 worker 已经部署，schema 与镜像/挂载代码必须同版本。
+
+## 5. 启动完整双分支
+
+打开：
 
 ```text
-RTSP -> Replay -> analysis-forwarder -> Savant -> Redis/PostgreSQL
-  -> clip-worker Replay job -> video-file-sink -> media-worker sidecar
+http://<host>:8090/operator
 ```
 
-Replay is the evidence source of truth. `analysis-forwarder` is part of the
-analysis path and is allowed to drop sampled analysis frames under pressure; it
-must not be used as the source for `raw_clip.mov`.
+普通操作员：
 
-Evidence bundles contain:
+1. 登记摄像头、ROI 和算法，不必逐路加入当前运行；
+2. 点击“选择摄像头并启动”；
+3. 选择 `production_t4_40` 或 `local_4090_60`；
+4. 选择精确的 40 或 60 路；
+5. 自动均分或手动 A/B；
+6. 启动并等待后台任务完成。
 
-- `raw_clip.mov`
-- `sink_metadata.json`
-- `annotations.frame_cache.identity.jsonl`
-- `summary.frame_cache.identity.json`
-- `metadata.json`
+后台阶段：预检、A/B TensorRT/容器、摄像头收敛、rolling-cache 预热、evidence
+开放。状态写入
+`/data/video-analytics/media/.runtime/topology_apply_status.json`。浏览器刷新不影响
+任务，但 API 容器重启会使任务失败。
 
-The media-worker writes `project_version=midterm` and `schema_version=2.0-midterm`
-for this deployment. Legacy metadata fields are disabled in the midterm compose.
+### 当前预设
 
-New evidence metadata must carry the alarm machine time in `metadata.json`:
+| 项目 | T4 40 | 4090 60 |
+| --- | ---: | ---: |
+| A/B | 20/20 | 30/30 |
+| FPS | 4 | 8 |
+| Pose/Face batch | 4/4 | 4/4 |
+| ROI AdaFace | 16 | 16 |
+| MPS | 45/45/10 | 关闭 |
+| rolling prefill/retention | 25s/600s | 25s/600s |
 
-```json
-{
-  "event": {
-    "created_at": "<events.created_at>",
-    "alarm_machine_time": "<events.created_at>",
-    "alarm_machine_time_source": "events.created_at"
-  }
-}
+4090 预设只关闭 MPS，不关闭 ROI AdaFace 或 rolling-cache。
+
+## 6. 启动后验收
+
+必须同时检查：
+
+- 8090 `/health`；
+- `/api/v1/runtime/overview`；
+- `/api/v1/runtime/latency`；
+- `/api/v1/runtime/topology-config` 与 apply-status；
+- A/B source 数、effective FPS、queue 和 send failures；
+- ROI AdaFace、person、face Redis group lag/pending；
+- rolling sink ready、segment source 覆盖与 retention；
+- evidence active/failed/expired/fallback；
+- DB-backed list/detail/timeline/annotation；
+- 新 MOV 的 5+5、约 24 FPS、HTTP Range 和 bbox/person context。
+
+`scripts/midterm_health.sh` 仍有旧固定清单：它没有检查
+`person-observation-worker`，并仍期待 legacy `source-adapter`。在代码修复前，不能只凭
+这个脚本判定完整双分支失败或成功。
+
+## 7. 停止语义
+
+8090“停止完整链路”：
+
+- 停止 dynamic source 和双分支推理/Replay/raw fanout/ROI/MPS；
+- 把当前摄像头标为 disabled；
+- 保留 event-worker、media-worker 和 rolling sink 做有限收尾；
+- 更新 apply-status 为 stopped。
+
+整栈停止：
+
+```bash
+bash scripts/midterm_stop.sh
 ```
 
-The 8090 evidence viewer also returns `alarm_machine_time` and
-`alarm_machine_time_source` from `/api/bundles` and `/api/bundles/{event_id}`.
-For old bundles without `created_at`, it may derive a display value only from
-epoch-millisecond-looking fields. Frame-relative or video-relative timestamps
-are not accepted as machine time.
+该脚本包含 local-postgres、dual、rolling、ROI 和 operator profiles。默认保留
+`/data/video-analytics` 数据。
 
-## Runtime Calibration
+## 8. 可选 profile
 
-Current defaults are set in `infra/env/midterm.env`:
+- `local-postgres`：本地 PostgreSQL；
+- `qdrant`：Qdrant 与 gallery sync worker；
+- `legacy-primary-rtsp`：旧静态 source adapter；
+- `rolling-cache` / `rolling-cache-dual`：手动 rolling 调试；
+- `roi-adaface`：手动 ROI worker；
+- `dual-replay-shards`、`dual-4090-two-source`：历史/压测组合；
+- `operator-dual-runtime`：8090 预创建与管理。
 
-- Analysis-forwarder FPS: `8/1`
-- Savant project ingress FPS gate: enabled, `8/1`
-- Savant nvstreammux `MAX_FPS_CONTROL`: disabled after Phase 0A
-- Pose infer interval: `1`
-- Pose detector/selector thresholds: `0.50`
-- Pose keypoint threshold: `0.35`
-- Pose minimum box: `60x100`
-- Face detector threshold: `0.50`
-- Watchlist similarity threshold: `0.60`
+当前 env 默认 `FACE_VECTOR_BACKEND=pgvector`。启用 qdrant profile 还不等于 face-worker
+已切换；必须同时设置向量后端、检查 outbox/bootstrap/reconcile 和 fallback 指标。
 
-These values are chosen to reduce excessive pose boxes, slow the inference path
-to a reasonable rate, and keep low-quality face detections out of comparison.
+## 9. 端口
 
-## Archive Locations
+| 端口 | 用途 |
+| ---: | --- |
+| 8090 | 用户入口、API/media 代理 |
+| 6396 | Redis |
+| 8098 | 基础 Replay API |
+| 18080 | 基础 Savant metrics |
+| 18081 | 基础 analysis-forwarder metrics |
+| 18184 | 基础 raw fanout metrics |
+| 18180/18181 | A/B Savant metrics |
+| 18185/18186 | A/B raw fanout metrics |
+| 18187 | ROI AdaFace metrics |
+| 5439 | 可选 local PostgreSQL |
 
-Historical files are preserved here:
+8090 不代理 FastAPI `/docs`。接口清单见
+`docs/frontend_interface/02_api_inventory.md`。
 
-- `infra/archive/phase-only/20260609/`
-- `modules/savant_replay/archive/phase-only/20260609/`
-- `modules/savant_security/config/archive/phase-only/20260609/`
-- `docs/archive/phase-only/20260610/`
-- `harness/tests/archive/phase-only/20260610/`
-- `scripts/*/archive/phase-only/20260610/`
-- `services/archive/phase-only/20260610/`
+## 10. 相关文档
 
-They are not deployment entrypoints.
+- 当前架构：`docs/current_architecture.md`
+- 当前状态：`docs/current_mainline_status.md`
+- Compose 服务表：`docs/compose_inventory.md`
+- 操作指南：`docs/midterm_web_operator_guide.md`
+- 双分支专项流程：
+  `docs/midterm_8090_single_gpu_dual_branch_operator_runbook_2026-07-14.md`

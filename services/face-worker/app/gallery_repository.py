@@ -11,7 +11,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 import psycopg
-from pgvector.psycopg import Vector
+from pgvector import Vector
 from psycopg.rows import dict_row
 
 from app.vector_store import register_vector_if_supported

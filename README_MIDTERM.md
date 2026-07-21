@@ -1,159 +1,82 @@
-# Midterm 视频分析系统 - 使用入口
+# Midterm 视频分析系统：使用入口
 
-> **快速开始：** 看 `QUICKSTART.txt` 一页纸指南
+更新时间：2026-07-20
 
-## 一键启动
+## 第一次启动
 
 ```bash
-# 迁移机/项目机统一启动入口
 bash scripts/midterm_start.sh
+```
 
-# 打开浏览器访问
+启动脚本负责机器层准备、镜像构建、基础服务启动，以及 8090 双分支容器的预创建。
+它不会自动把 40/60 路摄像头全部加入运行。
+
+打开：
+
+```text
 http://127.0.0.1:8090/operator
 ```
 
-启动脚本负责机器层准备：检查 Docker/GPU、创建运行目录、验证模型资产、构建镜像并
-启动所有容器。启动完成后，摄像头、人员/人脸、告警证据、存储维护和运行时重启都
-从 8090 页面管理。
+## 推荐操作流程
 
-## Web 操作台
+1. 在“配置 -> 摄像头”登记 RTSP、ROI 和算法规则；
+2. 登记阶段可以先不选择“加入当前运行”；
+3. 点击首屏“选择摄像头并启动”；
+4. 选择“生产 T4 40 路完整链路”或“本机 4090 60 路完整链路”；
+5. 选择精确路数，使用自动均分或手动 A/B；
+6. 点击“启动完整双分支”，等待五段后台进度完成；
+7. 在运行页确认 source/FPS/queue/latency，在证据和人员轨迹页确认结果。
 
-启动后通过浏览器操作，无需命令行：
+T4 生产机当前容量基线是 40 路、4 FPS。不要在散热和正式门禁没有重新通过时改成
+60 路。
 
-- **摄像头管理**：添加/编辑 RTSP 视频源
-- **人员与人脸**：上传人脸照片建立人员库
-- **告警证据**：查看告警录像和识别结果
+## 页面能力
 
-详细使用指南：[docs/midterm_web_operator_guide.md](docs/midterm_web_operator_guide.md)
+- 摄像头、ROI、规则和算法配置；
+- 人员与单图/批量人脸注册；
+- 人员轨迹和轨迹图片；
+- 告警视频与 watchlist 图片；
+- 运行总览、端到端延迟、完整链路启动/停止；
+- 高级性能和拓扑配置；
+- 存储统计、预览和受控删除。
 
-## 一键管理脚本
-
-| 脚本 | 功能 |
-|------|------|
-| `scripts/midterm_start.sh` | 迁移机/项目机整体启动入口 |
-| `scripts/midterm_stop.sh` | 停止服务，默认保留 `/data/video-analytics` 数据 |
-| `scripts/midterm_health.sh` | 全面健康检查 |
-
-## 健康检查
+## 运行与停止
 
 ```bash
 bash scripts/midterm_health.sh
+bash scripts/midterm_stop.sh
 ```
 
-会检查：
-- ✓ 容器状态（12个默认服务）
-- ✓ API 端点可用性
-- ✓ 摄像头配置状态
-- ✓ 人脸库注册状态
-- ✓ GPU 可用性
-- ✓ 磁盘空间
+`midterm_health.sh` 的固定容器清单仍偏向旧单分支形态；请同时以 8090 的运行总览、
+延迟和完整链路状态判断双分支与 `person-observation-worker`。
 
-## 文档导航
+8090 的“停止完整链路”会停止摄像头采集和双分支推理并禁用摄像头，同时保留部分
+worker 完成收尾；它与 `scripts/midterm_stop.sh` 的整栈停止不同。
+
+## 架构摘要
+
+```text
+RTSP -> Replay A/B -> raw fanout A/B
+  |-> sampled Savant A/B -> events / trajectories / face ROI / annotations
+  `-> full-rate rolling-cache A/B
+
+events + rolling segments -> media-worker -> DB-backed evidence -> 8090
+```
+
+完整预设使用外置 ROI AdaFace。4090 预设只是不启用 CUDA MPS，并不会关闭 ROI
+AdaFace 或 rolling-cache。
+
+## 关键文档
 
 | 文档 | 用途 |
-|------|------|
-| `QUICKSTART.txt` | 一页纸快速入门（推荐第一次看这个） |
-| `docs/midterm_web_operator_guide.md` | Web 操作台详细使用指南 |
-| `docs/midterm_quick_reference.md` | API/命令/故障排查参考 |
-| `docs/midterm_clean_machine_migration_2026-06-25.md` | 新机器干净迁移说明和打包/部署脚本 |
-| `docs/midterm_uos_clean_machine_migration_steps_2026-06-29.md` | 统信 UOS 新机器全 Docker / 离线迁移步骤 |
-| `docs/midterm_migration_runbook_2026-06-23.md` | 系统迁移打包流程 |
-| `CLAUDE.md` | 开发规则和部署入口说明 |
+| --- | --- |
+| `QUICKSTART.txt` | 一页快速入门 |
+| `docs/current_architecture.md` | 当前架构和两种运行形态 |
+| `docs/midterm_web_operator_guide.md` | 8090 详细操作 |
+| `docs/midterm_deployment.md` | 部署、目录、profile 和验证 |
+| `docs/midterm_quick_reference.md` | 命令与排障参考 |
+| `docs/midterm_knowledge_base/00_Index.md` | 专题知识库 |
+| `docs/documentation_sync_audit_2026-07-20.md` | 代码/文档差异审计 |
 
-## 系统架构
-
-```
-RTSP 源
-  → Replay 存储
-  → analysis-forwarder 采样分析
-  → Savant 推理（YOLO26-pose + YOLOv8-Face + AdaFace）
-  → Redis 事件流
-  → event-worker / face-worker
-  → clip-worker Replay 作业
-  → video-file-sink 原始录像
-  → media-worker 证据包生成
-  → 8090 Web 操作台复核
-```
-
-## 当前部署
-
-- **启动入口**: `scripts/midterm_start.sh`
-- **Compose 文件**: `infra/docker-compose.midterm.yml`
-- **环境配置**: `infra/env/midterm.env`
-- **compose 项目名**: `video-analytics-midterm`
-- **默认 SOURCE_ID**: `primary_rtsp`
-
-## 典型工作流
-
-```bash
-# 1. 启动系统
-bash scripts/midterm_start.sh
-
-# 2. 检查健康状态
-bash scripts/midterm_health.sh
-
-# 3. 打开浏览器配置和管理运行时
-open http://127.0.0.1:8090/operator
-
-# 4. 在 Web 界面添加摄像头和人员
-
-# 5. 查看告警证据
-
-# 6. 停止系统（保留数据）
-bash scripts/midterm_stop.sh
-```
-
-## 故障排查
-
-### 端口冲突
-
-```bash
-# 检查占用
-ss -ltn | grep -E ':(6396|8090|8098|18080|18081)'
-
-# 停止旧部署
-bash scripts/midterm_stop.sh
-```
-
-### 服务日志
-
-```bash
-# 所有服务
-docker compose -f infra/docker-compose.midterm.yml logs -f
-
-# 特定服务
-docker compose -f infra/docker-compose.midterm.yml logs -f api
-docker compose -f infra/docker-compose.midterm.yml logs -f savant-security
-```
-
-### 重启单个服务
-
-```bash
-docker compose -f infra/docker-compose.midterm.yml restart <service>
-```
-
-## 开发规则
-
-详见 `CLAUDE.md`，关键原则：
-
-1. 当前部署只使用 `midterm` 文件
-2. 修改前先添加/更新测试
-3. 功能代码变更后只重启受影响服务
-4. 运行态修改必须同步更新文档
-
-## 性能验证
-
-长期产能验证按 `specs/16_dual_path_30x2_t4_production_optimization.md` 执行。
-
-## 迁移打包
-
-准备迁移到其他机器：
-
-1. 运行健康检查确认当前状态正常
-2. 提交所有代码修改
-3. 按 `docs/midterm_migration_runbook_2026-06-23.md` 打包
-
-## 联系
-
-- 问题反馈：查看日志 + 健康检查输出
-- API 文档：http://127.0.0.1:8090/docs
+FastAPI `/docs` 只存在于内部 `api:8000`，8090 当前不代理 `/docs`。操作员请使用
+8090 页面，接口开发请查 `docs/frontend_interface/02_api_inventory.md`。

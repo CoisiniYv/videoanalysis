@@ -59,6 +59,7 @@ FORBIDDEN_IMAGE_FIELDS = {
 
 _RANGE_CACHE_LOCK = Lock()
 _RANGE_CACHE: OrderedDict[tuple[Any, ...], tuple[float, list[tuple[str, dict[str, Any]]]]] = OrderedDict()
+DEFAULT_FRAME_ANNOTATION_SCAN_HARD_LIMIT = 500
 
 
 class RedisStreamReadClient:
@@ -157,11 +158,18 @@ def write_frame_cache_identity_sidecar(
             config=config,
             event=event_copy,
         )
+        build_messages = messages
+        if (
+            reader_summary.get("media_anchor_exact_match_required") is True
+            and reader_summary.get("media_anchor_exact_match_found") is not True
+        ):
+            build_messages = []
+        reader_summary["messages_eligible_for_build"] = len(build_messages)
         pre_seconds = float(config.get("pre_seconds") or 5.0)
         post_seconds = float(config.get("post_seconds") or 5.0)
         identity_annotations, build_summary = build_sidecar_identity_annotations(
             event=event_copy,
-            frame_messages=messages,
+            frame_messages=build_messages,
             pre_seconds=pre_seconds,
             post_seconds=post_seconds,
             max_frames=int(config.get("max_frames") or 300),
@@ -267,20 +275,27 @@ def write_frame_cache_identity_sidecar(
             **production_contract,
             "error": None,
         }
-        _write_jsonl(annotations_path, identity_annotations)
-        if dropped_annotations and bool(config.get("write_dropped_debug_sidecar")):
-            _write_jsonl(_dropped_debug_path(annotations_path), dropped_annotations)
-        _write_summary(summary_path, summary)
+        persist_sidecar_files = bool(config.get("persist_sidecar_files", True))
+        if persist_sidecar_files:
+            _write_jsonl(annotations_path, identity_annotations)
+            if dropped_annotations and bool(config.get("write_dropped_debug_sidecar")):
+                _write_jsonl(_dropped_debug_path(annotations_path), dropped_annotations)
+            _write_summary(summary_path, summary)
         if state is not None:
-            state.sidecar_written += 1
+            if persist_sidecar_files:
+                state.sidecar_written += 1
             if annotation_status == "missing_frame_metadata":
                 state.sidecar_missing_frame_metadata += 1
             if annotation_status == "missing_trigger_face_annotation":
                 state.sidecar_missing_trigger_face += 1
         return summary, {
-            "written": True,
-            "annotations_path": str(annotations_path),
-            "summary_path": str(summary_path),
+            "written": persist_sidecar_files,
+            "in_memory": not persist_sidecar_files,
+            "annotations": identity_annotations,
+            "annotations_path": (
+                str(annotations_path) if persist_sidecar_files else None
+            ),
+            "summary_path": str(summary_path) if persist_sidecar_files else None,
         }
     except Exception as exc:
         if state is not None:
@@ -334,7 +349,7 @@ def build_sidecar_identity_annotations(
         anchor_frame_uuid=anchor.get("frame_uuid"),
         anchor_source_observation_id=source_observation_id,
         anchor_event_ts_ms=(
-            _event_wall_clock_epoch_ms(event)
+            _media_anchor_epoch_ms(event)
             or anchor.get("event_ts_ms")
             or anchor.get("timestamp_ms")
         ),
@@ -727,14 +742,17 @@ def _frame_annotation_anchor_found(
     source_observation_id = str(anchor.get("source_observation_id") or "").strip()
     frame_uuid = str(anchor.get("frame_uuid") or "").strip()
     frame_pts = _int_or_none(anchor.get("frame_pts"))
+    media_identity_required = bool(frame_uuid or frame_pts is not None)
     for message in messages:
-        if source_observation_id and _message_matches_source_observation(
-            message, source_observation_id
-        ):
-            return True
         if frame_uuid and str(message.get("frame_uuid") or "") == frame_uuid:
             return True
         if frame_pts is not None and _int_or_none(message.get("frame_pts")) == frame_pts:
+            return True
+        if (
+            not media_identity_required
+            and source_observation_id
+            and _message_matches_source_observation(message, source_observation_id)
+        ):
             return True
     return False
 
@@ -787,18 +805,31 @@ def _read_frame_annotations(
         source_stream_used = True
     else:
         stream_name = base_stream_name
-    lookback_count = int(config.get("lookback_count") or 10000)
-    max_scan = int(config.get("max_scan") or 20000)
-    range_count = int(config.get("range_count") or 2000)
+    scan_hard_limit = max(
+        1,
+        int(
+            config.get("scan_hard_limit")
+            or DEFAULT_FRAME_ANNOTATION_SCAN_HARD_LIMIT
+        ),
+    )
+    configured_lookback_count = int(config.get("lookback_count") or scan_hard_limit)
+    configured_max_scan = int(config.get("max_scan") or scan_hard_limit)
+    configured_range_count = int(config.get("range_count") or scan_hard_limit)
+    lookback_count = min(max(configured_lookback_count, 1), scan_hard_limit)
+    max_scan = min(max(configured_max_scan, 1), scan_hard_limit)
+    range_count = min(max(configured_range_count, 1), max_scan)
     range_max, range_min, read_mode = _frame_cache_stream_range(event, config)
-    if read_mode == "bounded_stream_id_range":
-        count = min(max(range_count, 1), max_scan)
-    else:
-        count = min(lookback_count, max_scan)
-    client = redis_client or RedisStreamReadClient(str(config.get("redis_url") or "redis://redis:6379/0"))
+    retrieval_anchor_ms, retrieval_anchor_source, retrieval_time_domain = (
+        _frame_cache_retrieval_anchor(event)
+    )
+    bounded_range = read_mode.startswith("bounded_")
+    count = min(max(range_count, 1), max_scan)
+    client = redis_client or RedisStreamReadClient(
+        str(config.get("redis_url") or "redis://redis:6379/0")
+    )
     messages: list[dict[str, Any]] = []
     event_ms = (
-        _event_wall_clock_epoch_ms(event)
+        _media_anchor_epoch_ms(event)
         or (anchor or {}).get("event_ts_ms")
         or (anchor or {}).get("timestamp_ms")
     )
@@ -814,9 +845,21 @@ def _read_frame_annotations(
         "base_stream_name": base_stream_name,
         "source_stream_used": source_stream_used,
         "read_mode": read_mode,
-        "bounded_range_used": read_mode == "bounded_stream_id_range",
+        "bounded_range_used": bounded_range,
         "range_max": range_max,
         "range_min": range_min,
+        "retrieval_anchor_epoch_ms": retrieval_anchor_ms,
+        "retrieval_anchor_source": retrieval_anchor_source,
+        "retrieval_time_domain": retrieval_time_domain,
+        "media_anchor_frame_uuid": (
+            str((anchor or {}).get("frame_uuid") or "") or None
+        ),
+        "media_anchor_frame_pts": _int_or_none((anchor or {}).get("frame_pts")),
+        "media_anchor_exact_match_required": bool(
+            str((anchor or {}).get("frame_uuid") or "").strip()
+            or _int_or_none((anchor or {}).get("frame_pts")) is not None
+        ),
+        "media_anchor_exact_match_found": False,
         "entries_scanned": 0,
         "messages_valid": 0,
         "messages_retained": 0,
@@ -843,6 +886,11 @@ def _read_frame_annotations(
         "range_count": range_count,
         "read_count": count,
         "max_scan": max_scan,
+        "configured_lookback_count": configured_lookback_count,
+        "configured_range_count": configured_range_count,
+        "configured_max_scan": configured_max_scan,
+        "scan_hard_limit": scan_hard_limit,
+        "scan_limit_clamped": configured_max_scan > max_scan,
         "pages_read": 0,
         "page_size": count,
         "entries_scanned_total": 0,
@@ -853,6 +901,10 @@ def _read_frame_annotations(
         "ack_used": False,
         "xdel_used": False,
     }
+
+    if not bounded_range:
+        summary["stop_reason"] = "missing_retrieval_anchor"
+        return [], summary
 
     next_max = range_max
     stop_reason = "max_scan_reached"
@@ -955,9 +1007,6 @@ def _read_frame_annotations(
             messages.append(normalized)
 
         summary["anchor_found"] = _frame_annotation_anchor_found(messages, anchor=anchor)
-        if read_mode != "bounded_stream_id_range":
-            stop_reason = "single_page"
-            break
         if _frame_annotation_window_satisfied(
             messages,
             anchor=anchor,
@@ -977,19 +1026,38 @@ def _read_frame_annotations(
             break
     summary["stop_reason"] = stop_reason
     summary["anchor_found"] = _frame_annotation_anchor_found(messages, anchor=anchor)
+    summary["media_anchor_exact_match_found"] = summary["anchor_found"]
     if (
         source_stream_used
         and not messages
         and bool(config.get("source_stream_fallback_global"))
     ):
+        source_entries_scanned = int(summary.get("entries_scanned_total") or 0)
+        remaining_scan = max(0, max_scan - source_entries_scanned)
+        if remaining_scan <= 0:
+            summary["stop_reason"] = "source_stream_scan_budget_exhausted"
+            return [], summary
         fallback_config = dict(config)
         fallback_config["source_stream_enabled"] = False
+        fallback_config["max_scan"] = remaining_scan
+        fallback_config["scan_hard_limit"] = remaining_scan
         fallback_messages, fallback_summary = _read_frame_annotations(
             redis_client=redis_client,
             config=fallback_config,
             event=event,
         )
         fallback_summary["source_stream_fallback_from"] = stream_name
+        fallback_summary["source_stream_entries_scanned"] = source_entries_scanned
+        fallback_summary["entries_scanned"] = (
+            int(fallback_summary.get("entries_scanned") or 0)
+            + source_entries_scanned
+        )
+        fallback_summary["entries_scanned_total"] = (
+            int(fallback_summary.get("entries_scanned_total") or 0)
+            + source_entries_scanned
+        )
+        fallback_summary["scan_hard_limit"] = max_scan
+        fallback_summary["max_scan"] = max_scan
         return fallback_messages, fallback_summary
 
     messages.sort(key=lambda item: (item.get("frame_pts") is None, int(item.get("frame_pts") or 0), str(item.get("frame_uuid") or "")))
@@ -1027,11 +1095,9 @@ def _frame_cache_stream_range(
     event: dict[str, Any],
     config: dict[str, Any],
 ) -> tuple[str, str, str]:
-    if bool(config.get("stream_id_range_unbounded")):
-        return "+", "-", "late_annotation_retry_lookback"
-    event_ms = _event_wall_clock_epoch_ms(event)
-    if event_ms is None:
-        return "+", "-", "lookback_fallback"
+    anchor_ms, _anchor_source, time_domain = _frame_cache_retrieval_anchor(event)
+    if anchor_ms is None:
+        return "", "", "missing_retrieval_anchor"
     pre_seconds = _float_or_none(config.get("pre_seconds"))
     if pre_seconds is None:
         pre_seconds = 5.0
@@ -1040,14 +1106,19 @@ def _frame_cache_stream_range(
         post_seconds = 5.0
     lower_ms = max(
         0,
-        int(event_ms - _freshness_before_seconds(config, pre_seconds) * 1000),
+        int(anchor_ms - _freshness_before_seconds(config, pre_seconds) * 1000),
     )
-    upper_ms = int(event_ms + _freshness_after_seconds(config, post_seconds) * 1000)
+    upper_ms = int(anchor_ms + _freshness_after_seconds(config, post_seconds) * 1000)
     bucket_ms = int(config.get("range_cache_bucket_ms") or 0)
     if bucket_ms > 0:
         lower_ms = (lower_ms // bucket_ms) * bucket_ms
         upper_ms = ((upper_ms + bucket_ms - 1) // bucket_ms) * bucket_ms
-    return f"{upper_ms}-999999", f"{lower_ms}-0", "bounded_stream_id_range"
+    read_mode = (
+        "bounded_producer_write_time"
+        if time_domain == "producer_write_time"
+        else "bounded_media_time_fallback"
+    )
+    return f"{upper_ms}-999999", f"{lower_ms}-0", read_mode
 
 
 def _cached_frame_annotation_range(
@@ -2249,34 +2320,60 @@ def _freshness_after_seconds(config: dict[str, Any], post_seconds: float) -> flo
 
 
 def _event_wall_clock_epoch_ms(event: dict[str, Any]) -> int | None:
-    for value in _event_created_at_candidates(event):
-        parsed = _epoch_ms_from_value(value)
-        if parsed is not None:
-            return parsed
-    return None
+    anchor_ms, _source, _domain = _frame_cache_retrieval_anchor(event)
+    return anchor_ms
 
 
 def _event_wall_clock_source(event: dict[str, Any]) -> str | None:
-    for key, value in _event_created_at_candidate_items(event):
-        if _epoch_ms_from_value(value) is not None:
-            return key
-    return None
+    _anchor_ms, source, _domain = _frame_cache_retrieval_anchor(event)
+    return source
 
 
 def _event_created_at_candidates(event: dict[str, Any]) -> list[Any]:
-    return [value for _key, value in _event_created_at_candidate_items(event)]
+    return [value for _key, value in _producer_write_time_candidate_items(event)]
 
 
 def _event_created_at_candidate_items(event: dict[str, Any]) -> list[tuple[str, Any]]:
+    return _producer_write_time_candidate_items(event)
+
+
+def _frame_cache_retrieval_anchor(
+    event: dict[str, Any],
+) -> tuple[int | None, str | None, str | None]:
+    for key, value in _producer_write_time_candidate_items(event):
+        parsed = (
+            _redis_stream_id_epoch_ms(value)
+            if key.endswith("stream_id")
+            else _epoch_ms_from_value(value)
+        )
+        if parsed is not None:
+            return parsed, key, "producer_write_time"
+    media_ms, media_source = _media_anchor_epoch_ms_with_source(event)
+    if media_ms is not None:
+        return media_ms, media_source, "media_time_fallback"
+    return None, None, None
+
+
+def _producer_write_time_candidate_items(
+    event: dict[str, Any],
+) -> list[tuple[str, Any]]:
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
-    request = media.get("replay_job_request") if isinstance(media.get("replay_job_request"), dict) else {}
+    request = (
+        media.get("replay_job_request")
+        if isinstance(media.get("replay_job_request"), dict)
+        else {}
+    )
     return [
-        ("event.event_ts_ms", event.get("event_ts_ms")),
-        ("event.start_ts_ms", event.get("start_ts_ms")),
-        ("payload.event_ts_ms", payload.get("event_ts_ms")),
-        ("payload.start_ts_ms", payload.get("start_ts_ms")),
-        ("payload.media.event_ts_ms", media.get("event_ts_ms")),
+        ("event.producer_created_at", event.get("producer_created_at")),
+        ("payload.producer_created_at", payload.get("producer_created_at")),
+        ("payload.media.producer_created_at", media.get("producer_created_at")),
+        ("event.event_redis_stream_id", event.get("event_redis_stream_id")),
+        ("event.redis_stream_id", event.get("redis_stream_id")),
+        ("event.stream_id", event.get("stream_id")),
+        ("payload.event_redis_stream_id", payload.get("event_redis_stream_id")),
+        ("payload.redis_stream_id", payload.get("redis_stream_id")),
+        ("payload.stream_id", payload.get("stream_id")),
         ("event.created_at", event.get("created_at")),
         ("payload.created_at", payload.get("created_at")),
         ("payload.media.created_at", media.get("created_at")),
@@ -2284,6 +2381,41 @@ def _event_created_at_candidate_items(event: dict[str, Any]) -> list[tuple[str, 
         ("payload.media.replay_job_created_at", media.get("replay_job_created_at")),
         ("payload.media.replay_job_request.created_at", request.get("created_at")),
     ]
+
+
+def _media_anchor_epoch_ms(event: dict[str, Any]) -> int | None:
+    value, _source = _media_anchor_epoch_ms_with_source(event)
+    return value
+
+
+def _media_anchor_epoch_ms_with_source(
+    event: dict[str, Any],
+) -> tuple[int | None, str | None]:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+    for key, value in (
+        ("event.event_ts_ms", event.get("event_ts_ms")),
+        ("event.start_ts_ms", event.get("start_ts_ms")),
+        ("event.timestamp_ms", event.get("timestamp_ms")),
+        ("payload.event_ts_ms", payload.get("event_ts_ms")),
+        ("payload.start_ts_ms", payload.get("start_ts_ms")),
+        ("payload.media.event_ts_ms", media.get("event_ts_ms")),
+        ("payload.media.timestamp_ms", media.get("timestamp_ms")),
+    ):
+        parsed = _epoch_ms_from_value(value)
+        if parsed is not None:
+            return parsed, key
+    return None, None
+
+
+def _redis_stream_id_epoch_ms(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not text or "-" not in text:
+        return None
+    epoch_text, sequence_text = text.split("-", 1)
+    if not epoch_text.isdigit() or not sequence_text.isdigit():
+        return None
+    return _epoch_ms_from_value(epoch_text)
 
 
 def _row_created_epoch_ms(row: dict[str, Any]) -> int | None:

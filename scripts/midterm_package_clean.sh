@@ -120,6 +120,7 @@ OFFLINE_IMAGES=(
     "video-analytics-midterm-clip-worker:latest"
     "video-analytics-midterm-media-worker:latest"
     "video-analytics-midterm-evidence-viewer:latest"
+    "video-analytics-midterm-rolling-cache-sink:latest"
 )
 
 mkdir -p "$PACKAGE_DIR"

@@ -23,6 +23,37 @@ from app import worker  # noqa: E402
 EVENT_ID = "11111111-1111-4111-8111-111111111111"
 
 
+def test_sink_window_guard_uses_stable_rolling_mux_pts_for_wall_clock_bursts() -> None:
+    rows = [
+        {
+            "pts": 10_000_000_000,
+            "rolling_cache_mux_pts": 20_000_000_000,
+        },
+        {
+            "pts": 11_700_000_000,
+            "rolling_cache_mux_pts": 21_000_000_000,
+        },
+        {
+            "pts": 11_700_001_000,
+            "rolling_cache_mux_pts": 22_000_000_000,
+        },
+    ]
+
+    guard = worker._sink_metadata_window_guard(
+        rows,
+        {
+            "requested_start_pts": 10_700_000_000,
+            "requested_end_pts": 12_700_000_000,
+            "event_frame_pts": 11_700_000_000,
+            "expected_event_t_s": 1.0,
+        },
+    )
+
+    assert guard["sink_window_guard_pts_domain"] == "rolling_cache_mux_pts"
+    assert guard["sink_window_guard_status"] == "passed"
+    assert guard["event_centered_in_clip"] is True
+
+
 def test_time_domain_crop_failure_does_not_publish_source_replay_output(
     monkeypatch, tmp_path: Path
 ) -> None:

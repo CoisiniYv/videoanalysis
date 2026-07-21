@@ -849,24 +849,74 @@ def _process_person_observation_batch(
     repo: EventRepository,
     consumer: RedisStreamConsumer,
 ) -> tuple[int, int, int, int]:
-    inserted = 0
-    duplicates = 0
-    skipped = 0
-    failed = 0
+    valid: list[tuple[str, dict]] = []
+    malformed_ids: list[str] = []
     for msg_id, fields in messages:
         observation = _parse_person_observation(fields)
         if observation is None:
-            skipped += 1
-            consumer.ack(msg_id)
+            malformed_ids.append(msg_id)
             continue
-        outcome = _handle_person_observation(observation, msg_id, repo, consumer)
-        if outcome == "inserted":
-            inserted += 1
-        elif outcome == "duplicate":
-            duplicates += 1
+        valid.append((msg_id, observation))
+
+    skipped = len(malformed_ids)
+    if malformed_ids:
+        _ack_person_messages(consumer, malformed_ids)
+    if not valid:
+        return 0, 0, skipped, 0
+
+    observations = [observation for _msg_id, observation in valid]
+    try:
+        insert_many = getattr(repo, "insert_person_bbox_observations", None)
+        if callable(insert_many):
+            results = list(insert_many(observations))
         else:
-            failed += 1
-    return inserted, duplicates, skipped, failed
+            # Compatibility for narrow unit-test repositories. Production uses
+            # the transactional pipeline method above.
+            results = [
+                repo.insert_person_bbox_observation(observation)
+                for observation in observations
+            ]
+    except Exception:
+        logger.exception(
+            "person observation batch db insert failed count=%d first_id=%s",
+            len(valid),
+            observations[0].get("source_observation_id"),
+        )
+        return 0, 0, skipped, len(valid)
+
+    if len(results) != len(valid):
+        logger.error(
+            "person observation batch result mismatch expected=%d actual=%d",
+            len(valid),
+            len(results),
+        )
+        # The database statement is idempotent; leave messages pending so a
+        # redelivery can safely reconcile an ambiguous client-side result.
+        return 0, 0, skipped, len(valid)
+
+    inserted = sum(result is not None for result in results)
+    duplicates = len(results) - inserted
+    committed_ids = [msg_id for msg_id, _observation in valid]
+    acked = _ack_person_messages(consumer, committed_ids)
+    if acked != len(committed_ids):
+        logger.error(
+            "person observation batch ack incomplete expected=%d actual=%d",
+            len(committed_ids),
+            acked,
+        )
+    return inserted, duplicates, skipped, 0
+
+
+def _ack_person_messages(
+    consumer: RedisStreamConsumer,
+    msg_ids: list[str],
+) -> int:
+    if not msg_ids:
+        return 0
+    ack_many = getattr(consumer, "ack_many", None)
+    if callable(ack_many):
+        return int(ack_many(msg_ids))
+    return sum(bool(consumer.ack(msg_id)) for msg_id in msg_ids)
 
 
 def connect_redis(cfg: Config) -> Redis:

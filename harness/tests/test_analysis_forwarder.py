@@ -166,6 +166,38 @@ def test_sampler_drops_empty_content() -> None:
     assert sampler.admit(_Frame("cam", pts=0, content=_Content(none=True))) is False
 
 
+def test_sampler_preserves_fractional_credit_for_near_target_pts() -> None:
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="8/1")
+
+    accepted = [
+        index
+        for index in range(800)
+        if sampler.admit(
+            _Frame(
+                "cam",
+                pts=round(index * 124_500_000),
+                keyframe=index % 8 == 0,
+            )
+        )
+    ]
+
+    # 124.5 ms is only 0.4% faster than the target cadence.  The gate should
+    # shed that fractional excess, not collapse into alternate-frame drops.
+    assert len(accepted) >= 790
+
+
+def test_sampler_still_limits_24fps_to_8fps() -> None:
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="8/1")
+
+    accepted = [
+        index
+        for index in range(24)
+        if sampler.admit(_Frame("cam", pts=index * 41_666_666))
+    ]
+
+    assert accepted == [0, 3, 6, 9, 12, 15, 18, 21]
+
+
 def test_metadata_filter_requires_matching_face_person_association() -> None:
     metadata_filter = sampler_mod.MetadataObjectFilter(
         object_namespace="yolov8_face",

@@ -1,7 +1,7 @@
 ---
 type: roadmap
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - risks
   - roadmap
@@ -9,115 +9,91 @@ tags:
 
 # 剩余风险与下一步
 
-## P0 真实 RTSP / 长时间 soak
+## P0：提交与部署一致性
 
-当前 pressure source 证明不等于真实摄像头生产证明。下一步最重要：
+当前工作区含未提交服务、migration、测试和文档。提交/部署前必须确认：
 
-- 混合真实 RTSP；
-- 不同码率、分辨率、GOP、网络抖动；
-- 断流重连；
-- 8 FPS 长时间 soak，建议至少 2-4 小时起步。
+- migration 032 与依赖它的 worker 代码同时交付；
+- 032 以 autocommit、`CREATE INDEX CONCURRENTLY`、非压力窗口执行；
+- production compose/env/override 与 API preset 来自同一 revision；
+- 部署后记录 image、migration hash、runtime preset 和 effective container env；
+- 不把本机 dirty working tree 结论直接当作生产已部署事实。
 
-验收：
+## P0：最新 revision 的 60 路复验
 
-- source 不退出、不重启；
-- forwarder queue 不长期堆积；
-- Savant effective FPS 达到所选 profile；
-- pose/person/face observation 持续产出；
-- Redis pending/lag 不增长；
-- retained evidence 50/50 playable；
-- lifecycle p95/p99 不超过 300s deadline；
-- 8090 list/detail 可查 retained samples。
+4090 60 路、8 FPS 在 2026-07-14 的当时 revision 通过。之后 rolling-cache 引入
+双时间域并只对 40 路重新正式验证，因此仍需：
 
-## P1 生产硬件 profile
+- 当前 revision；
+- 正确 native-24 fixture 身份；
+- 60 路、30/30、8 FPS；
+- 600s sampling + 120s drain；
+- 5+5、原始 FPS、timeline、bbox、trajectory、ROI pending 全门禁；
+- 两轮可比结果和一次 worker restart soak。
 
-仍需验证：
+## P0/P1：真实 RTSP 与恢复
 
-- 单 T4；
-- 双 T4；
-- 4090；
-- 双 GPU；
-- T4 + 3060 是否值得。
+pressure publisher 不等于真实摄像头。需要覆盖：
 
-输出目标：
+- 混合分辨率、码率、GOP 和厂商；
+- 网络抖动、断流、重连、PTS rollback；
+- source/session/epoch 变化；
+- rolling fragment、read pin、coverage retry；
+- event/person/face/media worker SIGKILL/restart；
+- API 在 topology apply 中重启。
 
-| 硬件 | 路数 | FPS | batch | topology | 证据延迟 | 结论 |
-| --- | ---: | ---: | ---: | --- | --- | --- |
+验收不能只有容器 Up；必须看 source age、FPS、queue、Redis lag/pending、task 收敛、
+playability、annotation 和 residual ownership。
 
-不要把 4090 pressure source 结果直接外推到 T4。
+## P1：T4 热/功耗与 evidence 波峰余量
 
-## P1 face-worker 同步链路
+当前生产基线 40 路、4 FPS 已通过，但审计看到：
 
-注册图库在线查询已经切到 Qdrant authoritative，并通过 60 路 8 FPS 压测和 20,000 向量 benchmark。
-因此原来的“pgvector 大图库查询是否会线性放大”已经从主要风险降级。
+- GPU 84–85°C；
+- 70W software power cap；
+- SM clock 明显低于理论上限；
+- 同步事件波峰 queue wait p95 约 47 秒；
+- media permit/remux/finalizer 会短时打满，随后清空。
 
-当前剩余风险是：`face-worker` 仍在单 consumer loop 中同步完成 DB insert、规则解析、Qdrant 查询、
-exact rerank、event publish 和 ACK。真实 RTSP 长时间运行或更高 face observation 速率下，仍需要确认
-端到端 ACK/pending 是否稳定。
+下一步优先改善散热并持续观察 hourly active=0、oldest ready、queue wait p95 和
+expired=0。不要在当前物理条件下直接把生产基线改成 60 路。
 
-已证明：
+## P1：后台 topology job 持久性
 
-- 60 路 8 FPS authoritative run 下 Qdrant query p95/p99 为 3ms/4ms；
-- 5000 人 x 4 图，即 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms；
-- fallback count 为 0；
-- `watchlist_hit` payload 和 8090 evidence 语义未改变。
+当前 status 文件持久，但执行是 API 进程内 daemon thread。需要评估：
 
-下一步需要：
+- durable job row/queue；
+- owner/lease/heartbeat；
+- API restart 后 resume 或确定性 rollback；
+- stop/apply 并发互斥；
+- 操作审计和重试幂等。
 
-- 真实 RTSP soak 下记录 observation insert、rule resolution、Qdrant query、exact rerank、event publish、
-  ACK p95/p99；
-- 如果 Qdrant query 已达标但 `security.face_observations` pending/ACK 仍异常，再拆
-  persistence/matching 队列；
-- 如果生产图库增长到 50k/100k active embeddings，再追加同脚本 benchmark。
+## P1：worker 恢复闭环
 
-## P1 Savant 阶段级 latency
+Media lifecycle 已有 lease/fence/handoff，Clip 有 Replay fencing，但还需运行证明：
 
-当前整体吞吐可观测，但模型链内部阶段不足。
+- finalizer_pending SIGKILL；
+- cleanup_pending 长时间恢复；
+- person stream 在 event storm 下无 trimming loss；
+- face-worker DB/query/publish/ACK p95/p99；
+- rolling retention 与 read pin 竞态；
+- API epoch barrier 与旧 worker 并发。
 
-需要阶段级指标：
+## P2：8090 生产化
 
-- pose detector；
-- tracker；
-- behavior_rules；
-- face detector；
-- face_person_associator；
-- AdaFace；
-- face_reid_gate；
-- pyfunc 后处理；
-- DeepStream batch wait / queue wait。
+- 鉴权与 RBAC；
+- 高风险操作审计；
+- WebSocket upgrade proxy；
+- 自动回滚/故障演练；
+- `midterm_health.sh` 与当前服务清单同步；
+- 更明确显示当前向量后端、migration revision 和 deployed image digest。
 
-目标是把“8 FPS 波动”定位到具体阶段，而不是只看整体 effective FPS。
+## P2：可选 Qdrant
 
-## P2 media finalizer 扩展
+Qdrant 有历史 20k benchmark，但当前 env 默认 pgvector。如重新启用：
 
-当前不要继续大改。只有以下情况出现再升级：
-
-- 真实 RTSP soak 下 lifecycle p95/p99 超 300s；
-- materialization expired 增多；
-- production 要求全事件 evidence，而不是 retained high-value evidence；
-- CPU 已平滑但 queue 长期不下降。
-
-候选路线：
-
-- 内部 worker pool；
-- 多 media-worker 容器 + DB-backed claim；
-- 独立 finalizer service。
-
-风险：
-
-- 重复终态；
-- 文件 cleanup 竞态；
-- Replay sink 堆积；
-- DB claim 锁竞争；
-- 磁盘膨胀。
-
-## P2 8090 生产化
-
-生产前仍需：
-
-- 鉴权；
-- 角色权限；
-- 更完整操作审计；
-- WebSocket 实时告警；
-- 运行状态可视化强化；
-- 配置保存 / runtime apply 的 UI 防误操作。
+- 显式配置 profile 与 `FACE_VECTOR_BACKEND=qdrant`；
+- 验证 bootstrap/outbox/reconcile；
+- 记录 exact rerank、fallback、shadow mismatch 和 sync lag；
+- 在目标图库规模与真实 face observation 速率下重跑；
+- 不能用历史 benchmark 声称当前运行态已启用 Qdrant。

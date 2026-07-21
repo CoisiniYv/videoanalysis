@@ -323,6 +323,29 @@ def test_durable_handoff_survives_retry_and_fences_previous_owner(conn) -> None:
     assert pending["materialization_phase"] == "finalizer_pending"
     assert pending["materialization_handoff"]["attempt_token"] == rolling.token
     assert pending["materialization_lease_token"] is None
+    queue_entered_at = pending["materialization_phase_updated_at"]
+    queue_metrics = repository.finalizer_pending_metrics(connection)
+    assert queue_metrics.total == 1
+    assert queue_metrics.unleased == 1
+    assert queue_metrics.leased == 0
+    assert queue_metrics.oldest_age_ms >= 0
+
+    assert repository.retry_unclaimed_finalizer_handoff(
+        connection,
+        event_id=event_id,
+        reason="capacity_unavailable:finalizer_lane_full",
+        retry_hint_s=0.25,
+    ) is True
+    capacity_retry = _task(connection, event_id)
+    assert capacity_retry["materialization_status"] == "materializing"
+    assert capacity_retry["materialization_phase"] == "finalizer_pending"
+    assert capacity_retry["materialization_lease_token"] is None
+    assert capacity_retry["materialization_handoff"]["attempt_token"] == rolling.token
+    assert capacity_retry["materialization_retry_reason"] == "capacity_unavailable"
+    assert capacity_retry["materialization_phase_updated_at"] == queue_entered_at
+    retry_at = capacity_retry["materialization_next_attempt_at"]
+    assert isinstance(retry_at, datetime)
+    assert 0 <= (retry_at - datetime.now(timezone.utc)).total_seconds() <= 1.0
 
     with connection.cursor() as cur:
         cur.execute(

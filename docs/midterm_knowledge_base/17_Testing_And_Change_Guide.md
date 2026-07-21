@@ -1,7 +1,7 @@
 ---
 type: testing-guide
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - testing
   - validation
@@ -67,6 +67,8 @@ pytest -q harness/tests/test_camera_runtime_apply_service.py
 pytest -q harness/tests/test_runtime_control_service.py
 pytest -q harness/tests/test_runtime_performance_service.py
 pytest -q harness/tests/test_runtime_topology_service.py
+pytest -q harness/tests/test_operator_full_runtime_orchestration.py
+pytest -q harness/tests/test_runtime_stop_and_latency.py
 pytest -q harness/tests/test_runtime_overview_api.py
 pytest -q harness/tests/test_replay_shard_routing.py
 pytest -q harness/tests/test_savant_supervisor_service.py
@@ -85,7 +87,10 @@ docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.
 - containers touched；
 - replay shard JSON/path；
 - 8090 状态提示；
-- disabled source 不误报。
+- disabled source 不误报；
+- `apply-async` 的并发 guard、阶段/百分比和终态；
+- apply-status 刷新后可恢复，但 API 进程重启会把仍在运行的线程任务标为失败；
+- `/runtime/latency` 的 10s/60s 阈值、A/B source/queue 和 DB/annotation 缺失语义。
 
 ## 改 event-worker
 
@@ -107,6 +112,24 @@ pytest -q harness/tests/test_pose_behavior_event_payload_contract.py
 - admission skip 状态可解释；
 - evidence task 不留假 active。
 
+## 改 person-observation-worker / 人体轨迹
+
+建议测试：
+
+```bash
+pytest -q harness/tests/test_event_worker_person_batch.py
+pytest -q harness/tests/test_event_worker_priority_and_image_atomicity.py
+pytest -q harness/tests/test_midterm_pressure60_script.py
+```
+
+必须验证：
+
+- `person-observation-worker` 使用独立入口和 consumer group；
+- event-worker 主循环不重新轮询高率 person stream；
+- batch insert、duplicate、ACK、retry 和 pending reclaim 语义；
+- person stream lag/pending、batch/duplicate/error 指标可观测；
+- 压力脚本和 Compose 同时包含该 worker，且不会把它误计为 event-worker 的附属线程。
+
 ## 改 face-worker
 
 建议测试：
@@ -117,7 +140,7 @@ pytest -q harness/tests/test_face_vector_store.py
 pytest -q harness/tests/test_gallery_match.py
 pytest -q harness/tests/test_face_match_evidence_policy.py
 pytest -q harness/tests/test_watchlist_evidence_identity_continuation.py
-# Qdrant 接入后补充：
+# 使用 Qdrant 可选 profile 时补充：
 pytest -q harness/tests/test_qdrant_gallery_store.py
 pytest -q harness/tests/test_qdrant_gallery_sync_outbox.py
 pytest -q harness/tests/test_face_worker_qdrant_backend_static.py
@@ -131,17 +154,23 @@ pytest -q harness/tests/test_face_worker_qdrant_backend_static.py
 - match_results 语义；
 - watchlist_hit event payload；
 - source_observation_id 绑定；
-- Qdrant score/threshold mapping、fallback count、outbox lag；
+- 默认 pgvector 路径保持可用；Qdrant 不是当前默认 authoritative backend；
+- 使用 Qdrant 时检查 score/threshold mapping、fallback count、outbox lag；
 - 20k/50k/100k 规模 benchmark 结果，如果生产图库规模变化；
 - observation insert、rule resolution、exact rerank、event publish、ACK p95/p99；
 - 小目标名单 hybrid routing 不误扩成 all-active。
 
-## 改 clip-worker
+## 改 clip-worker / Clip Coordinator V2（单分支或兼容链）
 
 建议测试：
 
 ```bash
 pytest -q harness/tests/test_clip_worker_queue_safety.py
+pytest -q harness/tests/test_clip_coordinator_v2_contract.py
+pytest -q harness/tests/test_clip_request_processor_v2.py
+pytest -q harness/tests/test_clip_worker_replay_planner.py
+pytest -q harness/tests/test_clip_replay_executor.py
+pytest -q harness/tests/test_clip_replay_slot_fencing.py
 pytest -q harness/tests/test_midterm_replay_cadence_payload.py
 pytest -q harness/tests/test_midterm_replay_duration_tuning.py
 pytest -q harness/tests/test_midterm_replay_epoch_isolation.py
@@ -156,7 +185,30 @@ pytest -q harness/tests/test_replay_shard_routing.py
 - 前后证据窗口正确；
 - per-source/per-shard 并发；
 - replay shard 路由；
-- Redis pending 最终收敛。
+- Redis pending 最终收敛；
+- plan hash、owner/token/generation 和 create slot fencing；
+- 完整双分支 rolling 预设仍 suppress record request，不能把本节误当成其主证据链。
+
+## 改 rolling-cache-sink / rolling 物化
+
+建议测试：
+
+```bash
+pytest -q services/rolling-cache-sink/tests/test_sink_contract.py
+pytest -q harness/tests/test_rolling_cache_materialization.py
+pytest -q harness/tests/test_midterm_stream_session_isolation.py
+pytest -q harness/tests/test_analysis_forwarder.py
+pytest -q harness/tests/test_savant_pts_fps_gate.py
+```
+
+必须验证：
+
+- raw fanout 的 full-rate 分支与 analysis sampling 分支语义分离；
+- fragment 以 epoch/source/session 隔离并原子发布；
+- 双时间域 metadata、segment catalog/index 和跨片段选择正确；
+- retention/byte cap 不删除仍被 pin 的片段；
+- 5+5 窗口、约 24 FPS、关键帧边界和 remux 输出可播放；
+- rolling 不可用时只能按当前配置进入明确 fallback/failed 状态，不能静默伪成功。
 
 ## 改 media-worker
 
@@ -165,6 +217,13 @@ pytest -q harness/tests/test_replay_shard_routing.py
 ```bash
 pytest -q harness/tests/test_evidence_materialization_phase0.py
 pytest -q harness/tests/test_evidence_materialization_phase2plus.py
+pytest -q harness/tests/test_materialization_repository_contract.py
+pytest -q harness/tests/test_evidence_lifecycle_contract.py
+pytest -q harness/tests/test_media_worker_scheduler_v2.py
+pytest -q harness/tests/test_media_worker_segment_index.py
+pytest -q harness/tests/test_media_worker_finalizer_boundary.py
+pytest -q harness/tests/test_media_worker_finalizer_integration.py
+pytest -q harness/tests/test_media_worker_long_lived_resources.py
 pytest -q harness/tests/test_media_worker_perf_safety.py
 pytest -q harness/tests/test_post_savant_evidence_bundle_crop.py
 pytest -q harness/tests/test_evidence_viewer_database_index.py
@@ -177,6 +236,10 @@ pytest -q harness/tests/test_evidence_viewer_materialization_state.py
 - bundle/artifacts/timeline/overlay DB 写入；
 - degraded annotation 语义；
 - lifecycle/queue wait/deadline slack；
+- Scheduler V2 lane/source/permit reservation 与 bounded dispatch；
+- image/remux/finalizer lane 隔离，进程 finalizer 不被请求线程生命周期截断；
+- segment index 命中、失效与 filesystem fallback 可解释；
+- lease/fencing/handoff/terminal CAS 和 stale-owner recovery；
 - ffmpeg/ffprobe 不 fallback；
 - terminal idempotency；
 - cleanup 不删错文件。
@@ -229,6 +292,7 @@ pytest -q harness/tests/test_savant_redis_stream_writer.py
 ```bash
 pytest -q harness/tests/test_events_table_performance_indexes_static.py
 pytest -q harness/tests/test_midterm_worker_indexes_static.py
+pytest -q harness/tests/test_worker_hotpath_indexes_static.py
 pytest -q harness/tests/test_algorithm_rule_response_schema.py
 ```
 
@@ -237,6 +301,8 @@ pytest -q harness/tests/test_algorithm_rule_response_schema.py
 - migration 顺序；
 - index concurrently；
 - partial index predicate；
+- migration 032 的 cleanup-recovery 与 algorithm cooldown 热路径索引；
+- 032 以 autocommit、非压力窗口应用，不能包在 transaction 中；
 - 旧数据兼容；
 - API response schema；
 - EXPLAIN 计划。

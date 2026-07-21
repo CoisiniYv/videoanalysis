@@ -185,6 +185,34 @@ def test_incremental_refresh_parses_only_new_or_changed_segments(tmp_path: Path)
     assert int(index.snapshot()["refreshes"]) >= 2
 
 
+def test_index_retains_compact_source_clock_bounds_after_row_cache_eviction(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    for index_value in range(4):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"000{index_value}",
+            pts_values=[index_value * 10 + 1, index_value * 10 + 9],
+        )
+    index = _index(root, row_cache_max_entries=1)
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    )
+
+    assert [(segment.source_first_pts, segment.source_last_pts) for segment in segments] == [
+        (1, 9),
+        (11, 19),
+        (21, 29),
+        (31, 39),
+    ]
+    assert int(index.snapshot()["row_cache_entries"]) == 1
+
+
 def test_half_written_segment_waits_for_stable_metadata_and_video(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     clock = [100.0]
@@ -253,14 +281,34 @@ def test_generation_change_invalidates_retention_deleted_entry(tmp_path: Path) -
         pts_values=[1, 2],
     )
     index = _index(root, refresh_interval_s=60.0)
+    walk_calls = 0
+    original_walk = index._walk
+
+    def counted_walk(path: Path):
+        nonlocal walk_calls
+        walk_calls += 1
+        yield from original_walk(path)
+
+    index._walk = counted_walk
     assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 1
+    assert walk_calls == 1
 
     shutil.rmtree(directory)
     (root / ".rolling-cache-generation").write_text("1\n", encoding="utf-8")
     assert index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a") == []
     stats = index.snapshot()
-    assert int(stats["reconciliations"]) == 1
+    assert int(stats["refreshes"]) == 1
+    assert int(stats["reconciliations"]) == 0
     assert int(stats["stale_entries"]) >= 1
+    assert walk_calls == 1
+
+    # The refresh acknowledges the new root generation.  A second lookup must
+    # not repeat either refresh or full reconciliation.
+    assert index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a") == []
+    repeated = index.snapshot()
+    assert int(repeated["refreshes"]) == 1
+    assert int(repeated["reconciliations"]) == 0
+    assert walk_calls == 1
 
 
 def test_parsed_row_cache_is_bounded_lru(tmp_path: Path) -> None:
@@ -416,6 +464,56 @@ def test_source_refresh_and_pin_publication_are_atomic_against_retention(
     )
     assert deleted["retention_deleted"] == 1
     assert not directory.exists()
+
+
+def test_maintenance_tree_discovery_does_not_hold_mutation_lock(
+    tmp_path: Path,
+) -> None:
+    maintenance = _maintenance()
+    root = tmp_path / "cache"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+        mtime_s=10.0,
+    )
+    index = _index(root, read_pin_ttl_s=100.0)
+    segments = index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
+    discovery_entered = threading.Event()
+    allow_discovery = threading.Event()
+    cleanup_finished = threading.Event()
+    original_discover = maintenance.discover_segments
+
+    def slow_discover(*args, **kwargs):
+        discovery_entered.set()
+        assert allow_discovery.wait(timeout=2.0)
+        return original_discover(*args, **kwargs)
+
+    maintenance.discover_segments = slow_discover
+
+    def cleanup() -> None:
+        maintenance.cleanup_once(
+            root,
+            retention_s=5.0,
+            max_bytes=0,
+            read_pin_ttl_s=100.0,
+            stability_age_s=0.0,
+            now_s=20.0,
+        )
+        cleanup_finished.set()
+
+    thread = threading.Thread(target=cleanup)
+    thread.start()
+    assert discovery_entered.wait(timeout=1.0)
+    with index.pin_segments(segments):
+        assert int(index.snapshot()["active_read_pins"]) == 1
+        assert not cleanup_finished.is_set()
+        allow_discovery.set()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert cleanup_finished.is_set()
 
 
 def test_source_pin_reports_concurrent_writer_change_as_retryable(tmp_path: Path) -> None:

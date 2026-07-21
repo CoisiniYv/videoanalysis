@@ -180,10 +180,12 @@ def test_midterm_shard_plan_job_sinks_exist_in_compose() -> None:
     assert services["video-file-sink-a"]["profiles"] == [
         "dual-replay-shards",
         "dual-4090-two-source",
+        "operator-dual-runtime",
     ]
     assert services["video-file-sink-b"]["profiles"] == [
         "dual-replay-shards",
         "dual-4090-two-source",
+        "operator-dual-runtime",
     ]
 
 

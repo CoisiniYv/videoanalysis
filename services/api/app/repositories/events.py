@@ -253,16 +253,29 @@ class EventRepository:
                 LIMIT 1
             ) latest_task ON true
         """
-        count_from_sql = f"""
+        # Keep the expensive artifact/task enrichment behind the page boundary.
+        # A retained evidence archive can contain tens of thousands of bundles;
+        # enriching every matching row before LIMIT made the operator's newest
+        # evidence page take seconds even when it requested only ten rows.
+        camera_filter_join_sql = (
+            """
+                LEFT JOIN cameras c
+                  ON c.id::text = eb.camera_id
+                  OR c.source_id = eb.source_id
+            """
+            if source_id
+            else ""
+        )
+        candidate_from_sql = f"""
             FROM evidence_bundles eb
-            LEFT JOIN cameras c
-              ON c.id::text = eb.camera_id
-              OR c.source_id = eb.source_id
+            {camera_filter_join_sql}
             {latest_task_join_sql if clip_status else ""}
             WHERE {where_sql}
         """
+        count_from_sql = candidate_from_sql
         data_from_sql = f"""
-            FROM evidence_bundles eb
+            FROM page
+            JOIN evidence_bundles eb ON eb.event_id = page.event_id
             LEFT JOIN cameras c
               ON c.id::text = eb.camera_id
               OR c.source_id = eb.source_id
@@ -301,10 +314,15 @@ class EventRepository:
                 WHERE et.event_id = eb.event_id
                    OR et.source_event_id = eb.source_event_id
             ) task_counts ON true
-            WHERE {where_sql}
         """
         count_query = f"SELECT COUNT(*) AS total {count_from_sql}"
         data_query = f"""
+            WITH page AS MATERIALIZED (
+                SELECT eb.event_id, eb.event_created_at
+                {candidate_from_sql}
+                ORDER BY eb.event_created_at DESC, eb.event_id DESC
+                LIMIT %(limit)s OFFSET %(offset)s
+            )
             SELECT
                 eb.event_id::text AS event_id,
                 eb.source_event_id,
@@ -363,7 +381,6 @@ class EventRepository:
                 latest_task.materialization_deadline_at AS latest_materialization_deadline_at
             {data_from_sql}
             ORDER BY eb.event_created_at DESC, eb.event_id DESC
-            LIMIT %(limit)s OFFSET %(offset)s
         """
 
         count_params = {k: v for k, v in params.items() if k not in {"limit", "offset"}}

@@ -119,6 +119,88 @@ ON CONFLICT (source_observation_id) DO NOTHING
 RETURNING id
 """
 
+_INSERT_PERSON_BBOX_OBSERVATIONS_SQL = """
+WITH input_rows AS (
+    SELECT *
+    FROM jsonb_to_recordset(%(rows)s::jsonb) AS item (
+        ordinal INTEGER,
+        source_observation_id TEXT,
+        source_id TEXT,
+        camera_id TEXT,
+        track_id TEXT,
+        timestamp_ms BIGINT,
+        frame_pts BIGINT,
+        frame_num INTEGER,
+        person_bbox JSONB,
+        person_confidence DOUBLE PRECISION,
+        gate_status TEXT,
+        payload JSONB
+    )
+), ranked_rows AS (
+    SELECT input_rows.*,
+           row_number() OVER (
+               PARTITION BY source_observation_id ORDER BY ordinal
+           ) AS duplicate_rank
+    FROM input_rows
+), inserted AS (
+    INSERT INTO person_bbox_observations (
+        source_observation_id,
+        source_id,
+        camera_id,
+        track_id,
+        timestamp_ms,
+        frame_pts,
+        frame_num,
+        person_bbox,
+        person_confidence,
+        gate_status,
+        payload
+    )
+    SELECT source_observation_id,
+           source_id,
+           camera_id,
+           track_id,
+           timestamp_ms,
+           frame_pts,
+           frame_num,
+           person_bbox,
+           person_confidence,
+           gate_status,
+           payload
+    FROM ranked_rows
+    WHERE duplicate_rank = 1
+    ON CONFLICT (source_observation_id) DO NOTHING
+    RETURNING source_observation_id, id
+)
+SELECT ranked_rows.ordinal,
+       CASE WHEN ranked_rows.duplicate_rank = 1 THEN inserted.id END AS id
+FROM ranked_rows
+LEFT JOIN inserted USING (source_observation_id)
+ORDER BY ranked_rows.ordinal
+"""
+
+
+def _person_bbox_observation_params(observation: Dict[str, Any]) -> dict[str, Any]:
+    payload = observation.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "source_observation_id": observation.get("source_observation_id", ""),
+        "source_id": observation.get("source_id", ""),
+        "camera_id": observation.get("camera_id", ""),
+        "track_id": observation.get("track_id") or None,
+        "timestamp_ms": int(observation.get("timestamp_ms", 0)),
+        "frame_pts": observation.get("frame_pts"),
+        "frame_num": observation.get("frame_num"),
+        "person_bbox": json.dumps(
+            observation.get("person_bbox"),
+            ensure_ascii=False,
+        ),
+        "person_confidence": observation.get("person_confidence"),
+        "gate_status": observation.get("gate_status") or "accepted",
+        "payload": json.dumps(payload, ensure_ascii=False),
+    }
+
 EVIDENCE_TASK_STATUSES = (
     "manifest_ready",
     "materialization_pending",
@@ -908,29 +990,42 @@ class EventRepository:
 
     def insert_person_bbox_observation(self, observation: Dict[str, Any]) -> str | None:
         """Idempotently insert one accepted person bbox observation."""
-
-        payload = observation.get("payload")
-        if not isinstance(payload, dict):
-            payload = {}
-        person_bbox = observation.get("person_bbox")
-        params = {
-            "source_observation_id": observation.get("source_observation_id", ""),
-            "source_id": observation.get("source_id", ""),
-            "camera_id": observation.get("camera_id", ""),
-            "track_id": observation.get("track_id") or None,
-            "timestamp_ms": int(observation.get("timestamp_ms", 0)),
-            "frame_pts": observation.get("frame_pts"),
-            "frame_num": observation.get("frame_num"),
-            "person_bbox": json.dumps(person_bbox, ensure_ascii=False),
-            "person_confidence": observation.get("person_confidence"),
-            "gate_status": observation.get("gate_status") or "accepted",
-            "payload": json.dumps(payload, ensure_ascii=False),
-        }
-
         with self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(_INSERT_PERSON_BBOX_OBSERVATION_SQL, params)
+            cur.execute(
+                _INSERT_PERSON_BBOX_OBSERVATION_SQL,
+                _person_bbox_observation_params(observation),
+            )
             row = cur.fetchone()
             return str(row["id"]) if row else None
+
+    def insert_person_bbox_observations(
+        self,
+        observations: list[Dict[str, Any]],
+    ) -> list[str | None]:
+        """Persist one trajectory batch with one PostgreSQL statement."""
+
+        if not observations:
+            return []
+        rows = []
+        for ordinal, observation in enumerate(observations):
+            params = _person_bbox_observation_params(observation)
+            rows.append(
+                {
+                    **params,
+                    "ordinal": ordinal,
+                    "person_bbox": json.loads(params["person_bbox"]),
+                    "payload": json.loads(params["payload"]),
+                }
+            )
+        with self._conn.transaction(), self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _INSERT_PERSON_BBOX_OBSERVATIONS_SQL,
+                {"rows": json.dumps(rows, ensure_ascii=False)},
+            )
+            return [
+                str(row["id"]) if row.get("id") is not None else None
+                for row in cur.fetchall()
+            ]
 
     def _face_observation_for_event(self, event: Dict[str, Any]) -> dict[str, Any]:
         source_observation_id = _source_observation_id_from_event(event)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import psycopg
 from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -23,11 +24,17 @@ from app.services.runtime_performance import (
     get_runtime_performance_config,
     save_runtime_performance_config,
 )
+from app.services.runtime_latency import build_runtime_latency
 from app.services.runtime_topology import (
     RuntimeTopologyError,
     apply_runtime_topology_config,
     get_runtime_topology_config,
     save_runtime_topology_config,
+)
+from app.services.runtime_topology_jobs import (
+    get_runtime_topology_apply_status,
+    mark_runtime_topology_stopped,
+    start_runtime_topology_apply_job,
 )
 
 
@@ -106,6 +113,14 @@ def runtime_overview(request_id: str = Depends(_request_id)):
         return _err_response(503, str(exc), request_id)
 
 
+@router.get("/latency")
+def runtime_latency(request_id: str = Depends(_request_id)):
+    try:
+        return _ok(build_runtime_latency(), request_id)
+    except (OSError, psycopg.Error, ValueError) as exc:
+        return _err_response(503, f"runtime latency unavailable: {exc}", request_id)
+
+
 @router.get("/control")
 def runtime_control(request_id: str = Depends(_request_id)):
     try:
@@ -168,6 +183,13 @@ def runtime_topology_config_save(
 
 @router.post("/topology-config/apply")
 def runtime_topology_config_apply(
+    body: dict | None = Body(
+        default=None,
+        description=(
+            "Optional camera-first selection. When source_ids is supplied, "
+            "the selection is staged and applied atomically before the topology starts."
+        ),
+    ),
     force: bool = Query(
         False,
         description="Force topology apply even when active evidence tasks would be interrupted.",
@@ -175,7 +197,41 @@ def runtime_topology_config_apply(
     request_id: str = Depends(_request_id),
 ):
     try:
-        return _ok(apply_runtime_topology_config(force=force), request_id)
+        return _ok(
+            apply_runtime_topology_config(
+                force=force,
+                camera_selection=body,
+            ),
+            request_id,
+        )
+    except RuntimeTopologyError as exc:
+        return _runtime_topology_error_response(exc, request_id)
+
+
+@router.get("/topology-config/apply-status")
+def runtime_topology_config_apply_status(
+    request_id: str = Depends(_request_id),
+):
+    return _ok(get_runtime_topology_apply_status(), request_id)
+
+
+@router.post("/topology-config/apply-async")
+def runtime_topology_config_apply_async(
+    body: dict | None = Body(default=None),
+    force: bool = Query(
+        False,
+        description="Force topology apply even when active evidence tasks would be interrupted.",
+    ),
+    request_id: str = Depends(_request_id),
+):
+    try:
+        return _ok(
+            start_runtime_topology_apply_job(
+                force=force,
+                camera_selection=body,
+            ),
+            request_id,
+        )
     except RuntimeTopologyError as exc:
         return _runtime_topology_error_response(exc, request_id)
 
@@ -213,6 +269,8 @@ def runtime_control_single_restart(
 @router.post("/control/dual/stop")
 def runtime_control_dual_stop(request_id: str = Depends(_request_id)):
     try:
-        return _ok(stop_dual_runtime(), request_id)
+        result = stop_dual_runtime()
+        result["apply_status"] = mark_runtime_topology_stopped(result)
+        return _ok(result, request_id)
     except RuntimeControlError as exc:
         return _runtime_control_error_response(exc, request_id)

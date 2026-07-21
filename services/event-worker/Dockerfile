@@ -11,5 +11,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app/ ./app/
 COPY main.py ./main.py
+COPY person_main.py ./person_main.py
 
 CMD ["python", "main.py"]

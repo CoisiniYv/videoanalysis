@@ -1,7 +1,7 @@
 ---
 type: performance-history
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - performance
   - optimization
@@ -9,7 +9,12 @@ tags:
 
 # 性能优化历史
 
-## 当前已证明能力
+> 历史范围：本页主体记录截至 2026-06-29 的优化演进。“当前/下一步”均指当时的
+> revision，不是 2026-07-20 当前工作区结论。当前验收基线见
+> [[14_Performance_And_Acceptance_Playbook|性能与验收手册]] 和
+> `docs/current_mainline_status.md`。
+
+## 截至 2026-06-29 已证明能力
 
 | Profile | 结论 |
 | --- | --- |
@@ -79,7 +84,7 @@ pressure harness 校验 topology replay shard JSON 和 clip-worker observed JSON
 - 8 FPS pressure 下 media-worker CPU 曾约 1151%；
 - evidence 能完成，但瞬时 CPU 太猛。
 
-当前模型：
+当时模型：
 
 - 单进程 deadline-aware pacer；
 - high-priority event type 优先；
@@ -114,7 +119,7 @@ pressure harness 校验 topology replay shard JSON 和 clip-worker observed JSON
 - 生产图库扩展到数千人员、每人多图时，查询成本可能随图库规模放大；
 - 8090 watchlist hit 需要保持阈值语义和 payload 不变。
 
-当前结果：
+当时结果：
 
 - PostgreSQL 仍是 `persons` / `person_gallery_embeddings` 事实源；
 - Qdrant 是 `face_gallery_current` 派生索引，可从 PostgreSQL rebuild；
@@ -135,7 +140,7 @@ pressure harness 校验 topology replay shard JSON 和 clip-worker observed JSON
 - 8 FPS pressure source 通过不等于真实 RTSP 长时间生产通过。
 - 当前 retained evidence 通过不等于所有事件都会生成完整 evidence。
 
-## 下一步性能工作
+## 当时列出的下一步性能工作
 
 优先级：
 
@@ -144,3 +149,13 @@ pressure harness 校验 topology replay shard JSON 和 clip-worker observed JSON
 3. face-worker 同步链路 ACK/匹配 p95，必要时拆 persistence/matching；
 4. Savant 阶段级 latency；
 5. 如果 lifecycle 超 300s，再评估 media finalizer worker pool / 多容器 claim。
+
+## 2026-07-20 差异说明
+
+- 完整双分支主证据链已转为 rolling-cache-first；上面的 Replay shard/50-of-50 结果仍是
+  历史 artifact，不是当前 revision 的容量承诺；
+- media-worker 已从旧单线程 pacer 演进为 Scheduler V2、bounded lanes、进程 finalizer、
+  segment index 和 lifecycle lease/fencing/handoff；
+- T4 40 路、4 FPS、双时间域 rolling 是当前 revision 已验证基线；
+- 4090 60 路、8 FPS 在双时间域改造前曾通过，当前 revision 仍需重跑；
+- 当前默认向量后端是 pgvector；Qdrant 历史 benchmark 证明可选能力，不代表默认 profile。

@@ -162,7 +162,7 @@ def test_claimed_unexpected_exception_schedules_durable_retry_before_release(
     )
     monkeypatch.setattr(
         worker,
-        "_set_event_evidence_state",
+        "_finalizer_attempt_dir",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("projection down")),
     )
 
@@ -183,6 +183,12 @@ def test_claimed_unexpected_exception_schedules_durable_retry_before_release(
     )
     assert permit.released is True
     assert guard.snapshot()["active"] == 0
+
+
+def test_v2_finalizer_does_not_rewrite_transient_event_state() -> None:
+    worker = _worker()
+
+    assert "_set_event_evidence_state" not in inspect.getsource(worker._finalize_one)
 
 
 def test_failed_terminal_write_returns_claim_to_durable_retry(
@@ -399,16 +405,32 @@ def test_success_holds_permit_through_terminal_index_and_cleanup(
         },
     )
     monkeypatch.setattr(worker, "_set_event_evidence_state", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        worker,
-        "_finalize_post_savant_evidence_bundle",
-        lambda *_args, **_kwargs: {
+    process_bundle = {
             "raw_clip": "/tmp/evidence/raw_clip.mov",
             "metadata": "/tmp/evidence/metadata.json",
             "evidence_dir": "/tmp/evidence",
             "clip_status": "ready",
             "materialization_metrics": {},
-        },
+            "_finalizer_process_pid": 4321,
+        }
+
+    class Completed:
+        def result(self) -> dict[str, object]:
+            return dict(process_bundle)
+
+    class ImmediateProcessPool:
+        def submit(self, fn: object, database_url: str, kwargs: dict) -> Completed:
+            assert fn is worker._finalize_bundle_process_entry
+            assert database_url == "postgresql://test"
+            assert kwargs["event_id"] == EVENT_ID
+            return Completed()
+
+    monkeypatch.setattr(
+        worker,
+        "_finalize_post_savant_evidence_bundle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("parent process executed GIL-heavy bundle build")
+        ),
     )
     monkeypatch.setattr(
         worker,
@@ -439,7 +461,12 @@ def test_success_holds_permit_through_terminal_index_and_cleanup(
         held("cleanup", {"status": "deleted", "deleted_bytes": 1}),
     )
 
-    result = _finalize(worker, permit)
+    result = _finalize(
+        worker,
+        permit,
+        bundle_process_pool=ImmediateProcessPool(),
+        database_url="postgresql://test",
+    )
 
     assert result.updated == 1
     assert result.processed is True
@@ -721,7 +748,9 @@ def test_cleanup_recovery_uses_durable_pending_rows(
         allowed_statuses=("ready",),
     )
 
-    assert recovered == 1
+    assert recovered.rows_scanned == 1
+    assert recovered.recovered == 1
+    assert recovered.retry_pending == 0
     assert calls[0]["event_id"] == EVENT_ID
 
 
@@ -761,6 +790,7 @@ def test_publish_attempt_renames_atomically_after_fence(
     bundle = {key: str(path) for key, path in paths.items()}
     bundle["evidence_dir"] = str(attempt)
     monkeypatch.setattr(worker, "heartbeat_lease", lambda *_a, **_k: True)
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "false")
 
     published = worker._publish_finalizer_attempt(
         object(),
@@ -780,6 +810,54 @@ def test_publish_attempt_renames_atomically_after_fence(
     assert not attempt.exists()
     metadata = json.loads((canonical / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["path"] == str(canonical / "raw_clip.mov")
+
+
+def test_db_first_publish_skips_json_rewrite_before_sidecar_prune(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker = _worker()
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="token-db-first",
+        generation=4,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    attempt = worker._finalizer_attempt_dir(
+        str(tmp_path), event_id=EVENT_ID, lease=lease
+    )
+    attempt.mkdir(parents=True)
+    raw_clip = attempt / "raw_clip.mov"
+    metadata = attempt / "metadata.json"
+    raw_clip.write_bytes(b"mov")
+    metadata.write_text(json.dumps({"path": str(raw_clip)}), encoding="utf-8")
+    monkeypatch.setattr(worker, "heartbeat_lease", lambda *_a, **_k: True)
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+    rewrites: list[Path] = []
+    monkeypatch.setattr(
+        worker,
+        "_rewrite_published_json_paths",
+        lambda path, **_kwargs: rewrites.append(path),
+    )
+
+    published = worker._publish_finalizer_attempt(
+        object(),
+        lease=lease,
+        event_id=EVENT_ID,
+        evidence_output_dir=str(tmp_path),
+        attempt_dir=attempt,
+        bundle={
+            "evidence_dir": str(attempt),
+            "raw_clip": str(raw_clip),
+            "metadata": str(metadata),
+        },
+        lease_seconds=30,
+    )
+
+    assert published is not None
+    assert published["raw_clip"] == str(tmp_path / EVENT_ID / "raw_clip.mov")
+    assert rewrites == []
 
 
 def test_publish_fence_loss_deletes_only_own_attempt(

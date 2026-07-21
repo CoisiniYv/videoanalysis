@@ -1,7 +1,7 @@
 ---
 type: knowledge-base-readme
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 ---
 
 # Midterm Project Knowledge Base
@@ -11,6 +11,8 @@ updated: 2026-06-29
 
 入口：
 
+- 仓库级当前架构：`docs/current_architecture.md`
+- 当前状态：`docs/current_mainline_status.md`
 - [[00_Index|知识库索引]]
 - [[09_AI_Agent_Onboarding|AI agent 快速上手]]
 - [[12_Service_Deep_Dive|服务深潜]]
@@ -28,3 +30,5 @@ updated: 2026-06-29
   [[13_Runtime_Control_Runbook|运行控制手册]] 和 [[15_Design_Invariants_And_Decisions|设计不变量与决策]]。
 - 不把运行时快照当作事实源。摄像头、规则、人员、人脸库和 evidence metadata 的事实源是 PostgreSQL。
 - 本知识库是索引和解释层；细节和证据仍以源码、迁移、压测 artifact 和正式 docs/specs 为准。
+- 完整双分支以 rolling-cache 为主 evidence 路径；单分支 Replay job 是兼容路径。
+- 当前 env 默认向量后端是 pgvector；历史 Qdrant 报告不代表当前 profile 已启用。

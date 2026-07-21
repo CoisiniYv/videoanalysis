@@ -24,11 +24,11 @@ def test_operator_has_chinese_storage_maintenance_entry() -> None:
     assert "存储维护" in html
     assert "/static/maintenance.js" in html
     assert "/static/operator.js?v=" in html
-    assert "operator-trajectory-page-20260712" in html
-    assert "maintenance-execute-control-20260627" in html
+    assert "style.css?v=runtime-nav-20260715-operator-copy" in html
+    assert "maintenance-execute-control-20260627-operator-copy" in html
     assert "删除后不会自动重新生成证据" in html
-    assert "删除必须先 preview" in html
-    assert "删除必须先 preview" in js
+    assert "删除前必须先核对预览" in html
+    assert "删除前必须先生成并核对预览" in js
     assert 'id="maintenance-execute-toggle"' in html
     assert 'id="apply-maintenance-execute-control"' in html
     assert "/execution-control" in js

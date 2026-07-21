@@ -1,7 +1,7 @@
 ---
 type: module-map
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - modules
   - services
@@ -9,86 +9,76 @@ tags:
 
 # 模块地图
 
-## Compose 与配置
+## 部署与配置
 
 | 模块 | 关键文件 | 职责 |
 | --- | --- | --- |
-| compose | `infra/docker-compose.midterm.yml` | midterm 服务编排、profiles、env wiring |
-| env | `infra/env/midterm.env` | 默认 FPS、batch、worker、evidence、storage 参数 |
-| start | `scripts/midterm_start.sh` | 启动入口 |
-| package | `scripts/midterm_package_clean.sh` | 干净迁移打包，支持 `--include-images` |
-| deploy | `scripts/midterm_deploy_clean.sh` | 干净迁移部署，支持加载 `images.tar` |
+| Compose | `infra/docker-compose.midterm.yml` | 基础服务、profiles、端口和 env wiring |
+| Env | `infra/env/midterm.env` | 单分支默认值，不等同于 operator preset 生效值 |
+| Storage | `infra/midterm-storage.override.yml` | rolling/trajectory 快速盘挂载 |
+| Operator override | `infra/operator-dual-runtime.override.yml` | 单 GPU 双分支预创建时限定 Savant B GPU0 |
+| Start | `scripts/midterm_start.sh` | 构建、基础启动、目录准备、双分支预创建 |
+| Precreate | `scripts/runtime/precreate_operator_dual_runtime.sh` | `--no-start` 创建 8090 管理容器 |
 
-## 入口和控制
+## 入口与控制面
 
-| 服务 | 关键文件 | 输入 | 输出 |
-| --- | --- | --- | --- |
-| `evidence-viewer` | `services/evidence-viewer/app/main.py` | 浏览器请求 | 8090 UI、API/media 代理 |
-| `api` | `services/api/app/main.py` | 8090/API 请求 | DB 更新、runtime apply、evidence API |
-| runtime topology | `services/api/app/services/runtime_topology.py` | topology config | source plan、replay shard plan、branch services |
-| runtime apply | `services/api/app/services/runtime_apply.py` | camera DB state | Savant camera YAML、source manifest |
-
-详见 [[04_Control_Plane_8090|8090 控制面]]。
+| 服务/模块 | 关键文件 | 职责 |
+| --- | --- | --- |
+| `evidence-viewer` | `services/evidence-viewer/app/main.py` | 8090 UI、API/media proxy、旧 evidence 兼容接口 |
+| FastAPI | `services/api/app/main.py` | 内部 API composition root |
+| runtime router | `services/api/app/routers/runtime.py` | overview、latency、control、performance、topology |
+| topology | `services/api/app/services/runtime_topology.py` | 预设、分片、容器编排、prefill/evidence gate |
+| topology jobs | `services/api/app/services/runtime_topology_jobs.py` | 进程内后台 apply 与原子状态文件 |
+| runtime latency | `services/api/app/services/runtime_latency.py` | annotation/DB/branch 延迟摘要 |
 
 ## 视频与推理
 
-| 服务 | 关键文件 | 职责 |
+| 角色 | 实现 | 当前职责 |
 | --- | --- | --- |
-| `replay-service` | compose image | 全速 RTSP 存储、取证时间窗 |
-| `source-adapter` / dynamic source | Savant adapter image + generated sources | RTSP 到 Replay |
-| `analysis-forwarder` | `services/analysis-forwarder/app/main.py` | 从 Replay 读取分析分支、PTS/FPS 采样、写 Savant |
-| `savant-security` | `modules/savant_security/module.yml` | DeepStream/Savant 模型链、规则、Redis export |
-
-Savant pipeline 主要阶段：
-
-```text
-PtsFpsGate
-  -> yolo26_pose
-  -> nvtracker
-  -> behavior_rules
-  -> yolov8_face
-  -> face_person_associator
-  -> adaface
-  -> face_reid_gate
-  -> face_observation_exporter
-  -> frame_annotation_exporter
-```
+| Replay | Savant Replay image/config | 全率 ingest/RocksDB、raw fanout 上游、兼容 Replay job |
+| raw fanout | `services/analysis-forwarder/` | 原始 PUB；完整模式还承担 sampled output |
+| analysis-forwarder | 同上 | 单分支/推理-only 分析采样 |
+| Savant | `modules/savant_security/module.yml` | Pose、tracker、rules、Face、ROI/annotation export |
+| dynamic sources | `scripts/runtime/camera_source_controller.py` | DB/export 驱动 RTSP adapter |
 
 ## Redis workers
 
-| 服务 | 关键文件 | 输入 stream | 输出 |
-| --- | --- | --- | --- |
-| `event-worker` | `services/event-worker/app/worker.py` | `security.events` | `events`、alerts、evidence tasks、record requests |
-| record publisher | `services/event-worker/app/record_request.py` | event id | Redis `security.record_requests` |
-| `face-worker` | `services/face-worker/app/worker.py` | `security.face_observations` | `face_observations`、watchlist/gallery events |
-| gallery search selector | `services/face-worker/app/gallery_search.py` | embedding + target persons | `pgvector` / `shadow` / `qdrant` / `hybrid` 后端选择 |
-| Qdrant gallery store | `services/face-worker/app/qdrant_gallery_store.py` | embedding | Qdrant candidate search + PostgreSQL exact rerank |
-| pgvector rollback store | `services/face-worker/app/vector_store.py` | embedding | pgvector exact search / rollback / historical observation search |
-| Qdrant sync | `services/face-worker/sync_qdrant_gallery.py` | PostgreSQL gallery rows / outbox | bootstrap、drain、reconcile、status |
-| `clip-worker` | `services/clip-worker/app/worker.py` | `security.record_requests` | Replay jobs、evidence task updates |
-| replay shards | `services/clip-worker/app/replay_shards.py` | shard map | per-source Replay/video-file-sink routing |
-
-## Evidence finalization
-
-| 服务 | 关键文件 | 职责 |
+| 服务 | 输入 | 输出 |
 | --- | --- | --- |
-| `video-file-sink` | compose image | 接收 Replay job 输出 raw clip |
-| `media-worker` | `services/media-worker/app/worker.py` | 扫描 sink 输出、校验、索引 evidence |
-| post-Savant bundle | `services/media-worker/app/post_savant_evidence_bundle.py` | 生成/校验证据 bundle |
-| integrity | `services/media-worker/app/post_savant_video_integrity.py` | raw clip decode/integrity 检查 |
-| snapshot | `services/media-worker/app/snapshot.py` | 截图/探测辅助 |
+| `event-worker` | `security.events` | events、alerts、evidence tasks、单分支 record requests |
+| `person-observation-worker` | `security.person_observations` | 批量 person bbox trajectories |
+| `adaface-roi-worker` | `security.face_rois` | `security.face_observations` |
+| `face-worker` | `security.face_observations` | face observations、matches、watchlist events |
+| `clip-worker` | `security.record_requests` | 兼容 Replay job、fenced slot/state |
 
-## 压测与观测
+`person-observation-worker` 复用 event-worker 镜像，但有独立进程入口、consumer group 和
+batch size；它不是 event-worker 主循环中的附属轮询。
 
-| 脚本 | 职责 |
+## Evidence
+
+| 模块 | 关键文件 | 职责 |
+| --- | --- | --- |
+| rolling sink | `services/rolling-cache-sink/` | GStreamer passthrough、fragment 原子发布、ready/metrics |
+| scheduler | `services/media-worker/app/materialization_scheduler.py` | bounded dispatch、lane/source/permit reservation |
+| lifecycle repository | `services/media-worker/app/materialization_repository.py` | claim/lease/retry/handoff/terminal CAS |
+| segment index | `services/media-worker/app/segment_index.py` | epoch/source catalog、row cache、read pins |
+| rolling materializer | `services/media-worker/app/rolling_cache.py` | time-domain mapping、coverage、remux/image |
+| finalizer root | `services/media-worker/app/worker.py` | resource lifetime、finalizer、publish/index/cleanup |
+| DB index | `services/media-worker/app/evidence_db_index.py` | bundle/artifact/timeline/overlay transaction |
+| lifecycle contract | `libs/evidence_lifecycle/contract.py` | canonical status/phase/reason vocabulary |
+
+## 数据与查询
+
+| 模块 | 职责 |
 | --- | --- |
-| `scripts/runtime/run_midterm_pressure60.py` | 60 路压测、topology apply、evidence drain、downstream observability |
-| `scripts/runtime/report_evidence_materialization_phase0.py` | evidence materialization 报告 |
+| `db/migrations/` | schema、lifecycle、fencing、hot-path indexes |
+| API event/evidence repositories | 分页、alias、bundle/detail 查询 |
+| `services/face-worker/app/vector_store.py` | 默认 pgvector 查询 |
+| Qdrant modules/sync | 可选图库 derived index |
 
-压测报告要看：
+## 验证与报告
 
-- `sample_summary.json`
-- `downstream_observability_summary.json`
-- `db_summary_before_cleanup.json`
-- `kept_50_evidence.csv`
-- worker logs since start
+- `scripts/runtime/run_midterm_pressure60.py`：统一 pressure runner；
+- `scripts/runtime/run_pressure60_dual1gpu_profile.sh`：T4/4090 profile wrapper；
+- `harness/tests/test_*`：静态、契约、故障注入和回归测试；
+- `docs/code_review/`：带日期/revision 的 checkpoint 和运行证据。

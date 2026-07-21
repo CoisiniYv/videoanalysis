@@ -22,8 +22,14 @@ let runtimeOverview = null;
 let runtimeControl = null;
 let runtimePerformance = null;
 let runtimeTopology = null;
+let runtimeTopologyApplyStatus = null;
+let runtimeLatency = null;
 let runtimeLoadErrors = {};
 let runtimeActionInFlight = "";
+let runtimeApplyPollTimer = 0;
+let quickRuntimeManualAssignments = {};
+let quickRuntimeSelectedSourceIds = new Set();
+let quickRuntimeSelectionInitialized = false;
 let lastRuntimeApplyResult = null;
 let selectedRuntimeConfig = null;
 let roiPreviewObjectUrl = "";
@@ -67,7 +73,29 @@ const runtimeTopologyForm = document.getElementById("runtime-topology-form");
 const runtimeTopologyStatusEl = document.getElementById("runtime-topology-status");
 const runtimeTopologyPlanEl = document.getElementById("runtime-topology-plan");
 const runtimeTopologyAssignmentsEl = document.getElementById("runtime-topology-assignments");
+const quickRuntimeProfileEl = document.getElementById("quick-runtime-profile");
+const quickRuntimeShardStrategyEl = document.getElementById("quick-runtime-shard-strategy");
+const quickRuntimeCapacityEl = document.getElementById("quick-runtime-capacity");
+const quickRuntimeAssignmentsEl = document.getElementById("quick-runtime-assignments");
+const quickRuntimeResultEl = document.getElementById("quick-runtime-result");
+const quickRuntimeProgressEl = document.getElementById("quick-runtime-progress");
+const quickRuntimeProgressPhaseEl = document.getElementById("quick-runtime-progress-phase");
+const quickRuntimeProgressPercentEl = document.getElementById("quick-runtime-progress-percent");
+const quickRuntimeProgressElapsedEl = document.getElementById("quick-runtime-progress-elapsed");
+const quickRuntimeProgressTrackEl = document.getElementById("quick-runtime-progress-track");
+const quickRuntimeProgressBarEl = document.getElementById("quick-runtime-progress-bar");
+const quickRuntimeProgressMessageEl = document.getElementById("quick-runtime-progress-message");
+const quickRuntimeRollingProgressEl = document.getElementById("quick-runtime-rolling-progress");
+const quickRuntimeRollingRemainingEl = document.getElementById("quick-runtime-rolling-remaining");
+const quickRuntimeStartBtn = document.getElementById("quick-runtime-start");
+const quickRuntimeStopBtn = document.getElementById("quick-runtime-stop");
+const quickRuntimeManageCamerasBtn = document.getElementById("quick-runtime-manage-cameras");
+const quickRuntimeSelectRequiredBtn = document.getElementById("quick-runtime-select-required");
+const quickRuntimeClearSelectionBtn = document.getElementById("quick-runtime-clear-selection");
 const refreshRuntimeOverviewBtn = document.getElementById("refresh-runtime-overview");
+const refreshRuntimeLatencyBtn = document.getElementById("refresh-runtime-latency");
+const runtimeLatencySummaryEl = document.getElementById("runtime-latency-summary");
+const runtimeLatencyDetailEl = document.getElementById("runtime-latency-detail");
 const startSingleRuntimeBtn = document.getElementById("start-single-runtime");
 const stopSingleRuntimeBtn = document.getElementById("stop-single-runtime");
 const restartSingleRuntimeBtn = document.getElementById("restart-single-runtime");
@@ -78,6 +106,7 @@ const saveRuntimePerformanceBtn = document.getElementById("save-runtime-performa
 const applyRuntimePerformanceBtn = document.getElementById("apply-runtime-performance");
 const saveRuntimeTopologyBtn = document.getElementById("save-runtime-topology");
 const applyRuntimeTopologyBtn = document.getElementById("apply-runtime-topology");
+const toggleRuntimeAdvancedBtn = document.getElementById("toggle-runtime-advanced");
 const runtimeTopologyBranchSettingsEl = document.getElementById("runtime-topology-branch-settings");
 const runtimeTopologyBranchBEl = document.getElementById("runtime-topology-branch-b");
 const camerasEl = document.getElementById("cameras");
@@ -123,6 +152,24 @@ const THEME_STORAGE_KEY = "operator-theme";
 const ACTIVE_VIEW_STORAGE_KEY = "operator-active-view";
 const EVIDENCE_COUNT_STORAGE_KEY = "operator-evidence-count";
 const TOP_VIEWS = new Set(["cameras", "people", "trajectory", "evidence", "maintenance", "runtime"]);
+const PRIMARY_TOP_VIEW_BY_VIEW = {
+  cameras: "cameras",
+  people: "cameras",
+  evidence: "evidence",
+  trajectory: "evidence",
+  runtime: "runtime",
+  maintenance: "runtime",
+};
+const RUNTIME_ADVANCED_PANE_IDS = [
+  "runtime-performance-pane",
+  "runtime-topology-pane",
+  "runtime-container-pane",
+];
+const QUICK_RUNTIME_PROFILE_META = {
+  production_t4_40: { label: "生产 T4 40 路", expected: 40 },
+  local_4090_60: { label: "本机 4090 60 路", expected: 60 },
+};
+let runtimeAdvancedVisible = false;
 
 /* ---- API URL display ---- */
 apiUrlEl.textContent = window.location.origin + API;
@@ -431,6 +478,10 @@ function normalizedTopView(view) {
   return TOP_VIEWS.has(view) ? view : "cameras";
 }
 
+function primaryTopView(view) {
+  return PRIMARY_TOP_VIEW_BY_VIEW[normalizedTopView(view)] || "cameras";
+}
+
 function topViewFromHash() {
   const hash = String(window.location.hash || "").replace(/^#/, "").split("?")[0];
   return TOP_VIEWS.has(hash) ? hash : "";
@@ -517,7 +568,7 @@ function apiErrorMessage(error) {
   if (details.blocked && details.active_count) {
     const count = formatInteger(details.active_count);
     const taskSummary = (details.tasks || []).slice(0, 3).map((task) => {
-      const label = evidenceStateLabel(task.blocking_state || task.status || task.materialization_status);
+      const label = runtimeEvidenceStateLabel(task.blocking_state || task.status || task.materialization_status);
       const source = task.source_id || task.camera_id || "--";
       const eventType = task.event_type || "--";
       return `${eventType}/${source}/${label}`;
@@ -527,7 +578,12 @@ function apiErrorMessage(error) {
   if (details.guard_unavailable) {
     return "无法确认是否存在生成中的证据任务，已阻止重启";
   }
-  return error?.message || String(error || "未知错误");
+  const raw = error?.message || String(error || "未知错误");
+  if (/failed to fetch|networkerror|load failed/i.test(raw)) return "无法连接服务，请检查网络后重试";
+  if (/timeout|timed out/i.test(raw)) return "操作等待超时，请稍后刷新状态";
+  if (/HTTP\s*5\d\d/i.test(raw)) return "服务暂时不可用，请稍后重试";
+  if (/HTTP\s*4\d\d/i.test(raw)) return "请求未被接受，请检查填写内容";
+  return raw;
 }
 
 function parseJsonTextarea(textarea, label) {
@@ -1226,11 +1282,12 @@ function addRoiCenterPoint() {
 }
 
 function updateSummary() {
+  const enabledCount = cameras.filter((camera) => camera.enabled !== false).length;
   if (cameraCountEl) {
     cameraCountEl.textContent = String(cameras.length);
   }
   if (enabledCameraCountEl) {
-    enabledCameraCountEl.textContent = String(cameras.filter((camera) => camera.enabled !== false).length);
+    enabledCameraCountEl.textContent = String(enabledCount);
   }
   if (peopleCountEl) {
     peopleCountEl.textContent = people.length ? String(people.length) : "--";
@@ -1800,6 +1857,15 @@ function formatInteger(value) {
   return String(Math.trunc(num));
 }
 
+function formatDate(value) {
+  if (value === undefined || value === null || value === "") return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 function formatAge(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "--";
@@ -1840,7 +1906,7 @@ function isPressureSourceId(sourceId) {
 
 function runtimeIssueLabel(issue) {
   const labels = {
-    compose_source_not_running: "固定源容器未运行；如果该摄像头已停用，可忽略",
+    compose_source_not_running: "固定视频源未运行；如果该摄像头已停用，可忽略",
     savant_metrics_unavailable: "推理指标不可用",
     analysis_forwarder_metrics_unavailable: "分析限流指标不可用",
     forwarder_metrics_unavailable: "分析限流指标不可用",
@@ -1848,7 +1914,12 @@ function runtimeIssueLabel(issue) {
     no_active_sources: "当前没有活跃视频源",
     source_count_mismatch: "活跃视频源数量与配置不一致",
     evidence_metrics_unavailable: "证据生成指标不可用",
-    container_restart_warning: "有容器近期频繁重启",
+    container_restart_warning: "有后台服务近期频繁重启",
+    profile_enabled_source_count: "启用摄像头数量符合所选运行预设",
+    full_pipeline_roi_worker_container_present: "人脸识别服务已准备",
+    full_pipeline_event_worker_container_present: "告警处理服务已准备",
+    full_pipeline_media_worker_container_present: "证据生成服务已准备",
+    full_pipeline_cuda_mps_container_present: "图形计算服务已准备",
   };
   if (!issue) return "--";
   return labels[issue] || String(issue).replace(/_/g, " ");
@@ -1884,10 +1955,10 @@ function healthText(value) {
 
 function containerRoleLabel(role) {
   const labels = {
-    api: "后端 API",
-    postgres: "PostgreSQL",
-    redis: "Redis",
-    savant: "Savant 推理",
+    api: "管理接口",
+    postgres: "数据存储",
+    redis: "高速数据服务",
+    savant: "视频识别",
     source_adapter: "固定视频源",
     compose_source: "固定视频源（固定源模式）",
     dynamic_source: "动态视频源",
@@ -1896,9 +1967,9 @@ function containerRoleLabel(role) {
     clip_worker: "证据调度",
     media_worker: "证据视频生成",
     evidence_viewer: "8090 管理端",
-    replay: "Replay 取证",
-    runtime_supervisor: "运行监督",
-    watchdog: "Watchdog",
+    replay: "录像取证",
+    runtime_supervisor: "运行监测",
+    watchdog: "故障监测",
   };
   return labels[role] || String(role || "--").replace(/_/g, " ");
 }
@@ -1932,20 +2003,45 @@ function eventTypeLabel(eventType) {
   return labels[eventType] || eventType || "--";
 }
 
-function evidenceStateLabel(state) {
+function runtimeEvidenceStateLabel(state) {
   const labels = {
     pending: "待处理",
     waiting_proof: "等待帧证明",
     queued: "排队",
     materializing: "生成中",
     materialization_skipped: "已跳过",
-    replaying: "Replay 中",
+    materialized: "可查看",
+    generated_unverified: "待复核",
+    materialization_failed: "生成失败",
+    materialization_deadline_expired: "生成超时",
+    replaying: "录像生成中",
     finalizing: "生成中",
     ready: "完成",
     failed: "失败",
     not_implemented: "未实现",
   };
   return labels[state] || state || "--";
+}
+
+function runtimeEvidenceStateIsFailure(state) {
+  return [
+    "failed",
+    "materialization_failed",
+    "materialization_deadline_expired",
+    "generated_corrupt",
+    "expired",
+  ].includes(String(state || ""));
+}
+
+function runtimeEvidenceReasonLabel(reason) {
+  const value = String(reason || "").toLowerCase();
+  if (!value) return "--";
+  if (value.includes("deadline") || value.includes("expired") || value.includes("timeout")) return "生成超时";
+  if (value.includes("missing") || value.includes("not_found")) return "所需录像或标注数据缺失";
+  if (value.includes("duration")) return "录像时长需复核";
+  if (value.includes("annotation") || value.includes("bbox")) return "画面标注需复核";
+  if (value.includes("queue") || value.includes("busy")) return "当前任务较多，仍在排队";
+  return "生成过程异常，请查看系统日志";
 }
 
 function containerGroupCounts(group = []) {
@@ -2079,9 +2175,9 @@ function renderRuntimeDecision() {
   if (runtimeActionInFlight) {
     copy = `正在${runtimeActionLabel(runtimeActionInFlight)}；请等待状态刷新后确认是否已收敛。`;
   } else if (sourceIssue) {
-    copy = `${sourceNames.length ? sourceNames.join("、") : "启用摄像头"} 的视频源未收敛；先恢复视频源，再判断是否需要切换拓扑。`;
+    copy = `${sourceNames.length ? sourceNames.join("、") : "启用摄像头"} 尚未全部连接；请先恢复视频源，再判断是否需要切换运行方式。`;
   } else if (drift.present) {
-    copy = `保存目标是${desired.label}，实际为${actual.label}。如需保留当前链路，请在下方将目标拓扑保存为对应模式；否则应用已保存的目标拓扑。`;
+    copy = `已保存设置为${desired.label}，当前实际为${actual.label}。如需保留当前状态，请更新保存设置；否则应用已保存设置。`;
   } else if (health.ok === false) {
     copy = "运行态仍有异常；请先查看下方故障摘要，不要直接执行整链路重启。";
   }
@@ -2094,10 +2190,10 @@ function renderRuntimeDecision() {
     ? `${sources.running.length}/${sources.enabled.length} 路运行`
     : "未获取";
   const sourceDetail = sourceIssue
-    ? (sourceNames.length ? `待恢复：${sourceNames.join("、")}` : "存在未收敛或陈旧源适配器")
-    : "启用的视频源适配器已收敛";
+    ? (sourceNames.length ? `待恢复：${sourceNames.join("、")}` : "部分摄像头连接状态异常")
+    : "启用的摄像头均已连接";
   const driftState = !desired.mode
-    ? "未获取目标拓扑"
+    ? "未获取保存设置"
     : (drift.present ? "配置与实际不一致" : "配置与实际一致");
   runtimeDriftSummaryEl.innerHTML =
     `<div class="runtime-drift-item ${["stopped", "mixed", "dual_partial"].includes(actual.key) ? "warn" : "ok"}">` +
@@ -2107,7 +2203,7 @@ function renderRuntimeDecision() {
       `<span>视频源</span><strong>${escapeHtml(sourceState)}</strong><small>${escapeHtml(sourceDetail)}</small>` +
     `</div>` +
     `<div class="runtime-drift-item ${drift.present ? "warn" : "ok"}">` +
-      `<span>目标拓扑</span><strong>${escapeHtml(desired.label || "未获取")}</strong><small>${escapeHtml(driftState)}</small>` +
+      `<span>保存设置</span><strong>${escapeHtml(desired.label || "未获取")}</strong><small>${escapeHtml(driftState)}</small>` +
     `</div>`;
 
   if (recoverRuntimeSourcesBtn) {
@@ -2129,7 +2225,7 @@ function runtimeLoadErrorLabel(key) {
     overview: "运行总览",
     control: "控制状态",
     performance: "性能配置",
-    topology: "拓扑配置",
+    topology: "处理能力设置",
   };
   return labels[key] || key;
 }
@@ -2175,8 +2271,8 @@ function renderRuntimePerformanceConfig() {
     `<div class="runtime-kv-grid">` +
       `<div><span>保存来源</span><strong>${escapeHtml(performanceSourceLabel(data.source))}</strong></div>` +
       `<div><span>待应用</span><strong>${formatInteger(pending.length)}</strong></div>` +
-      `<div><span>Forwarder</span><strong>${escapeHtml(containerStateLabel(forwarder))}</strong></div>` +
-      `<div><span>Savant</span><strong>${escapeHtml(containerStateLabel(savant))}</strong></div>` +
+      `<div><span>帧率控制</span><strong>${escapeHtml(containerStateLabel(forwarder))}</strong></div>` +
+      `<div><span>识别服务</span><strong>${escapeHtml(containerStateLabel(savant))}</strong></div>` +
     `</div>`;
   renderRuntimePerformanceDiff(diff);
 }
@@ -2212,7 +2308,7 @@ function renderRuntimePerformanceDiff(diff) {
   ).join("");
   runtimePerformanceDiffEl.innerHTML =
     `<table class="runtime-table runtime-performance-table">` +
-      `<thead><tr><th>参数</th><th>目标</th><th>env</th><th>保存值</th><th>运行值</th><th>状态</th></tr></thead>` +
+      `<thead><tr><th>参数</th><th>作用范围</th><th>配置来源</th><th>保存值</th><th>运行值</th><th>状态</th></tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>`;
 }
@@ -2243,18 +2339,396 @@ function renderRuntimeTopologyConfig() {
   }
   const plan = data.plan || {};
   const preflight = data.preflight || {};
+  const pipeline = data.runtime?.pipeline || {};
   const actual = runtimeActualTopology();
   runtimeTopologyStatusEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>计划模式</span><strong>${escapeHtml(topologyModeLabel(plan.effective_mode || config.topology_mode))}</strong></div>` +
+      `<div><span>运行方案</span><strong>${escapeHtml(QUICK_RUNTIME_PROFILE_META[config.runtime_profile]?.label || (config.runtime_profile === "custom" ? "自定义" : "未选择"))}</strong></div>` +
+      `<div><span>链路范围</span><strong>${config.pipeline_mode === "full_evidence" ? "完整证据链" : "仅推理"}</strong></div>` +
+      `<div><span>计划方式</span><strong>${escapeHtml(topologyModeLabel(plan.effective_mode || config.topology_mode))}</strong></div>` +
       `<div><span>实际链路</span><strong>${escapeHtml(actual.label)}</strong></div>` +
       `<div><span>启用摄像头</span><strong>${formatInteger(plan.enabled_source_count || 0)}</strong></div>` +
-      `<div><span>结构预检</span><strong>${escapeHtml(runtimePreflightLabel(preflight))}</strong></div>` +
+      `<div><span>启动检查</span><strong>${escapeHtml(runtimePreflightLabel(preflight))}</strong></div>` +
+      `<div><span>完整链路</span><strong>${pipeline.ready === true ? "已就绪" : (pipeline.ready === false ? "未就绪" : "不适用")}</strong></div>` +
     `</div>` +
-    `<div class="runtime-note">结构预检只说明容器与容量条件，不代表双路已经启动或视频源正在出帧。</div>`;
+    `<div class="runtime-note">完整分析要求识别、人员轨迹、录像缓存和证据生成服务同时正常运行。</div>`;
   updateRuntimeTopologyFormVisibility({ plan });
   renderRuntimeTopologyAssignments(config, plan);
   renderRuntimeTopologyPlan(plan, data.runtime || {}, preflight);
+}
+
+function quickRuntimeRegisteredCameras() {
+  return (cameras || []).filter((camera) => String(camera.source_id || "").trim());
+}
+
+function quickRuntimeSelectedCameras() {
+  return quickRuntimeRegisteredCameras().filter((camera) => (
+    quickRuntimeSelectedSourceIds.has(String(camera.source_id || ""))
+  ));
+}
+
+function quickRuntimeExpectedCount(profile) {
+  const preset = runtimeTopology?.profile_presets?.[profile] || {};
+  return Number(preset.expected_source_count || QUICK_RUNTIME_PROFILE_META[profile]?.expected || 0);
+}
+
+function quickRuntimeBranchCounts(selectedCameras, strategy) {
+  if (strategy !== "manual") {
+    return {
+      a: Math.ceil(selectedCameras.length / 2),
+      b: Math.floor(selectedCameras.length / 2),
+    };
+  }
+  return selectedCameras.reduce((counts, camera, index) => {
+    const sourceId = String(camera.source_id || "");
+    const branch = String(quickRuntimeManualAssignments[sourceId] || (index % 2 ? "b" : "a"));
+    counts[branch === "b" ? "b" : "a"] += 1;
+    return counts;
+  }, { a: 0, b: 0 });
+}
+
+function renderQuickRuntimeAssignments(registeredCameras) {
+  if (!quickRuntimeAssignmentsEl || !quickRuntimeShardStrategyEl) return;
+  const manual = quickRuntimeShardStrategyEl.value === "manual";
+  quickRuntimeAssignmentsEl.hidden = false;
+  if (!registeredCameras.length) {
+    quickRuntimeAssignmentsEl.innerHTML = `<div class="empty-state">请先添加摄像头并配置视频地址。</div>`;
+    return;
+  }
+  const saved = runtimeTopology?.saved_config?.manual_assignments || {};
+  const rows = registeredCameras.map((camera, index) => {
+    const sourceId = String(camera.source_id || "");
+    const selectedForRun = quickRuntimeSelectedSourceIds.has(sourceId);
+    const selected = String(
+      quickRuntimeManualAssignments[sourceId] || saved[sourceId] || (index % 2 ? "b" : "a")
+    );
+    quickRuntimeManualAssignments[sourceId] = selected;
+    return `<tr>` +
+      `<td class="runtime-camera-check"><input type="checkbox" data-quick-runtime-select="${escapeHtml(sourceId)}"${selectedForRun ? " checked" : ""} aria-label="选择 ${escapeHtml(camera.name || sourceId)}" /></td>` +
+      `<td>${escapeHtml(camera.name || sourceId || "未命名摄像头")}</td>` +
+      `<td>${escapeHtml(sourceId || "--")}</td>` +
+      `<td>${manual
+        ? `<select data-quick-runtime-source="${escapeHtml(sourceId)}"${selectedForRun ? "" : " disabled"}>` +
+            `<option value="a"${selected === "a" ? " selected" : ""}>分支 A</option>` +
+            `<option value="b"${selected === "b" ? " selected" : ""}>分支 B</option>` +
+          `</select>`
+        : `<span class="muted">系统自动均分</span>`}</td>` +
+      `<td><span class="badge ${camera.enabled !== false ? "success" : "neutral"}">${camera.enabled !== false ? "当前已启用" : "当前未启用"}</span></td>` +
+    `</tr>`;
+  }).join("");
+  quickRuntimeAssignmentsEl.innerHTML =
+    `<table class="runtime-table">` +
+      `<thead><tr><th>参与</th><th>摄像头</th><th>视频源 ID</th><th>目标分支</th><th>当前状态</th></tr></thead>` +
+      `<tbody>${rows}</tbody>` +
+    `</table>`;
+  quickRuntimeAssignmentsEl.querySelectorAll("[data-quick-runtime-select]").forEach((control) => {
+    control.addEventListener("change", () => {
+      const sourceId = control.dataset.quickRuntimeSelect || "";
+      if (control.checked) quickRuntimeSelectedSourceIds.add(sourceId);
+      else quickRuntimeSelectedSourceIds.delete(sourceId);
+      renderQuickRuntimeStart();
+    });
+  });
+  quickRuntimeAssignmentsEl.querySelectorAll("[data-quick-runtime-source]").forEach((control) => {
+    control.addEventListener("change", () => {
+      quickRuntimeManualAssignments[control.dataset.quickRuntimeSource || ""] = control.value;
+      renderQuickRuntimeStart();
+    });
+  });
+}
+
+function renderQuickRuntimeStart() {
+  if (!quickRuntimeProfileEl || !quickRuntimeShardStrategyEl || !quickRuntimeCapacityEl) return;
+  const saved = runtimeTopology?.saved_config || {};
+  const savedProfile = String(saved.runtime_profile || "");
+  if (!quickRuntimeProfileEl.dataset.initialized) {
+    quickRuntimeProfileEl.value = QUICK_RUNTIME_PROFILE_META[savedProfile]
+      ? savedProfile
+      : "production_t4_40";
+    quickRuntimeShardStrategyEl.value = saved.shard_strategy === "manual" ? "manual" : "balanced";
+    quickRuntimeManualAssignments = { ...(saved.manual_assignments || {}) };
+    quickRuntimeProfileEl.dataset.initialized = "true";
+  }
+  const registered = quickRuntimeRegisteredCameras();
+  if (!quickRuntimeSelectionInitialized && registered.length) {
+    quickRuntimeSelectedSourceIds = new Set(
+      registered
+        .filter((camera) => camera.enabled !== false)
+        .map((camera) => String(camera.source_id || ""))
+    );
+    quickRuntimeSelectionInitialized = true;
+  }
+  const profile = quickRuntimeProfileEl.value;
+  const strategy = quickRuntimeShardStrategyEl.value;
+  const expected = quickRuntimeExpectedCount(profile);
+  const selected = quickRuntimeSelectedCameras();
+  const counts = quickRuntimeBranchCounts(selected, strategy);
+  const countMatches = expected > 0 && selected.length === expected;
+  quickRuntimeCapacityEl.className = `runtime-quick-capacity ${countMatches ? "ok" : "warn"}`;
+  quickRuntimeCapacityEl.innerHTML = countMatches
+    ? `已登记 <strong>${registered.length}</strong> 路，已选择 <strong>${selected.length}</strong> 路，计划 A/B：<strong>${counts.a}/${counts.b}</strong>`
+    : `已登记 <strong>${registered.length}</strong> 路；方案需要 <strong>${expected}</strong> 路，当前已选择 <strong>${selected.length}</strong> 路`;
+  if (quickRuntimeStartBtn) {
+    const applyRunning = runtimeTopologyApplyStatus?.status === "running";
+    quickRuntimeStartBtn.disabled = !countMatches || Boolean(runtimeActionInFlight) || applyRunning;
+    quickRuntimeStartBtn.textContent = runtimeActionInFlight === "quick_full_start"
+      ? "完整链路启动中…"
+      : "启动完整双分支";
+  }
+  if (quickRuntimeStopBtn) {
+    const dualRunning = runtimeTopology?.plan?.dual === true && (
+      runtimeTopology?.runtime?.branches || []
+    ).some((branch) => branch.containers?.savant?.running === true);
+    quickRuntimeStopBtn.disabled = !dualRunning || Boolean(runtimeActionInFlight);
+  }
+  renderQuickRuntimeAssignments(registered);
+}
+
+function latencyText(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "--";
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`;
+  if (seconds < 120) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`;
+}
+
+function latencyClass(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "neutral";
+  if (seconds <= 10) return "ok";
+  if (seconds <= 60) return "warn";
+  return "critical";
+}
+
+function renderRuntimeLatency() {
+  if (!runtimeLatencySummaryEl || !runtimeLatencyDetailEl) return;
+  const data = runtimeLatency || {};
+  const annotation = data.annotation || {};
+  const database = data.database || {};
+  const branches = Array.isArray(data.branches) ? data.branches : [];
+  const mediaLag = annotation.media_lag_s;
+  const eventLag = database.event_media_lag_s;
+  const bundleLag = database.bundle_event_lag_s;
+  const indexAge = database.bundle_write_age_s;
+  const queueText = branches.length
+    ? branches.map((branch) => `${String(branch.branch_id || "").toUpperCase()} ${formatInteger(branch.queue_depth)}`).join(" / ")
+    : "--";
+  const maxQueue = branches.reduce((max, branch) => Math.max(max, Number(branch.queue_depth || 0)), 0);
+  runtimeLatencySummaryEl.innerHTML =
+    `<div class="runtime-latency-card ${latencyClass(mediaLag)}"><span>分析画面延迟</span><strong>${latencyText(mediaLag)}</strong><small>${escapeHtml(sourceDisplayName(annotation.source_id) || "最新分析画面")}</small></div>` +
+    `<div class="runtime-latency-card ${latencyClass(eventLag)}"><span>告警延迟</span><strong>${latencyText(eventLag)}</strong><small>最近写入 ${latencyText(database.event_write_age_s)} 前</small></div>` +
+    `<div class="runtime-latency-card ${latencyClass(bundleLag)}"><span>证据生成延迟</span><strong>${latencyText(bundleLag)}</strong><small>最近更新 ${latencyText(indexAge)} 前</small></div>` +
+    `<div class="runtime-latency-card ${maxQueue >= 7000 ? "critical" : (maxQueue >= 2000 ? "warn" : "ok")}"><span>待分析画面</span><strong>${escapeHtml(queueText)}</strong><small>待生成 ${formatInteger(database.materialization_pending)} / 生成中 ${formatInteger(database.materializing)}</small></div>`;
+  runtimeLatencyDetailEl.textContent =
+    `最后刷新 ${formatDate(data.generated_at)}；画面延迟按最新分析画面的拍摄时间计算，不包含网页刷新耗时。`;
+}
+
+async function loadRuntimeLatency({ silent = false } = {}) {
+  try {
+    runtimeLatency = await request(`${API}/runtime/latency`);
+    renderRuntimeLatency();
+    return runtimeLatency;
+  } catch (error) {
+    if (!silent) showError(`延迟查询失败：${apiErrorMessage(error)}`);
+    throw error;
+  }
+}
+
+const RUNTIME_APPLY_PHASE_LABELS = {
+  queued: "任务已排队",
+  validation: "读取配置",
+  preflight: "启动前预检",
+  camera_selection: "锁定摄像头",
+  pipeline_workers: "启动基础服务",
+  branch_a: "初始化分支 A",
+  branch_b: "初始化分支 B",
+  sources: "启动摄像头",
+  source_convergence: "等待摄像头收敛",
+  rolling_cache_ready: "检查录像缓存",
+  rolling_cache_prefill: "准备录像缓存",
+  evidence_activation: "启用证据生成",
+  complete: "启动完成",
+  failed: "启动失败",
+  stopped: "已停止",
+};
+
+function runtimeApplyStageGroup(phase) {
+  if (["queued", "validation", "preflight", "camera_selection", "pipeline_workers"].includes(phase)) return "preflight";
+  if (["branch_a", "branch_b"].includes(phase)) return "branches";
+  if (["sources", "source_convergence"].includes(phase)) return "sources";
+  if (["rolling_cache_ready", "rolling_cache_prefill"].includes(phase)) return "rolling";
+  if (["evidence_activation", "complete"].includes(phase)) return "evidence";
+  return "";
+}
+
+function runtimeApplyElapsedSeconds(status) {
+  const started = Date.parse(status?.started_at || "");
+  if (!Number.isFinite(started)) return 0;
+  const finished = Date.parse(status?.finished_at || "");
+  return Math.max(0, Math.round(((Number.isFinite(finished) ? finished : Date.now()) - started) / 1000));
+}
+
+function renderRuntimeTopologyApplyProgress() {
+  if (!quickRuntimeProgressEl) return;
+  const status = runtimeTopologyApplyStatus || {};
+  const state = String(status.status || "idle");
+  if (state === "idle") {
+    quickRuntimeProgressEl.hidden = true;
+    return;
+  }
+  const phase = String(status.phase || "queued");
+  const percent = Math.max(0, Math.min(100, Number(status.percent || 0)));
+  quickRuntimeProgressEl.hidden = false;
+  quickRuntimeProgressEl.className = `runtime-start-progress ${state}`;
+  if (quickRuntimeProgressPhaseEl) quickRuntimeProgressPhaseEl.textContent = RUNTIME_APPLY_PHASE_LABELS[phase] || phase;
+  if (quickRuntimeProgressPercentEl) quickRuntimeProgressPercentEl.textContent = `${Math.round(percent)}%`;
+  if (quickRuntimeProgressElapsedEl) quickRuntimeProgressElapsedEl.textContent = `已用时 ${runtimeApplyElapsedSeconds(status)} 秒`;
+  if (quickRuntimeProgressTrackEl) quickRuntimeProgressTrackEl.setAttribute("aria-valuenow", String(Math.round(percent)));
+  if (quickRuntimeProgressBarEl) quickRuntimeProgressBarEl.style.width = `${percent}%`;
+  if (quickRuntimeProgressMessageEl) {
+    quickRuntimeProgressMessageEl.textContent = state === "failed"
+      ? "启动未完成，请检查摄像头连接和运行状态"
+      : `${RUNTIME_APPLY_PHASE_LABELS[phase] || "正在启动分析服务"}，请稍候`;
+  }
+
+  const rolling = status.rolling_cache || null;
+  if (quickRuntimeRollingProgressEl) quickRuntimeRollingProgressEl.hidden = !rolling;
+  if (quickRuntimeRollingRemainingEl && rolling) {
+    const remaining = Number(rolling.remaining_seconds || 0);
+    quickRuntimeRollingRemainingEl.textContent = remaining > 0
+      ? `还需约 ${remaining} 秒（总预热 ${Number(rolling.prefill_seconds || 0)} 秒）`
+      : "预热完成";
+  }
+
+  const activeGroup = runtimeApplyStageGroup(phase);
+  const groups = ["preflight", "branches", "sources", "rolling", "evidence"];
+  const activeIndex = groups.indexOf(activeGroup);
+  quickRuntimeProgressEl.querySelectorAll("[data-runtime-stage]").forEach((item) => {
+    const index = groups.indexOf(item.dataset.runtimeStage || "");
+    item.classList.toggle("active", index === activeIndex && state === "running");
+    item.classList.toggle("done", state === "succeeded" || (activeIndex >= 0 && index < activeIndex));
+    item.classList.toggle("failed", state === "failed" && index === Math.max(0, activeIndex));
+  });
+
+  runtimeActionInFlight = state === "running" ? "quick_full_start" : "";
+  if (state === "running") ensureRuntimeApplyPolling();
+  else stopRuntimeApplyPolling();
+  renderQuickRuntimeStart();
+}
+
+function stopRuntimeApplyPolling() {
+  if (runtimeApplyPollTimer) window.clearInterval(runtimeApplyPollTimer);
+  runtimeApplyPollTimer = 0;
+}
+
+function ensureRuntimeApplyPolling() {
+  if (runtimeApplyPollTimer) return;
+  runtimeApplyPollTimer = window.setInterval(() => {
+    pollRuntimeTopologyApplyStatus().catch((error) => {
+      if (quickRuntimeProgressMessageEl) {
+        quickRuntimeProgressMessageEl.textContent = `进度刷新失败，启动任务仍在后台运行：${apiErrorMessage(error)}`;
+      }
+    });
+  }, 1000);
+}
+
+async function pollRuntimeTopologyApplyStatus() {
+  const previous = runtimeTopologyApplyStatus?.status;
+  runtimeTopologyApplyStatus = await request(`${API}/runtime/topology-config/apply-status`);
+  renderRuntimeTopologyApplyProgress();
+  const current = runtimeTopologyApplyStatus?.status;
+  if (previous === "running" && current === "succeeded") {
+    showSuccess("识别、轨迹和证据生成均已就绪");
+    await loadRuntimeOverview({ silent: true });
+  } else if (previous === "running" && current === "failed") {
+    showError("完整分析启动失败，请检查摄像头连接和运行状态");
+    await loadRuntimeOverview({ silent: true });
+  }
+  return runtimeTopologyApplyStatus;
+}
+
+function quickRuntimeRequestBody() {
+  const profile = String(quickRuntimeProfileEl?.value || "production_t4_40");
+  const strategy = String(quickRuntimeShardStrategyEl?.value || "balanced");
+  const selected = quickRuntimeSelectedCameras();
+  const manualAssignments = {};
+  if (strategy === "manual") {
+    selected.forEach((camera, index) => {
+      const sourceId = String(camera.source_id || "");
+      if (!sourceId) return;
+      manualAssignments[sourceId] = String(
+        quickRuntimeManualAssignments[sourceId] || (index % 2 ? "b" : "a")
+      );
+    });
+  }
+  return {
+    runtime_profile: profile,
+    pipeline_mode: "full_evidence",
+    topology_mode: "dual_same_gpu",
+    shard_strategy: strategy,
+    manual_assignments: manualAssignments,
+    source_ids: selected.map((camera) => String(camera.source_id || "")),
+    disable_unselected: true,
+  };
+}
+
+async function quickStartFullRuntime() {
+  const body = quickRuntimeRequestBody();
+  const expected = quickRuntimeExpectedCount(body.runtime_profile);
+  const selected = quickRuntimeSelectedCameras();
+  if (selected.length !== expected) {
+    throw new Error(`所选方案需要选择 ${expected} 路摄像头，当前为 ${selected.length} 路`);
+  }
+  const counts = quickRuntimeBranchCounts(selected, body.shard_strategy);
+  const profileLabel = QUICK_RUNTIME_PROFILE_META[body.runtime_profile]?.label || body.runtime_profile;
+  if (!window.confirm(
+    `确认启动${profileLabel}？\n本次选择 ${selected.length} 路，两个处理组分别为 ${counts.a}/${counts.b} 路。\n确认后将统一启用所选摄像头，并启动识别、人员轨迹和证据录像。`
+  )) {
+    return null;
+  }
+  clearMessages();
+  runtimeActionInFlight = "quick_full_start";
+  renderQuickRuntimeStart();
+  if (quickRuntimeResultEl) {
+    quickRuntimeResultEl.className = "runtime-quick-result";
+    quickRuntimeResultEl.textContent = "正在保存分配并启动分析服务，首次启动可能需要数分钟，请勿重复点击。";
+  }
+  try {
+    const { source_ids: sourceIds, disable_unselected: disableUnselected, ...topologyBody } = body;
+    const saved = await request(`${API}/runtime/topology-config`, {
+      method: "PUT",
+      body: JSON.stringify(topologyBody),
+    });
+    runtimeTopology = saved || runtimeTopology;
+    const applyJob = await request(`${API}/runtime/topology-config/apply-async`, {
+      method: "POST",
+      body: JSON.stringify({ source_ids: sourceIds, disable_unselected: disableUnselected }),
+    });
+    const selectedSet = new Set(sourceIds);
+    cameras = cameras.map((camera) => ({
+      ...camera,
+      enabled: selectedSet.has(String(camera.source_id || "")),
+    }));
+    renderCameras();
+    updateSummary();
+    runtimeTopologyApplyStatus = applyJob;
+    renderRuntimeTopologyApplyProgress();
+    if (quickRuntimeResultEl) {
+      quickRuntimeResultEl.className = "runtime-quick-result";
+      quickRuntimeResultEl.textContent = "启动任务已进入后台；可以刷新或切换页面，进度不会丢失。";
+    }
+    showSuccess("完整链路启动任务已进入后台");
+    return applyJob;
+  } catch (error) {
+    if (quickRuntimeResultEl) {
+      quickRuntimeResultEl.className = "runtime-quick-result warn";
+      quickRuntimeResultEl.textContent = `启动失败：${apiErrorMessage(error)}`;
+    }
+    throw error;
+  } finally {
+    if (runtimeTopologyApplyStatus?.status !== "running") runtimeActionInFlight = "";
+    renderQuickRuntimeStart();
+  }
 }
 
 function updateRuntimeTopologyFormVisibility({ plan = runtimeTopology?.plan || {} } = {}) {
@@ -2267,6 +2741,40 @@ function updateRuntimeTopologyFormVisibility({ plan = runtimeTopology?.plan || {
   if (runtimeTopologyBranchSettingsEl && !showBranchB && requested === "single") {
     runtimeTopologyBranchSettingsEl.open = false;
   }
+  const profile = String(runtimeTopologyForm.elements.runtime_profile?.value || "custom");
+  const presetLocked = profile !== "custom";
+  for (const control of runtimeTopologyForm.elements) {
+    if (!control?.name || control.name === "runtime_profile") continue;
+    if (
+      control.name === "pipeline_mode" ||
+      control.name === "topology_mode" ||
+      control.name === "streams_per_branch" ||
+      control.name.startsWith("a.") ||
+      control.name.startsWith("b.")
+    ) {
+      control.disabled = presetLocked;
+    }
+  }
+}
+
+function applyRuntimeTopologyPreset(profile) {
+  if (!runtimeTopologyForm || profile === "custom") {
+    updateRuntimeTopologyFormVisibility();
+    return;
+  }
+  const preset = runtimeTopology?.profile_presets?.[profile];
+  if (!preset) return;
+  runtimeTopologyForm.elements.pipeline_mode.value = preset.pipeline_mode || "full_evidence";
+  runtimeTopologyForm.elements.topology_mode.value = "dual_same_gpu";
+  runtimeTopologyForm.elements.shard_strategy.value = "balanced";
+  runtimeTopologyForm.elements.streams_per_branch.value = preset.streams_per_branch ?? "";
+  for (const branchId of ["a", "b"]) {
+    for (const [key, value] of Object.entries(preset.branch || {})) {
+      const control = runtimeTopologyForm.elements[`${branchId}.${key}`];
+      if (control) control.value = value ?? "";
+    }
+  }
+  updateRuntimeTopologyFormVisibility();
 }
 
 function renderRuntimeTopologyAssignments(config, plan) {
@@ -2349,13 +2857,20 @@ function renderRuntimeTopologyPlan(plan, runtime, preflight) {
       `<td>${escapeHtml(sourceIds.slice(0, 6).map(sourceDisplayName).join(", "))}${sourceIds.length > 6 ? " ..." : ""}</td>` +
     `</tr>`;
   }).join("");
-  const checks = (preflight?.checks || []).map((item) =>
+  const checks = (preflight?.checks || []).map((item) => {
+    const detail = item.container || (
+      item.expected_source_count != null
+        ? `${formatInteger(item.source_count)}/${formatInteger(item.expected_source_count)}`
+        : (item.gpu_id ?? "")
+    );
+    return (
     `<tr class="${item.ok ? "" : "warn-row"}">` +
       `<td>${escapeHtml(runtimeIssueLabel(item.name || ""))}</td>` +
       `<td>${item.ok ? "满足" : "不满足"}</td>` +
-      `<td>${escapeHtml(item.container || item.gpu_id || "")}</td>` +
+      `<td>${escapeHtml(detail)}</td>` +
     `</tr>`
-  ).join("");
+    );
+  }).join("");
   runtimeTopologyPlanEl.innerHTML =
     `<table class="runtime-table runtime-topology-table">` +
       `<thead><tr><th>分支</th><th>GPU</th><th>计划路数</th><th>推理路数</th><th>推理容器</th><th>限流容器</th><th>队列</th><th>累计发送失败</th><th>摄像头</th></tr></thead>` +
@@ -2379,46 +2894,70 @@ function renderRuntimeOverview() {
   const supervisorEnabled = supervisor.enabled === true;
   const annotationAge = supervisor.annotation_age_s;
   const sourceConvergence = sourceConvergenceSummary();
-  const issueText = issues.length ? issues.map(runtimeIssueLabel).join("；") : "无已知异常";
+  const topologyRuntime = runtimeTopology?.runtime || {};
+  const topologyPlan = runtimeTopology?.plan || {};
+  const topologyBranches = Array.isArray(topologyRuntime.branches) ? topologyRuntime.branches : [];
+  const dualReady = topologyPlan.dual === true && topologyRuntime.pipeline?.ready === true;
+  const dualSavantSources = topologyBranches.flatMap((branch) => branch.metrics?.savant?.sources || []);
+  const dualForwarderSources = topologyBranches.flatMap((branch) => branch.metrics?.forwarder?.sources || []);
+  const dualActiveSources = topologyBranches.reduce((sum, branch) => (
+    sum + Number(branch.metrics?.savant?.global?.va_savant_sources_active || 0)
+  ), 0);
+  const dualQueueDepth = topologyBranches.reduce((sum, branch) => (
+    sum + Number(branch.metrics?.forwarder?.global?.queue_depth || 0)
+  ), 0);
+  const effectiveHealthOk = dualReady ? true : health.ok;
+  const issueText = dualReady
+    ? `两个处理组均已就绪，共 ${dualActiveSources}/${Number(topologyPlan.enabled_source_count || 0)} 路，录像缓存正常`
+    : (issues.length ? issues.map(runtimeIssueLabel).join("；") : "无已知异常");
+  const effectiveForwarder = dualReady
+    ? {
+        available: true,
+        global: { queue_depth: dualQueueDepth, running: topologyBranches.length },
+        sources: dualForwarderSources,
+      }
+    : forwarder;
 
   runtimeHealthSummaryEl.innerHTML =
-    `<div class="summary-card runtime-health-card ${health.ok === true ? "ok" : (health.ok === false ? "warn" : "")}">` +
+    `<div class="summary-card runtime-health-card ${effectiveHealthOk === true ? "ok" : (effectiveHealthOk === false ? "warn" : "")}">` +
       `<span>整体状态</span>` +
-      `<strong>${statusText(health.ok)}</strong>` +
+      `<strong>${dualReady ? "分析服务就绪" : statusText(health.ok)}</strong>` +
       `<small>${escapeHtml(issueText)}</small>` +
     `</div>` +
     `<div class="summary-card">` +
       `<span>推理指标</span>` +
-      `<strong>${metrics.available ? "可用" : "不可用"}</strong>` +
-      `<small>${escapeHtml(overview.metrics_url || "")}</small>` +
+      `<strong>${dualReady ? "两个处理组可用" : (metrics.available ? "可用" : "不可用")}</strong>` +
+      `<small>${dualReady ? "处理组 A / 处理组 B" : "识别服务状态"}</small>` +
     `</div>` +
     `<div class="summary-card">` +
       `<span>当前活跃视频源</span>` +
-      `<strong>${formatInteger(metrics.sources_active ?? health.source_count)}</strong>` +
-      `<small>指标中保留 ${formatInteger((metrics.sources || []).length)} 路历史标签</small>` +
+      `<strong>${formatInteger(dualReady ? dualActiveSources : (metrics.sources_active ?? health.source_count))}</strong>` +
+      `<small>${dualReady ? `计划 ${formatInteger(topologyPlan.enabled_source_count)} 路，两个处理组均已连接` : `状态中包含 ${formatInteger((metrics.sources || []).length)} 路记录`}</small>` +
     `</div>` +
     `<div class="summary-card">` +
       `<span>标注延迟</span>` +
       `<strong>${annotationAge == null ? "--" : `${formatInteger(annotationAge)}s`}</strong>` +
-      `<small>${supervisorEnabled ? "supervisor 已启用" : "supervisor 未启用"}</small>` +
+      `<small>${supervisorEnabled ? "自动监测已启用" : "自动监测未启用"}</small>` +
     `</div>`;
 
   runtimeSupervisorSummaryEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>Savant 容器</span><strong>${escapeHtml(supervisor.savant_container || "--")}</strong></div>` +
-      `<div><span>模块状态</span><strong>${escapeHtml(supervisor.savant_module_status || "--")}</strong></div>` +
+      `<div><span>识别处理组</span><strong>${dualReady ? "处理组 A / 处理组 B" : (supervisor.savant_container ? "基础处理组" : "--")}</strong></div>` +
+      `<div><span>模块状态</span><strong>${dualReady ? "双分支运行中" : escapeHtml(supervisor.savant_module_status || "--")}</strong></div>` +
       `<div><span>冷却中</span><strong>${supervisor.in_cooldown ? "是" : "否"}</strong></div>` +
-      `<div><span>视频源收敛</span><strong>${!sourceConvergence.known ? "未获取" : (sourceConvergence.healthy ? "已收敛" : "待恢复")}</strong></div>` +
+      `<div><span>视频源收敛</span><strong>${dualReady ? "已收敛" : (!sourceConvergence.known ? "未获取" : (sourceConvergence.healthy ? "已收敛" : "待恢复"))}</strong></div>` +
     `</div>` +
-    `<div class="runtime-note">指标表可能保留历史视频源标签；“视频源收敛”以启用摄像头对应的动态源适配器为准。</div>`;
+    `<div class="runtime-note">状态表可能保留历史摄像头记录；请以当前启用摄像头的连接状态为准。</div>`;
 
-  renderRuntimeSourceTable(metrics.sources || []);
-  renderRuntimeForwarderTable(forwarder);
+  renderRuntimeSourceTable(dualReady ? dualSavantSources : (metrics.sources || []));
+  renderRuntimeForwarderTable(effectiveForwarder);
   renderRuntimeEvidenceTable(overview.evidence || {});
   renderRuntimeContainerTable(containers);
   renderRuntimeControlStatus();
   renderRuntimePerformanceConfig();
   renderRuntimeTopologyConfig();
+  renderQuickRuntimeStart();
+  renderRuntimeTopologyApplyProgress();
   renderRuntimeDecision();
 }
 
@@ -2456,7 +2995,7 @@ function renderRuntimeSourceTable(sources) {
   runtimeSourceTableEl.innerHTML =
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>摄像头</th><th>运行判断</th><th>有效 FPS</th><th>Pose FPS</th><th>Face FPS</th><th>AdaFace/s</th><th>最近帧延迟</th><th>已处理帧</th>` +
+        `<th>摄像头</th><th>运行判断</th><th>有效帧率</th><th>人体识别帧率</th><th>人脸检测帧率</th><th>人脸特征/秒</th><th>画面延迟</th><th>已处理帧</th>` +
         `<th>标注帧</th><th>人体</th><th>人脸</th><th>人脸特征</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
@@ -2488,10 +3027,10 @@ function renderRuntimeForwarderTable(forwarder) {
   }).join("");
   runtimeForwarderTableEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>队列深度</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
+      `<div><span>待分析画面</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
       `<div><span>运行状态</span><strong>${global.running === 1 ? "运行中" : "未运行"}</strong></div>` +
     `</div>` +
-    `<div class="runtime-note">发送失败为容器生命周期累计值，不单独代表当前故障；请结合队列深度、运行状态和刷新后的变化判断。</div>` +
+    `<div class="runtime-note">发送失败为本次运行的累计值，不单独代表当前故障；请结合待分析画面数量和刷新后的变化判断。</div>` +
     `<table class="runtime-table">` +
       `<thead><tr>` +
         `<th>摄像头</th><th>收到帧</th><th>转发帧</th><th>丢弃帧</th><th>丢弃比例</th><th>累计发送失败</th>` +
@@ -2504,7 +3043,7 @@ function renderRuntimeEvidenceTable(evidence) {
   if (!runtimeEvidenceTableEl) return;
   if (!evidence.available) {
     runtimeEvidenceTableEl.innerHTML =
-      `<div class="empty-state">暂无证据状态指标。${escapeHtml(evidence.error || "")}</div>`;
+      `<div class="empty-state">暂时无法获取证据生成状态，请稍后刷新。</div>`;
     return;
   }
   const counts = evidence.state_counts || [];
@@ -2512,30 +3051,32 @@ function renderRuntimeEvidenceTable(evidence) {
   const failures = evidence.recent_failures || [];
   const countHtml = counts.length
     ? counts.map((row) =>
-        `<div><span>${escapeHtml(evidenceStateLabel(row.state))}</span><strong>${formatInteger(row.count)}</strong></div>`
+        `<div><span>${escapeHtml(runtimeEvidenceStateLabel(row.state))}</span><strong>${formatInteger(row.count)}</strong></div>`
       ).join("")
     : `<div><span>最近 3 小时</span><strong>0</strong></div>`;
   const rows = recent.map((row) => {
-    const warn = row.evidence_state === "failed" || row.task_status && row.task_status !== row.evidence_state;
+    const warn = runtimeEvidenceStateIsFailure(row.evidence_state) ||
+      runtimeEvidenceStateIsFailure(row.task_status) ||
+      row.task_status && row.task_status !== row.evidence_state;
     return `<tr class="${warn ? "warn-row" : ""}">` +
       `<td>${escapeHtml(eventTypeLabel(row.event_type))}</td>` +
       `<td>${sourceCellHtml(row.source_id)}</td>` +
-      `<td>${escapeHtml(evidenceStateLabel(row.evidence_state))}</td>` +
-      `<td>${escapeHtml(evidenceStateLabel(row.task_status))}</td>` +
+      `<td>${escapeHtml(runtimeEvidenceStateLabel(row.evidence_state))}</td>` +
+      `<td>${escapeHtml(runtimeEvidenceStateLabel(row.task_status))}</td>` +
       `<td>${formatAge(row.age_seconds)}</td>` +
-      `<td>${escapeHtml(row.evidence_reason || "--")}</td>` +
+      `<td>${escapeHtml(runtimeEvidenceReasonLabel(row.evidence_reason))}</td>` +
     `</tr>`;
   }).join("");
   const failureRows = failures.slice(0, 5).map((row) =>
     `<li><strong>${escapeHtml(sourceDisplayName(row.source_id))}</strong> ` +
-    `${escapeHtml(eventTypeLabel(row.event_type))} / ${escapeHtml(row.evidence_reason || "failed")}</li>`
+    `${escapeHtml(eventTypeLabel(row.event_type))} / ${escapeHtml(runtimeEvidenceReasonLabel(row.evidence_reason))}</li>`
   ).join("");
   runtimeEvidenceTableEl.innerHTML =
     `<div class="runtime-kv-grid evidence-state-grid">${countHtml}</div>` +
     (failureRows ? `<ul class="runtime-failure-list">${failureRows}</ul>` : "") +
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>事件类型</th><th>摄像头</th><th>证据状态</th><th>任务状态</th><th>耗时</th><th>原因</th>` +
+        `<th>告警类型</th><th>摄像头</th><th>证据状态</th><th>处理状态</th><th>耗时</th><th>说明</th>` +
       `</tr></thead>` +
       `<tbody>${rows || `<tr><td colspan="6">暂无最近证据事件。</td></tr>`}</tbody>` +
     `</table>`;
@@ -2577,7 +3118,7 @@ function renderRuntimeContainerTable(containers) {
   }
   runtimeContainerTableEl.innerHTML =
     `<table class="runtime-table">` +
-      `<thead><tr><th>角色</th><th>容器</th><th>状态</th><th>健康</th><th>重启次数</th><th>每分钟重启</th></tr></thead>` +
+      `<thead><tr><th>服务</th><th>实例</th><th>状态</th><th>健康</th><th>重启次数</th><th>每分钟重启</th></tr></thead>` +
       `<tbody>${rows.join("")}</tbody>` +
     `</table>`;
 }
@@ -2585,18 +3126,17 @@ function renderRuntimeContainerTable(containers) {
 function renderRuntimeApplyResult() {
   if (!runtimeApplyResultEl) return;
   if (!lastRuntimeApplyResult) {
-    runtimeApplyResultEl.innerHTML = `<div class="muted">尚未应用运行时。</div>`;
+    runtimeApplyResultEl.innerHTML = `<div class="muted">配置尚未应用。</div>`;
     return;
   }
   if (isRuntimeConfigSyncResult(lastRuntimeApplyResult)) {
     runtimeApplyResultEl.innerHTML =
       `<div class="runtime-kv-grid">` +
         `<div><span>配置同步</span><strong>已保存</strong></div>` +
-        `<div><span>runtime epoch</span><strong>${escapeHtml(lastRuntimeApplyResult.runtime_epoch_id_preserved || "--")}</strong></div>` +
-        `<div><span>容器重启</span><strong>0</strong></div>` +
+        `<div><span>分析服务重启</span><strong>0</strong></div>` +
         `<div><span>视频源变更</span><strong>0</strong></div>` +
       `</div>` +
-      `<div class="runtime-note">算法/区域配置已写入运行配置快照；未自动重启推理链路。需要立即加载到 Savant 时，请手动执行受控重启。</div>`;
+      `<div class="runtime-note">算法和区域配置已保存，分析服务无需重启。</div>`;
     return;
   }
   const selectedRows = latestApplyRows().filter((row) => (
@@ -2605,22 +3145,18 @@ function renderRuntimeApplyResult() {
   const applied = selectedRows.filter((row) => row.runtime_apply_state === "applied");
   const skipped = selectedRows.filter((row) => row.runtime_apply_state === "skipped");
   const unsupported = selectedRows.filter((row) => row.runtime_apply_state === "unsupported");
-  const epoch = lastRuntimeApplyResult.runtime_epoch_id ||
-    lastRuntimeApplyResult.runtime_epoch?.runtime_epoch_id || "--";
   const sourceIds = (lastRuntimeApplyResult.source_ids || []).filter(Boolean);
   const warningRows = [...unsupported, ...skipped].slice(0, 8);
   const warningHtml = warningRows.length
     ? `<ul class="runtime-warning-list">` + warningRows.map((row) =>
         `<li><strong>${escapeHtml(row.rule_id || row.algorithm_id || "--")}</strong> ` +
-        `${escapeHtml(row.runtime_skip_reason || row.support_status || "skipped")} ` +
-        `<span>${escapeHtml(row.support_status_reason || "")}</span></li>`
+        `未能应用，请检查区域和算法设置</li>`
       ).join("") + `</ul>`
-    : `<div class="muted">当前选中摄像头没有运行时应用警告。</div>`;
+    : `<div class="muted">当前摄像头的配置没有异常提示。</div>`;
   runtimeApplyResultEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>runtime epoch</span><strong>${escapeHtml(epoch)}</strong></div>` +
       `<div><span>摄像头</span><strong>${formatInteger((lastRuntimeApplyResult.camera_ids || []).length)}</strong></div>` +
-      `<div><span>source</span><strong>${formatInteger(sourceIds.length)}</strong></div>` +
+      `<div><span>视频源</span><strong>${formatInteger(sourceIds.length)}</strong></div>` +
       `<div><span>已应用规则</span><strong>${formatInteger(applied.length)}</strong></div>` +
       `<div><span>已跳过</span><strong>${formatInteger(skipped.length)}</strong></div>` +
       `<div><span>未支持</span><strong>${formatInteger(unsupported.length)}</strong></div>` +
@@ -2673,11 +3209,36 @@ document.querySelectorAll(".top-tab").forEach((btn) => {
   });
 });
 
+document.querySelectorAll(".context-tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    activateTopView(btn.dataset.view, true);
+  });
+});
+
+function setRuntimeAdvancedVisible(visible) {
+  runtimeAdvancedVisible = Boolean(visible);
+  RUNTIME_ADVANCED_PANE_IDS.forEach((id) => {
+    const pane = document.getElementById(id);
+    if (pane) pane.hidden = !runtimeAdvancedVisible;
+  });
+  if (toggleRuntimeAdvancedBtn) {
+    toggleRuntimeAdvancedBtn.setAttribute("aria-expanded", runtimeAdvancedVisible ? "true" : "false");
+    toggleRuntimeAdvancedBtn.textContent = runtimeAdvancedVisible ? "收起高级运维" : "高级运维";
+  }
+}
+
 function activateTopView(view, updateHash = false) {
   const normalized = normalizedTopView(view);
+  const primary = primaryTopView(normalized);
   persistTopView(normalized);
   document.querySelectorAll(".top-tab").forEach((b) => {
-    b.classList.toggle("active", b.dataset.view === normalized);
+    b.classList.toggle("active", b.dataset.view === primary);
+  });
+  document.querySelectorAll(".workspace-context").forEach((context) => {
+    context.hidden = context.dataset.primaryView !== primary;
+  });
+  document.querySelectorAll(".context-tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === normalized);
   });
   document.getElementById("camera-view").hidden = normalized !== "cameras";
   document.getElementById("people-view").hidden = normalized !== "people";
@@ -2798,13 +3359,17 @@ async function loadRuntimeOverview({ silent = false } = {}) {
     request(`${API}/runtime/control`),
     request(`${API}/runtime/performance-config`),
     request(`${API}/runtime/topology-config`),
+    request(`${API}/runtime/topology-config/apply-status`),
+    request(`${API}/runtime/latency`),
   ]);
-  const keys = ["overview", "control", "performance", "topology"];
+  const keys = ["overview", "control", "performance", "topology", "topology_apply", "latency"];
   const values = [
     (value) => { runtimeOverview = value || {}; },
     (value) => { runtimeControl = value || {}; },
     (value) => { runtimePerformance = value || {}; },
     (value) => { runtimeTopology = value || {}; },
+    (value) => { runtimeTopologyApplyStatus = value || {}; },
+    (value) => { runtimeLatency = value || {}; },
   ];
   runtimeLoadErrors = {};
   results.forEach((result, index) => {
@@ -2816,6 +3381,7 @@ async function loadRuntimeOverview({ silent = false } = {}) {
     }
   });
   renderRuntimeOverview();
+  renderRuntimeLatency();
   const failed = Object.keys(runtimeLoadErrors);
   if (failed.length) {
     const message = `运行状态部分刷新失败：${failed.map(runtimeLoadErrorLabel).join("、")}`;
@@ -2890,7 +3456,6 @@ function renderPersonProfile(person) {
   if (!personProfileEl || !person) return;
   personProfileEl.innerHTML =
     `<strong>${person.name || "未命名人员"}</strong>` +
-    `<div class="muted">系统 ID：${person.person_id || selectedPersonId || "-"}</div>` +
     `<div class="muted">人员编号：${person.external_person_id || "未设置"}</div>` +
     `<div class="muted">状态：${person.is_active ? "有效" : "停用"}</div>` +
     `<div class="muted">${person.description || "暂无描述"}</div>`;
@@ -3116,6 +3681,7 @@ function runtimeDestructiveButtons() {
     stopSingleRuntimeBtn,
     restartSingleRuntimeBtn,
     stopDualRuntimeBtn,
+    quickRuntimeStopBtn,
     recoverRuntimeSourcesBtn,
     applySavedRuntimeTopologyBtn,
     applyRuntimePerformanceBtn,
@@ -3132,7 +3698,7 @@ function setRuntimeDestructiveBusy(action, busy) {
 function runtimeActionLabel(action) {
   const labels = {
     source_recovery: "恢复视频源",
-    topology_apply: "应用拓扑",
+    topology_apply: "应用处理设置",
     performance_apply: "应用性能配置",
     single_start: "启动基础单路链路",
     single_stop: "停止基础单路链路",
@@ -3165,7 +3731,7 @@ async function saveRuntimePerformanceConfig({ apply = false } = {}) {
   clearMessages();
   const body = runtimePerformanceFormBody();
   if (apply && !window.confirm(
-    "确认保存并应用推理性能配置？这会重建 analysis-forwarder 和/或 Savant；证据生成中时服务端会阻止操作。"
+    "确认保存并应用性能配置？相关分析服务会短暂重启；如果仍有证据正在生成，系统会自动阻止本次操作。"
   )) {
     setStatus("性能配置未保存");
     return null;
@@ -3208,8 +3774,7 @@ function runtimePerformanceApplyMessage(data) {
   if (!data?.changed) return "性能配置已保存，运行中配置无需变更";
   const actions = Array.isArray(data.actions) ? data.actions : [];
   const recreated = actions.filter((item) => item.action === "recreated").map((item) => item.container);
-  const targets = Array.isArray(data.pending_targets) ? data.pending_targets.join(", ") : "";
-  return `性能配置已应用：${recreated.length} 个容器已重建${targets ? `（${targets}）` : ""}`;
+  return `性能配置已应用，${recreated.length} 个相关服务已更新`;
 }
 
 function runtimeTopologyFormBody() {
@@ -3220,6 +3785,7 @@ function runtimeTopologyFormBody() {
     "pose_batch_size",
     "face_detector_batch_size",
     "face_embedding_batch_size",
+    "face_infer_interval",
     "max_parallel_streams",
     "analysis_fps",
     "analysis_min_fps",
@@ -3228,6 +3794,8 @@ function runtimeTopologyFormBody() {
     "batched_push_timeout",
   ];
   const body = {
+    runtime_profile: runtimeTopologyForm.elements.runtime_profile?.value || "custom",
+    pipeline_mode: runtimeTopologyForm.elements.pipeline_mode?.value || "inference_only",
     topology_mode: runtimeTopologyForm.elements.topology_mode?.value || "auto",
     shard_strategy: runtimeTopologyForm.elements.shard_strategy?.value || "balanced",
     streams_per_branch: asInt(runtimeTopologyForm.elements.streams_per_branch?.value, 30),
@@ -3266,9 +3834,9 @@ async function saveRuntimeTopologyConfig({ apply = false } = {}) {
   clearMessages();
   const body = runtimeTopologyFormBody();
   if (apply && !window.confirm(
-    "确认保存并应用目标拓扑？这会切换 source、analysis-forwarder 和 Savant；证据生成中时服务端会阻止操作。"
+    "确认保存并应用处理能力设置？识别、人员轨迹和证据录像服务将按新设置切换；如果仍有证据正在生成，系统会自动阻止本次操作。"
   )) {
-    setStatus("拓扑配置未保存");
+    setStatus("处理能力设置未保存");
     return null;
   }
   if (apply) {
@@ -3285,8 +3853,8 @@ async function saveRuntimeTopologyConfig({ apply = false } = {}) {
     runtimeTopology = saved || {};
     renderRuntimeTopologyConfig();
     if (!apply) {
-      showSuccess("拓扑配置已保存");
-      setStatus("拓扑配置已保存");
+      showSuccess("处理能力设置已保存");
+      setStatus("处理能力设置已保存");
       return saved;
     }
     const applied = await request(`${API}/runtime/topology-config/apply`, { method: "POST" });
@@ -3309,15 +3877,19 @@ function runtimeTopologyApplyMessage(data) {
   const mode = data?.mode || data?.status?.plan?.effective_mode || "--";
   const actions = Array.isArray(data?.actions) ? data.actions.length : 0;
   const sources = Array.isArray(data?.source_lifecycle) ? data.source_lifecycle.length : 0;
-  return `拓扑已应用：${topologyModeLabel(mode)}，容器动作 ${actions} 个，source ${sources} 路`;
+  const pipeline = data?.pipeline_convergence || {};
+  const pipelineText = pipeline.mode === "full_evidence"
+    ? (pipeline.ready ? "，完整分析服务已就绪" : "，完整分析服务仍在启动")
+    : "";
+  return `处理设置已应用：${topologyModeLabel(mode)}，更新 ${actions} 个服务、${sources} 路摄像头${pipelineText}`;
 }
 
 async function applySavedRuntimeTopology() {
   const desired = desiredRuntimeTopology();
   if (!desired.mode) {
-    throw new Error("尚未获取已保存的拓扑配置，请先刷新状态");
+    throw new Error("尚未获取已保存的处理设置，请先刷新状态");
   }
-  const confirmText = `确认应用已保存的${desired.label}？这会切换 source、analysis-forwarder 和 Savant；生成中的证据任务会由服务端保护。`;
+  const confirmText = `确认应用已保存的${desired.label}？识别、人员轨迹和证据录像服务将按保存设置切换；正在生成的证据会受到保护。`;
   if (!window.confirm(confirmText)) {
     return null;
   }
@@ -3343,7 +3915,7 @@ function runtimeControlActionMessage(data) {
     single_start: "单路链路启动命令已发送",
     single_stop: "单路链路停止命令已发送",
     single_restart: "单路链路重启命令已发送",
-    dual_stop: "双路扩展停止命令已发送",
+    dual_stop: "摄像头采集与识别已停止，已产生的证据会继续完成",
   };
   const label = labels[data?.runtime_action] || "运行控制命令已发送";
   return `${label}：成功 ${ok} 个，缺失 ${missing} 个，失败 ${failed} 个`;
@@ -3371,7 +3943,7 @@ async function startSingleRuntime() {
   return runRuntimeControlAction(
     `${API}/runtime/control/single/start`,
     "single_start",
-    "确认启动基础单路链路？会启动数据库、Redis、Replay、Savant、事件/人脸/取证 Worker 和固定源容器。若目标是双路拓扑，请改用“应用已保存拓扑”。"
+    "确认启动基础分析服务？系统将启动摄像头、识别、告警、人员轨迹和证据生成。若需要多路完整分析，请使用上方快速启动。"
   );
 }
 
@@ -3392,22 +3964,28 @@ async function restartSingleRuntime() {
 }
 
 async function stopDualRuntime() {
-  return runRuntimeControlAction(
+  const result = await runRuntimeControlAction(
     `${API}/runtime/control/dual/stop`,
     "dual_stop",
-    "确认停止双路扩展？分支 A/B 的 Savant、Forwarder、Replay 和视频 sink 会停止；基础单路与 8090 操作台不受影响。"
+    "确认停止当前完整分析？所有已启用摄像头和识别服务会停止；证据生成会继续运行一段时间，完成已经产生的证据。管理页面和已有证据不受影响。"
   );
+  if (result) {
+    cameras = cameras.map((camera) => ({ ...camera, enabled: false }));
+    runtimeTopologyApplyStatus = result.apply_status || runtimeTopologyApplyStatus;
+    updateSummary();
+    renderCameras();
+    renderRuntimeTopologyApplyProgress();
+  }
+  return result;
 }
 
 function runtimeApplyMessage(data) {
   const started = data.dynamic_sources_started || [];
   const composeStarted = data.compose_sources_started || [];
-  const restarted = data.savant_restarted || "Savant";
-  const replay = data.replay_restarted || "Replay";
   const appliedRules = (data.applied_rules || []).length;
   const skippedRules = (data.skipped_rules || []).length;
   const unsupportedRules = (data.unsupported_rules || []).length;
-  return `运行时已应用：${composeStarted.length} 个固定源、${started.length} 个动态源，${replay} / ${restarted} 已重启；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
+  return `运行设置已应用：${composeStarted.length + started.length} 路摄像头已更新；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
 }
 
 function sourceApplyMessage(data) {
@@ -3451,7 +4029,7 @@ async function recoverRuntimeSources() {
   const names = sources.stopped.slice(0, 4).map(sourceConvergenceName);
   const target = names.length ? names.join("、") : "启用摄像头";
   if (!window.confirm(
-    `确认同步并恢复 ${target} 的视频源？此操作会更新生成的源配置并重建或启动对应源适配器，不会主动重启 Savant。`
+    `确认同步并恢复 ${target} 的视频源？此操作会重新连接对应摄像头，不会主动重启识别服务。`
   )) {
     return null;
   }
@@ -3485,8 +4063,7 @@ async function applyRuntime({ context = "" } = {}) {
 }
 
 function runtimeConfigSyncMessage(data) {
-  const epoch = data?.runtime_epoch_id_preserved || "--";
-  return `运行配置已同步：保留 epoch ${epoch}，未重启容器`;
+  return "运行设置已同步，分析服务无需重启";
 }
 
 async function syncRuntimeConfig({ context = "" } = {}) {
@@ -3509,7 +4086,7 @@ function runtimeRestartMessage(data) {
   const appliedRules = (data.applied_rules || []).length;
   const skippedRules = (data.skipped_rules || []).length;
   const unsupportedRules = (data.unsupported_rules || []).length;
-  return `运行时已受控重启：${composeStarted.length} 个固定源、${started.length} 个动态源、${workers.length} 个 worker 已恢复；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
+  return `分析服务已安全重启：${composeStarted.length + started.length} 路摄像头、${workers.length} 个后台服务已恢复；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
 }
 
 async function restartRuntime() {
@@ -3872,7 +4449,7 @@ document.getElementById("new-camera").addEventListener("click", () => {
     gpu_id: 0,
     input_type: "rtsp",
     rtsp_transport: "tcp",
-    enabled: true,
+    enabled: false,
     fps_policy: { max_fps: "8/1", min_fps: "2/1" },
     alert_policy: { global_alert_cooldown_s: 30, store_suppressed_events: true, suppress_record_request: true, critical_bypass: false },
   });
@@ -4031,6 +4608,43 @@ refreshRuntimeOverviewBtn?.addEventListener("click", () => {
   clearMessages();
   loadRuntimeOverview().catch((e) => showError(`运行状态刷新失败：${e.message}`));
 });
+toggleRuntimeAdvancedBtn?.addEventListener("click", () => {
+  setRuntimeAdvancedVisible(!runtimeAdvancedVisible);
+});
+quickRuntimeManageCamerasBtn?.addEventListener("click", () => {
+  activateTopView("cameras", true);
+  document.getElementById("camera-view")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+quickRuntimeProfileEl?.addEventListener("change", () => {
+  renderQuickRuntimeStart();
+});
+quickRuntimeShardStrategyEl?.addEventListener("change", () => {
+  renderQuickRuntimeStart();
+});
+quickRuntimeSelectRequiredBtn?.addEventListener("click", () => {
+  const expected = quickRuntimeExpectedCount(quickRuntimeProfileEl?.value || "production_t4_40");
+  const registered = quickRuntimeRegisteredCameras();
+  quickRuntimeSelectedSourceIds = new Set(
+    registered.slice(0, expected).map((camera) => String(camera.source_id || ""))
+  );
+  quickRuntimeSelectionInitialized = true;
+  renderQuickRuntimeStart();
+});
+quickRuntimeClearSelectionBtn?.addEventListener("click", () => {
+  quickRuntimeSelectedSourceIds = new Set();
+  quickRuntimeSelectionInitialized = true;
+  renderQuickRuntimeStart();
+});
+quickRuntimeStartBtn?.addEventListener("click", () => {
+  quickStartFullRuntime().catch((error) => showError(`完整链路启动失败：${apiErrorMessage(error)}`));
+});
+quickRuntimeStopBtn?.addEventListener("click", () => {
+  stopDualRuntime().catch((error) => showError(`完整链路停止失败：${apiErrorMessage(error)}`));
+});
+refreshRuntimeLatencyBtn?.addEventListener("click", () => {
+  loadRuntimeLatency().catch(() => {});
+});
 saveRuntimePerformanceBtn?.addEventListener("click", () => {
   saveRuntimePerformanceConfig().catch((e) => showError(`性能配置保存失败：${apiErrorMessage(e)}`));
 });
@@ -4038,19 +4652,22 @@ applyRuntimePerformanceBtn?.addEventListener("click", () => {
   saveRuntimePerformanceConfig({ apply: true }).catch((e) => showError(`性能配置应用失败：${apiErrorMessage(e)}`));
 });
 saveRuntimeTopologyBtn?.addEventListener("click", () => {
-  saveRuntimeTopologyConfig().catch((e) => showError(`拓扑配置保存失败：${apiErrorMessage(e)}`));
+  saveRuntimeTopologyConfig().catch((e) => showError(`处理能力设置保存失败：${apiErrorMessage(e)}`));
 });
 applyRuntimeTopologyBtn?.addEventListener("click", () => {
-  saveRuntimeTopologyConfig({ apply: true }).catch((e) => showError(`拓扑配置应用失败：${apiErrorMessage(e)}`));
+  saveRuntimeTopologyConfig({ apply: true }).catch((e) => showError(`处理能力设置应用失败：${apiErrorMessage(e)}`));
 });
 recoverRuntimeSourcesBtn?.addEventListener("click", () => {
   recoverRuntimeSources().catch((e) => showError(`视频源恢复失败：${apiErrorMessage(e)}`));
 });
 applySavedRuntimeTopologyBtn?.addEventListener("click", () => {
-  applySavedRuntimeTopology().catch((e) => showError(`拓扑应用失败：${apiErrorMessage(e)}`));
+  applySavedRuntimeTopology().catch((e) => showError(`保存设置应用失败：${apiErrorMessage(e)}`));
 });
 runtimeTopologyForm?.elements.topology_mode?.addEventListener("change", () => {
   updateRuntimeTopologyFormVisibility();
+});
+runtimeTopologyForm?.elements.runtime_profile?.addEventListener("change", (event) => {
+  applyRuntimeTopologyPreset(String(event.target?.value || "custom"));
 });
 runtimeTopologyForm?.elements.shard_strategy?.addEventListener("change", () => {
   const config = {
@@ -4106,3 +4723,9 @@ loadCameras()
     activateTopView(requestedTopView, false);
   })
   .catch((e) => showError(e.message));
+window.setInterval(() => {
+  const runtimeView = document.getElementById("runtime-view");
+  if (runtimeView && !runtimeView.hidden) {
+    loadRuntimeLatency({ silent: true }).catch(() => {});
+  }
+}, 5000);

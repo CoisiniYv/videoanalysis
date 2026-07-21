@@ -1,7 +1,7 @@
 ---
 type: service-deep-dive
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - services
   - modules
@@ -10,406 +10,170 @@ tags:
 
 # 服务深潜
 
-本页按服务解释职责、输入输出、关键代码入口、常见故障和优化点。读完它，后续 agent 应能知道
-“改哪个模块会影响哪条链路”。
-
 ## evidence-viewer / 8090
 
-关键路径：
+关键文件：`services/evidence-viewer/app/main.py`、`static/*.js`。
 
-- `services/evidence-viewer/app/main.py`
-- 8090 静态 UI 和 `/api/v1/*` 代理；
-- `/media/*` 代理；
-- 旧 `/api/bundles*` 文件扫描兼容接口。
+- 对外监听 8090；
+- 提供 `/`、`/operator` 和静态页面；
+- 白名单代理 `/api/v1/*`，代理 `/media/*`；
+- 保留 `/api/bundles/*` 文件兼容接口；
+- 不代理 FastAPI `/docs`，也未实现 WebSocket upgrade。
 
-职责：
-
-- 用户唯一主入口；
-- 摄像头管理页面；
-- ROI / rule 编辑；
-- 人员注册；
-- evidence list/detail；
-- runtime status/performance/topology 控制入口；
-- storage maintenance UI。
-
-设计要求：
-
-- 对用户显示中文友好的 camera name、zone name、rule name；
-- 不把 source id / camera id 当成主要展示；
-- 保存配置和受控重启必须明确区分；
-- evidence 页面应从 DB-backed evidence API 读取，不应依赖旧文件扫描语义。
-
-常见坑：
-
-- 8090 页面状态不是容器真实运行状态；
-- 旧 evidence 文件兼容接口不能作为新证据链权威；
-- 算法/ROI 保存如果误走 runtime apply，会影响取证和用户体验。
+新功能应优先走 `/api/v1/evidence` 的 DB-backed 合同。
 
 ## api
 
-关键路径：
+关键模块：routers、`runtime_topology.py`、`runtime_topology_jobs.py`、
+`runtime_latency.py`、runtime apply/performance/control。
 
-- `services/api/app/main.py`
-- `services/api/app/routers/cameras.py`
-- `services/api/app/routers/runtime.py`
-- `services/api/app/routers/people.py`
-- `services/api/app/routers/evidence.py`
-- `services/api/app/services/runtime_apply.py`
-- `services/api/app/services/runtime_performance.py`
-- `services/api/app/services/runtime_topology.py`
-- `services/api/app/services/savant_supervisor.py`
+- DB 配置与查询面；
+- camera/ROI/rule export；
+- 人脸注册；
+- evidence list/detail；
+- Docker runtime 编排；
+- 40/60 路预设；
+- 异步 apply/status；
+- latency/overview/maintenance。
 
-职责：
+topology job 是进程内线程，不是持久队列。状态文件只恢复展示，不恢复执行。
 
-- 业务 API；
-- 摄像头/规则/ROI DB 写入；
-- 导出 Savant camera YAML 和 source manifest；
-- runtime apply / stop / restart；
-- performance config 保存和应用；
-- topology plan 保存和应用；
-- people/face registration；
-- evidence DB-backed 查询；
-- storage maintenance。
+## Replay、raw fanout、analysis-forwarder
 
-输入输出：
+- Replay A/B 接收全率 RTSP 并写 RocksDB；
+- full preset 的 `replay-raw-fanout-a/b` 同时做 sampled Savant 输出和 raw PUB；
+- rolling sink 从 raw PUB 取 sampler 之前的编码帧；
+- 单分支由独立 `analysis-forwarder` 采样；
+- Replay job API 仍供 clip-worker 兼容路径使用。
 
-```text
-8090 UI
-  -> API routers
-  -> PostgreSQL
-  -> generated config
-  -> Docker compose / dynamic containers
-```
+不要把 full preset 画成 `raw-fanout -> analysis-forwarder-a/b -> Savant`；当前代码在
+full mode 直接把 raw fanout 容器配置成 sampler。
 
-关键边界：
-
-- API 的 8000 端口只应在 compose 网络内使用；
-- 用户入口是 8090；
-- API 负责把 DB 状态导出成运行时快照，但 DB 才是 truth；
-- runtime apply 必须走 evidence guard。
-
-## replay-service
-
-职责：
-
-- 全速接入视频；
-- RocksDB 存储；
-- 为 analysis-forwarder 提供分析分支；
-- 为 clip-worker 提供取证时间窗和 Replay job。
-
-重要语义：
-
-- Replay 是证据时间窗权威；
-- analysis-forwarder 的采样不会影响 Replay 已存全速视频；
-- 证据前后 5s/自定义时长来自 Replay job，而不是 forwarder 输出。
-
-常见问题：
-
-- replay job payload 和 Replay 版本不兼容会导致 fallback；
-- constant-cadence 请求是 midterm 默认，避免旧 fallback 成常态；
-- 多 replay shard 时，clip-worker 必须把 source 路由到正确 replay/video-file-sink 分支。
-
-## source-adapter / dynamic source
-
-职责：
-
-- RTSP -> Replay；
-- 静态 compose source 和动态 `video-analytics-source-*` 都存在；
-- 根据 8090 DB 导出的 source manifest 启停。
-
-关键配置：
-
-- RTSP transport；
-- wallclock timestamps；
-- generated source manifest；
-- enabled/disabled source 状态。
-
-排障重点：
-
-- source 容器是否 exited；
-- negative PTS 是否增长；
-- RTSP 服务端是否扛得住 60 路；
-- `primary_rtsp` disabled 时，compose source exited 不一定是故障。
-
-## analysis-forwarder
-
-关键路径：
-
-- `services/analysis-forwarder/app/main.py`
-- `services/analysis-forwarder/app/sampler.py`
-
-职责：
-
-- 从 Replay 读取分析分支；
-- 按 PTS/FPS 降采样；
-- 用 bounded queue 保护进程；
-- 写 Savant ZeroMQ source；
-- 暴露 Prometheus metrics。
-
-关键指标：
-
-- seen frames；
-- forwarded frames；
-- dropped frames；
-- send failures；
-- queue depth；
-- effective input/output FPS。
-
-重要判断：
-
-- queue 长期满且 send failures/阻塞，通常说明下游 Savant 消费不够快；
-- null sink 通过但接 Savant 失败，说明 forwarder 自身不是主瓶颈；
-- 16/1 入口压力不等于 16 FPS 推理通过。
-
-## savant-security
-
-关键路径：
-
-- `modules/savant_security/module.yml`
-- `modules/savant_security/pyfuncs/*`
-- `modules/savant_security/config/cameras.midterm.yml`
-
-主要阶段：
+## Savant A/B
 
 ```text
 PtsFpsGate
   -> yolo26_pose
   -> nvtracker
-  -> behavior_rules
+  -> behavior_rules (events + person observations)
   -> yolov8_face
   -> face_person_associator
-  -> adaface
-  -> face_reid_gate
-  -> exporters
+  -> face_roi_exporter
+  -> in-pipeline adaface/reid/exporters (single path)
+  -> frame annotations / metrics
 ```
 
-职责：
+完整预设启用 ROI exporter、禁用 in-pipeline AdaFace input 和 face observation export，
+把 embedding 移到独立 worker。单分支仍可使用 in-pipeline AdaFace。
 
-- 执行 DeepStream/Savant 推理；
-- 根据 camera rules 产生行为事件；
-- 导出人脸、人形、frame annotation；
-- 提供性能指标。
+## rolling-cache-sink
 
-调优参数：
+关键目录：`services/rolling-cache-sink/`。
 
-- `BATCH_SIZE`
-- `POSE_BATCH_SIZE`
-- `FACE_DETECTOR_BATCH_SIZE`
-- `FACE_EMBEDDING_BATCH_SIZE`
-- `MAX_PARALLEL_STREAMS`
-- `MAX_FPS`
-- `MIN_FPS`
-- `FACE_INFER_INTERVAL`
-- `FACE_EMBEDDING_INFER_INTERVAL`
-- `FACE_REID_MIN_INTERVAL_MS`
+- 替代 rolling 场景的旧 `video_files.py`；
+- 每 source/session 一条 H.264 passthrough GStreamer pipeline；
+- splitmux MOV fragment；
+- staging 后同文件系统 rename 原子发布；
+- `metadata.json` 是 fragment commit marker；
+- 暴露 `/metrics`、`/healthz`、`/readyz`；
+- 原始 PTS 保留，另建 `rolling_cache_mux_pts`。
 
-未闭环风险：
-
-- 缺少 pose/face/AdaFace/pyfunc 阶段级 latency；
-- 只看整体 effective FPS 不足以判断卡在哪一段；
-- 单路测试因为 `max_same_source_frames=1` 可能凑不满 batch，不能外推 60 路。
+retention/byte quota 由单 owner 维护，不能删除 active read pin。
 
 ## event-worker
 
-关键路径：
-
-- `services/event-worker/app/worker.py`
-- `services/event-worker/app/repository.py`
-- `services/event-worker/app/record_request.py`
-
-职责：
-
 - 消费 `security.events`；
-- 写 `events`；
-- 执行 cooldown / suppression / admission；
-- 创建 `evidence_tasks`；
-- 发布 `security.record_requests`；
-- 写 alerts。
+- 持久化 event；
+- source+algorithm cooldown；
+- 创建 evidence task、alerts；
+- 单分支发布 record request；
+- full preset 在 prefill 前关闭 task 创建，开放后 suppress record request。
 
-优化点：
+event-worker 不再消费高率人体轨迹，避免策略/DB 工作饿死 person stream。
 
-- record request 去重从 `XRANGE - +` 改成 Redis `SET NX EX`；
-- duplicate/retry/reclaim 有 harness；
-- admission 按 global/source/event_type 控制证据风暴；
-- cooldown 按 source/event_type 分离，watchlist hit 不受 intrusion cooldown 影响。
+## person-observation-worker
 
-常见问题：
+关键文件：`services/event-worker/app/person_worker.py`、`person_main.py`。
 
-- admission skip 大量出现不等于系统失败，要看 retained evidence 是否达标；
-- 如果要求每个事件都生成完整证据，当前设计就需要重新扩容；
-- duplicate task 不能留下长期 pending。
+- 复用 event-worker image；
+- 独立 consumer group/process；
+- 先恢复 pending，再批量读新消息；
+- transactional batch 写 `person_bbox_observations`；
+- 默认 worker batch 500。
+
+健康检查要单独看该 consumer 的 lag/pending，不能只看 event-worker。
+
+## adaface-roi-worker
+
+- 消费有 TTL 的 112x112 JPEG ROI；
+- TensorRT batch 16；
+- T4 preset 通过 MPS 10%，4090 preset 不使用 MPS；
+- 发布 512 维 face observations；
+- 暴露 metrics/health；
+- 必须监控 ROI stream lag/pending、expired crop 和 batch occupancy。
 
 ## face-worker
 
-关键路径：
+- 持久化 face observation；
+- 查询注册图库；
+- exact match/rerank；
+- 写 match_results、轨迹图片；
+- 产生 `watchlist_hit` 回到 `security.events`。
 
-- `services/face-worker/app/worker.py`
-- `services/face-worker/app/vector_store.py`
-- `services/face-worker/app/watchlist_emitter.py`
-- `services/face-worker/app/gallery_search.py`
-- `services/face-worker/app/qdrant_gallery_store.py`
-- `services/face-worker/app/gallery_sync_outbox.py`
-- `services/face-worker/sync_qdrant_gallery.py`
-
-职责：
-
-- 消费 `security.face_observations`；
-- 校验 embedding；
-- 写 `face_observations`；
-- 查询 gallery/watchlist；
-- 产生 `watchlist_hit`；
-- 写 `match_results`。
-
-当前瓶颈风险：
-
-- 单 consumer loop；
-- DB insert、规则解析、Qdrant 查询、exact rerank、event publish 和 ACK 仍同步串行；
-- 2026-06-29 baseline 显示当前 3 条 active gallery 的 target-filtered
-  pgvector exact p95 约 0.198ms，所以当前小图库不是瓶颈；
-- Qdrant authoritative cutover 已完成，60 路 8 FPS 压测 Qdrant p95/p99 为 3ms/4ms；
-- 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms；
-- 当前后续风险不是注册图库 vector search 本身，而是单 worker 同步链路是否需要拆分。
-
-下一步优化应先观测：
-
-- gallery query p95/p99；
-- watchlist query p95/p99；
-- insert latency；
-- rule-resolution latency；
-- event-publish latency；
-- batch size；
-- Redis lag；
-- target-person cardinality；
-- Qdrant query p95/p99、fallback count、shadow mismatch count 和 outbox lag。
-- face observation ACK latency；
-- 50k/100k active embeddings 下的 Qdrant benchmark，如果生产图库规模继续扩大。
-
-Qdrant 运行原则：
-
-- PostgreSQL 继续是人员和图库事实源；
-- Qdrant 是 derived index，可从 PostgreSQL 重建；
-- 当前 authoritative runtime 是 `FACE_VECTOR_BACKEND=qdrant`；
-- pgvector 保留为 rollback / exact baseline；
-- Qdrant 默认 exact rerank 后才允许发 `watchlist_hit`；
-- Qdrant 故障不能影响 Savant、Replay、clip-worker 或 media-worker；
-- 回滚只需要重启 `face-worker`，不需要 DB rollback。
+当前默认后端是 pgvector。Qdrant 模块、outbox 和 sync worker 是可选能力，只有显式 env
+和 profile 生效后才可描述为 authoritative。
 
 ## clip-worker
 
-关键路径：
+当前结构包含 contracts、request consumer、proof resolver、pure planner、admission
+repository、Replay client/executor、request processor 和 coordinator。
 
-- `services/clip-worker/app/worker.py`
-- `services/clip-worker/app/replay_shards.py`
+- 负责单分支/兼容 record request；
+- planner shadow 只比较纯结果；
+- Coordinator V2 是默认 side-effect owner；
+- Replay slot 使用 owner/token/generation；
+- create 前持久化 plan hash/request/delivery；
+- ACK 只在 durable outcome 后发生；
+- 不恢复 rolling-owned lifecycle。
 
-职责：
-
-- 消费 `security.record_requests`；
-- claim / reclaim pending；
-- 等待 post-Savant frame proof；
-- 调 Replay job；
-- 更新 `evidence_tasks`；
-- 处理 stale/missing DB 事件；
-- 根据 replay shard 路由到正确 Replay/video-file-sink。
-
-关键配置：
-
-- 全局并发；
-- per-source 并发；
-- per-shard 并发；
-- replay shard JSON / config path；
-- evidence 前后窗口；
-- constant-cadence Replay payload。
-
-常见问题：
-
-- Redis pending 指向已不存在 DB event/task 时，必须 `XACK`，否则空转；
-- proof 缺失会导致 replay job 长期无法建立；
-- 双分支时 shard plan 不一致会让证据请求打到错误 Replay。
+完整双分支正常运行时不会把它当主物化 worker。
 
 ## video-file-sink
 
-职责：
-
 - 接收 Replay job 输出；
-- 写 `raw_clip.mov` 和相关 sink metadata；
-- 为 media-worker 提供扫描输入。
-
-排障重点：
-
-- sink 输出目录是否有新文件；
-- replay epoch 是否匹配；
-- 多分支时 source 是否落到正确 sink；
-- raw clip 是否能 ffprobe/播放。
+- 写兼容 raw video/metadata；
+- A/B/A–H 实例用于双分支兼容或 shard 压测；
+- full rolling path中这些实例不是主 evidence 输出。
 
 ## media-worker
 
-关键路径：
+核心职责：
 
-- `services/media-worker/app/worker.py`
-- `services/media-worker/app/post_savant_evidence_bundle.py`
-- `services/media-worker/app/post_savant_video_integrity.py`
-- `services/media-worker/app/snapshot.py`
+- Scheduler V2 非阻塞 dispatch；
+- process-lifetime WorkBudget；
+- image/remux/finalizer lanes 与 source caps；
+- PostgreSQL pool；
+- RollingSegmentIndex、row cache、read pins；
+- materialization lease/heartbeat/fence；
+- durable finalizer handoff；
+- finalizer process pool；
+- staging/atomic publish；
+- bundle/artifact/timeline/overlay transaction；
+- terminal state 与 durable cleanup recovery。
 
-职责：
+常见误判：
 
-- 扫描 video-file-sink 输出；
-- 校验 raw clip；
-- 生成 snapshot / annotation / manifest；
-- 写 DB-backed evidence bundle/artifacts/timeline/overlay；
-- 终态化 `evidence_tasks`；
-- 执行 cleanup。
+- finalizer worker 配置值不等于有效并发，shared WIP 仍是上限；
+- queue wait 高不一定是 finalizer pool wait；
+- legacy derivative 关闭不等于 DB annotation 关闭；
+- segment discovery 慢、read-pin retry、event late arrival要与 remux CPU 分开诊断。
 
-优化点：
+## PostgreSQL / Redis
 
-- ffmpeg/ffprobe 已进入镜像，避免 imageio fallback；
-- deadline-aware pacer；
-- CPU/native thread limit；
-- ffmpeg output-side thread limit；
-- priority + deadline ordering；
-- pressure report drain 后刷新日志，避免只看压力前半段。
+PostgreSQL 提供状态、配置和索引权威。Redis 提供 delivery。健康必须联合判断：
 
-当前边界：
-
-- 单进程轮询模型已经通过 8 FPS pressure profile；
-- 不要过早上多容器 claim；
-- 只有真实 RTSP soak 下 lifecycle p95/p99 超 300s 或要求全事件物化时，再升级 finalizer 模型。
-
-## PostgreSQL
-
-职责：
-
-- 配置事实源；
-- 业务事件事实源；
-- 人脸图库和 pgvector 查询；
-- evidence metadata 和查询索引；
-- audit。
-
-性能重点：
-
-- `events` recent/list/cooldown 查询；
-- `evidence_tasks` pending/materialization 队列；
-- `evidence_bundles` playable recent；
-- `face_observations` 和 `person_gallery_embeddings` vector query；
-- autovacuum/dead tuples。
-
-## Redis
-
-职责：
-
-- streaming message bus；
-- consumer groups；
-- bounded frame annotation；
-- record request queue。
-
-健康判断：
-
-- `XLEN`；
-- `XINFO GROUPS` lag；
-- `XPENDING`；
-- used memory / peak memory；
-- rejected connections / evicted keys。
-
-结论：
-
-- Redis/PG 都在热路径，但最近一次调查没有证明“Redis 把 PG 写爆”是证据不完整主因；
-- 证据完整率更依赖 admission、proof、Replay job、media finalization 和 annotation metadata 对齐。
+- DB locks/pool/query/index/autovacuum；
+- Redis XLEN/lag/pending/memory/eviction；
+- lifecycle active/oldest/lease；
+- source/epoch/session identity；
+- 文件系统和 DB 是否原子收敛。

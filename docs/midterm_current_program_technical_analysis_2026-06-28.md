@@ -1,5 +1,10 @@
 # Midterm 当前程序技术分析报告 - 2026-06-28
 
+> 历史快照：本文记录 2026-06-28 及随后追加的阶段性结论，不是当前工作区架构
+> 权威。2026-07-20 之后请先读 `docs/current_architecture.md` 和
+> `docs/current_mainline_status.md`；尤其不要用本文的逐事件 Replay 主链、Qdrant 默认
+> 后端或旧容量结论覆盖当前 rolling-cache-first/pgvector 默认实现。
+
 ## 1. 报告范围
 
 本报告基于当前 checkout 的代码、配置和 2026-06-28 已沉淀的压测文档进行静态技术分析。

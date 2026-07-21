@@ -78,6 +78,7 @@ def _config(module, **overrides):
         "rtsp_republish_readiness_parallelism": 4,
         "rtsp_republish_readiness_restart_attempts": 1,
         "rtsp_republish_input_offset_s": 0.0,
+        "rtsp_republish_input_offset_step_s": 0.0,
         "rtsp_republish_input_loop": False,
         "rtsp_republish_h264_repeat_headers": False,
         "max_send_failures": 0,
@@ -125,6 +126,31 @@ def test_pressure_runner_is_directly_executable_from_repo_root() -> None:
     )
 
     assert "Run a full midterm 60-source pressure test" in completed.stdout
+
+
+def test_person_trajectory_export_log_parser_sums_each_savant_branch() -> None:
+    module = _load_module()
+    text = """
+===== video-analytics-midterm-savant-a rc=0 =====
+component=savant_security_behavior_rules_tick source_id=run_00 total_person_observations_exported=120
+component=savant_security_behavior_rules_tick source_id=run_02 total_person_observations_exported=125
+===== video-analytics-midterm-savant-b rc=0 =====
+component=savant_security_behavior_rules_tick source_id=run_01 total_person_observations_exported=119
+component=savant_security_person_obs_redis_writer action=drop reason=queue_full
+stage=savant_security_person_obs_export_drop source_observation_id=x
+component=savant_security_person_obs_redis_writer action=write_error error=timeout
+"""
+
+    summary = module.parse_person_trajectory_export_logs(text, run_id="run")
+
+    assert summary["exported_by_container"] == {
+        "video-analytics-midterm-savant-a": 125,
+        "video-analytics-midterm-savant-b": 119,
+    }
+    assert summary["exported_total"] == 244
+    assert summary["exporter_drop_count"] == 1
+    assert summary["writer_drop_log_count"] == 1
+    assert summary["writer_error_count"] == 1
 
 
 def test_pressure_runner_sql_placeholder_styles_match_parameter_types() -> None:
@@ -177,6 +203,70 @@ def test_pressure_source_logs_are_captured_before_runtime_apply_removes_sources(
     )
 
 
+def test_pressure_source_log_capture_times_out_without_blocking_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+
+    def fake_run(command, **kwargs):
+        if command[1] == "ps":
+            assert kwargs["timeout"] == module.DOCKER_SOURCE_INSPECT_TIMEOUT_S
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=f"video-analytics-source-{cfg.run_id}_00\n",
+            )
+        assert command[1] == "logs"
+        assert kwargs["timeout"] == module.DOCKER_SOURCE_LOG_TIMEOUT_S
+        raise subprocess.TimeoutExpired(
+            command,
+            kwargs["timeout"],
+            output="partial source log\n",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    summary = module.capture_pressure_source_logs(cfg, artifact_name="source_logs")
+
+    assert summary["container_count"] == 1
+    assert summary["captured_count"] == 1
+    assert summary["timed_out_count"] == 1
+    assert summary["logs"][0]["returncode"] == 124
+    assert summary["logs"][0]["timed_out"] is True
+    assert Path(summary["logs"][0]["log_path"]).read_text() == "partial source log\n"
+
+
+def test_pressure_source_inspection_docker_calls_have_timeouts(monkeypatch) -> None:
+    module = _load_module()
+    source_name = "video-analytics-source-test-run_00"
+
+    def fake_run(command, **kwargs):
+        if command[1] == "ps":
+            assert kwargs["timeout"] == module.DOCKER_SOURCE_INSPECT_TIMEOUT_S
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"Names": source_name, "Status": "Up"}) + "\n",
+            )
+        if command[1] == "inspect":
+            assert kwargs["timeout"] == module.DOCKER_SOURCE_INSPECT_TIMEOUT_S
+        else:
+            assert command[1] == "logs"
+            assert kwargs["timeout"] == module.DOCKER_SOURCE_LOG_TIMEOUT_S
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    summary = module.inspect_pressure_source_containers("test-run")
+
+    assert summary["total"] == 1
+    assert summary["running"] == 0
+    assert summary["negative_pts_error_total"] == 0
+    assert summary["processed_zero_frames_total"] == 0
+
+
 def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     completed = subprocess.run(
         ["bash", str(PROFILE_SCRIPT), "4fps-t4"],
@@ -205,6 +295,180 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "--media-worker-rolling-remux-workers 1" in output
     assert "preserve_warmup_results=1" in output
     assert "--preserve-warmup-results" in output
+
+
+def test_4090_stress_profile_rejects_mps_with_full_gpu_engines() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "invalid-mps-dry-run",
+            "CUDA_MPS": "1",
+        },
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode == 2
+    assert "8fps-stress forbids CUDA MPS" in completed.stderr
+
+
+def test_4090_stress_profile_defaults_to_validated_local_pipeline() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={**os.environ, "DRY_RUN": "1", "RUN_ID": "local-pipeline-dry-run"},
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    output = completed.stdout
+    assert "duration_s=600" in output
+    assert "pressure_algorithm_cooldown_s=30" in output
+    assert "pressure_source_start_stagger_s=0.53" in output
+    assert "evidence_policy_groups=5:5" in output
+    assert "adaface_roi_redis=1" in output
+    assert "media_worker_materialization_max_active=20" in output
+    assert "media_worker_rolling_remux_workers=12" in output
+    assert "media_worker_finalizer_workers=8" in output
+    assert "media_worker_finalizer_process_workers=4" in output
+    assert "media_worker_finalizer_queue_capacity=8" in output
+    assert "media_worker_rolling_max_per_poll=8" in output
+    assert "pressure_pause_redis_rdb=1" in output
+    assert "--pressure-pause-redis-rdb" in output
+    assert "pressure_tune_postgres_checkpoints=1" in output
+    assert "--pressure-tune-postgres-checkpoints" in output
+    assert "pressure_cache_tmpfs=1" in output
+    assert "--pressure-rolling-cache-host-root" in output
+    assert "/dev/shm/video-analytics-pressure/local-pipeline-dry-run/rolling-cache" in output
+    assert (
+        "--rtsp-republish-input-uri "
+        "/data/video-analytics/pressure-fixtures/"
+        "1080movie_o300_native24_gop12_continuous_1200s.mp4"
+    ) in output
+    assert (
+        "rtsp_republish_input_sha256="
+        "688112c4172d9ab1328db717004e963cb0b9cf4f3642f5c9016ad9d1d76b1370"
+    ) in output
+    assert "rolling_cache_min_raw_fps=20" in output
+    assert "--rolling-cache-min-raw-fps 20" in output
+    assert "--pressure-source-start-stagger-s 0.53" in output
+    assert "rtsp_republish_input_offset_step_s=4" in output
+    assert "--rtsp-republish-input-offset-step-s 4" in output
+
+
+def test_pressure_tmpfs_cleanup_uses_sink_image_for_root_owned_tree(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    base = tmp_path / "pressure-cache"
+    base.mkdir()
+    (base / "root-owned-segment.mp4").write_bytes(b"segment")
+    monkeypatch.setattr(module, "_pressure_cache_tmpfs_base", lambda _cfg: base)
+
+    real_rmtree = module.shutil.rmtree
+    rmtree_calls = 0
+
+    def fake_rmtree(path, *, ignore_errors):
+        nonlocal rmtree_calls
+        rmtree_calls += 1
+        if rmtree_calls == 1:
+            return None
+        return real_rmtree(path, ignore_errors=ignore_errors)
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[1] == "inspect":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="local-rolling-cache-sink:latest\n",
+                stderr="",
+            )
+        assert command[1] == "run"
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.shutil, "rmtree", fake_rmtree)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    summary = module.cleanup_pressure_cache_host_mounts(cfg)
+
+    assert summary["status"] == "removed"
+    assert summary["removed_bytes"] == len(b"segment")
+    assert summary["root_cleanup"] == {
+        "status": "removed",
+        "image": "local-rolling-cache-sink:latest",
+        "returncode": 0,
+        "stderr": "",
+    }
+    assert commands[1][0:4] == ["docker", "run", "--rm", "--pull"]
+    assert f"{base}:/pressure-cache:rw" in commands[1]
+    assert not base.exists()
+
+
+def test_pressure_redis_rdb_pause_is_audited_and_reversible(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.save = "3600 1 300 100 60 10000"
+            self.rdb_saves = 7
+
+        def config_get(self, _name):
+            return {b"save": self.save.encode()}
+
+        def config_set(self, _name, value):
+            self.save = str(value)
+            return True
+
+        def info(self, section):
+            if section == "memory":
+                return {"used_memory": 1234, "used_memory_peak": 5678}
+            return {
+                "rdb_bgsave_in_progress": 0,
+                "rdb_saves": self.rdb_saves,
+                "rdb_last_save_time": 100,
+                "rdb_last_bgsave_status": "ok",
+                "rdb_last_bgsave_time_sec": 2,
+                "rdb_changes_since_last_save": 10,
+            }
+
+    redis = FakeRedis()
+    before = module.redis_rdb_persistence_snapshot(redis)
+    paused = module.pause_redis_rdb_for_pressure(redis, cfg, before=before)
+
+    assert paused["status"] == "paused"
+    assert paused["before"]["save"] == "3600 1 300 100 60 10000"
+    assert paused["after"]["save"] == ""
+    assert redis.save == ""
+    activity = module.redis_rdb_pressure_activity(
+        redis,
+        cfg,
+        baseline=paused["after"],
+    )
+    assert activity["status"] == "clean"
+    assert activity["rdb_saves_delta"] == 0
+
+    restored = module.restore_redis_rdb_after_pressure(
+        redis,
+        cfg,
+        save_schedule=before["save"],
+    )
+    assert restored["status"] == "restored"
+    assert redis.save == "3600 1 300 100 60 10000"
+    assert (tmp_path / "redis_rdb_pressure.json").exists()
+    assert (tmp_path / "redis_rdb_pressure_activity.json").exists()
+    assert (tmp_path / "redis_rdb_restore.json").exists()
 
 
 def test_profile_propagates_deterministic_rtsp_republish_contract() -> None:
@@ -244,6 +508,50 @@ def test_profile_propagates_deterministic_rtsp_republish_contract() -> None:
     assert "--rtsp-republish-readiness-parallelism 4" in output
     assert "--rtsp-republish-readiness-restart-attempts 1" in output
     assert "--rtsp-republish-local-server" not in output
+
+
+def test_profile_rejects_wrong_explicit_fixture_identity(tmp_path: Path) -> None:
+    fixture = tmp_path / "fixture.mp4"
+    fixture.write_bytes(b"wrong-content")
+
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "fixture-identity-dry-run",
+            "RTSP_REPUBLISH_INPUT_URI": str(fixture),
+            "RTSP_REPUBLISH_INPUT_SHA256": "0" * 64,
+        },
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.returncode == 2
+    assert "pressure fixture identity mismatch" in completed.stderr
+
+
+def test_profile_propagates_pressure_algorithm_cooldown() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "cooldown-dry-run",
+            "PRESSURE_ALGORITHM_COOLDOWN_S": "30",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    output = completed.stdout
+    assert "pressure_algorithm_cooldown_s=30" in output
+    assert "--pressure-algorithm-cooldown-s 30" in output
 
 
 def test_profile_defaults_to_run_scoped_rtsp_server_for_fixed_input() -> None:
@@ -541,6 +849,20 @@ def test_rtsp_republish_command_supports_deterministic_file_offset_and_loop() ->
     assert "copy" in command
 
 
+def test_rtsp_republisher_offsets_desynchronize_fixed_fixture_sources() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        rtsp_republish_input_offset_s=2.0,
+        rtsp_republish_input_offset_step_s=4.0,
+    )
+
+    assert [
+        module.rtsp_republish_input_offset_for_index(cfg, index)
+        for index in range(4)
+    ] == [2.0, 6.0, 10.0, 14.0]
+
+
 def test_rtsp_republish_readiness_requires_every_path(
     monkeypatch,
     tmp_path: Path,
@@ -704,6 +1026,7 @@ def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
     assert parsed.duration_s == 600
     assert parsed.drain_s == 120
     assert parsed.keep_evidence == -1
+    assert parsed.pressure_source_start_stagger_s == 0.53
     assert parsed.clear_existing_evidence is False
     assert parsed.discard_pressure_results is False
 
@@ -760,7 +1083,8 @@ def test_rolling_cache_pressure_disables_legacy_replay_fallback() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert '"ROLLING_CACHE_FALLBACK_TO_REPLAY": "false"' in source
-    assert "must prove the Replay raw tap -> rolling-cache" in source
+    assert "rolling_cache_direct_raw_fanout" in source
+    assert "stop_legacy_replay_services_for_direct_rolling_cache" in source
 
 
 def test_rolling_cache_pressure_sets_named_high_density_profile() -> None:
@@ -788,8 +1112,8 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
         module,
         rolling_cache_evidence=True,
         rolling_cache_prefill_s=25,
-        media_worker_materialization_max_active=8,
-        media_worker_rolling_remux_workers=4,
+        media_worker_materialization_max_active=12,
+        media_worker_rolling_remux_workers=8,
     )
     captured: dict[str, dict[str, str]] = {}
 
@@ -808,15 +1132,21 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     module.configure_rolling_cache_workers_for_pressure(cfg)
 
     values = captured["compose_recreate_media_worker_rolling_cache.log"]
-    assert values["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "8"
-    assert values["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "4"
+    assert values["MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE"] == "12"
+    assert values["MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT"] == "8"
     assert values["MEDIA_WORKER_FFMPEG_X264_PRESET"] == "ultrafast"
     assert values["MEDIA_WORKER_IMAGE_WORKERS"] == "4"
-    assert values["ROLLING_CACHE_MATERIALIZATION_WORKERS"] == "4"
-    assert values["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
+    assert values["ROLLING_CACHE_MATERIALIZATION_WORKERS"] == "8"
+    assert values["MEDIA_WORKER_REMUX_QUEUE_CAPACITY"] == "8"
+    assert values["MEDIA_WORKER_FINALIZER_WORKERS"] == "4"
+    assert values["MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"] == "4"
     assert values["MEDIA_WORKER_SCHEDULER_V2_ENABLED"] == "true"
     assert values["MEDIA_WORKER_DB_POOL_ENABLED"] == "true"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ENABLED"] == "true"
+    assert values["MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S"] == "60"
+    assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES"] == "2048"
+    assert values["MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED"] == "false"
+    assert values["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == "4"
     event_values = captured["compose_recreate_event_worker_rolling_cache.log"]
     assert event_values["EVIDENCE_TASK_CREATION_ENABLED"] == "false"
     assert event_values["EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS"] == "0"
@@ -1152,15 +1482,66 @@ def test_prepare_pressure_sampling_window_preserves_warmup_visual_results(
     window = module.prepare_pressure_sampling_window(
         object(),
         cfg,
+        before_sampling=lambda: calls.append("settled") or {"status": "ready"},
         after_prefill=lambda: calls.append("activated") or {"status": "activated"},
     )
 
-    assert calls == ["activated", "preserved"]
+    assert calls == ["settled", "activated", "preserved"]
     assert window["warmup_results_preserved"] is True
+    assert window["before_sampling"] == {"status": "ready"}
     assert window["after_prefill"] == {"status": "activated"}
     assert window["cleanup"]["event_rows_deleted"] == 0
     assert window["cleanup"]["evidence_dirs_removed"] == 0
     assert window["sampling_start_event_ts_ms"] > 0
+
+
+def test_pressure_sampling_settle_requires_zero_queue_and_counter_progress(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        pressure_source_visibility_poll_s=1,
+        pressure_source_visibility_stable_samples=2,
+    )
+    snapshots = iter(
+        [
+            {
+                "status": "all_visible",
+                "forwarder_queue_depth": 5,
+                "savant_frames_seen_total": 100,
+            },
+            {
+                "status": "all_visible",
+                "forwarder_queue_depth": 0,
+                "savant_frames_seen_total": 200,
+            },
+            {
+                "status": "all_visible",
+                "forwarder_queue_depth": 0,
+                "savant_frames_seen_total": 300,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        module,
+        "pressure_source_visibility_snapshot",
+        lambda _cfg: next(snapshots),
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    summary = module.wait_for_pressure_sampling_settle(cfg)
+
+    assert summary["status"] == "ready"
+    assert summary["stable_samples"] == 2
+    assert summary["last_snapshot"]["queue_depth_normalized"] == 0
+    assert summary["last_snapshot"]["savant_counters_advanced"] is True
+    persisted = json.loads(
+        (tmp_path / "pressure_sampling_settle_summary.json").read_text()
+    )
+    assert persisted["status"] == "ready"
 
 
 def test_prepare_pressure_sampling_window_cleanup_does_not_depend_on_result_retention(
@@ -1341,7 +1722,9 @@ def test_clear_existing_evidence_preserves_observations_and_trajectory_files(
         },
     ]
     monkeypatch.setattr(module, "evidence_database_counts", lambda _conn: counts.pop(0))
-    monkeypatch.setattr(module, "pressure_rolling_cache_root_host", lambda: rolling_root)
+    monkeypatch.setattr(
+        module, "pressure_rolling_cache_root_host", lambda *_args: rolling_root
+    )
     monkeypatch.setattr(
         module,
         "pressure_rolling_cache_materialized_root_host",
@@ -1640,6 +2023,33 @@ def test_rolling_cache_full_rate_gate_uses_raw_input_fps_when_available() -> Non
     assert gate["full_rate_ok"] is True
 
 
+def test_rolling_cache_full_rate_gate_rejects_analysis_rate_fixture() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        stream_count=2,
+        fps="8/1",
+        rolling_cache_min_raw_fps=20.0,
+    )
+
+    gate = module.rolling_cache_full_rate_gate(
+        cfg,
+        {
+            "segments_measured": 2,
+            "source_count": 2,
+            "segment_frame_rate_fps": {"p50": 8.1},
+        },
+        {"rolling_cache_expected_raw_fps": 8.0},
+    )
+
+    assert gate["configured_min_raw_fps"] == 20.0
+    assert gate["min_full_rate_fps"] == 20.0
+    assert gate["full_rate_ok"] is False
+    assert "rolling_cache_segment_fps_below_full_rate" in (
+        module.rolling_cache_full_rate_failure_reasons(gate)
+    )
+
+
 def test_rolling_cache_pressure_requires_all_evidence_retained() -> None:
     module = _load_module()
     cfg = _config(module, rolling_cache_evidence=True, keep_evidence=50)
@@ -1662,6 +2072,68 @@ def test_rolling_cache_pressure_requires_all_evidence_retained() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "rolling_cache_acceptance_must_keep_all_evidence" in reasons
+
+
+def test_rolling_cache_pressure_gates_fenced_handoff_and_residual_state() -> None:
+    module = _load_module()
+    cfg = _config(module, rolling_cache_evidence=True, keep_evidence=-1)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_delta": 0,
+            "max_raw_forwarder_frames_dropped_total": 0,
+            "max_raw_forwarder_send_failures_total": 0,
+            "queue_full_samples": 0,
+            "steady_effective_fps_sample_count": 1,
+            "steady_effective_fps_meets_minimum": True,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {
+            "savant": {"validate_seq_iq": 0},
+            "replay_raw_fanout": {},
+            "media_worker": {
+                "media_handoff_recovered_total": 1,
+                "media_finalizer_immediate_admission_gap": 2,
+                "media_scheduler_finalizer_handoff_retry_total": {"max": 1},
+                "media_scheduler_finalizer_handoff_retry_failed": {"max": 1},
+                "media_scheduler_permit_active_last": 1.0,
+                "media_scheduler_finalizer_lane_depth_last": 1.0,
+                "media_scheduler_finalizer_pending_leased_last": 1.0,
+            },
+        },
+    }
+    db_before_cleanup = {
+        "events": 1,
+        "distinct_events_with_playable_evidence": 1,
+        "distinct_events_with_terminal_nonplayable_outcome": 0,
+        "blocking_materialization_tasks": 0,
+        "expired_without_attempt_tasks": 1,
+        "active_materialization_leases": 1,
+        "finalizer_pending_tasks": 1,
+        "task_statuses": [],
+    }
+
+    reasons = module.pressure_failure_reasons(
+        cfg,
+        [],
+        diagnostics,
+        db_before_cleanup=db_before_cleanup,
+    )
+
+    assert "finalizer_handoff_lease_expiry_recovery_present" in reasons
+    assert "finalizer_handoff_fenced_retry_failed" in reasons
+    assert "finalizer_admission_gap_unaccounted" in reasons
+    assert "materialization_expired_without_remux_attempt" in reasons
+    assert "materialization_residual_lease_present" in reasons
+    assert "finalizer_pending_residual_present" in reasons
+    assert "materialization_wip_residual_present" in reasons
+    assert "finalizer_lane_residual_present" in reasons
+    assert "finalizer_pending_leased_residual_present" in reasons
 
 
 def test_rolling_cache_8090_annotation_gate_rejects_unchecked_annotations() -> None:
@@ -2321,6 +2793,58 @@ def test_dual_shard_pressure_enables_stage_metrics(tmp_path) -> None:
         assert override["services"][service]["environment"][
             "SAVANT_STAGE_METRICS_ENABLED"
         ] == "true"
+
+
+def test_dual_shard_small_canary_can_fill_batch_from_each_source(tmp_path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        stream_count=2,
+        batch_size=4,
+        evidence_shard_count=4,
+        dual_shard_same_gpu=True,
+        dual_shard_source_mode="balanced",
+    )
+
+    override = yaml.safe_load(
+        module.write_dual_shard_same_gpu_compose_override(cfg).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert override["services"]["savant-a"]["environment"][
+        "MAX_SAME_SOURCE_FRAMES"
+    ] == "4"
+    assert override["services"]["savant-b"]["environment"][
+        "MAX_SAME_SOURCE_FRAMES"
+    ] == "4"
+
+
+def test_dual_shard_dense_run_retains_one_frame_per_source_per_batch(
+    tmp_path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        stream_count=40,
+        batch_size=4,
+        evidence_shard_count=4,
+        dual_shard_same_gpu=True,
+        dual_shard_source_mode="balanced",
+    )
+
+    override = yaml.safe_load(
+        module.write_dual_shard_same_gpu_compose_override(cfg).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    for service in ("savant-a", "savant-b"):
+        assert override["services"][service]["environment"][
+            "MAX_SAME_SOURCE_FRAMES"
+        ] == "1"
 
 
 def test_dual_shard_pressure_can_propagate_face_secondary_track_ids(tmp_path) -> None:
@@ -3192,6 +3716,67 @@ def test_validate_seq_iq_with_transient_non_full_queue_remains_warning() -> None
     assert "forwarder_queue_nonzero" in reasons
 
 
+def test_tensorrt_engine_sm_mismatch_is_a_hard_failure() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=0)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_total": 0,
+            "max_savant_send_failures_delta": 0,
+            "max_forwarder_queue_depth": 0,
+            "queue_full_samples": 0,
+            "steady_effective_fps_sample_count": 1,
+            "steady_effective_fps_meets_minimum": True,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {
+            "savant": {"tensorrt_engine_incompatible": 1},
+        },
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+
+    assert "tensorrt_engine_incompatible" in reasons
+
+
+def test_tensorrt_engine_sm_warning_is_audited_but_not_failed_under_mps() -> None:
+    module = _load_module()
+    cfg = _config(module, keep_evidence=0, cuda_mps=True)
+    diagnostics = {
+        "sample_summary": {
+            "max_forwarder_sources": 2,
+            "max_savant_sources": 2,
+            "max_savant_send_failures_total": 0,
+            "max_savant_send_failures_delta": 0,
+            "max_forwarder_queue_depth": 0,
+            "queue_full_samples": 0,
+            "steady_effective_fps_sample_count": 1,
+            "steady_effective_fps_meets_minimum": True,
+        },
+        "source_containers": {
+            "exited": 0,
+            "restart_count_total": 0,
+            "negative_pts_error_total": 0,
+        },
+        "log_summary": {
+            "savant": {"tensorrt_engine_incompatible": 2},
+            "adaface_roi_worker": {"tensorrt_engine_incompatible": 1},
+        },
+    }
+
+    reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
+    warnings = module.pressure_warnings(cfg, diagnostics, reasons)
+
+    assert "tensorrt_engine_incompatible" not in reasons
+    assert "tensorrt_engine_mps_partition_warning" in warnings
+
+
 def test_validate_seq_iq_still_fails_when_ingress_is_unhealthy() -> None:
     module = _load_module()
     cfg = _config(module, keep_evidence=0)
@@ -3714,6 +4299,152 @@ def test_runtime_sample_summary_enforces_configured_steady_fps(tmp_path: Path) -
     assert summary["steady_effective_fps_target_ratio"] == 0.99
 
 
+def test_forwarder_queue_confirmation_preserves_transient_peak(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        keep_evidence=0,
+    )
+    depths = iter((0, 0, 0, 0, 0))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        module,
+        "fetch_forwarder_queue_depth_sample",
+        lambda _cfg: {"queue_depth": next(depths), "shards": []},
+    )
+    overview = {"forwarder": {"global": {"queue_depth": 1}, "sources": []}}
+
+    module.confirm_forwarder_queue_depth(cfg, overview)
+
+    global_metrics = overview["forwarder"]["global"]
+    assert global_metrics["queue_depth_instantaneous"] == 1
+    assert global_metrics["queue_depth_confirmed"] == 0
+    assert global_metrics["queue_depth_confirmation"]["status"] == (
+        "transient_cleared"
+    )
+    assert len(global_metrics["queue_depth_confirmation"]["samples"]) == 5
+
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "runtime_000.json").write_text(json.dumps(overview), encoding="utf-8")
+    (samples / "docker_stats_000.json").write_text("{}", encoding="utf-8")
+    summary = module.summarize_runtime_samples(cfg)
+
+    assert summary["max_forwarder_queue_depth_instantaneous"] == 1
+    assert summary["max_forwarder_queue_depth"] == 0
+    assert summary["transient_forwarder_queue_samples"] == 1
+    reasons = module.pressure_failure_reasons(
+        cfg,
+        [],
+        {
+            "sample_summary": summary,
+            "source_containers": {
+                "exited": 0,
+                "restart_count_total": 0,
+                "negative_pts_error_total": 0,
+            },
+            "log_summary": {"savant": {"validate_seq_iq": 0}},
+        },
+    )
+    assert "forwarder_queue_nonzero" not in reasons
+
+
+def test_forwarder_queue_confirmation_keeps_sustained_backlog(monkeypatch) -> None:
+    module = _load_module()
+    cfg = _config(module, dual_shard_same_gpu=True)
+    depths = iter((200, 150, 120, 90, 60))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        module,
+        "fetch_forwarder_queue_depth_sample",
+        lambda _cfg: {"queue_depth": next(depths), "shards": []},
+    )
+    overview = {"forwarder": {"global": {"queue_depth": 271}}}
+
+    module.confirm_forwarder_queue_depth(cfg, overview)
+
+    global_metrics = overview["forwarder"]["global"]
+    assert global_metrics["queue_depth_instantaneous"] == 271
+    assert global_metrics["queue_depth_confirmed"] == 60
+    assert global_metrics["queue_depth_confirmation"]["status"] == "sustained"
+
+
+def test_forwarder_queue_confirmation_fetch_error_is_fail_closed(monkeypatch) -> None:
+    module = _load_module()
+    cfg = _config(module, dual_shard_same_gpu=True)
+    calls = 0
+
+    def fake_fetch(_cfg):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("metrics unavailable")
+        return {"queue_depth": 0, "shards": []}
+
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(module, "fetch_forwarder_queue_depth_sample", fake_fetch)
+    overview = {"forwarder": {"global": {"queue_depth": 1}}}
+
+    module.confirm_forwarder_queue_depth(cfg, overview)
+
+    global_metrics = overview["forwarder"]["global"]
+    assert global_metrics["queue_depth_confirmed"] == 1
+    assert global_metrics["queue_depth_confirmation"]["status"] == (
+        "fetch_error_fail_closed"
+    )
+    assert len(global_metrics["queue_depth_confirmation"]["samples"]) == 5
+
+
+def test_forwarder_queue_full_uses_instantaneous_depth_after_confirmation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        keep_evidence=0,
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        module,
+        "fetch_forwarder_queue_depth_sample",
+        lambda _cfg: {"queue_depth": 0, "shards": []},
+    )
+    overview = {"forwarder": {"global": {"queue_depth": 2048}, "sources": []}}
+    module.confirm_forwarder_queue_depth(cfg, overview)
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "runtime_000.json").write_text(json.dumps(overview), encoding="utf-8")
+    (samples / "docker_stats_000.json").write_text("{}", encoding="utf-8")
+
+    summary = module.summarize_runtime_samples(cfg)
+
+    assert summary["max_forwarder_queue_depth_instantaneous"] == 2048
+    assert summary["max_forwarder_queue_depth"] == 0
+    assert summary["queue_full_samples"] == 1
+    reasons = module.pressure_failure_reasons(
+        cfg,
+        [],
+        {
+            "sample_summary": summary,
+            "source_containers": {
+                "exited": 0,
+                "restart_count_total": 0,
+                "negative_pts_error_total": 0,
+            },
+            "log_summary": {"savant": {"validate_seq_iq": 0}},
+        },
+    )
+    assert "forwarder_queue_full" in reasons
+
+
 def test_pressure_gate_rejects_steady_fps_below_minimum() -> None:
     module = _load_module()
     cfg = _config(module, stream_count=1, keep_evidence=0, fps="4/1", min_fps="99/25")
@@ -3912,6 +4643,47 @@ def test_rolling_cache_host_path_env_override_wins(monkeypatch) -> None:
     assert module.pressure_rolling_cache_root_host() == Path(
         "/custom/rolling-cache"
     )
+
+
+def test_rolling_cache_host_path_prefers_container_for_active_topology(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    inspected: list[str] = []
+
+    class Result:
+        returncode = 0
+
+        def __init__(self, source: str) -> None:
+            self.stdout = json.dumps(
+                [
+                    {
+                        "Type": "bind",
+                        "Source": source,
+                        "Destination": "/media/rolling-cache",
+                    }
+                ]
+            )
+
+    def fake_run(command, **_kwargs):
+        container = command[2]
+        inspected.append(container)
+        source = (
+            "/cache/single"
+            if container == "video-analytics-midterm-rolling-cache-sink"
+            else "/cache/dual"
+        )
+        return Result(source)
+
+    monkeypatch.delenv("PRESSURE_ROLLING_CACHE_ROOT_HOST", raising=False)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    single = _config(module, dual_shard_same_gpu=False)
+    dual = _config(module, dual_shard_same_gpu=True)
+    assert module.pressure_rolling_cache_root_host(single) == Path("/cache/single")
+    assert inspected[-1] == "video-analytics-midterm-rolling-cache-sink"
+    assert module.pressure_rolling_cache_root_host(dual) == Path("/cache/dual")
+    assert inspected[-1] == "video-analytics-midterm-rolling-cache-sink-a"
 
 
 def test_decoupled_adaface_gate_requires_only_eligible_sources_in_central() -> None:
@@ -4222,6 +4994,113 @@ def test_write_dual_shard_pressure_sources_splits_four_evidence_shards(
     sources_text = Path(plan["sources_path"]).read_text(encoding="utf-8")
     assert "dealer+connect:tcp://replay-c:5555" in sources_text
     assert "dealer+connect:tcp://replay-d:5555" in sources_text
+
+
+def test_rolling_cache_pressure_sources_bypass_replay_rocksdb(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        stream_count=60,
+        evidence_shard_count=4,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+    )
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "id": f"00000000-0000-4000-8000-{index:012d}",
+                    "name": f"pressure {index:02d}",
+                    "source_id": f"pressure60_test_{index:02d}",
+                    "rtsp_url": "rtsp://camera/live",
+                    "enabled": True,
+                }
+                for index in range(60)
+            ]
+
+    class _Conn:
+        def execute(self, *_args, **_kwargs):
+            return _Rows()
+
+    plan = module.write_dual_shard_pressure_sources(_Conn(), cfg)
+    sources = yaml.safe_load(Path(plan["sources_path"]).read_text(encoding="utf-8"))[
+        "sources"
+    ]
+    endpoints = {row["zmq_endpoint"] for row in sources.values()}
+
+    assert plan["ingress_mode"] == "rolling_cache_direct_raw_fanout"
+    assert endpoints == {
+        "dealer+connect:tcp://replay-raw-fanout-a:5557",
+        "dealer+connect:tcp://replay-raw-fanout-b:5557",
+    }
+    assert all(row["ingress_mode"] == plan["ingress_mode"] for row in sources.values())
+    assert all("tcp://replay-a:5555" not in row["zmq_endpoint"] for row in sources.values())
+    assert all("tcp://replay-b:5555" not in row["zmq_endpoint"] for row in sources.values())
+    assert all("tcp://replay-c:5555" not in row["zmq_endpoint"] for row in sources.values())
+    assert all("tcp://replay-d:5555" not in row["zmq_endpoint"] for row in sources.values())
+
+
+def test_direct_rolling_cache_runtime_uses_single_forwarder_layer() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+        adaface_roi_redis=True,
+    )
+
+    services = module.dual_shard_services(cfg)
+
+    assert "replay-raw-fanout-a" in services
+    assert "replay-raw-fanout-b" in services
+    assert "analysis-forwarder-a" not in services
+    assert "analysis-forwarder-b" not in services
+    assert "savant-a" in services
+    assert "savant-b" in services
+    assert "adaface-roi-worker" in services
+    assert not set(module.DUAL_SHARD_LEGACY_REPLAY_SERVICES).intersection(services)
+
+
+def test_direct_rolling_cache_override_samples_in_raw_fanout(tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+        fps="8/1",
+        min_fps="198/25",
+        cpu_isolation_profile="t4-16cpu",
+    )
+
+    override_path = module.write_dual_shard_same_gpu_compose_override(cfg)
+
+    class ComposeLoader(yaml.SafeLoader):
+        pass
+
+    ComposeLoader.add_constructor(
+        "!override",
+        lambda loader, node: loader.construct_sequence(node),
+    )
+    override = yaml.load(
+        override_path.read_text(encoding="utf-8"),
+        Loader=ComposeLoader,
+    )
+
+    for shard in ("a", "b"):
+        service = override["services"][f"replay-raw-fanout-{shard}"]
+        assert service["depends_on"] == [f"savant-{shard}"]
+        assert service["environment"]["FORWARDER_OUT_ENDPOINT"] == (
+            f"dealer+connect:tcp://savant-{shard}:5557"
+        )
+        assert service["environment"]["FORWARDER_SAMPLER_ENABLED"] == "true"
+        assert service["environment"]["ANALYSIS_FPS"] == "8/1"
+        assert service["environment"]["ANALYSIS_MIN_FPS"] == "198/25"
+        assert service["cpuset"] == "6,14"
 
 
 def test_four_evidence_shards_raise_global_materialization_limit(monkeypatch) -> None:
@@ -4573,6 +5452,35 @@ def test_evidence_window_validation_requires_configured_windows_and_durations() 
     assert summary["duration_mismatches"][0]["duration_source"] == "ffprobe"
 
 
+def test_evidence_window_validation_rejects_low_final_clip_frame_rate() -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        evidence_policy_groups=((5, 5),),
+        rolling_cache_min_raw_fps=20.0,
+    )
+
+    summary = module.evidence_window_validation_summary(
+        cfg,
+        [
+            {
+                "event_id": "event-low-fps",
+                "source_id": "camera-1",
+                "rule_pre_seconds": 5,
+                "rule_post_seconds": 5,
+                "actual_raw_clip_duration_seconds": 10.0,
+                "actual_raw_clip_fps": 8.0,
+            }
+        ],
+    )
+
+    assert summary["minimum_raw_clip_fps"] == 20.0
+    assert summary["failures"]["frame_rate_mismatch_count"] == 1
+    assert "evidence_clip_frame_rate_mismatch" in (
+        module.evidence_window_failure_reasons(summary)
+    )
+
+
 def test_wait_for_drain_waits_for_playable_evidence(monkeypatch, tmp_path: Path) -> None:
     module = _load_module()
     cfg = _config(module, artifact_dir=tmp_path, keep_evidence=50, drain_s=60)
@@ -4767,6 +5675,55 @@ def test_pressure_event_quiescence_waits_for_stable_run_events(
     assert [item["events"] for item in observed] == [10, 12, 12, 12]
     snapshots = json.loads((tmp_path / "pressure_event_quiescence_snapshots.json").read_text())
     assert snapshots[-1]["stable_samples"] == 3
+
+
+def test_pressure_event_quiescence_does_not_accept_docker_timeout_as_no_sources(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, keep_evidence=-1, drain_s=1)
+    now = [1_000.0]
+
+    monkeypatch.setattr(
+        module,
+        "db_pressure_event_ingest_summary_connect",
+        lambda _cfg: {"events": 1, "max_event_ts_ms": 1_000},
+    )
+    monkeypatch.setattr(
+        module,
+        "redis_run_id_stream_summary",
+        lambda *_args: {"total_run_id_entries": 1, "streams": {}},
+    )
+    monkeypatch.setattr(
+        module,
+        "inspect_pressure_source_containers",
+        lambda _run_id: {
+            "total": 0,
+            "running": 0,
+            "timed_out": True,
+            "error": "docker ps timed out",
+        },
+    )
+    monkeypatch.setattr(module.time, "time", lambda: now[0])
+    monkeypatch.setattr(
+        module.time,
+        "sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+
+    with pytest.raises(RuntimeError, match="did not quiesce"):
+        module.wait_for_pressure_event_quiescence(
+            cfg,
+            object(),
+            stable_samples_required=2,
+            poll_s=1,
+        )
+
+    snapshots = json.loads(
+        (tmp_path / "pressure_event_quiescence_snapshots.json").read_text()
+    )
+    assert snapshots[-1]["source_containers"]["timed_out"] is True
 
 
 def test_pressure_runner_refreshes_worker_logs_after_drain_before_observability() -> None:
@@ -4977,6 +5934,12 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         "docker_container_state",
         lambda name: {"container": name, "running": True, "status": "running"},
     )
+    expected_retention = module.pressure_rolling_cache_retention_seconds(cfg)
+    monkeypatch.setattr(
+        module,
+        "docker_container_env",
+        lambda _name: {"ROLLING_CACHE_RETENTION_SECONDS": str(expected_retention)},
+    )
     monkeypatch.setattr(
         module,
         "probe_video_input_fps",
@@ -4993,8 +5956,12 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     assert probed_uris == ["/fixtures/fixed-8fps.mp4"]
     assert calls[0]["env"]["ROLLING_CACHE_RUNTIME_EPOCH_ID"] == "midterm-epoch-123"
     assert calls[0]["env"]["ROLLING_CACHE_FPS"] == "8"
+    assert calls[0]["env"]["ROLLING_CACHE_RETENTION_SECONDS"] == str(
+        expected_retention
+    )
     assert summary["runtime_epoch_id"] == "midterm-epoch-123"
     assert summary["rolling_cache_expected_raw_fps"] == 8.0
+    assert summary["rolling_cache_retention_seconds"] == expected_retention
     assert summary["dependency_services"] == [
         "replay-raw-fanout-a",
         "replay-raw-fanout-b",
@@ -5131,6 +6098,11 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "sink_stable_to_ffprobe_ready_ms": module._not_enough_data("synthetic"),
             "sink_ffprobe_ready_to_finalizer_start_ms": module._not_enough_data("synthetic"),
             "finalizer_pool_wait_ms": module._not_enough_data("synthetic"),
+            "ready_to_remux_claim_ms": module._not_enough_data("synthetic"),
+            "remux_ms": module._not_enough_data("synthetic"),
+            "handoff_to_finalizer_admission_ms": module._not_enough_data(
+                "synthetic"
+            ),
             "queue_wait_ms_by_source": {},
             "queue_wait_ms_by_shard": {},
             "duplicate_materialization_count": 0,
@@ -5285,6 +6257,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_stable_to_ffprobe_ready_ms=40 "
                 "sink_ffprobe_ready_to_finalizer_start_ms=3 "
                 "finalizer_pool_wait_ms=4 "
+                "ready_to_remux_claim_ms=12 remux_ms=800 "
+                "handoff_to_finalizer_admission_ms=3 "
                 "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=20 ffmpeg_invocations=1 ffmpeg_duration_ms=80 "
@@ -5300,6 +6274,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_stable_to_ffprobe_ready_ms=60 "
                 "sink_ffprobe_ready_to_finalizer_start_ms=4 "
                 "finalizer_pool_wait_ms=6 "
+                "ready_to_remux_claim_ms=22 remux_ms=900 "
+                "handoff_to_finalizer_admission_ms=5 "
                 "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
@@ -5313,6 +6289,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "tick_gap_ms=unavailable rolling_due=True general_due=True "
                 "oldest_ready_age_ms=9000 image_lane_depth=3 "
                 "remux_lane_depth=2 finalizer_lane_depth=1 "
+                "finalizer_admission_rejected_total=1 "
+                "finalizer_handoff_retry_total=1 "
+                "finalizer_handoff_retry_failed=0 "
+                "finalizer_queued_lease_heartbeat_total=2 "
+                "finalizer_pending_total=1 finalizer_pending_unleased=1 "
+                "finalizer_pending_leased=0 finalizer_pending_oldest_age_ms=30 "
                 "permit_active=4 permit_limit=4 db_pool_in_use=3 "
                 "db_pool_limit=4 db_pool_peak_in_use=4 db_pool_checkout_count=20 "
                 "db_pool_checkout_wait_ms=15 db_pool_checkout_timeouts=0 "
@@ -5332,6 +6314,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "tick_gap_ms=1300 rolling_due=True general_due=True "
                 "oldest_ready_age_ms=5000 image_lane_depth=1 "
                 "remux_lane_depth=1 finalizer_lane_depth=0 "
+                "finalizer_admission_rejected_total=1 "
+                "finalizer_handoff_retry_total=1 "
+                "finalizer_handoff_retry_failed=0 "
+                "finalizer_queued_lease_heartbeat_total=4 "
+                "finalizer_pending_total=0 finalizer_pending_unleased=0 "
+                "finalizer_pending_leased=0 finalizer_pending_oldest_age_ms=0 "
                 "permit_active=1 permit_limit=4 db_pool_in_use=1 "
                 "db_pool_limit=4 db_pool_peak_in_use=4 db_pool_checkout_count=25 "
                 "db_pool_checkout_wait_ms=18 db_pool_checkout_timeouts=0 "
@@ -5346,6 +6334,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=0 segment_index_read_pins_created=4 "
                 "segment_index_read_pins_released=4 segment_index_generation=3",
+                "rolling_cache_finalizer_v2_admitted candidates=3 admitted=2",
+                "rolling_cache_finalizer_v2_admitted candidates=2 admitted=2",
+                "rolling_lifecycle_recovery ready_deadline_expired=0 "
+                "running_sla_missed=0 handoff_recovered=0 "
+                "lease_retry_scheduled=0 lease_deadline_expired=0",
+                "media_finalizer_admission_rejected reason=lane_full total=1",
                 "media-worker started materialization_max_active=4 "
                 "materialization_finalizer_workers=32 "
                 "materialization_cpu_thread_limit=4 cpu_thread_limit_result=applied",
@@ -5430,6 +6424,16 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["clip_worker"]["clip_replay_job_create_ms"]["max"] == 9.0
     assert summary["media_worker"]["media_replay_to_sink_metadata_ms"]["p50"] == 60.0
     assert summary["media_worker"]["media_finalizer_pool_wait_ms"]["max"] == 6.0
+    assert summary["media_worker"]["media_ready_to_remux_claim_ms"]["p50"] == 17.0
+    assert summary["media_worker"]["media_remux_ms"]["max"] == 900.0
+    assert (
+        summary["media_worker"]["media_handoff_to_finalizer_admission_ms"]["max"]
+        == 5.0
+    )
+    assert summary["media_worker"]["media_handoff_recovered_total"] == 0
+    assert summary["media_worker"]["media_finalizer_candidate_total"] == 5
+    assert summary["media_worker"]["media_finalizer_admitted_total"] == 4
+    assert summary["media_worker"]["media_finalizer_immediate_admission_gap"] == 1
     assert summary["clip_worker"]["replay_slot_acquired"] == 1
     assert summary["clip_worker"]["replay_slot_timeout_budget_s"]["max"] == 120.0
     assert summary["media_worker"]["replay_slot_released"] == 1
@@ -5455,6 +6459,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_scheduler_finalizer_lane_depth"]["max"] == 1.0
     assert summary["media_worker"]["media_scheduler_oldest_ready_age_ms"]["max"] == 9000.0
     assert summary["media_worker"]["media_scheduler_permit_active"]["max"] == 4.0
+    assert summary["media_worker"]["media_scheduler_permit_active_last"] == 1.0
+    assert (
+        summary["media_worker"]["media_scheduler_finalizer_pending_total_last"]
+        == 0.0
+    )
+    assert summary["media_worker"]["media_finalizer_admission_rejection_reasons"] == {
+        "lane_full": 1
+    }
     assert summary["media_worker"]["media_scheduler_db_pool_peak_in_use"]["max"] == 4.0
     assert summary["media_worker"]["media_scheduler_db_pool_checkout_wait_ms"]["max"] == 18.0
     assert summary["media_worker"]["media_scheduler_segment_index_hits"]["max"] == 14.0
@@ -5475,7 +6487,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     observable = module.media_worker_observability_summary(
         {"log_summary": summary}
     )
-    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v1"
+    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v2"
+    assert observable["scheduler"]["finalizer_admission"]["candidate_total"] == 5
+    assert (
+        observable["scheduler"]["finalizer_admission"]["immediate_admission_gap"]
+        == 1
+    )
+    assert observable["scheduler"]["durable_finalizer_queue"]["total_last"] == 0.0
     assert observable["scheduler"]["db_pool"]["limit"]["max"] == 4.0
     assert observable["scheduler"]["segment_index"]["parses"]["max"] == 9.0
     assert observable["scheduler"]["capacity"]["remux_workers"]["max"] == 1.0
@@ -5495,6 +6513,33 @@ def test_dual_pressure_services_include_replay_sinks() -> None:
     assert "video-file-sink-b" in module.DUAL_SHARD_SERVICES
     assert "replay-raw-fanout-a" in module.DUAL_SHARD_SERVICES
     assert "replay-raw-fanout-b" in module.DUAL_SHARD_SERVICES
+
+
+def test_docker_stats_sample_times_out_without_blocking_pressure_run(
+    monkeypatch,
+) -> None:
+    module = _load_module()
+    cfg = _config(module)
+    monkeypatch.setattr(module, "pressure_source_container_names", lambda _run_id: [])
+
+    def timed_out(command, **kwargs):
+        assert command[:3] == ["docker", "stats", "--no-stream"]
+        assert kwargs["timeout"] == module.DOCKER_STATS_TIMEOUT_S
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(module.subprocess, "run", timed_out)
+
+    sample = module.docker_stats_json(cfg)
+
+    assert sample == {
+        "_meta": {
+            "returncode": 124,
+            "errors": [
+                f"docker stats timed out after {module.DOCKER_STATS_TIMEOUT_S:.0f}s"
+            ],
+            "timed_out": True,
+        }
+    }
 
 
 def test_replay_topology_reports_single_sink_when_shards_not_active(monkeypatch) -> None:

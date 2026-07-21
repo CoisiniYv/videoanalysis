@@ -66,6 +66,7 @@ def evidence_health(request_id: str = Depends(_request_id)) -> dict:
     return _ok({"status": "ok", "index_source": "database"}, request_id)
 
 
+@router.get("")
 @router.get("/bundles")
 def evidence_bundles(
     event_type: Optional[str] = Query(None),

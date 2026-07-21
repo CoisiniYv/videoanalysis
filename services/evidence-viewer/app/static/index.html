@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=trajectory-page-20260712" />
+    <link rel="stylesheet" href="/static/style.css?v=runtime-nav-20260715-operator-copy" />
   </head>
   <body>
     <div class="app-shell">
@@ -20,34 +20,22 @@
           <div class="brand-mark">视</div>
           <div>
             <h1>视频分析操作台</h1>
-            <p>统一接入与人脸库</p>
+            <p>配置、复核与运行状态</p>
           </div>
         </div>
 
         <nav class="top-tabs" aria-label="操作台模块">
           <button class="top-tab active" data-view="cameras">
-            <span>摄像头管理</span>
-            <small>视频源配置</small>
-          </button>
-          <button class="top-tab" data-view="people">
-            <span>人员管理</span>
-            <small>人脸库与注册</small>
-          </button>
-          <button class="top-tab" data-view="trajectory">
-            <span>人脸轨迹</span>
-            <small>人员时空查询</small>
+            <span>配置</span>
+            <small>摄像头与人员</small>
           </button>
           <button class="top-tab" data-view="evidence">
-            <span>证据管理</span>
-            <small>录像复核</small>
+            <span>证据</span>
+            <small>录像与轨迹</small>
           </button>
           <button class="top-tab" data-view="runtime">
-            <span>运行控制</span>
-            <small>性能状态</small>
-          </button>
-          <button class="top-tab" data-view="maintenance">
-            <span>存储维护</span>
-            <small>预览清理</small>
+            <span>运维控制</span>
+            <small>启动、状态与维护</small>
           </button>
         </nav>
 
@@ -60,8 +48,8 @@
       <div class="workspace">
         <header class="workspace-header">
           <div>
-            <h2>统一配置台</h2>
-            <p>接入摄像头、维护人脸轨迹，并复核告警录像证据。</p>
+            <h2>视频分析管理台</h2>
+            <p>配置摄像头和人员，复核告警证据，并查看运行状态。</p>
           </div>
           <div class="workspace-actions">
             <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="切换黑夜模式" title="切换黑夜模式">
@@ -77,31 +65,45 @@
 
         <section class="dashboard-summary" aria-label="运行概览">
           <div class="summary-card">
-            <span>摄像头</span>
+            <span>视频源</span>
             <strong id="camera-count">--</strong>
-            <small>已登记视频源</small>
-          </div>
-          <div class="summary-card">
-            <span>启用中</span>
-            <strong id="enabled-camera-count">--</strong>
-            <small>正在参与调度</small>
+            <small>启用 <span id="enabled-camera-count">--</span> 路</small>
           </div>
           <div class="summary-card">
             <span>人员</span>
             <strong id="people-count">--</strong>
-            <small>已登记身份</small>
+            <small>人脸图片 <span id="gallery-count">--</span> 张</small>
           </div>
           <div class="summary-card">
-            <span>人脸图片</span>
-            <strong id="gallery-count">--</strong>
-            <small>已入库照片</small>
-          </div>
-          <div class="summary-card">
-            <span>告警证据</span>
+            <span>证据记录</span>
             <strong id="evidence-count">--</strong>
-            <small>可复核录像</small>
+            <small>按摄像头、人员或时间复核</small>
           </div>
         </section>
+
+        <nav id="config-context" class="workspace-context" data-primary-view="cameras" aria-label="配置功能">
+          <span class="workspace-context-label">配置</span>
+          <div class="workspace-context-tabs" role="tablist" aria-label="配置内容">
+            <button class="context-tab active" data-view="cameras" type="button">摄像头</button>
+            <button class="context-tab" data-view="people" type="button">人员与人脸库</button>
+          </div>
+        </nav>
+
+        <nav id="evidence-context" class="workspace-context" data-primary-view="evidence" aria-label="证据功能" hidden>
+          <span class="workspace-context-label">证据</span>
+          <div class="workspace-context-tabs" role="tablist" aria-label="证据内容">
+            <button class="context-tab" data-view="evidence" type="button">告警证据</button>
+            <button class="context-tab" data-view="trajectory" type="button">人员轨迹</button>
+          </div>
+        </nav>
+
+        <nav id="runtime-context" class="workspace-context" data-primary-view="runtime" aria-label="运行功能" hidden>
+          <span class="workspace-context-label">运维控制</span>
+          <div class="workspace-context-tabs" role="tablist" aria-label="运行内容">
+            <button class="context-tab" data-view="runtime" type="button">启动与状态</button>
+            <button class="context-tab" data-view="maintenance" type="button">高级维护</button>
+          </div>
+        </nav>
 
         <main id="camera-view" class="operator-view camera-workspace">
           <section class="pane camera-list">
@@ -129,7 +131,7 @@
                 <button id="enable-camera" type="button">启用</button>
                 <button id="disable-camera" type="button" class="danger">停用</button>
                 <button id="apply-runtime" type="button">应用视频源</button>
-                <button id="restart-runtime" type="button" class="danger">受控重启运行时</button>
+                <button id="restart-runtime" type="button" class="danger">安全重启分析服务</button>
               </div>
             </div>
             <form id="camera-form">
@@ -142,7 +144,8 @@
               <label>视频地址<input name="rtsp_url" required /></label>
               <label>站点<input name="site_id" /></label>
               <label>位置<input name="location" /></label>
-              <label class="inline"><input name="enabled" type="checkbox" checked /> 启用</label>
+              <label class="inline"><input name="enabled" type="checkbox" /> 保存后立即加入当前运行</label>
+              <p class="form-hint">推荐保持未勾选；摄像头和算法配置完成后，到“运维控制”中统一选择并启动。</p>
             </form>
 
             <div class="sub-section internal-config" hidden>
@@ -177,13 +180,13 @@
             <div class="sub-section runtime-apply-section">
               <div class="section-title-row">
                 <div>
-                  <h3>运行时应用状态</h3>
-                  <p>当前摄像头的规则应用结果与生成配置。</p>
+                  <h3>配置生效状态</h3>
+                  <p>查看当前摄像头的算法配置是否已经生效。</p>
                 </div>
-                <button id="refresh-runtime-config" type="button">刷新生成配置</button>
+                <button id="refresh-runtime-config" type="button">刷新状态</button>
               </div>
-              <div id="runtime-apply-result" class="result-card runtime-apply-result">尚未应用运行时</div>
-              <textarea id="generated-runtime-config" class="generated-runtime-config" readonly spellcheck="false" placeholder="选择摄像头后显示生成运行时配置"></textarea>
+              <div id="runtime-apply-result" class="result-card runtime-apply-result">配置尚未应用</div>
+              <textarea id="generated-runtime-config" class="generated-runtime-config internal-config" hidden readonly spellcheck="false" placeholder="选择摄像头后显示系统配置"></textarea>
             </div>
 
             <div class="sub-section internal-config" hidden>
@@ -213,7 +216,7 @@
               <div class="roi-workbench">
                 <div class="roi-editor">
                   <div class="roi-toolbar">
-                    <label>区域 ID<input id="roi-zone-id" value="perimeter" /></label>
+                    <label>区域编号<input id="roi-zone-id" value="perimeter" /></label>
                     <label>类型
                       <select id="roi-zone-type">
                         <option value="polygon">多边形</option>
@@ -224,7 +227,7 @@
                     <button id="add-roi-center-point" type="button">中心点</button>
                     <button id="undo-roi-point" type="button">撤销点</button>
                     <button id="clear-roi-points" type="button">清空</button>
-                    <button id="save-roi-zone" type="button" class="primary">保存 ROI</button>
+                    <button id="save-roi-zone" type="button" class="primary">保存区域</button>
                   </div>
                   <div id="roi-canvas-wrap" class="roi-canvas-wrap">
                     <img id="roi-preview-image" alt="摄像头预览画面" />
@@ -238,8 +241,8 @@
                 </div>
               </div>
               <details class="zone-json-details">
-                <summary>高级 JSON</summary>
-                <textarea id="zone-json" spellcheck="false" placeholder="区域 JSON"></textarea>
+                <summary>高级参数</summary>
+                <textarea id="zone-json" spellcheck="false" placeholder="区域参数"></textarea>
               </details>
             </div>
 
@@ -247,7 +250,7 @@
               <div class="pane-title">
                 <div>
                   <h2>高级规则</h2>
-                  <p>JSON 规则维护</p>
+                  <p>设置告警条件和录像时长</p>
                 </div>
                 <button id="save-rule" type="button" class="primary">保存规则</button>
               </div>
@@ -262,7 +265,7 @@
               </div>
               <form id="rule-form" class="rule-form">
                 <label>算法<select name="algorithm_id" id="rule-algorithm"></select></label>
-                <label>规则 ID<input name="rule_id" placeholder="自动生成" /></label>
+                <label>规则编号<input name="rule_id" placeholder="自动生成" /></label>
                 <label>绑定区域<select name="zone_id" id="rule-zone"></select></label>
                 <label>绑定检测线<select name="line_id" id="rule-line"></select></label>
                 <label>级别
@@ -280,7 +283,7 @@
                 <label>前录秒数<input name="pre_seconds" type="number" min="0" max="300" value="5" /></label>
                 <label>后录秒数<input name="post_seconds" type="number" min="0" max="300" value="5" /></label>
               </form>
-              <textarea id="rule-json" spellcheck="false" placeholder="算法参数 JSON"></textarea>
+              <textarea id="rule-json" spellcheck="false" placeholder="高级算法参数"></textarea>
               <div id="rules" class="scroll-list"></div>
             </div>
           </section>
@@ -291,7 +294,7 @@
             <div class="pane-title">
               <div>
                 <h2>人员库</h2>
-                <p>按姓名或外部 ID 检索</p>
+                <p>按姓名或人员编号检索</p>
               </div>
               <button id="refresh-people" type="button">刷新</button>
             </div>
@@ -352,12 +355,12 @@
             <div class="pane-title">
               <div>
                 <h2>轨迹搜索</h2>
-                <p>按人员 ID、时间范围和摄像头查询</p>
+                <p>按人员编号、时间范围和摄像头查询</p>
               </div>
             </div>
             <form id="trajectory-search-form" class="trajectory-search-form">
-              <label>人员 ID / 编号
-                <input id="trajectory-person-id" name="person_id" type="search" inputmode="numeric" list="trajectory-person-options" placeholder="系统 ID 或人员编号" autocomplete="off" required />
+              <label>人员编号
+                <input id="trajectory-person-id" name="person_id" type="search" inputmode="numeric" list="trajectory-person-options" placeholder="输入人员编号" autocomplete="off" required />
                 <datalist id="trajectory-person-options"></datalist>
               </label>
               <label>摄像头
@@ -377,7 +380,7 @@
               </div>
             </form>
             <div id="trajectory-search-summary" class="result-card trajectory-search-summary">
-              输入人员 ID 后查询；图片来自长期媒体存储，SSD 仅作为读取缓存。
+              输入人员编号后查询，系统会按时间倒序显示轨迹画面。
             </div>
           </section>
 
@@ -395,7 +398,7 @@
               <button id="trajectory-next" type="button" disabled>下一页</button>
             </div>
             <div id="trajectory-list" class="trajectory-result-list">
-              <div class="empty-state">请先按人员 ID 查询轨迹。</div>
+              <div class="empty-state">请先按人员编号查询轨迹。</div>
             </div>
           </section>
 
@@ -425,18 +428,109 @@
               </div>
               <div class="button-group">
                 <button id="refresh-runtime-overview" type="button">刷新状态</button>
+                <button id="toggle-runtime-advanced" type="button" aria-controls="runtime-performance-pane runtime-topology-pane runtime-container-pane" aria-expanded="false">高级运维</button>
               </div>
             </div>
             <div id="runtime-health-summary" class="runtime-health-grid"></div>
+            <section class="runtime-latency-panel" aria-labelledby="runtime-latency-title">
+              <div class="runtime-latency-header">
+                <div>
+                  <h3 id="runtime-latency-title">实时延迟</h3>
+                  <p>查看画面、告警和证据生成是否存在延迟。</p>
+                </div>
+                <button id="refresh-runtime-latency" type="button">刷新延迟</button>
+              </div>
+              <div id="runtime-latency-summary" class="runtime-latency-grid">
+                <div class="empty-state">正在读取端到端延迟。</div>
+              </div>
+              <div id="runtime-latency-detail" class="runtime-latency-detail"></div>
+            </section>
+            <section class="runtime-quick-start" aria-labelledby="runtime-quick-start-title">
+              <div class="runtime-quick-start-header">
+                <div>
+                  <span class="runtime-step-kicker">推荐入口</span>
+                  <h3 id="runtime-quick-start-title">完整链路快速启动</h3>
+                  <p>先添加并配置摄像头算法，再由系统自动分配或手动指定处理组。</p>
+                </div>
+                <button id="quick-runtime-manage-cameras" type="button">管理摄像头与算法</button>
+              </div>
+              <ol class="runtime-start-steps">
+                <li><strong>1</strong><span>添加摄像头<br /><small>填写名称和视频地址，并配置需要的算法</small></span></li>
+                <li><strong>2</strong><span>选择并分配<br /><small>勾选参与运行的摄像头，系统可自动分组</small></span></li>
+                <li><strong>3</strong><span>启动分析<br /><small>自动启动识别、人员轨迹和证据录像</small></span></li>
+              </ol>
+              <div class="runtime-quick-start-controls">
+                <label>运行方案
+                  <select id="quick-runtime-profile">
+                    <option value="production_t4_40">生产 T4 · 40 路 · 4 FPS</option>
+                    <option value="local_4090_60">本机 4090 · 60 路 · 8 FPS</option>
+                  </select>
+                </label>
+                <label>分支分配
+                  <select id="quick-runtime-shard-strategy">
+                    <option value="balanced">系统自动均分（推荐）</option>
+                    <option value="manual">手动分配处理组</option>
+                  </select>
+                </label>
+                <div id="quick-runtime-capacity" class="runtime-quick-capacity">正在读取摄像头数量。</div>
+                <div class="quick-runtime-action-group">
+                  <button id="quick-runtime-start" type="button" class="primary">启动全部分析</button>
+                  <button id="quick-runtime-stop" type="button" class="danger">停止采集与推理</button>
+                </div>
+              </div>
+              <section id="quick-runtime-progress" class="runtime-start-progress" aria-live="polite" hidden>
+                <div class="runtime-start-progress-header">
+                  <div>
+                    <span id="quick-runtime-progress-phase">准备启动</span>
+                    <strong id="quick-runtime-progress-percent">0%</strong>
+                  </div>
+                  <span id="quick-runtime-progress-elapsed">已用时 0 秒</span>
+                </div>
+                <div
+                  id="quick-runtime-progress-track"
+                  class="runtime-start-progress-track"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow="0"
+                >
+                  <span id="quick-runtime-progress-bar"></span>
+                </div>
+                <p id="quick-runtime-progress-message">正在准备启动任务。</p>
+                <div id="quick-runtime-rolling-progress" class="runtime-rolling-progress" hidden>
+                  <strong>录像缓存准备</strong>
+                  <span id="quick-runtime-rolling-remaining">等待开始</span>
+                </div>
+                <ol class="runtime-start-stage-list">
+                  <li data-runtime-stage="preflight">检查配置</li>
+                  <li data-runtime-stage="branches">启动识别服务</li>
+                  <li data-runtime-stage="sources">连接摄像头</li>
+                  <li data-runtime-stage="rolling">准备录像缓存</li>
+                  <li data-runtime-stage="evidence">启用证据生成</li>
+                </ol>
+              </section>
+              <div class="runtime-quick-selection-toolbar">
+                <div>
+                  <strong>选择本次参与运行的摄像头</strong>
+                  <small>这里只做选择；点击“启动全部分析”后才会统一启用所选摄像头。</small>
+                </div>
+                <div class="button-group">
+                  <button id="quick-runtime-select-required" type="button">按方案选择所需路数</button>
+                  <button id="quick-runtime-clear-selection" type="button">清空选择</button>
+                </div>
+              </div>
+              <div id="quick-runtime-assignments" class="runtime-quick-assignments"></div>
+              <div id="quick-runtime-result" class="runtime-quick-result" aria-live="polite"></div>
+            </section>
             <section id="runtime-decision-panel" class="runtime-decision-panel" aria-live="polite">
               <div class="runtime-decision-header">
                 <div>
                   <h3>建议下一步</h3>
-                  <p id="runtime-decision-copy">正在判断实际链路、视频源和保存的拓扑配置。</p>
+                  <p id="runtime-decision-copy">正在检查当前运行状态和已保存设置。</p>
                 </div>
                 <div class="button-group runtime-primary-actions">
                   <button id="recover-runtime-sources" type="button" class="primary" hidden>恢复视频源</button>
-                  <button id="apply-saved-runtime-topology" type="button" hidden>应用已保存拓扑</button>
+                  <button id="apply-saved-runtime-topology" type="button" hidden>应用已保存设置</button>
                 </div>
               </div>
               <div id="runtime-drift-summary" class="runtime-drift-summary">
@@ -446,7 +540,7 @@
             <div id="runtime-control-status" class="result-card runtime-control-status">运行控制待刷新</div>
             <details class="runtime-secondary-controls">
               <summary>更多运行操作</summary>
-              <p>这些操作影响整条推理或录像链路。请先处理上方的运行态差异。</p>
+              <p>这些操作会影响识别和录像服务，请先处理上方提示。</p>
               <div class="button-group">
                 <button id="start-single-runtime" type="button">启动基础单路链路</button>
                 <button id="restart-single-runtime" type="button">重启基础单路链路</button>
@@ -457,7 +551,7 @@
             <div id="runtime-supervisor-summary" class="result-card runtime-supervisor-summary"></div>
           </section>
 
-          <section class="pane runtime-performance-pane">
+          <section id="runtime-performance-pane" class="pane runtime-performance-pane runtime-advanced-pane" hidden>
             <div class="pane-title">
               <div>
                 <h2>推理性能</h2>
@@ -475,46 +569,46 @@
                 <div class="runtime-config-fields">
                   <label class="toggle-field">
                     <input name="forwarder_sampler_enabled" type="checkbox" />
-                    <span>Forwarder 采样</span>
+                    <span>启用分析帧率控制</span>
                   </label>
                   <label>采样最大 FPS<input name="analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
                   <label>采样最小 FPS<input name="analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                   <label>转发队列上限<input name="forwarder_queue_max_size" type="number" min="1" max="20000" step="1" /></label>
                   <label class="toggle-field">
                     <input name="ingress_fps_gate_enabled" type="checkbox" />
-                    <span>Savant 入流限速</span>
+                    <span>启用识别帧率控制</span>
                   </label>
-                  <label>Savant 最大 FPS<input name="savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                  <label>Savant 最小 FPS<input name="savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                  <label>Savant 并行流上限<input name="max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
+                  <label>识别最大帧率<input name="savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                  <label>识别最小帧率<input name="savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                  <label>同时分析路数上限<input name="max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
                 </div>
               </fieldset>
               <fieldset class="runtime-config-group">
-                <legend>模型 batch 与频率</legend>
+                <legend>模型批处理与识别频率</legend>
                 <div class="runtime-config-fields">
-                  <label>Savant batch<input name="savant_batch_size" type="number" min="1" max="128" step="1" /></label>
-                  <label>姿态 batch<input name="pose_batch_size" type="number" min="1" max="128" step="1" /></label>
-                  <label>人脸检测 batch<input name="face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
-                  <label>AdaFace batch<input name="face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
-                  <label>姿态 interval<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
-                  <label>人脸 interval<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
-                  <label>AdaFace interval<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
-                  <label>批量推送等待 us<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                  <label>主识别批量<input name="savant_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>人体识别批量<input name="pose_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>人脸检测批量<input name="face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>人脸特征批量<input name="face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                  <label>人体识别间隔<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>人脸检测间隔<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>人脸特征间隔<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>批量等待（微秒）<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
                 </div>
               </fieldset>
               <details class="runtime-advanced-details">
-                <summary>高级队列与 Redis 参数</summary>
+                <summary>高级队列参数</summary>
                 <div class="runtime-config-fields runtime-advanced-fields">
                   <label>发送超时 ms<input name="forwarder_send_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
                   <label>发送重试次数<input name="forwarder_send_retries" type="number" min="0" max="20" step="1" /></label>
                   <label>发送高水位<input name="forwarder_send_hwm" type="number" min="1" max="20000" step="1" /></label>
-                  <label>Savant Redis 超时 ms<input name="savant_redis_socket_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-                  <label>Savant Redis 连接超时 ms<input name="savant_redis_connect_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-                  <label>Savant Redis 队列上限<input name="savant_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
-                  <label>Savant Redis 写入重试<input name="savant_redis_write_retries" type="number" min="0" max="100" step="1" /></label>
-                  <label>Savant Redis 重试间隔 ms<input name="savant_redis_retry_sleep_ms" type="number" min="0" max="5000" step="10" /></label>
-                  <label>Frame annotation 写入超时 ms<input name="frame_annotation_write_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
-                  <label>Frame annotation Redis 队列上限<input name="frame_annotation_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
+                  <label>识别数据读取超时（毫秒）<input name="savant_redis_socket_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>识别数据连接超时（毫秒）<input name="savant_redis_connect_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>识别数据队列上限<input name="savant_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
+                  <label>识别数据写入重试<input name="savant_redis_write_retries" type="number" min="0" max="100" step="1" /></label>
+                  <label>识别数据重试间隔（毫秒）<input name="savant_redis_retry_sleep_ms" type="number" min="0" max="5000" step="10" /></label>
+                  <label>画面标注写入超时（毫秒）<input name="frame_annotation_write_timeout_ms" type="number" min="1" max="30000" step="100" /></label>
+                  <label>画面标注队列上限<input name="frame_annotation_redis_queue_maxsize" type="number" min="1" max="100000" step="1" /></label>
                 </div>
               </details>
             </form>
@@ -524,21 +618,34 @@
             </details>
           </section>
 
-          <section class="pane runtime-topology-pane">
+          <section id="runtime-topology-pane" class="pane runtime-topology-pane runtime-advanced-pane" hidden>
             <div class="pane-title">
               <div>
-                <h2>推理拓扑</h2>
-                <p>保存的是目标拓扑；只有“确认并应用”后才会切换实际链路。</p>
+                <h2>处理能力设置</h2>
+                <p>保存后不会立即切换，只有“确认并应用”才会改变当前运行方式。</p>
               </div>
               <div class="button-group">
                 <button id="save-runtime-topology" type="button">保存草稿</button>
                 <button id="apply-runtime-topology" type="button" class="primary">确认并应用</button>
               </div>
             </div>
-            <div id="runtime-topology-status" class="result-card runtime-topology-status">拓扑配置待刷新</div>
+            <div id="runtime-topology-status" class="result-card runtime-topology-status">处理能力设置待刷新</div>
             <form id="runtime-topology-form" class="runtime-topology-form">
               <div class="runtime-config-fields runtime-topology-core">
-                <label>目标拓扑模式
+                <label>运行预设
+                  <select name="runtime_profile">
+                    <option value="production_t4_40">生产 T4 40 路完整链路</option>
+                    <option value="local_4090_60">本机 4090 60 路完整链路</option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label>链路范围
+                  <select name="pipeline_mode">
+                    <option value="full_evidence">识别、轨迹和证据录像</option>
+                    <option value="inference_only">仅识别分析</option>
+                  </select>
+                </label>
+                <label>处理方式
                   <select name="topology_mode">
                     <option value="auto">自动</option>
                     <option value="single">单分支</option>
@@ -546,7 +653,7 @@
                     <option value="dual_dual_gpu">双分支双卡</option>
                   </select>
                 </label>
-                <label>分片策略
+                <label>摄像头分配方式
                   <select name="shard_strategy">
                     <option value="balanced">按数量均分</option>
                     <option value="gpu_id">按摄像头 GPU</option>
@@ -556,21 +663,22 @@
                 <label>每分支目标路数<input name="streams_per_branch" type="number" min="1" max="120" step="1" /></label>
               </div>
               <details id="runtime-topology-branch-settings" class="runtime-advanced-details" open>
-                <summary>分支参数</summary>
+                <summary>处理组参数</summary>
                 <div class="runtime-topology-branches">
                   <fieldset class="runtime-topology-branch" id="runtime-topology-branch-a">
                     <legend>分支 A</legend>
                     <div class="runtime-config-fields">
                       <label>GPU<input name="a.gpu_id" type="number" min="0" max="15" step="1" /></label>
-                      <label>batch<input name="a.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
-                      <label>姿态 batch<input name="a.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
-                      <label>人脸 batch<input name="a.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
-                      <label>AdaFace batch<input name="a.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>主识别批量<input name="a.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人体识别批量<input name="a.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸检测批量<input name="a.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸特征批量<input name="a.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸识别间隔<input name="a.face_infer_interval" type="number" min="0" max="120" step="1" /></label>
                       <label>并行流上限<input name="a.max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
-                      <label>Forwarder FPS<input name="a.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                      <label>Forwarder 最小 FPS<input name="a.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                      <label>Savant FPS<input name="a.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                      <label>Savant 最小 FPS<input name="a.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>分析帧率<input name="a.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>分析最低帧率<input name="a.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>识别帧率<input name="a.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>识别最低帧率<input name="a.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                       <label>批量推送等待 us<input name="a.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
                     </div>
                   </fieldset>
@@ -578,15 +686,16 @@
                     <legend>分支 B</legend>
                     <div class="runtime-config-fields">
                       <label>GPU<input name="b.gpu_id" type="number" min="0" max="15" step="1" /></label>
-                      <label>batch<input name="b.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
-                      <label>姿态 batch<input name="b.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
-                      <label>人脸 batch<input name="b.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
-                      <label>AdaFace batch<input name="b.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>主识别批量<input name="b.savant_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人体识别批量<input name="b.pose_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸检测批量<input name="b.face_detector_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸特征批量<input name="b.face_embedding_batch_size" type="number" min="1" max="128" step="1" /></label>
+                      <label>人脸识别间隔<input name="b.face_infer_interval" type="number" min="0" max="120" step="1" /></label>
                       <label>并行流上限<input name="b.max_parallel_streams" type="number" min="1" max="256" step="1" /></label>
-                      <label>Forwarder FPS<input name="b.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                      <label>Forwarder 最小 FPS<input name="b.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
-                      <label>Savant FPS<input name="b.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
-                      <label>Savant 最小 FPS<input name="b.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>分析帧率<input name="b.analysis_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>分析最低帧率<input name="b.analysis_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
+                      <label>识别帧率<input name="b.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
+                      <label>识别最低帧率<input name="b.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                       <label>批量推送等待 us<input name="b.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
                     </div>
                   </fieldset>
@@ -621,13 +730,13 @@
             <div class="pane-title">
               <div>
                 <h2>证据生成</h2>
-                <p>跟踪事件进入取证队列、Replay 和视频生成的状态。</p>
+                <p>查看告警证据的排队、生成和完成情况。</p>
               </div>
             </div>
             <div id="runtime-evidence-table" class="runtime-table-wrap"></div>
           </section>
 
-          <section class="pane runtime-container-pane">
+          <section id="runtime-container-pane" class="pane runtime-container-pane runtime-advanced-pane" hidden>
             <div class="pane-title">
               <div>
                 <h2>容器状态</h2>
@@ -818,7 +927,7 @@
               </div>
             </div>
             <div id="maintenance-execute-status" class="message-box maintenance-note">
-              Midterm 默认只允许统计和预览，执行删除处于关闭状态。
+              默认只允许查看和预览，删除功能处于关闭状态。
             </div>
             <div class="maintenance-execute-control">
               <label class="maintenance-switch">
@@ -834,7 +943,7 @@
             <div class="pane-title">
               <div>
                 <h2>按时间删除证据</h2>
-                <p>选择时间范围后生成预览，确认后只删除该范围内的 evidence。</p>
+                <p>选择时间范围后生成预览，确认后只删除该范围内的证据。</p>
               </div>
               <button id="preview-evidence-delete" type="button" class="primary">生成预览</button>
             </div>
@@ -847,7 +956,7 @@
             </form>
 
             <div id="maintenance-preview-result" class="result-card maintenance-preview-result">
-              还没有预览。删除必须先 preview，删除后不会自动重新生成证据。
+              还没有预览。删除前必须先核对预览，删除后不会自动重新生成证据。
             </div>
             <div class="maintenance-confirm">
               <label>删除原因<input id="maintenance-delete-reason" placeholder="填写操作原因" /></label>
@@ -881,9 +990,9 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=operator-face-batch-20260712"></script>
-    <script src="/static/trajectory.js?v=trajectory-page-20260712"></script>
-    <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712"></script>
-    <script src="/static/maintenance.js?v=maintenance-execute-control-20260627"></script>
+    <script src="/static/operator.js?v=runtime-nav-latency-20260715-operator-copy"></script>
+    <script src="/static/trajectory.js?v=trajectory-page-20260712-operator-copy"></script>
+    <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712-state-labels-20260712-operator-copy"></script>
+    <script src="/static/maintenance.js?v=maintenance-execute-control-20260627-operator-copy"></script>
   </body>
 </html>

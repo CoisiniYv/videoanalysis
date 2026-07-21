@@ -26,10 +26,10 @@ def test_operator_camera_page_embeds_roi_preview_editor() -> None:
     assert 'class="roi-workbench"' in html
     assert 'class="zone-list-panel"' in html
     assert 'class="zone-json-details"' in html
-    assert "高级 JSON" in html
+    assert "高级参数" in html
     assert html.index('id="zones"') < html.index('id="zone-json"')
-    assert "保存 ROI" in html
-    assert "operator-trajectory-page-20260712" in html
+    assert "保存区域" in html
+    assert "style.css?v=runtime-nav-20260715" in html
 
 
 def test_operator_roi_editor_uses_camera_preview_and_existing_zone_api() -> None:

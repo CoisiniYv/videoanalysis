@@ -8,3 +8,16 @@ services:
       FACE_TRAJECTORY_CACHE_LIMIT_PER_PERSON: "100"
     volumes:
       - ${FACE_TRAJECTORY_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/face_trajectory_cache}:/data/video-analytics/media/face_trajectory_cache:rw
+  rolling-cache-sink:
+    volumes:
+      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
+  rolling-cache-sink-a:
+    volumes:
+      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
+  rolling-cache-sink-b:
+    volumes:
+      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
+  media-worker:
+    volumes:
+      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
+      - ${ROLLING_CACHE_MATERIALIZED_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache-materialized}:/media/rolling-cache-materialized:rw

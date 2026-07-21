@@ -83,3 +83,11 @@ def test_file_bundle_defaults_existing_raw_clip_to_materialized(tmp_path: Path) 
     assert summary["raw_clip_url"] == "/api/bundles/event-ready/media/raw_clip"
     assert summary["materialization_status"] == "materialized"
     assert summary["raw_clip_unavailable_reason"] is None
+
+
+def test_operator_maps_materialization_states_to_user_facing_labels() -> None:
+    evidence_js = (VIEWER_DIR / "app" / "static" / "evidence.js").read_text(encoding="utf-8")
+
+    assert 'generated_unverified: "待复核"' in evidence_js
+    assert 'materialization_failed: "生成失败"' in evidence_js
+    assert 'materialization_deadline_expired: "生成超时"' in evidence_js

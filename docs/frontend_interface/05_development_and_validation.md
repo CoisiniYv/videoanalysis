@@ -3,20 +3,20 @@
 ## 1. 开始开发
 
 ```bash
-cd /home/user/video-analytics
+cd /path/to/SavantProject
 git status --short
 git rev-parse --short HEAD
 ```
 
-如果另一个 Codex/同事正在做 Worker 优化：
+如果工作树中已有其他人的 Worker/API/infra 改动：
 
 - 前端开发默认只修改 `services/evidence-viewer/**`、必要的 `services/api/**`、对应
   `harness/tests/**` 和本目录；
-- 不修改 `services/clip-worker/**`、`services/media-worker/**`；
+- 不覆盖或回滚无关的 `services/clip-worker/**`、`services/media-worker/**` 等改动；
 - 不使用 `git add -A`；
 - 提交时按精确路径 stage；
-- 如果确需修改 `db/migrations`、`runtime_apply.py`、evidence status 或 compose，先与
-  Worker 优化负责人确认，因为这些是潜在交叉面。
+- 如果确需修改 `db/migrations`、runtime control/topology、evidence status 或 compose，
+  先确认当前 owner 和跨层合同，因为这些是潜在交叉面。
 
 ## 2. 无构建前端开发模式
 
@@ -117,7 +117,10 @@ pytest -q \
 pytest -q \
   harness/tests/test_api_cameras.py \
   harness/tests/test_camera_runtime_apply_service.py \
-  harness/tests/test_runtime_overview_api.py
+  harness/tests/test_runtime_overview_api.py \
+  harness/tests/test_runtime_topology_service.py \
+  harness/tests/test_operator_full_runtime_orchestration.py \
+  harness/tests/test_runtime_stop_and_latency.py
 ```
 
 ### 5.4 Maintenance
@@ -210,7 +213,10 @@ curl --noproxy '*' -fsS http://127.0.0.1:8090/api/v1/people?limit=1
 #### Runtime
 
 - overview、control、performance、topology 均加载；
-- save 与 apply 文案区分；
+- latency 的 healthy/warning/critical/unavailable 不混淆，且不把 unavailable 显示为零；
+- save 与 apply 文案区分；命名预设、精确选源和 A/B 分片摘要正确；
+- apply-async 显示 queued 到 complete/failed 的阶段、百分比和 rolling 预热；
+- 刷新页面后能从 apply-status 恢复；API 重启后的 interrupted 状态显示失败并提示核对；
 - active evidence guard 的错误详情可读；
 - source 行展示 camera name，并保留必要的内部 ID 次级信息；
 - 高影响操作保留 confirm。
@@ -289,10 +295,10 @@ rg -n '@router.websocket' services/api/app/routers
 - image evidence 是否避免空黑区；
 - keyboard button/form semantics 是否保留。
 
-## 9. 与 Worker 优化的接口边界
+## 9. 与 Worker/证据链的接口边界
 
-另一个任务正在优化 `clip-worker` 和 `media-worker`。前端同事可以独立修改 UI，但以下
-字段属于双方合同，任何一方变化都必须同步：
+前端可以独立修改 UI，但以下字段属于跨层合同；`clip-worker` 的兼容 Replay 路径、
+rolling-cache 主路径或 `media-worker` Scheduler V2 任一变化，都必须同步检查：
 
 ```text
 evidence_state / evidence_reason
@@ -309,8 +315,9 @@ runtime overview evidence state counts
 Worker 可以改变内部模块、线程、lease 和 queue，但不能让前端根据临时内部 phase 拼
 媒体 URL，或删除已有兼容状态而不更新 API contract。
 
-如果 Worker 分支新增 migration/status 字段，前端分支合并后必须重新运行 evidence、runtime
-和 deployment tests，再做一次真实 evidence smoke。
+如果 Worker revision 新增 migration/status 字段，合并后必须重新运行 evidence、runtime
+和 deployment tests，再做一次真实 evidence smoke。完整双分支当前以 rolling-cache 为
+主证据链；不要只按 Replay/clip-worker 状态推断 evidence readiness。
 
 ## 10. 已知技术风险
 
@@ -321,7 +328,9 @@ Worker 可以改变内部模块、线程、lease 和 queue，但不能让前端�
 5. 当前 8090 HTTP proxy 不支持 WebSocket upgrade；
 6. 当前 API/Operator 没有统一 authentication/RBAC；
 7. dependency 版本主要是最低版本约束，重新 build 可能产生漂移；
-8. `test_trajectory_thumbnail_cache.py` 目前需要独立 pytest 进程。
+8. `test_trajectory_thumbnail_cache.py` 目前需要独立 pytest 进程；
+9. topology apply 状态可跨浏览器刷新，但后台线程不跨 API 进程重启；
+10. `scripts/midterm_health.sh` 的固定服务清单仍落后于当前完整双分支角色。
 
 ## 11. 交付完成条件
 

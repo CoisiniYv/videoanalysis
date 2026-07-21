@@ -1,7 +1,7 @@
 ---
 type: ai-agent-onboarding
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - ai-agent
   - onboarding
@@ -11,130 +11,85 @@ tags:
 
 ## 先读顺序
 
-1. [[00_Index|知识库索引]]
-2. [[01_System_Overview|系统总览]]
-3. [[02_Runtime_Data_Flow|运行时数据流]]
-4. [[03_Module_Map|模块地图]]
-5. [[05_Evidence_Chain|证据链]]
-6. [[06_Performance_Optimization_History|性能优化历史]]
-7. [[08_Open_Risks_And_Next_Actions|剩余风险与下一步]]
-8. [[11_Data_Contracts_And_Storage|数据契约与存储]]
-9. [[12_Service_Deep_Dive|服务深潜]]
-10. [[14_Performance_And_Acceptance_Playbook|性能与验收手册]]
+1. `docs/current_architecture.md`；
+2. `docs/current_mainline_status.md`；
+3. `docs/documentation_sync_audit_2026-07-20.md`；
+4. [[00_Index|知识库索引]]；
+5. [[11_Data_Contracts_And_Storage|数据契约与存储]]；
+6. [[12_Service_Deep_Dive|服务深潜]]；
+7. [[15_Design_Invariants_And_Decisions|设计不变量与决策]]；
+8. 任务对应 spec、tests 和最新带日期 artifact 报告。
 
-然后再读正式报告：
+## 开始前
 
-- `docs/midterm_current_program_technical_analysis_2026-06-28.md`
-- `specs/26_midterm_post_inference_bottleneck_closure_plan.md`
-- `docs/midterm_media_finalizer_pacer_8fps_report_2026-06-29.md`
+```bash
+git rev-parse --short HEAD
+git status --short --branch
+```
 
-如果是排障或压测失败，优先加读：
+当前 repo 经常有大规模 dirty worktree。不要回滚用户变更；必须区分 HEAD、工作区和
+已部署机器。
 
-- [[16_Troubleshooting_Playbook|排障手册]]
-- [[18_Artifact_And_Directory_Map|目录与 artifact 地图]]
+## 最容易误判的事实
 
-如果是准备改代码，优先加读：
+- 完整双分支主 evidence 路径是 rolling-cache，不是逐事件 Replay job；
+- 单分支仍保留 clip-worker/video-file-sink 兼容路径；
+- `security.record_requests=0` 在 full preset 可以正常；
+- 4090 preset 不用 MPS，但仍用 ROI AdaFace/rolling；
+- 当前默认向量后端是 pgvector，不是 Qdrant；
+- person observations 有独立 worker；
+- original PTS 和 rolling mux PTS 不能混用；
+- T4 40 路当前已验证，最新代码 4090 60 路尚需复跑；
+- 8090 apply-status 恢复页面显示，但不恢复 API 重启后的执行线程；
+- `midterm_health.sh` 的固定服务表不是当前完整 topology 权威。
 
-- [[15_Design_Invariants_And_Decisions|设计不变量与决策]]
-- [[17_Testing_And_Change_Guide|测试与变更指南]]
+## 代码入口
 
-## 不要踩的坑
+### 控制面
 
-- 不要只看 `cameras.midterm.yml` 判断配置真相。DB 是 source of truth。
-- 不要把 8090 页面状态等同于容器运行状态；要看 runtime overview、Docker、Redis、PostgreSQL。
-- 不要把 `16/1` 高入口压力误解成 16 FPS 推理通过。
-- 不要把 pressure source 通过误解成真实 RTSP 长时间生产通过。
-- 不要在算法/ROI 保存时触发 full runtime apply。
-- 不要无故 rebuild 镜像。Dockerfile / requirements / base image 变化才需要 rebuild。
-- 不要回滚用户未提交改动。
-
-## 常用定位入口
-
-### 8090 / API
-
-- `services/api/app/main.py`
-- `services/api/app/routers/cameras.py`
 - `services/api/app/routers/runtime.py`
-- `services/api/app/services/runtime_apply.py`
 - `services/api/app/services/runtime_topology.py`
-- `services/evidence-viewer/app/main.py`
+- `services/api/app/services/runtime_topology_jobs.py`
+- `services/api/app/services/runtime_latency.py`
+- `services/evidence-viewer/app/`
 
-### 推理
+### 数据面
 
 - `modules/savant_security/module.yml`
-- `services/analysis-forwarder/app/main.py`
+- `services/analysis-forwarder/`
+- `services/rolling-cache-sink/`
+- `services/adaface-roi-worker/`
+- `services/event-worker/app/person_worker.py`
+- `services/face-worker/`
+- `services/media-worker/`
+- `services/clip-worker/`
+- `libs/evidence_lifecycle/contract.py`
+- `db/migrations/029*` 到 `032*`
 
-### Redis workers
-
-- `services/event-worker/app/worker.py`
-- `services/event-worker/app/record_request.py`
-- `services/face-worker/app/worker.py`
-- `services/face-worker/app/vector_store.py`
-- `services/clip-worker/app/worker.py`
-- `services/clip-worker/app/replay_shards.py`
-- `services/media-worker/app/worker.py`
-
-### 压测
-
-- `scripts/runtime/run_midterm_pressure60.py`
-
-## 修改后常见验证
-
-按改动范围选择：
-
-```bash
-pytest -q harness/tests/test_midterm_pressure60_script.py
-pytest -q harness/tests/test_evidence_materialization_phase0.py
-pytest -q harness/tests/test_post_savant_evidence_bundle_crop.py
-pytest -q harness/tests/test_midterm_deployment_contract.py
-python -m compileall <changed-python-files>
-git diff --check
-docker compose --env-file infra/env/midterm.env -f infra/docker-compose.midterm.yml config >/tmp/midterm-compose-config.check.yml
-```
-
-运行态检查：
-
-```bash
-docker ps -a --format '{{.Names}}\t{{.Status}}'
-docker exec video-analytics-midterm-redis redis-cli XPENDING security.record_requests clip-workers-midterm
-```
-
-## 压测 artifact 重点看什么
-
-路径示例：
+## 排障顺序
 
 ```text
-/data/video-analytics/artifacts/<run_id>
+user-visible symptom
+  -> API/DB truth
+  -> runtime epoch/source/session
+  -> Redis delivery/lag/pending
+  -> task status/phase/owner/lease/reason
+  -> rolling/Replay media source
+  -> final artifact + DB index
+  -> 8090 query/render
 ```
 
-重点文件：
+不要把“无 event”“有 event 无 task”“task 无 coverage”“已物化但 UI 查不到”混成一个
+evidence 问题。
 
-- `report.json`
-- `sample_summary.json`
-- `downstream_observability_summary.json`
-- `db_summary_before_cleanup.json`
-- `drain_snapshots.json`
-- `kept_50_evidence.csv`
-- `media_worker_logs_since_start.txt`
-- `clip_worker_logs_since_start.txt`
+## 验证重点
 
-判断 60 路 evidence profile 是否健康：
-
-- source exited/restart/negative PTS 为 0；
-- forwarder queue 不长期满；
-- send failures 为 0；
-- semantic outputs 持续增长；
-- Redis pending/lag 不持续增长；
-- retained evidence 达标；
-- 8090 proof OK；
-- media lifecycle p95/p99 在 deadline 内。
-
-## 当前最佳下一步
-
-不要继续扩大配置面。优先：
-
-1. 真实 RTSP 8 FPS 长时间 soak；
-2. 生产硬件 profile；
-3. face-worker 同步链路 ACK/匹配 p95；
-4. Savant 阶段级 latency；
-5. 根据真实压力结果决定是否继续改 media finalizer。
+- targeted pytest 与 migration tests；
+- Compose effective config（含 env/storage/operator override）；
+- `git diff --check`；
+- current source count/FPS/queue；
+- event/person/face Redis groups；
+- evidence active/terminal/residual ownership；
+- raw 24 FPS 与 analysis 4/8 FPS 分别验证；
+- DB-backed detail/timeline/annotation；
+- artifact 记录 revision、dirty diff、input identity 和 cleanup audit。

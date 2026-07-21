@@ -1,7 +1,7 @@
 ---
 type: runtime-runbook
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - runtime
   - 8090
@@ -10,248 +10,148 @@ tags:
 
 # 运行控制手册
 
-本页解释哪些操作只是保存配置，哪些操作会影响运行时容器，以及每种操作应该如何验收。
-
-## 控制面分层
+## 1. 启动层次
 
 ```text
-8090 operator UI
-  -> evidence-viewer proxy
-  -> api /api/v1/*
-  -> PostgreSQL truth
-  -> generated runtime snapshots
-  -> Docker Compose / dynamic source containers
+scripts/midterm_start.sh
+  -> start base services
+  -> pre-create stopped operator dual containers
+  -> 8090 selects cameras/profile and starts full runtime
 ```
 
-分层原则：
+基础启动成功不代表 40/60 路完整链已运行。必须在 8090 完成 source 选择和后台 apply。
 
-- 8090 是用户入口；
-- API 是内部控制面；
-- PostgreSQL 是配置事实源；
-- generated YAML/source manifest 是运行快照；
-- Docker 容器状态是运行事实；
-- 证据生成中的任务由 evidence guard 保护。
+## 2. 普通配置保存
 
-## 保存配置
-
-保存配置包括：
-
-- 修改 ROI；
-- 修改检测线；
-- 修改算法阈值；
-- 修改 cooldown；
-- 修改 watchlist target person；
-- 启用/禁用某个摄像头上的某个规则。
-
-期望行为：
-
-```text
-DB update
-  -> config sync
-  -> generated camera/source snapshot
-  -> no full runtime apply
-  -> no unrelated container restart
-```
-
-验收：
-
-- API 返回保存成功；
-- `cameras.midterm.yml` 或 generated source snapshot 反映新配置；
-- 8090 刷新后配置仍存在；
-- 不重启 Savant / Replay / source adapter / clip-worker / media-worker；
-- evidence guard 不应该因为普通保存被触发。
-
-## 启停摄像头
-
-启停摄像头会影响 source adapter，属于运行态变更。
+适用：ROI、检测线、算法开关、阈值、cooldown、watchlist target。
 
 期望：
 
-- 只影响对应 source；
-- 不重启不相关 Replay/Savant/worker；
-- 8090 应提示这是运行态操作；
-- runtime overview 应显示 enabled/disabled 和容器真实状态。
-
-风险：
-
-- 如果实现误走全量 apply，可能中断其他证据；
-- 如果 generated source snapshot 滞后，8090 显示会和 Docker 状态漂移；
-- `primary_rtsp` disabled 时，compose source exited 不一定是故障。
-
-## 受控重启 / runtime apply
-
-触发场景：
-
-- 修改 RTSP URL；
-- 变更 source adapter 形态；
-- 修改 performance config 并 apply；
-- 修改 topology config 并 apply；
-- 手动点击受控重启；
-- 单/双分支运行模式切换。
-
-必须保护：
-
-- active `evidence_tasks`；
-- replay job；
-- media finalization；
-- Redis pending record request；
-- video-file-sink 输出目录。
-
-受控重启应记录：
-
-- operator；
-- operation type；
-- target services；
-- before/after health；
-- evidence guard result；
-- containers touched；
-- runtime epoch。
-
-## Performance config
-
-8090 可配置的性能参数包括：
-
-- analysis FPS；
-- Savant max/min FPS；
-- batch size；
-- pose batch；
-- face detector batch；
-- embedding batch；
-- max parallel streams；
-- forwarder queue size；
-- infer interval / ReID interval。
-
-语义：
-
-- 保存性能参数只是写配置；
-- apply 性能参数会重建相关 forwarder/Savant 容器；
-- apply 前必须判断 evidence guard；
-- apply 后要等 Savant ready，并记录 effective FPS。
-
-风险：
-
-- 单路测试 batch 可能凑不满，不代表 60 路；
-- batch 过大可能增加 latency；
-- forwarder queue 堆积可能来自 Savant 消费不足，而不是 forwarder 本身慢；
-- 16/1 入口压力不等于 16 FPS 推理通过。
-
-## Topology config
-
-支持模式：
-
-- `auto`
-- `single`
-- `dual_same_gpu`
-- `dual_dual_gpu`
-
-分片策略：
-
-- balanced；
-- gpu id；
-- manual；
-- 30+30 双分支。
-
-apply 输出：
-
-- Savant branch plan；
-- forwarder branch plan；
-- replay shard plan；
-- source adapter assignment；
-- runtime epoch；
-- generated config。
-
-双分支验收必须证明：
-
-- topology 文件 SHA256；
-- clip-worker 读取的 `REPLAY_SHARDS_JSON` / config path SHA256；
-- retained evidence 分布在正确 shard；
-- 8090 list/detail 可查；
-- Replay/video-file-sink 路由一致。
-
-## Evidence guard
-
-目标：
-
-- 避免重启中断正在生成证据；
-- 避免 active task 永久卡住；
-- 避免旧 pending message 反复 reclaim。
-
-guard 应看：
-
-- `evidence_tasks` active statuses；
-- `materialization_status`；
-- deadline 是否已过；
-- stale 终态收敛；
-- Redis pending；
-- media-worker backlog。
-
-允许的情况：
-
-- 没有 active evidence；
-- active evidence 已 stale 并可终态化；
-- 操作只影响非运行态配置；
-- 用户明确执行强操作并留下审计。
-
-## Runtime overview
-
-8090 runtime overview 不应只看 compose 静态服务。
-
-需要区分：
-
-- static compose source；
-- dynamic source containers；
-- DB enabled/disabled；
-- generated source manifest；
-- Savant active module；
-- forwarder metrics；
-- Replay/service health；
-- worker health。
-
-曾经出现的误导项：
-
-- `compose_source video-analytics-midterm-source-adapter exited`，但对应 `primary_rtsp` disabled；
-- 实际启用的是 dynamic `lab` source；
-- 因此 disabled compose source 不应被当成 P0 健康问题。
-
-## 操作前检查
-
-```bash
-git status --short
-docker ps -a --format '{{.Names}}\t{{.Status}}'
-docker exec video-analytics-midterm-redis redis-cli XPENDING security.record_requests clip-workers-midterm
+```text
+DB write -> config sync -> generated snapshot -> no full runtime restart
 ```
 
-如果是 runtime apply，还要检查：
+验收：保存后刷新仍存在，且没有不相关容器重启。
 
-- active evidence tasks；
-- media-worker 是否正在 materializing；
-- clip-worker 是否有 pending；
-- Replay/video-file-sink 是否有当前 job 输出。
+## 3. 完整链路启动
 
-## 操作后检查
+1. 登记摄像头和算法；
+2. 打开“选择摄像头并启动”；
+3. 选择 T4 40 或 4090 60；
+4. 选择精确路数；
+5. balanced 或 manual A/B；
+6. 确认启动；
+7. 观察 apply-status 直到 succeeded。
 
-基本检查：
+启动前预检至少包括：摄像头数、RTSP、A/B 容器、模型/B 分支 cache、GPU、并行流
+容量和 active evidence guard。
 
-- 8090 可访问；
-- API `/health` / `/ready`；
-- Docker 目标容器 running；
-- Redis lag/pending 不增长；
-- Savant effective FPS 恢复；
-- forwarder queue 不持续堆积；
-- retained evidence 可查询。
+启动阶段：
 
-配置检查：
+```text
+preflight
+  -> runtime epoch + branch containers
+  -> dynamic sources converge
+  -> rolling sinks ready
+  -> 25s prefill
+  -> event task creation enabled with activation timestamp
+```
 
-- DB 配置存在；
-- generated YAML/source manifest 更新；
-- Savant rules 加载；
-- 8090 刷新后仍显示保存值。
+不要在任务 running 时重复点击。刷新页面可以继续查看；API 重启后任务会失败，需要先
+核对实际容器/摄像头/epoch 再重试。
 
-## 不该做的事
+## 4. 运行中验收
 
-- 不要因为 ROI 保存去重启整条推理链；
-- 不要把 generated YAML 手工改成配置真相；
-- 不要在 evidence 生成中无保护重启 Replay/video-file-sink/media-worker；
-- 不要无故 rebuild 镜像；
-- 不要用旧 runtime snapshot 判断 DB 配置；
-- 不要把 disabled source 的 exited 状态当成故障。
+### 推理
+
+- A/B source 20/20 或 30/30；
+- recent frame age 持续更新；
+- effective FPS 达到 4 或 8；
+- forwarder queue 不持续增长；
+- send failure/drop 无增量。
+
+### 人脸/轨迹
+
+- ROI stream pending/lag 收敛；
+- face observation 持续；
+- person-observation worker lag/pending 收敛；
+- 已登记人员轨迹图片可访问。
+
+### Evidence
+
+- rolling sink ready；
+- segment source/epoch 覆盖正确；
+- task pending/materializing 最终收敛；
+- failed/expired/fallback 不增长；
+- MOV 5+5、约 24 FPS、HTTP Range 206；
+- DB timeline/annotation/bbox/person_context 完整。
+
+### 在线延迟
+
+读取 `/api/v1/runtime/latency`，区分 annotation media lag、DB event/bundle lag、
+oldest active task 和 A/B source receive age。该面板不能替代正式 artifact。
+
+## 5. 高级性能/拓扑
+
+保存草稿不应用；apply 会触发 evidence guard 和容器变更。命名 preset 会覆盖分支
+参数，自定义模式才应手填。
+
+`force=true` 会绕过正常等待并终态化旧 epoch 任务，只能在明确接受丢失/中断风险时
+使用，不是普通重试。
+
+## 6. 停止完整链路
+
+8090 stop 会：
+
+- 停止 dynamic sources；
+- 停止 A/B capture/inference、ROI 和 MPS；
+- 禁用 DB cameras；
+- 保留 event/media/rolling 收尾；
+- 把 apply-status 标为 stopped。
+
+等待收尾后如需停整栈，再执行：
+
+```bash
+bash scripts/midterm_stop.sh
+```
+
+## 7. 失败恢复
+
+### apply 失败
+
+先检查：
+
+- apply-status 的 phase/error/details；
+- 实际 container state；
+- DB enabled cameras；
+- runtime epoch 和 generated topology；
+- source containers；
+- evidence active/lease/slot。
+
+不要只根据页面最后一句错误盲目重试。
+
+### source 未收敛
+
+- 验证 RTSP 可读；
+- 看 dynamic adapter 状态/日志；
+- 核对 source_id 与 branch assignment；
+- 看 Replay/raw-fanout/Savant visible source；
+- 防止用 legacy compose source 状态误判动态源。
+
+### evidence 不收敛
+
+分开判断：
+
+1. event 是否产生；
+2. task 是否因 cooldown/gate 创建；
+3. rolling segment coverage 是否存在；
+4. task phase、retry reason、lease；
+5. finalizer handoff/DB index/cleanup；
+6. 8090 DB query 与媒体文件。
+
+full preset 的 `security.record_requests=0` 是预期，不代表 evidence worker 停止。
+
+## 8. 已知工具边界
+
+`midterm_health.sh` 的固定服务清单尚未同步 person worker/动态 source 角色。使用它时
+必须结合 8090 overview、latency、Redis group 和容器实际状态。

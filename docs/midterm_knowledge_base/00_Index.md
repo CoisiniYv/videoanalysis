@@ -1,18 +1,23 @@
 ---
 type: index
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - midterm
-  - obsidian
   - knowledge-base
 ---
 
 # Midterm 知识库索引
 
-## 快速入口
+## 当前权威入口
 
-- [[09_AI_Agent_Onboarding|AI agent 快速上手]]
+- 仓库级架构：`docs/current_architecture.md`
+- 当前实现/验证状态：`docs/current_mainline_status.md`
+- 部署：`docs/midterm_deployment.md`
+- 本次代码/文档同步审计：`docs/documentation_sync_audit_2026-07-20.md`
+
+知识库专题页：
+
 - [[01_System_Overview|系统总览]]
 - [[02_Runtime_Data_Flow|运行时数据流]]
 - [[03_Module_Map|模块地图]]
@@ -21,6 +26,7 @@ tags:
 - [[06_Performance_Optimization_History|性能优化历史]]
 - [[07_Deployment_Migration|部署与迁移]]
 - [[08_Open_Risks_And_Next_Actions|剩余风险与下一步]]
+- [[09_AI_Agent_Onboarding|AI agent 快速上手]]
 - [[10_Glossary|术语表]]
 - [[11_Data_Contracts_And_Storage|数据契约与存储]]
 - [[12_Service_Deep_Dive|服务深潜]]
@@ -30,43 +36,19 @@ tags:
 - [[16_Troubleshooting_Playbook|排障手册]]
 - [[17_Testing_And_Change_Guide|测试与变更指南]]
 - [[18_Artifact_And_Directory_Map|目录与 artifact 地图]]
-- Canonical pressure profile: `docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md`
 
-## 当前一句话结论
+## 当前一句话状态
 
-Midterm 栈已经具备 8090 管理、RTSP 接入、Replay 存储、Savant/DeepStream 推理、
-Redis worker 后处理、DB-backed evidence 和离线迁移打包能力。当前最强证明是：
+系统已具备 8090 管理的单 GPU 双分支、ROI AdaFace、独立人体轨迹消费、
+rolling-cache-first evidence、Scheduler V2 和 DB-backed 播放/标注。T4 40 路、4 FPS
+是当前已验证生产基线；4090 60 路、8 FPS 在较早 revision 通过，但最新双时间域代码
+仍需同 revision 复跑。
 
-- 60 路 3 FPS 下游证据链通过；
-- 单 4090 同卡双分支 60 路 4 FPS / 8 FPS retained-evidence pressure source 通过；
-- 当前 60 路单卡双分支压测必须按
-  `docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md` 固定拓扑、batch、
-  cooldown、duration、drain、`5:5/10:10/15:15` 证据窗口以及 DB-backed
-  overlay/timeline visual gate；
-- media-worker deadline-aware 平滑调度把 8 FPS pressure profile 下的 CPU 峰值控制到约 98%，
-  evidence lifecycle p95 约 192 秒；
-- face-worker 注册图库 Qdrant authoritative cutover 通过，20,000 向量 benchmark all-search p95/p99
-  为 4.037ms/6.427ms；
-- 仍缺真实 RTSP 混合输入、长时间 soak、生产硬件 profile、face-worker 同步链路 ACK/匹配延迟验证和
-  Savant 阶段级 latency。
+## 阅读规则
 
-## 如何使用这个知识库
-
-- 想快速接手项目：读 [[09_AI_Agent_Onboarding|AI agent 快速上手]]。
-- 想理解整体结构：读 [[01_System_Overview|系统总览]]、[[02_Runtime_Data_Flow|运行时数据流]]、
-  [[03_Module_Map|模块地图]]。
-- 想改代码：先读 [[11_Data_Contracts_And_Storage|数据契约与存储]]、
-  [[12_Service_Deep_Dive|服务深潜]] 和 [[17_Testing_And_Change_Guide|测试与变更指南]]。
-- 想跑压测或判断是否生产可用：读 [[14_Performance_And_Acceptance_Playbook|性能与验收手册]]。
-- 想排查线上问题：读 [[16_Troubleshooting_Playbook|排障手册]]。
-
-## 事实源
-
-- 代码入口：`scripts/midterm_start.sh`
-- Compose：`infra/docker-compose.midterm.yml`
-- Env：`infra/env/midterm.env`
-- Savant module：`modules/savant_security/module.yml`
-- 操作台：`http://127.0.0.1:8090/operator`
-- 主技术报告：`docs/midterm_current_program_technical_analysis_2026-06-28.md`
-- 后推理性能计划：`specs/26_midterm_post_inference_bottleneck_closure_plan.md`
-- media finalizer 报告：`docs/midterm_media_finalizer_pacer_8fps_report_2026-06-29.md`
+1. 当前代码/迁移优先；
+2. `current_architecture` 和 `current_mainline_status` 优先于专题页；
+3. 带日期报告只证明其 revision/profile/artifact；
+4. archive 只作追溯；
+5. `infra/env/midterm.env` 默认是 pgvector，Qdrant 是可选 profile；
+6. 完整双分支主 evidence 路径是 rolling-cache，逐事件 Replay 是单分支兼容路径。

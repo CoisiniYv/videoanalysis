@@ -3,28 +3,10 @@ set -eu
 
 CACHE_ROOT="${ROLLING_CACHE_ROOT:-/media/rolling-cache}"
 NAMESPACE="${ROLLING_CACHE_NAMESPACE:-midterm}"
-EPOCH_ID="${ROLLING_CACHE_RUNTIME_EPOCH_ID:-}"
-
-if [ -z "${EPOCH_ID}" ] && [ -n "${RUNTIME_EPOCH_STATE_PATH:-}" ] && [ -f "${RUNTIME_EPOCH_STATE_PATH}" ]; then
-  EPOCH_ID="$(python - <<'PY'
-import json
-import os
-
-path = os.getenv("RUNTIME_EPOCH_STATE_PATH", "")
-try:
-    with open(path, "r", encoding="utf-8") as fh:
-        print(str((json.load(fh) or {}).get("runtime_epoch_id") or ""))
-except Exception:
-    print("")
-PY
-)"
-fi
-
-if [ -z "${EPOCH_ID}" ]; then
-  EPOCH_ID="$(date -u +midterm-%Y%m%dT%H%M%SZ-rolling)"
-fi
-
-mkdir -p "${CACHE_ROOT}/${NAMESPACE}/epochs/${EPOCH_ID}"
+export ROLLING_CACHE_ROOT="${CACHE_ROOT}"
+export ROLLING_CACHE_NAMESPACE="${NAMESPACE}"
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
 
 ROLLING_CACHE_RETENTION_SECONDS="${ROLLING_CACHE_RETENTION_SECONDS:-300}"
 ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS="${ROLLING_CACHE_CLEANUP_INTERVAL_SECONDS:-30}"
@@ -42,29 +24,6 @@ case "$(printf '%s' "${ROLLING_CACHE_MAINTENANCE_OWNER}" | tr '[:upper:]' '[:low
     ;;
 esac
 
-SEGMENT_FRAMES="${ROLLING_CACHE_SEGMENT_FRAMES:-}"
-if [ -z "${SEGMENT_FRAMES}" ]; then
-  SEGMENT_FRAMES="$(python - <<'PY'
-import os
+echo "[rolling-cache-sink] implementation=long-lived-splitmux root=${CACHE_ROOT} namespace=${NAMESPACE} segment_s=${ROLLING_CACHE_SEGMENT_SECONDS:-4} http_port=${ROLLING_CACHE_SINK_HTTP_PORT:-8080}"
 
-try:
-    seconds = float(os.getenv("ROLLING_CACHE_SEGMENT_SECONDS", "4"))
-except ValueError:
-    seconds = 4.0
-try:
-    fps = float(os.getenv("ROLLING_CACHE_FPS", "8"))
-except ValueError:
-    fps = 8.0
-print(max(1, int(round(seconds * fps))))
-PY
-)"
-fi
-
-# Savant 0.6.0 tokens are prefix tokens (``%source_id``, ``%src_filename``),
-# not printf-style tokens with a closing percent. A trailing percent becomes a
-# literal path character and breaks exact source-id lookup in Media Worker.
-export DIR_LOCATION="${CACHE_ROOT}/${NAMESPACE}/epochs/${EPOCH_ID}/%source_id/%src_filename/"
-export CHUNK_SIZE="${SEGMENT_FRAMES}"
-export METADATA_JSON_FORMAT="${METADATA_JSON_FORMAT:-native}"
-
-exec python /opt/savant/adapters/gst/sinks/video_files.py
+exec python /opt/rolling-cache-sink/app/main.py

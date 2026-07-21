@@ -179,6 +179,26 @@ def _fake_runtime() -> FakeDockerClient:
     return fake
 
 
+def test_recreate_container_can_override_cpuset_without_losing_host_config() -> None:
+    fake = _fake_runtime()
+
+    result = runtime_performance._recreate_container_with_env(
+        fake,
+        "video-analytics-midterm-analysis-forwarder",
+        {"ANALYSIS_FPS": "4/1"},
+        force_start=True,
+        host_config_updates={"CpusetCpus": "6,14"},
+    )
+
+    host_config = fake.inspect_by_name[
+        "video-analytics-midterm-analysis-forwarder"
+    ]["HostConfig"]
+    assert host_config["NetworkMode"] == "video-analytics-midterm_default"
+    assert host_config["RestartPolicy"] == {"Name": "unless-stopped"}
+    assert host_config["CpusetCpus"] == "6,14"
+    assert result["host_config_updates"] == ["CpusetCpus"]
+
+
 def test_performance_config_uses_runtime_env_without_saved_file(tmp_path: Path) -> None:
     fake = _fake_runtime()
     fake.inspect_by_name["video-analytics-midterm-analysis-forwarder"]["Config"]["Env"][0] = (

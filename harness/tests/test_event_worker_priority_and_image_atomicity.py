@@ -15,9 +15,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKER_PATH = ROOT / "services" / "event-worker" / "app" / "worker.py"
+PERSON_WORKER_PATH = ROOT / "services" / "event-worker" / "app" / "person_worker.py"
 REPOSITORY_PATH = ROOT / "services" / "event-worker" / "app" / "repository.py"
 FACE_REPOSITORY_PATH = ROOT / "services" / "face-worker" / "app" / "repository.py"
 FACE_CONSUMER_PATH = ROOT / "services" / "face-worker" / "app" / "redis_consumer.py"
+EVENT_CONSUMER_PATH = ROOT / "services" / "event-worker" / "app" / "redis_consumer.py"
 COMPOSE_PATH = ROOT / "infra" / "docker-compose.midterm.yml"
 
 
@@ -34,20 +36,31 @@ def test_event_delivery_gets_a_bounded_turn_before_person_observations() -> None
     assert "scheduling=events_first_bounded" in source
 
 
-def test_midterm_event_batch_matches_bounded_person_batch() -> None:
+def test_midterm_person_observations_have_a_dedicated_worker() -> None:
     compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
-    environment = compose["services"]["event-worker"]["environment"]
+    event_environment = compose["services"]["event-worker"]["environment"]
+    service = compose["services"]["person-observation-worker"]
+    person_environment = service["environment"]
 
-    assert environment["EVENT_BATCH_SIZE"] == "${EVENT_BATCH_SIZE:-100}"
-    assert environment["PERSON_OBSERVATION_BATCH_SIZE"] == (
-        "${PERSON_OBSERVATION_BATCH_SIZE:-100}"
+    assert event_environment["EVENT_BATCH_SIZE"] == "${EVENT_BATCH_SIZE:-100}"
+    assert event_environment["PERSON_OBSERVATION_CONSUMER_ENABLED"] == "false"
+    assert person_environment["PERSON_OBSERVATION_CONSUMER_ENABLED"] == "true"
+    assert person_environment["PERSON_OBSERVATION_BATCH_SIZE"] == (
+        "${PERSON_OBSERVATION_WORKER_BATCH_SIZE:-500}"
     )
-    assert environment["EVIDENCE_TASK_CREATION_ENABLED"] == (
+    assert service["command"] == ["python", "person_main.py"]
+    assert event_environment["EVIDENCE_TASK_CREATION_ENABLED"] == (
         "${EVIDENCE_TASK_CREATION_ENABLED:-true}"
     )
-    assert environment["EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS"] == (
+    assert event_environment["EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS"] == (
         "${EVIDENCE_TASK_EVENT_NOT_BEFORE_TS_MS:-0}"
     )
+
+    source = PERSON_WORKER_PATH.read_text(encoding="utf-8")
+    assert "run_person_observation_worker" in source
+    assert "scheduling=dedicated" in source
+    assert "_process_person_observation_batch" in source
+    assert "AlertPolicyService" not in source
 
 
 def test_image_evidence_write_is_atomic_and_json_parameters_are_typed() -> None:
@@ -69,6 +82,20 @@ def test_face_observation_hot_path_batches_transaction_pipeline_and_ack() -> Non
     assert "with self._conn.pipeline():" in repository
     assert "def ack_many" in consumer
     assert "xack(self._stream, self._group, *msg_ids)" in consumer
+
+
+def test_person_observation_hot_path_batches_transaction_pipeline_and_ack() -> None:
+    repository = REPOSITORY_PATH.read_text(encoding="utf-8")
+    consumer = EVENT_CONSUMER_PATH.read_text(encoding="utf-8")
+    worker = WORKER_PATH.read_text(encoding="utf-8")
+
+    assert "def insert_person_bbox_observations" in repository
+    assert "jsonb_to_recordset(%(rows)s::jsonb)" in repository
+    assert "_INSERT_PERSON_BBOX_OBSERVATIONS_SQL" in repository
+    assert "with self._conn.transaction(), self._conn.cursor" in repository
+    assert "def ack_many" in consumer
+    assert "xack(self._stream, self._group, *msg_ids)" in consumer
+    assert "insert_person_bbox_observations" in worker
 
 
 def _load_event_repository_module():
@@ -143,6 +170,56 @@ def test_real_postgres_face_batch_insert_is_idempotent_and_atomic() -> None:
                 raise RollbackProbe
         residual = connection.execute(
             "SELECT count(*) FROM face_observations "
+            "WHERE source_observation_id = %(source_observation_id)s",
+            {"source_observation_id": source_observation_id},
+        ).fetchone()[0]
+        assert residual == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_real_postgres_person_batch_insert_is_idempotent_and_atomic() -> None:
+    database_url = os.getenv("EVENT_WORKER_REPOSITORY_TEST_DATABASE_URL", "")
+    if not database_url:
+        pytest.skip("EVENT_WORKER_REPOSITORY_TEST_DATABASE_URL not set")
+
+    repository_module = _load_event_repository_module()
+    source_observation_id = f"person-batch-atomic:{uuid.uuid4()}"
+    row = {
+        "source_observation_id": source_observation_id,
+        "camera_id": "person-batch-atomic-camera",
+        "source_id": "person-batch-atomic-source",
+        "track_id": "person-batch-atomic-track",
+        "timestamp_ms": int(time.time() * 1000),
+        "frame_pts": 123456789,
+        "frame_num": 42,
+        "person_bbox": [10.0, 20.0, 110.0, 220.0],
+        "person_confidence": 0.9,
+        "gate_status": "accepted",
+        "payload": {"batch_atomic_test": True},
+    }
+
+    class RollbackProbe(Exception):
+        pass
+
+    connection = psycopg.connect(database_url, autocommit=True)
+    try:
+        repository = repository_module.EventRepository(connection)
+        with pytest.raises(RollbackProbe):
+            with connection.transaction():
+                results = repository.insert_person_bbox_observations([row, dict(row)])
+                assert results[0]
+                assert results[1] is None
+                count = connection.execute(
+                    "SELECT count(*) FROM person_bbox_observations "
+                    "WHERE source_observation_id = %(source_observation_id)s",
+                    {"source_observation_id": source_observation_id},
+                ).fetchone()[0]
+                assert count == 1
+                raise RollbackProbe
+        residual = connection.execute(
+            "SELECT count(*) FROM person_bbox_observations "
             "WHERE source_observation_id = %(source_observation_id)s",
             {"source_observation_id": source_observation_id},
         ).fetchone()[0]

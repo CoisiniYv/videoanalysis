@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -12,7 +13,14 @@ import signal
 import subprocess
 import sys
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +62,7 @@ from app.materialization_scheduler import (
     WorkPermit,
 )
 from app.materialization_repository import (
+    FinalizerPendingMetrics,
     MaterializationLease,
     claim_finalizer_task,
     claim_rolling_task,
@@ -62,6 +71,7 @@ from app.materialization_repository import (
     defer_terminal_task,
     fail_unclaimed_task,
     fail_rolling_task,
+    finalizer_pending_metrics,
     heartbeat_lease,
     persist_finalizer_handoff,
     pending_cleanup_tasks,
@@ -69,6 +79,7 @@ from app.materialization_repository import (
     recoverable_finalizer_handoffs,
     recover_and_expire_rolling_tasks,
     retry_finalizer_handoff,
+    retry_unclaimed_finalizer_handoff,
     retry_rolling_task,
     schedule_unclaimed_retry,
     supports_lifecycle_v2,
@@ -132,6 +143,8 @@ DEFAULT_MATERIALIZATION_THROTTLE_DEADLINE_GUARD_S = 0.0
 DEFAULT_MATERIALIZATION_CPU_THREAD_LIMIT = 0
 DEFAULT_FRAME_CACHE_ANCHOR_WAIT_MAX_S = 120.0
 DEFAULT_FRAME_CACHE_ANCHOR_WAIT_FACTOR = 1.5
+DEFAULT_FRAME_CACHE_ANCHOR_POLL_MAX_S = 5.0
+DEFAULT_FRAME_CACHE_ANCHOR_MAX_RETRIES = 2
 DEFAULT_INVALID_SINK_OUTPUT_MAX_RETRIES = 3
 DEFAULT_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES = ("ready",)
 IMAGE_EVIDENCE_NEAREST_FRAME_TOLERANCE_NS = 500_000_000
@@ -215,25 +228,101 @@ def _write_frame_cache_sidecar_after_anchor(
             )
         ),
     )
+    poll_max_s = max(
+        0.25,
+        float(
+            os.getenv(
+                "FRAME_CACHE_ANCHOR_POLL_MAX_S",
+                str(DEFAULT_FRAME_CACHE_ANCHOR_POLL_MAX_S),
+            )
+        ),
+    )
+    max_retries = max(
+        0,
+        int(
+            os.getenv(
+                "FRAME_CACHE_ANCHOR_MAX_RETRIES",
+                str(DEFAULT_FRAME_CACHE_ANCHOR_MAX_RETRIES),
+            )
+        ),
+    )
     started = time.monotonic()
     attempts = 0
     waited_s = 0.0
     sidecar_build_s = 0.0
     initial_lag_s = None
     cache_bypassed_for_retry = False
+    cache_bypass_retries = 0
+    scan_attempts: list[dict[str, object]] = []
+    retry_stop_reason = "annotation_ready"
     writer_kwargs = dict(kwargs)
     while True:
         writer_started = time.monotonic()
         summary, result = write_frame_cache_identity_sidecar(**writer_kwargs)
         sidecar_build_s += max(0.0, time.monotonic() - writer_started)
+        reader_summary = summary.get("frame_cache_reader_summary")
+        reader_summary = reader_summary if isinstance(reader_summary, dict) else {}
+        scan_attempts.append(
+            {
+                "attempt": len(scan_attempts) + 1,
+                "read_mode": str(reader_summary.get("read_mode") or ""),
+                "retrieval_anchor_source": reader_summary.get(
+                    "retrieval_anchor_source"
+                ),
+                "entries_scanned": int(
+                    reader_summary.get("entries_scanned_total") or 0
+                ),
+                "max_scan": int(reader_summary.get("max_scan") or 0),
+                "anchor_found": bool(reader_summary.get("anchor_found")),
+                "stop_reason": str(reader_summary.get("stop_reason") or ""),
+            }
+        )
         lag_s = _frame_cache_anchor_lag_seconds(summary)
         if initial_lag_s is None:
             initial_lag_s = lag_s
         elapsed_s = time.monotonic() - started
         remaining_s = max_wait_s - elapsed_s
-        if lag_s is None or lag_s <= 0.0 or remaining_s <= 0.0:
+        if lag_s is None:
+            retry_stop_reason = (
+                "lag_not_measurable"
+                if str(summary.get("annotation_status") or "")
+                == "missing_frame_metadata"
+                else "annotation_ready"
+            )
             break
-        sleep_s = min(max(1.0, lag_s * wait_factor), remaining_s)
+        if lag_s <= 0.0:
+            break
+        if remaining_s <= 0.0:
+            retry_stop_reason = "max_wait_reached"
+            break
+        retry_count = len(scan_attempts) - 1
+        if retry_count >= max_retries:
+            retry_stop_reason = "max_retries_reached"
+            break
+        retry_config = dict(writer_kwargs.get("config") or {})
+        range_cache_enabled = bool(
+            float(retry_config.get("range_cache_ttl_s") or 0.0) > 0.0
+            and int(retry_config.get("range_cache_max_entries") or 0) > 0
+        )
+        if not cache_bypassed_for_retry and range_cache_enabled:
+            retry_config["range_cache_ttl_s"] = 0.0
+            retry_config["range_cache_max_entries"] = 0
+            writer_kwargs["config"] = retry_config
+            cache_bypassed_for_retry = True
+            cache_bypass_retries += 1
+            logger.info(
+                "frame_cache_anchor_retry source_id=%s event_id=%s "
+                "lag_s=%.3f action=refresh_bounded_range_immediately",
+                (kwargs.get("event") or {}).get("source_id", ""),
+                (kwargs.get("event") or {}).get("event_id", ""),
+                lag_s,
+            )
+            continue
+        sleep_s = min(
+            max(1.0, lag_s * wait_factor),
+            poll_max_s,
+            remaining_s,
+        )
         logger.info(
             "frame_cache_anchor_wait source_id=%s event_id=%s "
             "lag_s=%.3f sleep_s=%.3f attempt=%d",
@@ -243,13 +332,6 @@ def _write_frame_cache_sidecar_after_anchor(
             sleep_s,
             attempts + 1,
         )
-        if not cache_bypassed_for_retry:
-            retry_config = dict(writer_kwargs.get("config") or {})
-            retry_config["range_cache_ttl_s"] = 0.0
-            retry_config["range_cache_max_entries"] = 0
-            retry_config["stream_id_range_unbounded"] = True
-            writer_kwargs["config"] = retry_config
-            cache_bypassed_for_retry = True
         time.sleep(sleep_s)
         waited_s += sleep_s
         attempts += 1
@@ -267,8 +349,35 @@ def _write_frame_cache_sidecar_after_anchor(
         ),
         "status": str(summary.get("annotation_status") or ""),
         "range_cache_bypassed_for_retry": cache_bypassed_for_retry,
+        "cache_bypass_retries": cache_bypass_retries,
+        "poll_max_s": poll_max_s,
+        "max_retries": max_retries,
+        "retry_count": max(0, len(scan_attempts) - 1),
+        "retry_stop_reason": retry_stop_reason,
+        "bounded_retry_only": True,
+        "unbounded_retry_used": False,
+        "scan_attempts": scan_attempts,
+        "scan_entries_total": sum(
+            int(item.get("entries_scanned") or 0) for item in scan_attempts
+        ),
+        "scan_entries_max_per_attempt": max(
+            (int(item.get("entries_scanned") or 0) for item in scan_attempts),
+            default=0,
+        ),
     }
     summary["sidecar_build_ms"] = int(sidecar_build_s * 1000)
+    logger.info(
+        "frame_cache_anchor_retry_summary source_id=%s event_id=%s "
+        "writer_attempts=%d retries=%d scans=%d max_scan=%d stop_reason=%s status=%s",
+        (kwargs.get("event") or {}).get("source_id", ""),
+        (kwargs.get("event") or {}).get("event_id", ""),
+        len(scan_attempts),
+        max(0, len(scan_attempts) - 1),
+        summary["annotation_anchor_wait"]["scan_entries_total"],
+        summary["annotation_anchor_wait"]["scan_entries_max_per_attempt"],
+        retry_stop_reason,
+        str(summary.get("annotation_status") or ""),
+    )
     return summary, result
 
 
@@ -3203,6 +3312,11 @@ def _post_savant_phase_latency_metrics(
         "sink_ffprobe_ready_at": sink_ffprobe_ready_at,
         "finalizer_submitted_at": finalizer_submitted_at,
         "finalizer_started_at": finalizer_started_at,
+        "ready_to_remux_claim_ms": phase.get("ready_to_remux_claim_ms"),
+        "remux_ms": phase.get("remux_ms"),
+        "handoff_to_finalizer_admission_ms": phase.get(
+            "handoff_to_finalizer_admission_ms"
+        ),
         "replay_to_sink_metadata_ms": _elapsed_ms_between_iso(
             replay_job_created_at,
             sink_metadata_first_seen_at,
@@ -3645,6 +3759,17 @@ def _single_finalizer_boundary_enabled() -> bool:
     return _env_bool("MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED", default=True)
 
 
+def _legacy_derivatives_enabled() -> bool:
+    """Whether legacy snapshot/annotated-snapshot discovery is scheduled.
+
+    Rolling image evidence has its own admission path and is intentionally not
+    controlled by this flag.  DB-backed video timeline/overlay indexing is also
+    independent from these legacy derivative jobs.
+    """
+
+    return _env_bool("MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED", default=True)
+
+
 def _post_savant_fast_raw_clip_enabled() -> bool:
     return _env_bool("POST_SAVANT_FAST_RAW_CLIP_ENABLED", default=False)
 
@@ -3764,11 +3889,41 @@ def _sink_metadata_window_guard(rows: list[dict], time_window: dict | None) -> d
     requested_start_pts = _to_int(time_window.get("requested_start_pts"))
     requested_end_pts = _to_int(time_window.get("requested_end_pts"))
     event_frame_pts = _to_int(time_window.get("event_frame_pts"))
-    pts_values = [
-        value
-        for value in (_to_int(row.get("pts") or row.get("frame_pts")) for row in rows)
-        if value is not None
+    source_event_frame_pts = event_frame_pts
+    mux_pairs = [
+        (
+            _to_int(row.get("rolling_cache_mux_pts")),
+            _to_int(row.get("pts") or row.get("frame_pts")),
+        )
+        for row in rows
     ]
+    mux_pairs = [pair for pair in mux_pairs if pair[0] is not None and pair[1] is not None]
+    guard_pts_domain = "source_pts"
+    if (
+        mux_pairs
+        and requested_start_pts is not None
+        and requested_end_pts is not None
+        and event_frame_pts is not None
+    ):
+        event_mux_pts, _ = min(
+            mux_pairs,
+            key=lambda pair: abs(int(pair[1]) - int(event_frame_pts)),
+        )
+        pre_ns = max(0, int(event_frame_pts) - int(requested_start_pts))
+        post_ns = max(0, int(requested_end_pts) - int(event_frame_pts))
+        requested_start_pts = int(event_mux_pts) - pre_ns
+        requested_end_pts = int(event_mux_pts) + post_ns
+        event_frame_pts = int(event_mux_pts)
+        pts_values = sorted(int(pair[0]) for pair in mux_pairs)
+        guard_pts_domain = "rolling_cache_mux_pts"
+    else:
+        pts_values = [
+            value
+            for value in (
+                _to_int(row.get("pts") or row.get("frame_pts")) for row in rows
+            )
+            if value is not None
+        ]
     summary = {
         "sink_window_guard_status": "not_applicable",
         "sink_window_guard_failed": False,
@@ -3780,6 +3935,8 @@ def _sink_metadata_window_guard(rows: list[dict], time_window: dict | None) -> d
         "event_projected_t_s": None,
         "event_centered_in_clip": False,
         "max_sink_metadata_pts_gap_ns": None,
+        "sink_window_guard_pts_domain": guard_pts_domain,
+        "source_event_frame_pts": source_event_frame_pts,
     }
     if requested_start_pts is None or requested_end_pts is None or event_frame_pts is None:
         summary.update(
@@ -4026,6 +4183,9 @@ def _without_published_raw_clip(bundle_result: object) -> _EvidenceBundleView:
         production_sidecar_path=Path(getattr(bundle_result, "production_sidecar_path")),
         summary_path=Path(getattr(bundle_result, "summary_path")),
         summary=getattr(bundle_result, "summary"),
+        db_timeline_rows=getattr(bundle_result, "db_timeline_rows", None),
+        db_overlay_rows=getattr(bundle_result, "db_overlay_rows", None),
+        db_sidecar_summary=getattr(bundle_result, "db_sidecar_summary", None),
     )
 
 
@@ -4471,6 +4631,9 @@ class _EvidenceBundleView:
         production_sidecar_path: Path,
         summary_path: Path,
         summary: dict,
+        db_timeline_rows: list[dict] | None = None,
+        db_overlay_rows: list[dict] | None = None,
+        db_sidecar_summary: dict | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.raw_clip_path = raw_clip_path
@@ -4478,6 +4641,9 @@ class _EvidenceBundleView:
         self.production_sidecar_path = production_sidecar_path
         self.summary_path = summary_path
         self.summary = summary
+        self.db_timeline_rows = db_timeline_rows
+        self.db_overlay_rows = db_overlay_rows
+        self.db_sidecar_summary = db_sidecar_summary
 
 
 def _build_event_metadata(
@@ -5042,6 +5208,7 @@ def _finalize_post_savant_evidence_bundle(
                 "require_trigger_face": False,
                 "pre_seconds": float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
                 "post_seconds": float(os.getenv("DEFAULT_POST_SECONDS", "5")),
+                "persist_sidecar_files": not _evidence_db_index_expanded_rows_enabled(),
             }
         )
         identity_continuations = _watchlist_identity_continuations(
@@ -5120,6 +5287,12 @@ def _finalize_post_savant_evidence_bundle(
             ),
             summary_path=summary_path,
             summary=summary,
+            db_timeline_rows=list(sink_metadata_rows),
+            db_overlay_rows=list(sidecar_result.get("annotations") or []),
+            # The final frame-cache summary contains annotation_lines,
+            # sidecar_frame_count and production readiness expected by the DB
+            # bundle index. The raw writer summary alone lacks those fields.
+            db_sidecar_summary=dict(summary),
         )
     duration_guard = _post_savant_duration_guard(
         getattr(result, "raw_clip_path", None),
@@ -5300,6 +5473,11 @@ def _finalize_post_savant_evidence_bundle(
         "face_count": int(object_counts.get("face") or 0),
         "known_face_count": int(object_counts.get("known_face") or 0),
         "materialization_metrics": summary.get("materialization_metrics") or {},
+        "_db_metadata": business_metadata,
+        "_db_summary": summary,
+        "_db_sidecar_summary": getattr(result, "db_sidecar_summary", None),
+        "_db_timeline_rows": getattr(result, "db_timeline_rows", None),
+        "_db_overlay_rows": getattr(result, "db_overlay_rows", None),
     }
 
 
@@ -5446,6 +5624,8 @@ def _index_finalized_bundle(
     try:
         db_index_started = time.monotonic()
         expanded_rows_enabled = _evidence_db_index_expanded_rows_enabled()
+        if not expanded_rows_enabled or evidence_state != "materialized":
+            _retain_in_memory_bundle_sidecars(bundle)
         index_result = upsert_evidence_bundle_index(
             pg_conn,
             event_id=event_id,
@@ -5453,6 +5633,9 @@ def _index_finalized_bundle(
             compute_sha256=False,
             include_timeline=expanded_rows_enabled,
             include_overlays=expanded_rows_enabled,
+            **_db_index_payload_kwargs(
+                bundle, expanded_rows_enabled=expanded_rows_enabled
+            ),
         )
         logger.info(
             "evidence_db_index_upserted event_id=%s "
@@ -5499,6 +5682,7 @@ def _index_finalized_bundle(
         _set_event_db_index_status(pg_conn, event_id, status="ready")
         return True
     except Exception as exc:
+        _retain_in_memory_bundle_sidecars(bundle)
         logger.exception("evidence_db_index_upsert_failed event_id=%s", event_id)
         _set_event_db_index_status(
             pg_conn,
@@ -5507,6 +5691,51 @@ def _index_finalized_bundle(
             error=str(exc),
         )
         return False
+
+
+def _db_index_payload_kwargs(
+    bundle: dict, *, expanded_rows_enabled: bool
+) -> dict[str, object]:
+    if not expanded_rows_enabled:
+        return {}
+    mapping = {
+        "metadata_override": bundle.get("_db_metadata"),
+        "summary_override": bundle.get("_db_summary"),
+        "sidecar_summary_override": bundle.get("_db_sidecar_summary"),
+        "timeline_rows": bundle.get("_db_timeline_rows"),
+        "overlay_rows": bundle.get("_db_overlay_rows"),
+    }
+    return {
+        key: value
+        for key, value in mapping.items()
+        if isinstance(value, dict) or isinstance(value, list)
+    }
+
+
+def _retain_in_memory_bundle_sidecars(bundle: dict) -> dict[str, object]:
+    """Persist diagnostic sidecars only when DB-backed publication fails.
+
+    The normal materialized path carries timeline/overlay rows in memory and
+    indexes them directly. Failed or non-materialized bundles retain those rows
+    on disk so operators still have an auditable fallback.
+    """
+    evidence_dir = str(bundle.get("evidence_dir") or "").strip()
+    if not evidence_dir:
+        return {"written": False, "reason": "missing_evidence_dir"}
+    root = Path(evidence_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    overlay_rows = bundle.get("_db_overlay_rows")
+    annotations_path = root / SIDECAR_ANNOTATIONS_FILE
+    if isinstance(overlay_rows, list) and overlay_rows and not annotations_path.is_file():
+        _write_metadata_jsonl(annotations_path, overlay_rows)
+        written.append(annotations_path.name)
+    sidecar_summary = bundle.get("_db_sidecar_summary")
+    sidecar_summary_path = root / SIDECAR_SUMMARY_FILE
+    if isinstance(sidecar_summary, dict) and not sidecar_summary_path.is_file():
+        _atomic_write_json(sidecar_summary_path, sidecar_summary)
+        written.append(sidecar_summary_path.name)
+    return {"written": bool(written), "files": written}
 
 
 def _attempt_terminal_sink_cleanup(
@@ -5571,12 +5800,13 @@ def _recover_pending_sink_cleanups(
     enabled: bool,
     allowed_statuses: tuple[str, ...],
     limit: int = 16,
-) -> int:
+) -> "CleanupRecoveryStats":
     rows = pending_cleanup_tasks(pg_conn, limit=max(1, int(limit or 1)))
     if not rows:
-        return 0
+        return CleanupRecoveryStats()
     retry_clip_status = next(iter(allowed_statuses), "ready")
     recovered = 0
+    retry_pending = 0
     for row in rows:
         event_id = str(row.get("event_id") or "")
         sink_output_path = str(row.get("sink_output_path") or "")
@@ -5593,7 +5823,22 @@ def _recover_pending_sink_cleanups(
         )
         if str(result.get("status") or "") != "cleanup_pending":
             recovered += 1
-    return recovered
+        else:
+            retry_pending += 1
+    return CleanupRecoveryStats(
+        rows_scanned=len(rows),
+        recovered=recovered,
+        retry_pending=retry_pending,
+    )
+
+
+@dataclass(frozen=True)
+class CleanupRecoveryStats:
+    """One bounded durable-cleanup recovery poll."""
+
+    rows_scanned: int = 0
+    recovered: int = 0
+    retry_pending: int = 0
 
 
 def _handoff_identity_matches(
@@ -5693,11 +5938,17 @@ def _recoverable_finalizer_metadata(
         metadata["_meta_dir"] = sink_output_path
         metadata["_finalizer_phase"] = {
             "handoff_recovered_at": datetime.now(timezone.utc).isoformat(),
+            "handoff_persisted_at": row.get("handoff_persisted_at"),
             "lease_generation": int(
                 row.get("materialization_lease_generation") or 0
             ),
             "attempt_token": handoff.get("attempt_token"),
             "runtime_epoch_id": row.get("runtime_epoch_id"),
+            "ready_to_remux_claim_ms": handoff.get(
+                "ready_to_remux_claim_ms"
+            ),
+            "remux_claimed_at": handoff.get("remux_claimed_at"),
+            "remux_ms": handoff.get("remux_ms"),
         }
         labels = metadata.get("labels")
         if isinstance(labels, dict):
@@ -5722,6 +5973,7 @@ def _log_finalize_one_metrics(
     materialization_metrics: dict,
     throttle_decision: dict | None,
     probe_delta: dict[str, int],
+    stage_timings: dict[str, int],
 ) -> None:
     correlation = materialization_metrics.get("correlation")
     correlation = correlation if isinstance(correlation, dict) else {}
@@ -5736,10 +5988,14 @@ def _log_finalize_one_metrics(
         "sink_metadata_to_video_ms=%s sink_video_to_stable_ms=%s "
         "sink_stable_to_ffprobe_ready_ms=%s "
         "sink_ffprobe_ready_to_finalizer_start_ms=%s finalizer_pool_wait_ms=%s "
+        "ready_to_remux_claim_ms=%s remux_ms=%s "
+        "handoff_to_finalizer_admission_ms=%s "
         "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
         "metadata_files_visited=%s ffprobe_invocations=%s "
         "ffprobe_duration_ms=%s ffmpeg_invocations=%s ffmpeg_duration_ms=%s "
-        "imageio_ffmpeg_fallback_count=%s imageio_ffmpeg_fallback_duration_ms=%s",
+        "imageio_ffmpeg_fallback_count=%s imageio_ffmpeg_fallback_duration_ms=%s "
+        "pre_bundle_ms=%s bundle_ms=%s publish_ms=%s terminal_commit_ms=%s "
+        "bundle_process_pid=%s",
         event_id,
         meta_dir,
         correlation.get("request_id"),
@@ -5765,6 +6021,9 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("sink_stable_to_ffprobe_ready_ms"),
         materialization_metrics.get("sink_ffprobe_ready_to_finalizer_start_ms"),
         materialization_metrics.get("finalizer_pool_wait_ms"),
+        materialization_metrics.get("ready_to_remux_claim_ms"),
+        materialization_metrics.get("remux_ms"),
+        materialization_metrics.get("handoff_to_finalizer_admission_ms"),
         (throttle_decision or {}).get("sleep_s"),
         (throttle_decision or {}).get("reason"),
         (throttle_decision or {}).get("deadline_slack_s"),
@@ -5775,6 +6034,11 @@ def _log_finalize_one_metrics(
         probe_delta["ffmpeg_duration_ms"],
         probe_delta["imageio_ffmpeg_fallback_count"],
         probe_delta["imageio_ffmpeg_fallback_duration_ms"],
+        stage_timings.get("pre_bundle_ms", 0),
+        stage_timings.get("bundle_ms", 0),
+        stage_timings.get("publish_ms", 0),
+        stage_timings.get("terminal_commit_ms", 0),
+        stage_timings.get("bundle_process_pid", 0),
     )
 
 
@@ -5949,7 +6213,17 @@ def _publish_finalizer_attempt(
         for key, value in bundle.items()
     }
     rebased["evidence_dir"] = str(canonical_dir)
-    _rewrite_published_json_paths(canonical_dir, old_root=attempt_dir)
+    if _evidence_db_index_expanded_rows_enabled():
+        # DB-first bundles index timeline/overlay rows from the in-memory
+        # result and prune these JSON sidecars immediately after success.
+        # Re-reading and atomically rewriting them on the mechanical evidence
+        # disk only to delete them moments later is redundant hot-path I/O.
+        logger.debug(
+            "finalizer_json_path_rewrite_skipped event_id=%s mode=db_expanded_rows",
+            event_id,
+        )
+    else:
+        _rewrite_published_json_paths(canonical_dir, old_root=attempt_dir)
     return rebased
 
 
@@ -6022,6 +6296,8 @@ def _finalize_one(
     scan_stats: dict,
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None = None,
     shutdown_controller: ShutdownController | None = None,
+    bundle_process_pool: _FinalizerProcessPool | None = None,
+    database_url: str = "",
 ) -> _FinalizeOneResult:
     finalize_started = time.monotonic()
     probe_before = _probe_metrics_snapshot()
@@ -6030,6 +6306,7 @@ def _finalize_one(
     lease: MaterializationLease | None = None
     heartbeat_handle: LeaseHeartbeatHandle | None = None
     terminal_committed = False
+    stage_timings: dict[str, int] = {}
     try:
         if shutdown_controller is not None and shutdown_controller.force_requested:
             return _FinalizeOneResult(claim_status="shutdown_deferred")
@@ -6094,7 +6371,10 @@ def _finalize_one(
                 lease_seconds=max(1.0, float(materialization_timeout_s or 0.0)),
             )
 
-        _set_event_evidence_state(pg_conn, event_id, state="materializing")
+        # The fenced finalizer claim already makes evidence_tasks authoritative
+        # for in-progress state. Avoid a duplicate transient projection into
+        # the hot events row; the terminal CTE below performs the one durable
+        # event projection required by the API and viewer.
         if not evidence_output_dir:
             error_message = "post_savant_finalizer_missing_evidence_output_dir"
             terminal_committed = _mark_media_finalize_failed(
@@ -6127,22 +6407,44 @@ def _finalize_one(
             attempt_dir,
             evidence_output_dir=evidence_output_dir,
         )
+        stage_timings["pre_bundle_ms"] = int(
+            (time.monotonic() - finalize_started) * 1000
+        )
+        bundle_started = time.monotonic()
+        finalize_kwargs: dict[str, object] = {
+            "event_id": event_id,
+            "meta_dir": meta_dir,
+            "metadata_file": metadata_file,
+            "evidence_output_dir": evidence_output_dir,
+            "bundle_output_dir": attempt_dir,
+            "materialization_timeout_s": materialization_timeout_s,
+            "materialization_guardrails": guardrails,
+            "phase_diagnostics": phase_diagnostics,
+            "authoritative_probe": (
+                meta.get("_authoritative_probe")
+                if isinstance(meta.get("_authoritative_probe"), dict)
+                else None
+            ),
+        }
         try:
-            bundle = _finalize_post_savant_evidence_bundle(
-                pg_conn,
-                event_id=event_id,
-                meta_dir=meta_dir,
-                metadata_file=metadata_file,
-                evidence_output_dir=evidence_output_dir,
-                bundle_output_dir=attempt_dir,
-                materialization_timeout_s=materialization_timeout_s,
-                materialization_guardrails=guardrails,
-                phase_diagnostics=phase_diagnostics,
-                authoritative_probe=(
-                    meta.get("_authoritative_probe")
-                    if isinstance(meta.get("_authoritative_probe"), dict)
-                    else None
-                ),
+            if bundle_process_pool is not None:
+                if not database_url:
+                    raise RuntimeError("finalizer process pool requires database_url")
+                bundle = bundle_process_pool.submit(
+                    _finalize_bundle_process_entry,
+                    database_url,
+                    finalize_kwargs,
+                ).result()
+                stage_timings["bundle_process_pid"] = int(
+                    bundle.pop("_finalizer_process_pid", 0) or 0
+                )
+            else:
+                bundle = _finalize_post_savant_evidence_bundle(
+                    pg_conn,
+                    **finalize_kwargs,
+                )
+            stage_timings["bundle_ms"] = int(
+                (time.monotonic() - bundle_started) * 1000
             )
         except Exception as exc:
             error_message = f"{type(exc).__name__}:{exc}"
@@ -6214,6 +6516,7 @@ def _finalize_one(
             )
             return _FinalizeOneResult(claim_status=claim_status)
 
+        publish_started = time.monotonic()
         published_bundle = _publish_finalizer_attempt(
             pg_conn,
             lease=lease,
@@ -6225,6 +6528,9 @@ def _finalize_one(
         )
         if published_bundle is None:
             return _FinalizeOneResult(claim_status=claim_status)
+        stage_timings["publish_ms"] = int(
+            (time.monotonic() - publish_started) * 1000
+        )
         bundle = published_bundle
         if heartbeat_handle is not None and not heartbeat_handle.healthy:
             retry_finalizer_handoff(
@@ -6243,6 +6549,7 @@ def _finalize_one(
         clip_status = str(bundle.get("clip_status") or "generated_unverified")
         evidence_state = _evidence_state_for_clip_status(clip_status)
         evidence_reason = _evidence_reason_for_bundle(clip_status, bundle)
+        terminal_commit_started = time.monotonic()
         terminal_committed = complete_finalizer_task(
             pg_conn,
             lease,
@@ -6251,6 +6558,9 @@ def _finalize_one(
             clip_path=clip_path,
             metadata_path=str(bundle.get("metadata") or metadata_file),
             output_root=str(bundle.get("evidence_dir") or ""),
+        )
+        stage_timings["terminal_commit_ms"] = int(
+            (time.monotonic() - terminal_commit_started) * 1000
         )
         if not terminal_committed:
             logger.warning(
@@ -6293,6 +6603,7 @@ def _finalize_one(
             materialization_metrics=materialization_metrics,
             throttle_decision=throttle_decision,
             probe_delta=_probe_metrics_delta(probe_before),
+            stage_timings=stage_timings,
         )
         replay_job_id = str(meta.get("job_id") or meta.get("new_job") or "")
         if not _persist_finalized_event_details(
@@ -7558,6 +7869,11 @@ def _process_sink_output(
                             expanded_rows_enabled = (
                                 _evidence_db_index_expanded_rows_enabled()
                             )
+                            if (
+                                not expanded_rows_enabled
+                                or evidence_state != "materialized"
+                            ):
+                                _retain_in_memory_bundle_sidecars(bundle)
                             index_result = upsert_evidence_bundle_index(
                                 pg_conn,
                                 event_id=event_id,
@@ -7565,6 +7881,10 @@ def _process_sink_output(
                                 compute_sha256=False,
                                 include_timeline=expanded_rows_enabled,
                                 include_overlays=expanded_rows_enabled,
+                                **_db_index_payload_kwargs(
+                                    bundle,
+                                    expanded_rows_enabled=expanded_rows_enabled,
+                                ),
                             )
                             db_index_duration_ms = int(
                                 (time.monotonic() - db_index_started) * 1000
@@ -7625,6 +7945,7 @@ def _process_sink_output(
                                 status="ready",
                             )
                         except Exception as exc:
+                            _retain_in_memory_bundle_sidecars(bundle)
                             logger.exception(
                                 "evidence_db_index_upsert_failed event_id=%s",
                                 event_id,
@@ -7720,6 +8041,68 @@ class _FinalizerJob:
     schedule_row: dict
 
 
+class _FinalizerProcessPool:
+    """Spawn-based executor for GIL-heavy bundle/sidecar construction."""
+
+    def __init__(self, max_workers: int) -> None:
+        self.max_workers = max(1, int(max_workers or 1))
+        self._executor = ProcessPoolExecutor(
+            max_workers=self.max_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+        self._lock = Lock()
+        self._submitted = 0
+        self._completed = 0
+        self._failed = 0
+
+    def submit(self, fn: Callable, /, *args, **kwargs) -> Future[object]:
+        future = self._executor.submit(fn, *args, **kwargs)
+        with self._lock:
+            self._submitted += 1
+
+        def record_completion(done: Future[object]) -> None:
+            with self._lock:
+                self._completed += 1
+                if done.cancelled() or done.exception() is not None:
+                    self._failed += 1
+
+        future.add_done_callback(record_completion)
+        return future
+
+    def snapshot(self) -> dict[str, int | str]:
+        with self._lock:
+            return {
+                "mode": "spawn_process_pool",
+                "workers": self.max_workers,
+                "submitted": self._submitted,
+                "completed": self._completed,
+                "failed": self._failed,
+            }
+
+    def close(self, *, wait_for_running: bool, cancel_futures: bool) -> None:
+        self._executor.shutdown(
+            wait=wait_for_running,
+            cancel_futures=cancel_futures,
+        )
+
+
+def _finalize_bundle_process_entry(
+    database_url: str,
+    finalize_kwargs: dict[str, object],
+) -> dict:
+    """Build one bundle in an isolated process; parent owns lease publication."""
+    connection = psycopg.connect(database_url, autocommit=True)
+    try:
+        bundle = _finalize_post_savant_evidence_bundle(
+            connection,
+            **finalize_kwargs,
+        )
+        bundle["_finalizer_process_pid"] = os.getpid()
+        return bundle
+    finally:
+        connection.close()
+
+
 @dataclass(frozen=True)
 class _FinalizerAdmissionV2:
     meta: dict
@@ -7731,6 +8114,17 @@ class _FinalizerAdmissionV2:
     worker_id: str
     schedule_row: dict
     phase_diagnostics: dict[str, object] | None
+    finalizer_submitted_at: str
+    finalizer_submitted_monotonic: float
+
+
+@dataclass
+class _FinalizerHandoffTransfer:
+    """Move-only remux ownership crossing the durable finalizer boundary."""
+
+    lease: MaterializationLease
+    work_permit: WorkPermit
+    lease_heartbeat: LeaseHeartbeatHandle | None = None
 
 
 @dataclass
@@ -7743,6 +8137,7 @@ class _FinalizerFlightV2:
     candidate_dirs: dict[str, tuple[int, int]] | None
     invalid_output_failures: dict[str, int] | None
     stability_checks: int
+    durable_handoff: bool
     work_permit: WorkPermit
     source_permit: SourcePermit
 
@@ -7758,12 +8153,34 @@ def _run_finalizer_admission_v2(
     replay_sink_output_max_bytes: int,
     work_permit: WorkPermit,
     source_permit: SourcePermit,
+    queued_lease_heartbeat: LeaseHeartbeatHandle | None = None,
+    bundle_process_pool: _FinalizerProcessPool | None = None,
 ) -> dict[str, object]:
     """Run readiness/probe/finalization wholly inside the finalizer lane."""
+    executor_started_at = datetime.now(timezone.utc).isoformat()
+    executor_started_monotonic = time.monotonic()
+    if runtime_resources.lease_heartbeats is not None:
+        # The remux lease is heartbeated from enqueue until this executor slot
+        # starts.  Finalization claims/transfers the fence below and registers
+        # its own heartbeat for the running phase.
+        runtime_resources.lease_heartbeats.unregister(queued_lease_heartbeat)
     connection_provider = runtime_resources.db_pool
     if connection_provider is None:
         raise RuntimeError("Scheduler V2 finalizer requires a PostgreSQL pool")
     phase_diagnostics = dict(admission.phase_diagnostics or {})
+    phase_diagnostics.setdefault(
+        "finalizer_submitted_at",
+        admission.finalizer_submitted_at,
+    )
+    phase_diagnostics.setdefault(
+        "finalizer_submitted_monotonic",
+        admission.finalizer_submitted_monotonic,
+    )
+    phase_diagnostics.setdefault("finalizer_started_at", executor_started_at)
+    phase_diagnostics.setdefault(
+        "finalizer_started_monotonic",
+        executor_started_monotonic,
+    )
     phase_override = admission.phase_diagnostics is not None
     try:
         conn = connection_provider.scoped_connection()
@@ -7838,8 +8255,6 @@ def _run_finalizer_admission_v2(
                 "sink_ffprobe_ready",
             )
 
-        submitted_at = datetime.now(timezone.utc).isoformat()
-        submitted_monotonic = time.monotonic()
         job = _FinalizerJob(
             meta=admission.meta,
             meta_dir=admission.meta_dir,
@@ -7848,11 +8263,7 @@ def _run_finalizer_admission_v2(
             source_id=admission.source_id,
             replay_shard_id=admission.replay_shard_id,
             worker_id=admission.worker_id,
-            phase_diagnostics={
-                **phase_diagnostics,
-                "finalizer_submitted_at": submitted_at,
-                "finalizer_submitted_monotonic": submitted_monotonic,
-            },
+            phase_diagnostics=phase_diagnostics,
             schedule_row=admission.schedule_row,
         )
         raw_result = _process_single_finalizer_job(
@@ -7889,6 +8300,7 @@ def _run_finalizer_admission_v2(
             source_permit=source_permit,
             lease_heartbeat_supervisor=runtime_resources.lease_heartbeats,
             shutdown_controller=runtime_resources.shutdown,
+            bundle_process_pool=bundle_process_pool,
         )
         result = dict(raw_result or {})
         result.setdefault("status", "finalized")
@@ -7917,7 +8329,27 @@ class _FinalizerSchedulerV2:
         self._updated_total = 0
         self._submit_failures = 0
         self._not_ready_total = 0
+        self._admission_rejected_total = 0
+        self._admission_rejected_by_reason: dict[str, int] = {}
+        self._handoff_retry_total = 0
+        self._handoff_retry_failed = 0
+        self._queued_lease_heartbeat_total = 0
         self._oldest_ready_age_ms: int | None = None
+        process_workers = int(
+            getattr(cfg, "materialization_finalizer_process_workers", 0) or 0
+        )
+        self._bundle_process_pool = (
+            _FinalizerProcessPool(process_workers)
+            if process_workers > 0
+            else None
+        )
+
+    def close(self, *, wait_for_running: bool, cancel_futures: bool) -> None:
+        if self._bundle_process_pool is not None:
+            self._bundle_process_pool.close(
+                wait_for_running=wait_for_running,
+                cancel_futures=cancel_futures,
+            )
 
     def _schedule_submit_retry(
         self,
@@ -7925,36 +8357,57 @@ class _FinalizerSchedulerV2:
         *,
         event_id: str,
         reason: str,
+        exact_lease: MaterializationLease | None = None,
+        durable_handoff: bool = False,
     ) -> bool:
         retry_reason = _retryable_finalizer_reason(reason)
+        retry_hint_s = (
+            0.25
+            if classify_reason(retry_reason).code == "capacity_unavailable"
+            else 1.0
+        )
         try:
-            lease = current_lease(
+            lease = exact_lease or current_lease(
                 pg_conn,
                 event_id=event_id,
                 fallback_owner="media-finalizer",
                 fallback_phase=MaterializationPhase.FINALIZER_PENDING.value,
             )
             if lease is not None:
-                return _retry_claimed_finalizer(
+                changed = _retry_claimed_finalizer(
                     pg_conn,
                     lease,
                     reason=retry_reason,
-                    retry_hint_s=1.0,
+                    retry_hint_s=retry_hint_s,
                 )
-            changed = schedule_unclaimed_retry(
-                pg_conn,
-                event_id=event_id,
-                reason=retry_reason,
-                retry_hint_s=1.0,
-            )
+            elif durable_handoff:
+                changed = retry_unclaimed_finalizer_handoff(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=retry_reason,
+                    retry_hint_s=retry_hint_s,
+                )
+            else:
+                changed = schedule_unclaimed_retry(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=retry_reason,
+                    retry_hint_s=retry_hint_s,
+                )
         except Exception:
+            if durable_handoff:
+                self._handoff_retry_failed += 1
             logger.exception(
                 "media_scheduler_v2_finalizer_retry_failed event_id=%s reason=%s",
                 event_id,
                 retry_reason,
             )
             return False
+        if durable_handoff and changed:
+            self._handoff_retry_total += 1
         if not changed:
+            if durable_handoff:
+                self._handoff_retry_failed += 1
             logger.warning(
                 "media_scheduler_v2_finalizer_retry_not_changed event_id=%s "
                 "reason=%s",
@@ -7962,6 +8415,41 @@ class _FinalizerSchedulerV2:
                 retry_reason,
             )
         return changed
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        reason_code = str(reason or "unknown")
+        self._admission_rejected_total += 1
+        self._admission_rejected_by_reason[reason_code] = (
+            self._admission_rejected_by_reason.get(reason_code, 0) + 1
+        )
+        logger.info(
+            "media_finalizer_admission_rejected reason=%s total=%s",
+            reason_code,
+            self._admission_rejected_total,
+        )
+
+    def _converge_transferred_handoff(
+        self,
+        pg_conn: psycopg.Connection,
+        transfer: _FinalizerHandoffTransfer,
+        *,
+        reason: str,
+    ) -> bool:
+        """Persist fenced retry before releasing the transferred WIP permit."""
+        if self.runtime_resources.lease_heartbeats is not None:
+            self.runtime_resources.lease_heartbeats.unregister(
+                transfer.lease_heartbeat
+            )
+        try:
+            return self._schedule_submit_retry(
+                pg_conn,
+                event_id=transfer.lease.event_id,
+                reason=reason,
+                exact_lease=transfer.lease,
+                durable_handoff=True,
+            )
+        finally:
+            transfer.work_permit.release()
 
     def admit_metadata(
         self,
@@ -7977,13 +8465,14 @@ class _FinalizerSchedulerV2:
         stability_checks: int,
         cleanup_replay_sink_output_enabled: bool,
         replay_sink_output_max_bytes: int,
-        transferred_work_permits: dict[str, WorkPermit] | None = None,
+        transferred_handoffs: dict[str, _FinalizerHandoffTransfer] | None = None,
     ) -> int:
         transferred = (
-            transferred_work_permits
-            if transferred_work_permits is not None
+            transferred_handoffs
+            if transferred_handoffs is not None
             else {}
         )
+        unsubmitted_reason = "capacity_unavailable:finalizer_admission_not_submitted"
         try:
             return self._admit_metadata_impl(
                 pg_conn,
@@ -7999,13 +8488,21 @@ class _FinalizerSchedulerV2:
                     cleanup_replay_sink_output_enabled
                 ),
                 replay_sink_output_max_bytes=replay_sink_output_max_bytes,
-                transferred_work_permits=transferred,
+                transferred_handoffs=transferred,
             )
+        except Exception:
+            unsubmitted_reason = "temporary_io_error:finalizer_admission_exception"
+            raise
         finally:
-            # A remux permit is transferred into this call.  Discovery, sort,
-            # identity and DB failures must not strand it before submission.
-            for permit in transferred.values():
-                permit.release()
+            # Every remux completion already owns a durable fenced handoff.  No
+            # discovery, fairness, capacity or shutdown branch may return while
+            # retaining that lease without an executor owner.
+            for transfer in transferred.values():
+                self._converge_transferred_handoff(
+                    pg_conn,
+                    transfer,
+                    reason=unsubmitted_reason,
+                )
             transferred.clear()
 
     def _admit_metadata_impl(
@@ -8022,13 +8519,10 @@ class _FinalizerSchedulerV2:
         stability_checks: int,
         cleanup_replay_sink_output_enabled: bool,
         replay_sink_output_max_bytes: int,
-        transferred_work_permits: dict[str, WorkPermit] | None = None,
+        transferred_handoffs: dict[str, _FinalizerHandoffTransfer] | None = None,
     ) -> int:
         if not self.runtime_resources.admission_open:
-            for permit in (transferred_work_permits or {}).values():
-                permit.release()
-            if transferred_work_permits is not None:
-                transferred_work_permits.clear()
+            self._record_admission_rejection("admission_closed")
             return 0
 
         processed_dirs_before = set(processed_dirs)
@@ -8060,7 +8554,7 @@ class _FinalizerSchedulerV2:
             if age is not None
         )
         self._oldest_ready_age_ms = max(ready_ages, default=0)
-        transferred = transferred_work_permits or {}
+        transferred = transferred_handoffs or {}
         admitted = 0
         source_counts: dict[str, int] = {}
         workers = max(1, self.runtime_resources.finalizer_lane.max_workers)
@@ -8076,37 +8570,47 @@ class _FinalizerSchedulerV2:
                 )
                 continue
             if event_id in self._active_event_ids:
-                permit = transferred.pop(event_id, None)
-                if permit is not None:
-                    permit.release()
+                self._record_admission_rejection("event_already_active")
                 continue
             if meta_dir and meta_dir in processed_dirs:
-                permit = transferred.pop(event_id, None)
-                if permit is not None:
-                    permit.release()
+                # A remux transfer is still a live fenced lease even if the
+                # filesystem scan state says the directory was processed.
+                # Leave it in ``transferred`` so the public finally block
+                # durably returns the handoff before releasing WIP.
                 continue
             if meta_dir and _invalid_sink_output_marker_path(meta_dir).exists():
                 processed_dirs.add(meta_dir)
-                permit = transferred.pop(event_id, None)
-                if permit is not None:
-                    permit.release()
                 continue
             if _is_already_ready(pg_conn, event_id):
                 if meta_dir:
                     processed_dirs.add(meta_dir)
                     _clear_sink_phase(meta_dir)
-                permit = transferred.pop(event_id, None)
-                if permit is not None:
-                    permit.release()
                 continue
 
             schedule_row = schedule_rows.get(event_id, {})
             source_id = _metadata_source_id(meta, schedule_row)
+            phase_override = meta.get("_finalizer_phase")
+            phase_diagnostics = (
+                dict(phase_override) if isinstance(phase_override, dict) else None
+            )
+            durable_handoff = phase_diagnostics is not None
+            if phase_diagnostics is not None:
+                admission_attempted_at = datetime.now(timezone.utc).isoformat()
+                phase_diagnostics["finalizer_admission_attempted_at"] = (
+                    admission_attempted_at
+                )
+                phase_diagnostics["handoff_to_finalizer_admission_ms"] = (
+                    _elapsed_ms_between_iso(
+                        phase_diagnostics.get("handoff_persisted_at"),
+                        admission_attempted_at,
+                    )
+                )
             source_count = source_counts.get(source_id, 0)
             max_per_source = int(
                 self.cfg.materialization_finalizer_max_per_source_per_poll or 0
             )
             if max_per_source > 0 and source_count >= max_per_source:
+                self._record_admission_rejection("source_poll_limit")
                 continue
             if (
                 self.cfg.materialization_finalizer_source_serial
@@ -8115,22 +8619,26 @@ class _FinalizerSchedulerV2:
                     for flight in self._futures.values()
                 )
             ):
+                self._record_admission_rejection("source_serial_limit")
                 continue
 
             lane_reservation = self.runtime_resources.finalizer_lane.try_reserve()
             if lane_reservation is None:
+                self._record_admission_rejection("lane_full")
                 break
             source_permit: SourcePermit | None = None
             work_permit: WorkPermit | None = None
+            transfer = transferred.get(event_id)
             try:
                 source_permit = self.runtime_resources.source_slots.try_acquire(
                     source_id
                 )
                 if source_permit is None:
                     lane_reservation.cancel()
+                    self._record_admission_rejection("source_slot_full")
                     continue
-                work_permit = transferred.pop(event_id, None)
-                if work_permit is None:
+                work_permit = transfer.work_permit if transfer is not None else None
+                if transfer is None:
                     work_permit = self.runtime_resources.work_budget.try_acquire(
                         "finalizer",
                         owner=event_id,
@@ -8140,17 +8648,20 @@ class _FinalizerSchedulerV2:
                 if work_permit is None:
                     source_permit.release()
                     lane_reservation.cancel()
+                    self._record_admission_rejection("work_budget_full")
                     break
             except Exception:
-                if work_permit is not None:
+                if transfer is None and work_permit is not None:
                     work_permit.release()
                 if source_permit is not None:
                     source_permit.release()
                 lane_reservation.cancel()
                 raise
 
+            queued_lease_heartbeat: LeaseHeartbeatHandle | None = None
             try:
-                phase_override = meta.get("_finalizer_phase")
+                submitted_at = datetime.now(timezone.utc).isoformat()
+                submitted_monotonic = time.monotonic()
                 admission = _FinalizerAdmissionV2(
                     meta=meta,
                     meta_dir=meta_dir,
@@ -8162,12 +8673,29 @@ class _FinalizerSchedulerV2:
                         f"finalizer-v2-{(self._submitted_total % workers) + 1}"
                     ),
                     schedule_row=schedule_row,
-                    phase_diagnostics=(
-                        dict(phase_override)
-                        if isinstance(phase_override, dict)
-                        else None
-                    ),
+                    phase_diagnostics=phase_diagnostics,
+                    finalizer_submitted_at=submitted_at,
+                    finalizer_submitted_monotonic=submitted_monotonic,
                 )
+                if (
+                    transfer is not None
+                    and self.runtime_resources.lease_heartbeats is not None
+                ):
+                    queued_lease_heartbeat = transfer.lease_heartbeat
+                    if queued_lease_heartbeat is None:
+                        queued_lease_heartbeat = (
+                            self.runtime_resources.lease_heartbeats.register(
+                                "finalizer-queued:"
+                                f"{transfer.lease.event_id}:"
+                                f"{transfer.lease.token}:"
+                                f"{transfer.lease.generation}",
+                                payload=transfer.lease,
+                                lease_seconds=(
+                                    self.cfg.rolling_cache_materialization_processing_deadline_seconds
+                                ),
+                            )
+                        )
+                    self._queued_lease_heartbeat_total += 1
                 future = lane_reservation.submit(
                     _run_finalizer_admission_v2,
                     admission,
@@ -8181,18 +8709,33 @@ class _FinalizerSchedulerV2:
                     replay_sink_output_max_bytes=replay_sink_output_max_bytes,
                     work_permit=work_permit,
                     source_permit=source_permit,
+                    queued_lease_heartbeat=queued_lease_heartbeat,
+                    bundle_process_pool=self._bundle_process_pool,
                 )
             except Exception as exc:
-                work_permit.release()
-                source_permit.release()
+                if self.runtime_resources.lease_heartbeats is not None:
+                    self.runtime_resources.lease_heartbeats.unregister(
+                        queued_lease_heartbeat
+                    )
                 lane_reservation.cancel()
                 self._submit_failures += 1
                 reason = f"finalizer_lane_submit_failed:{type(exc).__name__}"
-                self._schedule_submit_retry(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=reason,
-                )
+                if transfer is not None:
+                    transferred.pop(event_id, None)
+                    self._converge_transferred_handoff(
+                        pg_conn,
+                        transfer,
+                        reason=reason,
+                    )
+                else:
+                    self._schedule_submit_retry(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=reason,
+                        durable_handoff=durable_handoff,
+                    )
+                    work_permit.release()
+                source_permit.release()
                 logger.exception(
                     "media_scheduler_v2_finalizer_submit_failed event_id=%s",
                     event_id,
@@ -8200,11 +8743,17 @@ class _FinalizerSchedulerV2:
                 continue
 
             future.add_done_callback(
-                lambda _done, permit=work_permit, source=source_permit: (
+                lambda _done, permit=work_permit, source=source_permit,
+                heartbeat=queued_lease_heartbeat: (
+                    self.runtime_resources.lease_heartbeats.unregister(heartbeat)
+                    if self.runtime_resources.lease_heartbeats is not None
+                    else None,
                     permit.release(),
                     source.release(),
                 )
             )
+            if transfer is not None:
+                transferred.pop(event_id, None)
             self._futures[future] = _FinalizerFlightV2(
                 admission=admission,
                 sink_dir=sink_dir,
@@ -8214,6 +8763,7 @@ class _FinalizerSchedulerV2:
                 candidate_dirs=candidate_dirs,
                 invalid_output_failures=invalid_output_failures,
                 stability_checks=max(1, int(stability_checks or 1)),
+                durable_handoff=durable_handoff,
                 work_permit=work_permit,
                 source_permit=source_permit,
             )
@@ -8222,9 +8772,6 @@ class _FinalizerSchedulerV2:
             source_counts[source_id] = source_count + 1
             admitted += 1
 
-        for permit in transferred.values():
-            permit.release()
-        transferred.clear()
         if (
             processed_state_path is not None
             and processed_dirs != processed_dirs_before
@@ -8335,6 +8882,7 @@ class _FinalizerSchedulerV2:
                     pg_conn,
                     event_id=flight.admission.event_id,
                     reason=f"finalizer_lane_job_failed:{type(exc).__name__}",
+                    durable_handoff=flight.durable_handoff,
                 )
                 result = {}
             state_changed = False
@@ -8369,6 +8917,7 @@ class _FinalizerSchedulerV2:
                 pg_conn,
                 event_id=flight.admission.event_id,
                 reason="media_worker_shutdown_forced",
+                durable_handoff=flight.durable_handoff,
             )
             self._futures.pop(future, None)
             self._active_event_ids.discard(flight.admission.event_id)
@@ -8376,7 +8925,7 @@ class _FinalizerSchedulerV2:
             flight.source_permit.release()
 
     def snapshot(self) -> dict[str, int]:
-        return {
+        snapshot = {
             "active": len(self._futures),
             "active_events": len(self._active_event_ids),
             "submitted_total": self._submitted_total,
@@ -8384,8 +8933,32 @@ class _FinalizerSchedulerV2:
             "updated_total": self._updated_total,
             "submit_failures": self._submit_failures,
             "not_ready_total": self._not_ready_total,
+            "admission_rejected_total": self._admission_rejected_total,
+            "handoff_retry_total": self._handoff_retry_total,
+            "handoff_retry_failed": self._handoff_retry_failed,
+            "queued_lease_heartbeat_total": self._queued_lease_heartbeat_total,
             "oldest_ready_age_ms": self._oldest_ready_age_ms or 0,
         }
+        if self._bundle_process_pool is not None:
+            process_snapshot = self._bundle_process_pool.snapshot()
+            snapshot.update(
+                {
+                    "process_workers": int(process_snapshot["workers"]),
+                    "process_submitted": int(process_snapshot["submitted"]),
+                    "process_completed": int(process_snapshot["completed"]),
+                    "process_failed": int(process_snapshot["failed"]),
+                }
+            )
+        else:
+            snapshot.update(
+                {
+                    "process_workers": 0,
+                    "process_submitted": 0,
+                    "process_completed": 0,
+                    "process_failed": 0,
+                }
+            )
+        return snapshot
 
 
 def _process_sink_output_with_finalizer_pool(
@@ -8924,14 +9497,16 @@ def _process_single_finalizer_job(
     source_permit: SourcePermit | None = None,
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None = None,
     shutdown_controller: ShutdownController | None = None,
+    bundle_process_pool: _FinalizerProcessPool | None = None,
 ) -> dict[str, object]:
     finalizer_started_at = datetime.now(timezone.utc).isoformat()
     finalizer_started_monotonic = time.monotonic()
-    phase_diagnostics = {
-        **(job.phase_diagnostics or {}),
-        "finalizer_started_at": finalizer_started_at,
-        "finalizer_started_monotonic": finalizer_started_monotonic,
-    }
+    phase_diagnostics = dict(job.phase_diagnostics or {})
+    phase_diagnostics.setdefault("finalizer_started_at", finalizer_started_at)
+    phase_diagnostics.setdefault(
+        "finalizer_started_monotonic",
+        finalizer_started_monotonic,
+    )
     del sink_scan_max_metadata_files
     lock_context = source_lock if source_permit is None else nullcontext()
     try:
@@ -8950,6 +9525,7 @@ def _process_single_finalizer_job(
             return _run_single_finalizer_job_with_connection(
                 job,
                 conn=scoped_connection,
+                database_url=database_url,
                 sink_dir=sink_dir,
                 scan_stats=scan_stats,
                 evidence_output_dir=evidence_output_dir,
@@ -8976,6 +9552,7 @@ def _process_single_finalizer_job(
                 preacquired_work_permit=preacquired_work_permit,
                 lease_heartbeat_supervisor=lease_heartbeat_supervisor,
                 shutdown_controller=shutdown_controller,
+                bundle_process_pool=bundle_process_pool,
             )
     finally:
         if connection_provider is None and "conn" in locals() and conn is not None:
@@ -8990,6 +9567,7 @@ def _run_single_finalizer_job_with_connection(
     job: _FinalizerJob,
     *,
     conn: psycopg.Connection,
+    database_url: str,
     sink_dir: str,
     scan_stats: dict,
     evidence_output_dir: str | None,
@@ -9010,6 +9588,7 @@ def _run_single_finalizer_job_with_connection(
     preacquired_work_permit: WorkPermit | None,
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None,
     shutdown_controller: ShutdownController | None,
+    bundle_process_pool: _FinalizerProcessPool | None,
 ) -> dict[str, object]:
         permit: _HeldMaterializationPermit | None = None
         try:
@@ -9158,6 +9737,8 @@ def _run_single_finalizer_job_with_connection(
                 scan_stats=scan_stats,
                 lease_heartbeat_supervisor=lease_heartbeat_supervisor,
                 shutdown_controller=shutdown_controller,
+                bundle_process_pool=bundle_process_pool,
+                database_url=database_url,
             )
             if outcome.throttle_decision:
                 pacer.apply_decision(outcome.throttle_decision)
@@ -10136,6 +10717,8 @@ class _ImageSchedulerV2:
         return admitted
 
     def admit_snapshots(self, pg_conn: psycopg.Connection) -> int:
+        if not _legacy_derivatives_enabled():
+            return 0
         _mark_not_required(pg_conn)
         if not self.runtime_resources.admission_open:
             return 0
@@ -10166,6 +10749,8 @@ class _ImageSchedulerV2:
         return admitted
 
     def admit_annotations(self, pg_conn: psycopg.Connection) -> int:
+        if not _legacy_derivatives_enabled():
+            return 0
         if not self.runtime_resources.admission_open:
             return 0
         admitted = 0
@@ -10279,6 +10864,11 @@ def _rolling_cache_image_candidate_tasks(
                     et.camera_id, et.event_type, et.event_ts_ms,
                     et.pre_seconds, et.post_seconds, et.replay_window,
                     et.priority, e.payload, e.frame_uuid, e.created_at,
+                    et.created_at AS task_created_at,
+                    COALESCE(
+                        et.materialization_next_attempt_at,
+                        et.materialization_ready_at
+                    ) AS materialization_due_at,
                     et.materialization_ready_at AS rolling_cache_ready_at
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
@@ -10292,14 +10882,11 @@ def _rolling_cache_image_candidate_tasks(
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_ready_at <= now()
                   AND COALESCE(
-                        NULLIF(
-                            to_jsonb(et)->>'materialization_next_attempt_at',
-                            ''
-                        )::timestamptz,
+                        et.materialization_next_attempt_at,
                         et.materialization_ready_at
                       ) <= now()
                   AND COALESCE(
-                        NULLIF(to_jsonb(et)->>'materialization_owner', ''),
+                        et.materialization_owner,
                         'rolling'
                       ) = 'rolling'
                   AND NOT EXISTS (
@@ -10318,7 +10905,11 @@ def _rolling_cache_image_candidate_tasks(
                 )::bigint AS rolling_cache_ready_lag_ms
             FROM candidates
             WHERE rolling_cache_ready_at <= now()
-            ORDER BY priority DESC, rolling_cache_ready_at ASC, created_at ASC
+            ORDER BY
+                priority DESC,
+                materialization_due_at ASC,
+                rolling_cache_ready_at ASC,
+                task_created_at ASC
             LIMIT %(limit)s
             """,
             {
@@ -11362,6 +11953,7 @@ class _RollingCacheMaterializationRunner:
             return 0
 
         metadata_overrides: list[dict] = []
+        transferred_handoffs: dict[str, _FinalizerHandoffTransfer] = {}
         transferred_work_permits: dict[str, WorkPermit] = {}
         for future, future_context in list(self._futures.items()):
             if not future.done():
@@ -11390,7 +11982,19 @@ class _RollingCacheMaterializationRunner:
                     metadata,
                 ):
                     metadata_overrides.append(metadata)
-                    if work_permit is not None:
+                    if (
+                        self._finalizer_scheduler_v2 is not None
+                        and work_permit is not None
+                        and lease is not None
+                    ):
+                        transferred_handoffs[event_id] = _FinalizerHandoffTransfer(
+                            lease=lease,
+                            work_permit=work_permit,
+                            lease_heartbeat=heartbeat_handle,
+                        )
+                        work_permit = None
+                        heartbeat_handle = None
+                    elif work_permit is not None:
                         transferred_work_permits[event_id] = work_permit
                         work_permit = None
             except SegmentPinRetryableError as exc:
@@ -11452,13 +12056,16 @@ class _RollingCacheMaterializationRunner:
                 stability_checks=1,
                 cleanup_replay_sink_output_enabled=True,
                 replay_sink_output_max_bytes=0,
-                transferred_work_permits=transferred_work_permits,
+                transferred_handoffs=transferred_handoffs,
             )
             logger.info(
                 "rolling_cache_finalizer_v2_admitted candidates=%s admitted=%s",
                 len(metadata_overrides),
                 admitted,
             )
+            for permit in transferred_work_permits.values():
+                permit.release()
+            transferred_work_permits.clear()
             return 0
         return _flush_rolling_cache_finalizer_batch_or_defer(
             pg_conn,
@@ -11496,6 +12103,11 @@ def _prepare_rolling_cache_job(
     )
     if lease is None:
         return None
+    remux_claimed_at = datetime.now(timezone.utc)
+    ready_to_remux_claim_ms = _elapsed_ms_between(
+        _datetime_or_none(row.get("rolling_cache_ready_at")),
+        remux_claimed_at,
+    )
     try:
         event_context = _load_event_context(pg_conn, event_id)
         window = _rolling_cache_window(row, event_context)
@@ -11520,12 +12132,22 @@ def _prepare_rolling_cache_job(
             requested_end_pts=requested_end_pts,
             event_frame_pts=event_frame_pts,
         )
-        segments = _find_rolling_segments(
-            cfg=cfg,
-            source_id=source_id,
-            runtime_epoch_id=runtime_epoch_id,
-            segment_index=segment_index,
-            segment_cache=segment_cache,
+        # With the process-lifetime index enabled, discovery and read-pin
+        # publication belong to the remux worker.  Doing discovery here blocks
+        # the scheduler tick and is redundant because
+        # _materialize_rolling_cache_job() refreshes and pins the same source.
+        # The legacy path still needs its per-poll segment snapshot prepared
+        # before submission.
+        segments = (
+            None
+            if segment_index is not None
+            else _find_rolling_segments(
+                cfg=cfg,
+                source_id=source_id,
+                runtime_epoch_id=runtime_epoch_id,
+                segment_index=None,
+                segment_cache=segment_cache,
+            )
         )
         return {
             "event_id": event_id,
@@ -11536,6 +12158,8 @@ def _prepare_rolling_cache_job(
             "labels": labels,
             "segments": segments,
             "lease": lease,
+            "remux_claimed_at": remux_claimed_at.isoformat(),
+            "ready_to_remux_claim_ms": ready_to_remux_claim_ms,
         }
     except RollingCacheCoverageMiss as exc:
         _defer_rolling_cache_task(
@@ -11625,6 +12249,12 @@ def _materialize_rolling_cache_job(
         "size": int(identity.st_size),
         "mtime_ns": int(identity.st_mtime_ns),
         "immutable_probe": materialized.immutable_probe,
+        # Preserve phase diagnostics inside the immutable handoff so a
+        # PostgreSQL-queue retry reports the same remux timing as the immediate
+        # in-memory path.
+        "ready_to_remux_claim_ms": job.get("ready_to_remux_claim_ms"),
+        "remux_claimed_at": job.get("remux_claimed_at"),
+        "remux_ms": materialized.materialization_ms,
     }
     observed_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -11645,6 +12275,9 @@ def _materialize_rolling_cache_job(
             "sink_video_stable_at": observed_at,
             "sink_ffprobe_ready_at": observed_at,
             "rolling_cache_materialization_ms": materialized.materialization_ms,
+            "ready_to_remux_claim_ms": job.get("ready_to_remux_claim_ms"),
+            "remux_claimed_at": job.get("remux_claimed_at"),
+            "remux_ms": materialized.materialization_ms,
             "rolling_cache_segment_ids": list(materialized.segment_ids),
         },
     }
@@ -11866,6 +12499,11 @@ def _rolling_cache_candidate_tasks(
                     et.camera_id, et.event_type, et.event_ts_ms,
                     et.pre_seconds, et.post_seconds, et.replay_window,
                     et.priority, e.payload, e.frame_uuid, e.created_at,
+                    et.created_at AS task_created_at,
+                    COALESCE(
+                        et.materialization_next_attempt_at,
+                        et.materialization_ready_at
+                    ) AS materialization_due_at,
                     et.materialization_ready_at AS rolling_cache_ready_at
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
@@ -11880,14 +12518,11 @@ def _rolling_cache_candidate_tasks(
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_ready_at <= now()
                   AND COALESCE(
-                        NULLIF(
-                            to_jsonb(et)->>'materialization_next_attempt_at',
-                            ''
-                        )::timestamptz,
+                        et.materialization_next_attempt_at,
                         et.materialization_ready_at
                       ) <= now()
                   AND COALESCE(
-                        NULLIF(to_jsonb(et)->>'materialization_owner', ''),
+                        et.materialization_owner,
                         'rolling'
                       ) = 'rolling'
                   AND COALESCE(et.replay_slot_status, '') <> 'active'
@@ -11901,7 +12536,11 @@ def _rolling_cache_candidate_tasks(
                 )::bigint AS rolling_cache_ready_lag_ms
             FROM candidates
             WHERE rolling_cache_ready_at <= now()
-            ORDER BY priority DESC, rolling_cache_ready_at ASC, created_at ASC
+            ORDER BY
+                priority DESC,
+                materialization_due_at ASC,
+                rolling_cache_ready_at ASC,
+                task_created_at ASC
             LIMIT %(limit)s
             """,
             {
@@ -11983,12 +12622,22 @@ def _defer_rolling_cache_task(
             reason,
         )
         return False
-    return retry_rolling_task(
+    persisted = retry_rolling_task(
         pg_conn,
         lease,
         reason=reason,
         retry_hint_s=max(0.5, float(retry_after_s or 0.0)),
     )
+    logger.info(
+        "rolling_cache_coverage_deferred event_id=%s reason=%s retry_after_s=%.3f "
+        "persisted=%s generation=%s",
+        event_id,
+        reason,
+        max(0.5, float(retry_after_s or 0.0)),
+        persisted,
+        lease.generation,
+    )
+    return persisted
 
 
 def _defer_rolling_cache_task_safely(
@@ -12733,6 +13382,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "materialization_max_active=%d materialization_timeout_s=%.1f "
         "materialization_max_backlog=%d materialization_max_per_poll=%d "
         "materialization_finalizer_workers=%d "
+        "materialization_finalizer_process_workers=%d "
         "materialization_finalizer_max_per_source_per_poll=%d "
         "materialization_finalizer_source_serial=%s "
         "single_finalizer_boundary_v2=%s "
@@ -12758,6 +13408,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         cfg.materialization_max_backlog,
         cfg.materialization_max_per_poll,
         cfg.materialization_finalizer_workers,
+        int(getattr(cfg, "materialization_finalizer_process_workers", 0) or 0),
         cfg.materialization_finalizer_max_per_source_per_poll,
         cfg.materialization_finalizer_source_serial,
         _single_finalizer_boundary_enabled(),
@@ -12950,6 +13601,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     next_rolling_cache_poll_at = 0.0
     next_general_poll_at = 0.0
     next_lifecycle_recovery_poll_at = 0.0
+    next_cleanup_recovery_poll_at = 0.0
+    cleanup_rows_scanned_total = 0
+    cleanup_recovered_total = 0
+    cleanup_retry_pending_total = 0
+    finalizer_pending_snapshot = FinalizerPendingMetrics()
     last_scheduler_tick_started_at: float | None = None
     scheduler_tick_sequence = 0
     try:
@@ -12971,6 +13627,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             general_due = now_monotonic >= next_general_poll_at
             lifecycle_recovery_due = (
                 now_monotonic >= next_lifecycle_recovery_poll_at
+            )
+            cleanup_recovery_due = (
+                now_monotonic >= next_cleanup_recovery_poll_at
             )
             try:
                 recovery_updates = 0
@@ -13016,6 +13675,14 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                             cfg.sink_output_dir
                         )
                         if finalizer_scheduler_v2 is not None:
+                            try:
+                                finalizer_pending_snapshot = finalizer_pending_metrics(
+                                    pg_conn
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "media_finalizer_pending_metrics_failed"
+                                )
                             recovered_metadata = _recoverable_finalizer_metadata(
                                 pg_conn,
                                 limit=max(
@@ -13076,25 +13743,46 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                                     general_admitted,
                                 )
 
-                        cleanup_updates = _recover_pending_sink_cleanups(
-                            pg_conn,
-                            sink_root=cfg.sink_output_dir,
-                            enabled=cfg.cleanup_replay_sink_output_enabled,
-                            allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
-                            limit=max(
-                                1,
-                                int(
-                                    os.getenv(
-                                        "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
-                                        "16",
-                                    )
+                        if cleanup_recovery_due:
+                            cleanup_stats = _recover_pending_sink_cleanups(
+                                pg_conn,
+                                sink_root=cfg.sink_output_dir,
+                                enabled=cfg.cleanup_replay_sink_output_enabled,
+                                allowed_statuses=(
+                                    cfg.cleanup_replay_sink_output_statuses
                                 ),
-                            ),
-                        )
-                        if cleanup_updates:
+                                limit=max(
+                                    1,
+                                    int(
+                                        os.getenv(
+                                            "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
+                                            "16",
+                                        )
+                                    ),
+                                ),
+                            )
+                            cleanup_rows_scanned_total += cleanup_stats.rows_scanned
+                            cleanup_recovered_total += cleanup_stats.recovered
+                            cleanup_retry_pending_total += cleanup_stats.retry_pending
+                            cleanup_retry_delay_s = (
+                                min(
+                                    5.0,
+                                    cfg.cleanup_recovery_poll_interval_s,
+                                )
+                                if cleanup_stats.rows_scanned
+                                else cfg.cleanup_recovery_poll_interval_s
+                            )
+                            next_cleanup_recovery_poll_at = (
+                                now_monotonic + cleanup_retry_delay_s
+                            )
                             logger.info(
-                                "media_worker: recovered sink cleanup %d events",
-                                cleanup_updates,
+                                "media_cleanup_recovery cleanup_rows_scanned=%d "
+                                "cleanup_recovered=%d cleanup_retry_pending=%d "
+                                "next_poll_s=%.1f",
+                                cleanup_stats.rows_scanned,
+                                cleanup_stats.recovered,
+                                cleanup_stats.retry_pending,
+                                cleanup_retry_delay_s,
                             )
                         alias_updates = _reconcile_covered_event_aliases(pg_conn)
                         if alias_updates:
@@ -13216,25 +13904,41 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                     if clip_updates:
                         logger.info("media_worker: clip updated %d events", clip_updates)
 
-                    cleanup_updates = _recover_pending_sink_cleanups(
-                        pg_conn,
-                        sink_root=cfg.sink_output_dir,
-                        enabled=cfg.cleanup_replay_sink_output_enabled,
-                        allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
-                        limit=max(
-                            1,
-                            int(
-                                os.getenv(
-                                    "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
-                                    "16",
-                                )
+                    if cleanup_recovery_due:
+                        cleanup_stats = _recover_pending_sink_cleanups(
+                            pg_conn,
+                            sink_root=cfg.sink_output_dir,
+                            enabled=cfg.cleanup_replay_sink_output_enabled,
+                            allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
+                            limit=max(
+                                1,
+                                int(
+                                    os.getenv(
+                                        "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
+                                        "16",
+                                    )
+                                ),
                             ),
-                        ),
-                    )
-                    if cleanup_updates:
+                        )
+                        cleanup_rows_scanned_total += cleanup_stats.rows_scanned
+                        cleanup_recovered_total += cleanup_stats.recovered
+                        cleanup_retry_pending_total += cleanup_stats.retry_pending
+                        cleanup_retry_delay_s = (
+                            min(5.0, cfg.cleanup_recovery_poll_interval_s)
+                            if cleanup_stats.rows_scanned
+                            else cfg.cleanup_recovery_poll_interval_s
+                        )
+                        next_cleanup_recovery_poll_at = (
+                            now_monotonic + cleanup_retry_delay_s
+                        )
                         logger.info(
-                            "media_worker: recovered sink cleanup %d events",
-                            cleanup_updates,
+                            "media_cleanup_recovery cleanup_rows_scanned=%d "
+                            "cleanup_recovered=%d cleanup_retry_pending=%d "
+                            "next_poll_s=%.1f",
+                            cleanup_stats.rows_scanned,
+                            cleanup_stats.recovered,
+                            cleanup_stats.retry_pending,
+                            cleanup_retry_delay_s,
                         )
 
                     alias_updates = _reconcile_covered_event_aliases(pg_conn)
@@ -13291,12 +13995,17 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 if rolling_cache_runner is not None
                 else {"active": 0, "capacity": 0}
             )
+            finalizer_scheduler_snapshot = (
+                finalizer_scheduler_v2.snapshot()
+                if finalizer_scheduler_v2 is not None
+                else {}
+            )
             oldest_ready_age_ms: int | str = "unavailable"
             if scheduler_v2_enabled:
                 oldest_ready_age_ms = max(
                     int(remux_snapshot.get("oldest_ready_age_ms") or 0),
                     int(
-                        (finalizer_scheduler_v2.snapshot() if finalizer_scheduler_v2 else {}).get(
+                        finalizer_scheduler_snapshot.get(
                             "oldest_ready_age_ms",
                             0,
                         )
@@ -13312,9 +14021,17 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=%s sequence=%s tick_duration_ms=%s "
                 "tick_gap_ms=%s recovery_due=%s rolling_due=%s general_due=%s "
+                "cleanup_recovery_due=%s cleanup_rows_scanned=%s "
+                "cleanup_recovered=%s cleanup_retry_pending=%s "
                 "oldest_ready_age_ms=%s "
                 "image_lane_depth=%s remux_lane_depth=%s "
                 "finalizer_lane_depth=%s "
+                "finalizer_admission_rejected_total=%s "
+                "finalizer_handoff_retry_total=%s "
+                "finalizer_handoff_retry_failed=%s "
+                "finalizer_queued_lease_heartbeat_total=%s "
+                "finalizer_pending_total=%s finalizer_pending_unleased=%s "
+                "finalizer_pending_leased=%s finalizer_pending_oldest_age_ms=%s "
                 "permit_active=%s permit_limit=%s "
                 "db_pool_in_use=%s db_pool_limit=%s "
                 "db_pool_peak_in_use=%s db_pool_checkout_count=%s "
@@ -13342,10 +14059,25 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 lifecycle_recovery_due,
                 rolling_cache_due,
                 general_due,
+                cleanup_recovery_due,
+                cleanup_rows_scanned_total,
+                cleanup_recovered_total,
+                cleanup_retry_pending_total,
                 oldest_ready_age_ms,
                 (resource_snapshot.get("image_lane") or {}).get("reserved", 0),
                 remux_snapshot["active"],
                 (resource_snapshot.get("finalizer_lane") or {}).get("reserved", 0),
+                finalizer_scheduler_snapshot.get("admission_rejected_total", 0),
+                finalizer_scheduler_snapshot.get("handoff_retry_total", 0),
+                finalizer_scheduler_snapshot.get("handoff_retry_failed", 0),
+                finalizer_scheduler_snapshot.get(
+                    "queued_lease_heartbeat_total",
+                    0,
+                ),
+                finalizer_pending_snapshot.total,
+                finalizer_pending_snapshot.unleased,
+                finalizer_pending_snapshot.leased,
+                finalizer_pending_snapshot.oldest_age_ms,
                 permit_snapshot["active"],
                 permit_snapshot["max_active"],
                 (resource_snapshot.get("db_pool") or {}).get("in_use", 0),
@@ -13445,6 +14177,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             time.sleep(0.1)
         if rolling_cache_runner is not None:
             rolling_cache_runner.close()
+        if finalizer_scheduler_v2 is not None:
+            finalizer_scheduler_v2.close(
+                wait_for_running=not runtime_resources.shutdown.force_requested,
+                cancel_futures=runtime_resources.shutdown.force_requested,
+            )
         runtime_resources.close(
             wait=not runtime_resources.shutdown.force_requested,
             force=runtime_resources.shutdown.force_requested,

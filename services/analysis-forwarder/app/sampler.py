@@ -28,7 +28,14 @@ class AnalysisFrameSampler:
             else 0
         )
         self.pts_quantization_slack_ns = min(1_000_000, self.min_interval_ns // 1000)
+        # Keep one interval of residual credit after an admission.  A strict
+        # ``pts - last_accepted >= interval`` comparison collapses an 8 FPS
+        # wall-clock stream to roughly 4-6 FPS when normal RTSP jitter makes
+        # many adjacent intervals 124.x ms instead of exactly 125 ms.
+        self.max_credit_ns = self.min_interval_ns * 2
         self._last_accepted_pts_ns_by_source: dict[str, int] = {}
+        self._last_observed_pts_ns_by_source: dict[str, int] = {}
+        self._credit_ns_by_source: dict[str, int] = {}
 
     def admit(self, video_frame: Any) -> bool:
         source_key = _source_key(video_frame)
@@ -42,18 +49,47 @@ class AnalysisFrameSampler:
         if pts_ns is None:
             self._accept(source_key, None)
             return True
-        if _is_keyframe(video_frame):
+
+        return self._admit_pts(
+            source_key,
+            pts_ns,
+            force=_is_keyframe(video_frame),
+        )
+
+    def _admit_pts(self, source_key: str, pts_ns: int, *, force: bool) -> bool:
+        last_observed_pts_ns = self._last_observed_pts_ns_by_source.get(source_key)
+        if last_observed_pts_ns is None or pts_ns <= last_observed_pts_ns:
+            # A new source session or PTS rollback starts a fresh rate domain.
+            self._last_observed_pts_ns_by_source[source_key] = pts_ns
+            self._credit_ns_by_source[source_key] = 0
             self._accept(source_key, pts_ns)
             return True
 
-        last_pts_ns = self._last_accepted_pts_ns_by_source.get(source_key)
-        if last_pts_ns is None or pts_ns <= last_pts_ns:
+        credit_ns = min(
+            self.max_credit_ns,
+            self._credit_ns_by_source.get(source_key, 0)
+            + (pts_ns - last_observed_pts_ns),
+        )
+        self._last_observed_pts_ns_by_source[source_key] = pts_ns
+
+        if force:
+            self._credit_ns_by_source[source_key] = max(
+                0,
+                credit_ns - self.min_interval_ns,
+            )
             self._accept(source_key, pts_ns)
             return True
-        if pts_ns - last_pts_ns + self.pts_quantization_slack_ns >= self.min_interval_ns:
-            self._accept(source_key, pts_ns)
-            return True
-        return False
+
+        if credit_ns + self.pts_quantization_slack_ns < self.min_interval_ns:
+            self._credit_ns_by_source[source_key] = credit_ns
+            return False
+
+        self._credit_ns_by_source[source_key] = max(
+            0,
+            credit_ns - self.min_interval_ns,
+        )
+        self._accept(source_key, pts_ns)
+        return True
 
     def _accept(self, source_key: str, pts_ns: int | None) -> None:
         if pts_ns is not None:

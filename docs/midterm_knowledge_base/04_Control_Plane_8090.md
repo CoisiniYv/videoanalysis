@@ -1,7 +1,7 @@
 ---
 type: control-plane-note
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - "8090"
   - control-plane
@@ -11,96 +11,89 @@ tags:
 
 ## 产品职责
 
-8090 是用户和运维入口，覆盖：
-
-- 摄像头管理；
-- ROI / 区域 / 检测线；
-- 算法规则；
-- 人员和人脸库；
-- 证据浏览；
-- 存储维护；
-- 运行状态；
-- 性能配置；
-- 单分支 / 双分支拓扑配置。
-
-API 服务的 8000 端口只在 compose 网络内使用，8090 通过代理访问 `/api/v1/*`。
-
-## 配置保存与 runtime apply 的区别
-
-最重要的产品语义：
+8090 是唯一主浏览器入口，覆盖摄像头、ROI/规则、人员、人脸、轨迹、evidence、存储、
+运行总览、端到端延迟、完整链路启停和高级性能/拓扑配置。
 
 ```text
-保存摄像头规则 / ROI
-  -> DB update
-  -> /api/v1/cameras/runtime/config/sync
-  -> 生成 Savant/adapter 快照
-  -> 不重启推理链路
-
-启停摄像头 / 修改 RTSP / 修改性能参数 / 修改拓扑
-  -> controlled runtime apply/restart
-  -> evidence guard
-  -> 只重启必要容器
+Browser -> evidence-viewer:8090 -> api:8000 -> DB/Docker/runtime
 ```
 
-已修复：
+`/api/v1/*` 和 `/media/*` 由 8090 代理；FastAPI `/docs` 不在代理范围。
 
-- ROI/算法配置保存不应触发 full runtime apply；
-- 保存后应返回 `containers_restarted=[]` 和 `source_containers_touched=[]`；
-- 8090 需要用中文清晰区分“保存配置”和“受控重启/应用运行时”。
+## 保存与应用
 
-## Runtime performance
+```text
+保存 ROI/规则
+  -> DB update -> config sync -> no full restart
 
-`/api/v1/runtime/performance-config` 管理：
+加入运行/改 RTSP/改性能/改拓扑
+  -> evidence guard -> controlled apply -> runtime epoch/container changes
+```
 
-- analysis FPS；
-- Savant max/min FPS；
-- batch size；
-- pose batch；
-- face detector batch；
-- face embedding batch；
-- max parallel streams；
-- batched push timeout。
+批量双分支的推荐入口不是逐路 camera enable，而是“选择摄像头并启动”。确认时 API 在
+同一受控操作中更新所选摄像头的 enabled 状态并应用拓扑。
 
-应用性能参数会影响 forwarder / Savant 容器，必须走 controlled apply。
+## 完整链路预设
 
-## Runtime topology
+- `production_t4_40`：40 路、20/20、4 FPS、MPS、ROI、rolling；
+- `local_4090_60`：60 路、30/30、8 FPS、无 MPS、仍有 ROI 与 rolling；
+- `custom`：高级运维，自行承担参数和容量验证。
 
-`/api/v1/runtime/topology-config` 支持：
+命名预设会覆盖分支参数。页面显示值若与当前代码 preset 不同，应以服务端返回为准。
 
-- `auto`
-- `single`
-- `dual_same_gpu`
-- `dual_dual_gpu`
+## 后台 apply
 
-双分支拓扑负责生成：
+相关接口：
 
-- Savant branch plan；
-- analysis-forwarder branch plan；
-- Replay/video-file-sink branch；
-- source-to-branch assignment；
-- replay shard plan。
+```text
+PUT  /api/v1/runtime/topology-config
+POST /api/v1/runtime/topology-config/apply-async
+GET  /api/v1/runtime/topology-config/apply-status
+```
 
-pressure harness 已证明同卡双分支 30+30 的 replay shard JSON 可以注入到 clip-worker，
-并完成 retained-evidence 证据链验收。
+状态阶段：
 
-## Evidence guard
+```text
+queued/preflight -> branches -> sources -> rolling_cache_ready/prefill
+  -> evidence -> complete | failed | stopped
+```
 
-任何可能中断取证链路的操作都必须检查 active evidence：
+状态原子持久化到 `media/.runtime/topology_apply_status.json`。页面刷新可恢复显示，
+但执行线程属于当前 API 进程，API 重启会终止任务并标记失败。
 
-- pending；
-- waiting proof；
-- replay job created；
-- materializing；
-- finalizing。
+## Runtime latency
 
-目标是避免 source/replay/savant/worker 重启中断正在生成的证据。旧 active 状态已纳入 stale 终态收敛。
+`GET /api/v1/runtime/latency` 汇总：
 
-## 8090 后续优化
+- 最新 frame annotation 的 media lag 与 write age；
+- 最新 event/bundle media time 与 DB write age；
+- pending/materializing/oldest active task；
+- A/B queue、source count 和最大 source receive age；
+- 10 秒 healthy、60 秒 warning 阈值。
 
-优先级低于真实 RTSP / soak，但生产前仍需要：
+它是在线信号，不代替 pressure artifact 或逐阶段 trace。
 
-- 鉴权和权限；
-- 操作审计更完整；
-- 运行状态指标更清晰；
-- WebSocket 实时告警；
-- 更明确展示 evidence 延迟、队列、topology、RTSP 异常。
+## Evidence guard 与 epoch barrier
+
+性能/拓扑 apply 和受控重启必须检查旧 epoch 活跃任务。默认 blocked 时返回 409；
+`force=true` 只用于明确的高风险操作，并将剩余旧 epoch 任务显式终态化，不能作为普通
+重试按钮。
+
+## 停止完整链路
+
+`POST /api/v1/runtime/control/dual/stop`：
+
+- 停止动态源和双分支采集/推理；
+- 禁用当前摄像头；
+- 保留 event/media/rolling 收尾角色；
+- 更新 apply-status。
+
+它不等于 `midterm_stop.sh` 整栈停止。
+
+## 当前开放项
+
+- 鉴权/RBAC 和更完整操作审计；
+- 跨 API 重启的持久作业队列；
+- WebSocket upgrade proxy；
+- 自动回滚和断流故障演练；
+- 健康脚本清单与当前服务角色同步。

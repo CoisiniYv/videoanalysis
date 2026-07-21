@@ -16,7 +16,8 @@ import math
 from typing import Any
 
 import psycopg
-from pgvector.psycopg import Vector, register_vector
+from pgvector import Vector
+from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)

@@ -140,6 +140,17 @@ class RedisStreamConsumer:
             logger.exception("xack failed for msg_id=%s", msg_id)
             return False
 
+    def ack_many(self, msg_ids: list[str]) -> int:
+        """ACK one committed database batch with a single Redis round trip."""
+
+        if not msg_ids:
+            return 0
+        try:
+            return int(self._client.xack(self._stream, self._group, *msg_ids))
+        except Exception:
+            logger.exception("batch ack failed count=%d", len(msg_ids))
+            return 0
+
     def trim(self, maxlen: int = 10000) -> None:
         """Trim the stream to approximately *maxlen* entries."""
         try:

@@ -280,6 +280,7 @@ def test_media_worker_frame_cache_sidecar_filters_runtime_epoch() -> None:
         event={
             "source_id": "primary_rtsp",
             "camera_id": "primary_rtsp",
+            "created_at": "2026-06-12T01:00:00Z",
             "frame_uuid": "current-frame",
             "frame_pts": 100_000_000_000,
             "payload": {"runtime_epoch_id": CURRENT_EPOCH},
@@ -291,11 +292,12 @@ def test_media_worker_frame_cache_sidecar_filters_runtime_epoch() -> None:
     assert summary["messages_filtered_runtime_epoch"] == 2
 
 
-def test_media_worker_frame_cache_reader_uses_event_ts_when_created_at_lags() -> None:
+def test_media_worker_frame_cache_reader_uses_producer_time_when_media_lags() -> None:
     writer = _activate("media-worker", "app.frame_cache_sidecar_writer")
     event_ts_ms = 1_782_641_303_618
-    delayed_created_at_ms = event_ts_ms + 30_000
-    entry_stream_id = f"{event_ts_ms + 5_980}-0"
+    producer_created_at_ms = event_ts_ms + 100_000
+    delayed_created_at_ms = producer_created_at_ms + 30_000
+    entry_stream_id = f"{producer_created_at_ms + 5_980}-0"
 
     class FakeRedis:
         calls: list[tuple[str, str]] = []
@@ -333,6 +335,10 @@ def test_media_worker_frame_cache_reader_uses_event_ts_when_created_at_lags() ->
             "source_id": "primary_rtsp",
             "camera_id": "primary_rtsp",
             "event_ts_ms": event_ts_ms,
+            "producer_created_at": datetime.fromtimestamp(
+                producer_created_at_ms / 1000.0,
+                tz=timezone.utc,
+            ),
             "created_at": datetime.fromtimestamp(
                 delayed_created_at_ms / 1000.0,
                 tz=timezone.utc,
@@ -349,8 +355,10 @@ def test_media_worker_frame_cache_reader_uses_event_ts_when_created_at_lags() ->
 
     assert [message["frame_uuid"] for message in messages] == ["event-frame"]
     assert summary["anchor_found"] is True
-    assert summary["range_min"] == f"{event_ts_ms - 18_000}-0"
-    assert summary["range_max"] == f"{event_ts_ms + 18_000}-999999"
+    assert summary["retrieval_anchor_source"] == "event.producer_created_at"
+    assert summary["retrieval_time_domain"] == "producer_write_time"
+    assert summary["range_min"] == f"{producer_created_at_ms - 18_000}-0"
+    assert summary["range_max"] == f"{producer_created_at_ms + 18_000}-999999"
     assert fake_redis.calls[0] == (summary["range_max"], summary["range_min"])
 
 

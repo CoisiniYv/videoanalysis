@@ -640,5 +640,87 @@ savant_min_fps
 batched_push_timeout
 ```
 
+命名预设的 UI 流程是先 PUT 保存 topology，再 POST：
+
+```ts
+type RuntimeTopologyApplySelection = {
+  source_ids: string[];
+  disable_unselected: boolean;
+};
+```
+
+到 `/runtime/topology-config/apply-async`。成功响应和后续
+`/runtime/topology-config/apply-status` 都返回状态对象，其稳定核心字段为：
+
+```ts
+type RuntimeTopologyApplyStatus = {
+  job_id?: string | null;
+  status: "idle" | "running" | "succeeded" | "failed" | "stopped" | string;
+  phase: string;
+  percent: number;
+  message: string;
+  started_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
+  rolling_cache?: {
+    prefill_seconds?: number;
+    remaining_seconds?: number;
+  } | null;
+  error?: {
+    message: string;
+    status_code?: number;
+    details?: unknown;
+  } | null;
+  result?: Record<string, unknown> | null;
+};
+```
+
+页面可在刷新后从状态文件恢复进度；后台执行线程不跨 API 进程重启存活。遗留的
+`running` 状态会在读取时转为 `failed`，页面应要求用户先核对实际容器/source 状态再
+重试，不能自动假定回滚成功。
+
 保存与应用是两个动作；apply 可能因 active evidence tasks 被 409/503 guard 阻止，
-`error.details` 会包含 `blocked`、`active_count` 和 task 摘要。
+`error.details` 会包含 `blocked`、`active_count` 和 task 摘要。`force=true` 是高级绕过
+保护的入口，普通 UI 不应把它做成一般重试。
+
+## 12. Runtime Latency Contract
+
+`GET /api/v1/runtime/latency` 的 `data` 核心结构为：
+
+```ts
+type RuntimeLatency = {
+  generated_at: string;
+  generated_at_epoch_ms: number;
+  status: "healthy" | "warning" | "critical" | "unavailable";
+  annotation: {
+    available: boolean;
+    source_id?: string | null;
+    media_lag_s?: number | null;
+    annotation_write_age_s?: number | null;
+    error?: string;
+  };
+  database: {
+    event_media_lag_s?: number | null;
+    event_write_age_s?: number | null;
+    bundle_event_lag_s?: number | null;
+    bundle_write_age_s?: number | null;
+    materialization_pending: number;
+    materializing: number;
+    oldest_active_task_age_s?: number | null;
+  };
+  branches: Array<{
+    branch_id: "a" | "b" | string;
+    queue_depth: number;
+    source_count: number;
+    max_source_receive_age_s?: number | null;
+    available: boolean;
+  }>;
+  thresholds: {
+    healthy_max_s: 10;
+    warning_max_s: 60;
+  };
+};
+```
+
+顶层 severity 当前按 annotation `media_lag_s` 判定。该接口是操作台在线诊断信号，
+不能替代 pressure runner 的完整验收 artifact；`unavailable` 也不能被渲染为零延迟。

@@ -1,0 +1,3 @@
+# Runtime dependencies (PyGObject/GStreamer, savant-rs and pyzmq bindings) are
+# supplied by the pinned Savant 0.6.0 adapter base image. The HTTP metrics and
+# health surface intentionally uses the Python standard library.

@@ -45,12 +45,14 @@ def test_operator_adds_people_face_registration_controls() -> None:
 def test_operator_page_is_chinese_console_ui() -> None:
     html = _text(STATIC_ROOT / "index.html")
     assert "视频分析操作台" in html
-    assert "统一配置台" in html
+    assert "视频分析管理台" in html
     assert "运行概览" in html
-    assert "摄像头管理" in html
-    assert "人员管理" in html
-    assert "人脸轨迹" in html
-    assert "证据管理" in html
+    assert "配置" in html
+    assert "证据" in html
+    assert "运行" in html
+    assert "人员与人脸库" in html
+    assert "人员轨迹" in html
+    assert "高级维护" in html
     assert "报警机器时间" in html
     assert "人脸注册" in html
     assert "轨迹搜索" in html
@@ -58,6 +60,25 @@ def test_operator_page_is_chinese_console_ui() -> None:
     assert "开始注册" in html
     assert "theme-toggle" in html
     assert "黑夜" in html
+
+
+def test_operator_groups_six_workflows_into_three_primary_paths() -> None:
+    html = _text(STATIC_ROOT / "index.html")
+    js = _text(STATIC_ROOT / "operator.js")
+
+    assert html.count('<button class="top-tab') == 3
+    assert 'id="config-context"' in html
+    assert 'id="evidence-context"' in html
+    assert 'id="runtime-context"' in html
+    assert 'data-view="cameras"' in html
+    assert 'data-view="people"' in html
+    assert 'data-view="evidence"' in html
+    assert 'data-view="trajectory"' in html
+    assert 'data-view="runtime"' in html
+    assert 'data-view="maintenance"' in html
+    assert "PRIMARY_TOP_VIEW_BY_VIEW" in js
+    assert "primaryTopView" in js
+    assert "workspace-context" in js
 
 
 def test_operator_customer_view_hides_internal_debug_fields() -> None:
@@ -173,13 +194,13 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
     assert "配置并启用算法规则" in js
     assert "cameras/runtime/config/sync" in js
     assert "syncRuntimeConfig" in js
-    assert "运行配置已同步" in js
+    assert "运行设置已同步" in js
     assert "cameras/runtime/apply" in js
-    assert "运行时已应用" in js
+    assert "运行设置已应用" in js
     assert "restart-runtime" in html
-    assert "受控重启运行时" in html
+    assert "安全重启分析服务" in html
     assert "cameras/runtime/restart" in js
-    assert "运行时已受控重启" in js
+    assert "分析服务已安全重启" in js
 
 
 def test_operator_rule_and_roi_saves_use_config_sync_not_runtime_restart() -> None:
@@ -238,8 +259,8 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=operator-face-batch-20260712" in html
-    assert "trajectory.js?v=trajectory-page-20260712" in html
+    assert "operator.js?v=runtime-nav-latency-20260715-operator-copy" in html
+    assert "trajectory.js?v=trajectory-page-20260712-operator-copy" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js

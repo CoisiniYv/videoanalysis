@@ -52,6 +52,7 @@ class Config:
     rolling_cache_materialization_poll_interval_s: float
     rolling_cache_materialization_ready_segment_grace_seconds: float
     rolling_cache_materialization_processing_deadline_seconds: float
+    cleanup_recovery_poll_interval_s: float = 30.0
     materialization_image_workers: int = 1
     materialization_image_queue_capacity: int = 0
     materialization_remux_queue_capacity: int = 0
@@ -72,6 +73,9 @@ class Config:
     media_worker_shutdown_kill_timeout_s: float = 5.0
     materialization_lease_heartbeat_interval_s: float = 10.0
     materialization_max_attempt_age_s: float = 300.0
+    # Number of spawn-based worker processes used for CPU-heavy evidence
+    # bundle/sidecar construction. Zero preserves the legacy in-process path.
+    materialization_finalizer_process_workers: int = 0
 
 
 def load_config() -> Config:
@@ -126,6 +130,10 @@ def load_config() -> Config:
         materialization_finalizer_workers=max(
             1,
             int(os.getenv("MEDIA_WORKER_FINALIZER_WORKERS", "1")),
+        ),
+        materialization_finalizer_process_workers=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_FINALIZER_PROCESS_WORKERS", "0")),
         ),
         materialization_finalizer_max_per_source_per_poll=max(
             0,
@@ -188,6 +196,15 @@ def load_config() -> Config:
                 "MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES", "ready"
             ).split(",")
             if status.strip()
+        ),
+        cleanup_recovery_poll_interval_s=max(
+            1.0,
+            float(
+                os.getenv(
+                    "MEDIA_WORKER_CLEANUP_RECOVERY_POLL_INTERVAL_S",
+                    "30",
+                )
+            ),
         ),
         rolling_cache_enabled=os.getenv("ROLLING_CACHE_ENABLED", "false")
         .strip()

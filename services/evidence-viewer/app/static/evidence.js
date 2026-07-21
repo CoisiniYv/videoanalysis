@@ -336,12 +336,22 @@ function evidenceStateLabel(bundle = {}) {
     image_ready: "图片就绪",
     image_missing: "图片缺失",
     materialized: "可查看",
+    generated_unverified: "待复核",
+    materialization_skipped: "未生成",
+    materialization_failed: "生成失败",
+    materialization_deadline_expired: "生成超时",
     ready: "可查看",
     failed: "生成失败"
   };
   const label = labels[stateValue] || stateValue || "";
   if (!label) return "";
-  return stateValue === "failed" && reason ? `${label}: ${reason}` : label;
+  const failureStates = new Set([
+    "failed",
+    "materialization_failed",
+    "materialization_deadline_expired",
+    "generated_corrupt"
+  ]);
+  return failureStates.has(stateValue) && reason ? `${label}，请查看提示` : label;
 }
 
 function warningLabel(value) {
@@ -662,10 +672,7 @@ function renderBundleList() {
       evidenceStatusLabel(bundle.visual_evidence_status),
       `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
     ].filter(Boolean).join(" | ");
-    const reason = textOrNull(bundle.evidence_reason);
-    if (reason) {
-      button.title = reason;
-    }
+    if (textOrNull(bundle.evidence_reason)) button.title = "该证据生成异常，请查看提示";
     button.append(main, sub);
     if (isIdentity) {
       const action = document.createElement("span");

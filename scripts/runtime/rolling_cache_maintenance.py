@@ -209,6 +209,38 @@ def _delete_segment(candidate: SegmentCandidate, *, root: Path) -> int:
     return size
 
 
+def _candidate_is_unchanged_and_stable(
+    candidate: SegmentCandidate,
+    *,
+    now_s: float,
+    stability_age_s: float,
+) -> bool:
+    """Revalidate a segment after acquiring the deletion lock.
+
+    Discovery is intentionally performed without the root-wide mutation lock
+    so remux readers are not blocked by a full retention-tree walk.  Before a
+    delete, the small immutable identity is checked again while the lock is
+    held.  A segment that changed between discovery and deletion is deferred
+    to the next maintenance pass.
+    """
+
+    try:
+        metadata_stat = candidate.metadata_path.stat()
+        current_video = _find_video(candidate.directory)
+        if current_video is None:
+            return False
+        current_video = current_video.resolve(strict=False)
+        if current_video != candidate.video_path:
+            return False
+        video_stat = current_video.stat()
+    except OSError:
+        return False
+    newest_mtime_s = max(metadata_stat.st_mtime, video_stat.st_mtime)
+    if newest_mtime_s != candidate.newest_mtime_s:
+        return False
+    return now_s - newest_mtime_s >= stability_age_s
+
+
 def cleanup_once(
     root: Path,
     *,
@@ -222,20 +254,24 @@ def cleanup_once(
     root = root.resolve(strict=False)
     root.mkdir(parents=True, exist_ok=True)
     now = time.time() if now_s is None else float(now_s)
+    discovery_started = time.monotonic()
+    candidates = discover_segments(
+        root,
+        now_s=now,
+        stability_age_s=stability_age_s,
+    )
+    discovery_duration_ms = int((time.monotonic() - discovery_started) * 1000)
+    total_bytes = sum(candidate.size_bytes for candidate in candidates)
     mutation_lock = root / MUTATION_LOCK_FILE
+    lock_started = time.monotonic()
     with mutation_lock.open("a+", encoding="utf-8") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        lock_acquired = time.monotonic()
         pinned, pin_stats = load_active_read_pins(
             root,
             now_s=now,
             corrupt_pin_ttl_s=max(1.0, read_pin_ttl_s),
         )
-        candidates = discover_segments(
-            root,
-            now_s=now,
-            stability_age_s=stability_age_s,
-        )
-        total_bytes = sum(candidate.size_bytes for candidate in candidates)
         deleted_bytes = 0
         retention_deleted = 0
         quota_deleted = 0
@@ -250,6 +286,12 @@ def cleanup_once(
                     continue
                 if block_all or candidate.directory in pinned:
                     skipped_pinned += 1
+                    continue
+                if not _candidate_is_unchanged_and_stable(
+                    candidate,
+                    now_s=now,
+                    stability_age_s=stability_age_s,
+                ):
                     continue
                 if not dry_run:
                     deleted_bytes += _delete_segment(candidate, root=root)
@@ -268,6 +310,12 @@ def cleanup_once(
                 if block_all or candidate.directory in pinned:
                     skipped_pinned += 1
                     continue
+                if not _candidate_is_unchanged_and_stable(
+                    candidate,
+                    now_s=now,
+                    stability_age_s=stability_age_s,
+                ):
+                    continue
                 if not dry_run:
                     removed = _delete_segment(candidate, root=root)
                 else:
@@ -281,6 +329,7 @@ def cleanup_once(
         if deleted_paths and not dry_run:
             generation = _advance_generation(root)
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        lock_released = time.monotonic()
 
     return {
         "status": "ok",
@@ -300,6 +349,9 @@ def cleanup_once(
         "conservative_block_all": block_all,
         "generation": generation,
         "dry_run": dry_run,
+        "discovery_duration_ms": discovery_duration_ms,
+        "lock_wait_ms": int((lock_acquired - lock_started) * 1000),
+        "lock_hold_ms": int((lock_released - lock_acquired) * 1000),
     }
 
 

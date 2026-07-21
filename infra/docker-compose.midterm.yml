@@ -96,6 +96,7 @@ services:
       SAVANT_SUPERVISOR_AUTO_REPAIR_STOPPED_SOURCES: "${SAVANT_SUPERVISOR_AUTO_REPAIR_STOPPED_SOURCES:-false}"
       RUNTIME_OVERVIEW_FORWARDER_CONTAINER: video-analytics-midterm-analysis-forwarder
       RUNTIME_OVERVIEW_FORWARDER_METRICS_URL: http://analysis-forwarder:8081/metrics
+      RUNTIME_TOPOLOGY_SAVANT_B_MODEL_ROOT: /data/video-analytics/models-savant-b
     volumes:
       - ../services/api:/app:rw
       - ../libs:/app/libs:ro
@@ -104,6 +105,7 @@ services:
       - ../infra/config:/app/infra/config:ro
       - /data/video-analytics/media:/data/video-analytics/media:rw
       - /data/video-analytics/models:/data/video-analytics/models:ro
+      - /data/video-analytics/models-savant-b:/data/video-analytics/models-savant-b:ro
       - /var/run/docker.sock:/var/run/docker.sock
     expose:
       - "8000"
@@ -151,7 +153,7 @@ services:
   replay-a:
     image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
     container_name: video-analytics-midterm-replay-a
-    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    profiles: ["dual-replay-shards", "dual-4090-two-source", "operator-dual-runtime"]
     ports:
       - "${REPLAY_A_HOST_PORT:-8198}:8080"
     environment:
@@ -167,7 +169,7 @@ services:
   replay-b:
     image: ghcr.io/insight-platform/savant-replay-x86:v0.6.0
     container_name: video-analytics-midterm-replay-b
-    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    profiles: ["dual-replay-shards", "dual-4090-two-source", "operator-dual-runtime"]
     ports:
       - "${REPLAY_B_HOST_PORT:-8298}:8080"
     environment:
@@ -323,7 +325,7 @@ services:
         BUILDKIT_INLINE_CACHE: "1"
     image: video-analytics-midterm-analysis-forwarder:latest
     container_name: video-analytics-midterm-replay-raw-fanout-a
-    profiles: ["dual-4090-two-source"]
+    profiles: ["dual-4090-two-source", "operator-dual-runtime"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
@@ -363,7 +365,7 @@ services:
         BUILDKIT_INLINE_CACHE: "1"
     image: video-analytics-midterm-analysis-forwarder:latest
     container_name: video-analytics-midterm-replay-raw-fanout-b
-    profiles: ["dual-4090-two-source"]
+    profiles: ["dual-4090-two-source", "operator-dual-runtime"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
@@ -442,7 +444,7 @@ services:
         BUILDKIT_INLINE_CACHE: "1"
     image: video-analytics-midterm-analysis-forwarder:latest
     container_name: video-analytics-midterm-analysis-forwarder-a
-    profiles: ["dual-4090-two-source"]
+    profiles: ["dual-4090-two-source", "operator-dual-runtime"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
@@ -484,7 +486,7 @@ services:
         BUILDKIT_INLINE_CACHE: "1"
     image: video-analytics-midterm-analysis-forwarder:latest
     container_name: video-analytics-midterm-analysis-forwarder-b
-    profiles: ["dual-4090-two-source"]
+    profiles: ["dual-4090-two-source", "operator-dual-runtime"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
       FORWARDER_IN_ENDPOINT: router+bind:tcp://0.0.0.0:5557
@@ -541,6 +543,9 @@ services:
       METRICS_HISTORY: "100"
       METRICS_EXTRA_LABELS: '{"service":"savant-security","profile":"midterm"}'
       BATCH_SIZE: "${BATCH_SIZE:-4}"
+      # A daily single-source module still keeps the bs4 engines. Allow the
+      # muxer to form that batch from consecutive frames of the same source.
+      MAX_SAME_SOURCE_FRAMES: "${SAVANT_SINGLE_MAX_SAME_SOURCE_FRAMES:-4}"
       MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-64}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
@@ -597,6 +602,7 @@ services:
       FRAME_ANNOTATION_EXPORT_MIN_INTERVAL_MS: "${FRAME_ANNOTATION_EXPORT_MIN_INTERVAL_MS:-0}"
       STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS: "${STREAM_SESSION_PTS_ROLLBACK_TOLERANCE_NS:-5000000000}"
       PERSON_OBSERVATION_STREAM: security.person_observations
+      PERSON_OBSERVATION_MAXLEN: "${PERSON_OBSERVATION_MAXLEN:-100000}"
       PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_BBOX_OBSERVATION_MIN_INTERVAL_MS:-333}"
       PERSON_OBSERVATION_MIN_INTERVAL_MS: "${PERSON_OBSERVATION_MIN_INTERVAL_MS:-333}"
       SAME_FRAME_DEBUG_ENABLED: "${SAME_FRAME_DEBUG_ENABLED:-false}"
@@ -646,7 +652,7 @@ services:
   savant-a:
     image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
     container_name: video-analytics-midterm-savant-a
-    profiles: ["dual-4090-two-source"]
+    profiles: ["dual-4090-two-source", "operator-dual-runtime"]
     entrypoint:
       [
         "bash", "-c",
@@ -668,6 +674,8 @@ services:
       METRICS_HISTORY: "100"
       METRICS_EXTRA_LABELS: '{"service":"savant-a","profile":"dual-4090-two-source"}'
       BATCH_SIZE: "${BATCH_SIZE:-4}"
+      # Dense shards should prefer cross-source batches for fair scheduling.
+      MAX_SAME_SOURCE_FRAMES: "${SAVANT_DUAL_MAX_SAME_SOURCE_FRAMES:-1}"
       MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-64}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
@@ -700,6 +708,8 @@ services:
       - /data/video-analytics/downloads:/downloads:rw
       - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
       - /data/video-analytics/media:/data/video-analytics/media:rw
+      - /tmp/video-analytics-mps:/tmp/video-analytics-mps:rw
+    ipc: host
     ports:
       - "${SAVANT_A_METRICS_HOST_PORT:-18180}:8080"
     deploy:
@@ -722,7 +732,7 @@ services:
   savant-b:
     image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
     container_name: video-analytics-midterm-savant-b
-    profiles: ["dual-4090-two-source"]
+    profiles: ["dual-4090-two-source", "operator-dual-runtime"]
     entrypoint:
       [
         "bash", "-c",
@@ -745,6 +755,7 @@ services:
       METRICS_HISTORY: "100"
       METRICS_EXTRA_LABELS: '{"service":"savant-b","profile":"dual-4090-two-source"}'
       BATCH_SIZE: "${BATCH_SIZE:-4}"
+      MAX_SAME_SOURCE_FRAMES: "${SAVANT_DUAL_MAX_SAME_SOURCE_FRAMES:-1}"
       MAX_PARALLEL_STREAMS: "${MAX_PARALLEL_STREAMS:-64}"
       MAX_FPS_CONTROL: "${MAX_FPS_CONTROL:-false}"
       INGRESS_FPS_GATE_ENABLED: "${INGRESS_FPS_GATE_ENABLED:-true}"
@@ -777,6 +788,8 @@ services:
       - /data/video-analytics/downloads:/downloads:rw
       - /data/video-analytics/artifacts:/data/video-analytics/artifacts:rw
       - /data/video-analytics/media:/data/video-analytics/media:rw
+      - /tmp/video-analytics-mps:/tmp/video-analytics-mps:rw
+    ipc: host
     ports:
       - "${SAVANT_B_METRICS_HOST_PORT:-18181}:8080"
     deploy:
@@ -796,8 +809,54 @@ services:
       start_period: 15m
     restart: unless-stopped
 
+  cuda-mps-operator:
+    image: ghcr.io/insight-platform/savant-deepstream:0.6.0-7.1
+    container_name: video-analytics-midterm-cuda-mps-operator
+    profiles: ["operator-dual-runtime"]
+    entrypoint: ["bash", "-lc"]
+    command:
+      - >-
+        set -eu;
+        mkdir -p "$${CUDA_MPS_PIPE_DIRECTORY}" "$${CUDA_MPS_LOG_DIRECTORY}";
+        rm -f "$${CUDA_MPS_PIPE_DIRECTORY}"/* "$${CUDA_MPS_LOG_DIRECTORY}"/*;
+        nvidia-cuda-mps-control -d;
+        trap 'echo quit | nvidia-cuda-mps-control >/tmp/mps-quit.log 2>&1 || true' TERM INT EXIT;
+        while :; do sleep 5; done
+    environment:
+      CUDA_MPS_PIPE_DIRECTORY: /tmp/video-analytics-mps/pipe
+      CUDA_MPS_LOG_DIRECTORY: /tmp/video-analytics-mps/log
+      NVIDIA_VISIBLE_DEVICES: "${OPERATOR_MPS_GPU_DEVICE_ID:-0}"
+      CUDA_VISIBLE_DEVICES: "0"
+    volumes:
+      - /tmp/video-analytics-mps:/tmp/video-analytics-mps:rw
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${OPERATOR_MPS_GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "echo get_server_list | nvidia-cuda-mps-control >/dev/null 2>&1",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
   rolling-cache-sink:
-    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    build:
+      context: ..
+      dockerfile: services/rolling-cache-sink/Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-rolling-cache-sink:latest
     container_name: video-analytics-midterm-rolling-cache-sink
     profiles: ["rolling-cache"]
     entrypoint: ["/bin/sh", "/opt/rolling-cache-sink-entrypoint.sh"]
@@ -819,16 +878,23 @@ services:
       METADATA_JSON_FORMAT: native
     volumes:
       - /data/video-analytics/media:/media:rw
+      - ../services/rolling-cache-sink/app:/opt/rolling-cache-sink/app:ro
       - ../scripts/runtime/rolling_cache_sink_entrypoint.sh:/opt/rolling-cache-sink-entrypoint.sh:ro
       - ../scripts/runtime/rolling_cache_maintenance.py:/opt/rolling-cache-maintenance.py:ro
     depends_on:
       replay-raw-fanout: { condition: service_started }
+    pids_limit: ${ROLLING_CACHE_SINK_PIDS_LIMIT:-2048}
     restart: unless-stopped
 
   rolling-cache-sink-a:
-    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    build:
+      context: ..
+      dockerfile: services/rolling-cache-sink/Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-rolling-cache-sink:latest
     container_name: video-analytics-midterm-rolling-cache-sink-a
-    profiles: ["rolling-cache-dual"]
+    profiles: ["rolling-cache-dual", "operator-dual-runtime"]
     entrypoint: ["/bin/sh", "/opt/rolling-cache-sink-entrypoint.sh"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
@@ -848,16 +914,35 @@ services:
       METADATA_JSON_FORMAT: native
     volumes:
       - /data/video-analytics/media:/media:rw
+      - ../services/rolling-cache-sink/app:/opt/rolling-cache-sink/app:ro
       - ../scripts/runtime/rolling_cache_sink_entrypoint.sh:/opt/rolling-cache-sink-entrypoint.sh:ro
       - ../scripts/runtime/rolling_cache_maintenance.py:/opt/rolling-cache-maintenance.py:ro
     depends_on:
       replay-raw-fanout-a: { condition: service_started }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5m
+    pids_limit: ${ROLLING_CACHE_SINK_PIDS_LIMIT:-2048}
     restart: unless-stopped
 
   rolling-cache-sink-b:
-    image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
+    build:
+      context: ..
+      dockerfile: services/rolling-cache-sink/Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    image: video-analytics-midterm-rolling-cache-sink:latest
     container_name: video-analytics-midterm-rolling-cache-sink-b
-    profiles: ["rolling-cache-dual"]
+    profiles: ["rolling-cache-dual", "operator-dual-runtime"]
     entrypoint: ["/bin/sh", "/opt/rolling-cache-sink-entrypoint.sh"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
@@ -877,10 +962,24 @@ services:
       METADATA_JSON_FORMAT: native
     volumes:
       - /data/video-analytics/media:/media:rw
+      - ../services/rolling-cache-sink/app:/opt/rolling-cache-sink/app:ro
       - ../scripts/runtime/rolling_cache_sink_entrypoint.sh:/opt/rolling-cache-sink-entrypoint.sh:ro
       - ../scripts/runtime/rolling_cache_maintenance.py:/opt/rolling-cache-maintenance.py:ro
     depends_on:
       replay-raw-fanout-b: { condition: service_started }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5m
+    pids_limit: ${ROLLING_CACHE_SINK_PIDS_LIMIT:-2048}
     restart: unless-stopped
 
   source-adapter:
@@ -959,7 +1058,9 @@ services:
       WATCHLIST_TARGET_NAMES: "${WATCHLIST_TARGET_NAMES:-Reese,Finch}"
       CONSUMER_GROUP: event-workers-midterm
       CONSUMER_NAME: event-worker-midterm-1
-      PERSON_OBSERVATION_CONSUMER_ENABLED: "true"
+      # Event and evidence policy work must not starve the high-rate trajectory
+      # stream. The dedicated service below owns this consumer group.
+      PERSON_OBSERVATION_CONSUMER_ENABLED: "false"
       PERSON_OBSERVATION_STREAM: security.person_observations
       PERSON_OBSERVATION_CONSUMER_GROUP: person-observation-workers-midterm
       PERSON_OBSERVATION_CONSUMER_NAME: event-worker-midterm-person-1
@@ -967,6 +1068,31 @@ services:
       PERSON_OBSERVATION_BATCH_SIZE: "${PERSON_OBSERVATION_BATCH_SIZE:-100}"
       POLL_TIMEOUT_MS: "2000"
       EVENT_BATCH_SIZE: "${EVENT_BATCH_SIZE:-100}"
+    volumes:
+      - ../services/event-worker:/app:rw
+      - ../libs:/app/libs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  person-observation-worker:
+    # Reuse the event-worker image; this is a separate process role, not a
+    # second image/build surface.
+    image: video-analytics-midterm-event-worker:latest
+    container_name: video-analytics-midterm-person-observation-worker
+    command: ["python", "person_main.py"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${VIDEO_ANALYTICS_DATABASE_URL:-postgresql://video:video@host.docker.internal:5432/video_analytics}
+      PERSON_OBSERVATION_CONSUMER_ENABLED: "true"
+      PERSON_OBSERVATION_STREAM: security.person_observations
+      PERSON_OBSERVATION_CONSUMER_GROUP: person-observation-workers-midterm
+      PERSON_OBSERVATION_CONSUMER_NAME: person-observation-worker-midterm-1
+      PERSON_OBSERVATION_CONSUMER_START_ID: "${PERSON_OBSERVATION_CONSUMER_START_ID:-$$}"
+      PERSON_OBSERVATION_BATCH_SIZE: "${PERSON_OBSERVATION_WORKER_BATCH_SIZE:-500}"
+      POLL_TIMEOUT_MS: "1000"
     volumes:
       - ../services/event-worker:/app:rw
       - ../libs:/app/libs:ro
@@ -1035,7 +1161,7 @@ services:
     restart: unless-stopped
 
   adaface-roi-worker:
-    profiles: ["roi-adaface"]
+    profiles: ["roi-adaface", "operator-dual-runtime"]
     build:
       context: ../services/adaface-roi-worker
       dockerfile: Dockerfile
@@ -1061,6 +1187,8 @@ services:
       METRICS_PORT: "8080"
     volumes:
       - /data/video-analytics/models:/models:ro
+      - /tmp/video-analytics-mps:/tmp/video-analytics-mps:rw
+    ipc: host
     ports:
       - "${ADAFACE_ROI_METRICS_HOST_PORT:-18187}:8080"
     deploy:
@@ -1072,6 +1200,18 @@ services:
               capabilities: [gpu]
     depends_on:
       redis: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/metrics', timeout=2).read(1)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
   qdrant-sync-worker:
@@ -1220,7 +1360,7 @@ services:
   video-file-sink-a:
     image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
     container_name: video-analytics-midterm-video-file-sink-a
-    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    profiles: ["dual-replay-shards", "dual-4090-two-source", "operator-dual-runtime"]
     entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
@@ -1240,7 +1380,7 @@ services:
   video-file-sink-b:
     image: ghcr.io/insight-platform/savant-adapters-gstreamer:0.6.0
     container_name: video-analytics-midterm-video-file-sink-b
-    profiles: ["dual-replay-shards", "dual-4090-two-source"]
+    profiles: ["dual-replay-shards", "dual-4090-two-source", "operator-dual-runtime"]
     entrypoint: ["/bin/sh", "/opt/video-file-sink-entrypoint.sh"]
     environment:
       LOGLEVEL: ${LOGLEVEL:-INFO}
@@ -1410,6 +1550,7 @@ services:
       MEDIA_WORKER_IMAGE_QUEUE_CAPACITY: "${MEDIA_WORKER_IMAGE_QUEUE_CAPACITY:-4}"
       MEDIA_WORKER_REMUX_QUEUE_CAPACITY: "${MEDIA_WORKER_REMUX_QUEUE_CAPACITY:-4}"
       MEDIA_WORKER_FINALIZER_WORKERS: "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
+      MEDIA_WORKER_FINALIZER_PROCESS_WORKERS: "${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-0}"
       MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY: "${MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY:-4}"
       MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL: "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
       MEDIA_WORKER_FINALIZER_SOURCE_SERIAL: "${MEDIA_WORKER_FINALIZER_SOURCE_SERIAL:-false}"
@@ -1441,6 +1582,7 @@ services:
       EVIDENCE_STORAGE_HARD_RATIO: "${EVIDENCE_STORAGE_HARD_RATIO:-1.00}"
       MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED: "${MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_ENABLED:-true}"
       MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES: "${MEDIA_WORKER_CLEANUP_REPLAY_SINK_OUTPUT_STATUSES:-ready,generated,generated_unverified,generated_annotation_failed,duration_guard_failed,generated_corrupt,failed}"
+      MEDIA_WORKER_CLEANUP_RECOVERY_POLL_INTERVAL_S: "${MEDIA_WORKER_CLEANUP_RECOVERY_POLL_INTERVAL_S:-30}"
       DEFAULT_PRE_SECONDS: "${DEFAULT_PRE_SECONDS:-5}"
       DEFAULT_POST_SECONDS: "${DEFAULT_POST_SECONDS:-5}"
       EVIDENCE_MAX_DURATION_SLACK_SEC: "${EVIDENCE_MAX_DURATION_SLACK_SEC:-10}"
@@ -1457,6 +1599,9 @@ services:
       FRAME_CACHE_SIDECAR_LOOKBACK_COUNT: "${FRAME_CACHE_SIDECAR_LOOKBACK_COUNT:-20000}"
       FRAME_CACHE_SIDECAR_RANGE_COUNT: "${FRAME_CACHE_SIDECAR_RANGE_COUNT:-2000}"
       FRAME_CACHE_SIDECAR_MAX_SCAN: "${FRAME_CACHE_SIDECAR_MAX_SCAN:-20000}"
+      # Hard safety boundary: profile/env drift must never restore the old
+      # unbounded 10k-30k annotation scan behavior.
+      FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT: "${FRAME_CACHE_SIDECAR_SCAN_HARD_LIMIT:-500}"
       FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS: "${FRAME_CACHE_SIDECAR_RANGE_CACHE_BUCKET_MS:-0}"
       FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S: "${FRAME_CACHE_SIDECAR_RANGE_CACHE_TTL_S:-0}"
       FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES: "${FRAME_CACHE_SIDECAR_RANGE_CACHE_MAX_ENTRIES:-0}"

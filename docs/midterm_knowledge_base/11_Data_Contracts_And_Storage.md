@@ -1,7 +1,7 @@
 ---
 type: data-contracts
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - database
   - redis
@@ -11,270 +11,173 @@ tags:
 
 # 数据契约与存储
 
-本页把 midterm 栈的核心数据契约放在一起：PostgreSQL 表、Redis Streams、文件系统产物、
-状态机和索引优化。它不是 schema 的替代品；权威细节仍以 `db/migrations/*.sql` 和服务代码为准。
-
 ## 总体原则
 
-- PostgreSQL 是摄像头、规则、人员、图库和 evidence metadata 的事实源。
-- Redis Streams 是运行时消息总线，不是长期事实源。
-- Replay RocksDB 是全速视频存储和取证时间窗来源。
-- 文件系统只长期保存视频和必要 artifact；证据列表、timeline、overlay、annotation metadata 以 DB-backed 语义查询。
-- 8090 展示应优先读 DB-backed API，不应重新扫描整个 evidence 目录作为主路径。
+- PostgreSQL 是配置、业务身份、事件、调度状态和 evidence 索引事实源；
+- Redis Streams 提供有界 delivery，不是最终状态源；
+- Replay 和 rolling 保存在线原始视频窗口；
+- 文件系统保存最终视频/图片，数据库保存可查询索引和展示 metadata；
+- generated YAML/JSON 是快照；
+- 状态和媒体身份必须按 source、runtime epoch、stream session、frame UUID/PTS 隔离。
 
 ## PostgreSQL 表组
 
-| 表组 | 代表表 | 主要写入方 | 主要读取方 |
-| --- | --- | --- | --- |
-| 摄像头配置 | `cameras`, `camera_zones`, `camera_rules` | API / 8090 | config export, runtime apply, Savant rules |
-| 事件 | `events` | event-worker, face-worker | 8090 event/evidence list, media-worker, clip-worker |
-| 人员图库 | `persons`, `person_gallery_embeddings` | API / people registration | face-worker, 8090 |
-| 人脸观测 | `face_observations`, `match_results` | face-worker | face search, evidence overlay, diagnostics |
-| 人体观测 | `person_bbox_observations` | exporter / worker path | evidence overlay, analytics diagnostics |
-| 证据任务 | `evidence_tasks` | event-worker, clip-worker, media-worker | clip-worker, media-worker, runtime guard |
-| 证据索引 | `evidence_bundles`, `evidence_artifacts`, `evidence_frame_timeline`, `evidence_overlay_segments` | media-worker | 8090 evidence API |
-| 审计 | `audit_logs`, storage maintenance audit | API / maintenance | 8090, ops audit |
+| 表组 | 代表表 | 主要 owner |
+| --- | --- | --- |
+| 摄像头配置 | `cameras`, `camera_zones`, `camera_rules` | API |
+| 事件 | `events`, alerts/audit rows | event-worker / face-worker |
+| 人员图库 | `persons`, `person_gallery_embeddings` | API registration |
+| 图库同步 | `gallery_vector_sync_outbox` | API/face sync worker |
+| 人脸观测 | `face_observations`, `match_results` | face-worker |
+| 人体轨迹 | `person_bbox_observations` | person-observation-worker |
+| 证据任务 | `evidence_tasks`, `evidence_event_links` | event/clip/media workers |
+| 证据索引 | `evidence_bundles`, `evidence_artifacts`, `evidence_frame_timeline`, `evidence_overlay_segments` | media-worker |
 
-## 摄像头配置表
+## 摄像头身份
 
-`cameras` 描述 source 级别配置：
+- `cameras.id`：DB camera id；
+- `source_id`：跨 Replay/Savant/Redis/rolling/evidence 的稳定运行身份；
+- `camera_name`：用户展示；
+- `enabled`：是否加入当前运行；
+- zone 的稳定引用是文本 `zone_id`，migration 016 处理历史类型兼容；
+- camera/rule 保存后导出快照，但不应自动做全量 apply。
 
-- `id` 是 DB 内部 camera id；
-- `source_id` 是运行时视频源身份，必须稳定；
-- `camera_name` 是 8090 应优先展示给用户的名称；
-- `enabled` 表示是否应该导出并启动；
-- RTSP URL、transport、动态 source 相关配置由 API 导出到 generated config。
+## Evidence materialization v2
 
-`camera_zones` 描述 ROI / line / polygon：
+权威词汇：`libs/evidence_lifecycle/contract.py`。
 
-- `zone_id` 是面向规则引用的稳定文本 ID；
-- `zone_name` 是 8090 展示名；
-- polygon/line 坐标通常是归一化画面坐标；
-- 规则应引用 `zone_id`，而不是前端临时 label。
-
-`camera_rules` 描述算法配置：
-
-- `rule_id` 是规则稳定 ID；
-- `algorithm_id` / `rule_type` 表示入侵、watchlist hit 等算法；
-- `enabled` 控制该摄像头是否启用该规则；
-- `config` 保存阈值、cooldown、ROI 选择、watchlist 目标等结构化参数。
-
-重要不变量：
-
-- 保存 ROI/算法规则只更新 DB 和导出运行快照，不应触发 full runtime apply。
-- camera/rule 修改后要验收 `containers_restarted=[]` 或等效审计结果。
-- 不要用 `cameras.midterm.yml` 手工判断最终配置真相，它只是 DB 导出的快照。
-
-## 事件表
-
-`events` 是告警和 evidence 的业务入口。典型字段语义：
-
-- `id`：DB event UUID；
-- `source_event_id`：来自 Savant/exporter 的事件 ID；
-- `event_type` / `algorithm_type`：业务类型；
-- `source_id` / `camera_id` / `camera_name`：源和展示身份；
-- `event_ts_ms` / `start_ts_ms` / `created_at`：事件发生时间和入库时间；
-- `status`：事件处理状态；
-- payload/metadata：保留 exporter、规则、证据状态和 UI 展示字段。
-
-事件表的热路径包括：
-
-- 8090 最近事件/证据列表；
-- event-worker source/type cooldown 和 duplicate 判断；
-- media-worker 查找需要 snapshot/annotation/finalization 的事件；
-- evidence API 按 camera/type/time 查询。
-
-已加过的性能索引：
-
-- `idx_events_created_at_desc`
-- `idx_events_event_type_created_at_desc`
-- `idx_events_source_type_created_at_desc_unsuppressed`
-- `idx_events_camera_type_ts_desc_unsuppressed`
-- media-worker queue partial indexes：`idx_events_media_*`
-
-## 人脸和图库表
-
-`persons` 保存人员实体。`person_gallery_embeddings` 保存注册图库：
-
-- embedding 是 `vector(512)`；
-- 一个人可以有多张注册图；
-- 8090 注册人脸后，人员和图库都在 PostgreSQL，不在 `/data/video-analytics/downloads`。
-
-`face_observations` 保存运行时检测到的人脸：
-
-- `source_observation_id` 是 exporter 给出的稳定观测 ID；
-- `embedding vector(512)` 用于 gallery/watchlist 查询；
-- bbox、quality、track/person association 信息用于 evidence overlay 和诊断；
-- 与 `match_results` 共同构成 gallery/watchlist 查询历史。
-
-当前注意点：
-
-- 小图库下 exact pgvector search 成本低；生产在线图库检索已经改为 Qdrant derived index。
-- PostgreSQL 仍保存 `person_gallery_embeddings.embedding vector(512)`，作为事实源、rollback path 和 exact rerank 来源。
-- Qdrant 只服务在线 gallery lookup，第一阶段不迁移历史 `face_observations` 相似搜索。
-- 当前 authoritative runtime 使用 `FACE_VECTOR_BACKEND=qdrant`、
-  `QDRANT_FALLBACK_TO_PGVECTOR=false`、`QDRANT_PREFER_GRPC=true`。
-- Qdrant 结果默认 exact rerank，避免阈值语义漂移；pgvector path 保留为 rollback / exact baseline。
-- 20,000 active vectors benchmark 已证明“数千人员、每人几张图”场景下 Qdrant 查询本身不是当前瓶颈。
-
-Qdrant 相关契约：
-
-- collection：`face_gallery_adaface_512_v1`；
-- alias：`face_gallery_current`；
-- point id：`person_gallery_embeddings.id`；
-- vector size：512；
-- distance：Cosine；
-- PostgreSQL outbox：`gallery_vector_sync_outbox`，用于 upsert/delete 同步；
-- Qdrant 数据目录：`/data/video-analytics/qdrant-midterm`，属于可重建派生状态，不是干净迁移必需数据。
-- 已验收指标：60 路 8 FPS Qdrant p95/p99 为 3ms/4ms，20,000 向量 all-search p95/p99 为
-  4.037ms/6.427ms，fallback count 为 0。
-
-## Evidence 任务表
-
-`evidence_tasks` 是 event-worker、clip-worker、media-worker 之间的状态契约。
-
-典型状态流：
+### 状态
 
 ```text
-pending
-  -> claimed / replay_job_created
-  -> materializing / finalizing
-  -> ready
-  -> terminal failure / materialization_skipped / stale / expired
+manifest_ready
+materialization_pending
+materializing
+materialized
+materialization_deferred
+materialization_failed
+materialization_expired
+materialization_skipped
 ```
 
-关键字段：
+### Phase
 
-- `event_id`：关联 `events.id`；
-- `source_event_id`：用于去重和跨流追踪；
-- `source_id` / `event_type`：admission、并发和优先级使用；
-- `status`：clip-worker 侧任务状态；
-- `materialization_status`：media-worker 侧物化状态；
-- `materialization_deadline_at`：300 秒窗口内的 deadline；
-- `priority`：高价值事件优先，例如 watchlist hit。
+```text
+waiting_ready
+waiting_coverage
+image_running
+remux_running
+finalizer_pending
+finalizing
+terminal
+manual_quarantine
+```
 
-已优化点：
+### 关键字段族
 
-- active/stale 状态会被 runtime guard 识别并终态收敛；
-- pending record request 指向不存在 DB event/task 时，clip-worker 会清理并 `XACK`；
-- `evidence_tasks` 有 pending/materialization priority 索引和 active source/type 索引。
+- 身份：`event_id`, `source_event_id`, `source_id`, `runtime_epoch_id`；
+- 时序：`materialization_ready_at`, `materialization_next_attempt_at`, deadline；
+- 所有权：`materialization_owner`, lease owner/token/generation/expiry/heartbeat；
+- 交接：`materialization_handoff`；
+- 原因：retry/defer/failure/expired reason，互斥使用；
+- Replay：slot owner/token/generation、create state、plan hash、request/delivery id；
+- 清理：`cleanup_audit` 中 durable pending/result。
 
-## Evidence 索引表
+合同：
 
-`evidence_bundles` 是 8090 evidence list/detail 的主入口：
+- ready time 是原始策略时间，retry 不得移动它；
+- deferred 是终态，retryable reason 留在 pending；
+- terminal 状态清空 lease/next-attempt；
+- lease/fence 丢失后不得发布、提交或删除；
+- rolling recovery 由 media-worker 唯一拥有；Replay recovery 由 clip-worker 唯一拥有；
+- DB terminal commit 前不删除 source artifact。
 
-- event/camera/source 元数据；
-- media 状态；
-- raw clip 路径；
-- created/event time；
-- playable/degraded 信息。
+## Migrations 029–032
 
-`evidence_artifacts` 保存每个 evidence 的文件或逻辑 artifact：
+| Migration | 作用 | 部署注意 |
+| --- | --- | --- |
+| 029 | lifecycle、owner、lease、handoff、历史分类/隔离 | ambiguous active row fail closed 到 quarantine |
+| 030 | lifecycle claim/recovery indexes | 与 Scheduler V2 查询口径一致 |
+| 031 | Replay slot/create fencing | 防止旧 clip worker 重复提交 |
+| 032 | cleanup_pending、algorithm cooldown hot indexes | concurrent、autocommit、非压力窗口 |
 
-- raw clip；
-- snapshot；
-- manifest；
-- overlay/timeline metadata；
-- 其他可审查输出。
-
-`evidence_frame_timeline` 和 `evidence_overlay_segments` 保存帧级时间线和展示片段：
-
-- 它们用于让 8090 展示“什么时候识别到人脸/人体/命中名单”；
-- raw clip 可播放但 frame metadata 缺失时，bundle 可以 degraded，而不是失败。
+不要仅部署新 worker 而漏 migration，也不要只应用 migration 后继续运行旧镜像而不做
+兼容性检查。
 
 ## Redis Streams
 
-| Stream | 写入方 | 消费方 | 语义 |
-| --- | --- | --- | --- |
-| `security.events` | Savant exporters, face-worker watchlist emitter | event-worker | 行为事件和 watchlist hit |
-| `security.face_observations` | Savant face exporter | face-worker | 人脸观测、embedding、质量信息 |
-| `security.person_observations` | Savant person exporter | worker/diagnostics | 人体框/轨迹观测 |
-| `security.record_requests` | event-worker | clip-worker | 取证请求 |
-| `security.frame_annotations` | Savant frame annotation exporter | clip/media evidence path | 帧级 overlay/timeline proof |
-
-Redis 使用约定：
-
-- consumer group lag/pending 是压测必须记录的指标；
-- pending 不为 0 不一定是故障，要看是否持续增长、是否对应已不存在 DB task；
-- `security.frame_annotations` 是有界近似保留，不要按 60 路线性放大到无限；
-- record request 去重已经从全流 `XRANGE - +` 改为 Redis `SET NX EX` 幂等键。
-
-## Record request 去重契约
-
-旧问题：
-
-```text
-RecordRequestPublisher.has_request()
-  -> XRANGE security.record_requests - +
-```
-
-在长跑或 60 路事件风暴下，这是 O(N) 热点。
-
-当前契约：
-
-- key 由 stream、`source_event_id`、strategy 计算；
-- `publish()` 在 `XADD` 前 `SET NX EX`；
-- `XADD` 失败释放 key，允许重试；
-- `has_request()` 只做 Redis `EXISTS`；
-- duplicate retry task 标记为 duplicate skip，不留下活跃 pending；
-- TTL 默认以天为单位，覆盖 replay/evidence 任务生命周期。
-
-验证入口：
-
-- `harness/tests/test_record_request_idempotency.py`
-- `harness/tests/test_event_worker_recording_policy.py`
-- pressure report 中 event-worker dedupe counters。
-
-## 文件系统目录
-
-| 路径 | 作用 | 是否干净迁移 |
+| Stream | Producer | Consumer |
 | --- | --- | --- |
-| `/data/video-analytics/models` | 模型文件 | 需要迁移 |
-| `/data/video-analytics/media` | evidence/raw clip/runtime media | 默认不迁历史 |
-| `/data/video-analytics/artifacts` | 压测和诊断 artifact | 默认不迁历史 |
-| `/data/video-analytics/downloads` | 临时下载/导入区 | 当前不作为迁移必需 |
-| Replay RocksDB 路径 | 全速视频存储 | 默认不迁历史 |
-| PostgreSQL data | 业务状态 | 干净迁移默认不带 |
-| Redis data | 运行消息状态 | 干净迁移默认不带 |
+| `security.events` | Savant behavior / face-worker | event-worker |
+| `security.person_observations` | behavior rules | person-observation-worker |
+| `security.face_rois` | Savant ROI exporter | adaface-roi-worker |
+| `security.face_observations` | Savant single path / ROI worker | face-worker |
+| `security.frame_annotations` | Savant | latency、单分支兼容 proof |
+| `security.frame_annotations.<source>` | Savant full preset | media-worker source-scoped lookup |
+| `security.record_requests` | event-worker normal path | clip-worker |
+| `security.alerts` | event-worker | API WebSocket router |
 
-干净迁移原则：
+Redis contract：
 
-- 代码和模型迁移；
-- 旧 evidence、Replay、Redis、PostgreSQL 不迁，除非目标明确是业务数据迁移；
-- 人脸注册数据在 PostgreSQL，因此新机器需要重新注册或另做 DB 迁移。
+- consumer group pending/lag 必须观测；
+- stream trimming 不能删除未消费高率轨迹；因此 person 消费已拆独立进程并提高 maxlen；
+- record request 使用 `SET NX EX` 幂等键，不扫描全 stream；
+- full preset suppress record request；
+- source-scoped annotation 在 full preset 不允许静默 fallback global。
 
-## 状态和时间口径
+## 人脸向量
 
-不要混用这些时间：
+- PostgreSQL `person_gallery_embeddings` 是事实源，512 维；
+- 当前 env 默认 `FACE_VECTOR_BACKEND=pgvector`；
+- Qdrant profile、collection/alias、outbox 和 exact rerank 仍受支持；
+- Qdrant 只在显式启用并观测 bootstrap/sync/fallback 后才是运行查询后端；
+- 历史 Qdrant benchmark 不改变当前默认配置。
 
-- 摄像头画面 PTS；
-- Savant frame timestamp；
-- event `event_ts_ms`；
-- event `created_at`；
-- evidence task `created_at`；
-- materialization deadline；
-- media-worker finalization 完成时间。
+## Evidence 索引
 
-排障时要明确是在问：
+`evidence_bundles` 是 list/detail 主入口；`evidence_artifacts` 保存媒体/manifest 逻辑，
+timeline 与 overlay 是 8090 的帧级展示来源。
 
-- 事件是否产生；
-- record request 是否产生；
-- Replay job 是否成功；
-- raw clip 是否写出；
-- DB-backed bundle 是否 ready；
-- 8090 是否能查到；
-- overlay/annotation 是否 complete。
+- DB 有 bundle 但媒体缺失：不可播放；
+- 文件存在但 DB 无 bundle：主页面不可见；
+- annotation degraded 必须显式标注，不能伪装 complete；
+- image evidence 与 video evidence 可以在不同产品页面展示；
+- covered child 必须可追到 parent/physical evidence。
 
-## 数据契约改动检查表
+## 时间域
 
-修改数据契约时必须回答：
+| 时间/身份 | 用途 |
+| --- | --- |
+| `frame_uuid` / keyframe UUID | 视觉身份绑定 |
+| 原始 `frame_pts` | 事件、轨迹、annotation、窗口映射 |
+| `rolling_cache_mux_pts` | 稳定 MOV/segment/crop |
+| `event_ts_ms` | 业务事件时间 |
+| `created_at` | 入库/机器时间 |
+| Redis stream id | delivery/诊断，不是媒体锚点 |
 
-- 是否新增/修改 DB migration；
-- 是否影响旧数据兼容；
-- 是否影响 Redis stream payload；
-- 是否影响 8090 list/detail；
-- 是否影响 evidence task 状态机；
-- 是否影响 runtime guard；
-- 是否需要新增索引；
-- 是否需要 pressure report 新增字段；
-- 是否需要更新本知识库。
+原始 PTS 与 mux PTS 的映射必须通过同一 source/session/epoch 和 frame identity 完成。
+
+## 存储路径
+
+| 路径 | 作用 |
+| --- | --- |
+| `/data/video-analytics/models` | 共享模型 |
+| `/data/video-analytics/models-savant-b` | B 分支独立 engine cache |
+| `/data/video-analytics/replay-midterm*` | Replay RocksDB |
+| `/home/user/video-analytics-fast/rolling-cache` | 默认 rolling 在线窗口 |
+| `/home/user/video-analytics-fast/rolling-cache-materialized` | 默认中间物化 |
+| `/data/video-analytics/media/evidence` | 最终 evidence |
+| `/home/user/video-analytics-fast/face_trajectory_cache` | 轨迹展示 cache |
+| `/data/video-analytics/artifacts` | 压测/诊断证据 |
+
+host 路径可被环境变量覆盖，以 effective Compose mount 为准。
+
+## 改动检查表
+
+- 是否有 migration/upgrade/idempotence 路径；
+- 是否改变 status/phase/owner/reason；
+- 是否改变 stream producer/consumer/maxlen/ACK；
+- 是否改变 source/epoch/session/frame identity；
+- 是否改变 raw/mux/business 时间域；
+- 是否保持 DB-backed list/detail；
+- 是否需要新索引和在线创建策略；
+- 是否同步当前架构、部署和 API 文档。

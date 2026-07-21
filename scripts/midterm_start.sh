@@ -9,6 +9,7 @@ COMPOSE_FILE="$REPO_ROOT/infra/docker-compose.midterm.yml"
 STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
+FAST_DATA_ROOT="${VIDEO_ANALYTICS_FAST_ROOT:-/home/user/video-analytics-fast}"
 OPERATOR_URL="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
 
 BUILD_IMAGES=true
@@ -221,6 +222,11 @@ ensure_data_directories() {
         "$DATA_ROOT/replay-midterm"
         "$DATA_ROOT/replay-midterm-a"
         "$DATA_ROOT/replay-midterm-b"
+        "/tmp/video-analytics-mps/pipe"
+        "/tmp/video-analytics-mps/log"
+        "$FAST_DATA_ROOT/rolling-cache"
+        "$FAST_DATA_ROOT/rolling-cache-materialized"
+        "$FAST_DATA_ROOT/face_trajectory_cache"
     )
     if [[ "$LOCAL_POSTGRES" == true ]]; then
         dirs+=("$DATA_ROOT/postgres-midterm")
@@ -234,6 +240,16 @@ ensure_data_directories() {
     done
 
     log_success "Runtime directories are ready"
+}
+
+precreate_operator_dual_runtime() {
+    log_info "Pre-creating the stopped dual-runtime containers managed by 8090..."
+    MIDTERM_COMPOSE_FILE="$COMPOSE_FILE" \
+    MIDTERM_STORAGE_OVERRIDE="$STORAGE_OVERRIDE" \
+    MIDTERM_OPERATOR_OVERRIDE="$REPO_ROOT/infra/operator-dual-runtime.override.yml" \
+    MIDTERM_ENV_FILE="$ENV_FILE" \
+        bash "$SCRIPT_DIR/runtime/precreate_operator_dual_runtime.sh"
+    log_success "8090 dual-runtime containers are ready for browser-controlled startup"
 }
 
 ensure_yolov8_face_symlinks() {
@@ -409,6 +425,9 @@ build_images() {
     log_info "Building remaining service images..."
     compose build
 
+    log_info "Building the ROI AdaFace image used by the 8090 full-runtime preset..."
+    docker compose "${COMPOSE_ARGS[@]}" --profile operator-dual-runtime build adaface-roi-worker
+
     log_success "Images are built"
 }
 
@@ -505,6 +524,7 @@ main() {
     echo ""
     build_images
     start_services
+    precreate_operator_dual_runtime
 
     echo ""
     wait_for_health || true

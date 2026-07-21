@@ -1,10 +1,10 @@
 ---
 type: evidence-note
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - evidence
-  - replay
+  - rolling-cache
   - media-worker
 ---
 
@@ -12,122 +12,137 @@ tags:
 
 ## 设计目标
 
-证据链目标是生成可审查、可播放、可追踪来源的 evidence。
+- 视频 evidence 保留可播放 `raw_clip.mov`；
+- watchlist 命中可生成图片 evidence/轨迹图片；
+- bundle、artifact、timeline、overlay 和状态以 PostgreSQL 为主；
+- 8090 不依赖全目录扫描；
+- frame UUID/PTS、runtime epoch、stream session 和 source identity 可审计；
+- 失败、过期、策略跳过和 covered alias 不能伪装成成功。
 
-当前语义：
-
-- `raw_clip.mov` 是文件系统视频 artifact；
-- manifest、timeline、overlay、annotation metadata 进入 PostgreSQL；
-- 8090 evidence list/detail 以 DB-backed index 为主；
-- raw clip 可播放但 annotation 缺失时，可以展示 degraded 状态，而不是把 evidence 判为完全失败。
-
-## 状态流
+## 完整预设主路径
 
 ```text
-event created
-  -> evidence_task pending
-  -> record_request published
-  -> clip-worker waits for proof / calls Replay
-  -> replay_job_created
-  -> video-file-sink output ready
-  -> media-worker materializing
-  -> materialized / materialization_failed / materialization_skipped
-  -> evidence_bundles indexed
+Replay raw output
+  -> rolling-cache-sink A/B
+  -> epoch/source/session fragments
+
+Savant event
+  -> event-worker cooldown
+  -> evidence_task (after rolling prefill gate)
+
+media-worker
+  -> wait segment coverage
+  -> fenced claim/read pin
+  -> image or remux
+  -> durable finalizer handoff
+  -> finalizer process
+  -> atomic publish + DB index
+  -> materialized
 ```
 
-相关表：
+完整预设固定：
 
-- `events`
-- `evidence_tasks`
-- `evidence_bundles`
-- `evidence_artifacts`
-- `evidence_frame_timeline`
-- `evidence_overlay_segments`
+```text
+ROLLING_CACHE_SUPPRESS_RECORD_REQUESTS=true
+ROLLING_CACHE_MATERIALIZATION_ENABLED=true
+ROLLING_CACHE_FALLBACK_TO_REPLAY=false
+MEDIA_WORKER_SCHEDULER_V2_ENABLED=true
+MEDIA_WORKER_SEGMENT_INDEX_ENABLED=true
+```
 
-## Admission 与 backpressure
+因此正常完整链不占 Replay job slot，也不启动每事件 video-file-sink export。
 
-60 路事件风暴下，系统不是为每个事件全量生成 evidence。当前策略是通过 admission/backpressure
-保留预算内高价值证据：
+## 单分支兼容路径
 
-- global active budget；
-- per-source active budget；
-- per-event-type budget；
-- clip-worker concurrency；
-- per-shard concurrency；
-- per-source replay concurrency；
-- media-worker materialization backlog / deadline guard。
+```text
+record_request
+  -> clip-worker proof/planner/admission
+  -> fenced Replay create
+  -> video-file-sink
+  -> media-worker sink finalization
+```
 
-跳过的事件会以 `materialization_skipped` 等状态终态化，避免无限 pending。
+Clip Coordinator V2 仍是有效实现。它负责 Replay-owned 阶段，不得恢复 rolling-owned
+任务；media-worker 不重新执行 Replay admission。
 
-## Clip-worker
+## Canonical lifecycle v2
 
-输入：
+状态：
 
-- Redis `security.record_requests`
-- PostgreSQL events/evidence_tasks
-- Redis frame annotations / proof
+```text
+manifest_ready
+materialization_pending
+materializing
+materialized
+materialization_deferred
+materialization_failed
+materialization_expired
+materialization_skipped
+```
 
-输出：
+运行 phase：
 
-- Replay job；
-- evidence task 状态；
-- replay shard diagnostics。
+```text
+waiting_ready
+waiting_coverage
+image_running
+remux_running
+finalizer_pending
+finalizing
+terminal
+manual_quarantine
+```
 
-已优化：
+关键合同：
 
-- stale/缺失 DB 事件 pending record request 会 `XACK`；
-- replay shard routing 支持 `REPLAY_SHARDS_JSON` / `REPLAY_SHARDS_CONFIG_PATH`；
-- constant-cadence Replay 请求成为默认。
+- `materialization_deferred` 是 claim-terminal；
+- retry 使用 pending、`materialization_next_attempt_at` 和 normalized reason；
+- claim 使用 lease owner/token/generation；
+- remux 到 finalizer 使用 durable handoff；
+- stale owner 不能 publish、commit 或 cleanup；
+- terminal commit 后 cleanup，失败时记录 `cleanup_pending` 供恢复；
+- migration 029–031 是该状态/围栏的 schema 基础。
 
-## Media-worker
+## 时间域和视频
 
-输入：
+```text
+frame_uuid/keyframe_uuid      视觉身份
+Savant frame_pts              事件、轨迹、annotation 关联
+rolling_cache_mux_pts         MOV 封装、segment、裁剪
+event_ts_ms/created_at        业务时间和诊断
+```
 
-- video-file-sink 输出目录；
-- sink metadata；
-- evidence task deadline；
-- frame annotation / DB metadata。
+RTSP wallclock PTS 可能抖动。rolling sink 不修改原始 Savant PTS，而是为编码媒体建立
+稳定 mux cadence；media-worker 用 event frame UUID（必要时最近原始 PTS）映射到 mux
+窗口。annotation/timeline 仍保存原始分析时间域。
 
-输出：
+证据视频应约为原始 24 FPS，bbox/timeline 约为 4/8 FPS 稀疏标注。不能把稀疏 bbox
+误判为视频丢帧。
 
-- DB-backed evidence index；
-- retained `raw_clip.mov`；
-- terminal evidence state。
+## 物理文件与数据库
 
-已优化：
+最终 evidence 可能包含：
 
-- deadline-aware pacer；
-- high-priority event type 优先；
-- earliest deadline 优先；
-- finalization 后 0.5s 平滑停顿；
-- deadline guard 90s 内跳过停顿；
-- `MEDIA_WORKER_MATERIALIZATION_CPU_THREAD_LIMIT=4`；
-- ffmpeg output-side `-threads` 和 `ultrafast` preset；
-- pressure report 在 drain 后刷新 logs；
-- `imageio_ffmpeg_fallback_count` 按数值解析。
+- `raw_clip.mov` 或 image artifact；
+- `metadata.json`/manifest 等兼容文件；
+- 可重建 sidecar（单分支/诊断时）；
+- PostgreSQL `evidence_bundles`、`evidence_artifacts`、
+  `evidence_frame_timeline`、`evidence_overlay_segments`。
 
-## 当前 evidence 延迟
+完整预设关闭 legacy derivatives，但仍写 expanded DB rows。8090 的 list/detail、
+timeline 和 annotation 必须优先来自数据库；filesystem fallback 只能是显式兼容状态。
 
-在 `pressure60_media_fullobs_8fps_20260629T092901Z` 中：
+## Cooldown、coverage 与成功口径
 
-- retained playable：50/50；
-- media-worker CPU peak：98.08%；
-- queue wait p95：约 189.9s；
-- lifecycle p95：约 192.3s；
-- lifecycle p99：约 195.7s；
-- deadline slack min：约 103.1s；
-- imageio fallback：0。
+- event 总数可以高于 task/bundle 数，因为 source+algorithm cooldown 会抑制重复任务；
+- covered alias 必须通过 `evidence_event_links`/parent 语义可追踪；
+- `materialization_skipped`、failed、expired 都不是 playable success；
+- watchlist 图片可能在人员轨迹页展示，不一定出现在视频 evidence 列表；
+- 验收应分别统计 events、unsuppressed tasks、physical bundles、playable event coverage。
 
-解释：
+## 当前容量结论
 
-这是用 300 秒 materialization deadline 换 CPU 平滑。它不是告警触发延迟，而是事件创建到 evidence
-可播放/入库完成的延迟。
-
-## 何时需要更强 finalizer
-
-暂时不建议直接上 worker pool 或多 media-worker 容器。只有出现以下情况再升级：
-
-- 真实 RTSP / 长 soak 下 lifecycle p95/p99 接近或超过 300s；
-- `materialization_expired` 增多；
-- 生产目标从 retained high-value evidence 改为全事件 evidence；
-- media-worker CPU 已平滑但队列持续增长。
+- T4 40 路完整链已验证，4 小时运行无 failed/expired/fallback；
+- 同步事件波峰下 queue wait 明显，当前 media max-active/remux/finalizer 仍需监控；
+- 4090 60 路较早 revision 通过，最新双时间域实现需要 60 路复跑；
+- 不允许通过关闭 proof、降低原始视频 FPS、删除失败结果或放宽 deadline 伪造通过。

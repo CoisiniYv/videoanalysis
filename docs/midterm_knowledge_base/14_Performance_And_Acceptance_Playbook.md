@@ -1,7 +1,7 @@
 ---
 type: performance-acceptance
 project: video-analytics-midterm
-updated: 2026-06-29
+updated: 2026-07-20
 tags:
   - performance
   - pressure
@@ -10,295 +10,165 @@ tags:
 
 # 性能与验收手册
 
-本页把当前性能结论、压测口径、指标含义和验收门槛固化下来，避免后续把不同测试混在一起解释。
+## 当前有效基线
 
-## 当前已证明的能力
-
-| 场景 | 结论 | 限制 |
+| 场景 | 结论 | 适用边界 |
 | --- | --- | --- |
-| 60 路 3 FPS downstream evidence | 50/50 retained playable，8090 可查 | pressure source，不是真实 RTSP soak |
-| 60 路 4 FPS 同卡双分支 | retained evidence 证据链通过 | 仍需真实 RTSP / 长时间 |
-| 60 路 8 FPS 同卡双分支 | retained evidence 通过，media lifecycle p95 约 192s | pressure source，非生产硬件承诺 |
-| 60 路 16/1 高入口压力 | 证据链保住样本 | 不是 16 FPS 推理证明 |
-| media finalizer pacer 8 FPS | CPU peak 约 98%，50/50 playable | 单进程模型仍需真实 soak 观察 |
+| 生产 T4 40 路、4 FPS | 2026-07-14 正式门禁通过 | 当前生产容量基线 |
+| 同链路约 4 小时 | 无 evidence failed/expired/fallback | 波峰 queue wait 与 GPU 热余量有限 |
+| 4090 60 路、8 FPS | 2026-07-14 当时 revision 通过 | 后续双时间域代码尚未同规模复跑 |
+| 双时间域 40 路、4 FPS | 2026-07-15 通过 | 证明最新 rolling 时间域修复的 40 路闭环 |
 
-## Canonical 60 路单卡双分支 Profile
+不要再使用 6 月的 50/50 retained、单进程 pacer 或“Phase 2 未跑”作为当前主结论。
 
-当前 60 路单卡双分支压测口径以
-`docs/midterm_pressure60_dual1gpu_profile_2026-07-09.md` 为准。
+## 正式 profile
 
-固定项：
+### T4 production
 
-- `--dual-shard-same-gpu --dual-shard-gpu 0 --dual-shard-source-mode balanced`；
-- 60 路拆成 `30+30`，不得退回单 Savant branch；
-- `--batch-size 4 --pose-batch-size 4 --face-detector-batch-size 4 --face-embedding-batch-size 16`；
-- `--duration-s 400 --drain-s 120 --pressure-algorithm-cooldown-s 60`；
-- `--evidence-shard-count 4 --rolling-cache-evidence`；
-- evidence window 固定为 `--evidence-policy-groups 5:5,10:10,15:15`
-  和 `--evidence-group-size 20`；
-- `--rolling-cache-prefill-s 25`，保证 15 秒前录窗口有缓存预热；
-- 8090 visual gate 必须检查 DB-backed timeline/overlay rows、bbox、人员框和轨迹；
-- 8 FPS stress profile 使用 `--fps 8/1`；
-- 单 T4 生产探测 profile 使用同一套拓扑和 batch，仅把 `--fps` 改为 `4/1`。
+- 40 source，A/B 20/20；
+- 4 FPS analysis；
+- Pose/Face batch 4，ROI AdaFace 16；
+- MPS 45/45/10；
+- cooldown 60s；
+- rolling prefill 25s、retention 600s；
+- 当前 preset media max-active/remux/finalizer-process = 10/5/5；
+- 5+5 evidence。
 
-优先使用包装脚本，避免漏掉同卡双分支或 cooldown：
+### 4090 local
 
-```bash
-bash scripts/runtime/run_pressure60_dual1gpu_profile.sh 8fps-stress
-bash scripts/runtime/run_pressure60_dual1gpu_profile.sh 4fps-t4
+- 60 source，A/B 30/30；
+- 8 FPS analysis；
+- Pose/Face batch 4，ROI AdaFace 16；
+- 无 MPS；
+- cooldown 30s；
+- rolling prefill 25s、retention 600s；
+- media 12/8/16；
+- 5+5 evidence。
+
+精确值以 runtime preset 代码和 artifact 中 observed container env 为准。
+
+## 测试分层
+
+### Ingress/forwarder
+
+只证明 source/readability/queue/send。不能证明模型、ROI 或 evidence。
+
+### Savant/ROI
+
+证明 source visibility、effective FPS、Pose/Face output、ROI batch/pending。不能只看
+GPU utilization 或配置值。
+
+### Full evidence
+
+完整预设要看：
+
+```text
+source -> Replay/raw fanout -> Savant/ROI/person/face
+  -> events/tasks -> rolling coverage -> media scheduler/finalizer
+  -> DB-backed evidence -> 8090
 ```
 
-## 不同测试的含义
+正常 full preset 不要求 clip-worker Replay job 数大于 0；相反，fallback/record request
+不应成为主路径。
 
-### Forwarder null sink
+### Recovery soak
 
-目的：
+在正式吞吐基础上注入 source、event/person/face/media worker 和 API 重启，证明 durable
+state 可以收敛且没有 duplicate bundle/job、stale lease 或残留容器。
 
-- 隔离 analysis-forwarder；
-- 证明 Replay -> forwarder -> null 写入能力；
-- 不测 Savant 推理。
+## 核心门禁
 
-通过不代表：
+### 输入与推理
 
-- Savant 能消费同样 FPS；
-- evidence 链路完成；
-- GPU 足够。
+- exact source count；
+- RTSP/fixture identity；
+- source restart/exited；
+- A/B visibility；
+- effective FPS；
+- forwarder queue/full/drop/send failure；
+- Pose/Face outputs；
+- ROI published/batch occupancy/expired/pending。
 
-### 接 Savant 单分支
+### 人员与人脸
 
-目的：
+- person producer/persisted/source coverage/loss；
+- person consumer lag/pending；
+- face observation count/embedding norm/source coverage；
+- gallery effective backend；
+- watchlist event 与轨迹图片。
 
-- 测 forwarder 到 Savant 的真实消费；
-- 观察 queue、send failures、effective FPS；
-- 判断单 Savant branch 是否够。
+### Rolling 与 evidence
 
-常见结论：
+- segment source/epoch coverage；
+- segment FPS，原始门槛不得被 analysis FPS 替代；
+- segment index hit/miss/fallback/read pin；
+- task status/phase/retry/lease；
+- queue wait、oldest ready、WIP/lane depth；
+- failed/expired/fallback/active after drain；
+- physical bundle、playable event coverage；
+- MOV duration/FPS/playability/HTTP Range；
+- DB detail/timeline/annotation/bbox/person_context；
+- cleanup/residual ownership。
 
-- 4 FPS 可通过；
-- 8 FPS 单分支容易 queue full；
-- batch 调大不一定线性提升；
-- effective FPS 是核心指标，不只是脚本门槛。
+### 时间域
 
-### 同卡双分支
+- 原始 frame UUID/PTS 与 event/annotation 一致；
+- mux PTS cadence 稳定；
+- frame identity 到 mux window 映射可审计；
+- 不允许 wallclock PTS 抖动造成短 clip/coverage false miss。
 
-目的：
+## 当前 T4 风险阈值
 
-- 把 60 路拆成 30+30；
-- 同一张 GPU 上跑两个 Savant/forwarder branch；
-- 降低单 branch 队列和 batch wait 压力。
+生产审计显示平均可持续，但同步波峰会把 permit/remux/finalizer 打满。持续观察：
 
-当前结论：
+- hourly active 是否回到 0；
+- queue wait p95；
+- oldest ready；
+- failed/expired=0；
+- GPU temperature/power cap/SM clock；
+- DB index/publish latency；
+- rolling maintenance lock wait。
 
-- 4 FPS 和 8 FPS pressure source retained evidence 都有通过证据；
-- 这是当前 4090 生产候选方向；
-- 仍需真实 RTSP 混合输入和长时间 soak。
+40 路若持续低于 3.96 FPS，应先处理热/功耗，不直接扩容或放宽门禁。
 
-### 下游 evidence pressure
+## 60 路最新 revision 复验要求
 
-目的：
+- 600s sample + 120s drain；
+- 正确 native-24 fixture hash；
+- 60/60 source；
+- analysis 8 FPS，raw evidence >=20 FPS；
+- queue/full/send failure=0；
+- person/face/ROI loss/pending=0；
+- tasks/bundles 全收敛，无 failed/expired/fallback；
+- 5+5、timeline/annotation/bbox/person context 全通过；
+- 结果保留，不用清理掩盖失败；
+- 至少两轮可比 + 一轮 restart soak。
 
-- 不只看推理，还看 event-worker、clip-worker、Replay job、video-file-sink、media-worker、8090；
-- 验证 retained evidence 是否可播放、可查、可审计。
+## Qdrant 验收语义
 
-判断成功：
+历史 20k benchmark 是可选后端能力证据。当前默认 pgvector。如测试 Qdrant，报告必须
+包含 effective backend、collection/alias、bootstrap/outbox lag、query/rerank p95/p99、
+fallback/shadow mismatch；否则不能写“Qdrant authoritative run”。
 
-- source exited/restart/negative PTS 为 0；
-- forwarder send failures 为 0；
-- Redis pending/lag 不持续增长；
-- retained evidence 达标；
-- playable 50/50；
-- media lifecycle p95/p99 在 deadline 内；
-- 8090 list/detail proof OK。
-- 视频证据只能是前后 `5s/10s/15s` 三组窗口，且实际长度接近
-  `10s/20s/30s`。
-- 标注不能只靠 filesystem fallback；DB overlay/timeline rows、人员框、bbox
-  和轨迹都要可见。
+## Artifact 必填
 
-## 指标解释
-
-| 指标 | 含义 | 风险信号 |
-| --- | --- | --- |
-| source exited | source adapter 是否退出 | 大于 0 要查 RTSP/adapter |
-| negative PTS | 时间戳异常 | 增长说明输入/PTS 有问题 |
-| forwarder queue | forwarder 到 Savant 的等待 | 长期满说明下游消费不足 |
-| send failures | ZeroMQ 写失败 | 非 0 需要排查 Savant/网络 |
-| Savant effective FPS | 实际完成推理输出 FPS | 低于目标说明模型链或 batch 不够 |
-| Redis pending | consumer group 未 ack | 持续增长说明 worker 卡住 |
-| evidence retained | admission 后保留样本 | 太低说明 admission/事件风暴 |
-| playable | raw clip 可播放 | 低于目标说明 Replay/media 链路 |
-| annotation complete | overlay metadata 完整 | 可低于 playable，但要明确 degraded |
-| lifecycle p95 | evidence 从任务到完成 | 超 300s 会触发 deadline 风险 |
-| queue wait p95 | media-worker 等待物化时间 | 长期增长说明 finalizer 不够 |
-| deadline slack | 距 deadline 剩余 | 接近 0 说明 pacer 太慢 |
-
-## 60 路 8 FPS 验收门槛
-
-推荐最小门槛：
-
-- 60 source active；
-- 4/8 FPS profile 明确记录；
-- batch/max parallel streams 明确记录；
-- runtime epoch 明确记录；
-- dirty diff 明确记录；
-- source exited=0；
-- negative PTS=0；
-- forwarder send failures=0；
-- queue 不长期满；
-- Savant effective FPS 接近目标；
-- event-worker 无 O(N) scan；
-- face-worker Redis lag 不增长；
-- clip-worker pending 最终为 0；
-- media-worker lifecycle p95/p99 < 300s；
-- retained evidence 50/50 playable；
-- 8090 proof OK。
-
-## 真实 RTSP soak 验收
-
-pressure source 通过后，下一步要做真实 RTSP：
-
-- 至少混合真实摄像头和本地推流；
-- 不同码率、分辨率、GOP；
-- 网络抖动；
-- 断流重连；
-- 2-4 小时起步；
-- 有条件再跑过夜。
-
-需要额外记录：
-
-- 每路 RTSP 输入 FPS；
-- 解码失败；
-- source reconnect；
-- camera enabled/disabled 变更；
-- evidence 生成期间是否发生 runtime apply；
-- 磁盘增长；
-- PostgreSQL table/index size；
-- Redis memory peak。
-
-## 生产硬件 profile
-
-不得从 4090 直接外推到 T4。
-
-建议矩阵：
-
-| 硬件 | 拓扑 | 目标 |
-| --- | --- | --- |
-| 单 4090 | dual_same_gpu 30+30 | 60 路 8 FPS 候选 |
-| 单 T4 | single 或 dual_same_gpu | 验证能否 60 路低 FPS |
-| 双 T4 | dual_dual_gpu | 每卡解码+推理一组 |
-| T4+3060 | 特殊拆分 | 只在预算极限时评估，注意跨 GPU 拷贝 |
-| 双 4090 | dual_dual_gpu | 更高 FPS 或更高冗余 |
-
-每个 profile 输出：
-
-- 路数；
-- FPS；
-- batch；
-- topology；
-- GPU memory；
-- GPU utilization；
-- CPU peak；
-- evidence latency；
-- playable rate；
-- annotation rate；
-- 结论。
-
-## face-worker 验收
-
-当前已完成的注册图库查询验收：
-
-- 60 路 8 FPS Qdrant authoritative pressure run；
-- fallback count 为 0；
-- Qdrant query p95/p99 为 3ms/4ms；
-- exact rerank p95/p99 为 1ms/2ms；
-- 8090 retained evidence proof 为 50/50；
-- 5000 人 x 4 张图，即 20,000 向量 gRPC benchmark all-search p95/p99 为 4.037ms/6.427ms。
-
-继续验收的端到端指标：
-
-指标：
-
-- insert p95/p99；
-- gallery query p95/p99；
-- exact rerank p95/p99；
-- rule resolution p95/p99；
-- event publish p95/p99；
-- observation ACK p95/p99；
-- Redis lag；
-- emitted watchlist hit；
-- false positive / false negative；
-- threshold correctness；
-- target-person filtering correctness。
-
-下一步只有在真实 RTSP 或更高 face observation 速率下出现 ACK/pending 问题时，再考虑：
-
-- persistence/matching 解耦；
-- 独立 `security.face_match_requests`；
-- 多 matcher worker；
-- per-camera/person cache；
-- 低质量 observation skip 策略。
-
-Qdrant cutover 已完成门槛：
-
-- PostgreSQL `person_gallery_embeddings` 仍是事实源；
-- Qdrant collection 可以从 PostgreSQL bootstrap/reconcile；
-- final authoritative run fallback count 为 0；
-- Qdrant query p95/p99、outbox lag、shadow mismatch、fallback count 进入压力报告；
-- `watchlist_hit` payload 和 8090 evidence 查询语义不变。
-
-后续图库规模门槛：
-
-- 当前已覆盖 20,000 active embeddings；
-- 如果生产达到 50,000 / 100,000 active embeddings，需要复跑
-  `services/face-worker/benchmark_qdrant_gallery_scale.py` 并固化 p95/p99。
-
-## media-worker 验收
-
-当前默认不继续大改。
-
-需要继续记录：
-
-- claim time；
-- raw clip proof time；
-- ffprobe time；
-- decode/integrity time；
-- ffmpeg/fallback time；
-- DB terminal update time；
-- cleanup time；
-- lifecycle p95/p99；
-- deadline slack。
-
-升级 finalizer 的条件：
-
-- lifecycle p95/p99 超 300s；
-- materialization_expired 增长；
-- retained evidence 低于目标；
-- production 要求全事件物化；
-- CPU 已平滑但 backlog 不下降。
-
-## 压测报告必须包含
-
-每次 pressure artifact 至少包含：
-
-- run id；
-- git commit；
-- dirty diff summary；
-- runtime epoch；
-- source count；
-- source generation method；
-- FPS/batch/topology；
-- Redis summary；
-- PostgreSQL summary；
-- worker CPU summary；
-- forwarder/Savant metrics；
-- retained evidence sample；
-- 8090 proof；
-- failure reason classification。
+- run id、revision、dirty diff；
+- hardware/driver/power/temperature；
+- input path/hash/codec/GOP/bitrate；
+- source count、FPS、batch、topology/MPS；
+- preset 与 observed env；
+- sampling/prefill/postfill/drain/cooldown；
+- Redis/PG/runtime samples；
+- evidence/trajectory/ROI/visual gates；
+- logs、cleanup/preservation audit；
+- failure/warning 分类和未声明项。
 
 ## 常见误读
 
-- `16/1` 是入口配置，不是推理证明。
-- 50/50 playable 不等于 50/50 annotation complete。
-- `materialization_skipped` 大量存在不一定失败，它可能是 admission 保护。
-- forwarder queue 背压不一定是 forwarder 慢，常常是 Savant 消费不足。
-- 单路 batch 测试不能代表 60 路 batch。
-- pressure source 不是生产 RTSP soak。
+- 分析 8 FPS 不等于 evidence 8 FPS；
+- bundle 数小于 event 数可能来自 cooldown；
+- watchlist image 不一定在视频列表；
+- `security.record_requests=0` 在 full preset 是预期；
+- materialization skipped/failed/expired 不能算 playable；
+- 旧 60 路 pass 不自动证明新 revision；
+- pressure publisher pass 不等于混合真实 RTSP pass。

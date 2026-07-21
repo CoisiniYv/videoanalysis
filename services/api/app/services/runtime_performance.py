@@ -838,10 +838,11 @@ def _container_env_map(inspect_doc: dict[str, Any]) -> dict[str, str]:
 def _recreate_container_with_env(
     client: DockerSocketClient,
     container_name: str,
-    env_updates: dict[str, str],
+    env_updates: dict[str, str | None],
     *,
     force_start: bool = False,
     restart_policy_name: str | None = None,
+    host_config_updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     inspect_doc = _inspect_required(client, container_name)
     state = inspect_doc.get("State") if isinstance(inspect_doc, dict) else {}
@@ -852,6 +853,7 @@ def _recreate_container_with_env(
         inspect_doc,
         env_updates,
         restart_policy_name=restart_policy_name,
+        host_config_updates=host_config_updates,
     )
     encoded = quote(container_name, safe="")
     backup_encoded = quote(backup_name, safe="")
@@ -924,6 +926,7 @@ def _recreate_container_with_env(
         "create_status": create_status,
         "start_status": start_status,
         "restart_policy": restart_policy_name,
+        "host_config_updates": sorted((host_config_updates or {}).keys()),
     }
 
 
@@ -956,9 +959,10 @@ def _inspect_required(client: DockerSocketClient, container_name: str) -> dict[s
 
 def _create_body_from_inspect(
     inspect_doc: dict[str, Any],
-    env_updates: dict[str, str],
+    env_updates: dict[str, str | None],
     *,
     restart_policy_name: str | None = None,
+    host_config_updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config = inspect_doc.get("Config") if isinstance(inspect_doc, dict) else {}
     if not isinstance(config, dict):
@@ -991,15 +995,26 @@ def _create_body_from_inspect(
     host_config = inspect_doc.get("HostConfig")
     if isinstance(host_config, dict):
         body["HostConfig"] = copy.deepcopy(host_config)
-        if restart_policy_name is not None:
-            body["HostConfig"]["RestartPolicy"] = {"Name": restart_policy_name}
+    if host_config_updates:
+        target = body.setdefault("HostConfig", {})
+        for key, value in host_config_updates.items():
+            if value is None:
+                target.pop(key, None)
+            else:
+                target[key] = copy.deepcopy(value)
+    if restart_policy_name is not None:
+        body.setdefault("HostConfig", {})["RestartPolicy"] = {
+            "Name": restart_policy_name
+        }
     networking_config = _networking_config_from_inspect(inspect_doc)
     if networking_config:
         body["NetworkingConfig"] = networking_config
     return body
 
 
-def _merge_env_list(values: list[Any], updates: dict[str, str]) -> list[str]:
+def _merge_env_list(
+    values: list[Any], updates: dict[str, str | None]
+) -> list[str]:
     env: dict[str, str] = {}
     order: list[str] = []
     for item in values:
@@ -1010,6 +1025,11 @@ def _merge_env_list(values: list[Any], updates: dict[str, str]) -> list[str]:
             order.append(key)
         env[key] = value
     for key, value in updates.items():
+        if value is None:
+            env.pop(key, None)
+            if key in order:
+                order.remove(key)
+            continue
         if key not in env:
             order.append(key)
         env[key] = value

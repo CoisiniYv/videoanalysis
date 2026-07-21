@@ -43,8 +43,15 @@ class PtsFpsGate(BaseFrameFilter):
             else 0
         )
         self.pts_quantization_slack_ns = min(1_000_000, self.min_interval_ns // 1000)
+        # Preserve fractional PTS credit across accepted frames.  Resetting the
+        # anchor to every accepted PTS causes near-target wall-clock streams to
+        # drop every second frame whenever an interval is just below the exact
+        # target period.
+        self.max_credit_ns = self.min_interval_ns * 2
         self.log_every_n_frames = max(int(log_every_n_frames), 1)
         self._last_accepted_pts_ns_by_source: dict[str, int] = {}
+        self._last_observed_pts_ns_by_source: dict[str, int] = {}
+        self._credit_ns_by_source: dict[str, int] = {}
         self._frames_seen_by_source: dict[str, int] = {}
         self._frames_accepted_by_source: dict[str, int] = {}
 
@@ -77,24 +84,47 @@ class PtsFpsGate(BaseFrameFilter):
             self._log_tick(source_key)
             return True
 
-        if _is_keyframe(video_frame):
-            self._accept(source_key, pts_ns)
-            self._log_tick(source_key)
-            return True
-
-        last_pts_ns = self._last_accepted_pts_ns_by_source.get(source_key)
-        if last_pts_ns is None or pts_ns <= last_pts_ns:
-            self._accept(source_key, pts_ns)
-            self._log_tick(source_key)
-            return True
-
-        if pts_ns - last_pts_ns + self.pts_quantization_slack_ns >= self.min_interval_ns:
-            self._accept(source_key, pts_ns)
-            self._log_tick(source_key)
-            return True
-
+        admitted = self._admit_pts(
+            source_key,
+            pts_ns,
+            force=_is_keyframe(video_frame),
+        )
         self._log_tick(source_key)
-        return False
+        return admitted
+
+    def _admit_pts(self, source_key: str, pts_ns: int, *, force: bool) -> bool:
+        last_observed_pts_ns = self._last_observed_pts_ns_by_source.get(source_key)
+        if last_observed_pts_ns is None or pts_ns <= last_observed_pts_ns:
+            self._last_observed_pts_ns_by_source[source_key] = pts_ns
+            self._credit_ns_by_source[source_key] = 0
+            self._accept(source_key, pts_ns)
+            return True
+
+        credit_ns = min(
+            self.max_credit_ns,
+            self._credit_ns_by_source.get(source_key, 0)
+            + (pts_ns - last_observed_pts_ns),
+        )
+        self._last_observed_pts_ns_by_source[source_key] = pts_ns
+
+        if force:
+            self._credit_ns_by_source[source_key] = max(
+                0,
+                credit_ns - self.min_interval_ns,
+            )
+            self._accept(source_key, pts_ns)
+            return True
+
+        if credit_ns + self.pts_quantization_slack_ns < self.min_interval_ns:
+            self._credit_ns_by_source[source_key] = credit_ns
+            return False
+
+        self._credit_ns_by_source[source_key] = max(
+            0,
+            credit_ns - self.min_interval_ns,
+        )
+        self._accept(source_key, pts_ns)
+        return True
 
     def _accept(self, source_key: str, pts_ns: int | None) -> None:
         if pts_ns is not None:

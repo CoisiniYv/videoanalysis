@@ -17,12 +17,19 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert 'data-view="runtime"' in html
     assert 'id="runtime-view"' in html
     assert 'id="runtime-health-summary"' in html
+    assert 'id="runtime-latency-summary"' in html
+    assert 'id="refresh-runtime-latency"' in html
+    assert 'id="quick-runtime-stop"' in html
     assert 'id="runtime-source-table"' in html
     assert 'id="runtime-forwarder-table"' in html
     assert 'id="runtime-evidence-table"' in html
     assert 'id="runtime-container-table"' in html
     assert 'id="runtime-control-status"' in html
     assert 'id="runtime-decision-panel"' in html
+    assert 'id="toggle-runtime-advanced"' in html
+    assert 'id="runtime-performance-pane"' in html
+    assert 'id="runtime-topology-pane"' in html
+    assert 'id="runtime-container-pane"' in html
     assert 'id="recover-runtime-sources"' in html
     assert 'id="apply-saved-runtime-topology"' in html
     assert 'id="runtime-performance-form"' in html
@@ -41,17 +48,24 @@ def test_8090_operator_has_runtime_control_tab_and_panel() -> None:
     assert "推理性能" in html
     assert "确认并应用" in html
     assert "保存草稿" in html
-    assert "Savant 最大 FPS" in html
+    assert "识别最大帧率" in html
     assert "转发队列上限" in html
     assert "发送超时 ms" in html
     assert "发送重试次数" in html
     assert "发送高水位" in html
-    assert "Savant Redis 超时 ms" in html
-    assert "Savant Redis 写入重试" in html
-    assert "Frame annotation 写入超时 ms" in html
+    assert "识别数据读取超时（毫秒）" in html
+    assert "识别数据写入重试" in html
+    assert "画面标注写入超时（毫秒）" in html
     assert "先判断真实运行态和配置差异，再执行恢复或切换操作" in html
     assert "摄像头性能" in html
     assert "证据生成" in html
+    assert "高级运维" in html
+    assert "运维控制" in html
+    assert "startup-callout" not in html
+    runtime_html = html.split('id="runtime-view"', 1)[1].split(
+        'id="evidence-view"', 1
+    )[0]
+    assert 'id="quick-runtime-start"' in runtime_html
 
 
 def test_operator_runtime_overview_uses_api_proxy_only() -> None:
@@ -62,6 +76,9 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "loadRuntimeOverview" in js
     assert "`${API}/runtime/overview`" in js
     assert "`${API}/runtime/control`" in js
+    assert "`${API}/runtime/latency`" in js
+    assert "function formatDate(value)" in js
+    assert "formatDate(data.generated_at)" in js
     assert "`${API}/runtime/performance-config`" in js
     assert "runtime/performance-config/apply" in js
     assert "renderRuntimePerformanceConfig" in js
@@ -78,6 +95,9 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "Promise.allSettled" in js
     assert "renderRuntimeForwarderTable" in js
     assert "renderRuntimeEvidenceTable" in js
+    assert "setRuntimeAdvancedVisible" in js
+    assert "runtimeEvidenceStateIsFailure" in js
+    assert "materialization_failed: \"生成失败\"" in js
     assert "waiting_proof" in js
     assert "recent_failures" in js
     assert "frames_dropped_total" in js
@@ -86,7 +106,7 @@ def test_operator_runtime_overview_uses_api_proxy_only() -> None:
     assert "runtimeIssueLabel" in js
     assert "containerStateText" in js
     assert "每分钟重启" in js
-    assert "固定源容器未运行" in js
+    assert "固定视频源未运行" in js
     assert "推理指标" in js
     assert "运行判断" in js
     assert "发送失败" in js
@@ -119,5 +139,6 @@ def test_operator_runtime_overview_has_stable_table_styles() -> None:
     assert ".runtime-performance-form" in css
     assert ".runtime-performance-table" in css
     assert ".runtime-evidence-pane" in css
+    assert ".runtime-advanced-pane[hidden]" in css
     assert ".runtime-failure-list" in css
     assert ".warn-row" in css

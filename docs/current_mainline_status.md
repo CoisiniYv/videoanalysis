@@ -1,181 +1,92 @@
 # Current Mainline Status
 
-## 2026-06-15 Midterm Project Version
+更新时间：2026-07-20
 
-The current deployable runtime in this checkout is the midterm project version.
-It intentionally avoids historical codename files in the active deployment surface.
+## 当前基线
 
-- Branch: current working-tree branch.
-- Compose file: `infra/docker-compose.midterm.yml`.
-- Env file: `infra/env/midterm.env`.
-- Compose project: `video-analytics-midterm`.
-- Containers: `video-analytics-midterm-*`.
-- Source id: `primary_rtsp`.
-- Operator portal / evidence viewer: host port `8090`.
-- Internal API service: compose network port `8000`; not published to host and
-  reached through the 8090 portal proxy.
-- Replay API: host port `8098`.
-- Analysis-forwarder metrics: host port `18081`.
-- Worker database default: `host.docker.internal:5432`.
-- Internal API runtime: `services/api/Dockerfile.face-runtime`, inheriting from
-  `video-analytics-midterm-face-worker:latest` to reuse the already-installed
-  ONNX Runtime/OpenCV/Numpy face-registration layer.
-- Analysis path isolation: `analysis-forwarder` is inserted between
-  Replay `out_stream` and Savant. Replay remains the full-rate evidence storage
-  authority; the forwarder samples/drops only the analysis branch and exposes
-  `va_forwarder_*` metrics.
-- Face gallery search: `face-worker` currently uses Qdrant authoritative
-  registered-gallery lookup with PostgreSQL exact rerank and pgvector rollback.
-  PostgreSQL remains the source of truth for `persons` and
-  `person_gallery_embeddings`; Qdrant is a rebuildable derived index.
-- Savant v0.6.0 PTS-reset crash hardening: `savant-security` applies the
-  md5-pinned overlay in `modules/savant_security/savant_patches/` before module
-  startup, and the API service behind the 8090 management plane runs the
-  STOPPED/stall supervisor for Savant plus primary and dynamic source adapters.
-  The previous `docker:27-cli` watchdog profile has been removed.
-- Operator portal design: `docs/midterm_operator_portal_runtime_design.md`.
-- 8090 evidence list/detail displays alarm machine time from bundle metadata;
-  new bundles write `event.alarm_machine_time` from `events.created_at`.
-- 8090 evidence playback fail-closed behavior is backed by the media-worker
-  post-Savant crop fix: raw clip crop now selects one contiguous sink metadata
-  segment, prefers matching `frame_uuid/uuid` anchors when present, normalizes
-  ffmpeg trim with `setpts`, and filters frame annotation cache by runtime
-  epoch. Runtime apply/restart also resets the frame annotation Redis cache;
-  see `docs/midterm_8090_port_integration.md`.
-- Replay `offset.seconds` remains the positive rewind value from the anchor
-  keyframe to `requested_start_pts`; do not flip it negative. Current playback
-  validation used ready bundle `f208b550-6b34-44ff-a847-3219041349ea` and latest
-  8090 listing `3acfac74-6c54-4045-820b-b659df3894da`.
-- The earlier rolling-cache pressure conclusion is invalid for evidence-video
-  fidelity: the cache sink was subscribed to the analysis-forwarder raw branch,
-  so it was still coupled to the inference-facing forwarder path. The topology
-  has been corrected so Replay `out_stream` feeds `replay-raw-fanout` first;
-  rolling-cache subscribes to that pre-analysis fanout and the sampler-facing
-  `analysis-forwarder` is downstream of it. A fresh 60-route pressure run must
-  prove segment/evidence FPS from this corrected tap before calling the path
-  validated again.
-- Historical run
-  `rollingcache_live_p60_finalclean4_20260704T171638Z` remains useful as a
-  worker/materialization datapoint, but it is no longer accepted as proof of
-  full-rate rolling-cache evidence because it used the old forwarder-side cache
-  tap.
-- 2026-07-05 recount failure diagnosis is now closed at the code level: the
-  pressure runner had been recreating `rolling-cache-sink*` before runtime
-  apply/restart finished, so the sinks latched stale `runtime_epoch_id` values
-  and kept writing segments into old epoch roots. The current runner now starts
-  rolling-cache sinks only after the new runtime epoch exists, passes
-  `ROLLING_CACHE_RUNTIME_EPOCH_ID` explicitly, captures rolling-cache sink logs
-  into the artifact, and rolling-cache lookup stays within the requested
-  `runtime_epoch_id` instead of scanning every historical epoch for the same
-  `source_id`.
-- 2026-07-05 runtime epoch barrier is now implemented on the production
-  restart/apply path. `evidence_tasks.runtime_epoch_id` is a first-class column,
-  runtime restart guards now wait on non-terminal epoch-scoped evidence tasks,
-  `force=true` promotes remaining tasks to explicit
-  `epoch_superseded_incomplete` terminal state through one conditional DB
-  update, and runtime overview exposes epoch-barrier orphan diagnostics instead
-  of relying on manual media-worker log inspection.
-- `security.record_requests` stayed at 0 for the historical rolling-cache run,
-  which means evidence generation no longer depended on one Replay job per
-  event in that high-density materialization experiment.
-- Runtime performance observability is documented in
-  `docs/midterm_runtime_performance_observability.md`. 8090 runtime overview
-  now surfaces per-camera rolling pose-stage FPS, face-stage FPS, and
-  AdaFace embedding rate from the lightweight `va_savant_*` metrics. Heavy
-  dumps such as pose converter debug output remain disabled by default.
-- Operator algorithm-control runtime status:
-  `docs/midterm_operator_algorithm_controls_runtime_status.md`.
-- 2026-06-11 progress snapshot and next-plan baseline:
-  `docs/midterm_progress_snapshot_2026-06-11.md`.
-- 2026-06-15 documentation network and phase map:
-  `docs/project_knowledge_network.md`.
-- Dual-path / T4 production capacity plan and phase status:
-  `specs/16_dual_path_30x2_t4_production_optimization.md`.
-- Dual-4090 as T4 two-source validation plan:
-  `specs/20_dual_4090_as_t4_two_source_validation.md`.
-- Replay evidence IO optimization plan:
-  `specs/21_replay_evidence_io_optimization_60_stream_production.md`.
-- Clip-worker/evidence real-time alignment plan:
-  `specs/17_clip_worker_evidence_realtime_alignment_fix.md`.
-- Post-Savant evidence proof window fix record:
-  `docs/midterm_post_savant_evidence_proof_windows_2026-06-15.md`.
-- Current Replay intrusion clip-duration diagnosis:
-  `docs/midterm_replay_intrusion_clip_duration_diagnosis.md`.
-- Replay routing-id mismatch recovery:
-  `docs/midterm_replay_routing_id_recovery.md`.
-- Current `/data/video-analytics` directory inventory and cleanup record:
-  `docs/midterm_data_directory_inventory.md`.
+- 分支：`feat/roi-adaface-redis-20260711`；
+- HEAD：`1eb4174`；
+- 本文同时描述当前未提交工作区实现；
+- 部署入口：`scripts/midterm_start.sh`；
+- Compose：`infra/docker-compose.midterm.yml`；
+- 用户入口：`http://<host>:8090/operator`；
+- 当前架构权威说明：`docs/current_architecture.md`。
 
-## Current Runtime Chain
+当前工作区不是干净 checkout。下表的“已实现”表示代码/配置存在；“已验证”只在有
+对应当前或明确 revision 的 artifact 时成立。
+
+## 实现状态
+
+| 领域 | 当前实现 | 验证状态 |
+| --- | --- | --- |
+| 8090 管理入口 | UI、API/media 代理、摄像头/人员/evidence/维护/运行页 | 已实现 |
+| 完整启动 | 摄像头批量选择、T4/4090 预设、异步 apply/status、五段进度 | 已实现；后台线程不跨 API 重启 |
+| 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
+| ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
+| 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL | 40/60 压测报告均有覆盖；当前实现未单独做 restart soak |
+| rolling-cache | 自有 GStreamer sink、原子 fragment 发布、双时间域、segment index | 最新双时间域实现已通过 40 路正式门禁 |
+| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | T4 40 路与 4 小时生产审计通过，波峰余量有限 |
+| 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031 与测试存在 |
+| 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 存在但当前未提交，部署时需单独应用 |
+| Evidence UI | DB-backed list/detail/timeline/overlay；视频 HTTP Range | T4 审计通过；文件接口仅兼容 |
+| 向量匹配 | pgvector 默认；Qdrant 可选且可由 PostgreSQL 重建 | Qdrant 有历史 benchmark，不是当前默认 profile |
+
+## 当前完整双分支主链
 
 ```text
-RTSP -> Replay storage -> replay-raw-fanout -> analysis-forwarder -> Savant inference
-  -> Redis events/annotations
-  -> event-worker / face-worker -> PostgreSQL / Qdrant
-  -> media-worker rolling-cache materialization / covered-by aliasing
-  -> 8090 operator portal
+RTSP -> Replay A/B -> replay-raw-fanout A/B
+  |-> sampled Savant A/B -> events/person/face ROI/source annotations
+  `-> full-rate rolling-cache-sink A/B
 
-Rolling-cache side tap:
-
-Replay storage -> replay-raw-fanout -> rolling-cache sink segments
-  -> media-worker rolling-cache materialization / covered-by aliasing
-  -> 8090 operator portal
-
-Fallback path:
-
-RTSP -> Replay storage -> replay-raw-fanout -> analysis-forwarder -> Savant inference
-  -> Redis events/annotations
-  -> event-worker / face-worker -> PostgreSQL / Qdrant
-  -> clip-worker -> Replay job -> video-file-sink
-  -> media-worker evidence sidecar -> 8090 operator portal
+events -> event-worker -> evidence_tasks
+person stream -> person-observation-worker -> trajectories
+face ROI -> adaface-roi-worker -> face-worker -> watchlist events
+tasks + rolling segments -> media-worker -> DB-backed evidence -> 8090
 ```
 
-Evidence must remain full-rate because rolling-cache now derives from the
-Replay output before the analysis-forwarder sampler/resampler. The current
-midterm defaults favor fast, more
-complete playable evidence retention over strict exact-window clipping:
-rolling-cache outputs are GOP/segment-level approximate `rolling_cache_copy`
-clips, and the Replay fallback still uses `POST_SAVANT_FAST_RAW_CLIP_ENABLED=true`
-to publish non-canonical `generated_unverified` clips instead of dropping them.
+完整预设 suppress `security.record_requests` 且关闭 Replay fallback。因此
+`clip-worker -> Replay job -> video-file-sink` 是普通单分支和兼容链，不是完整预设主链。
 
-## Current Calibration
+## 当前运行预设
 
-The midterm entrypoint keeps Savant's project ingress FPS gate enabled, disables
-nvstreammux `MAX_FPS_CONTROL` after the Phase 0A experiment, and limits the
-analysis branch through `analysis-forwarder`:
+| 预设 | 当前代码参数 | 状态 |
+| --- | --- | --- |
+| `production_t4_40` | 40 路、20/20、4 FPS、batch 4、ROI 16、MPS 45/45/10、media 10/5/5 | 当前生产基线 |
+| `local_4090_60` | 60 路、30/30、8 FPS、batch 4、ROI 16、无 MPS、media 12/8/16 | 预设存在；最新代码 60 路需复跑 |
 
-- `MAX_FPS_CONTROL=false`
-- `INGRESS_FPS_GATE_ENABLED=true`
-- `ANALYSIS_FPS=8/1`
-- `MAX_FPS=8/1`
-- `MIN_FPS=2/1`
-- `POSE_INFER_INTERVAL=1`
-- `POSE_CONFIDENCE_THRESHOLD=0.50`
-- `POSE_KEYPOINT_THRESHOLD=0.35`
-- `POSE_SELECTOR_CONFIDENCE_THRESHOLD=0.50`
-- `POSE_SELECTOR_NMS_IOU_THRESHOLD=0.50`
-- `POSE_MIN_WIDTH=60`
-- `POSE_MIN_HEIGHT=100`
-- `FACE_CONFIDENCE_THRESHOLD=0.50`
-- `WATCHLIST_THRESHOLD=0.60`
+## 最近有效证据
 
-## Phase Status
+1. `production_t4_pressure40_currentcode_2026-07-14.md`：T4 40 路、4 FPS、600s +
+   120s drain 正式通过；
+2. `production_runtime_evidence_audit_2026-07-15.md`：生产双分支约 4 小时稳定审计，
+   evidence 无失败/过期/fallback，但同步波峰 queue wait p95 约 47 秒；
+3. `local4090_pressure60_worker_regression_remediation_2026-07-13.md`：4090 60 路、
+   8 FPS 在 7 月 14 日当时 revision 和正确 fixture 下通过；
+4. `local_rolling_cache_dual_clock_remediation_2026-07-15.md`：后续双时间域实现通过
+   40 路、4 FPS 正式门禁。
 
-| Area | Current status |
-| --- | --- |
-| Midterm deployment surface | Active. Use only neutral `midterm` entrypoints. |
-| Replay/Savant backpressure Phase 0 | Complete for observability and reversible experiments 0A-0D. Kept `MAX_FPS_CONTROL=false`, short Replay retry, and `SYNC_OUTPUT=false`; did not add ineffective RTSP adapter tolerance envs. |
-| Phase 0.5 forwarder spike | Complete. Savant image can use `savant_rs`; current ingress gate drops before decode on the ZMQ path. |
-| Phase 1 analysis-forwarder | Complete for the current two-source runtime. `PASS_PHASE1_FORWARDER` is documented. |
-| Phase 2 single-T4 30 streams | Gated. Readiness and pressure-run scripts exist, but the current development host is not a T4 30-stream environment. |
-| Phase 3 dual-T4 60 streams | Re-opened for evidence-video fidelity. Earlier rolling-cache pressure runs are materialization datapoints only because the cache tap was after/inside the inference-facing forwarder path. The corrected pre-analysis `replay-raw-fanout` topology must pass a fresh 60-route run with segment/evidence FPS proof before this is called validated again. |
-| Face gallery search | Qdrant authoritative cutover complete for current scale gate. Final 60-route 8 FPS rerun fallback=0, Qdrant query p95/p99=4ms/5ms; 20,000-vector gRPC benchmark all-search p95/p99=4.275ms/6.801ms with top1 self/person hit rate 1.0. Remaining risk is the synchronous face-worker loop, not registered-gallery vector lookup. |
-| Phase 4 production hardening | Not implemented. Requires drills, dashboard thresholds, storage sizing, and runbook. |
-| Evidence proof window fix | Partially implemented and runtime-validated for "event exists but proof window fails"; frontend frame-bound overlay hardening remains open. |
-| Algorithm support matrix | Not implemented as a stable API/UI matrix. Current docs still define the boundary. |
+严格结论：当前代码可把 T4 40 路作为已验证基线；不能把较早的 4090 60 路结果无条件
+升级为“当前工作区 revision 已复验”。
 
-## Archive Rule
+## 已知开放项
 
-Historical codename files remain in archive directories for traceability.
-They are not current deployment entrypoints and should not be copied to a
-project machine unless explicitly doing historical regression.
+### P0/P1
+
+- 将当前 dirty worktree 中代码、migration 032、测试和文档作为一致单元提交/部署；
+- 在当前 revision 重新执行 4090 60 路、8 FPS、600s + 120s drain；
+- 完成真实混合 RTSP 的断流、重连和长 soak；
+- 完成 event/person/face/media worker restart/recovery soak；
+- 继续观察生产 T4 84–85°C、70W power cap 和 evidence 波峰排队。
+
+### P2
+
+- topology apply 改为跨 API 进程可恢复的持久作业；
+- 修正 `midterm_health.sh` 对 legacy source 和新 person worker 的固定服务清单；
+- 增加鉴权、RBAC 和更完整操作审计；
+- 实现 8090 WebSocket upgrade 代理；
+- 如启用 Qdrant，必须显式记录 profile/env、sync/outbox 和 fallback 状态。
+
+## 文档规则
+
+当前架构和状态只由本文件、`docs/current_architecture.md`、部署说明与当前代码共同决定。
+带日期报告是证据，不是永久 current status；`archive/phase-only/` 不作为部署或设计入口。

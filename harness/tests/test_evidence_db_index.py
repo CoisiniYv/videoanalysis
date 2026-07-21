@@ -201,9 +201,83 @@ def test_expanded_db_rows_do_not_publish_pruned_sidecar_artifacts(
         assert isinstance(result[field], int)
         assert result[field] >= 0
     assert result["db_index_total_ms"] >= result["db_bundle_index_ms"]
+    bundle_params = next(
+        params
+        for query, params in conn.cursor_obj.executions
+        if "INSERT INTO evidence_bundles" in query
+    )
+    indexed_summary = bundle_params["summary"].obj
+    assert indexed_summary["metadata_storage"] == "db_backed"
+    assert indexed_summary["timeline_storage"] == "db_backed"
+    assert indexed_summary["annotation_storage"] == "db_backed"
+    assert "metadata_path" not in indexed_summary
+    assert "sink_metadata_path" not in indexed_summary
+    assert "annotations_jsonl_path" not in indexed_summary
+    assert "summary_json_path" not in indexed_summary
+    assert any(
+        "UPDATE events" in query and "metadata_storage" in query
+        for query, _params in conn.cursor_obj.executions
+    )
+    assert any(
+        "UPDATE evidence_tasks" in query and "metadata_path = NULL" in query
+        for query, _params in conn.cursor_obj.executions
+    )
+    artifact_cleanup_params = next(
+        params
+        for query, params in conn.cursor_obj.executions
+        if "DELETE FROM evidence_artifacts" in query
+    )
+    assert artifact_cleanup_params["artifact_types"] == [
+        "overlay_annotations",
+        "sink_timeline",
+        "bundle_summary",
+    ]
     raw_artifact_params = next(
         params
         for query, params in conn.cursor_obj.executions
         if "INSERT INTO evidence_artifacts" in query
     )
     assert raw_artifact_params["sha256"] == golden["raw_clip_sha256"]
+
+
+def test_expanded_db_rows_accept_in_memory_timeline_and_overlays(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "raw_clip.mov").write_bytes(b"video")
+    conn = _Connection()
+
+    result = module.upsert_evidence_bundle_index(
+        conn,
+        event_id="11111111-1111-4111-8111-111111111111",
+        bundle_dir=bundle,
+        include_timeline=True,
+        include_overlays=True,
+        metadata_override={"event": {"event_id": "event-1"}},
+        summary_override={"clip_status": "ready", "raw_clip_duration": 10.0},
+        sidecar_summary_override={
+            "production_ready": True,
+            "annotation_lines": 1,
+        },
+        timeline_rows=[
+            {"clip_frame_index": 0, "uuid": "frame-1", "pts": 100}
+        ],
+        overlay_rows=[
+            {
+                "clip_frame_index": 0,
+                "frame_uuid": "frame-1",
+                "frame_pts": 100,
+                "objects": [{"object_type": "person"}],
+            }
+        ],
+    )
+
+    assert result["timeline_rows"] == 1
+    assert result["overlay_rows"] == 1
+    queries = "\n".join(query for query, _params in conn.cursor_obj.executions)
+    assert "INSERT INTO evidence_frame_timeline" in queries
+    assert "INSERT INTO evidence_overlay_segments" in queries
+    assert not (bundle / "sink_metadata.json").exists()
+    assert not (bundle / "annotations.frame_cache.identity.jsonl").exists()

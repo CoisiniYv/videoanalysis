@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,116 @@ if MEDIA_WORKER_ROOT in sys.path:
 sys.path.insert(0, MEDIA_WORKER_ROOT)
 
 from app import rolling_cache  # noqa: E402
+
+
+def test_wall_clock_event_window_maps_to_stable_mux_clock() -> None:
+    rows = [
+        {
+            "pts": 10_000_000_000,
+            "rolling_cache_mux_pts": 20_000_000_000,
+            "uuid": "before",
+        },
+        {
+            "pts": 11_700_000_000,
+            "rolling_cache_mux_pts": 20_041_708_333,
+            "uuid": "event-frame",
+        },
+        {
+            "pts": 11_700_001_000,
+            "rolling_cache_mux_pts": 20_083_416_666,
+            "uuid": "after",
+        },
+    ]
+
+    mapped = rolling_cache._map_source_window_to_mux(
+        [SimpleNamespace(metadata_path=Path("unused"))],
+        requested_start_pts=6_700_000_000,
+        requested_end_pts=16_700_000_000,
+        labels={
+            "event_frame_pts": 11_700_000_000,
+            "event_frame_uuid": "event-frame",
+        },
+        row_loader=lambda _segment: rows,
+    )
+
+    assert mapped == (15_041_708_333, 25_041_708_333, 20_041_708_333)
+
+
+def test_source_clock_mapping_reads_only_nearest_segment_ranges() -> None:
+    segments = []
+    rows_by_name = {}
+    for index in range(225):
+        source_start = index * 4_000_000_000
+        source_end = source_start + 3_999_999_999
+        name = f"segment-{index:03d}"
+        segments.append(
+            SimpleNamespace(
+                segment_id=name,
+                metadata_path=Path(name),
+                source_first_pts=source_start,
+                source_last_pts=source_end,
+            )
+        )
+        rows_by_name[name] = [
+            {
+                "pts": source_start,
+                "rolling_cache_mux_pts": source_start + 50_000_000_000,
+                "uuid": f"frame-{index}-first",
+            },
+            {
+                "pts": source_end,
+                "rolling_cache_mux_pts": source_end + 50_000_000_000,
+                "uuid": f"frame-{index}-last",
+            },
+        ]
+
+    loaded = []
+
+    def load_rows(segment):
+        loaded.append(segment.segment_id)
+        return rows_by_name[segment.segment_id]
+
+    event_index = 170
+    event_source_pts = event_index * 4_000_000_000 + 3_999_999_999
+    mapped = rolling_cache._map_source_window_to_mux(
+        segments,
+        requested_start_pts=event_source_pts - 5_000_000_000,
+        requested_end_pts=event_source_pts + 5_000_000_000,
+        labels={
+            "event_frame_pts": event_source_pts,
+            "event_frame_uuid": f"frame-{event_index}-last",
+        },
+        row_loader=load_rows,
+    )
+
+    assert mapped == (
+        event_source_pts + 45_000_000_000,
+        event_source_pts + 55_000_000_000,
+        event_source_pts + 50_000_000_000,
+    )
+    assert loaded == [f"segment-{event_index:03d}"]
+
+
+def test_source_clock_mapping_keeps_legacy_full_scan_without_bounds() -> None:
+    segments = [
+        SimpleNamespace(segment_id="first", metadata_path=Path("first")),
+        SimpleNamespace(segment_id="second", metadata_path=Path("second")),
+    ]
+    loaded = []
+
+    def load_rows(segment):
+        loaded.append(segment.segment_id)
+        source_pts = 100 if segment.segment_id == "first" else 200
+        return [{"pts": source_pts, "rolling_cache_mux_pts": source_pts + 1_000}]
+
+    assert rolling_cache._map_source_window_to_mux(
+        segments,
+        requested_start_pts=150,
+        requested_end_pts=250,
+        labels={"event_frame_pts": 200},
+        row_loader=load_rows,
+    ) == (1_150, 1_250, 1_200)
+    assert loaded == ["first", "second"]
 
 
 def _write_segment(
@@ -154,6 +265,7 @@ def test_materialize_window_writes_sink_like_metadata_and_concat_command(tmp_pat
         labels={"event_type": "intrusion"},
         ffmpeg="/usr/bin/ffmpeg",
         command_runner=fake_runner,
+        coverage_slack_ns=1_000_000_000,
     )
 
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
@@ -266,6 +378,74 @@ def test_materialize_window_transcodes_when_copy_duration_is_short(
     assert result.immutable_probe == immutable_probe
 
 
+def test_materialize_window_transcodes_when_copy_frame_rate_is_low(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    output_root = tmp_path / "materialized"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1_000_000_000, 2_000_000_000, 3_000_000_000],
+    )
+    commands: list[list[str]] = []
+    durations = [2.0, 2.0]
+    frame_rates = [23.0, 23.976]
+
+    def fake_runner(command: list[str], _log_path: Path) -> None:
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"video")
+
+    result = rolling_cache.materialize_window(
+        root=root,
+        output_root=output_root,
+        event_id="11111111-1111-4111-8111-111111111111",
+        source_id="camera-01",
+        requested_start_pts=1_000_000_000,
+        requested_end_pts=3_000_000_000,
+        runtime_epoch_id="epoch-a",
+        command_runner=fake_runner,
+        duration_probe=lambda _path: durations.pop(0),
+        frame_rate_probe=lambda _path: frame_rates.pop(0),
+    )
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert len(commands) == 2
+    assert "libx264" in commands[1]
+    assert metadata["rolling_cache"]["duration_repair_attempted"] is True
+    assert metadata["rolling_cache"]["probed_output_frame_rate_fps"] == 23.976
+
+
+def test_select_rows_sorts_and_deduplicates_pts(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[3, 1, 2],
+    )
+    second = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[2, 4],
+    )
+    segments = rolling_cache.find_segments(
+        root,
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    )
+
+    rows = rolling_cache._select_rows(segments, 1, 4)
+
+    assert [row["pts"] for row in rows if row.get("pts") is not None] == [1, 2, 3, 4]
+    assert first.is_dir() and second.is_dir()
+
+
 def test_materialize_window_reports_initial_and_retry_ffmpeg_failures(
     tmp_path: Path,
 ) -> None:
@@ -355,7 +535,7 @@ def test_materialize_window_allows_small_segment_edge_gap(tmp_path: Path) -> Non
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert metadata["rolling_cache"]["start_gap_ns"] == 50_000_000
     assert metadata["rolling_cache"]["end_gap_ns"] == 50_000_000
-    assert metadata["rolling_cache"]["coverage_slack_ns"] == 500_000_000
+    assert metadata["rolling_cache"]["coverage_slack_ns"] == 750_000_000
 
 
 def test_materialize_window_rejects_partial_window_by_default(
@@ -393,6 +573,131 @@ def test_materialize_window_rejects_partial_window_by_default(
 
     assert "rolling_cache_requested_window_not_fully_covered" in message
     assert "pre_gap_ns=7000000000" in message
+
+
+def test_materialize_window_retries_when_middle_fragment_is_not_visible(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    output_root = tmp_path / "materialized"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1_000_000_000, 2_000_000_000],
+    )
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0003",
+        pts_values=[6_000_000_000, 7_000_000_000],
+    )
+    commands: list[list[str]] = []
+
+    def fake_runner(command: list[str], _log_path: Path) -> None:
+        commands.append(command)
+
+    try:
+        rolling_cache.materialize_window(
+            root=root,
+            output_root=output_root,
+            event_id="11111111-1111-4111-8111-111111111111",
+            source_id="camera-01",
+            requested_start_pts=1_000_000_000,
+            requested_end_pts=7_000_000_000,
+            runtime_epoch_id="epoch-a",
+            command_runner=fake_runner,
+        )
+    except rolling_cache.RollingCacheCoverageMiss as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion path
+        raise AssertionError("expected internal rolling-cache gap to be retried")
+
+    assert "rolling_cache_requested_window_internal_gap" in message
+    assert "internal_gap_ns=4000000000" in message
+    assert commands == []
+
+
+def test_materialize_window_retries_when_segment_endpoints_hide_row_gap(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    output_root = tmp_path / "materialized"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[
+            1_000_000_000,
+            1_100_000_000,
+            1_200_000_000,
+            3_000_000_000,
+        ],
+    )
+    commands: list[list[str]] = []
+
+    try:
+        rolling_cache.materialize_window(
+            root=root,
+            output_root=output_root,
+            event_id="11111111-1111-4111-8111-111111111111",
+            source_id="camera-01",
+            requested_start_pts=1_000_000_000,
+            requested_end_pts=3_000_000_000,
+            runtime_epoch_id="epoch-a",
+            command_runner=lambda command, _log: commands.append(command),
+        )
+    except rolling_cache.RollingCacheCoverageMiss as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion path
+        raise AssertionError("expected metadata row gap to be retried")
+
+    assert "rolling_cache_selected_rows_internal_gap" in message
+    assert "internal_gap_ns=1800000000" in message
+    assert commands == []
+
+
+def test_materialize_window_still_short_after_transcode_is_retryable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    output_root = tmp_path / "materialized"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1_000_000_000, 2_000_000_000, 3_000_000_000],
+    )
+    durations = [0.5, 0.75]
+
+    def duration_probe(_path: Path) -> float | None:
+        return durations.pop(0)
+
+    def fake_runner(command: list[str], _log_path: Path) -> None:
+        Path(command[-1]).write_bytes(b"video")
+
+    try:
+        rolling_cache.materialize_window(
+            root=root,
+            output_root=output_root,
+            event_id="11111111-1111-4111-8111-111111111111",
+            source_id="camera-01",
+            requested_start_pts=1_000_000_000,
+            requested_end_pts=3_000_000_000,
+            runtime_epoch_id="epoch-a",
+            command_runner=fake_runner,
+            duration_probe=duration_probe,
+        )
+    except rolling_cache.RollingCacheCoverageMiss as exc:
+        message = str(exc)
+    else:  # pragma: no cover - defensive assertion path
+        raise AssertionError("expected short decoded output to be retried")
+
+    assert "rolling_cache_output_duration_short" in message
 
 
 def test_materialize_window_can_opt_into_partial_window_for_diagnostics(

@@ -29,6 +29,11 @@ def upsert_evidence_bundle_index(
     compute_sha256: bool = False,
     include_timeline: bool = False,
     include_overlays: bool = False,
+    metadata_override: dict[str, Any] | None = None,
+    summary_override: dict[str, Any] | None = None,
+    sidecar_summary_override: dict[str, Any] | None = None,
+    timeline_rows: list[dict[str, Any]] | None = None,
+    overlay_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, int | str | bool]:
     """Upsert searchable DB rows for one evidence bundle.
 
@@ -38,9 +43,21 @@ def upsert_evidence_bundle_index(
 
     total_started = time.monotonic()
     bundle = Path(bundle_dir)
-    metadata = _load_json(bundle / "metadata.json")
-    summary = _load_json(bundle / BUNDLE_SUMMARY_FILE)
-    sidecar_summary = _load_json(bundle / SIDECAR_SUMMARY_FILE)
+    metadata = (
+        dict(metadata_override)
+        if isinstance(metadata_override, dict)
+        else _load_json(bundle / "metadata.json")
+    )
+    summary = (
+        dict(summary_override)
+        if isinstance(summary_override, dict)
+        else _load_json(bundle / BUNDLE_SUMMARY_FILE)
+    )
+    sidecar_summary = (
+        dict(sidecar_summary_override)
+        if isinstance(sidecar_summary_override, dict)
+        else _load_json(bundle / SIDECAR_SUMMARY_FILE)
+    )
     raw_clip = _first_existing(bundle, (RAW_CLIP_FILE, "raw_clip.mp4", "raw_clip.mkv", "raw_clip.webm"))
     annotations_path = bundle / PRODUCTION_ANNOTATIONS_FILE
     sink_metadata_path = bundle / SINK_METADATA_FILE
@@ -58,6 +75,7 @@ def upsert_evidence_bundle_index(
         sidecar_summary=sidecar_summary,
         annotations_path=annotations_path,
         sink_metadata_path=sink_metadata_path,
+        db_backed_sidecars=include_timeline and include_overlays,
     )
     materialization = _materialization(summary, sidecar_summary)
 
@@ -220,13 +238,30 @@ def upsert_evidence_bundle_index(
     timeline_count = 0
     overlay_count = 0
     timeline_index_started = time.monotonic()
-    if include_timeline and sink_metadata_path.is_file():
-        timeline_count = _upsert_timeline(conn, event_id=event_id, path=sink_metadata_path)
+    if include_timeline:
+        if timeline_rows is not None:
+            timeline_count = _upsert_timeline_rows(
+                conn, event_id=event_id, rows=timeline_rows
+            )
+        elif sink_metadata_path.is_file():
+            timeline_count = _upsert_timeline(
+                conn, event_id=event_id, path=sink_metadata_path
+            )
     timeline_index_ms = int((time.monotonic() - timeline_index_started) * 1000)
     overlay_index_started = time.monotonic()
-    if include_overlays and annotations_path.is_file():
-        overlay_count = _upsert_overlays(conn, event_id=event_id, path=annotations_path)
+    if include_overlays:
+        if overlay_rows is not None:
+            overlay_count = _upsert_overlay_rows(
+                conn, event_id=event_id, rows=overlay_rows
+            )
+        elif annotations_path.is_file():
+            overlay_count = _upsert_overlays(
+                conn, event_id=event_id, path=annotations_path
+            )
     overlay_index_ms = int((time.monotonic() - overlay_index_started) * 1000)
+
+    if include_timeline and include_overlays and media_status == "materialized":
+        _mark_sidecars_db_backed(conn, event_id=event_id)
 
     return {
         "event_id": event_id,
@@ -295,7 +330,17 @@ def _upsert_artifact(
 
 
 def _upsert_timeline(conn: psycopg.Connection, *, event_id: str, path: Path) -> int:
-    rows = _load_records(path)
+    return _upsert_timeline_rows(
+        conn, event_id=event_id, rows=_load_records(path)
+    )
+
+
+def _upsert_timeline_rows(
+    conn: psycopg.Connection,
+    *,
+    event_id: str,
+    rows: list[dict[str, Any]],
+) -> int:
     params = []
     for index, record in enumerate(rows):
         frame_index = _int_or_none(record.get("clip_frame_index"))
@@ -374,7 +419,17 @@ def _upsert_timeline(conn: psycopg.Connection, *, event_id: str, path: Path) -> 
 
 
 def _upsert_overlays(conn: psycopg.Connection, *, event_id: str, path: Path) -> int:
-    rows = _load_records(path)
+    return _upsert_overlay_rows(
+        conn, event_id=event_id, rows=_load_records(path)
+    )
+
+
+def _upsert_overlay_rows(
+    conn: psycopg.Connection,
+    *,
+    event_id: str,
+    rows: list[dict[str, Any]],
+) -> int:
     records_by_frame: dict[int, dict[str, Any]] = {}
     for index, record in enumerate(rows):
         frame_index = _int_or_none(record.get("clip_frame_index"))
@@ -500,6 +555,7 @@ def _merged_summary(
     sidecar_summary: dict[str, Any],
     annotations_path: Path,
     sink_metadata_path: Path,
+    db_backed_sidecars: bool = False,
 ) -> dict[str, Any]:
     media = _dict(metadata.get("media"))
     event = _dict(metadata.get("event"))
@@ -510,12 +566,91 @@ def _merged_summary(
         "source_event_id": event.get("source_event_id"),
         "evidence_dir": str(bundle),
         "raw_clip_path": str(bundle / RAW_CLIP_FILE),
-        "sink_metadata_path": str(sink_metadata_path) if sink_metadata_path.is_file() else media.get("sink_metadata_path"),
-        "annotations_jsonl_path": str(annotations_path) if annotations_path.is_file() else media.get("annotations_jsonl_path"),
-        "summary_json_path": str(bundle / BUNDLE_SUMMARY_FILE),
+        "metadata_path": None if db_backed_sidecars else media.get("metadata_path"),
+        "sink_metadata_path": None
+        if db_backed_sidecars
+        else (
+            str(sink_metadata_path)
+            if sink_metadata_path.is_file()
+            else media.get("sink_metadata_path")
+        ),
+        "annotations_jsonl_path": None
+        if db_backed_sidecars
+        else (
+            str(annotations_path)
+            if annotations_path.is_file()
+            else media.get("annotations_jsonl_path")
+        ),
+        "summary_json_path": None
+        if db_backed_sidecars
+        else str(bundle / BUNDLE_SUMMARY_FILE),
+        "metadata_storage": "db_backed" if db_backed_sidecars else "filesystem",
+        "timeline_storage": "db_backed" if db_backed_sidecars else "filesystem",
+        "annotation_storage": "db_backed" if db_backed_sidecars else "filesystem",
         "clip_status": summary.get("clip_status") or media.get("clip_status") or "ready",
     }
     return {key: value for key, value in merged.items() if value is not None}
+
+
+def _mark_sidecars_db_backed(conn: psycopg.Connection, *, event_id: str) -> None:
+    """Stop advertising sidecar files after their rows are durable in PostgreSQL."""
+
+    sidecar_path_keys = (
+        "metadata_path",
+        "sink_metadata_path",
+        "annotations_jsonl_path",
+        "summary_json_path",
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE events
+            SET payload = jsonb_set(
+                    COALESCE(payload, '{}'::jsonb),
+                    '{media}',
+                    (
+                        COALESCE(payload->'media', '{}'::jsonb)
+                        - %(sidecar_path_keys)s::text[]
+                    ) || jsonb_build_object(
+                        'metadata_storage', 'db_backed',
+                        'timeline_storage', 'db_backed',
+                        'annotation_storage', 'db_backed'
+                    ),
+                    true
+                ),
+                updated_at = now()
+            WHERE id = %(event_id)s::uuid
+            """,
+            {
+                "event_id": event_id,
+                "sidecar_path_keys": list(sidecar_path_keys),
+            },
+        )
+        cur.execute(
+            """
+            UPDATE evidence_tasks
+            SET metadata_path = NULL,
+                updated_at = now()
+            WHERE event_id = %(event_id)s::uuid
+              AND COALESCE(materialization_status, status) = 'materialized'
+            """,
+            {"event_id": event_id},
+        )
+        cur.execute(
+            """
+            DELETE FROM evidence_artifacts
+            WHERE event_id = %(event_id)s::uuid
+              AND artifact_type = ANY(%(artifact_types)s::text[])
+            """,
+            {
+                "event_id": event_id,
+                "artifact_types": [
+                    "overlay_annotations",
+                    "sink_timeline",
+                    "bundle_summary",
+                ],
+            },
+        )
 
 
 def _materialization(summary: dict[str, Any], sidecar_summary: dict[str, Any]) -> dict[str, Any]:
