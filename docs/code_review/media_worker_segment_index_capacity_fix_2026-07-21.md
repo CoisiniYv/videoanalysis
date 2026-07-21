@@ -179,8 +179,51 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
 - Verification: combined relevant suite 452 passed with one expected skip;
   disposable PostgreSQL initialized by migrations 001-032 retained all eight
   exact-lease/fenced-finalizer passes; `py_compile`, critical Ruff rules,
-  compose rendering, and diff checks passed. Runtime interoperability and the
-  300s-retention pressure gate remain pending.
+  compose rendering, and diff checks passed.
+- Runtime interoperability: real bind-mounted sink/media-worker containers
+  reported `segment_index_io_concurrency=2`; discovery produced one manifest
+  parse with zero native-row parse/cache entry, and loading the selected row
+  then produced one native-row parse/cache entry. A finalized job emitted the
+  new slot-wait diagnostic. The temporary shared root and containers were
+  removed afterward.
+- Invalid pressure attempt:
+  `/data/video-analytics/artifacts/pressure60_8p1_ioadm2_b10m_r300_20260721T1635Z`.
+  It reached 60/60 sources and began sampling, but the root filesystem returned
+  `ENOSPC` while writing the first runtime samples. The attempt is retained as
+  an environmental failure and is not a capacity pass/fail result. Manual
+  recovery restored zero enabled cameras, active tasks, leases, finalizer
+  pending rows, pressure processes, and the daily Redis/PostgreSQL/media
+  settings.
+- Completed 300s-retention diagnostic:
+  `/data/video-analytics/artifacts/pressure60_8p1_ioadm2_b10m_r300b_20260721T1705Z`.
+  The 600s formal window sustained 60/60 sources at 8.0201 FPS with zero
+  sampling-window Savant send failure, forwarder queue-full, or raw loss.
+  All 968 formal tasks and all 1,004 warmup/postfill-inclusive tasks eventually
+  materialized; attempt-zero expiry, duplicate, claim-busy, finalizer failure,
+  handoff recovery, retry failure, and drain residuals were zero. All 1,004
+  retained videos passed window, duration, frame-rate, 8090 detail, and timeline
+  checks.
+- Capacity result: failed. During the formal window cumulative ready arrivals
+  versus completions ended at 934/822, about 1.56/1.37 tasks/s. Ready work ended
+  at 107 with oldest-ready about 70.6s; scheduler oldest-ready p95/max was
+  78.24s/138.65s. Ready-to-remux claim p95 was 70.94s, media queue p95 91.73s,
+  and lifecycle p95 92.12s. Although poll-gap p95 was 1.736s and media-worker
+  peak CPU was 314.32%, backlog was moved into bounded admission rather than
+  removed.
+- Attribution: slot wait p50/p95 was 2.012s/4.455s. Pre-pin-through-handoff
+  `remux_total` p95 was 6.308s while actual ffmpeg/remux p95 was 0.786s;
+  refresh and pin-publication p95 were 1.609s and 1.401s. Compared with Round 4,
+  the two-slot bound reduced per-job refresh/pin amplification but its sustained
+  service rate stayed about 12% below arrival. The next isolated capacity
+  variable is therefore I/O admission `2 -> 3`, not WIP/remux/finalizer growth.
+- Full-run validity caveat: this completed run is a media-capacity diagnostic,
+  not the required complete r300 gate. A pre-existing
+  `person-observation-worker` lost its Redis stream/group and looped on
+  `NOGROUP`; trajectory persistence was zero and 34/1,004 videos had no DB
+  annotation rows. Unbounded Docker json-file logs reached about 168GB for the
+  person worker and 85GB for face-worker, repeatedly pushing the root disk
+  toward ENOSPC. The consumer-group recovery and bounded-log remediation must
+  pass before repeating the unchanged two-slot baseline.
 
 ## Recovery audit after Round 1
 
@@ -195,15 +238,16 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Recreate the bind-mounted media-worker and rolling-cache sink services and
-   prove the effective resource log reports `segment_index_io_concurrency=2`,
-   a finalized job reports `segment_index_io_slot_wait_ms`, and a live segment
-   retains the valid compact-manifest/lazy-row contract.
-2. Run the unchanged Candidate B load for 600s with 300s retention. Treat slot
-   wait as part of ready-to-remux service time; admission is not a pass if
-   oldest-ready or wait continues to accumulate.
-3. If and only if it passes, repeat with 3,840s retention.
-4. Analyze manifest/stat/refresh/rebuild timing and service-rate/oldest-ready
-   slope before changing another dimension.
+1. Recreate person/face workers with bounded json-file rotation and prove a
+   deleted person-observation group self-recovers from retained stream rows
+   without an exception loop; confirm trajectory persistence and log bounds.
+2. Repeat the unchanged Candidate B 600s/120s-drain load with 300s retention
+   and I/O admission still at two. This is the controlled baseline because the
+   first completed media diagnostic lacked the person-consumer load and full
+   annotation gate.
+3. Add an artifact-audited pressure override for I/O admission and change only
+   `2 -> 3`. Treat slot wait as part of ready-to-remux service time; admission
+   is not a pass if oldest-ready or wait continues to accumulate.
+4. If and only if the three-slot r300 gate passes, repeat with 3,840s retention.
 5. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.
