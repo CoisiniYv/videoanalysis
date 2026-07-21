@@ -559,6 +559,73 @@ def test_changed_parent_reuses_known_immutable_leaf_membership(
     assert len(resolve_calls) <= 20
 
 
+def test_selected_pin_identity_lookup_is_independent_of_retained_catalog_width(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    for sequence in range(128):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"{sequence:04d}",
+            pts_values=[sequence * 2 + 1, sequence * 2 + 2],
+        )
+    index = _index(root)
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+    )
+    selected = segments[60:66]
+    catalog = index._catalogs[("camera-01", "epoch-a")]
+    expected = {
+        segment.directory.resolve(strict=False): (
+            catalog.entries[
+                segment.directory.resolve(strict=False)
+                / "segment_manifest.json"
+            ].metadata_identity,
+            catalog.entries[
+                segment.directory.resolve(strict=False)
+                / "segment_manifest.json"
+            ].video_identity,
+        )
+        for segment in selected
+    }
+
+    class CountingEntries(dict):
+        value_visits = 0
+
+        def values(self):
+            for value in super().values():
+                self.value_visits += 1
+                yield value
+
+    counting_entries = CountingEntries(catalog.entries)
+    with catalog.lock:
+        catalog.entries = counting_entries
+
+    original_resolve = Path.resolve
+    resolved_segment_directories: list[Path] = []
+
+    def counted_resolve(path: Path, *args, **kwargs) -> Path:
+        if path.parent.name == "segments":
+            resolved_segment_directories.append(path)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", counted_resolve)
+    identities = index._catalog_segment_identities(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        segments=selected,
+    )
+
+    assert identities == expected
+    assert counting_entries.value_visits <= len(selected)
+    assert len(resolved_segment_directories) <= len(selected)
+
+
 def test_periodic_reconcile_uses_incremental_membership_without_full_walk(
     tmp_path: Path,
 ) -> None:
