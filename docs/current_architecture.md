@@ -4,7 +4,7 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `307a9c4`。
+exact-lease 修复 `2a57f20`，当前容量观测 checkpoint `70d4e75`。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -276,6 +276,13 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   JSON serialize/write 之前结束，随后 worker 又立即 parse 同一文件。下一轮先补 metadata
   publish bytes/time、reload、handoff-build 与 unattributed 指标，再只优化实测主导子阶段；
   不同时扩大 WIP/remux/finalizer；
+- `7e238a8`/`70d4e75` 已只补观测、不改行为。exact diagnostic r300
+  `pressure60_8p1_metapubmetrics_ioadm3_b10m_r300_20260721T225212Z` 证明约 239KB metadata 的
+  pretty JSON publish/reload p95 为 1.101s/0.885s，但剩余 unattributed p95 3.334s 与
+  `segment_index_lock_hold_ms` p95 3.067s 的逐 job 相关系数为 0.972。代码路径显示
+  `_catalog_segment_identities()` 在 catalog lock 内扫描/resolve 全 retention catalog，只为取
+  已选 5-6 leaf 的 identities；下一唯一变量是 selected-leaf direct lookup，metadata 格式和容量
+  暂不同时改变。该轮 ready/media/lifecycle p95 仍为 28.29s/48.47s/48.66s，r3840 禁止；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

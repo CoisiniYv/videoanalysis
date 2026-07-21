@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `307a9c4`，尚未合入或声明为 60 路默认容量；
+  `307a9c4`、最新观测提交 `70d4e75`，尚未合入或声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -175,13 +175,23 @@ frame metadata 的 pretty JSON serialize/write 前停止 `materialization_ms`，
 文件。先以红测加入 publish time/bytes、reload、handoff-build 和 unattributed 指标，再只优化
 实测主导子阶段。
 
+`7e238a8`/`70d4e75` 已把 metadata publish time/bytes、immediate reload、handoff build 与
+unattributed residual 贯通 handoff/recovery/log/artifact，未改变调度或序列化。exact diagnostic
+`pressure60_8p1_metapubmetrics_ioadm3_b10m_r300_20260721T225212Z` 的 60/60、8.0518 FPS、
+970/970 正式与 1,009 retained、视频/8090/annotation/person/fence/residual 全通过；capacity 仍以
+ready/media/lifecycle p95 28.29s/48.47s/48.66s 失败。约 239KB metadata 的 pretty publish/reload
+p95 是 1.101s/0.885s，但 residual p95 3.334s 与 `segment_index_lock_hold_ms` p95 3.067s 的逐
+job 相关系数为 0.972。下一变量收窄为 `_catalog_segment_identities()` 对 selected 5-6 leaf 的
+direct lookup，避免在 catalog lock 内 scan/resolve 全 retention catalog；metadata 格式和容量
+本轮不同时改变。
+
 ## 已知开放项
 
 ### P0/P1
 
 - 保持 width 3 和 Candidate B 其余参数不变；把 sink 原子发布、retention generation 与
-  index discovery 的 journal/reconciliation 正确性合同保持不变；下一变量仅为 remux metadata
-  publish/reload/handoff 计时，测试必须先证明现有 `remux_total` 盲区被完整分解；
+  index discovery 的 journal/reconciliation 正确性合同保持不变；下一变量仅为 selected-leaf
+  identity direct lookup，红测必须证明路径工作量不随 retained catalog width 增长；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
 - 最新 r300 的 finalizer/process-pool wait p95 已回到 4.823s/2.758s；index discovery

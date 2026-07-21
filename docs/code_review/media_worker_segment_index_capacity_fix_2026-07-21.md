@@ -52,6 +52,8 @@ retention short gates nor the two one-hour acceptance runs have passed yet.
 | `0f7d775` | bounded crash-recoverable publication journal | Sink appends checksummed immutable identities after atomic segment rename; index consumes only new records and keeps filesystem reconciliation authoritative |
 | `c06cf28` | journal-first periodic-reconcile red test | Proves a scheduled audit must not reparse a journal-covered leaf while it still recovers an unjournaled crash-window leaf and prunes a deleted leaf |
 | `307a9c4` | journal-first periodic reconciliation | Consumes and validates the journal tail before membership enumeration without weakening corruption, rotation, deletion, pin or identity recovery |
+| `7e238a8` | remux metadata-gap red tests | Requires metadata publish time/bytes, immediate reload, handoff build, residual, finalizer log and pressure-artifact aggregation |
+| `70d4e75` | instrumentation-only remux attribution | Carries the new metrics through materialization, durable handoff/recovery, finalization logs and retained pressure summaries without changing scheduling or serialization |
 
 ## Measurement rounds
 
@@ -773,6 +775,55 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   then optimize only the measured dominating subphase. Do not widen WIP,
   remux and finalizer together, and do not run r3840.
 
+### Round 16: production remux metadata-gap attribution
+
+- Tests-only commit `7e238a8` first required five new fields at the materializer
+  result, durable handoff/phase, recovery/finalizer log and pressure-summary
+  layers: `remux_metadata_publish_ms`, `remux_metadata_bytes`,
+  `remux_metadata_reload_ms`, `remux_handoff_build_ms` and
+  `remux_unattributed_ms`. All four focused contracts failed on the old code.
+- Instrumentation-only `70d4e75` times the pretty JSON construction/write,
+  immediate parse-back and immutable handoff construction, then carries those
+  values through restart recovery and artifact aggregation. It changes no
+  queue, lock, serialization format, capacity, deadline or state transition.
+  Focused index/sink/rolling passed 137, pressure harness/analyzer 201, broader
+  lifecycle/scheduler/finalizer 154 with one environment skip, and a fresh
+  PostgreSQL 001-032 database passed all eight real contracts. Critical Ruff,
+  compile, Compose rendering and diff checks passed.
+- Exact diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_metapubmetrics_ioadm3_b10m_r300_20260721T225212Z`.
+  It kept the fixed input/hash and every Candidate B/width-three dimension.
+  Input passed at 60/60 and 8.0518 FPS with zero send/queue/raw loss. All 970
+  formal and 1,009 retained tasks materialized; all retained videos and 8090/
+  timeline/annotation/bbox/person-context checks passed. Person persistence was
+  100,968 stored versus 100,966 exported with zero measured loss and final
+  lag/pending 0/0. Expiry, handoff recovery, retry failure, claim-busy,
+  duplicate, finalizer failure and all residuals were zero.
+- Strict capacity still failed: ready/media/lifecycle/DB lifecycle p95 were
+  `28.290/48.466/48.663/51.081s`, oldest-ready p95 36.334s and poll-gap p95
+  2.033s. The formal tail had 82 active/44 ready and relied on drain. Actual
+  remux/finalizer-pool-wait/finalization p95 were `1.241/1.514/4.220s`; WIP,
+  remux and finalizer depth p95 were `19/12/10`.
+- The new fields prove that the stable approximately 239KB metadata document is
+  not free under synchronized concurrency: pretty-JSON publish was
+  262ms p50/1.101s p95 and immediate reload 158ms/0.885s. Handoff build was
+  only 4ms/46ms. This round-trip is a valid later optimization candidate, but
+  it is not the largest remaining phase.
+- The computed residual was 80ms p50/3.334s p95. Per-job log correlation shows
+  Pearson 0.972 between that residual and aggregate
+  `segment_index_lock_hold_ms`, whose p95 was 3.067s; subtracting lock hold
+  leaves only 26.5ms p50/598ms p95. Static alignment identifies a retained-
+  width operation: `_catalog_segment_identities()` holds `catalog.lock`, scans
+  every catalog entry and repeatedly resolves every directory merely to return
+  identities for the already-selected 5-6 pin leaves. This defeats the bounded-
+  pin intent without adding safety.
+- The next single behavior variable is therefore direct identity lookup for
+  only selected leaves under the short catalog lock. A deterministic red test
+  must bound resolve/entry visits independently of retained catalog width and
+  preserve missing-entry retry, exact metadata/video identity fencing and pin
+  publication. Metadata serialization, WIP/remux/finalizer sizes, width three,
+  retention and deadlines remain unchanged for its r300 comparison.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -786,12 +837,12 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Add an instrumentation-only red test and fields for rolling metadata publish
-   duration/bytes, immediate metadata reload, handoff build and remux
-   unattributed time. Preserve scheduling and all Candidate B dimensions.
-2. Use the new attribution to make one minimal behavior change only in the
-   measured dominant subphase; keep filesystem/journal/pin/identity/lease
-   fences and PostgreSQL durable-queue semantics unchanged.
+1. Add a deterministic red test requiring `_catalog_segment_identities()` to
+   visit/resolve only selected pin leaves, independent of retained catalog
+   width, while preserving missing-entry and exact identity behavior.
+2. Implement only that direct selected-entry lookup. Keep the measured metadata
+   publish/reload format, filesystem/journal/pin/identity/lease fences and
+   PostgreSQL durable-queue semantics unchanged for attribution.
 3. Repeat focused tests, fresh PostgreSQL and a bind-mounted representative
    smoke, then the exact width-three r300 gate. Only a full strict pass permits
    r3840; watchlist-zero is not a substitute for latency/visibility gates.
