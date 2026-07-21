@@ -293,6 +293,8 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "--media-worker-materialization-max-active 4" in output
     assert "media_worker_rolling_remux_workers=1" in output
     assert "--media-worker-rolling-remux-workers 1" in output
+    assert "media_worker_segment_index_io_concurrency=2" in output
+    assert "--media-worker-segment-index-io-concurrency 2" in output
     assert "preserve_warmup_results=1" in output
     assert "--preserve-warmup-results" in output
 
@@ -341,6 +343,8 @@ def test_4090_stress_profile_defaults_to_validated_local_pipeline() -> None:
     assert "media_worker_finalizer_process_workers=4" in output
     assert "media_worker_finalizer_queue_capacity=8" in output
     assert "media_worker_rolling_max_per_poll=8" in output
+    assert "media_worker_segment_index_io_concurrency=2" in output
+    assert "--media-worker-segment-index-io-concurrency 2" in output
     assert "pressure_pause_redis_rdb=1" in output
     assert "--pressure-pause-redis-rdb" in output
     assert "pressure_tune_postgres_checkpoints=1" in output
@@ -1031,11 +1035,43 @@ def test_pressure_runner_exposes_media_worker_capacity_candidates() -> None:
             "12",
             "--media-worker-rolling-remux-workers",
             "4",
+            "--media-worker-segment-index-io-concurrency",
+            "3",
         ]
     )
 
     assert parsed.media_worker_materialization_max_active == 12
     assert parsed.media_worker_rolling_remux_workers == 4
+    assert parsed.media_worker_segment_index_io_concurrency == 3
+
+
+def test_pressure_runner_rejects_nonpositive_segment_index_io_concurrency() -> None:
+    module = _load_module()
+
+    with pytest.raises(
+        SystemExit,
+        match="--media-worker-segment-index-io-concurrency must be positive",
+    ):
+        module.main(["--media-worker-segment-index-io-concurrency", "0"])
+
+
+def test_4090_profile_allows_one_dimension_index_io_override() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "io-concurrency-dry-run",
+            "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY": "3",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert "media_worker_segment_index_io_concurrency=3" in completed.stdout
+    assert "--media-worker-segment-index-io-concurrency 3" in completed.stdout
 
 
 def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
@@ -1135,6 +1171,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
         rolling_cache_prefill_s=25,
         media_worker_materialization_max_active=12,
         media_worker_rolling_remux_workers=8,
+        media_worker_segment_index_io_concurrency=3,
     )
     captured: dict[str, dict[str, str]] = {}
 
@@ -1167,7 +1204,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S"] == "60"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES"] == "2048"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES"] == "268435456"
-    assert values["MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY"] == "2"
+    assert values["MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY"] == "3"
     assert values["MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED"] == "false"
     assert values["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == "4"
     event_values = captured["compose_recreate_event_worker_rolling_cache.log"]
