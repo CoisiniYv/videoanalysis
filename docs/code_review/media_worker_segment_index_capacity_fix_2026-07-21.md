@@ -3,10 +3,10 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. The source-window-bounded pin improved the width-three r300
-comparison, but the strict r300 capacity and visibility gates still failed.
-Neither the two retention short gates nor the two one-hour acceptance runs have
-passed yet.
+completion claim. Per-catalog singleflight passed its deterministic and real-
+container correctness proofs, but the unchanged width-three r300 repeat still
+failed the strict capacity and visibility gates. Neither the two retention
+short gates nor the two one-hour acceptance runs have passed yet.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -537,13 +537,16 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   2.879s, and short catalog lock hold 3.028s. Peak media-worker CPU was 361.54%,
   still about 75.5% below the 1,475.75% baseline but higher than Round 9's
   288.21%.
-- `1ec97fc` had the intended narrow effect but did not remove refresh rework.
+- `1ec97fc` had the intended narrow effect but did not remove the measured
+  refresh cost.
   Cumulative `scanned_known` fell only from 94,400 to 89,220 and refresh p95
-  only from 3.009s to 2.879s. The run published 5,847 rolling segments but
-  recorded 12,122 `new_or_changed` operations, essentially unchanged from
-  Round 9's 12,092. This approximately 2.07x amplification is consistent with
-  concurrent jobs copying the same catalog version, independently parsing the
-  same newly published leaves, and discarding losing COW publications.
+  only from 3.009s to 2.879s. The artifact's 5,847 segment count is a retained
+  filesystem snapshot after a 600-second run with 300-second retention, while
+  12,122 `new_or_changed` is a cumulative process counter. They cover different
+  time domains and cannot be divided into an amplification ratio or used to
+  attribute duplicate refresh work. The duplicate same-catalog refresh race is
+  instead established independently by the deterministic concurrent red test
+  in `25d5fec`.
 - The harness's only declared failure remained
   `adaface_roi_watchlist_events_zero`; the independent strict capacity and
   visibility failures prohibit r3840 regardless. Cleanup restored disabled
@@ -599,8 +602,59 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   is retained. Its copied test module lacked the expected `harness/tests`
   parent depth and exited during module import before fixture or DB mutation.
   The corrected smoke restored that path layout.
-- The structural/runtime correctness proof is complete; capacity remains
-  unclaimed until the unchanged width-three r300 repeat passes.
+- The structural/runtime correctness proof is complete. The unchanged
+  width-three r300 repeat is recorded in Round 13 and did not pass, so capacity
+  remains unclaimed.
+
+### Round 13: singleflight width-three r300 result
+
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_singleflight_ioadm3_b10m_r300_20260721T2049Z`.
+  The only structural change from Round 11 was per-catalog singleflight and the
+  completion-time watermark. WIP/remux/max-per-poll remained `20/12/8`,
+  finalizer threads/processes/queue remained `8/4/8`, index I/O admission
+  remained three, and the run retained the same 600s/120s, 300s-retention
+  fixture and fixed SHA256.
+- Input and correctness passed: 60/60 sources sustained 8.038 FPS with zero
+  sampling-window send failure, forwarder queue-full, raw drop, or raw send
+  failure. All 971 formal tasks and all 1,009 retained tasks materialized. All
+  retained videos passed duration/FPS, 8090 detail/timeline, annotation, bbox,
+  and person-context checks. Person persistence passed with 102,091 stored
+  rows versus 102,088 exports across all 60 sources; the sampling report ended
+  with person-consumer lag/pending `1/2` while the post-run observability
+  snapshot had converged to zero.
+- Exact fences passed: candidates/immediate-admitted/gap/fenced-retry were
+  `1009/996/13/13`; attempt-zero expiry, handoff recovery, retry failure,
+  claim-busy, duplicate, finalizer failure, and final active task/lease/WIP/
+  lane/finalizer-pending residuals were zero. Pinned-segment
+  min/p50/p95/max remained `4/6/6/6`.
+- The strict r300 capacity gate failed. Ready-to-remux p95 was 53.417s,
+  scheduler oldest-ready p95 58.929s, media queue p95 73.826s, lifecycle p95
+  74.369s, and metadata visibility p95 15.235s. Poll-gap p95 was 2.156s,
+  also above two one-second intervals. The final formal sample held 971 tasks,
+  869 bundles, 101 active tasks, and 65 ready tasks; only the later drain
+  returned all state to zero. Therefore r3840 remains prohibited.
+- Singleflight did not remove the measured pressure bottleneck. Per-catalog
+  lock wait p95 was 0.045ms and cumulative wait only about 21ms. In contrast,
+  global I/O-slot wait p95 was 4.455s and refresh p95 2.575s; pre-pin through
+  handoff p95 was 7.164s while actual ffmpeg/remux was 0.960s. Pin publication,
+  DB claim, finalizer pool wait, and finalization p95 were respectively
+  0.096s, 0.284s, 2.758s, and 4.823s. Media-worker peak CPU was 408.25%, about
+  72.3% below the original 1,475.75% baseline, but the backlog was still moved
+  into the drain window.
+- The latest artifact again exposes two non-comparable counters: 5,645
+  retained segments after 300-second retention and 12,273 cumulative
+  `new_or_changed` operations. No amplification ratio or causal conclusion is
+  drawn from them. Together with the negligible real singleflight wait, the
+  next structural target is the repeated retention-directory discovery and
+  manifest/stat work itself: inspect sink publication, retention generation,
+  and index discovery as one contract, then require a red test for a crash-safe
+  incremental publication feed (or equivalent) with periodic reconciliation
+  and deletion safety before changing production code.
+- Cleanup restored disabled pressure cameras, zero pressure publishers,
+  ffmpeg/MediaMTX processes and lifecycle residuals, daily disabled
+  materialization, 300s retention, width two, and Redis/PostgreSQL defaults.
+  Media-worker restart count remained zero and about 237GB root space remained.
 
 ## Recovery audit after Round 1
 
@@ -615,13 +669,17 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Repeat the unchanged width-three r300 gate at `b69575b`; compare actual
-   segment publications with `new_or_changed`, refresh/slot/lock wait, formal
-   arrival/completion slope, pinned cardinality, strict latency, visibility,
-   correctness, annotation, and residuals against Rounds 9 and 11.
-2. Only if that r300 gate passes every input, capacity, correctness, annotation,
-   visibility, and residual gate, run r3840. Do not increase admission width or
-   use the harness's watchlist-only failure list as a substitute for the strict
-   latency gates.
-3. Only after both short gates pass, run two comparable one-hour acceptances
+1. Keep width three and every Candidate B dimension fixed. Trace sink atomic
+   publication, retention deletion/generation, and index discovery together;
+   add a deterministic red test proving the selected incremental discovery
+   contract avoids per-task retained-directory enumeration while recovering
+   from missed/crashed publication and preserving deletion safety.
+2. Implement only that structural discovery variable, retain the mutation
+   flock/read pin/identity/rename fences, and repeat focused tests, disposable
+   PostgreSQL, and the bind-mounted real-container smoke.
+3. Repeat the exact width-three r300 gate. Only if it passes every input,
+   capacity, correctness, annotation, visibility, and residual gate may r3840
+   run. Do not increase admission width or use the harness's watchlist-only
+   failure list as a substitute for the strict latency gates.
+4. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.

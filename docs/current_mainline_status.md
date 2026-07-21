@@ -26,7 +26,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership 复用与 per-catalog singleflight | singleflight/pin/retention/identity 单测和真实容器 smoke 通过；前一 width-three r300 容量/visibility 失败，`b69575b` 同口径 r300 待执行 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership 复用与 per-catalog singleflight | singleflight/pin/retention/identity 单测和真实容器 smoke 通过；`b69575b` 同口径 width-three r300 容量/visibility 仍失败 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -130,25 +130,35 @@ persistence、exact-lease 与末态 residual 全通过。但 ready/media/lifecyc
 36.60s/57.03s/57.53s，oldest-ready p95=40.68s、metadata visibility p95=7.50s，正式窗口
 末仍有 79 active/39 ready，依靠 drain 才清零；r300 严格门失败，r3840 继续禁止。
 
-该轮 5,847 个实际发布 segment 对应 12,122 次 `new_or_changed`，而 Round 9 为 12,092；
-已知 leaf probe 优化没有消除同一 source 的并发 COW refresh/parse 重做。`25d5fec` 已用红测
-稳定复现，`b69575b` 在全局 width-three 之前增加 per-(source,epoch) singleflight，并把
-refresh watermark 记录在完成时刻；WIP/remux/finalizer/deadline 均保持不变。真实容器
+该轮 artifact 的 5,847 是 300 秒 retention 后的保留快照，12,122 次 `new_or_changed` 是
+累计计数，二者不能相除或作为 refresh 放大率。独立并发红测 `25d5fec` 已稳定复现同一
+catalog 的重复 refresh，`b69575b` 在全局 width-three 之前增加 per-(source,epoch)
+singleflight，并把 refresh watermark 记录在完成时刻；WIP/remux/finalizer/deadline 均
+保持不变。真实容器
 `segment_index_singleflight_smoke_20260721T204645Z` 的 8/8 用例证明同 catalog 只 refresh/parse
 一次、跨 source/snapshot 不阻塞，且 bounded/legacy pin、retention、identity fence、count log
-和零 marker residual 均保留。相同 r300 尚未执行，容量仍不成立。
+和零 marker residual 均保留。
+
+相同 width-three r300 已保留在
+`pressure60_8p1_singleflight_ioadm3_b10m_r300_20260721T2049Z`：60/60、8.038 FPS、
+971/971 正式任务与 1,009/1,009 retained video 最终 materialized，视频/8090/annotation/
+person persistence、exact-lease 与末态 residual 全通过。但 ready/media/lifecycle p95 为
+53.42s/73.83s/74.37s，oldest-ready p95=58.93s、metadata visibility p95=15.24s，正式窗口
+末仍有 101 active/65 ready，依赖 drain 才清零。slot wait/refresh p95 为 4.455s/2.575s，
+而 per-catalog lock wait p95 仅 0.045ms、累计约 21ms；singleflight 修复了确定性竞态，但
+不是压力瓶颈。r300 严格门仍失败，r3840 继续禁止。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3，不再扩大 admission；用已通过并发红测与真实容器 smoke 的 `b69575b`
-  重跑相同 300s retention 短门，比较 segment publication/new-or-changed 放大率、service
-  rate、refresh/slot/lock wait、pinned 分布与严格 latency/visibility 门；
+- 保持 width 3 和 Candidate B 其余参数不变；把 sink 原子发布、retention generation 与
+  index discovery 作为一个合同检查，先用红测定义 crash-safe 增量 publication feed（或
+  等价机制）、周期 reconciliation 与 deletion safety，再改变唯一结构变量；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
-- 独立处理 finalizer p95 5.244s / process-pool wait p95 5.576s，禁止与 index/WIP/remux
-  调整一次性混在同一候选；
+- 最新 r300 的 finalizer/process-pool wait p95 已回到 4.823s/2.758s；index discovery
+  门未通过前不把 finalizer 作为下一调参轴，也不与 index 结构变量混在同一候选；
 - 完成真实混合 RTSP 的断流、重连和长 soak；
 - 完成 event/person/face/media worker restart/recovery soak；
 - 继续观察生产 T4 84–85°C、70W power cap 和 evidence 波峰排队。

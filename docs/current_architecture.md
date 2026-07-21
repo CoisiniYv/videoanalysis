@@ -239,11 +239,20 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   1,011 retained video、annotation/person persistence 与全部 fence/residual 通过，但
   ready/media/lifecycle p95 为 36.60s/57.03s/57.53s，metadata visibility p95=7.50s；
   正式窗口末仍有 79 active/39 ready，依赖 drain 才清零，因此容量门失败且 r3840 禁止；
-- 该轮 5,847 个实际 segment 对应 12,122 次 `new_or_changed`，显示同一 catalog 的并发
-  COW refresh 仍重复工作。`b69575b` 已加入位于全局 width admission 之前的 per-source/epoch
-  singleflight，并把 refresh watermark 改为完成时；真实容器
+- 该轮 artifact 的 5,847 是 300 秒 retention 后的保留快照，12,122 次
+  `new_or_changed` 是累计计数，二者时间域不同，不能作为放大率或因果证据。独立并发红测
+  `25d5fec` 确实复现了同 catalog 重复 refresh；`b69575b` 已加入位于全局 width admission
+  之前的 per-source/epoch singleflight，并把 refresh watermark 改为完成时；真实容器
   `segment_index_singleflight_smoke_20260721T204645Z` 已通过同 catalog 单次 parse、跨 source
-  非阻塞、pin/retention/identity/count 边界。相同 r300 尚未复测，不能写成容量已改善；
+  非阻塞、pin/retention/identity/count 边界；
+- 对应相同 width-three r300
+  `pressure60_8p1_singleflight_ioadm3_b10m_r300_20260721T2049Z` 的输入、971/971 正式任务、
+  1,009/1,009 retained video、annotation/person persistence 与全部 fence/residual 通过，
+  但 ready/media/lifecycle p95 为 53.42s/73.83s/74.37s，oldest-ready p95=58.93s，
+  metadata visibility p95=15.24s，正式窗口末仍有 101 active/65 ready，依赖 drain 才清零；
+  per-catalog lock wait p95 仅 0.045ms，说明 singleflight 修复了真实竞态但不是容量瓶颈。
+  后续保持 width 3 和 Candidate B 其余维度不变，转向 sink 发布、retention generation 与
+  index discovery 的 crash-safe 增量合同；r300 未通过，r3840 继续禁止；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
