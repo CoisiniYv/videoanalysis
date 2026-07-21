@@ -233,6 +233,64 @@ def test_incremental_refresh_parses_only_new_or_changed_manifests(tmp_path: Path
     assert int(index.snapshot()["refreshes"]) >= 2
 
 
+def test_changed_parent_reuses_known_immutable_leaf_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    directories = [
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"{sequence:04d}",
+            pts_values=[sequence * 2 + 1, sequence * 2 + 2],
+        )
+        for sequence in range(32)
+    ]
+    index = _index(root)
+    assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 32
+
+    segments_dir = directories[0].parent
+    parent_stat = segments_dir.stat()
+    new_directory = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0032",
+        pts_values=[65, 66],
+    )
+    os.utime(
+        segments_dir,
+        ns=(parent_stat.st_atime_ns, parent_stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    original_is_file = Path.is_file
+    original_resolve = Path.resolve
+    manifest_probes: list[Path] = []
+    resolve_calls: list[Path] = []
+
+    def counted_is_file(path: Path) -> bool:
+        if path.name == "segment_manifest.json":
+            manifest_probes.append(path)
+        return original_is_file(path)
+
+    def counted_resolve(path: Path, *args, **kwargs) -> Path:
+        resolve_calls.append(path)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", counted_is_file)
+    monkeypatch.setattr(Path, "resolve", counted_resolve)
+
+    segments = index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
+
+    assert [segment.segment_id for segment in segments] == [
+        f"{sequence:04d}" for sequence in range(33)
+    ]
+    assert manifest_probes == [new_directory / "segment_manifest.json"]
+    assert len(resolve_calls) <= 20
+
+
 def test_periodic_reconcile_uses_incremental_membership_without_full_walk(
     tmp_path: Path,
 ) -> None:
