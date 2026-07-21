@@ -3,10 +3,11 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. Per-catalog singleflight passed its deterministic and real-
-container correctness proofs, but the unchanged width-three r300 repeat still
-failed the strict capacity and visibility gates. Neither the two retention
-short gates nor the two one-hour acceptance runs have passed yet.
+completion claim. The crash-recoverable segment-publication journal and the
+journal-first periodic reconciliation order both passed deterministic and
+real-container correctness proofs, but their unchanged width-three r300
+repeats still failed the strict capacity and visibility gates. Neither the two
+retention short gates nor the two one-hour acceptance runs have passed yet.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -46,6 +47,11 @@ short gates nor the two one-hour acceptance runs have passed yet.
 | `db19d1f`, `1ec97fc` | changed-parent immutable membership reuse | A changed source parent probes only new/pending manifest leaves instead of resolving and probing every already cataloged immutable leaf |
 | `25d5fec` | same-catalog duplicate-refresh red test | Reproduces two concurrent callers parsing the same new manifest while retaining a direct stale-version fence test |
 | `b69575b` | per-catalog refresh/pin singleflight | Coalesces same-source refresh work before global I/O admission and publishes refresh/reconcile watermarks at completion |
+| `43ca946` | retained/cumulative-counter documentation correction | Rejects the invalid 300s-retained-segment versus 600s-cumulative-operation ratio |
+| `c1c3a20`, `1eeb1a2` | publication-journal red/recovery tests | Require atomic incremental publication, bounded rotation, corruption fallback, crash-window recovery, metrics and retention safety |
+| `0f7d775` | bounded crash-recoverable publication journal | Sink appends checksummed immutable identities after atomic segment rename; index consumes only new records and keeps filesystem reconciliation authoritative |
+| `c06cf28` | journal-first periodic-reconcile red test | Proves a scheduled audit must not reparse a journal-covered leaf while it still recovers an unjournaled crash-window leaf and prunes a deleted leaf |
+| `307a9c4` | journal-first periodic reconciliation | Consumes and validates the journal tail before membership enumeration without weakening corruption, rotation, deletion, pin or identity recovery |
 
 ## Measurement rounds
 
@@ -656,6 +662,117 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   materialization, 300s retention, width two, and Redis/PostgreSQL defaults.
   Media-worker restart count remained zero and about 237GB root space remained.
 
+### Round 14: crash-recoverable incremental publication journal
+
+- The retained 5,847 segments in Round 11 were a post-run filesystem snapshot
+  after 300-second retention, while 12,122 `new_or_changed` operations were a
+  process-lifetime cumulative counter over the 600-second run. Commit
+  `43ca946` records that these time domains cannot form an amplification ratio;
+  the independently reproduced duplicate-refresh race in `25d5fec` remains
+  valid without that ratio.
+- Red tests `c1c3a20`/`1eeb1a2` define the next structural contract. The sink
+  first publishes the complete segment directory through the existing atomic
+  rename, then best-effort appends a checksummed compact manifest plus immutable
+  manifest/metadata/video identities. Append failure never invalidates a
+  committed segment. The journal is bounded at 16 MiB and atomically rotates.
+  Corruption, truncation, replacement or rotation force filesystem membership
+  reconciliation.
+- Implementation `0f7d775` makes ordinary index refresh consume only new
+  records. Initial and periodic filesystem membership audits remain the
+  recovery authority for a sink crash between rename and append and for
+  retention deletion. The mutation flock, read-pin marker, exact identity
+  fence, atomic segment rename and fenced finalizer handoff are unchanged.
+- Focused index/sink/rolling tests passed 137; pressure harness/analyzer passed
+  201; broader lifecycle/scheduler/finalizer/deployment/static tests passed;
+  a fresh PostgreSQL database migrated through 001-032 passed all eight real
+  materialization/finalizer contracts. Compile, Ruff, Compose rendering and
+  diff checks passed.
+- Bind-mounted smoke:
+  `/data/video-analytics/artifacts/segment_index_publication_journal_smoke_20260721T213820Z`.
+  It proved 65 atomic records, one new journal-only discovery with zero retained
+  directory scan or extra manifest parse, zero journal error, a two-segment
+  read pin, retention skipping both pins then deleting them after release, and
+  zero marker/database residual.
+- The combined launch artifact
+  `/data/video-analytics/artifacts/pressure60_8p1_pubjournal_ioadm3_b10m_r300_20260721T2139Z`
+  is deliberately retained but is not a capacity result. It contains one
+  pre-runtime host DB-port error and one intentionally interrupted pre-sampling
+  attempt caused by a minute-level run-id collision. Later commands must set
+  both host `DATABASE_URL=...127.0.0.1:5439...` and container
+  `VIDEO_ANALYTICS_DATABASE_URL=...postgres:5432...`.
+- The clean unchanged r300 is
+  `/data/video-analytics/artifacts/pressure60_8p1_pubjournal_ioadm3_b10m_r300_20260721T214242Z_r2`.
+  It passed 60/60 input at 8.0504 FPS, materialized 969/969 formal and 1,005/
+  1,005 retained tasks, passed every video/8090/timeline/annotation/bbox/person-
+  context check, and retained zero send/queue/raw loss, expiry, recovery,
+  duplicate, finalizer failure or residual. Exact admission counts were
+  `1005/1001/4/4` candidates/admitted/gap/fenced retry.
+- Strict capacity failed: ready-to-remux/oldest-ready/media queue/lifecycle/DB
+  lifecycle p95 were `35.237/44.724/56.594/56.886/59.007s`; the final formal
+  sample still had 88 active and 45 ready. Journal read p95 was only 77.8ms,
+  with 10/17 records per job and zero journal error/reconcile fallback.
+  Manifest parse time fell from 43.676s in the earlier comparison to 28.059s,
+  cumulative refresh to 295.897s and scanned-known to 45,236, but the backlog
+  still moved into drain. r3840 remained prohibited.
+
+### Round 15: journal-first periodic membership ordering
+
+- Round 14 still let a scheduled periodic audit enumerate membership before
+  consuming its journal tail. It therefore parsed newly published leaves from
+  the directory and only afterward consumed duplicate publication records.
+  Red test `c06cf28` combines one journal-covered leaf, one unjournaled
+  rename-before-append crash leaf, and one retention-deleted catalog leaf. Old
+  code parsed both new manifests; the contract requires exactly one parse.
+- `307a9c4` changes only the order: consume/validate the journal first, then
+  enumerate membership to recover missed publications and deletions, and
+  consume again after the audit to close the concurrent-append window. The
+  journaled leaf is already immutable catalog membership and is not reparsed.
+  Corruption and rotation still force reconciliation.
+- Focused index/sink/rolling tests passed 137, pressure harness/analyzer 201,
+  broader lifecycle/scheduler/finalizer suites 154 with one environment skip,
+  and a fresh 001-032 PostgreSQL database passed all eight real contracts.
+- A first isolated smoke is preserved at
+  `/data/video-analytics/artifacts/segment_index_journal_first_reconcile_smoke_20260721T221307Z`.
+  It is a harness-only failure: the fixture advanced maintenance wall time by
+  two hours while using a 60-second pin TTL, so production maintenance correctly
+  expired the marker. It touched no daily rolling root or database row.
+- The corrected bind-mounted smoke
+  `/data/video-analytics/artifacts/segment_index_journal_first_reconcile_smoke_20260721T221437Z`
+  passed at `307a9c4`: zero manifest parse for the journal-covered leaf, one for
+  the crash-window leaf, both leaves returned, the deleted catalog leaf pruned,
+  zero full-row parse/journal error, two active pins skipped, both leaves
+  deleted after release, and zero marker residual.
+- Exact unchanged width-three r300 artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_journalfirst_ioadm3_b10m_r300_20260721T221602Z`.
+  Fixed dimensions remained WIP/remux/max-per-poll `20/12/8`, finalizer
+  threads/processes/queue `8/4/8`, 600s/120s, 300s retention and the same
+  fixture SHA256. Input passed at 60/60 and 8.058 FPS with zero sampling-window
+  send failure, queue-full or raw loss. All 973 formal and 1,011 retained tasks
+  materialized; 1,011/1,011 passed duration/FPS and every 8090/timeline/
+  annotation/bbox/person-context check. Person rows were exactly 102,490/
+  102,490 with final lag/pending 0/0. Candidates/admitted/gap/retry were
+  `1011/1002/9/9`, with zero expiry, recovery, retry failure, claim-busy,
+  duplicate, finalizer failure or residual.
+- The ordering optimization is dynamically effective but capacity still fails.
+  Cumulative manifest parse time fell from 28.059s to 1.756s and refresh time
+  from 295.897s to 241.788s with zero publication error/reconcile fallback.
+  Nevertheless ready-to-remux/oldest-ready/media queue/lifecycle/DB lifecycle
+  p95 worsened to `51.355/58.436/70.519/70.875/72.892s`; poll-gap p95 was
+  2.265s. The formal tail held 101 active/64 ready and relied on drain.
+  WIP/remux/finalizer-depth p95 reached `20/12/11`, while actual remux,
+  finalizer pool wait and finalization p95 were `1.241/3.331/4.750s`.
+- Existing phase fields now expose a new blind spot rather than justify blind
+  capacity growth. `remux_total` was 3.475s p50/7.438s p95, but measured index
+  admission/refresh/pin plus actual remux and pin release leave an unexplained
+  residual of about 1.146s p50/4.771s p95. Static alignment shows
+  `materialization_ms` stops before the selected frame metadata is pretty-
+  serialized and atomically written, and `_materialize_rolling_cache_job()`
+  immediately parses that same file back before durable handoff. The next
+  variable is instrumentation-only: time metadata publish/bytes, immediate
+  reload and handoff build, close the remux accounting gap with a red test,
+  then optimize only the measured dominating subphase. Do not widen WIP,
+  remux and finalizer together, and do not run r3840.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -669,17 +786,14 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Keep width three and every Candidate B dimension fixed. Trace sink atomic
-   publication, retention deletion/generation, and index discovery together;
-   add a deterministic red test proving the selected incremental discovery
-   contract avoids per-task retained-directory enumeration while recovering
-   from missed/crashed publication and preserving deletion safety.
-2. Implement only that structural discovery variable, retain the mutation
-   flock/read pin/identity/rename fences, and repeat focused tests, disposable
-   PostgreSQL, and the bind-mounted real-container smoke.
-3. Repeat the exact width-three r300 gate. Only if it passes every input,
-   capacity, correctness, annotation, visibility, and residual gate may r3840
-   run. Do not increase admission width or use the harness's watchlist-only
-   failure list as a substitute for the strict latency gates.
-4. Only after both short gates pass, run two comparable one-hour acceptances
-   with the fixed fixture/hash and the full evidence/8090 validation set.
+1. Add an instrumentation-only red test and fields for rolling metadata publish
+   duration/bytes, immediate metadata reload, handoff build and remux
+   unattributed time. Preserve scheduling and all Candidate B dimensions.
+2. Use the new attribution to make one minimal behavior change only in the
+   measured dominant subphase; keep filesystem/journal/pin/identity/lease
+   fences and PostgreSQL durable-queue semantics unchanged.
+3. Repeat focused tests, fresh PostgreSQL and a bind-mounted representative
+   smoke, then the exact width-three r300 gate. Only a full strict pass permits
+   r3840; watchlist-zero is not a substitute for latency/visibility gates.
+4. Only after both short retention gates pass, run two comparable one-hour
+   acceptances with the fixed fixture/hash and full evidence/8090 validation.

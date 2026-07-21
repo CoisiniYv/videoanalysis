@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `b69575b`，尚未合入或声明为 60 路默认容量；
+  `307a9c4`，尚未合入或声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -26,7 +26,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership 复用与 per-catalog singleflight | singleflight/pin/retention/identity 单测和真实容器 smoke 通过；`b69575b` 同口径 width-three r300 容量/visibility 仍失败 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership、per-catalog singleflight、crash-safe publication journal 与 journal-first reconcile | journal/corruption/rotation/crash/deletion/pin 单测和真实容器 smoke 通过；`307a9c4` 同口径 width-three r300 容量/visibility 仍失败 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -148,13 +148,40 @@ person persistence、exact-lease 与末态 residual 全通过。但 ready/media/
 而 per-catalog lock wait p95 仅 0.045ms、累计约 21ms；singleflight 修复了确定性竞态，但
 不是压力瓶颈。r300 严格门仍失败，r3840 继续禁止。
 
+`0f7d775` 随后加入 16MiB 有界、checksum、atomic rotation 的 segment publication journal：
+sink 先原子 rename 完整 segment，再 best-effort append compact manifest 与 immutable identities；
+append failure 不撤销 segment，filesystem reconciliation 继续负责 crash-window/deletion recovery。
+真实容器 `segment_index_publication_journal_smoke_20260721T213820Z` 证明普通 refresh 只消费新
+record、零 retained-directory scan、pin/retention 与零 residual。clean r300
+`pressure60_8p1_pubjournal_ioadm3_b10m_r300_20260721T214242Z_r2` 的输入、969/969 正式任务、
+1,005 retained video、annotation/person persistence 和全部 fence/residual 通过，但 ready/media/
+lifecycle p95 仍为 35.24s/56.59s/56.89s；因此不是 capacity pass。更早的
+`pressure60_8p1_pubjournal_ioadm3_b10m_r300_20260721T2139Z` 同时含宿主 DB 端口失败和主动中断
+的 run-id collision，只是保留的无效启动 artifact。
+
+`c06cf28`/`307a9c4` 再把 periodic reconciliation 改为 journal-tail-first：journal-covered leaf
+先成为 catalog membership，随后目录审计只解析未 journal 的 rename crash leaf并 prune deleted
+leaf。`segment_index_journal_first_reconcile_smoke_20260721T221437Z` 通过这组合同、两段 pin/
+retention 和零 marker residual；`...T221307Z` 是测试 clock 超过 60s pin TTL 的保留 harness-only
+失败。相同 width-three r300
+`pressure60_8p1_journalfirst_ioadm3_b10m_r300_20260721T221602Z` 仍未过门：60/60、8.058 FPS、
+973/973 正式与 1,011 retained 全 materialized，视频/8090/annotation/person/fence/residual 全通过，
+manifest parse 总时长从 28.059s 降到 1.756s；但 ready/media/lifecycle p95 为
+51.36s/70.52s/70.88s，正式尾部仍有 101 active/64 ready，依赖 drain。r3840 继续禁止。
+
+当前最窄下一步是补齐 remux phase 盲区，而不是组合扩容：`remux_total` p50/p95 为
+3.475s/7.438s，扣除现有 index/remux/pin 分段后仍约有 1.146s/4.771s 未归属；代码在 selected
+frame metadata 的 pretty JSON serialize/write 前停止 `materialization_ms`，随后立即 parse 同一
+文件。先以红测加入 publish time/bytes、reload、handoff-build 和 unattributed 指标，再只优化
+实测主导子阶段。
+
 ## 已知开放项
 
 ### P0/P1
 
 - 保持 width 3 和 Candidate B 其余参数不变；把 sink 原子发布、retention generation 与
-  index discovery 作为一个合同检查，先用红测定义 crash-safe 增量 publication feed（或
-  等价机制）、周期 reconciliation 与 deletion safety，再改变唯一结构变量；
+  index discovery 的 journal/reconciliation 正确性合同保持不变；下一变量仅为 remux metadata
+  publish/reload/handoff 计时，测试必须先证明现有 `remux_total` 盲区被完整分解；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
 - 最新 r300 的 finalizer/process-pool wait p95 已回到 4.823s/2.758s；index discovery

@@ -4,7 +4,7 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `b69575b`。
+exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `307a9c4`。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -149,7 +149,7 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、原子 fragment 发布、健康指标 |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、原子 fragment/compact manifest 发布、原子 rename 后的有界校验 publication journal、健康指标 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
 
@@ -253,6 +253,29 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   per-catalog lock wait p95 仅 0.045ms，说明 singleflight 修复了真实竞态但不是容量瓶颈。
   后续保持 width 3 和 Candidate B 其余维度不变，转向 sink 发布、retention generation 与
   index discovery 的 crash-safe 增量合同；r300 未通过，r3840 继续禁止；
+- `0f7d775` 已把 sink 原子 rename 后的 compact manifest 与 immutable file identities 追加到
+  16MiB 有界、校验和保护、原子 rotation 的 publication journal；append 失败不撤销已提交
+  segment，initial/periodic filesystem membership reconciliation 仍负责 rename→append crash
+  窗口、corruption/rotation 和 retention deletion。真实容器
+  `segment_index_publication_journal_smoke_20260721T213820Z` 已证明 journal-only 增量发现、零
+  retained-directory scan、两段 read pin/retention 安全和零 residual；
+- clean journal width-three r300
+  `pressure60_8p1_pubjournal_ioadm3_b10m_r300_20260721T214242Z_r2` 的 60/60 输入、969/969 正式
+  任务、1,005 retained video、annotation/person persistence 与全部 fence/residual 通过，
+  但 ready/media/lifecycle p95 仍为 35.24s/56.59s/56.89s，r300 严格门失败；更早的
+  `...20260721T2139Z` 同时包含 DB 端口失败和主动中断的 run-id collision，不是容量结果；
+- `c06cf28`/`307a9c4` 进一步要求 periodic audit 先 consume journal tail 再 enumerate
+  membership。`segment_index_journal_first_reconcile_smoke_20260721T221437Z` 动态证明 journal
+  覆盖 leaf 零 manifest parse、未 journal 的 rename crash leaf 一次 parse、deleted leaf prune、
+  pin/retention 和零 marker residual。对应 exact r300
+  `pressure60_8p1_journalfirst_ioadm3_b10m_r300_20260721T221602Z` 仍失败：虽然 manifest parse
+  总时长降到 1.756s、journal error/reconcile fallback 为 0，ready/media/lifecycle p95 却为
+  51.36s/70.52s/70.88s，正式尾部 101 active/64 ready，依赖 drain；因此 r3840 禁止；
+- 最新 phase 对齐显示 `remux_total` p50/p95 3.475s/7.438s 中仍有约
+  1.146s/4.771s 未归属。当前实现的 `materialization_ms` 在 selected-frame metadata 的 pretty
+  JSON serialize/write 之前结束，随后 worker 又立即 parse 同一文件。下一轮先补 metadata
+  publish bytes/time、reload、handoff-build 与 unattributed 指标，再只优化实测主导子阶段；
+  不同时扩大 WIP/remux/finalizer；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
