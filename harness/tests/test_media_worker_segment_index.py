@@ -233,6 +233,83 @@ def test_incremental_refresh_parses_only_new_or_changed_manifests(tmp_path: Path
     assert int(index.snapshot()["refreshes"]) >= 2
 
 
+def test_periodic_reconcile_uses_incremental_membership_without_full_walk(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    clock = [0.0]
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(
+        root,
+        refresh_interval_s=0.5,
+        reconcile_interval_s=30.0,
+        monotonic=lambda: clock[0],
+    )
+    walk_calls = 0
+    original_walk = index._walk
+
+    def counted_walk(path: Path):
+        nonlocal walk_calls
+        walk_calls += 1
+        yield from original_walk(path)
+
+    index._walk = counted_walk
+    assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 1
+    assert walk_calls == 1
+
+    clock[0] = 61.0
+    assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 1
+
+    assert walk_calls == 1
+    snapshot = index.snapshot()
+    assert int(snapshot["initial_scans"]) == 1
+    assert int(snapshot["reconciliations"]) == 1
+
+
+def test_steady_lookup_does_not_restat_known_immutable_payloads(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    clock = [0.0]
+    directories = [
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"{index_value:04d}",
+            pts_values=[index_value * 2 + 1, index_value * 2 + 2],
+        )
+        for index_value in range(12)
+    ]
+    index = _index(
+        root,
+        refresh_interval_s=0.5,
+        reconcile_interval_s=30.0,
+        monotonic=lambda: clock[0],
+    )
+    assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 12
+    before = index.snapshot()
+    catalog = index._catalogs[("camera-01", "epoch-a")]
+
+    assert all(directory.resolve(strict=False) not in catalog.containers for directory in directories)
+
+    clock[0] = 1.0
+    assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 12
+    after = index.snapshot()
+
+    # Root generation plus the source/segments discovery containers are the
+    # only instrumented stats needed when immutable membership is unchanged.
+    assert int(after["stat_calls"]) - int(before["stat_calls"]) <= 5
+    assert int(after["manifest_parses"]) == int(before["manifest_parses"])
+    assert int(after["full_row_parses"]) == 0
+
+
 def test_discovery_uses_compact_manifests_and_parses_only_selected_rows(
     tmp_path: Path,
 ) -> None:
@@ -398,17 +475,19 @@ def test_slow_source_refresh_does_not_block_other_source_or_snapshot(
     assert len(index.find_segments(source_id="camera-a", runtime_epoch_id="epoch-a")) == 1
     assert len(index.find_segments(source_id="camera-b", runtime_epoch_id="epoch-a")) == 1
 
-    metadata_a = source_a / "metadata.json"
-    metadata_a.write_text(
-        json.dumps({"frames": [{"pts": 1}, {"pts": 2}, {"pts": 5}]}),
-        encoding="utf-8",
-    )
-    manifest_a = _write_manifest(
-        source_a,
+    new_source_a = _write_segment(
+        root,
         epoch="epoch-a",
         source_id="camera-a",
-        name="0001",
-        pts_values=[1, 2, 5],
+        name="0002",
+        pts_values=[5, 6],
+    )
+    manifest_a = new_source_a / "segment_manifest.json"
+    segments_dir = source_a.parent
+    segments_stat = segments_dir.stat()
+    os.utime(
+        segments_dir,
+        ns=(segments_stat.st_atime_ns, segments_stat.st_mtime_ns + 1_000_000_000),
     )
     refresh_entered = threading.Event()
     allow_refresh = threading.Event()
@@ -942,6 +1021,42 @@ def test_source_pin_reports_concurrent_writer_change_as_retryable(tmp_path: Path
             runtime_epoch_id="epoch-a",
         ):
             raise AssertionError("pin should not activate for a changed segment")
+
+
+def test_source_pin_fences_same_size_atomic_payload_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    directory = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(root)
+    original_find = index.find_segments
+
+    def find_then_replace_video(**kwargs):
+        segments = original_find(**kwargs)
+        video = directory / "video.mov"
+        original = video.stat()
+        replacement = directory / ".video.mov.replacement"
+        replacement.write_bytes(b"z" * original.st_size)
+        os.utime(
+            replacement,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+        os.replace(replacement, video)
+        return segments
+
+    index.find_segments = find_then_replace_video
+    from app.segment_index import SegmentPinRetryableError
+
+    with pytest.raises(SegmentPinRetryableError, match="identity changed"):
+        with index.pin_source_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+        ):
+            raise AssertionError("pin should fence a same-size inode replacement")
 
 
 def test_image_lane_defers_retryable_segment_pin_failures() -> None:
