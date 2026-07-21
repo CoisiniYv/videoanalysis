@@ -28,6 +28,7 @@ SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
 MAX_SEGMENT_MANIFEST_BYTES = 64 * 1024
 
 _OPERATION_TIMING_FIELDS = (
+    "io_slot_wait_ms",
     "lock_wait_ms",
     "lock_hold_ms",
     "refresh_ms",
@@ -268,6 +269,7 @@ class RollingSegmentIndex:
         stability_age_s: float = 0.25,
         row_cache_max_entries: int = 256,
         row_cache_max_bytes: int = 256 * 1024 * 1024,
+        io_concurrency: int = 2,
         max_catalogs: int = 256,
         max_scan_entries: int = 20_000,
         max_scan_depth: int = 6,
@@ -286,6 +288,7 @@ class RollingSegmentIndex:
         self.stability_age_s = max(0.0, float(stability_age_s))
         self.row_cache_max_entries = max(1, int(row_cache_max_entries))
         self.row_cache_max_bytes = max(1, int(row_cache_max_bytes))
+        self.io_concurrency = max(1, int(io_concurrency))
         self.max_catalogs = max(1, int(max_catalogs))
         self.max_scan_entries = max(1, int(max_scan_entries))
         self.max_scan_depth = max(1, int(max_scan_depth))
@@ -299,6 +302,7 @@ class RollingSegmentIndex:
         # now protects only the catalog map and never filesystem work.
         self._lock = self._map_lock
         self._row_cache_lock = threading.RLock()
+        self._io_slots = threading.BoundedSemaphore(self.io_concurrency)
         self._metrics_lock = threading.Lock()
         self._diagnostic_local = threading.local()
         self._catalogs: OrderedDict[tuple[str, str], _Catalog] = OrderedDict()
@@ -643,32 +647,41 @@ class RollingSegmentIndex:
             self.root.mkdir(parents=True, exist_ok=True)
             lock_path = self.root / MUTATION_LOCK_FILE
             pin: SegmentReadPin | None = None
-            with lock_path.open("a+", encoding="utf-8") as lock_fh:
-                mutation_wait_started_at = self._timer()
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
-                self._record_timing(
-                    "mutation_lock_wait_ms",
-                    (self._timer() - mutation_wait_started_at) * 1000.0,
-                )
-                try:
-                    segments = self.find_segments(
-                        source_id=source_id,
-                        runtime_epoch_id=runtime_epoch_id,
+            io_wait_started_at = self._timer()
+            self._io_slots.acquire()
+            self._record_timing(
+                "io_slot_wait_ms",
+                (self._timer() - io_wait_started_at) * 1000.0,
+            )
+            try:
+                with lock_path.open("a+", encoding="utf-8") as lock_fh:
+                    mutation_wait_started_at = self._timer()
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+                    self._record_timing(
+                        "mutation_lock_wait_ms",
+                        (self._timer() - mutation_wait_started_at) * 1000.0,
                     )
-                    expected_identities = self._catalog_segment_identities(
-                        source_id=source_id,
-                        runtime_epoch_id=runtime_epoch_id,
-                        segments=segments,
-                    )
-                    pin = self.pin_segments(
-                        segments,
-                        ttl_s=ttl_s,
-                        _expected_identities=expected_identities,
-                    )
-                    with self._timed("pin_publish_ms"):
-                        pin._activate_locked()
-                finally:
-                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                    try:
+                        segments = self.find_segments(
+                            source_id=source_id,
+                            runtime_epoch_id=runtime_epoch_id,
+                        )
+                        expected_identities = self._catalog_segment_identities(
+                            source_id=source_id,
+                            runtime_epoch_id=runtime_epoch_id,
+                            segments=segments,
+                        )
+                        pin = self.pin_segments(
+                            segments,
+                            ttl_s=ttl_s,
+                            _expected_identities=expected_identities,
+                        )
+                        with self._timed("pin_publish_ms"):
+                            pin._activate_locked()
+                    finally:
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._io_slots.release()
             try:
                 yield segments
             finally:

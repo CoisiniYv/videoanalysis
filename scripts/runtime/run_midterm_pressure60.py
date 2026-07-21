@@ -4312,6 +4312,7 @@ def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
+        "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
         "MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED",
         "ROLLING_CACHE_ENABLED",
         "ROLLING_CACHE_MATERIALIZATION_ENABLED",
@@ -4869,6 +4870,7 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S": "60",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES": "2048",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES": "268435456",
+        "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY": "2",
         # Rolling evidence has its own image lane. Avoid scanning the legacy
         # post-Replay snapshot/annotation backlog every general scheduler poll;
         # DB-backed timeline/overlay/person_context indexing remains enabled.
@@ -10011,6 +10013,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         media_segment_index_job_metrics = {
             field: _extract_metric_numbers(text, field)
             for field in (
+                "segment_index_io_slot_wait_ms",
                 "segment_index_lock_wait_ms",
                 "segment_index_lock_hold_ms",
                 "segment_index_refresh_ms",
@@ -10132,6 +10135,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_read_pins_created",
                 "segment_index_read_pins_released",
                 "segment_index_generation",
+                "segment_index_io_slot_wait_ms_total",
                 "segment_index_lock_wait_ms_total",
                 "segment_index_lock_hold_ms_total",
                 "segment_index_refresh_ms_total",
@@ -10167,6 +10171,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "source_limit",
                 "segment_index_row_cache_entries",
                 "segment_index_row_cache_max_bytes",
+                "segment_index_io_concurrency",
             )
         }
         media_resource_capacity_metrics["cpu_thread_limit"] = (
@@ -12922,6 +12927,7 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
             name: logs.get(f"media_segment_index_{name}")
             or _not_enough_data(f"segment-index job {name} unavailable")
             for name in (
+                "io_slot_wait_ms",
                 "lock_wait_ms",
                 "lock_hold_ms",
                 "refresh_ms",
@@ -13147,6 +13153,10 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "media_scheduler_segment_index_generation"
                 )
                 or _not_enough_data("segment-index generation unavailable"),
+                "io_slot_wait_ms_total": logs.get(
+                    "media_scheduler_segment_index_io_slot_wait_ms_total"
+                )
+                or _not_enough_data("segment-index IO slot wait total unavailable"),
                 "lock_wait_ms_total": logs.get(
                     "media_scheduler_segment_index_lock_wait_ms_total"
                 )
@@ -13221,6 +13231,10 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "media_resource_segment_index_row_cache_max_bytes"
                 )
                 or _not_enough_data("segment-index row cache byte bound unavailable"),
+                "segment_index_io_concurrency": logs.get(
+                    "media_resource_segment_index_io_concurrency"
+                )
+                or _not_enough_data("segment-index IO concurrency unavailable"),
             },
         },
         "cpu_percent": (
@@ -13321,6 +13335,7 @@ def evidence_phase_latency_summary(diagnostics: dict[str, Any]) -> dict[str, Any
                 name: media_logs.get(f"media_segment_index_{name}")
                 or _not_enough_data(f"segment-index job {name} unavailable")
                 for name in (
+                    "io_slot_wait_ms",
                     "lock_wait_ms",
                     "lock_hold_ms",
                     "refresh_ms",

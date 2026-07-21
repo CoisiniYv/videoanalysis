@@ -127,6 +127,7 @@ DEFAULT_MEDIA_WORKER_STATE_PATH = (
     "/media/replay-sink-output/midterm/.media-worker.processed.json"
 )
 SEGMENT_INDEX_JOB_METRIC_FIELDS = (
+    "segment_index_io_slot_wait_ms",
     "segment_index_lock_wait_ms",
     "segment_index_lock_hold_ms",
     "segment_index_refresh_ms",
@@ -6025,6 +6026,7 @@ def _log_finalize_one_metrics(
         "sink_ffprobe_ready_to_finalizer_start_ms=%s finalizer_pool_wait_ms=%s "
         "ready_to_remux_claim_ms=%s remux_ms=%s remux_exec_ms=%s "
         "remux_total_ms=%s "
+        "segment_index_io_slot_wait_ms=%s "
         "segment_index_lock_wait_ms=%s segment_index_lock_hold_ms=%s "
         "segment_index_refresh_ms=%s segment_index_rebuild_ms=%s "
         "segment_index_stat_ms=%s segment_index_full_row_parse_ms=%s "
@@ -6067,6 +6069,7 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("remux_ms"),
         materialization_metrics.get("remux_exec_ms"),
         materialization_metrics.get("remux_total_ms"),
+        materialization_metrics.get("segment_index_io_slot_wait_ms"),
         materialization_metrics.get("segment_index_lock_wait_ms"),
         materialization_metrics.get("segment_index_lock_hold_ms"),
         materialization_metrics.get("segment_index_refresh_ms"),
@@ -13646,6 +13649,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "media_worker_segment_index_row_cache_max_bytes",
                 256 * 1024 * 1024,
             ),
+            io_concurrency=getattr(
+                cfg,
+                "media_worker_segment_index_io_concurrency",
+                2,
+            ),
             max_catalogs=getattr(
                 cfg,
                 "media_worker_segment_index_max_catalogs",
@@ -13697,7 +13705,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "db_pool_effective=%s segment_index_requested=%s "
         "segment_index_effective=%s segment_index_refresh_s=%s "
         "segment_index_reconcile_s=%s segment_index_row_cache_entries=%s "
-        "segment_index_row_cache_max_bytes=%s "
+        "segment_index_row_cache_max_bytes=%s segment_index_io_concurrency=%s "
         "segment_read_pin_ttl_s=%s "
         "lanes_effective=%s "
         "max_active=%s image_workers=%s remux_workers=%s finalizer_workers=%s "
@@ -13717,6 +13725,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             "media_worker_segment_index_row_cache_max_bytes",
             256 * 1024 * 1024,
         ),
+        getattr(cfg, "media_worker_segment_index_io_concurrency", 2),
         getattr(cfg, "rolling_cache_read_pin_ttl_s", 600.0),
         runtime_resources.finalizer_lane is not None,
         cfg.materialization_max_active,
@@ -14213,6 +14222,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "segment_index_read_pins_created=%s "
                 "segment_index_read_pins_released=%s "
                 "segment_index_generation=%s "
+                "segment_index_io_slot_wait_ms_total=%s "
                 "segment_index_lock_wait_ms_total=%s "
                 "segment_index_lock_hold_ms_total=%s "
                 "segment_index_refresh_ms_total=%s "
@@ -14324,6 +14334,10 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 segment_index_snapshot.get("read_pins_created", "unavailable"),
                 segment_index_snapshot.get("read_pins_released", "unavailable"),
                 segment_index_snapshot.get("generation", "unavailable"),
+                segment_index_snapshot.get(
+                    "io_slot_wait_ms_total",
+                    "unavailable",
+                ),
                 segment_index_snapshot.get("lock_wait_ms_total", "unavailable"),
                 segment_index_snapshot.get("lock_hold_ms_total", "unavailable"),
                 segment_index_snapshot.get("refresh_ms_total", "unavailable"),

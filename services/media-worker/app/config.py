@@ -68,6 +68,7 @@ class Config:
     media_worker_segment_index_stability_age_s: float = 0.25
     media_worker_segment_index_row_cache_entries: int = 256
     media_worker_segment_index_row_cache_max_bytes: int = 256 * 1024 * 1024
+    media_worker_segment_index_io_concurrency: int = 2
     media_worker_segment_index_max_catalogs: int = 256
     rolling_cache_read_pin_ttl_s: float = 600.0
     media_worker_shutdown_grace_s: float = 45.0
@@ -362,6 +363,15 @@ def load_config() -> Config:
                 os.getenv(
                     "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
                     str(256 * 1024 * 1024),
+                )
+            ),
+        ),
+        media_worker_segment_index_io_concurrency=max(
+            1,
+            int(
+                os.getenv(
+                    "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
+                    "2",
                 )
             ),
         ),
