@@ -67,6 +67,24 @@ def test_atomic_publication_matches_media_worker_layout_and_native_jsonl(
         .splitlines()
     ]
     assert rows == fragment.rows
+    manifest = json.loads(
+        (final_dir / "segment_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest == {
+        "schema_version": "rolling-segment-manifest-v1",
+        "segment_id": "s0123456789abcdef-00000007",
+        "source_id": "camera-01",
+        "runtime_epoch_id": "epoch-a",
+        "video_file": "video.mov",
+        "metadata_file": "metadata.json",
+        "first_pts": 1_000_000_000,
+        "last_pts": 1_000_000_000,
+        "frame_count": 1,
+        "source_first_pts": 1_000_000_000,
+        "source_last_pts": 1_000_000_000,
+        "video_size_bytes": (final_dir / "video.mov").stat().st_size,
+        "metadata_size_bytes": (final_dir / "metadata.json").stat().st_size,
+    }
     assert not fragment.staging_dir.exists()
     assert list((tmp_path / "cache").rglob("*.partial")) == []
 
@@ -84,6 +102,56 @@ def test_missing_video_is_not_published_and_staging_is_preserved(
     assert fragment.staging_dir.is_dir()
     assert not fragment.final_dir.exists()
     assert not (fragment.staging_dir / "metadata.json").exists()
+    assert not (fragment.staging_dir / "segment_manifest.json").exists()
+
+
+def test_compact_manifest_is_published_with_the_atomic_segment_rename(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(9)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {
+                "source_id": "camera-01",
+                "pts": 10,
+                "rolling_cache_mux_pts": 100,
+            },
+            {
+                "source_id": "camera-01",
+                "pts": 20,
+                "rolling_cache_mux_pts": 200,
+            },
+        ]
+    )
+    import publishing
+
+    real_replace = publishing.os.replace
+    observed = {}
+
+    def inspect_then_replace(source: Path, destination: Path) -> None:
+        source = Path(source)
+        destination = Path(destination)
+        assert source == fragment.staging_dir
+        assert destination == fragment.final_dir
+        assert not destination.exists()
+        observed.update(
+            json.loads((source / "segment_manifest.json").read_text(encoding="utf-8"))
+        )
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "replace", inspect_then_replace)
+
+    final_dir = publisher.publish(fragment)
+
+    assert final_dir == fragment.final_dir
+    assert observed["first_pts"] == 100
+    assert observed["last_pts"] == 200
+    assert observed["source_first_pts"] == 10
+    assert observed["source_last_pts"] == 20
+    assert observed["frame_count"] == 2
 
 
 def test_fragment_ledger_assigns_boundary_frames_to_new_fragment(
@@ -257,12 +325,17 @@ def test_published_segment_is_discoverable_by_current_media_worker(
             source_id="camera-01",
             runtime_epoch_id="epoch-a",
         )
-        indexed = RollingSegmentIndex(
+        index = RollingSegmentIndex(
             tmp_path / "cache",
             refresh_interval_s=0.0,
             reconcile_interval_s=60.0,
             stability_age_s=0.0,
-        ).find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
+        )
+        indexed = index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+        )
+        index_snapshot = index.snapshot()
     finally:
         sys.path.remove(str(media_worker_root))
 
@@ -273,6 +346,9 @@ def test_published_segment_is_discoverable_by_current_media_worker(
     assert segments[0].frame_count == 2
     assert segments[0].video_path.name == "video.mov"
     assert [segment.segment_id for segment in indexed] == ["s0123456789abcdef-00000003"]
+    assert int(index_snapshot["manifest_parses"]) == 1
+    assert int(index_snapshot["full_row_parses"]) == 0
+    assert int(index_snapshot["row_cache_entries"]) == 0
 
 
 def test_static_pipeline_is_long_lived_h264_passthrough_splitmux() -> None:

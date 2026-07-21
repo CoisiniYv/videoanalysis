@@ -72,10 +72,54 @@ def _write_segment(
         ),
         encoding="utf-8",
     )
+    _write_manifest(
+        directory,
+        epoch=epoch,
+        source_id=source_id,
+        name=name,
+        pts_values=pts_values,
+    )
     if mtime_s is not None:
         os.utime(video, (mtime_s, mtime_s))
         os.utime(metadata, (mtime_s, mtime_s))
+        os.utime(directory / "segment_manifest.json", (mtime_s, mtime_s))
     return directory
+
+
+def _write_manifest(
+    directory: Path,
+    *,
+    epoch: str,
+    source_id: str,
+    name: str,
+    pts_values: list[int],
+) -> Path:
+    metadata = directory / "metadata.json"
+    video = directory / "video.mov"
+    manifest = directory / "segment_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "rolling-segment-manifest-v1",
+                "segment_id": name,
+                "source_id": source_id,
+                "runtime_epoch_id": epoch,
+                "video_file": video.name,
+                "metadata_file": metadata.name,
+                "first_pts": min(pts_values),
+                "last_pts": max(pts_values),
+                "frame_count": len(pts_values),
+                "source_first_pts": min(pts_values),
+                "source_last_pts": max(pts_values),
+                "video_size_bytes": video.stat().st_size,
+                "metadata_size_bytes": metadata.stat().st_size,
+            },
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return manifest
 
 
 def _index(root: Path, **overrides):
@@ -148,7 +192,7 @@ def test_initial_scan_is_epoch_fenced_and_steady_lookup_avoids_full_walk(
     assert stats["fallback_scans"] == 0
 
 
-def test_incremental_refresh_parses_only_new_or_changed_segments(tmp_path: Path) -> None:
+def test_incremental_refresh_parses_only_new_or_changed_manifests(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     first_dir = _write_segment(
         root,
@@ -159,7 +203,8 @@ def test_incremental_refresh_parses_only_new_or_changed_segments(tmp_path: Path)
     )
     index = _index(root)
     assert len(index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")) == 1
-    initial_parses = int(index.snapshot()["metadata_parses"])
+    initial_manifest_parses = int(index.snapshot()["manifest_parses"])
+    assert int(index.snapshot()["full_row_parses"]) == 0
 
     _write_segment(
         root,
@@ -179,11 +224,68 @@ def test_incremental_refresh_parses_only_new_or_changed_segments(tmp_path: Path)
     )
     segments = index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
     assert [segment.segment_id for segment in segments] == ["0001", "0002"]
-    assert int(index.snapshot()["metadata_parses"]) == initial_parses + 1
+    assert int(index.snapshot()["manifest_parses"]) == initial_manifest_parses + 1
+    assert int(index.snapshot()["full_row_parses"]) == 0
 
     index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
-    assert int(index.snapshot()["metadata_parses"]) == initial_parses + 1
+    assert int(index.snapshot()["manifest_parses"]) == initial_manifest_parses + 1
+    assert int(index.snapshot()["full_row_parses"]) == 0
     assert int(index.snapshot()["refreshes"]) >= 2
+
+
+def test_discovery_uses_compact_manifests_and_parses_only_selected_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    for index_value in range(4):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"000{index_value}",
+            pts_values=[index_value * 2 + 1, index_value * 2 + 2],
+        )
+    index = _index(root)
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    )
+    after_discovery = index.snapshot()
+
+    assert len(segments) == 4
+    assert int(after_discovery["manifest_parses"]) == 4
+    assert int(after_discovery["full_row_parses"]) == 0
+    assert int(after_discovery["row_cache_entries"]) == 0
+
+    assert len(index.rows_for_segment(segments[2])) == 2
+    after_selected = index.snapshot()
+    assert int(after_selected["manifest_parses"]) == 4
+    assert int(after_selected["full_row_parses"]) == 1
+    assert int(after_selected["row_cache_entries"]) == 1
+
+
+def test_segment_without_compact_manifest_does_not_trigger_full_row_fallback(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    directory = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    (directory / "segment_manifest.json").unlink()
+    index = _index(root)
+
+    assert index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    ) == []
+    snapshot = index.snapshot()
+    assert int(snapshot["manifest_parses"]) == 0
+    assert int(snapshot["full_row_parses"]) == 0
 
 
 def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> None:
@@ -222,6 +324,7 @@ def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> Non
     assert expected_timings <= diagnostics.keys()
     assert all(float(diagnostics[name]) >= 0 for name in expected_timings)
     assert int(diagnostics["segment_index_full_row_parses"]) >= 1
+    assert int(diagnostics["segment_index_manifest_parses"]) >= 1
     assert int(diagnostics["segment_index_stat_calls"]) >= 2
     assert int(diagnostics["segment_index_scanned_known"]) >= 1
     assert int(diagnostics["segment_index_new_or_changed"]) >= 1
@@ -234,6 +337,7 @@ def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> Non
         diagnostics["segment_index_full_row_parse_ms"]
     )
     assert int(snapshot["full_row_parses"]) >= 1
+    assert int(snapshot["manifest_parses"]) >= 1
     assert int(snapshot["stat_calls"]) >= 2
 
 
@@ -299,19 +403,26 @@ def test_slow_source_refresh_does_not_block_other_source_or_snapshot(
         json.dumps({"frames": [{"pts": 1}, {"pts": 2}, {"pts": 5}]}),
         encoding="utf-8",
     )
+    manifest_a = _write_manifest(
+        source_a,
+        epoch="epoch-a",
+        source_id="camera-a",
+        name="0001",
+        pts_values=[1, 2, 5],
+    )
     refresh_entered = threading.Event()
     allow_refresh = threading.Event()
     source_b_finished = threading.Event()
     snapshot_finished = threading.Event()
-    original_parse = index._parse_rows
+    original_parse = index._parse_manifest
 
     def slow_parse(path: Path):
-        if path == metadata_a.resolve(strict=False):
+        if path == manifest_a.resolve(strict=False):
             refresh_entered.set()
             assert allow_refresh.wait(timeout=2.0)
         return original_parse(path)
 
-    index._parse_rows = slow_parse
+    index._parse_manifest = slow_parse
     source_a_thread = threading.Thread(
         target=lambda: index.find_segments(
             source_id="camera-a",
@@ -493,7 +604,7 @@ def test_index_retains_compact_source_clock_bounds_after_row_cache_eviction(
         (21, 29),
         (31, 39),
     ]
-    assert int(index.snapshot()["row_cache_entries"]) == 1
+    assert int(index.snapshot()["row_cache_entries"]) == 0
 
 
 def test_half_written_segment_waits_for_stable_metadata_and_video(tmp_path: Path) -> None:
@@ -520,7 +631,7 @@ def test_half_written_segment_waits_for_stable_metadata_and_video(tmp_path: Path
     assert [segment.directory for segment in segments] == [directory]
 
 
-def test_unchanged_malformed_metadata_is_not_reparsed_each_task(tmp_path: Path) -> None:
+def test_unchanged_malformed_manifest_is_not_reparsed_each_task(tmp_path: Path) -> None:
     root = tmp_path / "cache"
     directory = _write_segment(
         root,
@@ -536,22 +647,27 @@ def test_unchanged_malformed_metadata_is_not_reparsed_each_task(tmp_path: Path) 
         name="prefix-neighbor",
         pts_values=[3, 4],
     )
-    metadata_path = directory / "metadata.json"
-    metadata_path.write_text("{", encoding="utf-8")
+    manifest_path = directory / "segment_manifest.json"
+    manifest_path.write_text("{", encoding="utf-8")
     index = _index(root)
 
     assert index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a") == []
-    parses = int(index.snapshot()["metadata_parses"])
+    parses = int(index.snapshot()["manifest_parses"])
     index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
-    assert int(index.snapshot()["metadata_parses"]) == parses
+    assert int(index.snapshot()["manifest_parses"]) == parses
+    assert int(index.snapshot()["full_row_parses"]) == 0
 
-    metadata_path.write_text(
-        json.dumps({"frames": [{"pts": 1}, {"pts": 2}]}),
-        encoding="utf-8",
+    _write_manifest(
+        directory,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
     )
     segments = index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
     assert [segment.segment_id for segment in segments] == ["0001"]
-    assert int(index.snapshot()["metadata_parses"]) == parses + 1
+    assert int(index.snapshot()["manifest_parses"]) == parses + 1
+    assert int(index.snapshot()["full_row_parses"]) == 0
 
 
 def test_generation_change_invalidates_retention_deleted_entry(tmp_path: Path) -> None:
@@ -607,8 +723,8 @@ def test_parsed_row_cache_is_bounded_lru(tmp_path: Path) -> None:
     index = _index(root, row_cache_max_entries=2)
     segments = index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
     assert len(segments) == 3
-    assert int(index.snapshot()["row_cache_entries"]) == 2
-    assert int(index.snapshot()["row_cache_evictions"]) >= 1
+    assert int(index.snapshot()["row_cache_entries"]) == 0
+    assert int(index.snapshot()["row_cache_evictions"]) == 0
 
     evictions_before_reads = int(index.snapshot()["row_cache_evictions"])
     for segment in segments:
