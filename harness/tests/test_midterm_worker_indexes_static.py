@@ -12,6 +12,9 @@ READY_CLAIM_MIGRATION = ROOT / "db" / "migrations" / "026_evidence_task_ready_cl
 READY_DEFERRED_MIGRATION = (
     ROOT / "db" / "migrations" / "027_evidence_task_ready_indexes_terminal_deferred.sql"
 )
+LIFECYCLE_INDEX_MIGRATION = (
+    ROOT / "db" / "migrations" / "030_evidence_materialization_lifecycle_indexes.sql"
+)
 MEDIA_WORKER = ROOT / "services" / "media-worker" / "app" / "worker.py"
 
 
@@ -122,6 +125,7 @@ def test_epoch_barrier_migration_promotes_runtime_epoch_and_active_index() -> No
 def test_ready_claim_index_matches_rolling_cache_claim_order() -> None:
     migration = _text(READY_CLAIM_MIGRATION)
     deferred_fix_migration = _text(READY_DEFERRED_MIGRATION)
+    lifecycle_index_migration = _text(LIFECYCLE_INDEX_MIGRATION)
     worker = _text(MEDIA_WORKER)
 
     assert "CREATE INDEX IF NOT EXISTS evidence_tasks_ready_claim_order_idx" in migration
@@ -130,5 +134,9 @@ def test_ready_claim_index_matches_rolling_cache_claim_order() -> None:
     assert "'materialization_deferred'" not in migration
     assert "DROP INDEX IF EXISTS evidence_tasks_ready_claim_order_idx" in deferred_fix_migration
     assert "'materialization_deferred'" not in deferred_fix_migration
+    assert "DROP INDEX CONCURRENTLY IF EXISTS evidence_tasks_ready_claim_order_idx" in lifecycle_index_migration
+    assert "COALESCE(materialization_next_attempt_at, materialization_ready_at)" in lifecycle_index_migration
     assert "materialization_ready_at <= now()" in worker
-    assert "ORDER BY priority DESC, rolling_cache_ready_at ASC, created_at ASC" in worker
+    assert "materialization_due_at ASC" in worker
+    assert "rolling_cache_ready_at ASC" in worker
+    assert "task_created_at ASC" in worker
