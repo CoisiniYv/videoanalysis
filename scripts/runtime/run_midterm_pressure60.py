@@ -4292,6 +4292,7 @@ def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
         "MEDIA_WORKER_SEGMENT_INDEX_ENABLED",
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
+        "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
         "MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED",
         "ROLLING_CACHE_ENABLED",
         "ROLLING_CACHE_MATERIALIZATION_ENABLED",
@@ -4846,6 +4847,7 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         "MEDIA_WORKER_SEGMENT_INDEX_ENABLED": "true",
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S": "60",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES": "2048",
+        "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES": "268435456",
         # Rolling evidence has its own image lane. Avoid scanning the legacy
         # post-Replay snapshot/annotation backlog every general scheduler poll;
         # DB-backed timeline/overlay/person_context indexing remains enabled.
@@ -10085,6 +10087,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_fallback_scans",
                 "segment_index_row_cache_entries",
                 "segment_index_row_cache_evictions",
+                "segment_index_row_cache_bytes",
+                "segment_index_row_cache_byte_evictions",
                 "segment_index_active_read_pins",
                 "segment_index_read_pins_created",
                 "segment_index_read_pins_released",
@@ -10122,6 +10126,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "remux_queue_capacity",
                 "finalizer_queue_capacity",
                 "source_limit",
+                "segment_index_row_cache_entries",
+                "segment_index_row_cache_max_bytes",
             )
         }
         media_resource_capacity_metrics["cpu_thread_limit"] = (
@@ -13076,6 +13082,16 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "media_scheduler_segment_index_row_cache_evictions"
                 )
                 or _not_enough_data("segment-index row cache evictions unavailable"),
+                "row_cache_bytes": logs.get(
+                    "media_scheduler_segment_index_row_cache_bytes"
+                )
+                or _not_enough_data("segment-index row cache bytes unavailable"),
+                "row_cache_byte_evictions": logs.get(
+                    "media_scheduler_segment_index_row_cache_byte_evictions"
+                )
+                or _not_enough_data(
+                    "segment-index row cache byte evictions unavailable"
+                ),
                 "active_read_pins": logs.get(
                     "media_scheduler_segment_index_active_read_pins"
                 )
@@ -13158,6 +13174,14 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                 or _not_enough_data("finalizer queue capacity unavailable"),
                 "source_limit": logs.get("media_resource_source_limit")
                 or _not_enough_data("source limit unavailable"),
+                "segment_index_row_cache_entries": logs.get(
+                    "media_resource_segment_index_row_cache_entries"
+                )
+                or _not_enough_data("segment-index row cache entry bound unavailable"),
+                "segment_index_row_cache_max_bytes": logs.get(
+                    "media_resource_segment_index_row_cache_max_bytes"
+                )
+                or _not_enough_data("segment-index row cache byte bound unavailable"),
             },
         },
         "cpu_percent": (

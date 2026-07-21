@@ -89,6 +89,8 @@ class _IndexedSegment:
 class _Catalog:
     source_id: str
     runtime_epoch_id: str
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    version: int = 0
     entries: dict[Path, _IndexedSegment] = field(default_factory=dict)
     pending: set[Path] = field(default_factory=set)
     failed_identities: dict[
@@ -101,6 +103,12 @@ class _Catalog:
     root_generation: tuple[int, int] = (0, 0)
     last_refresh_at: float = 0.0
     last_reconcile_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class _CachedRows:
+    rows: tuple[dict, ...]
+    size_bytes: int
 
 
 class SegmentReadPin:
@@ -218,6 +226,7 @@ class RollingSegmentIndex:
         reconcile_interval_s: float = 30.0,
         stability_age_s: float = 0.25,
         row_cache_max_entries: int = 256,
+        row_cache_max_bytes: int = 256 * 1024 * 1024,
         max_catalogs: int = 256,
         max_scan_entries: int = 20_000,
         max_scan_depth: int = 6,
@@ -235,6 +244,7 @@ class RollingSegmentIndex:
         )
         self.stability_age_s = max(0.0, float(stability_age_s))
         self.row_cache_max_entries = max(1, int(row_cache_max_entries))
+        self.row_cache_max_bytes = max(1, int(row_cache_max_bytes))
         self.max_catalogs = max(1, int(max_catalogs))
         self.max_scan_entries = max(1, int(max_scan_entries))
         self.max_scan_depth = max(1, int(max_scan_depth))
@@ -243,14 +253,25 @@ class RollingSegmentIndex:
         self._monotonic = monotonic
         self._wall_clock = wall_clock
         self._timer = timer
-        self._lock = threading.RLock()
+        self._map_lock = threading.RLock()
+        # Kept as a compatibility alias for narrow lock-contention tests.  It
+        # now protects only the catalog map and never filesystem work.
+        self._lock = self._map_lock
+        self._row_cache_lock = threading.RLock()
         self._metrics_lock = threading.Lock()
         self._diagnostic_local = threading.local()
         self._catalogs: OrderedDict[tuple[str, str], _Catalog] = OrderedDict()
         self._row_cache: OrderedDict[
-            tuple[str, FileIdentity], tuple[dict, ...]
+            tuple[str, FileIdentity], _CachedRows
         ] = OrderedDict()
+        self._row_cache_size_bytes = 0
+        self._row_cache_bytes = 0
+        self._row_cache_entry_count = 0
         self._active_pins: set[str] = set()
+        self._catalog_count = 0
+        self._catalog_entry_count = 0
+        self._catalog_pending_count = 0
+        self._catalog_generation = 0
         self._stats = {
             "hits": 0,
             "misses": 0,
@@ -264,7 +285,9 @@ class RollingSegmentIndex:
             "row_cache_hits": 0,
             "row_cache_misses": 0,
             "row_cache_evictions": 0,
+            "row_cache_byte_evictions": 0,
             "catalog_evictions": 0,
+            "catalog_publish_conflicts": 0,
             "read_pins_created": 0,
             "read_pins_released": 0,
         }
@@ -327,9 +350,10 @@ class RollingSegmentIndex:
             self._record_timing(name, (self._timer() - started_at) * 1000.0)
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self, lock: object | None = None) -> Iterator[None]:
+        active_lock = lock if lock is not None else self._map_lock
         wait_started_at = self._timer()
-        self._lock.acquire()
+        active_lock.acquire()  # type: ignore[attr-defined]
         self._record_timing(
             "lock_wait_ms",
             (self._timer() - wait_started_at) * 1000.0,
@@ -339,8 +363,96 @@ class RollingSegmentIndex:
             yield
         finally:
             hold_ms = (self._timer() - hold_started_at) * 1000.0
-            self._lock.release()
+            active_lock.release()  # type: ignore[attr-defined]
             self._record_timing("lock_hold_ms", hold_ms)
+
+    def _increment_stat(self, name: str, count: int = 1) -> None:
+        with self._metrics_lock:
+            self._stats[name] += int(count)
+
+    def _get_or_create_catalog(
+        self,
+        key: tuple[str, str],
+    ) -> tuple[_Catalog, bool]:
+        created = False
+        with self._locked(self._map_lock):
+            catalog = self._catalogs.get(key)
+            if catalog is None:
+                catalog = _Catalog(
+                    source_id=key[0],
+                    runtime_epoch_id=key[1],
+                )
+                self._catalogs[key] = catalog
+                created = True
+                with self._metrics_lock:
+                    self._catalog_count += 1
+                self._evict_catalogs()
+            else:
+                self._catalogs.move_to_end(key)
+        self._increment_stat("misses" if created else "hits")
+        return catalog, created
+
+    def _copy_catalog(self, catalog: _Catalog) -> tuple[_Catalog, int]:
+        with self._locked(catalog.lock):
+            version = catalog.version
+            source_id = catalog.source_id
+            runtime_epoch_id = catalog.runtime_epoch_id
+            entries = catalog.entries
+            pending = catalog.pending
+            failed_identities = catalog.failed_identities
+            containers = catalog.containers
+            initialized = catalog.initialized
+            generation = catalog.generation
+            root_generation = catalog.root_generation
+            last_refresh_at = catalog.last_refresh_at
+            last_reconcile_at = catalog.last_reconcile_at
+        return (
+            _Catalog(
+                source_id=source_id,
+                runtime_epoch_id=runtime_epoch_id,
+                version=version,
+                entries=dict(entries),
+                pending=set(pending),
+                failed_identities=dict(failed_identities),
+                containers=dict(containers),
+                initialized=initialized,
+                generation=generation,
+                root_generation=root_generation,
+                last_refresh_at=last_refresh_at,
+                last_reconcile_at=last_reconcile_at,
+            ),
+            version,
+        )
+
+    def _publish_catalog(
+        self,
+        catalog: _Catalog,
+        candidate: _Catalog,
+        *,
+        expected_version: int,
+    ) -> bool:
+        with self._locked(catalog.lock):
+            if catalog.version != expected_version:
+                self._increment_stat("catalog_publish_conflicts")
+                return False
+            old_entries = len(catalog.entries)
+            old_pending = len(catalog.pending)
+            old_generation = catalog.generation
+            catalog.entries = candidate.entries
+            catalog.pending = candidate.pending
+            catalog.failed_identities = candidate.failed_identities
+            catalog.containers = candidate.containers
+            catalog.initialized = candidate.initialized
+            catalog.generation = candidate.generation
+            catalog.root_generation = candidate.root_generation
+            catalog.last_refresh_at = candidate.last_refresh_at
+            catalog.last_reconcile_at = candidate.last_reconcile_at
+            catalog.version += 1
+            with self._metrics_lock:
+                self._catalog_entry_count += len(catalog.entries) - old_entries
+                self._catalog_pending_count += len(catalog.pending) - old_pending
+                self._catalog_generation += catalog.generation - old_generation
+            return True
 
     def find_segments(
         self,
@@ -355,46 +467,45 @@ class RollingSegmentIndex:
         key = (source_id, runtime_epoch_id)
         with self._diagnostic_scope(diagnostics):
             try:
-                with self._locked():
-                    now = self._monotonic()
-                    catalog = self._catalogs.get(key)
-                    if catalog is None:
-                        self._stats["misses"] += 1
-                        catalog = _Catalog(
-                            source_id=source_id,
-                            runtime_epoch_id=runtime_epoch_id,
-                        )
-                        self._catalogs[key] = catalog
-                        self._evict_catalogs()
-                        self._rebuild(catalog, now=now, initial=True)
-                    else:
-                        self._stats["hits"] += 1
-                        self._catalogs.move_to_end(key)
-                        root_generation = self._read_root_generation()
-                        if now - catalog.last_reconcile_at >= self.reconcile_interval_s:
-                            self._rebuild(catalog, now=now, initial=False)
-                        elif (
-                            root_generation != catalog.root_generation
-                            or now - catalog.last_refresh_at >= self.refresh_interval_s
-                        ):
-                            self._refresh(catalog, now=now)
-                    segments = [entry.segment for entry in catalog.entries.values()]
-                    with self._timed("sort_ms"):
-                        return sorted(
-                            segments,
-                            key=lambda segment: (
-                                segment.first_pts,
-                                segment.last_pts,
-                                str(segment.metadata_path),
-                            ),
-                        )
+                now = self._monotonic()
+                root_generation = self._read_root_generation()
+                catalog, _created = self._get_or_create_catalog(key)
+                candidate, version = self._copy_catalog(catalog)
+                changed = False
+                if not candidate.initialized:
+                    self._rebuild(candidate, now=now, initial=True)
+                    changed = True
+                elif now - candidate.last_reconcile_at >= self.reconcile_interval_s:
+                    self._rebuild(candidate, now=now, initial=False)
+                    changed = True
+                elif (
+                    root_generation != candidate.root_generation
+                    or now - candidate.last_refresh_at >= self.refresh_interval_s
+                ):
+                    self._refresh(candidate, now=now)
+                    changed = True
+                if changed and not self._publish_catalog(
+                    catalog,
+                    candidate,
+                    expected_version=version,
+                ):
+                    candidate, _version = self._copy_catalog(catalog)
+                segments = [entry.segment for entry in candidate.entries.values()]
+                with self._timed("sort_ms"):
+                    return sorted(
+                        segments,
+                        key=lambda segment: (
+                            segment.first_pts,
+                            segment.last_pts,
+                            str(segment.metadata_path),
+                        ),
+                    )
             except Exception:
                 if not allow_fallback:
                     raise
                 from app.rolling_cache import find_segments as legacy_find_segments
 
-                with self._locked():
-                    self._stats["fallback_scans"] += 1
+                self._increment_stat("fallback_scans")
                 legacy_segments = legacy_find_segments(
                     self.root,
                     source_id=source_id,
@@ -415,20 +526,24 @@ class RollingSegmentIndex:
 
     def rows_for_segment(self, segment: RollingSegment) -> list[dict]:
         metadata_path = segment.metadata_path.resolve(strict=False)
-        with self._locked():
-            identity = self._file_identity(metadata_path)
-            key = (str(metadata_path), identity)
-            rows = self._row_cache.get(key)
-            if rows is not None:
-                self._stats["row_cache_hits"] += 1
-                self._record_count("row_cache_hits")
+        identity = self._file_identity(metadata_path)
+        key = (str(metadata_path), identity)
+        with self._locked(self._row_cache_lock):
+            cached = self._row_cache.get(key)
+            if cached is not None:
                 self._row_cache.move_to_end(key)
-                return list(rows)
-            self._stats["row_cache_misses"] += 1
-            self._record_count("row_cache_misses")
-            parsed = self._parse_rows(metadata_path)
-            self._remember_rows(metadata_path, identity, parsed)
-            return list(parsed)
+                rows = list(cached.rows)
+            else:
+                rows = None
+        if rows is not None:
+            self._increment_stat("row_cache_hits")
+            self._record_count("row_cache_hits")
+            return rows
+        self._increment_stat("row_cache_misses")
+        self._record_count("row_cache_misses")
+        parsed = self._parse_rows(metadata_path)
+        self._remember_rows(metadata_path, identity, parsed)
+        return list(parsed)
 
     def pin_segments(
         self,
@@ -492,40 +607,44 @@ class RollingSegmentIndex:
 
     def force_reconcile(self, *, source_id: str, runtime_epoch_id: str) -> None:
         key = (source_id, runtime_epoch_id)
-        with self._locked():
-            catalog = self._catalogs.get(key)
-            if catalog is None:
-                catalog = _Catalog(source_id=source_id, runtime_epoch_id=runtime_epoch_id)
-                self._catalogs[key] = catalog
-            self._rebuild(catalog, now=self._monotonic(), initial=not catalog.initialized)
+        catalog, _created = self._get_or_create_catalog(key)
+        for _attempt in range(3):
+            candidate, version = self._copy_catalog(catalog)
+            self._rebuild(
+                candidate,
+                now=self._monotonic(),
+                initial=not candidate.initialized,
+            )
+            if self._publish_catalog(
+                catalog,
+                candidate,
+                expected_version=version,
+            ):
+                return
+        raise RuntimeError("rolling_segment_index_publish_conflict")
 
     def snapshot(self) -> dict[str, int | float | str]:
-        with self._locked():
-            snapshot: dict[str, int | float | str] = {
+        with self._metrics_lock:
+            return {
                 "mode": "incremental",
                 **self._stats,
-                "catalogs": len(self._catalogs),
-                "entries": sum(len(catalog.entries) for catalog in self._catalogs.values()),
-                "pending": sum(len(catalog.pending) for catalog in self._catalogs.values()),
-                "row_cache_entries": len(self._row_cache),
+                "catalogs": self._catalog_count,
+                "entries": self._catalog_entry_count,
+                "pending": self._catalog_pending_count,
+                "row_cache_entries": self._row_cache_entry_count,
+                "row_cache_bytes": self._row_cache_bytes,
                 "active_read_pins": len(self._active_pins),
-                "generation": sum(catalog.generation for catalog in self._catalogs.values()),
+                "generation": self._catalog_generation,
+                **{
+                    f"{name}_total": total
+                    for name, total in self._timing_totals.items()
+                },
+                **{
+                    f"{name}_max": value
+                    for name, value in self._timing_maxima.items()
+                },
+                **self._operation_counts,
             }
-        with self._metrics_lock:
-            snapshot.update(
-                {
-                    **{
-                        f"{name}_total": total
-                        for name, total in self._timing_totals.items()
-                    },
-                    **{
-                        f"{name}_max": value
-                        for name, value in self._timing_maxima.items()
-                    },
-                    **self._operation_counts,
-                }
-            )
-        return snapshot
 
     def _rebuild(self, catalog: _Catalog, *, now: float, initial: bool) -> None:
         with self._timed("rebuild_ms"):
@@ -561,11 +680,13 @@ class RollingSegmentIndex:
             catalog.root_generation = self._read_root_generation()
             catalog.last_refresh_at = now
             catalog.last_reconcile_at = now
-            self._stats["initial_scans" if initial else "reconciliations"] += 1
+            self._increment_stat(
+                "initial_scans" if initial else "reconciliations"
+            )
 
     def _refresh(self, catalog: _Catalog, *, now: float) -> None:
         with self._timed("refresh_ms"):
-            self._stats["refreshes"] += 1
+            self._increment_stat("refreshes")
             known_candidates = set(catalog.entries) | set(catalog.pending)
             self._record_count("scanned_known", len(known_candidates))
             for metadata_path in tuple(known_candidates):
@@ -673,19 +794,23 @@ class RollingSegmentIndex:
             return
         self._record_count("new_or_changed")
         cache_key = (str(metadata_path), metadata_identity)
-        rows = self._row_cache.get(cache_key)
-        if rows is not None:
-            self._stats["row_cache_hits"] += 1
+        with self._locked(self._row_cache_lock):
+            cached = self._row_cache.get(cache_key)
+            if cached is not None:
+                self._row_cache.move_to_end(cache_key)
+                parsed = list(cached.rows)
+            else:
+                parsed = None
+        if parsed is not None:
+            self._increment_stat("row_cache_hits")
             self._record_count("row_cache_hits")
-            self._row_cache.move_to_end(cache_key)
-            parsed = list(rows)
         else:
-            self._stats["row_cache_misses"] += 1
+            self._increment_stat("row_cache_misses")
             self._record_count("row_cache_misses")
             try:
                 parsed = self._parse_rows(metadata_path)
             except Exception:
-                self._stats["parse_errors"] += 1
+                self._increment_stat("parse_errors")
                 catalog.pending.add(metadata_path)
                 catalog.failed_identities[metadata_path] = failed_identity
                 self._remove_entry(catalog, metadata_path)
@@ -697,7 +822,7 @@ class RollingSegmentIndex:
             if pts is not None
         ]
         if not pts_values:
-            self._stats["parse_errors"] += 1
+            self._increment_stat("parse_errors")
             catalog.pending.add(metadata_path)
             catalog.failed_identities[metadata_path] = failed_identity
             self._remove_entry(catalog, metadata_path)
@@ -741,11 +866,19 @@ class RollingSegmentIndex:
 
     def _remove_entry(self, catalog: _Catalog, metadata_path: Path) -> None:
         if catalog.entries.pop(metadata_path, None) is not None:
-            self._stats["stale_entries"] += 1
+            self._increment_stat("stale_entries")
         metadata_text = str(metadata_path)
-        for key in tuple(self._row_cache):
-            if key[0] == metadata_text:
-                self._row_cache.pop(key, None)
+        with self._locked(self._row_cache_lock):
+            for key in tuple(self._row_cache):
+                if key[0] != metadata_text:
+                    continue
+                cached = self._row_cache.pop(key)
+                self._row_cache_size_bytes -= cached.size_bytes
+            cache_entries = len(self._row_cache)
+            cache_bytes = self._row_cache_size_bytes
+        with self._metrics_lock:
+            self._row_cache_entry_count = cache_entries
+            self._row_cache_bytes = cache_bytes
 
     def _parse_rows(self, metadata_path: Path) -> list[dict]:
         self._record_count("full_row_parses")
@@ -755,7 +888,7 @@ class RollingSegmentIndex:
                 for row in load_native_metadata(metadata_path)
                 if isinstance(row, dict)
             ]
-        self._stats["metadata_parses"] += 1
+        self._increment_stat("metadata_parses")
         return rows
 
     def _remember_rows(
@@ -765,25 +898,61 @@ class RollingSegmentIndex:
         rows: Iterable[dict],
     ) -> None:
         key = (str(metadata_path), identity)
-        self._row_cache[key] = tuple(rows)
-        self._row_cache.move_to_end(key)
-        while len(self._row_cache) > self.row_cache_max_entries:
-            self._row_cache.popitem(last=False)
-            self._stats["row_cache_evictions"] += 1
-            self._record_count("row_cache_evictions")
+        cached = _CachedRows(
+            rows=tuple(rows),
+            size_bytes=max(1, int(identity.size)),
+        )
+        evictions = 0
+        byte_evictions = 0
+        with self._locked(self._row_cache_lock):
+            previous = self._row_cache.pop(key, None)
+            if previous is not None:
+                self._row_cache_size_bytes -= previous.size_bytes
+            self._row_cache[key] = cached
+            self._row_cache_size_bytes += cached.size_bytes
+            self._row_cache.move_to_end(key)
+            while (
+                len(self._row_cache) > self.row_cache_max_entries
+                or self._row_cache_size_bytes > self.row_cache_max_bytes
+            ):
+                byte_limited = self._row_cache_size_bytes > self.row_cache_max_bytes
+                _evicted_key, evicted = self._row_cache.popitem(last=False)
+                self._row_cache_size_bytes -= evicted.size_bytes
+                evictions += 1
+                if byte_limited:
+                    byte_evictions += 1
+            cache_entries = len(self._row_cache)
+            cache_bytes = self._row_cache_size_bytes
+        if evictions:
+            self._increment_stat("row_cache_evictions", evictions)
+            self._record_count("row_cache_evictions", evictions)
+        if byte_evictions:
+            self._increment_stat("row_cache_byte_evictions", byte_evictions)
+        with self._metrics_lock:
+            self._row_cache_entry_count = cache_entries
+            self._row_cache_bytes = cache_bytes
 
     def _evict_catalogs(self) -> None:
         while len(self._catalogs) > self.max_catalogs:
-            self._catalogs.popitem(last=False)
-            self._stats["catalog_evictions"] += 1
+            _key, catalog = self._catalogs.popitem(last=False)
+            with self._locked(catalog.lock):
+                entries = len(catalog.entries)
+                pending = len(catalog.pending)
+                generation = catalog.generation
+            with self._metrics_lock:
+                self._catalog_count -= 1
+                self._catalog_entry_count -= entries
+                self._catalog_pending_count -= pending
+                self._catalog_generation -= generation
+            self._increment_stat("catalog_evictions")
 
     def _pin_opened(self, token: str) -> None:
-        with self._locked():
+        with self._metrics_lock:
             self._active_pins.add(token)
             self._stats["read_pins_created"] += 1
 
     def _pin_closed(self, token: str) -> None:
-        with self._locked():
+        with self._metrics_lock:
             self._active_pins.discard(token)
             self._stats["read_pins_released"] += 1
 

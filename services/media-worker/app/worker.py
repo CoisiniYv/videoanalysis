@@ -13641,6 +13641,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "media_worker_segment_index_row_cache_entries",
                 256,
             ),
+            row_cache_max_bytes=getattr(
+                cfg,
+                "media_worker_segment_index_row_cache_max_bytes",
+                256 * 1024 * 1024,
+            ),
             max_catalogs=getattr(
                 cfg,
                 "media_worker_segment_index_max_catalogs",
@@ -13692,6 +13697,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "db_pool_effective=%s segment_index_requested=%s "
         "segment_index_effective=%s segment_index_refresh_s=%s "
         "segment_index_reconcile_s=%s segment_index_row_cache_entries=%s "
+        "segment_index_row_cache_max_bytes=%s "
         "segment_read_pin_ttl_s=%s "
         "lanes_effective=%s "
         "max_active=%s image_workers=%s remux_workers=%s finalizer_workers=%s "
@@ -13706,6 +13712,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         getattr(cfg, "media_worker_segment_index_refresh_interval_s", 0.5),
         getattr(cfg, "media_worker_segment_index_reconcile_interval_s", 30.0),
         getattr(cfg, "media_worker_segment_index_row_cache_entries", 256),
+        getattr(
+            cfg,
+            "media_worker_segment_index_row_cache_max_bytes",
+            256 * 1024 * 1024,
+        ),
         getattr(cfg, "rolling_cache_read_pin_ttl_s", 600.0),
         runtime_resources.finalizer_lane is not None,
         cfg.materialization_max_active,
@@ -14123,6 +14134,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                     "fallback_scans": "unavailable",
                     "row_cache_entries": "unavailable",
                     "row_cache_evictions": "unavailable",
+                    "row_cache_bytes": "unavailable",
+                    "row_cache_byte_evictions": "unavailable",
                     "active_read_pins": "unavailable",
                     "read_pins_created": "unavailable",
                     "read_pins_released": "unavailable",
@@ -14194,6 +14207,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "segment_index_fallback_scans=%s "
                 "segment_index_row_cache_entries=%s "
                 "segment_index_row_cache_evictions=%s "
+                "segment_index_row_cache_bytes=%s "
+                "segment_index_row_cache_byte_evictions=%s "
                 "segment_index_active_read_pins=%s "
                 "segment_index_read_pins_created=%s "
                 "segment_index_read_pins_released=%s "
@@ -14300,6 +14315,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 segment_index_snapshot.get("fallback_scans", "unavailable"),
                 segment_index_snapshot.get("row_cache_entries", "unavailable"),
                 segment_index_snapshot.get("row_cache_evictions", "unavailable"),
+                segment_index_snapshot.get("row_cache_bytes", "unavailable"),
+                segment_index_snapshot.get(
+                    "row_cache_byte_evictions",
+                    "unavailable",
+                ),
                 segment_index_snapshot.get("active_read_pins", "unavailable"),
                 segment_index_snapshot.get("read_pins_created", "unavailable"),
                 segment_index_snapshot.get("read_pins_released", "unavailable"),
