@@ -209,10 +209,13 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   duplicate/residual；Phase 4 该正确性子门可关闭；
 - 同一运行的容量门失败：5,781 个正式任务仅 4,742 materialized，1,039 个 attempt=0
   expired；Candidate C 的 82.03% 又低于 B 的 85.17%，两者都不能作为默认 60 路配置；
-- B/C 对照将容量热点收窄为高置信度 `Probable`：process-wide segment-index lock 覆盖
-  retained-history refresh/stat/full-metadata parse/cache，remux/tick 指标又遗漏 lock/pin/
-  snapshot 等待；C 的 active read pins p95 7→15、poll-gap p95 7.08s→13.21s，而
-  post-pin remux p95 仍约 1.2s。没有分段 lock-wait A/B 前不得称为动态 Confirmed；
+- B/C 对照定位出的 segment-index 热路径已完成分段计时、per-catalog COW 隔离、紧凑
+  manifest/lazy native-row、mutation-driven reconcile 和 discovery-through-pin 有界 admission；
+  filesystem mutation flock、read pin、identity fence 与 atomic rename 均保留；
+- 完整 person-consumer 负载下的 two-slot r300 对照仍未过容量门：966/966 正式任务最终
+  materialized，person persistence 与视频正确性通过，但 ready-to-remux/media queue/lifecycle
+  p95 为 105.45s/126.82s/127.21s，17/1,006 retained video 缺 annotation。下一轮只把
+  segment-index I/O admission 从 2 改为 3，不同时改变 WIP/remux/finalizer；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
@@ -227,6 +230,7 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
 - `docs/code_review/local4090_pressure60_worker_regression_remediation_2026-07-13.md`
 - `docs/code_review/local_rolling_cache_dual_clock_remediation_2026-07-15.md`
 - `docs/code_review/media_worker_finalizer_admission_fenced_retry_2026-07-21.md`
+- `docs/code_review/media_worker_segment_index_capacity_fix_2026-07-21.md`
 
 ## 11. 变更同步要求
 

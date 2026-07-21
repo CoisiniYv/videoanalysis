@@ -33,6 +33,10 @@ acceptance runs have passed yet.
 | `a5782d8` | reconciliation/identity tests | No periodic full walk, bounded steady stats, leaf pruning, retention invalidation, and same-size inode replacement fencing covered |
 | `2cf5301` | bounded index I/O admission | Caps only discovery-through-pin publication at two concurrent jobs, releases admission before ffmpeg/remux, and exposes job/cumulative wait plus effective capacity |
 | `9587dde` | admission/config/observability tests | Covers the concurrency bound, observable slot wait, env clamping, pressure override, and downstream summary extraction |
+| `63e4288` | observation-group recovery and bounded worker logs | Recreates deleted event/face consumer groups from retained stream rows and applies `50m x 3` Docker log rotation to person/face workers |
+| `db87559` | recovery/log-rotation tests | Covers group recreation and the effective Compose logging contract |
+| `cf64609` | pressure override tests | Specifies default, validation, profile override, pressure environment, and run-config audit behavior for index I/O admission |
+| `3f3abd9` | artifact-audited index I/O pressure override | Exposes the isolated discovery-through-pin admission width without changing remux, WIP, or finalizer capacity |
 
 ## Measurement rounds
 
@@ -224,6 +228,46 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   person worker and 85GB for face-worker, repeatedly pushing the root disk
   toward ENOSPC. The consumer-group recovery and bounded-log remediation must
   pass before repeating the unchanged two-slot baseline.
+- Recovery proof: `63e4288`/`db87559` recreated the person and face workers
+  with `50m x 3` json-file rotation. A controlled deletion of the retained
+  person-observation consumer group caused it to be recreated from stream ID
+  `0` without an error/traceback loop. The relevant recovery/logging suite
+  passed 103 tests with three expected skips, plus compile, critical Ruff,
+  Compose rendering, and diff checks.
+- Controlled two-slot repeat:
+  `/data/video-analytics/artifacts/pressure60_8p1_ioadm2_b10m_r300c_20260721T1740Z`.
+  The fixed fixture hash remained
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`;
+  the 600s/120s run sustained 60/60 sources at 8.048 FPS with zero
+  sampling-window send failure, forwarder queue-full, raw drop, or raw send
+  failure. All 966 formal tasks and all 1,006 retained tasks materialized.
+  All 1,006 videos passed window, duration, frame-rate, 8090 detail, and
+  timeline checks. Person persistence passed with 100,884 rows versus 100,881
+  exports across 60 sources and zero measured loss.
+- Correctness remained fenced: candidates/immediate-admitted/gap/fenced-retry
+  were `1006/1004/2/2`; handoff recovery, retry failure, claim-busy, duplicate,
+  finalizer failure, attempt-zero expiry, and all drain residuals were zero.
+  Seventeen of 1,006 retained videos lacked annotation/bbox/person-context
+  rows. Since person persistence passed, this is consistent with excessive
+  evidence delay rather than the prior missing-consumer load, but it still
+  fails the complete annotation gate.
+- Capacity failed decisively. Ready-to-remux p95 was 105.451s, scheduler
+  oldest-ready p95 112.267s, media queue p95 126.817s, and lifecycle p95
+  127.207s. Poll-gap p95 was 2.515s. Slot-wait p95 was 4.942s and
+  pre-pin-through-handoff p95 was 7.023s, while actual ffmpeg/remux p95 was
+  only 0.910s; refresh and pin-publication p95 were 1.981s and 1.443s.
+  Live ready work peaked at 167 with oldest-ready around 109s before the drain
+  eventually returned all state to zero. Media-worker peak CPU was 266.84%.
+- Conclusion: two admission slots preserve bounded behavior but remain below
+  the required sustained service rate. The next and only capacity variable is
+  segment-index I/O admission `2 -> 3`; Candidate B WIP/remux/max-per-poll and
+  finalizer values remain unchanged. The pressure override in
+  `cf64609`/`3f3abd9` makes that value explicit in wrapper output, runner
+  config, effective Compose environment, and retained artifacts.
+- Cleanup restored zero enabled pressure cameras, active tasks, leases,
+  finalizer-pending rows, pressure publishers/containers, and the daily Redis,
+  PostgreSQL, rolling-materialization-disabled, 300s-retention, two-slot
+  configuration. About 255GB remained free on the root filesystem.
 
 ## Recovery audit after Round 1
 
@@ -238,16 +282,11 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Recreate person/face workers with bounded json-file rotation and prove a
-   deleted person-observation group self-recovers from retained stream rows
-   without an exception loop; confirm trajectory persistence and log bounds.
-2. Repeat the unchanged Candidate B 600s/120s-drain load with 300s retention
-   and I/O admission still at two. This is the controlled baseline because the
-   first completed media diagnostic lacked the person-consumer load and full
-   annotation gate.
-3. Add an artifact-audited pressure override for I/O admission and change only
-   `2 -> 3`. Treat slot wait as part of ready-to-remux service time; admission
-   is not a pass if oldest-ready or wait continues to accumulate.
-4. If and only if the three-slot r300 gate passes, repeat with 3,840s retention.
-5. Only after both short gates pass, run two comparable one-hour acceptances
+1. Run the unchanged Candidate B 600s/120s-drain load with 300s retention and
+   segment-index I/O admission set to three. Treat slot wait as part of
+   ready-to-remux service time; admission is not a pass if oldest-ready or wait
+   continues to accumulate.
+2. If and only if the three-slot r300 gate passes every input, capacity,
+   correctness, annotation, and residual gate, repeat with 3,840s retention.
+3. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.

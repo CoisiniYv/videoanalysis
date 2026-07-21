@@ -24,7 +24,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment 发布、双时间域、segment index | 正确性通过；3,840s endurance retention 下 index scalability gate 重新打开 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission | 正确性通过；two-slot 300s retention 容量门失败，three-slot 正交门待测 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -72,29 +72,26 @@ tasks + rolling segments -> media-worker -> DB-backed evidence -> 8090
 完整性与 exact-lease 正确性已在最新 revision 复验，但持续容量没有通过。B/C 两轮均在
 约 300 秒 deadline 前形成 attempt=0 ready backlog，Phase 6 保持打开。
 
-2026-07-22 的 two-slot I/O admission r300 诊断进一步确认：poll-gap p95 已降到
-1.736s，但 ready-to-remux p95 仍为 70.94s，正式窗口 ready 到达/完成约
-934/822，slot-wait p95 4.455s，服务率仍低于 arrival。该运行还暴露了独立恢复问题：
-person consumer 在 group 被删除后陷入 `NOGROUP` 循环，person/face Docker 日志分别
-膨胀到约 168GB/85GB。当前实现为两类高率 worker 增加 retained-row group 自愈和
-50MB×3 日志轮转；完整 r300 仍须在该防护生效后复跑，不能用本次诊断关闭容量门。
+首个 two-slot I/O admission r300 诊断把 poll-gap p95 降到 1.736s，但仍形成
+70.94s ready-to-remux p95；它同时暴露 person consumer `NOGROUP` 循环和约
+168GB/85GB person/face Docker 日志。当前实现已增加 retained-row group 自愈和
+50MB×3 日志轮转，受控删除 group 的 smoke 与 103 项相关测试通过。
 
-Candidate B/C 的静态/动态对照把主要容量热点收窄为高置信度 `Probable`：
-`RollingSegmentIndex` 的单进程全局锁覆盖 retained-history refresh、文件 identity 和 full
-metadata parse/cache；`remux_ms` 不含进入 read pin 前的 index wait，`tick_duration_ms` 又在
-同锁的 `segment_index.snapshot()` 前结束。C 把 active read pins p95 从 7 提到 15 时，
-poll-gap p95 从 7.08s 增到 13.21s，而 post-pin remux p95 仍约 1.2s。最终因果定级仍需
-lock/refresh/pin 分段指标与修复前后 A/B。
+防护生效后的同配置受控复跑保留在
+`pressure60_8p1_ioadm2_b10m_r300c_20260721T1740Z`：60/60、8.048 FPS、966/966
+正式任务 materialized、100,884/100,881 person persisted/exported，且 send/queue/raw loss、
+attempt=0 expiry、recovery、claim-busy、duplicate、finalizer failure 与 drain residual 均为 0。
+但 ready-to-remux/media queue/lifecycle p95 仍达 105.45s/126.82s/127.21s，slot-wait p95
+4.942s，17/1,006 retained video 缺 annotation，two-slot 容量门明确失败。已增加 artifact-
+audited pressure override；下一轮唯一变量是 I/O admission 2→3。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 为 segment index 增加 lock/refresh/stat/parse/pin 与完整 scheduler-cycle 分段指标；
-- 把 catalog map、per-source/epoch catalog、selected-row cache 分锁，并由 rolling sink
-  原子发布紧凑 segment manifest；保留 mutation flock、read pin 与 identity fence；
-- 分别用日常 300s retention 和 endurance 3,840s retention 做 10–15 分钟正交 A/B；
-  attempt=0 expiry、oldest-ready 与 poll-gap 未通过前不再跑一小时；
+- 仅把 segment-index I/O admission 从 2 改为 3，先完成日常 300s retention 短门；
+- 只有 three-slot r300 的输入、容量、correctness、annotation、residual 全通过，才运行
+  3,840s endurance 短门；两者未通过前不再跑一小时；
 - 独立处理 finalizer p95 5.244s / process-pool wait p95 5.576s，禁止与 index/WIP/remux
   调整一次性混在同一候选；
 - 完成真实混合 RTSP 的断流、重连和长 soak；
