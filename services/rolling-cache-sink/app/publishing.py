@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import logging
 import os
 import shutil
 import threading
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +18,13 @@ from config import safe_component
 
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
+SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
+SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
+SEGMENT_PUBLICATION_SCHEMA_VERSION = "rolling-segment-publication-v1"
+SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
+
+LOGGER = logging.getLogger("rolling_cache_sink.publisher")
 
 
 @dataclass
@@ -71,7 +81,10 @@ class AtomicSegmentPublisher:
         )
 
     def publish(self, fragment: Fragment) -> Path:
-        if not fragment.video_path.is_file() or fragment.video_path.stat().st_size <= 0:
+        if not fragment.video_path.is_file():
+            raise RuntimeError(f"rolling_segment_video_missing:{fragment.segment_id}")
+        video_stat = fragment.video_path.stat()
+        if video_stat.st_size <= 0:
             raise RuntimeError(f"rolling_segment_video_missing:{fragment.segment_id}")
         pts_values = [
             pts
@@ -95,8 +108,9 @@ class AtomicSegmentPublisher:
                 handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        video_size_bytes = fragment.video_path.stat().st_size
-        metadata_size_bytes = metadata_path.stat().st_size
+        metadata_stat = metadata_path.stat()
+        video_size_bytes = video_stat.st_size
+        metadata_size_bytes = metadata_stat.st_size
         manifest = {
             "schema_version": SEGMENT_MANIFEST_SCHEMA_VERSION,
             "segment_id": fragment.segment_id,
@@ -124,6 +138,7 @@ class AtomicSegmentPublisher:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        manifest_stat = manifest_path.stat()
         _fsync_directory(fragment.staging_dir)
 
         fragment.final_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +148,157 @@ class AtomicSegmentPublisher:
             )
         os.replace(fragment.staging_dir, fragment.final_dir)
         _fsync_directory(fragment.final_dir.parent)
+        try:
+            _append_publication_record(
+                segments_root=fragment.final_dir.parent,
+                manifest=manifest,
+                manifest_stat=manifest_stat,
+                metadata_stat=metadata_stat,
+                video_stat=video_stat,
+            )
+        except Exception as exc:
+            # The atomic segment directory is authoritative. The journal is a
+            # bounded discovery accelerator, so a crash or append failure in
+            # this post-commit window must leave the segment usable; the media
+            # worker's periodic directory reconciliation recovers it.
+            LOGGER.warning(
+                "segment publication journal append failed source=%s epoch=%s "
+                "segment=%s path=%s error=%s",
+                self._source_id,
+                self._runtime_epoch_id,
+                fragment.segment_id,
+                fragment.final_dir,
+                exc,
+            )
         return fragment.final_dir
+
+
+def _identity_payload(stat: os.stat_result) -> dict[str, int]:
+    return {
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _publication_record_bytes(
+    *,
+    manifest: dict[str, Any],
+    manifest_stat: os.stat_result,
+    metadata_stat: os.stat_result,
+    video_stat: os.stat_result,
+) -> bytes:
+    record: dict[str, Any] = {
+        "schema_version": SEGMENT_PUBLICATION_SCHEMA_VERSION,
+        "source_id": manifest["source_id"],
+        "runtime_epoch_id": manifest["runtime_epoch_id"],
+        "segment_id": manifest["segment_id"],
+        "manifest": manifest,
+        "identities": {
+            "manifest": _identity_payload(manifest_stat),
+            "metadata": _identity_payload(metadata_stat),
+            "video": _identity_payload(video_stat),
+        },
+    }
+    canonical = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    record["crc32"] = f"{zlib.crc32(canonical) & 0xFFFFFFFF:08x}"
+    encoded = (
+        json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if len(encoded) > MAX_SEGMENT_PUBLICATION_RECORD_BYTES:
+        raise RuntimeError(
+            "rolling_segment_publication_record_too_large:"
+            f"{manifest.get('segment_id')}:{len(encoded)}"
+        )
+    return encoded
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("rolling_segment_publication_journal_short_write")
+        view = view[written:]
+
+
+def _append_publication_record(
+    *,
+    segments_root: Path,
+    manifest: dict[str, Any],
+    manifest_stat: os.stat_result,
+    metadata_stat: os.stat_result,
+    video_stat: os.stat_result,
+) -> None:
+    """Append one bounded discovery hint after the atomic segment commit.
+
+    The journal intentionally does not fsync each record: the segment directory
+    was already fsynced and remains the correctness source of truth. A host
+    crash may lose a recent hint, which periodic reconciliation is required to
+    recover. A separate flock serializes append/rotation and lets readers avoid
+    observing an in-process partial write.
+    """
+
+    encoded = _publication_record_bytes(
+        manifest=manifest,
+        manifest_stat=manifest_stat,
+        metadata_stat=metadata_stat,
+        video_stat=video_stat,
+    )
+    journal_path = segments_root / SEGMENT_PUBLICATION_JOURNAL_FILE
+    lock_path = segments_root / SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE
+    with lock_path.open("a+b") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                current_size = int(journal_path.stat().st_size)
+            except OSError:
+                current_size = 0
+            if current_size + len(encoded) <= SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES:
+                fd = os.open(
+                    journal_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o640,
+                )
+                try:
+                    _write_all(fd, encoded)
+                finally:
+                    os.close(fd)
+                return
+
+            temp_path = segments_root / (
+                f".{SEGMENT_PUBLICATION_JOURNAL_FILE}.{os.getpid()}."
+                f"{threading.get_ident()}.tmp"
+            )
+            fd = os.open(
+                temp_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o640,
+            )
+            try:
+                _write_all(fd, encoded)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.replace(temp_path, journal_path)
+                _fsync_directory(segments_root)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 class FragmentLedger:

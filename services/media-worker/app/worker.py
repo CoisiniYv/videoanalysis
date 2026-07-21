@@ -139,6 +139,7 @@ SEGMENT_INDEX_JOB_METRIC_FIELDS = (
     "segment_index_mutation_lock_wait_ms",
     "segment_index_pin_publish_ms",
     "segment_index_pin_release_ms",
+    "segment_index_publication_read_ms",
     "segment_index_stat_calls",
     "segment_index_full_row_parses",
     "segment_index_manifest_parses",
@@ -148,6 +149,10 @@ SEGMENT_INDEX_JOB_METRIC_FIELDS = (
     "segment_index_row_cache_hits",
     "segment_index_row_cache_misses",
     "segment_index_row_cache_evictions",
+    "segment_index_publication_records",
+    "segment_index_publication_bytes",
+    "segment_index_publication_errors",
+    "segment_index_publication_reconciles",
 )
 
 
@@ -6038,7 +6043,12 @@ def _log_finalize_one_metrics(
         "segment_index_manifest_parse_ms=%s segment_index_sort_ms=%s "
         "segment_index_mutation_lock_wait_ms=%s "
         "segment_index_pin_publish_ms=%s segment_index_pin_release_ms=%s "
+        "segment_index_publication_read_ms=%s "
         "segment_index_pinned_segments=%s "
+        "segment_index_publication_records=%s "
+        "segment_index_publication_bytes=%s "
+        "segment_index_publication_errors=%s "
+        "segment_index_publication_reconciles=%s "
         "handoff_to_finalizer_admission_ms=%s "
         "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
         "metadata_files_visited=%s ffprobe_invocations=%s "
@@ -6087,7 +6097,12 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("segment_index_mutation_lock_wait_ms"),
         materialization_metrics.get("segment_index_pin_publish_ms"),
         materialization_metrics.get("segment_index_pin_release_ms"),
+        materialization_metrics.get("segment_index_publication_read_ms"),
         materialization_metrics.get("segment_index_pinned_segments"),
+        materialization_metrics.get("segment_index_publication_records"),
+        materialization_metrics.get("segment_index_publication_bytes"),
+        materialization_metrics.get("segment_index_publication_errors"),
+        materialization_metrics.get("segment_index_publication_reconciles"),
         materialization_metrics.get("handoff_to_finalizer_admission_ms"),
         (throttle_decision or {}).get("sleep_s"),
         (throttle_decision or {}).get("reason"),
@@ -14243,11 +14258,16 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "segment_index_mutation_lock_wait_ms_total=%s "
                 "segment_index_pin_publish_ms_total=%s "
                 "segment_index_pin_release_ms_total=%s "
+                "segment_index_publication_read_ms_total=%s "
                 "segment_index_stat_calls=%s "
                 "segment_index_full_row_parses=%s "
                 "segment_index_manifest_parses=%s "
                 "segment_index_scanned_known=%s "
-                "segment_index_new_or_changed=%s",
+                "segment_index_new_or_changed=%s "
+                "segment_index_publication_records=%s "
+                "segment_index_publication_bytes=%s "
+                "segment_index_publication_errors=%s "
+                "segment_index_publication_reconciles=%s",
                 "v2" if scheduler_v2_enabled else "legacy",
                 scheduler_tick_sequence,
                 tick_duration_ms,
@@ -14367,11 +14387,22 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 ),
                 segment_index_snapshot.get("pin_publish_ms_total", "unavailable"),
                 segment_index_snapshot.get("pin_release_ms_total", "unavailable"),
+                segment_index_snapshot.get(
+                    "publication_read_ms_total",
+                    "unavailable",
+                ),
                 segment_index_snapshot.get("stat_calls", "unavailable"),
                 segment_index_snapshot.get("full_row_parses", "unavailable"),
                 segment_index_snapshot.get("manifest_parses", "unavailable"),
                 segment_index_snapshot.get("scanned_known", "unavailable"),
                 segment_index_snapshot.get("new_or_changed", "unavailable"),
+                segment_index_snapshot.get("publication_records", "unavailable"),
+                segment_index_snapshot.get("publication_bytes", "unavailable"),
+                segment_index_snapshot.get("publication_errors", "unavailable"),
+                segment_index_snapshot.get(
+                    "publication_reconciles",
+                    "unavailable",
+                ),
             )
             logging_ms = int((time.monotonic() - logging_started_at) * 1000)
 

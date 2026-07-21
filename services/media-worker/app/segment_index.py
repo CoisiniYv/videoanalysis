@@ -26,6 +26,11 @@ READ_PIN_SCHEMA_VERSION = "rolling-segment-read-pin-v1"
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
 MAX_SEGMENT_MANIFEST_BYTES = 64 * 1024
+SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
+SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
+SEGMENT_PUBLICATION_SCHEMA_VERSION = "rolling-segment-publication-v1"
+SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
+MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
 
 _OPERATION_TIMING_FIELDS = (
     "io_slot_wait_ms",
@@ -40,6 +45,7 @@ _OPERATION_TIMING_FIELDS = (
     "mutation_lock_wait_ms",
     "pin_publish_ms",
     "pin_release_ms",
+    "publication_read_ms",
 )
 _OPERATION_COUNT_FIELDS = (
     "stat_calls",
@@ -51,6 +57,10 @@ _OPERATION_COUNT_FIELDS = (
     "row_cache_hits",
     "row_cache_misses",
     "row_cache_evictions",
+    "publication_records",
+    "publication_bytes",
+    "publication_errors",
+    "publication_reconciles",
 )
 
 
@@ -132,12 +142,22 @@ class _Catalog:
     last_refresh_at: float = 0.0
     last_reconcile_at: float = 0.0
     next_reconcile_at: float = 0.0
+    publication_cursors: dict[Path, "_PublicationCursor"] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
 class _CachedRows:
     rows: tuple[dict, ...]
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class _PublicationCursor:
+    device: int
+    inode: int
+    offset: int
 
 
 class SegmentReadPin:
@@ -473,6 +493,7 @@ class RollingSegmentIndex:
             last_refresh_at = catalog.last_refresh_at
             last_reconcile_at = catalog.last_reconcile_at
             next_reconcile_at = catalog.next_reconcile_at
+            publication_cursors = catalog.publication_cursors
         return (
             _Catalog(
                 source_id=source_id,
@@ -488,6 +509,7 @@ class RollingSegmentIndex:
                 last_refresh_at=last_refresh_at,
                 last_reconcile_at=last_reconcile_at,
                 next_reconcile_at=next_reconcile_at,
+                publication_cursors=dict(publication_cursors),
             ),
             version,
         )
@@ -516,6 +538,7 @@ class RollingSegmentIndex:
             catalog.last_refresh_at = candidate.last_refresh_at
             catalog.last_reconcile_at = candidate.last_reconcile_at
             catalog.next_reconcile_at = candidate.next_reconcile_at
+            catalog.publication_cursors = candidate.publication_cursors
             catalog.version += 1
             with self._metrics_lock:
                 self._catalog_entry_count += len(catalog.entries) - old_entries
@@ -841,8 +864,278 @@ class RollingSegmentIndex:
         fraction = zlib.crc32(identity) / float(2**32)
         return self.reconcile_interval_s * (0.5 + fraction)
 
+    def _publication_journal_paths(self, catalog: _Catalog) -> tuple[Path, ...]:
+        return tuple(
+            source_root / "segments" / SEGMENT_PUBLICATION_JOURNAL_FILE
+            for source_root in self._candidate_source_roots(
+                source_id=catalog.source_id,
+                runtime_epoch_id=catalog.runtime_epoch_id,
+            )
+        )
+
+    def _snapshot_publication_tails(
+        self,
+        catalog: _Catalog,
+    ) -> dict[Path, _PublicationCursor]:
+        """Fence a full scan against concurrent journal appends.
+
+        The full directory scan covers everything committed before the cursor.
+        Consuming from these offsets after the scan covers publications that
+        raced with it without replaying an epoch-long journal on restart.
+        """
+
+        cursors: dict[Path, _PublicationCursor] = {}
+        for journal_path in self._publication_journal_paths(catalog):
+            if not journal_path.is_file():
+                continue
+            lock_path = journal_path.parent / SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE
+            try:
+                with lock_path.open("a+b") as lock_fh:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+                    try:
+                        with journal_path.open("rb") as journal_fh:
+                            stat = os.fstat(journal_fh.fileno())
+                    finally:
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                continue
+            cursors[journal_path] = _PublicationCursor(
+                device=int(stat.st_dev),
+                inode=int(stat.st_ino),
+                offset=int(stat.st_size),
+            )
+        return cursors
+
+    def _consume_publication_journals(
+        self,
+        catalog: _Catalog,
+    ) -> tuple[bool, bool]:
+        journal_seen = False
+        requires_reconcile = False
+        paths = set(self._publication_journal_paths(catalog)) | set(
+            catalog.publication_cursors
+        )
+        for journal_path in sorted(paths, key=str):
+            seen, invalidated = self._consume_publication_journal(
+                catalog,
+                journal_path,
+            )
+            journal_seen = journal_seen or seen
+            requires_reconcile = requires_reconcile or invalidated
+        return journal_seen, requires_reconcile
+
+    def _consume_publication_journal(
+        self,
+        catalog: _Catalog,
+        journal_path: Path,
+    ) -> tuple[bool, bool]:
+        previous = catalog.publication_cursors.get(journal_path)
+        if not journal_path.is_file():
+            if previous is None:
+                return False, False
+            catalog.publication_cursors.pop(journal_path, None)
+            self._record_count("publication_errors")
+            return False, True
+
+        lock_path = journal_path.parent / SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE
+        try:
+            with self._timed("publication_read_ms"):
+                with lock_path.open("a+b") as lock_fh:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_SH)
+                    try:
+                        with journal_path.open("rb") as journal_fh:
+                            stat = os.fstat(journal_fh.fileno())
+                            identity = (int(stat.st_dev), int(stat.st_ino))
+                            reset = (
+                                previous is not None
+                                and (
+                                    identity != (previous.device, previous.inode)
+                                    or int(stat.st_size) < previous.offset
+                                )
+                            )
+                            start = 0 if previous is None or reset else previous.offset
+                            available = max(0, int(stat.st_size) - start)
+                            if available > (
+                                SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES
+                                + MAX_SEGMENT_PUBLICATION_RECORD_BYTES
+                            ):
+                                catalog.publication_cursors[journal_path] = (
+                                    _PublicationCursor(
+                                        device=identity[0],
+                                        inode=identity[1],
+                                        offset=int(stat.st_size),
+                                    )
+                                )
+                                self._record_count("publication_errors")
+                                return True, True
+                            journal_fh.seek(start)
+                            data = journal_fh.read(available)
+                    finally:
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            self._record_count("publication_errors")
+            return True, True
+
+        self._record_count("publication_bytes", len(data))
+        last_newline = data.rfind(b"\n")
+        complete = data[: last_newline + 1] if last_newline >= 0 else b""
+        catalog.publication_cursors[journal_path] = _PublicationCursor(
+            device=identity[0],
+            inode=identity[1],
+            offset=start + len(complete),
+        )
+        requires_reconcile = reset
+        if reset:
+            self._record_count("publication_errors")
+        for encoded_line in complete.splitlines():
+            if not encoded_line:
+                continue
+            if len(encoded_line) > MAX_SEGMENT_PUBLICATION_RECORD_BYTES:
+                self._record_count("publication_errors")
+                requires_reconcile = True
+                continue
+            try:
+                payload = json.loads(encoded_line)
+                if not isinstance(payload, dict):
+                    raise ValueError("rolling_segment_publication_not_object")
+                checksum = payload.pop("crc32", None)
+                canonical = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                expected_checksum = f"{zlib.crc32(canonical) & 0xFFFFFFFF:08x}"
+                if checksum != expected_checksum:
+                    raise ValueError("rolling_segment_publication_checksum_invalid")
+                self._refresh_publication_record(
+                    catalog,
+                    journal_path=journal_path,
+                    payload=payload,
+                )
+            except Exception:
+                self._record_count("publication_errors")
+                requires_reconcile = True
+                continue
+            self._record_count("publication_records")
+        return True, requires_reconcile
+
+    def _refresh_publication_record(
+        self,
+        catalog: _Catalog,
+        *,
+        journal_path: Path,
+        payload: dict,
+    ) -> None:
+        if payload.get("schema_version") != SEGMENT_PUBLICATION_SCHEMA_VERSION:
+            raise ValueError("rolling_segment_publication_schema_invalid")
+        manifest = self._manifest_from_payload(payload.get("manifest"))
+        for name, expected in (
+            ("source_id", catalog.source_id),
+            ("runtime_epoch_id", catalog.runtime_epoch_id),
+            ("segment_id", manifest.segment_id),
+        ):
+            value = payload.get(name)
+            if value != expected:
+                raise ValueError(f"rolling_segment_publication_{name}_invalid")
+        segment_id = manifest.segment_id
+        if (
+            not segment_id
+            or segment_id in {".", ".."}
+            or Path(segment_id).name != segment_id
+        ):
+            raise ValueError("rolling_segment_publication_segment_id_invalid")
+        if (
+            manifest.source_id != catalog.source_id
+            or manifest.runtime_epoch_id != catalog.runtime_epoch_id
+        ):
+            raise ValueError("rolling_segment_publication_identity_invalid")
+
+        identities = payload.get("identities")
+        if not isinstance(identities, dict):
+            raise ValueError("rolling_segment_publication_identities_invalid")
+
+        def identity(name: str) -> FileIdentity:
+            value = identities.get(name)
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"rolling_segment_publication_{name}_identity_invalid"
+                )
+            parsed: dict[str, int] = {}
+            for field_name in ("device", "inode", "size", "mtime_ns"):
+                field_value = value.get(field_name)
+                if isinstance(field_value, bool):
+                    raise ValueError(
+                        f"rolling_segment_publication_{name}_identity_invalid"
+                    )
+                try:
+                    parsed[field_name] = int(field_value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"rolling_segment_publication_{name}_identity_invalid"
+                    ) from exc
+                if parsed[field_name] < 0:
+                    raise ValueError(
+                        f"rolling_segment_publication_{name}_identity_invalid"
+                    )
+            return FileIdentity(**parsed)
+
+        manifest_identity = identity("manifest")
+        metadata_identity = identity("metadata")
+        video_identity = identity("video")
+        if (
+            manifest_identity.size <= 0
+            or manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
+            or metadata_identity.size != manifest.metadata_size_bytes
+            or video_identity.size != manifest.video_size_bytes
+            or video_identity.size < self.min_video_bytes
+        ):
+            raise ValueError("rolling_segment_publication_size_identity_invalid")
+
+        segment_dir = journal_path.parent / segment_id
+        manifest_path = segment_dir / SEGMENT_MANIFEST_FILE
+        if self._runtime_epoch_from_path(manifest_path) != catalog.runtime_epoch_id:
+            raise ValueError("rolling_segment_publication_epoch_path_invalid")
+        metadata_path = segment_dir / manifest.metadata_file
+        video_path = segment_dir / manifest.video_file
+        existing = catalog.entries.get(manifest_path)
+        if existing is not None:
+            if (
+                existing.manifest_identity != manifest_identity
+                or existing.metadata_identity != metadata_identity
+                or existing.video_identity != video_identity
+            ):
+                raise ValueError("rolling_segment_publication_immutable_identity_changed")
+            return
+
+        self._record_count("new_or_changed")
+        segment = RollingSegment(
+            segment_id=manifest.segment_id,
+            source_id=manifest.source_id,
+            runtime_epoch_id=manifest.runtime_epoch_id,
+            directory=segment_dir,
+            video_path=video_path,
+            metadata_path=metadata_path,
+            first_pts=manifest.first_pts,
+            last_pts=manifest.last_pts,
+            frame_count=manifest.frame_count,
+            size_bytes=video_identity.size,
+            source_first_pts=manifest.source_first_pts,
+            source_last_pts=manifest.source_last_pts,
+        )
+        catalog.entries[manifest_path] = _IndexedSegment(
+            segment=segment,
+            manifest_identity=manifest_identity,
+            metadata_identity=metadata_identity,
+            video_identity=video_identity,
+        )
+        catalog.pending.discard(manifest_path)
+        catalog.failed_identities.pop(manifest_path, None)
+        catalog.containers.pop(segment_dir, None)
+
     def _rebuild(self, catalog: _Catalog, *, now: float, initial: bool) -> None:
         with self._timed("rebuild_ms"):
+            catalog.publication_cursors = self._snapshot_publication_tails(catalog)
             candidates: set[Path] = set()
             containers: dict[Path, int] = {}
             visited = 0
@@ -877,6 +1170,10 @@ class RollingSegmentIndex:
             missing = previous - candidates
             for manifest_path in missing:
                 self._remove_entry(catalog, manifest_path)
+            # The directory walk covers every publication before the captured
+            # tails. Consume only records appended while it ran so a restart
+            # does not replay an epoch-long journal.
+            self._consume_publication_journals(catalog)
             catalog.initialized = True
             catalog.generation += 1
             catalog.root_generation = self._read_root_generation()
@@ -900,6 +1197,7 @@ class RollingSegmentIndex:
         reconcile: bool = False,
     ) -> None:
         with self._timed("refresh_ms"):
+            membership_reconcile = reconcile
             self._increment_stat("reconciliations" if reconcile else "refreshes")
             # Final directories are immutable after atomic publication. Only
             # incomplete/invalid manifests need payload identity retries on a
@@ -909,6 +1207,22 @@ class RollingSegmentIndex:
             self._record_count("scanned_known", len(pending_candidates))
             for manifest_path in pending_candidates:
                 self._refresh_candidate(catalog, manifest_path)
+
+            if not reconcile:
+                journal_seen, journal_requires_reconcile = (
+                    self._consume_publication_journals(catalog)
+                )
+                if journal_seen and not journal_requires_reconcile:
+                    # Retention deletion can leave old catalog entries until
+                    # the staggered periodic membership audit. That is safe:
+                    # the read-pin identity fence runs under the shared
+                    # mutation flock before any file is consumed.
+                    catalog.root_generation = self._read_root_generation()
+                    catalog.last_refresh_at = max(float(now), self._monotonic())
+                    return
+                if journal_requires_reconcile:
+                    self._record_count("publication_reconciles")
+                    membership_reconcile = True
 
             queue: list[Path] = []
             queued: set[Path] = set()
@@ -944,7 +1258,7 @@ class RollingSegmentIndex:
                 if current_mtime == 0:
                     remove_tree(container)
                     continue
-                if reconcile or current_mtime != previous_mtime:
+                if membership_reconcile or current_mtime != previous_mtime:
                     enqueue(container)
 
             visited = 0
@@ -1004,7 +1318,7 @@ class RollingSegmentIndex:
                         continue
                     catalog.containers[child_path] = child_mtime
                     if (
-                        reconcile
+                        membership_reconcile
                         or previous_child_mtime is None
                         or previous_child_mtime != child_mtime
                     ):
@@ -1020,13 +1334,17 @@ class RollingSegmentIndex:
                     catalog.pending.discard(missing_manifest)
                     catalog.failed_identities.pop(missing_manifest, None)
                     self._remove_entry(catalog, missing_manifest)
+            # Consume records appended while the compatibility/periodic
+            # directory audit was running. The next ordinary refresh can then
+            # remain journal-only.
+            self._consume_publication_journals(catalog)
             # Retention advances one root-wide generation after deleting segments.
             # Membership comparison on changed discovery parents has already
             # removed deleted immutable leaves, so acknowledge that generation.
             catalog.root_generation = self._read_root_generation()
             completed_at = max(float(now), self._monotonic())
             catalog.last_refresh_at = completed_at
-            if reconcile:
+            if membership_reconcile:
                 catalog.last_reconcile_at = completed_at
                 catalog.next_reconcile_at = completed_at + self.reconcile_interval_s
 
@@ -1182,6 +1500,10 @@ class RollingSegmentIndex:
         self._record_count("manifest_parses")
         with self._timed("manifest_parse_ms"):
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return self._manifest_from_payload(payload)
+
+    @staticmethod
+    def _manifest_from_payload(payload: object) -> _SegmentManifest:
         if not isinstance(payload, dict):
             raise ValueError("rolling_segment_manifest_not_object")
         if payload.get("schema_version") != SEGMENT_MANIFEST_SCHEMA_VERSION:

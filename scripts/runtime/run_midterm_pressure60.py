@@ -10030,7 +10030,11 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         media_remux_exec_ms = _extract_metric_numbers(text, "remux_exec_ms")
         media_remux_total_ms = _extract_metric_numbers(text, "remux_total_ms")
         media_segment_index_job_metrics = {
-            field: _extract_metric_numbers(text, field)
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_event_finalized",
+                field=field,
+            )
             for field in (
                 "segment_index_io_slot_wait_ms",
                 "segment_index_lock_wait_ms",
@@ -10044,7 +10048,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_mutation_lock_wait_ms",
                 "segment_index_pin_publish_ms",
                 "segment_index_pin_release_ms",
+                "segment_index_publication_read_ms",
                 "segment_index_pinned_segments",
+                "segment_index_publication_records",
+                "segment_index_publication_bytes",
+                "segment_index_publication_errors",
+                "segment_index_publication_reconciles",
             )
         }
         media_handoff_to_finalizer_admission_ms = _extract_metric_ints(
@@ -10167,11 +10176,16 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_mutation_lock_wait_ms_total",
                 "segment_index_pin_publish_ms_total",
                 "segment_index_pin_release_ms_total",
+                "segment_index_publication_read_ms_total",
                 "segment_index_stat_calls",
                 "segment_index_full_row_parses",
                 "segment_index_manifest_parses",
                 "segment_index_scanned_known",
                 "segment_index_new_or_changed",
+                "segment_index_publication_records",
+                "segment_index_publication_bytes",
+                "segment_index_publication_errors",
+                "segment_index_publication_reconciles",
             )
         }
         media_resource_capacity_metrics = {
@@ -12959,7 +12973,12 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                 "mutation_lock_wait_ms",
                 "pin_publish_ms",
                 "pin_release_ms",
+                "publication_read_ms",
                 "pinned_segments",
+                "publication_records",
+                "publication_bytes",
+                "publication_errors",
+                "publication_reconciles",
             )
         },
         "handoff_to_finalizer_admission_ms": logs.get(
@@ -13218,6 +13237,36 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "media_scheduler_segment_index_new_or_changed"
                 )
                 or _not_enough_data("segment-index changed count unavailable"),
+                "publication_read_ms_total": logs.get(
+                    "media_scheduler_segment_index_publication_read_ms_total"
+                )
+                or _not_enough_data(
+                    "segment-index publication read total unavailable"
+                ),
+                "publication_records": logs.get(
+                    "media_scheduler_segment_index_publication_records"
+                )
+                or _not_enough_data(
+                    "segment-index publication record count unavailable"
+                ),
+                "publication_bytes": logs.get(
+                    "media_scheduler_segment_index_publication_bytes"
+                )
+                or _not_enough_data(
+                    "segment-index publication byte count unavailable"
+                ),
+                "publication_errors": logs.get(
+                    "media_scheduler_segment_index_publication_errors"
+                )
+                or _not_enough_data(
+                    "segment-index publication error count unavailable"
+                ),
+                "publication_reconciles": logs.get(
+                    "media_scheduler_segment_index_publication_reconciles"
+                )
+                or _not_enough_data(
+                    "segment-index publication reconcile count unavailable"
+                ),
             },
             "capacity": {
                 "max_active": logs.get("media_resource_max_active")
