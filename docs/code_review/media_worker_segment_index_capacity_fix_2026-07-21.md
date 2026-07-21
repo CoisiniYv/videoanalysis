@@ -322,6 +322,44 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   two-slot configuration were restored. The worktree remained clean and the
   root filesystem retained about 251GB free.
 
+### Round 7: four-slot bounded-admission limit
+
+- Hypothesis: width four, matching the existing per-source execution bound,
+  was the final simple admission candidate that might clear the residual
+  width-three queue without changing any other capacity dimension.
+- Unique variable: `MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY=4`; WIP 20,
+  remux 12, max-per-poll 8, finalizer `8/4/8`, 600s/120s, 300s retention, and
+  the fixed input/hash were unchanged and artifact-audited.
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_ioadm4_b10m_r300_20260721T1837Z`.
+- Input/correctness again passed: 60/60, 8.0479 FPS, zero send/queue/raw loss;
+  969/969 formal tasks and 1,008/1,008 retained tasks materialized. All retained
+  videos passed window/duration/FPS plus 8090 detail/timeline/annotation/bbox/
+  person-context with zero fallback. Person persistence passed with 100,906
+  stored versus 100,904 exported rows over 60 sources and final lag/pending
+  zero. Candidates/admitted/gap/retry were `1008/1007/1/1`; expiry, recovery,
+  retry failure, claim-busy, duplicate, finalizer failure, and residuals were
+  zero.
+- Capacity regressed versus width three: ready-to-remux p95 rose from 37.205s
+  to 55.772s, media queue from 57.800s to 76.731s, lifecycle from 58.305s to
+  77.215s, and oldest-ready from 44.209s to 62.931s. The formal queue reached
+  106 pending with oldest-ready about 54s near the end, then converged only in
+  drain. Metadata visibility p95 also worsened from 9.425s to 10.459s.
+- The attribution is an I/O convoy, not insufficient admission slots. Slot-
+  wait p95 fell slightly from 5.102s to 4.830s, but refresh rose from 1.926s to
+  2.458s, pin publication from 1.934s to 2.004s, lock hold from 1.606s to
+  1.743s, and pre-pin-through-handoff from 7.720s to 8.087s. Actual remux p95
+  remained only 0.826s, DB claim 0.193s, finalizer pool wait 0.566s, and
+  handoff-to-admission 0.864s. Media-worker peak CPU was 294.76%.
+- Conclusion: do not test width five or run r3840. Width three remains the best
+  measured comparison point, but it is not accepted. The next loop must reduce
+  refresh/pin publication work structurally and then repeat r300 at width
+  three before any endurance run.
+- Cleanup restored daily width two, disabled rolling materialization, 300s
+  retention, Redis/PostgreSQL defaults, zero pressure sources/processes,
+  enabled cameras, active tasks, leases, or finalizer-pending rows. About
+  248GB remained free and the worktree was clean.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -335,13 +373,12 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Run the unchanged Candidate B 600s/120s-drain load with 300s retention and
-   segment-index I/O admission set to four. Treat slot wait as part of
-   ready-to-remux service time; admission is not a pass if oldest-ready or wait
-   continues to accumulate.
-2. If and only if the four-slot r300 gate passes every input, capacity,
-   correctness, annotation, and residual gate, repeat with 3,840s retention.
-3. If four slots still fail, stop widening admission and use the new refresh,
-   pin-publication, WIP, and visibility evidence for the next structural fix.
+1. Keep pressure admission at width three and make one structural change that
+   reduces refresh or pin-publication work without weakening mutation flock,
+   read-pin durability, identity fences, or atomic publication.
+2. Prove the change with focused concurrency/failure tests and a real-container
+   interoperability smoke, then repeat the unchanged width-three r300 gate.
+3. Only if the structural width-three r300 gate passes every input, capacity,
+   correctness, annotation, visibility, and residual gate, run r3840.
 4. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.
