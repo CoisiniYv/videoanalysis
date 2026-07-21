@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,92 @@ def test_incremental_refresh_parses_only_new_or_changed_segments(tmp_path: Path)
     index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
     assert int(index.snapshot()["metadata_parses"]) == initial_parses + 1
     assert int(index.snapshot()["refreshes"]) >= 2
+
+
+def test_operation_diagnostics_cover_index_and_pin_timing(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(root)
+    diagnostics = index.new_operation_diagnostics()
+
+    with index.pin_source_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        diagnostics=diagnostics,
+    ) as segments:
+        assert len(segments) == 1
+        assert len(index.rows_for_segment(segments[0])) == 2
+
+    expected_timings = {
+        "segment_index_lock_wait_ms",
+        "segment_index_lock_hold_ms",
+        "segment_index_refresh_ms",
+        "segment_index_rebuild_ms",
+        "segment_index_stat_ms",
+        "segment_index_full_row_parse_ms",
+        "segment_index_manifest_parse_ms",
+        "segment_index_sort_ms",
+        "segment_index_mutation_lock_wait_ms",
+        "segment_index_pin_publish_ms",
+        "segment_index_pin_release_ms",
+    }
+    assert expected_timings <= diagnostics.keys()
+    assert all(float(diagnostics[name]) >= 0 for name in expected_timings)
+    assert int(diagnostics["segment_index_full_row_parses"]) >= 1
+    assert int(diagnostics["segment_index_stat_calls"]) >= 2
+    assert int(diagnostics["segment_index_scanned_known"]) >= 1
+    assert int(diagnostics["segment_index_new_or_changed"]) >= 1
+
+    snapshot = index.snapshot()
+    assert float(snapshot["lock_wait_ms_total"]) >= float(
+        diagnostics["segment_index_lock_wait_ms"]
+    )
+    assert float(snapshot["full_row_parse_ms_total"]) >= float(
+        diagnostics["segment_index_full_row_parse_ms"]
+    )
+    assert int(snapshot["full_row_parses"]) >= 1
+    assert int(snapshot["stat_calls"]) >= 2
+
+
+def test_operation_diagnostics_measure_global_lock_contention(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(root)
+    diagnostics = index.new_operation_diagnostics()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def lookup() -> None:
+        started.set()
+        index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            diagnostics=diagnostics,
+        )
+        finished.set()
+
+    with index._lock:
+        thread = threading.Thread(target=lookup)
+        thread.start()
+        assert started.wait(timeout=1.0)
+        time.sleep(0.03)
+        assert not finished.is_set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert float(diagnostics["segment_index_lock_wait_ms"]) >= 20.0
 
 
 def test_index_retains_compact_source_clock_bounds_after_row_cache_eviction(

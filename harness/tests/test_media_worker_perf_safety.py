@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,154 @@ def _activate(service: str, module_name: str):
         sys.path.remove(service_root)
     sys.path.insert(0, service_root)
     return importlib.import_module(module_name)
+
+
+def test_scheduler_cycle_observability_accounts_for_hidden_tick_time() -> None:
+    worker = _activate("media-worker", "app.worker")
+
+    observed = worker._scheduler_cycle_observability(
+        tick_gap_ms=1300,
+        tick_body_ms=200,
+        snapshot_ms=600,
+        logging_ms=20,
+        planned_sleep_ms=100,
+        actual_sleep_ms=110,
+    )
+
+    assert observed == {
+        "cycle_body_ms": 200,
+        "cycle_snapshot_ms": 600,
+        "cycle_logging_ms": 20,
+        "cycle_planned_sleep_ms": 100,
+        "cycle_actual_sleep_ms": 110,
+        "cycle_accounted_ms": 930,
+        "cycle_work_ms": 1190,
+        "cycle_total_ms": 1300,
+        "cycle_unattributed_ms": 370,
+    }
+    assert worker._scheduler_cycle_observability(
+        tick_gap_ms=None,
+        tick_body_ms=0,
+        snapshot_ms=0,
+        logging_ms=0,
+        planned_sleep_ms=0,
+        actual_sleep_ms=0,
+    )["cycle_total_ms"] == "unavailable"
+
+
+def test_remux_job_preserves_pre_pin_and_index_diagnostics(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    sink_dir = tmp_path / "materialized" / EVENT_ID
+    sink_dir.mkdir(parents=True)
+    metadata_path = sink_dir / "metadata.json"
+    video_path = sink_dir / "video.mov"
+    metadata_path.write_text(
+        json.dumps({"event_id": EVENT_ID, "source_id": "source-1"}),
+        encoding="utf-8",
+    )
+    video_path.write_bytes(b"video")
+    diagnostics = {
+        "segment_index_lock_wait_ms": 31.5,
+        "segment_index_lock_hold_ms": 42.5,
+    }
+
+    class FakeIndex:
+        @staticmethod
+        def new_operation_diagnostics() -> dict[str, float]:
+            return dict(diagnostics)
+
+        @contextmanager
+        def pin_source_segments(self, **kwargs: Any):
+            assert kwargs["diagnostics"] == diagnostics
+            yield []
+
+        @staticmethod
+        def rows_for_segment(_segment: object) -> list[dict]:
+            return []
+
+    materialized = SimpleNamespace(
+        metadata_path=metadata_path,
+        video_path=video_path,
+        sink_dir=sink_dir,
+        segment_ids=("segment-1",),
+        immutable_probe={"status": "ready"},
+        materialization_ms=17,
+    )
+    monkeypatch.setattr(worker, "materialize_window", lambda **_kwargs: materialized)
+    monotonic_values = iter((10.0, 10.123))
+    monkeypatch.setattr(worker.time, "monotonic", lambda: next(monotonic_values))
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="worker-1",
+        token="lease-1",
+        generation=1,
+        phase="remux_running",
+        schema_v2=True,
+    )
+
+    result = worker._materialize_rolling_cache_job(
+        root=str(tmp_path / "rolling"),
+        output_root=str(tmp_path / "materialized"),
+        job={
+            "event_id": EVENT_ID,
+            "source_id": "source-1",
+            "runtime_epoch_id": CURRENT_EPOCH,
+            "requested_start_pts": 1,
+            "requested_end_pts": 2,
+            "lease": lease,
+        },
+        segment_index=FakeIndex(),
+    )
+
+    handoff = result["_lifecycle_handoff"]
+    phase = result["_finalizer_phase"]
+    assert handoff["remux_ms"] == 17
+    assert handoff["remux_exec_ms"] == 17
+    assert handoff["remux_total_ms"] == 123
+    assert handoff["segment_index_lock_wait_ms"] == 31.5
+    assert phase["remux_total_ms"] == 123
+    assert phase["segment_index_lock_hold_ms"] == 42.5
+
+
+def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
+    worker = _activate("media-worker", "app.worker")
+    caplog.set_level("INFO", logger="app.worker")
+
+    worker._log_finalize_one_metrics(
+        event_id=EVENT_ID,
+        meta_dir="/tmp/meta",
+        finalizer_worker_id="finalizer-1",
+        source_id="source-1",
+        replay_shard_id="replay-1",
+        claim_status="claimed",
+        claim_wait_ms=1,
+        finalize_duration_ms=2,
+        scan_stats={"scan_duration_ms": 3, "metadata_files_visited": 1},
+        materialization_metrics={
+            "remux_ms": 17,
+            "remux_exec_ms": 17,
+            "remux_total_ms": 123,
+            "segment_index_lock_wait_ms": 31.5,
+            "segment_index_lock_hold_ms": 42.5,
+        },
+        throttle_decision=None,
+        probe_delta={
+            "ffprobe_invocation_count": 0,
+            "ffprobe_duration_ms": 0,
+            "ffmpeg_invocation_count": 0,
+            "ffmpeg_duration_ms": 0,
+            "imageio_ffmpeg_fallback_count": 0,
+            "imageio_ffmpeg_fallback_duration_ms": 0,
+        },
+        stage_timings={},
+    )
+
+    assert "remux_total_ms=123" in caplog.text
+    assert "segment_index_lock_wait_ms=31.5" in caplog.text
+    assert "segment_index_lock_hold_ms=42.5" in caplog.text
 
 
 def test_processed_sink_dirs_survive_restart(tmp_path: Path) -> None:

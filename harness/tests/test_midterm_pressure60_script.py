@@ -6100,6 +6100,9 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "finalizer_pool_wait_ms": module._not_enough_data("synthetic"),
             "ready_to_remux_claim_ms": module._not_enough_data("synthetic"),
             "remux_ms": module._not_enough_data("synthetic"),
+            "remux_exec_ms": module._not_enough_data("synthetic"),
+            "remux_total_ms": module._not_enough_data("synthetic"),
+            "segment_index_job": module._not_enough_data("synthetic"),
             "handoff_to_finalizer_admission_ms": module._not_enough_data(
                 "synthetic"
             ),
@@ -6257,7 +6260,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_stable_to_ffprobe_ready_ms=40 "
                 "sink_ffprobe_ready_to_finalizer_start_ms=3 "
                 "finalizer_pool_wait_ms=4 "
-                "ready_to_remux_claim_ms=12 remux_ms=800 "
+                "ready_to_remux_claim_ms=12 remux_ms=800 remux_exec_ms=800 "
+                "remux_total_ms=1800 segment_index_lock_wait_ms=400.5 "
+                "segment_index_lock_hold_ms=700.5 segment_index_refresh_ms=650 "
+                "segment_index_rebuild_ms=0 segment_index_stat_ms=200 "
+                "segment_index_full_row_parse_ms=300 "
+                "segment_index_manifest_parse_ms=0 segment_index_sort_ms=10 "
+                "segment_index_mutation_lock_wait_ms=2 "
+                "segment_index_pin_publish_ms=4 segment_index_pin_release_ms=1 "
                 "handoff_to_finalizer_admission_ms=3 "
                 "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
@@ -6274,7 +6284,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_stable_to_ffprobe_ready_ms=60 "
                 "sink_ffprobe_ready_to_finalizer_start_ms=4 "
                 "finalizer_pool_wait_ms=6 "
-                "ready_to_remux_claim_ms=22 remux_ms=900 "
+                "ready_to_remux_claim_ms=22 remux_ms=900 remux_exec_ms=900 "
+                "remux_total_ms=2100 segment_index_lock_wait_ms=600.5 "
+                "segment_index_lock_hold_ms=800.5 segment_index_refresh_ms=750 "
+                "segment_index_rebuild_ms=0 segment_index_stat_ms=250 "
+                "segment_index_full_row_parse_ms=350 "
+                "segment_index_manifest_parse_ms=0 segment_index_sort_ms=12 "
+                "segment_index_mutation_lock_wait_ms=3 "
+                "segment_index_pin_publish_ms=5 segment_index_pin_release_ms=2 "
                 "handoff_to_finalizer_admission_ms=5 "
                 "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
@@ -6312,6 +6329,11 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=2 tick_duration_ms=200 "
                 "tick_gap_ms=1300 rolling_due=True general_due=True "
+                "completed_cycle_sequence=1 cycle_body_ms=1200 "
+                "cycle_snapshot_ms=40 cycle_logging_ms=10 "
+                "cycle_planned_sleep_ms=100 cycle_actual_sleep_ms=105 "
+                "cycle_accounted_ms=1355 cycle_work_ms=1195 "
+                "cycle_total_ms=1300 cycle_unattributed_ms=0 "
                 "oldest_ready_age_ms=5000 image_lane_depth=1 "
                 "remux_lane_depth=1 finalizer_lane_depth=0 "
                 "finalizer_admission_rejected_total=1 "
@@ -6426,6 +6448,16 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_finalizer_pool_wait_ms"]["max"] == 6.0
     assert summary["media_worker"]["media_ready_to_remux_claim_ms"]["p50"] == 17.0
     assert summary["media_worker"]["media_remux_ms"]["max"] == 900.0
+    assert summary["media_worker"]["media_remux_exec_ms"]["max"] == 900.0
+    assert summary["media_worker"]["media_remux_total_ms"]["max"] == 2100.0
+    assert (
+        summary["media_worker"]["media_segment_index_lock_wait_ms"]["p50"]
+        == 500.5
+    )
+    assert (
+        summary["media_worker"]["media_segment_index_full_row_parse_ms"]["max"]
+        == 350.0
+    )
     assert (
         summary["media_worker"]["media_handoff_to_finalizer_admission_ms"]["max"]
         == 5.0
@@ -6454,6 +6486,9 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_deadline_slack_s"]["min"] == 45.0
     assert summary["media_worker"]["media_scheduler_tick_duration_ms"]["p50"] == 700.0
     assert summary["media_worker"]["media_scheduler_tick_gap_ms"]["max"] == 1300.0
+    assert summary["media_worker"]["media_scheduler_cycle_work_ms"]["max"] == 1195.0
+    assert summary["media_worker"]["media_scheduler_cycle_snapshot_ms"]["max"] == 40.0
+    assert summary["media_worker"]["media_scheduler_cycle_actual_sleep_ms"]["max"] == 105.0
     assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 2.0
     assert summary["media_worker"]["media_scheduler_image_lane_depth"]["max"] == 3.0
     assert summary["media_worker"]["media_scheduler_finalizer_lane_depth"]["max"] == 1.0
@@ -6487,7 +6522,10 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     observable = module.media_worker_observability_summary(
         {"log_summary": summary}
     )
-    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v2"
+    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v3"
+    assert observable["scheduler"]["cycle"]["work_ms"]["max"] == 1195.0
+    assert observable["remux_total_ms"]["max"] == 2100.0
+    assert observable["segment_index_job"]["lock_wait_ms"]["p50"] == 500.5
     assert observable["scheduler"]["finalizer_admission"]["candidate_total"] == 5
     assert (
         observable["scheduler"]["finalizer_admission"]["immediate_admission_gap"]
