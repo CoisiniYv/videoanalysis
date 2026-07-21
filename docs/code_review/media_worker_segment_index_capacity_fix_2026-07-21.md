@@ -31,6 +31,8 @@ acceptance runs have passed yet.
 | `dbb872b` | manifest/index tests | Atomic publication, manifest-only discovery, lazy selected-row parsing, malformed/missing manifest, COW, retention, pin, and cache behavior covered |
 | `3c02771` | mutation-driven reconciliation | Periodic reconciliation compares immutable-leaf membership through tracked parents, spreads first reconcile phase, and carries exact catalog identities into read-pin fencing |
 | `a5782d8` | reconciliation/identity tests | No periodic full walk, bounded steady stats, leaf pruning, retention invalidation, and same-size inode replacement fencing covered |
+| `2cf5301` | bounded index I/O admission | Caps only discovery-through-pin publication at two concurrent jobs, releases admission before ffmpeg/remux, and exposes job/cumulative wait plus effective capacity |
+| `9587dde` | admission/config/observability tests | Covers the concurrency bound, observable slot wait, env clamping, pressure override, and downstream summary extraction |
 
 ## Measurement rounds
 
@@ -111,7 +113,7 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   selected/candidate native-row loads took about 797ms; row cache had 498
   entries and zero evictions. By 120s, service rate matched arrival rate and
   oldest-ready had returned to about 1.7s.
-- Remaining failure: synchronized 30s periodic catalog reconciliation caused
+- Remaining failure: synchronized 60s periodic catalog reconciliation caused
   repeated 3.8-10.5s scheduler cycles. Oldest-ready rose to 36.6s despite an
   intermittently empty remux lane. In one 16s interval cumulative rebuild time
   rose from 21.2s to 31.2s; cumulative stat time reached 16.5s. This is a
@@ -126,9 +128,9 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
 ### Round 4: mutation-driven immutable catalog reconciliation
 
 - Hypothesis: immutable manifest leaves do not need retention-wide payload
-  re-stat or a full tree walk every 30s. Atomic parent membership plus the
-  retention generation is sufficient for discovery/deletion; read-pin must
-  retain exact identity fencing.
+  re-stat or a full tree walk every 60s under the pressure override. Atomic
+  parent membership plus the retention generation is sufficient for
+  discovery/deletion; read-pin must retain exact identity fencing.
 - Unique implementation variable: `3c02771`.
 - New behavior: steady refresh retries only pending manifests and watches the
   source/segments discovery parents. Parent membership detects atomic additions
@@ -140,7 +142,45 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   same-size, same-mtime inode replacement is rejected as retryable.
 - Verification: focused suite 52/52; combined media-worker, rolling-cache,
   pressure-harness, deployment, topology, and materialization suite 450 passed
-  with one expected skip. Pressure result pending.
+  with one expected skip.
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_manifestinc_b10m_r300_20260721T1604Z`
+- Result: intentionally interrupted diagnostic, not a formal short gate.
+  Mutation-driven reconciliation removed the periodic full-walk/rebuild storm,
+  but 12 remux workers still entered Python directory discovery, JSON/stat, and
+  read-pin publication concurrently. Across samples 5-8, ready work rose
+  `1 -> 18 -> 72 -> 44`, oldest-ready approached 36s, and expiry remained zero.
+- For 425 completed jobs, refresh p50/p95/max was
+  135.5ms/2,968.7ms/3,815ms; pin publication was
+  86.4ms/1,692.6ms/2,627ms; and remux-total was
+  1,462ms/5,676ms/6,157ms. Stat p95 was 124.5ms and selected full-row parse p95
+  was 20.9ms. The remaining convoy was concurrent Python filesystem/JSON/stat/
+  pin amplification, not a reason to add workers.
+- Cleanup converged through the KeyboardInterrupt path and restored the daily
+  disabled-camera, no-source-process, rolling-materialization-disabled,
+  300s-retention state with no active leases or finalizer-pending rows.
+
+### Round 5: bounded discovery and read-pin admission
+
+- Hypothesis: limiting only the filesystem-heavy discovery-through-pin
+  publication region to two concurrent jobs will prevent the 12-way Python I/O
+  amplification while preserving Candidate B's 12-way ffmpeg/remux capacity.
+- Unique implementation variable: `2cf5301`. A process-local bounded semaphore
+  covers the shared mutation lock, catalog discovery/refresh, exact identity
+  snapshot, read-pin construction, and atomic pin publication. The slot is
+  released before materialization begins; the read pin remains active for the
+  existing fenced lifetime.
+- Observability: every completed job reports
+  `segment_index_io_slot_wait_ms`; scheduler snapshots report cumulative
+  `segment_index_io_slot_wait_ms_total`; resource logs report
+  `segment_index_io_concurrency=2`. The pressure artifact summaries retain all
+  three levels so a run that merely transfers delay into admission wait cannot
+  be called a pass.
+- Verification: combined relevant suite 452 passed with one expected skip;
+  disposable PostgreSQL initialized by migrations 001-032 retained all eight
+  exact-lease/fenced-finalizer passes; `py_compile`, critical Ruff rules,
+  compose rendering, and diff checks passed. Runtime interoperability and the
+  300s-retention pressure gate remain pending.
 
 ## Recovery audit after Round 1
 
@@ -156,8 +196,12 @@ leases/finalizer-pending rows.
 ## Next gates
 
 1. Recreate the bind-mounted media-worker and rolling-cache sink services and
-   prove a live segment contains a valid compact manifest.
-2. Run the unchanged Candidate B load for 10-15 minutes with 300s retention.
+   prove the effective resource log reports `segment_index_io_concurrency=2`,
+   a finalized job reports `segment_index_io_slot_wait_ms`, and a live segment
+   retains the valid compact-manifest/lazy-row contract.
+2. Run the unchanged Candidate B load for 600s with 300s retention. Treat slot
+   wait as part of ready-to-remux service time; admission is not a pass if
+   oldest-ready or wait continues to accumulate.
 3. If and only if it passes, repeat with 3,840s retention.
 4. Analyze manifest/stat/refresh/rebuild timing and service-rate/oldest-ready
    slope before changing another dimension.
