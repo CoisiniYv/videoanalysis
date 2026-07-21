@@ -233,8 +233,15 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   probe 全部已知 manifest；32+1 的测试只探测新 leaf。`0bc6c82` 同时修复 finalizer
   flattening 丢失 pinned-segment 等 count metric。真实容器 artifact
   `segment_index_refresh_pin_smoke_20260721T200925Z` 已证明 32→33 只 probe 新 manifest、
-  finalizer 日志输出 pinned=5，并重验 legacy/identity/marker/retention 边界；相同
-  width-three r300 仍待动态验证，不能写成容量已改善；
+  finalizer 日志输出 pinned=5，并重验 legacy/identity/marker/retention 边界；
+- 对应 width-three r300
+  `pressure60_8p1_leafreuse_ioadm3_b10m_r300_20260721T2011Z` 的输入、972/972 正式任务、
+  1,011 retained video、annotation/person persistence 与全部 fence/residual 通过，但
+  ready/media/lifecycle p95 为 36.60s/57.03s/57.53s，metadata visibility p95=7.50s；
+  正式窗口末仍有 79 active/39 ready，依赖 drain 才清零，因此容量门失败且 r3840 禁止；
+- 该轮 5,847 个实际 segment 对应 12,122 次 `new_or_changed`，显示同一 catalog 的并发
+  COW refresh 仍重复工作。下一结构门是 per-source/epoch singleflight 与完成时 refresh
+  watermark；它尚未实现，不能写成容量已改善；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

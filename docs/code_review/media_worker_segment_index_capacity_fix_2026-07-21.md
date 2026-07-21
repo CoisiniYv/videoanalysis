@@ -501,6 +501,75 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
 - Runtime correctness is now proved; the unchanged width-three r300 capacity
   comparison remains pending.
 
+### Round 11: immutable-membership width-three r300 result
+
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_leafreuse_ioadm3_b10m_r300_20260721T2011Z`.
+  The only implementation change from Round 9 was the committed immutable-leaf
+  membership reuse/count-metric path. WIP/remux/max-per-poll remained
+  `20/12/8`, finalizer threads/processes/queue remained `8/4/8`, index I/O
+  admission remained three, and the run retained the same 600s/120s,
+  300s-retention fixture with SHA256
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`.
+- Input and correctness passed: 60/60 sources sustained 8.0499 FPS with zero
+  sampling-window send failure, queue-full, raw drop, or raw send failure. All
+  972 formal tasks and all 1,011 retained tasks eventually materialized. Every
+  retained video passed duration/FPS plus 8090 detail/timeline/annotation/bbox/
+  person-context. Person persistence passed at 103,206 stored versus 103,201
+  exports over all 60 sources with zero measured loss and final Redis
+  lag/pending zero.
+- Exact fences also passed: candidates/immediate-admitted/gap/fenced-retry were
+  `1011/1006/5/5`; handoff recovery, retry failure, claim-busy, duplicate,
+  finalizer failure, attempt-zero expiry, and final active task/lease/WIP/lane/
+  finalizer-pending residuals were zero. Pinned-segment aggregation is now real:
+  count/min/p50/p95/max was `1011/4/6/6/6`.
+- The strict r300 capacity gate failed and regressed against Round 9.
+  Ready-to-remux p95 was 36.599s, scheduler oldest-ready p95 was 40.684s, media
+  queue p95 was 57.029s, lifecycle p95 was 57.528s, and metadata visibility p95
+  was 7.501s. The last formal sample held 972 tasks, 893 bundles, 79 active and
+  39 ready; only the later drain returned all state to zero. Poll-gap p95 was
+  2.043s, narrowly above two one-second intervals.
+- Downstream remained secondary: actual ffmpeg/remux, DB claim, finalizer pool
+  wait, and finalization p95 were 1.024s, 0.393s, 3.750s, and 4.789s. In
+  contrast, pre-pin-through-handoff p95 was 7.231s, slot wait 4.103s, refresh
+  2.879s, and short catalog lock hold 3.028s. Peak media-worker CPU was 361.54%,
+  still about 75.5% below the 1,475.75% baseline but higher than Round 9's
+  288.21%.
+- `1ec97fc` had the intended narrow effect but did not remove refresh rework.
+  Cumulative `scanned_known` fell only from 94,400 to 89,220 and refresh p95
+  only from 3.009s to 2.879s. The run published 5,847 rolling segments but
+  recorded 12,122 `new_or_changed` operations, essentially unchanged from
+  Round 9's 12,092. This approximately 2.07x amplification is consistent with
+  concurrent jobs copying the same catalog version, independently parsing the
+  same newly published leaves, and discarding losing COW publications.
+- The harness's only declared failure remained
+  `adaface_roi_watchlist_events_zero`; the independent strict capacity and
+  visibility failures prohibit r3840 regardless. Cleanup restored disabled
+  pressure cameras, zero active lifecycle state and pressure processes, daily
+  width two, disabled materialization, 300s retention, Redis/PostgreSQL
+  defaults, and a restart-zero media-worker. About 241GB root space remained.
+
+### Round 12 hypothesis: per-catalog refresh singleflight
+
+- High-confidence hypothesis: same-source jobs currently acquire separate
+  global I/O admission slots, copy the same catalog version, and repeat changed
+  parent enumeration/manifest parsing concurrently. The version fence protects
+  correctness but only discards the duplicate work after it has consumed the
+  filesystem/GIL budget. In addition, `last_refresh_at` records refresh start;
+  a refresh longer than the 0.5s interval is already stale when it publishes,
+  so a waiting job can immediately repeat it.
+- Next unique structural variable: add one per `(source_id, runtime_epoch_id)`
+  refresh/pin singleflight gate acquired before the global width-three slot,
+  and publish the refresh watermark at completion. Other sources remain
+  independent, while same-source waiters reuse the first published COW
+  snapshot instead of occupying global slots and repeating work. The COW
+  version check remains as a safety fence.
+- Required red proof: two concurrent callers observing one new manifest must
+  perform one refresh/manifest parse, publish the complete catalog to both, and
+  retain the existing cross-source/snapshot non-blocking behavior. No WIP,
+  remux, finalizer, retention, deadline, or admission-width value changes with
+  this fix.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -514,13 +583,14 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Repeat the unchanged width-three r300 gate at `1ec97fc`; Candidate B WIP,
-   remux, max-per-poll, finalizer dimensions, fixture hash and all other inputs
-   remain fixed. Compare refresh, slot wait, pinned-segment distribution,
-   ready/media/lifecycle, service rate, and visibility against Round 9.
-2. Only if that r300 gate passes every input, capacity, correctness, annotation,
+1. Add the concurrent same-catalog red test, implement per-catalog singleflight
+   plus completion-time refresh watermark, and run the full index/scheduler/
+   rolling and pressure-harness regression sets.
+2. Recreate only media-worker and run a bind-mounted concurrency/pin/retention/
+   identity/count-metric smoke, then repeat the unchanged width-three r300 gate.
+3. Only if that r300 gate passes every input, capacity, correctness, annotation,
    visibility, and residual gate, run r3840. Do not increase admission width or
    use the harness's watchlist-only failure list as a substitute for the strict
    latency gates.
-3. Only after both short gates pass, run two comparable one-hour acceptances
+4. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.
