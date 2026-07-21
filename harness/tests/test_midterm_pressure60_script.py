@@ -6063,15 +6063,25 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
     monkeypatch.setattr(
         module,
         "write_combined_docker_logs",
-        lambda containers, path, since=None: combined.append(
-            {"containers": containers, "path": path, "since": since}
+        lambda containers, path, since=None, **kwargs: combined.append(
+            {
+                "containers": containers,
+                "path": path,
+                "since": since,
+                **kwargs,
+            }
         ),
     )
     monkeypatch.setattr(
         module,
         "run",
         lambda command, path, check=False, **kwargs: runs.append(
-            {"command": command, "path": path, "check": check}
+            {
+                "command": command,
+                "path": path,
+                "check": check,
+                **kwargs,
+            }
         ),
     )
 
@@ -6083,6 +6093,16 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
     commands = [" ".join(item["command"]) for item in runs]
     assert any("video-analytics-midterm-rolling-cache-sink-a" in item for item in commands)
     assert any("video-analytics-midterm-rolling-cache-sink-b" in item for item in commands)
+    assert all("--until" in item["command"] for item in runs)
+    assert all(
+        item["timeout_s"] == module.DOCKER_RUNTIME_LOG_TIMEOUT_S
+        for item in runs
+    )
+    until_values = {
+        item["command"][item["command"].index("--until") + 1]
+        for item in runs
+    }
+    assert len(until_values) == 1
     assert any(
         item["containers"]
         == [
@@ -6090,8 +6110,101 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
             "video-analytics-midterm-replay-raw-fanout-b",
         ]
         and item["path"].name == "replay_raw_fanout_logs_since_start.txt"
+        and item["until"] in until_values
+        and item["timeout_s"] == module.DOCKER_RUNTIME_LOG_TIMEOUT_S
         for item in combined
     )
+
+
+def test_sample_runtime_closes_window_without_synchronous_log_capture() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    function_start = source.index("def sample_runtime(")
+    function_end = source.index("def _forwarder_queue_metrics_urls(", function_start)
+    function_source = source[function_start:function_end]
+
+    assert "capture_runtime_logs_since_start" not in function_source
+    assert '"ended_at": datetime.now(timezone.utc).isoformat()' in function_source
+
+
+def test_run_preserves_partial_output_when_nonfatal_command_times_out(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    command = ["docker", "logs", "worker"]
+
+    def timed_out(actual_command, **kwargs):
+        assert actual_command == command
+        assert kwargs["timeout"] == 1.25
+        raise subprocess.TimeoutExpired(
+            actual_command,
+            kwargs["timeout"],
+            output=b"partial runtime log\n",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", timed_out)
+    log_path = tmp_path / "runtime.log"
+
+    completed = module.run(
+        command,
+        log_path,
+        check=False,
+        timeout_s=1.25,
+    )
+
+    assert completed.returncode == 124
+    assert "partial runtime log" in completed.stdout
+    assert "timed out after 1.25s" in completed.stdout
+    assert log_path.read_text(encoding="utf-8") == completed.stdout
+
+
+def test_combined_docker_logs_use_fixed_end_and_bound_each_container(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        assert kwargs["timeout"] == 2.5
+        if command[-1] == "worker-a":
+            raise subprocess.TimeoutExpired(
+                command,
+                kwargs["timeout"],
+                output=b"partial-a\n",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="complete-b\n")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    log_path = tmp_path / "combined.log"
+
+    module.write_combined_docker_logs(
+        ["worker-a", "worker-b"],
+        log_path,
+        since="2026-07-21T14:00:00Z",
+        until="2026-07-21T14:10:00Z",
+        timeout_s=2.5,
+    )
+
+    assert len(calls) == 2
+    assert all(
+        call[0][1:5]
+        == [
+            "logs",
+            "--since",
+            "2026-07-21T14:00:00Z",
+            "--until",
+        ]
+        and call[0][5] == "2026-07-21T14:10:00Z"
+        for call in calls
+    )
+    output = log_path.read_text(encoding="utf-8")
+    assert "worker-a rc=124" in output
+    assert "partial-a" in output
+    assert "timed out after 2.5s" in output
+    assert "worker-b rc=0" in output
+    assert "complete-b" in output
 
 
 def test_compose_exposes_runtime_epoch_override_for_rolling_cache_sinks() -> None:

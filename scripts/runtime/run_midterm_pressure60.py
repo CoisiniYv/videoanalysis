@@ -242,6 +242,7 @@ PRESSURE_OBSERVED_WINDOW_SLACK_S = 60.0
 DOCKER_STATS_TIMEOUT_S = 10.0
 DOCKER_SOURCE_INSPECT_TIMEOUT_S = 3.0
 DOCKER_SOURCE_LOG_TIMEOUT_S = 3.0
+DOCKER_RUNTIME_LOG_TIMEOUT_S = 30.0
 EVIDENCE_WINDOW_DURATION_TOLERANCE_S = 1.25
 PRESSURE_COOLDOWN_SECONDS = 30
 PRESSURE_COOLDOWN_GRACE_MS = 1000
@@ -6436,7 +6437,6 @@ def sample_runtime(
             time.sleep(max(1, min(cfg.sample_interval_s, end_at - now)))
     finally:
         sample_redis_client.close()
-    capture_runtime_logs_since_start(cfg, started_at)
     summary = {
         "status": "completed",
         "duration_s": cfg.duration_s,
@@ -7424,11 +7424,31 @@ def prune_pressure_post_sample_nonplayable_rows(
 
 def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) -> None:
     since = started_at.isoformat().replace("+00:00", "Z")
+    until = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def capture(container: str, artifact_name: str) -> None:
+        run(
+            [
+                "docker",
+                "logs",
+                "--since",
+                since,
+                "--until",
+                until,
+                container,
+            ],
+            cfg.artifact_dir / artifact_name,
+            check=False,
+            timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
+        )
+
     if cfg.dual_shard_same_gpu:
         write_combined_docker_logs(
             ["video-analytics-midterm-savant-a", "video-analytics-midterm-savant-b"],
             cfg.artifact_dir / "savant_logs_since_start.txt",
             since=since,
+            until=until,
+            timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
         )
         if cfg.adaface_decoupled:
             write_combined_docker_logs(
@@ -7438,12 +7458,13 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
                 ],
                 cfg.artifact_dir / "adaface_central_logs_since_start.txt",
                 since=since,
+                until=until,
+                timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
             )
         if cfg.adaface_roi_redis:
-            run(
-                ["docker", "logs", "--since", since, ADAFACE_ROI_WORKER_CONTAINER],
-                cfg.artifact_dir / "adaface_roi_worker_logs_since_start.txt",
-                check=False,
+            capture(
+                ADAFACE_ROI_WORKER_CONTAINER,
+                "adaface_roi_worker_logs_since_start.txt",
             )
             write_combined_docker_logs(
                 [
@@ -7452,6 +7473,8 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
                 ],
                 cfg.artifact_dir / "adaface_forwarder_logs_since_start.txt",
                 since=since,
+                until=until,
+                timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
             )
         analysis_forwarder_containers = (
             [
@@ -7468,6 +7491,8 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
             analysis_forwarder_containers,
             cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt",
             since=since,
+            until=until,
+            timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
         )
         write_combined_docker_logs(
             [
@@ -7476,47 +7501,41 @@ def capture_runtime_logs_since_start(cfg: PressureConfig, started_at: datetime) 
             ],
             cfg.artifact_dir / "replay_raw_fanout_logs_since_start.txt",
             since=since,
+            until=until,
+            timeout_s=DOCKER_RUNTIME_LOG_TIMEOUT_S,
         )
     else:
-        run(["docker", "logs", "--since", since, "video-analytics-midterm-savant"], cfg.artifact_dir / "savant_logs_since_start.txt", check=False)
-        run(["docker", "logs", "--since", since, "video-analytics-midterm-analysis-forwarder"], cfg.artifact_dir / "analysis_forwarder_logs_since_start.txt", check=False)
-    run(["docker", "logs", "--since", since, "video-analytics-midterm-media-worker"], cfg.artifact_dir / "media_worker_logs_since_start.txt", check=False)
-    run(["docker", "logs", "--since", since, "video-analytics-midterm-clip-worker"], cfg.artifact_dir / "clip_worker_logs_since_start.txt", check=False)
-    run(["docker", "logs", "--since", since, "video-analytics-midterm-event-worker"], cfg.artifact_dir / "event_worker_logs_since_start.txt", check=False)
-    run(
-        [
-            "docker",
-            "logs",
-            "--since",
-            since,
-            "video-analytics-midterm-person-observation-worker",
-        ],
-        cfg.artifact_dir / "person_worker_logs_since_start.txt",
-        check=False,
+        capture("video-analytics-midterm-savant", "savant_logs_since_start.txt")
+        capture(
+            "video-analytics-midterm-analysis-forwarder",
+            "analysis_forwarder_logs_since_start.txt",
+        )
+    capture("video-analytics-midterm-media-worker", "media_worker_logs_since_start.txt")
+    capture("video-analytics-midterm-clip-worker", "clip_worker_logs_since_start.txt")
+    capture("video-analytics-midterm-event-worker", "event_worker_logs_since_start.txt")
+    capture(
+        "video-analytics-midterm-person-observation-worker",
+        "person_worker_logs_since_start.txt",
     )
-    run(["docker", "logs", "--since", since, "video-analytics-midterm-face-worker"], cfg.artifact_dir / "face_worker_logs_since_start.txt", check=False)
+    capture("video-analytics-midterm-face-worker", "face_worker_logs_since_start.txt")
     if cfg.dual_shard_same_gpu:
-        run(
-            ["docker", "logs", "--since", since, "video-analytics-midterm-rolling-cache-sink-a"],
-            cfg.artifact_dir / "rolling_cache_sink_a_logs_since_start.txt",
-            check=False,
+        capture(
+            "video-analytics-midterm-rolling-cache-sink-a",
+            "rolling_cache_sink_a_logs_since_start.txt",
         )
-        run(
-            ["docker", "logs", "--since", since, "video-analytics-midterm-rolling-cache-sink-b"],
-            cfg.artifact_dir / "rolling_cache_sink_b_logs_since_start.txt",
-            check=False,
+        capture(
+            "video-analytics-midterm-rolling-cache-sink-b",
+            "rolling_cache_sink_b_logs_since_start.txt",
         )
     else:
-        run(
-            ["docker", "logs", "--since", since, "video-analytics-midterm-rolling-cache-sink"],
-            cfg.artifact_dir / "rolling_cache_sink_logs_since_start.txt",
-            check=False,
+        capture(
+            "video-analytics-midterm-rolling-cache-sink",
+            "rolling_cache_sink_logs_since_start.txt",
         )
     for sink_instance, container_name in VIDEO_FILE_SINK_CONTAINERS.items():
-        run(
-            ["docker", "logs", "--since", since, container_name],
-            cfg.artifact_dir / VIDEO_FILE_SINK_LOG_PATHS[sink_instance],
-            check=False,
+        capture(
+            container_name,
+            VIDEO_FILE_SINK_LOG_PATHS[sink_instance],
         )
 
 
@@ -14386,15 +14405,47 @@ def _parse_prom_labels(raw: str) -> dict[str, str]:
     return labels
 
 
-def write_combined_docker_logs(containers: list[str], path: Path, *, since: str) -> None:
+def _run_captured_subprocess(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout_s: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    kwargs: dict[str, Any] = {
+        "env": env,
+        "check": False,
+        "text": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+    }
+    if timeout_s is not None:
+        kwargs["timeout"] = timeout_s
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout if exc.stdout is not None else exc.output
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        output = str(output or "")
+        if output and not output.endswith("\n"):
+            output += "\n"
+        output += f"[command timed out after {float(timeout_s or 0):g}s]\n"
+        return subprocess.CompletedProcess(cmd, 124, stdout=output)
+
+
+def write_combined_docker_logs(
+    containers: list[str],
+    path: Path,
+    *,
+    since: str,
+    until: str,
+    timeout_s: float = DOCKER_RUNTIME_LOG_TIMEOUT_S,
+) -> None:
     chunks: list[str] = []
     for name in containers:
-        completed = subprocess.run(
-            ["docker", "logs", "--since", since, name],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+        completed = _run_captured_subprocess(
+            ["docker", "logs", "--since", since, "--until", until, name],
+            timeout_s=timeout_s,
         )
         chunks.append(f"===== {name} rc={completed.returncode} =====\n{completed.stdout}\n")
     write_text(path, "".join(chunks))
@@ -14640,13 +14691,12 @@ def run(
     *,
     env: dict[str, str] | None = None,
     check: bool = True,
+    timeout_s: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
+    completed = _run_captured_subprocess(
         cmd,
         env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        timeout_s=timeout_s,
     )
     write_text(log_path, completed.stdout)
     if check and completed.returncode != 0:
