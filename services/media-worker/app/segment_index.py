@@ -1208,21 +1208,26 @@ class RollingSegmentIndex:
             for manifest_path in pending_candidates:
                 self._refresh_candidate(catalog, manifest_path)
 
-            if not reconcile:
-                journal_seen, journal_requires_reconcile = (
-                    self._consume_publication_journals(catalog)
-                )
-                if journal_seen and not journal_requires_reconcile:
-                    # Retention deletion can leave old catalog entries until
-                    # the staggered periodic membership audit. That is safe:
-                    # the read-pin identity fence runs under the shared
-                    # mutation flock before any file is consumed.
-                    catalog.root_generation = self._read_root_generation()
-                    catalog.last_refresh_at = max(float(now), self._monotonic())
-                    return
-                if journal_requires_reconcile:
-                    self._record_count("publication_reconciles")
-                    membership_reconcile = True
+            # Consume the fenced publication tail before any membership
+            # enumeration, including a scheduled audit. Journal-covered
+            # immutable leaves then enter the candidate catalog without a
+            # duplicate manifest parse; the filesystem audit remains
+            # authoritative for missed crash-window publications and
+            # retention deletions.
+            journal_seen, journal_requires_reconcile = (
+                self._consume_publication_journals(catalog)
+            )
+            if journal_requires_reconcile:
+                self._record_count("publication_reconciles")
+                membership_reconcile = True
+            if journal_seen and not membership_reconcile:
+                # Retention deletion can leave old catalog entries until the
+                # staggered periodic membership audit. That is safe: the
+                # read-pin identity fence runs under the shared mutation flock
+                # before any file is consumed.
+                catalog.root_generation = self._read_root_generation()
+                catalog.last_refresh_at = max(float(now), self._monotonic())
+                return
 
             queue: list[Path] = []
             queued: set[Path] = set()
