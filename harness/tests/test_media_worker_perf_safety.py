@@ -305,6 +305,28 @@ def test_remux_job_bounded_pin_preserves_dual_clock_materialization(
     assert int(segment_index.snapshot()["full_row_parses"]) == 3
 
 
+def test_finalizer_metrics_flatten_segment_index_count_fields() -> None:
+    worker = _activate("media-worker", "app.worker")
+    started_at = worker.datetime.now(worker.timezone.utc)
+
+    metrics = worker._post_savant_materialization_metrics(
+        summary={},
+        event_context={},
+        started_at=started_at,
+        finished_at=started_at,
+        finalization_duration_ms=0,
+        phase_diagnostics={
+            "segment_index_pinned_segments": 5,
+            "segment_index_stat_calls": 12,
+            "segment_index_pin_publish_ms": 3.5,
+        },
+    )
+
+    assert metrics["segment_index_pinned_segments"] == 5
+    assert metrics["segment_index_stat_calls"] == 12
+    assert metrics["segment_index_pin_publish_ms"] == 3.5
+
+
 def test_finalizer_log_formats_extended_remux_metrics(caplog: Any) -> None:
     worker = _activate("media-worker", "app.worker")
     caplog.set_level("INFO", logger="app.worker")
