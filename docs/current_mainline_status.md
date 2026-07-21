@@ -24,7 +24,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission | 正确性通过；two-slot 300s retention 容量门失败，three-slot 正交门待测 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission | 正确性通过；two/three-slot 300s retention 容量门失败，four-slot 正交门待测 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -77,21 +77,28 @@ tasks + rolling segments -> media-worker -> DB-backed evidence -> 8090
 168GB/85GB person/face Docker 日志。当前实现已增加 retained-row group 自愈和
 50MB×3 日志轮转，受控删除 group 的 smoke 与 103 项相关测试通过。
 
-防护生效后的同配置受控复跑保留在
-`pressure60_8p1_ioadm2_b10m_r300c_20260721T1740Z`：60/60、8.048 FPS、966/966
-正式任务 materialized、100,884/100,881 person persisted/exported，且 send/queue/raw loss、
-attempt=0 expiry、recovery、claim-busy、duplicate、finalizer failure 与 drain residual 均为 0。
-但 ready-to-remux/media queue/lifecycle p95 仍达 105.45s/126.82s/127.21s，slot-wait p95
-4.942s，17/1,006 retained video 缺 annotation，two-slot 容量门明确失败。已增加 artifact-
-audited pressure override；下一轮唯一变量是 I/O admission 2→3。
+防护生效后的 two-slot 受控复跑保留在
+`pressure60_8p1_ioadm2_b10m_r300c_20260721T1740Z`；ready-to-remux/media queue/lifecycle
+p95 仍为 105.45s/126.82s/127.21s。随后通过 artifact-audited override 只把 admission
+改为 three-slot，结果保留在
+`pressure60_8p1_ioadm3_b10m_r300_20260721T1809Z`。该轮 60/60、8.0527 FPS、969/969
+正式任务 materialized、1,007/1,007 retained video 全部通过视频与 annotation 门，person
+persistence 104,679/104,679，且 send/queue/raw loss、attempt=0 expiry、recovery、
+claim-busy、duplicate、finalizer failure 与 residual 均为 0。
+
+three-slot 把 ready/media/lifecycle p95 明显改善到 37.21s/57.80s/58.30s，poll-gap p95
+1.360s，但仍未达到 5s/10s/30s，oldest-ready p95=44.21s，metadata visibility p95=9.43s。
+实际 remux、DB claim、finalizer pool wait p95 仅 0.708s/0.383s/0.792s；主要等待仍在
+index admission/refresh/pin。下一轮唯一变量是 admission 3→4；若仍失败，不再继续扩容。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 仅把 segment-index I/O admission 从 2 改为 3，先完成日常 300s retention 短门；
-- 只有 three-slot r300 的输入、容量、correctness、annotation、residual 全通过，才运行
+- 仅把 segment-index I/O admission 从 3 改为 4，先完成日常 300s retention 短门；
+- 只有 four-slot r300 的输入、容量、correctness、annotation、residual 全通过，才运行
   3,840s endurance 短门；两者未通过前不再跑一小时；
+- 若 four-slot 仍失败，停止扩大 admission，回到 refresh/pin publication 结构修复；
 - 独立处理 finalizer p95 5.244s / process-pool wait p95 5.576s，禁止与 index/WIP/remux
   调整一次性混在同一候选；
 - 完成真实混合 RTSP 的断流、重连和长 soak；

@@ -212,10 +212,10 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
 - B/C 对照定位出的 segment-index 热路径已完成分段计时、per-catalog COW 隔离、紧凑
   manifest/lazy native-row、mutation-driven reconcile 和 discovery-through-pin 有界 admission；
   filesystem mutation flock、read pin、identity fence 与 atomic rename 均保留；
-- 完整 person-consumer 负载下的 two-slot r300 对照仍未过容量门：966/966 正式任务最终
-  materialized，person persistence 与视频正确性通过，但 ready-to-remux/media queue/lifecycle
-  p95 为 105.45s/126.82s/127.21s，17/1,006 retained video 缺 annotation。下一轮只把
-  segment-index I/O admission 从 2 改为 3，不同时改变 WIP/remux/finalizer；
+- 完整 person-consumer 负载下 two-slot 与 three-slot r300 均未过容量门。three-slot 已把
+  ready-to-remux/media queue/lifecycle p95 从 105.45s/126.82s/127.21s 降到
+  37.21s/57.80s/58.30s，并让 1,007/1,007 retained video 的 annotation 全通过，但仍高于
+  5s/10s/30s 目标且 metadata visibility p95=9.43s。下一轮只把 admission 3 改为 4；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

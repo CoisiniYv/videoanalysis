@@ -269,6 +269,59 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   PostgreSQL, rolling-materialization-disabled, 300s-retention, two-slot
   configuration. About 255GB remained free on the root filesystem.
 
+### Round 6: three-slot discovery and read-pin admission
+
+- Hypothesis: the two-slot bound removed the 12-way convoy but remained below
+  arrival; one additional bounded slot may raise aggregate discovery-through-
+  pin service rate without changing Candidate B's WIP, remux, max-per-poll, or
+  finalizer dimensions.
+- Unique variable: `MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY=3`, supplied
+  through the artifact-audited `cf64609`/`3f3abd9` pressure path. Effective
+  configuration remained WIP 20, remux 12, max-per-poll 8, finalizer
+  threads/processes/queue `8/4/8`, 600s sample, 120s drain, and 300s retention.
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_ioadm3_b10m_r300_20260721T1809Z`.
+  `run_config.json`, the effective Compose override, and resource metrics all
+  record admission width three. The fixed fixture SHA256 remained
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`.
+- Input and correctness passed: 60/60 sources, 8.0527 FPS, zero sampling-window
+  Savant send failure, queue-full, raw drop, or raw send failure; 969/969
+  formal tasks and all 1,007 retained tasks materialized. All 1,007 videos
+  passed window/duration/FPS and 8090 detail/timeline/annotation/bbox/person-
+  context checks. Person persistence was exact at 104,679 exported and 104,679
+  stored rows over 60 sources, with final Redis lag/pending zero.
+- Fences also passed: candidates/immediate-admitted/gap/fenced-retry were
+  `1007/1006/1/1`; attempt-zero expiry, handoff recovery, retry failure,
+  claim-busy, duplicate, finalizer failure, and active task/lease/WIP/lane/
+  finalizer-pending residuals were zero.
+- Capacity still failed. Ready-to-remux p95 was 37.205s, scheduler oldest-ready
+  p95/max 44.209s/54.167s, media queue p95 57.800s, and lifecycle p95 58.305s.
+  The live formal-window queue repeatedly cleared early, then grew to 78
+  pending with oldest-ready about 36s before ending at 52 pending/about 20s;
+  the bounded drain later returned it to zero. Rolling metadata visibility p95
+  was 9.425s, above the 2s closure target.
+- The comparison is nevertheless directional: versus the controlled two-slot
+  repeat, ready/media/lifecycle p95 improved by about 65%/54%/54%, and
+  poll-gap p95 improved from 2.515s to 1.360s. Actual ffmpeg/remux p95 was
+  0.708s, DB claim wait p95 0.383s, finalizer process-pool wait p95 0.792s,
+  and handoff-to-admission p95 1.528s; none is the primary ready backlog.
+- Per-job index cost shows diminishing returns: slot-wait p95 was 5.102s,
+  pre-pin-through-handoff p95 7.720s, refresh p95 1.926s, and pin publication
+  p95 1.934s. Media-worker peak CPU rose from 266.84% to 344.77%, still about
+  76.6% below the original 1,475.75% baseline. Remux depth remained p95 12/12
+  while WIP was p95 18/20 and downstream waits passed.
+- Conclusion: three slots materially improve aggregate throughput but still do
+  not meet the r300 gate, so r3840 is prohibited. Width four is the next and
+  final simple bounded-admission candidate, matching the existing per-source
+  execution bound. It changes only the same measured axis. If width four does
+  not clear the ready/visibility gates, do not continue increasing admission;
+  return to the refresh/pin publication structure revealed by these metrics.
+- Cleanup again restored zero pressure sources/processes, enabled pressure
+  cameras, active tasks, leases, and finalizer-pending rows; Redis/PostgreSQL
+  defaults, disabled rolling materialization, 300s retention, and daily
+  two-slot configuration were restored. The worktree remained clean and the
+  root filesystem retained about 251GB free.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -283,10 +336,12 @@ leases/finalizer-pending rows.
 ## Next gates
 
 1. Run the unchanged Candidate B 600s/120s-drain load with 300s retention and
-   segment-index I/O admission set to three. Treat slot wait as part of
+   segment-index I/O admission set to four. Treat slot wait as part of
    ready-to-remux service time; admission is not a pass if oldest-ready or wait
    continues to accumulate.
-2. If and only if the three-slot r300 gate passes every input, capacity,
+2. If and only if the four-slot r300 gate passes every input, capacity,
    correctness, annotation, and residual gate, repeat with 3,840s retention.
-3. Only after both short gates pass, run two comparable one-hour acceptances
+3. If four slots still fail, stop widening admission and use the new refresh,
+   pin-publication, WIP, and visibility evidence for the next structural fix.
+4. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.
