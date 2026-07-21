@@ -1,10 +1,10 @@
 # 当前程序架构
 
-更新时间：2026-07-20
+更新时间：2026-07-21
 
-适用范围：当前工作区分支 `feat/roi-adaface-redis-20260711`，HEAD
-`1eb4174`，并包含当前尚未提交的工作区实现。本文描述“这个 checkout 现在实际写成
-什么样”，不等同于某台机器已经部署了同一份代码。
+适用范围：分支 `feat/roi-adaface-redis-20260711`；产品 checkpoint
+`fd39fdb`，exact-lease 修复 `2a57f20`，Candidate C 结论文档基线 `cb0595e`。
+本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
 
@@ -198,9 +198,17 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
 
 - 生产 T4 40 路、4 FPS、双分支、ROI AdaFace、rolling-cache、5+5 evidence 已在
   2026-07-14 正式门禁通过，并在 2026-07-15 做过约 4 小时只读运行审计；
-- 4090 60 路、8 FPS 在 2026-07-14 的当时 revision/fixture 上通过；
-- 随后的 rolling-cache 双时间域实现于 2026-07-15 对 40 路、4 FPS 重新通过，但
-  当前工作区尚没有同 revision 的 60 路、8 FPS 正式复跑记录；
+- `2a57f20` 的 4090 60 路、8 FPS Candidate C 一小时运行确认输入稳定、4,826 个
+  retained bundle 完整且 exact-lease/finalizer admission 无 recovery/claim-busy/
+  duplicate/residual；Phase 4 该正确性子门可关闭；
+- 同一运行的容量门失败：5,781 个正式任务仅 4,742 materialized，1,039 个 attempt=0
+  expired；Candidate C 的 82.03% 又低于 B 的 85.17%，两者都不能作为默认 60 路配置；
+- B/C 对照将容量热点收窄为高置信度 `Probable`：process-wide segment-index lock 覆盖
+  retained-history refresh/stat/full-metadata parse/cache，remux/tick 指标又遗漏 lock/pin/
+  snapshot 等待；C 的 active read pins p95 7→15、poll-gap p95 7.08s→13.21s，而
+  post-pin remux p95 仍约 1.2s。没有分段 lock-wait A/B 前不得称为动态 Confirmed；
+- Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
+  300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
   有限；
 - 尚未完成真实混合摄像头断流/恢复、worker restart soak、跨 API 重启的持久作业恢复、
@@ -212,6 +220,7 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
 - `docs/code_review/production_runtime_evidence_audit_2026-07-15.md`
 - `docs/code_review/local4090_pressure60_worker_regression_remediation_2026-07-13.md`
 - `docs/code_review/local_rolling_cache_dual_clock_remediation_2026-07-15.md`
+- `docs/code_review/media_worker_finalizer_admission_fenced_retry_2026-07-21.md`
 
 ## 11. 变更同步要求
 

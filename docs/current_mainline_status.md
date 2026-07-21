@@ -1,19 +1,19 @@
 # Current Mainline Status
 
-更新时间：2026-07-20
+更新时间：2026-07-21
 
 ## 当前基线
 
 - 分支：`feat/roi-adaface-redis-20260711`；
-- HEAD：`1eb4174`；
-- 本文同时描述当前未提交工作区实现；
+- 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
+- Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
 - 当前架构权威说明：`docs/current_architecture.md`。
 
-当前工作区不是干净 checkout。下表的“已实现”表示代码/配置存在；“已验证”只在有
-对应当前或明确 revision 的 artifact 时成立。
+user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示代码/配置存在；“已验证”
+只在有对应 revision、参数和 artifact 时成立。
 
 ## 实现状态
 
@@ -24,10 +24,10 @@
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL | 40/60 压测报告均有覆盖；当前实现未单独做 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment 发布、双时间域、segment index | 最新双时间域实现已通过 40 路正式门禁 |
-| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | T4 40 路与 4 小时生产审计通过，波峰余量有限 |
-| 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031 与测试存在 |
-| 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 存在但当前未提交，部署时需单独应用 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment 发布、双时间域、segment index | 正确性通过；3,840s endurance retention 下 index scalability gate 重新打开 |
+| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
+| 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
+| 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
 | Evidence UI | DB-backed list/detail/timeline/overlay；视频 HTTP Range | T4 审计通过；文件接口仅兼容 |
 | 向量匹配 | pgvector 默认；Qdrant 可选且可由 PostgreSQL 重建 | Qdrant 有历史 benchmark，不是当前默认 profile |
 
@@ -52,7 +52,7 @@ tasks + rolling segments -> media-worker -> DB-backed evidence -> 8090
 | 预设 | 当前代码参数 | 状态 |
 | --- | --- | --- |
 | `production_t4_40` | 40 路、20/20、4 FPS、batch 4、ROI 16、MPS 45/45/10、media 10/5/5 | 当前生产基线 |
-| `local_4090_60` | 60 路、30/30、8 FPS、batch 4、ROI 16、无 MPS、media 12/8/16 | 预设存在；最新代码 60 路需复跑 |
+| `local_4090_60` | 60 路、30/30、8 FPS、batch 4、ROI 16、无 MPS、media 12/8/16 | 输入/正确性已复验；Candidate B/C override 的一小时容量均失败，默认容量未获准 |
 
 ## 最近有效证据
 
@@ -63,17 +63,33 @@ tasks + rolling segments -> media-worker -> DB-backed evidence -> 8090
 3. `local4090_pressure60_worker_regression_remediation_2026-07-13.md`：4090 60 路、
    8 FPS 在 7 月 14 日当时 revision 和正确 fixture 下通过；
 4. `local_rolling_cache_dual_clock_remediation_2026-07-15.md`：后续双时间域实现通过
-   40 路、4 FPS 正式门禁。
+   40 路、4 FPS 正式门禁；
+5. `media_worker_finalizer_admission_fenced_retry_2026-07-21.md`：`2a57f20`
+   exact-lease 正确性通过；Candidate C 60 路、8 FPS 一小时只有
+   4,742/5,781 materialized（82.03%），不能作为默认容量配置。
 
-严格结论：当前代码可把 T4 40 路作为已验证基线；不能把较早的 4090 60 路结果无条件
-升级为“当前工作区 revision 已复验”。
+严格结论：当前代码可把 T4 40 路作为已验证基线；4090 60 路的输入稳定性、bundle
+完整性与 exact-lease 正确性已在最新 revision 复验，但持续容量没有通过。B/C 两轮均在
+约 300 秒 deadline 前形成 attempt=0 ready backlog，Phase 6 保持打开。
+
+Candidate B/C 的静态/动态对照把主要容量热点收窄为高置信度 `Probable`：
+`RollingSegmentIndex` 的单进程全局锁覆盖 retained-history refresh、文件 identity 和 full
+metadata parse/cache；`remux_ms` 不含进入 read pin 前的 index wait，`tick_duration_ms` 又在
+同锁的 `segment_index.snapshot()` 前结束。C 把 active read pins p95 从 7 提到 15 时，
+poll-gap p95 从 7.08s 增到 13.21s，而 post-pin remux p95 仍约 1.2s。最终因果定级仍需
+lock/refresh/pin 分段指标与修复前后 A/B。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 将当前 dirty worktree 中代码、migration 032、测试和文档作为一致单元提交/部署；
-- 在当前 revision 重新执行 4090 60 路、8 FPS、600s + 120s drain；
+- 为 segment index 增加 lock/refresh/stat/parse/pin 与完整 scheduler-cycle 分段指标；
+- 把 catalog map、per-source/epoch catalog、selected-row cache 分锁，并由 rolling sink
+  原子发布紧凑 segment manifest；保留 mutation flock、read pin 与 identity fence；
+- 分别用日常 300s retention 和 endurance 3,840s retention 做 10–15 分钟正交 A/B；
+  attempt=0 expiry、oldest-ready 与 poll-gap 未通过前不再跑一小时；
+- 独立处理 finalizer p95 5.244s / process-pool wait p95 5.576s，禁止与 index/WIP/remux
+  调整一次性混在同一候选；
 - 完成真实混合 RTSP 的断流、重连和长 soak；
 - 完成 event/person/face/media worker restart/recovery soak；
 - 继续观察生产 T4 84–85°C、70W power cap 和 evidence 波峰排队。

@@ -253,7 +253,7 @@ send failure、forwarder queue-full、raw fanout drop/failure 均为 0。
 吞吐门失败的阶段证据：
 
 - ready-to-remux claim p50=215.23s、p95=285.70s；
-- scheduler tick gap p95=7.40s、max=17.37s；
+- scheduler tick gap p95=7.08s、max=17.37s；
 - remux lane p95=12/12，WIP p95=20/20；
 - finalizer process-pool wait p95=3.65s、max=9.15s；
 - oldest-ready p95=299.06s，随后通过 deadline 淘汰维持有界。
@@ -304,7 +304,7 @@ send failure、forwarder queue-full、raw fanout drop/failure 均为 0。
 | finalizer process workers | 4 | 8 |
 
 queue 仍保持 8，PostgreSQL 继续是持久队列。max-per-poll=16 用于覆盖实测
-7.40s 的 p95 tick gap；WIP=32 允许 16 个 remux 与最多 16 个 finalizer
+7.08s 的 p95 tick gap；WIP=32 允许 16 个 remux 与最多 16 个 finalizer
 lane owner 同时存在；process workers=8 则由已修正埋点的 3.65s p95 wait
 直接驱动。Candidate C 短测只有在 attempt=0 expiry=0、oldest-ready 不累积、
 handoff lease-expiry recovery=0 后才能进入新的 1 小时正式测。
@@ -441,8 +441,9 @@ Candidate C 不得成为默认容量配置。与 Candidate B 相比：
 - finalization p50 从 2.414s 增到 3.309s；
 - process-pool wait p95 从 3.653s 增到 5.576s。
 
-这证明把 max-per-poll、WIP、remux 和 process workers 一次性放大，会形成
-更大的 remux/finalizer 批次和资源争用，不能视为“单独扩容 remux/WIP”。
+这些数据确认 Candidate C 这一组组合参数发生退化，也显示更大的
+remux/finalizer 批次与资源争用相关；但它们本身不能把某一个旋钮或“阶段
+振荡”定为单一因果根因。静态热路径复核与证据等级见 12.6。
 下一轮必须先分解 scheduler poll gap（当前 `tick_duration_ms` 在 snapshot/
 日志和 sleep 之前取值，不能完整解释 13 秒 gap），再做正交 A/B：保持
 PostgreSQL durable queue 与 finalizer queue=8，分别比较 process workers
@@ -451,3 +452,125 @@ PostgreSQL durable queue 与 finalizer queue=8，分别比较 process workers
 在新的 10–15 分钟候选同时满足 service rate 高于到达率、oldest-ready 可
 回落和 attempt=0 expiry=0 前，不再进行第三次 1 小时容量声明。代码提交为
 `fd39fdb`（fenced admission）和 `2a57f20`（exact-lease claim）。
+
+### 12.6 静态热路径复核：高置信度 Probable 根因
+
+本节把 1 小时原始 artifact 与 `2a57f20` 对应代码逐段对齐。证据等级必须
+分开：
+
+- **Confirmed**：Candidate C 的 exact-lease/finalizer admission 正确性通过，
+  60 路一小时容量失败；等待主要发生在 ready 到 remux claim 之前；
+- **Probable（高置信度）**：共享 `RollingSegmentIndex` 的全局锁、全历史
+  revalidation、full-JSONL row-cache churn 与缺失的计时边界共同形成主要容量
+  热点，并被 Candidate C 的 16 路 remux 并发放大为 lock convoy；
+- **Probable（次级）**：8 个 finalizer process workers 带来的 CPU/process-pool
+  争用进一步拉长 finalization，并让 16 remux + 16 finalizer 更频繁占满 WIP；
+- **尚未 Confirmed**：没有 `catalog_lock_wait_ms`、`refresh_ms`、`pin_ms` 等
+  分段指标，也没有 index 修复前后的受控 A/B，因此不能把静态路径写成已经
+  动态证明的唯一根因。
+
+#### B/C 对照排除了“只是 ffmpeg remux 变慢”
+
+两轮原始 `report.json` 和 `downstream_observability_summary.json` 的同口径
+对照如下。B/C 都使用 3,840 秒 endurance retention：
+
+| 指标 | Candidate B | Candidate C | 解释 |
+| --- | ---: | ---: | --- |
+| measured segments | 63,131 | 63,075 | working set 基本相同 |
+| index metadata parses | 76,014 | 76,357 | 两轮都有同量级 full JSONL 解析 |
+| row-cache entries / evictions | 2,048 / 73,966 | 2,048 / 74,309 | 两轮都持续 cache churn；C 的 evictions 恰为 parses - 2,048 |
+| active read pins p95 | 7 | 15 | C 的并发 pinned remux work 约翻倍 |
+| scheduler tick-duration p95 | 1.517s | 1.375s | 已计时 loop 主体没有同步变慢 |
+| scheduler poll-gap p95 | 7.077s | 13.211s | 未被 tick-duration 覆盖的停顿约翻倍 |
+| post-pin remux p95 | 1.262s | 1.186s | 真正物化/remux 没有变慢 |
+| finalization p95 / pool wait p95 | 4.602s / 3.653s | 5.244s / 5.576s | finalizer 是次级退化面 |
+| 正式任务成功率 | 85.17% | 82.03% | C 的组合配置更差 |
+
+因此，约 76k parses/74k evictions 是 B/C **共同容量负担**，不能单独解释
+C 相对 B 的退化；C 特有的强信号是 active pins 与 poll-gap 同时放大，而
+已计时 tick 主体和 post-pin remux 基本不变。这与全局 index lock convoy
+完全一致，仍需新增分段指标作最终因果确认。
+
+原始文件身份：
+
+```text
+Candidate B report
+eee609a116169bebaaf58f05a98562f53271e187b5186bf9aa4403427832fac5
+Candidate B downstream
+ca3b77e79893626c4cadf6445a4e73642e7fe96147a77fac828d0eac21cf1c66
+Candidate C report
+f83afc2aef657240eebc2c607f2ceefbe2d92e78fa432d7e0705a867bee43143
+Candidate C downstream
+e205bb43e8f5ec9bfb48df8b7aa1456273fd27640a403a373f4f5e5010e1ce43
+```
+
+#### 代码级因果链
+
+1. `RollingSegmentIndex` 只有一个进程级 `threading.RLock`；
+   `find_segments()` 在该锁内完成 catalog lookup、refresh/rebuild、文件
+   identity/stat、JSONL 解析、LRU 更新和排序。60 个 source/epoch catalog 与
+   16 个 remux worker 因而不是独立推进。
+2. `_refresh()` 每次先遍历该 source/epoch 的全部已知 metadata 路径；即使
+   identity 未变化、不重新解析，也要在全局锁内重验 metadata/video identity。
+   3,840 秒 retention 下每路约有一千个 segment，这一成本会随 retained
+   history 增长。
+3. catalog 建立和实际窗口取帧共用同一个 full-JSONL row cache。Candidate C
+   末值 76,357 parses、2,048 entries、74,309 evictions，说明 63k segment
+   working set 远大于缓存；扩大到全量 row cache 又会把内存问题替代锁问题。
+4. `_materialize_rolling_cache_job()` 先进入 `pin_source_segments()`，后调用
+   `materialize_window()`；`materialization_ms/remux_ms` 的计时在后者内部才
+   开始。因此 1.186 秒 p95 **不包含** 等待全局 index lock、refresh、排序、
+   read-pin marker 发布的时间。
+5. scheduler 在计算 `tick_duration_ms` 后才调用 `segment_index.snapshot()`；
+   `snapshot()` 又等待同一把全局锁。该等待、后续 snapshot/logging 和 planned
+   sleep 都会进入下一次 `tick_gap_ms`，却不进入当前 `tick_duration_ms`。这正好
+   对应 C 的 tick-duration p95 1.375 秒、poll-gap p95 13.211 秒分裂。
+6. exact-lease/fenced admission 修复位于 handoff/claim 边界，解决了无人负责的
+   lease、`claim_busy` 和 duplicate 风险；它没有缩短上述 ready→index→pin
+   热路径。因此“正确性通过但容量没有改善”不是矛盾，而是两个不同问题。
+
+上述判断适用于本轮 3,840 秒 endurance retention。压测恢复后的日常配置为
+300 秒 retention、256-row cache；日常 working set 更小，不能直接宣称存在同等
+严重度，也不能用日常短 retention 的通过替代 keep-all endurance 门。
+
+#### 修改顺序
+
+**P0：先补可证伪指标，不改容量旋钮。**
+
+- 在进入 `pin_source_segments()` 前启动 `remux_total_ms`，保留现有
+  `remux_exec_ms`（当前 `remux_ms` 语义）并新增 index wait、refresh/rebuild、
+  identity stat、manifest/full-JSONL parse、sort、pin publication 分段；
+- scheduler 记录不含 planned sleep 的完整 cycle work，并单列
+  snapshot wait、logging 与 sleep；不能再用当前 tick-duration 解释 poll-gap；
+- index 按 source/epoch 输出 scanned-known、new/changed、manifest parses、
+  full-row parses、cache hit/miss/eviction 及 lock wait/hold 分布。
+
+**P1：移除跨 source 全局 I/O 临界区。**
+
+- 全局锁只保护 catalog map；每个 `(source_id, runtime_epoch_id)` 使用独立
+  catalog lock/version，row cache 使用另一个短锁；
+- 在锁内取得 immutable catalog/version 快照，文件 stat 与 parse 移到锁外，
+  再用 generation/version 检查发布 copy-on-write snapshot；
+- `snapshot()` 读取原子/缓存 counters，不等待正在执行文件 I/O 的 catalog；
+- rolling sink 在原子 segment directory 中同时发布紧凑
+  `segment_manifest.json`（identity、mux/source PTS bounds、frame count、video
+  size）。index 只解析 manifest；完整 native JSONL 只在实际选中 segment 时
+  读取；selected-row cache 按 bytes 限制，不按 retention 全量扩容。
+
+必须保留现有 filesystem mutation `flock`、read-pin marker、metadata/video
+identity fence 和 atomic directory rename；这些是正确性边界，不是应删除的锁。
+
+**P2：在 index 修复后正交调容量。**
+
+1. 先用 B 参数（WIP=20、remux=12、max-per-poll=8、process workers=4）作
+   诊断基线，不把 B 当默认配置；
+2. 分别在日常 300 秒 retention 与 endurance 3,840 秒 retention 做 10–15 分钟
+   同输入 A/B，要求 poll-gap p95 不超过两个 poll interval、oldest-ready 可回落、
+   service rate 高于 arrival 且 attempt=0 expiry=0；
+3. 再分别改变 remux/WIP、max-per-poll、process workers，禁止一次改变全部；
+4. index 门通过后再处理 finalizer p95 5.244 秒与 pool-wait p95 5.576 秒；
+5. 短测未过上述门之前，不再跑 1 小时，也不通过增加约 300 秒 deadline、继续
+   放大 WIP/max-per-poll 或把 63k segment 的 full metadata 全部常驻内存来掩盖队列。
+
+Phase 6 只有在修复后的同口径 60 路一小时运行中实现 attempt=0 expiry=0、
+oldest-ready 不累积，并保留 exact-lease 全部正确性门时才能关闭。
