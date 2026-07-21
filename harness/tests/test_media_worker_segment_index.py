@@ -1101,6 +1101,52 @@ def test_source_refresh_and_pin_publication_are_atomic_against_retention(
     assert not directory.exists()
 
 
+def test_source_window_pin_protects_selected_leaves_during_retention(
+    tmp_path: Path,
+) -> None:
+    maintenance = _maintenance()
+    root = tmp_path / "cache"
+    directories = []
+    for sequence in range(6):
+        directories.append(
+            _write_segment(
+                root,
+                epoch="epoch-a",
+                source_id="camera-01",
+                name=f"{sequence:04d}",
+                pts_values=[sequence * 100, sequence * 100 + 99],
+                mtime_s=10.0,
+            )
+        )
+    index = _index(root, read_pin_ttl_s=100.0)
+
+    with index.pin_source_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        requested_source_start_pts=250,
+        requested_source_end_pts=350,
+    ) as pinned_segments:
+        assert [segment.segment_id for segment in pinned_segments] == [
+            "0001",
+            "0002",
+            "0003",
+            "0004",
+        ]
+        cleanup = maintenance.cleanup_once(
+            root,
+            retention_s=5.0,
+            max_bytes=0,
+            read_pin_ttl_s=100.0,
+            stability_age_s=0.0,
+            now_s=20.0,
+        )
+        assert cleanup["retention_deleted"] == 2
+        assert cleanup["skipped_pinned"] == 4
+        assert not directories[0].exists()
+        assert not directories[5].exists()
+        assert all(directory.exists() for directory in directories[1:5])
+
+
 def test_maintenance_tree_discovery_does_not_hold_mutation_lock(
     tmp_path: Path,
 ) -> None:
