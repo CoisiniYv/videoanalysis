@@ -1,6 +1,6 @@
 # Midterm Deployment
 
-更新时间：2026-07-20
+更新时间：2026-07-22
 
 ## 1. 支持的入口
 
@@ -144,6 +144,18 @@ http://<host>:8090/operator
 `scripts/midterm_health.sh` 仍有旧固定清单：它没有检查
 `person-observation-worker`，并仍期待 legacy `source-adapter`。在代码修复前，不能只凭
 这个脚本判定完整双分支失败或成功。
+
+高率 observation worker 还必须检查 Redis group 与 Docker 日志轮转：
+
+```text
+security.person_observations / person-observation-workers-midterm
+security.face_observations   / face-worker-midterm
+json-file max-size=50m, max-file=3（默认）
+```
+
+stream/group 被清理时，worker 会从 id `0` 重建 group 并依靠数据库幂等收敛；如果日志
+持续出现 `NOGROUP` traceback、group 未恢复或日志配置为空，运行态不合格。日志上限可用
+`MIDTERM_HIGH_RATE_LOG_MAX_SIZE` / `MIDTERM_HIGH_RATE_LOG_MAX_FILE` 显式覆盖。
 
 ## 7. 停止语义
 

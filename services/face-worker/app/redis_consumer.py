@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 # ResponseError from redis-py when group already exists
 _GROUP_EXISTS_MSG = "BUSYGROUP"
+_GROUP_MISSING_MSG = "NOGROUP"
+_GROUP_RECOVERY_START_ID = "0"
 
 
 class RedisStreamConsumer:
@@ -38,17 +40,16 @@ class RedisStreamConsumer:
         self._consumer = consumer
         self._start_id = start_id
 
-    def ensure_group(self) -> None:
-        """Create the consumer group if it does not already exist."""
+    def _create_group(self, start_id: str) -> None:
         try:
             self._client.xgroup_create(
-                self._stream, self._group, id=self._start_id, mkstream=True
+                self._stream, self._group, id=start_id, mkstream=True
             )
             logger.info(
                 "created consumer group=%s stream=%s start_id=%s",
                 self._group,
                 self._stream,
-                self._start_id,
+                start_id,
             )
         except Exception as exc:
             if _GROUP_EXISTS_MSG in str(exc):
@@ -59,6 +60,35 @@ class RedisStreamConsumer:
                 )
             else:
                 raise
+
+    def ensure_group(self) -> None:
+        """Create the consumer group if it does not already exist."""
+        self._create_group(self._start_id)
+
+    def _recover_missing_group(self, operation: str) -> bool:
+        """Recreate a deleted group without skipping retained stream rows."""
+
+        logger.warning(
+            "consumer group missing during %s; recreating group=%s stream=%s "
+            "start_id=%s",
+            operation,
+            self._group,
+            self._stream,
+            _GROUP_RECOVERY_START_ID,
+        )
+        try:
+            # Normal first startup may intentionally tail from '$'. Recovery is
+            # different: replay retained rows from zero and let idempotent DB
+            # writes collapse any duplicates instead of silently losing them.
+            self._create_group(_GROUP_RECOVERY_START_ID)
+        except Exception:
+            logger.exception(
+                "consumer group recreation failed group=%s stream=%s",
+                self._group,
+                self._stream,
+            )
+            return False
+        return True
 
     def read_new(
         self, count: int = 10, block_ms: int = 5000
@@ -76,9 +106,24 @@ class RedisStreamConsumer:
                 count=count,
                 block=block_ms,
             )
-        except Exception:
-            logger.exception("xreadgroup failed")
-            return []
+        except Exception as exc:
+            if _GROUP_MISSING_MSG in str(exc):
+                if not self._recover_missing_group("xreadgroup"):
+                    return []
+                try:
+                    result = self._client.xreadgroup(
+                        self._group,
+                        self._consumer,
+                        {self._stream: ">"},
+                        count=count,
+                        block=block_ms,
+                    )
+                except Exception:
+                    logger.exception("xreadgroup failed after group recreation")
+                    return []
+            else:
+                logger.exception("xreadgroup failed")
+                return []
 
         if not result:
             return []
@@ -98,8 +143,11 @@ class RedisStreamConsumer:
             pending = self._client.xpending_range(
                 self._stream, self._group, "-", "+", count=count
             )
-        except Exception:
-            logger.exception("xpending_range failed")
+        except Exception as exc:
+            if _GROUP_MISSING_MSG in str(exc):
+                self._recover_missing_group("xpending_range")
+            else:
+                logger.exception("xpending_range failed")
             return []
 
         if not pending:
@@ -123,8 +171,11 @@ class RedisStreamConsumer:
                 min_idle_time=min_idle_ms,
                 message_ids=stale_ids,
             )
-        except Exception:
-            logger.exception("xclaim failed")
+        except Exception as exc:
+            if _GROUP_MISSING_MSG in str(exc):
+                self._recover_missing_group("xclaim")
+            else:
+                logger.exception("xclaim failed")
             return []
 
         messages: List[Tuple[str, Dict[bytes, bytes]]] = []

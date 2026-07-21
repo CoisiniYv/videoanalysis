@@ -11,6 +11,12 @@
 
 name: video-analytics-midterm
 
+x-high-rate-worker-logging: &high-rate-worker-logging
+  driver: json-file
+  options:
+    max-size: "${MIDTERM_HIGH_RATE_LOG_MAX_SIZE:-50m}"
+    max-file: "${MIDTERM_HIGH_RATE_LOG_MAX_FILE:-3}"
+
 services:
   redis:
     image: redis:7-alpine
@@ -1100,6 +1106,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       redis: { condition: service_healthy }
+    logging: *high-rate-worker-logging
     restart: unless-stopped
 
   face-worker:
@@ -1158,6 +1165,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       redis: { condition: service_healthy }
+    logging: *high-rate-worker-logging
     restart: unless-stopped
 
   adaface-roi-worker:

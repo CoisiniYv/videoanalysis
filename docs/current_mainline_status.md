@@ -1,6 +1,6 @@
 # Current Mainline Status
 
-更新时间：2026-07-21
+更新时间：2026-07-22
 
 ## 当前基线
 
@@ -23,7 +23,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 完整启动 | 摄像头批量选择、T4/4090 预设、异步 apply/status、五段进度 | 已实现；后台线程不跨 API 重启 |
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
-| 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL | 40/60 压测报告均有覆盖；当前实现未单独做 restart soak |
+| 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
 | rolling-cache | 自有 GStreamer sink、原子 fragment 发布、双时间域、segment index | 正确性通过；3,840s endurance retention 下 index scalability gate 重新打开 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
@@ -71,6 +71,13 @@ tasks + rolling segments -> media-worker -> DB-backed evidence -> 8090
 严格结论：当前代码可把 T4 40 路作为已验证基线；4090 60 路的输入稳定性、bundle
 完整性与 exact-lease 正确性已在最新 revision 复验，但持续容量没有通过。B/C 两轮均在
 约 300 秒 deadline 前形成 attempt=0 ready backlog，Phase 6 保持打开。
+
+2026-07-22 的 two-slot I/O admission r300 诊断进一步确认：poll-gap p95 已降到
+1.736s，但 ready-to-remux p95 仍为 70.94s，正式窗口 ready 到达/完成约
+934/822，slot-wait p95 4.455s，服务率仍低于 arrival。该运行还暴露了独立恢复问题：
+person consumer 在 group 被删除后陷入 `NOGROUP` 循环，person/face Docker 日志分别
+膨胀到约 168GB/85GB。当前实现为两类高率 worker 增加 retained-row group 自愈和
+50MB×3 日志轮转；完整 r300 仍须在该防护生效后复跑，不能用本次诊断关闭容量门。
 
 Candidate B/C 的静态/动态对照把主要容量热点收窄为高置信度 `Probable`：
 `RollingSegmentIndex` 的单进程全局锁覆盖 retained-history refresh、文件 identity 和 full

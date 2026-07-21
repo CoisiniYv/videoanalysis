@@ -1,6 +1,6 @@
 # 当前程序架构
 
-更新时间：2026-07-21
+更新时间：2026-07-22
 
 适用范围：分支 `feat/roi-adaface-redis-20260711`；产品 checkpoint
 `fd39fdb`，exact-lease 修复 `2a57f20`，Candidate C 结论文档基线 `cb0595e`。
@@ -151,6 +151,12 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、原子 fragment 发布、健康指标 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
+
+`person-observation-worker` 与 `face-worker` 是高率 Redis consumer。它们在
+stream/group 被运行清理删除后会从 retained stream row 重新创建 group，而不是持续
+输出 `NOGROUP` traceback；两者的 Docker `json-file` 日志均按 50MB、3 files 默认
+轮转，避免消费故障把根分区写满。恢复从 stream id `0` 开始，依靠数据库幂等写入
+收敛重复，不能用 `$` 跳过已发布 observation。
 
 ## 8. Evidence 生命周期与所有权
 
