@@ -190,6 +190,14 @@ Broader targeted suite:                    346 passed, 6 skipped
 真实 PostgreSQL 合约已在从当前 runtime schema 克隆的独立临时数据库中
 执行并在退出时删除；定向回归没有失败项。
 
+exact-lease claim 修复后的最终定向回归为：
+
+```text
+Scheduler/finalizer/perf/pressure: 291 passed
+Rolling-cache targeted suite:       43 passed
+Disposable PostgreSQL contracts:     7 passed
+```
+
 ## 8. 回滚
 
 如短测触发重复 bundle、fence loss、retry failure 或残留 lease/WIP：
@@ -300,3 +308,146 @@ queue 仍保持 8，PostgreSQL 继续是持久队列。max-per-poll=16 用于覆
 lane owner 同时存在；process workers=8 则由已修正埋点的 3.65s p95 wait
 直接驱动。Candidate C 短测只有在 attempt=0 expiry=0、oldest-ready 不累积、
 handoff lease-expiry recovery=0 后才能进入新的 1 小时正式测。
+
+## 12. Candidate C 实测与最终结论
+
+### 12.1 15 分钟短测
+
+Artifact：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_exactlease_c15m_20260721T110655Z
+```
+
+配置为 WIP=32、remux=16、rolling max-per-poll=16、finalizer
+threads/queue/process workers=8。正式窗口 1,427/1,427 个任务 materialized，
+含 warmup/postfill 共 1,474/1,474 个 bundle 通过 ffprobe 与 8090
+detail/timeline/annotation/bbox/person-context 检查。输入平均 8.0375 fps，
+无 send failure、queue-full 或 raw loss。
+
+短测正确性计数为 candidates=1,474、immediate admitted=1,352、gap=122、
+fenced retry=122、retry failed=0、claim busy=0、handoff recovered=0、
+duplicate=0；末态 active task/lease/WIP/lane/finalizer_pending 全为 0。
+oldest-ready p95=25.69s、max=47.20s，短窗口没有 attempt=0 expiry。
+
+harness 总状态仍因既有 `adaface_roi_watchlist_events_zero` 门标记失败；这不
+改变 scheduler、媒体与 8090 门均通过的事实，也不能把 15 分钟结果外推为
+1 小时容量通过。
+
+### 12.2 1 小时正式测
+
+最终有效 artifact：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_exactlease_c_1h_20260721T114530Z
+```
+
+正式窗口为北京时间 `2026-07-21 19:48:08–20:48:25`，配置与短测完全
+一致，固定输入为：
+
+```text
+/data/video-analytics/pressure-fixtures/1080movie_o300_native24_gop12_continuous_4800s_20260720.mp4
+```
+
+输入门通过：60/60 路可见，平均有效帧率 8.0245 fps，最低 7.92 fps；
+Savant send failure delta=0、forwarder queue-full=0、raw forwarder drop/
+send failure=0。Redis 三个 consumer group 最终 lag/pending 均为 0；
+PostgreSQL DB pool timeout/error/connection-lost 均为 0。压力期间发生 2 次
+30 分钟 timed checkpoint，但不能解释 ready-to-remux 的持续排队。
+
+正式窗口 5,781 个任务：
+
+- 4,742 materialized，82.03%；
+- 1,039 materialization expired，17.97%；
+- 1,039/1,039 的 `materialization_attempt_count=0`；
+- drain 后 active task/lease/finalizer_pending 均为 0。
+
+因此 Candidate C 的吞吐门失败。持续阶段的关键分布为：
+
+| 指标 | p50 | p95 | max |
+| --- | ---: | ---: | ---: |
+| ready-to-remux claim | 249.69s | 285.49s | 289.90s |
+| remux | 0.393s | 1.186s | 10.034s |
+| handoff-to-finalizer admission | 0.023s | 0.167s | 13.228s |
+| finalization | 3.309s | 5.244s | 8.502s |
+| finalizer process-pool wait | 0s | 5.576s | 8.426s |
+| scheduler poll gap | 1.000s | 13.211s | 18.931s |
+| oldest-ready | 1.258s | 301.22s | 309.96s |
+
+remux 和 finalizer lane 的 p95 都达到 16，WIP p95 达到 32；但真正 remux
+和 handoff admission 很快，主要排队已经明确移动到 ready-to-remux claim。
+后半程 remux/finalizer 经常以 `16+16` 批次同时占满 WIP，poll gap 随并发
+扩大，最终依靠约 300 秒 deadline 淘汰维持有界。
+
+### 12.3 exact-lease 正确性门
+
+1 小时运行中：
+
+```text
+candidates                  4826
+immediate admitted          4807
+immediate gap                 19
+fenced handoff retry          19
+retry failed                   0
+handoff recovered              0
+finalizer claim busy           0
+duplicate materialization      0
+finalizer failed               0
+```
+
+即 `candidates = immediate admitted + fenced retry`，且 4,826 个 candidate
+全部最终 materialized。durable finalizer queue 最大深度 8、末态 0；read pin
+created/released 均为 4,826；drain 后 active lease、WIP、remux/finalizer lane
+和 finalizer_pending residual 全为 0。原来的 120 秒 handoff recovery 与
+`SKIP LOCKED` claim-busy 竞态均未复现。
+
+heartbeat supervisor 记录了 1 次 CAS false，但 heartbeat expired/error=0，
+且没有对应 recovery、claim-busy、duplicate、candidate 缺口或残留 lease。
+当前日志没有输出该 handle 的 event_id，不能把原因进一步归属；这作为
+观测竞态保留，后续应在 heartbeat false 时记录 key/phase/terminal state，
+不能把它误报成一次业务 handoff recovery。
+
+因此可以关闭本次重新打开的“finalizer admission/exact-lease transfer”
+Phase 4 子门；Phase 6 容量门仍保持打开。
+
+### 12.4 保留证据与环境恢复
+
+含 warmup/postfill 共保留 4,826 个 bundle，raw clip 合计约 11.82 GiB：
+
+- 4,826/4,826 通过 5+5 窗口、时长与最低 20 fps 检查；
+- 4,826/4,826 通过 8090 detail 和 timeline，0 fallback；
+- 4,826/4,826 通过 annotation、bbox、person-context，0 fallback；
+- 26 个 annotation count 相差 1，均为 DB overlay 合并同一 clip frame
+  index 的既有允许语义，annotation/bbox/person-context 仍完整；
+- person trajectory 持久化 581,189 条、60/60 source、loss=0。
+
+压测结束后已恢复 Redis RDB、PostgreSQL checkpoint 参数、日常单分支和
+原 media/event/clip worker 配置。60 个压测 source 均 disabled，相关
+source/ffmpeg/MediaMTX 进程为 0，数据库 active lease/finalizer_pending/
+active task 为 0，Git worktree 在写本文前为 clean。
+
+一次更早的启动尝试 artifact
+`pressure60_8p1_exactlease_c_1h_20260721T113554Z` 因宿主 DB 端口和 compose
+容器 DB URL 未同时显式设置而在正式采样初期中止，不作为性能结果。最终
+有效运行同时固定宿主 `DATABASE_URL=:5439` 和容器
+`VIDEO_ANALYTICS_DATABASE_URL=postgres:5432`。
+
+### 12.5 Phase 6 下一步
+
+Candidate C 不得成为默认容量配置。与 Candidate B 相比：
+
+- 成功率从 85.17% 降到 82.03%；
+- scheduler poll-gap p95 从 7.08s 增到 13.21s；
+- finalization p50 从 2.414s 增到 3.309s；
+- process-pool wait p95 从 3.653s 增到 5.576s。
+
+这证明把 max-per-poll、WIP、remux 和 process workers 一次性放大，会形成
+更大的 remux/finalizer 批次和资源争用，不能视为“单独扩容 remux/WIP”。
+下一轮必须先分解 scheduler poll gap（当前 `tick_duration_ms` 在 snapshot/
+日志和 sleep 之前取值，不能完整解释 13 秒 gap），再做正交 A/B：保持
+PostgreSQL durable queue 与 finalizer queue=8，分别比较 process workers
+4/8、max-per-poll 8/12/16、WIP/remux 配对，不再同时改变全部旋钮。
+
+在新的 10–15 分钟候选同时满足 service rate 高于到达率、oldest-ready 可
+回落和 attempt=0 expiry=0 前，不再进行第三次 1 小时容量声明。代码提交为
+`fd39fdb`（fenced admission）和 `2a57f20`（exact-lease claim）。

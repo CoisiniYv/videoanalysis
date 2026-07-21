@@ -1479,3 +1479,46 @@ exact owner/token/generation 的阻塞式行锁转移；普通 recovered/unlease
 threads=8、queue=8、process workers=8。先通过 10–15 分钟 A/B，且满足
 handoff lease-expiry recovery=0、attempt=0 expiry=0、oldest-ready 不累积，
 再重跑 1 小时。Candidate B 不得成为默认容量结论。
+
+### 15.1 Candidate C closure result
+
+exact-lease 修复提交 `2a57f20` 后，Candidate C 的 15 分钟短测通过
+scheduler/media 正确性与吞吐子门：正式任务 1,427/1,427 materialized，
+candidates=1,474、gap=122、fenced retry=122、retry failed/recovery/
+claim-busy/duplicate=0。短测 artifact：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_exactlease_c15m_20260721T110655Z
+```
+
+同配置 1 小时正式 artifact：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_exactlease_c_1h_20260721T114530Z
+```
+
+正式窗口 5,781 个任务中 4,742 materialized（82.03%）、1,039 attempt=0
+expired（17.97%）。输入 60/60、8.0245 fps，send/queue/raw loss=0；含
+warmup/postfill 的 4,826 个 bundle 全部通过 ffprobe 与 8090 detail/
+timeline/annotation/bbox/person-context。drain 后 active task/lease/WIP/lane/
+finalizer_pending 全为 0。
+
+本次 exact-lease 子门通过：candidates=4,826、immediate admitted=4,807、
+gap=19、fenced retry=19、retry failed=0、handoff recovered=0、claim-busy=0、
+duplicate=0。一次 heartbeat CAS false 没有伴随 expiry、recovery、candidate
+缺口或残留状态；需要补 event key/phase 观测，但不等同于 lease-expiry
+handoff recovery。Phase 4 的 admission/exact-transfer reopen 子门可关闭。
+
+Phase 6 仍失败，而且 Candidate C 不得默认化。ready-to-remux p50/p95 为
+249.69s/285.49s，实际 remux p95 仅 1.186s，handoff-to-admission p95 仅
+0.167s；oldest-ready p95=301.22s。remux/finalizer lane p95 均为 16，WIP
+p95=32，poll-gap p95=13.21s，finalizer process-pool wait p95=5.576s。
+Candidate C 相比 B 的 85.17% 成功率反而降到 82.03%，说明同时把
+max-per-poll、WIP/remux 和 process workers 放大造成阶段振荡/资源争用。
+
+下一步不再盲目扩容。先补全 scheduler loop total/poll-gap 分解（现有
+`tick_duration_ms` 不覆盖 snapshot/logging/sleep 后段），再正交比较
+process workers 4/8、max-per-poll 8/12/16 与 WIP/remux 配对；finalizer
+queue 保持 8，PostgreSQL 继续作为唯一 durable queue。只有短测证明持续
+service rate 高于到达率、oldest-ready 可回落且 attempt=0 expiry=0，才允许
+再次进入 1 小时 Phase 6 验收。
