@@ -475,9 +475,31 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   mutation flock, and retention fence remain unchanged.
 - Red-to-green proof: `db19d1f` builds 32 known leaves, changes the parent by
   adding leaf 33, and asserts that refresh probes only the new manifest while
-  returning all 33 catalog entries. This is a deterministic unit proof only;
-  the required bind-mounted changed-parent/count-metric smoke and unchanged
-  width-three r300 comparison are still pending.
+  returning all 33 catalog entries.
+- Bind-mounted container proof:
+  `/data/video-analytics/artifacts/segment_index_refresh_pin_smoke_20260721T200925Z`.
+  The recreated media-worker used the explicit Compose-network PostgreSQL URL
+  and loaded `1ec97fc` from the bind-mounted worktree. A 32-leaf catalog plus
+  one atomic addition returned all 33 leaves while probing exactly the new
+  manifest, issuing five `Path.resolve()` calls, and parsing zero full native
+  rows. The modern 10-leaf fixture still pinned five and selected three;
+  production retention deleted five unrelated leaves, skipped five pinned
+  leaves, and observed one active marker. Legacy fallback pinned 10/10, the
+  same-size/same-mtime inode replacement was fenced, and every path ended with
+  zero marker residual.
+- The same smoke dynamically closes the `0bc6c82` observability check: the
+  finalizer-flattened value and production metric log both contain
+  `segment_index_pinned_segments=5`, never `None`. Media-worker restart count
+  remained zero and the database retained zero enabled cameras, active tasks,
+  leases, or finalizer-pending rows.
+- A preceding artifact
+  `/data/video-analytics/artifacts/segment_index_refresh_pin_smoke_20260721T200639Z`
+  is retained as a harness-only failure. Its dynamic maintenance module was not
+  registered in `sys.modules` before Python 3.12 dataclass execution; it exited
+  before creating any segment fixture or database mutation. The corrected
+  smoke registered the copied production module before execution.
+- Runtime correctness is now proved; the unchanged width-three r300 capacity
+  comparison remains pending.
 
 ## Recovery audit after Round 1
 
@@ -492,18 +514,13 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Recreate only media-worker with the explicit Compose-network PostgreSQL URL,
-   then run a bind-mounted smoke proving 32 known plus one new leaf probes only
-   the new manifest and finalizer output retains
-   `segment_index_pinned_segments=5`; repeat the legacy, identity, marker, and
-   retention checks.
-2. Repeat the unchanged width-three r300 gate at `1ec97fc`; Candidate B WIP,
+1. Repeat the unchanged width-three r300 gate at `1ec97fc`; Candidate B WIP,
    remux, max-per-poll, finalizer dimensions, fixture hash and all other inputs
    remain fixed. Compare refresh, slot wait, pinned-segment distribution,
    ready/media/lifecycle, service rate, and visibility against Round 9.
-3. Only if that r300 gate passes every input, capacity, correctness, annotation,
+2. Only if that r300 gate passes every input, capacity, correctness, annotation,
    visibility, and residual gate, run r3840. Do not increase admission width or
    use the harness's watchlist-only failure list as a substitute for the strict
    latency gates.
-4. Only after both short gates pass, run two comparable one-hour acceptances
+3. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.

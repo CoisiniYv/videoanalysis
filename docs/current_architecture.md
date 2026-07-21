@@ -231,8 +231,10 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   r3840 仍不允许；
 - 最新 `1ec97fc` 复用已知 immutable leaf membership，避免每次 parent 变化时重新 resolve/
   probe 全部已知 manifest；32+1 的测试只探测新 leaf。`0bc6c82` 同时修复 finalizer
-  flattening 丢失 pinned-segment 等 count metric。两项仍需真实容器 smoke 和相同
-  width-three r300 动态验证，不能写成容量已改善；
+  flattening 丢失 pinned-segment 等 count metric。真实容器 artifact
+  `segment_index_refresh_pin_smoke_20260721T200925Z` 已证明 32→33 只 probe 新 manifest、
+  finalizer 日志输出 pinned=5，并重验 legacy/identity/marker/retention 边界；相同
+  width-three r300 仍待动态验证，不能写成容量已改善；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

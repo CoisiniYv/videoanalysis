@@ -26,7 +26,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 source-window-bounded read pin 和已知 immutable leaf membership 复用 | bounded-pin 单测、真实容器 smoke 与 width-three r300 正确性通过，但严格容量/visibility 门失败；`1ec97fc` 的 changed-parent 动态 smoke/r300 待执行 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 source-window-bounded read pin 和已知 immutable leaf membership 复用 | bounded-pin 与 changed-parent 单测/真实容器 smoke 通过；前一 width-three r300 正确性通过但严格容量/visibility 门失败，`1ec97fc` 的同口径 r300 待执行 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -119,15 +119,16 @@ visibility p95=10.27s，也超过 2s。refresh p95=3.009s，成为剩余主要 i
 
 `0bc6c82` 已修复 finalizer metric flattening 丢失 pinned-segment 等 count 字段；`1ec97fc`
 则让 changed parent 复用已 catalog 的 immutable leaf membership，只 probe 新/pending manifest。
-32 known + 1 new 的测试已证明只探测新 leaf，但真实容器 changed-parent/count-metric smoke 和
-相同 width-three r300 尚未执行，当前不能宣称 refresh 或容量已动态改善。
+真实容器 `segment_index_refresh_pin_smoke_20260721T200925Z` 已证明 32 known + 1 new 只探测
+新 manifest，finalizer flatten/log 均保留 pinned=5，并再次通过 modern/legacy pin、retention、
+identity fence 和零 marker residual。相同 width-three r300 尚未执行，当前仍不能宣称 refresh
+或容量已动态改善。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3，不再扩大 admission；先以显式 `postgres:5432` 容器 URL 完成
-  changed-parent/count-metric/legacy/identity/retention smoke，再用 `1ec97fc` 重跑相同日常
+- 保持 width 3，不再扩大 admission；用已通过真实容器 smoke 的 `1ec97fc` 重跑相同日常
   300s retention 短门，同时审计 pinned-segment 分布与 refresh/pin 时延；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
