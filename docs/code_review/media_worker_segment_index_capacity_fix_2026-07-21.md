@@ -29,6 +29,8 @@ acceptance runs have passed yet.
 | `652621d` | bounded pressure log capture | Sampling now closes before log collection; each log has a fixed `--until`, 30s timeout, and partial-output diagnostics |
 | `263411f` | compact per-segment manifest | Sink publishes a manifest inside the atomic segment rename; index discovery no longer parses native JSONL |
 | `dbb872b` | manifest/index tests | Atomic publication, manifest-only discovery, lazy selected-row parsing, malformed/missing manifest, COW, retention, pin, and cache behavior covered |
+| `3c02771` | mutation-driven reconciliation | Periodic reconciliation compares immutable-leaf membership through tracked parents, spreads first reconcile phase, and carries exact catalog identities into read-pin fencing |
+| `a5782d8` | reconciliation/identity tests | No periodic full walk, bounded steady stats, leaf pruning, retention invalidation, and same-size inode replacement fencing covered |
 
 ## Measurement rounds
 
@@ -90,6 +92,56 @@ discovery can retain only bounds and identities while native rows remain lazy.
   harness selection passed 362 tests with one expected skip.
 - Pressure result: pending.
 
+Runtime interoperability proof used the real bind-mounted containers. The sink
+published one segment into a temporary shared media root; media-worker observed
+`manifest_parses=1`, `full_row_parses=0`, and `row_cache_entries=0` after
+discovery, then `full_row_parses=1` and `row_cache_entries=1` only after loading
+the selected segment. The temporary root and sink container were removed and
+daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
+
+### Round 3: diagnostic 300s-retention run after compact manifest
+
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_segmanifest_b10m_r300_20260721T1543Z`
+- Result: intentionally interrupted diagnostic, not a formal short gate. The
+  harness reached 60/60 sources with no restart, then was stopped once the
+  failure mechanism was unambiguous so another six minutes of invalid work was
+  not admitted.
+- Early improvement: discovery parsed 2,466 manifests in about 670ms while 498
+  selected/candidate native-row loads took about 797ms; row cache had 498
+  entries and zero evictions. By 120s, service rate matched arrival rate and
+  oldest-ready had returned to about 1.7s.
+- Remaining failure: synchronized 30s periodic catalog reconciliation caused
+  repeated 3.8-10.5s scheduler cycles. Oldest-ready rose to 36.6s despite an
+  intermittently empty remux lane. In one 16s interval cumulative rebuild time
+  rose from 21.2s to 31.2s; cumulative stat time reached 16.5s. This is a
+  filesystem/GIL reconcile convoy, not evidence that WIP or remux concurrency
+  should be increased.
+- Cleanup: the KeyboardInterrupt path restored single-branch runtime, Redis
+  and PostgreSQL defaults, 300s retention, and disabled rolling
+  materialization. It left zero enabled cameras, source/ffmpeg/MediaMTX
+  processes, active leases, or finalizer-pending rows. Eight interrupted tasks
+  were explicitly terminal-failed rather than left active.
+
+### Round 4: mutation-driven immutable catalog reconciliation
+
+- Hypothesis: immutable manifest leaves do not need retention-wide payload
+  re-stat or a full tree walk every 30s. Atomic parent membership plus the
+  retention generation is sufficient for discovery/deletion; read-pin must
+  retain exact identity fencing.
+- Unique implementation variable: `3c02771`.
+- New behavior: steady refresh retries only pending manifests and watches the
+  source/segments discovery parents. Parent membership detects atomic additions
+  and retention deletions. Periodic reconcile performs the same membership
+  audit without `_walk`, and the first reconcile deadline is deterministically
+  spread across 0.5-1.5 intervals per source/epoch.
+- Correctness: read-pin now compares the catalog's exact metadata/video
+  device, inode, size, and mtime identities under the mutation flock. A
+  same-size, same-mtime inode replacement is rejected as retryable.
+- Verification: focused suite 52/52; combined media-worker, rolling-cache,
+  pressure-harness, deployment, topology, and materialization suite 450 passed
+  with one expected skip. Pressure result pending.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -111,4 +163,3 @@ leases/finalizer-pending rows.
    slope before changing another dimension.
 5. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.
-
