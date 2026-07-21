@@ -92,6 +92,9 @@ Environment overrides:
   PRESSURE_CACHE_TMPFS=<profile default>
                       Bind pressure rolling-cache/intermediate materialization
                       to shared host tmpfs; final evidence remains on disk.
+  PRESSURE_ROLLING_CACHE_RETENTION_S=0
+                      Explicit pressure-only retention. Use 300 for the daily
+                      retention gate or 3840 for the endurance gate.
   ROLLING_CACHE_MIN_RAW_FPS=<profile default>
                       Minimum pre-resampler evidence cadence. The 4090 profile
                       requires 20 FPS while Savant still analyzes at 8 FPS.
@@ -215,6 +218,7 @@ media_worker_rolling_max_per_poll="${MEDIA_WORKER_ROLLING_MAX_PER_POLL:-${media_
 pressure_pause_redis_rdb="${PRESSURE_PAUSE_REDIS_RDB:-${pressure_pause_redis_rdb_default}}"
 pressure_tune_postgres_checkpoints="${PRESSURE_TUNE_POSTGRES_CHECKPOINTS:-${pressure_tune_postgres_checkpoints_default}}"
 pressure_cache_tmpfs="${PRESSURE_CACHE_TMPFS:-${pressure_cache_tmpfs_default}}"
+pressure_rolling_cache_retention_s="${PRESSURE_ROLLING_CACHE_RETENTION_S:-0}"
 rolling_cache_min_raw_fps="${ROLLING_CACHE_MIN_RAW_FPS:-${rolling_cache_min_raw_fps_default}}"
 preserve_warmup_results="${PRESERVE_WARMUP_RESULTS:-1}"
 rtsp_republish_output_base="${RTSP_REPUBLISH_OUTPUT_BASE:-}"
@@ -266,6 +270,7 @@ cmd=(
   --media-worker-finalizer-process-workers "${media_worker_finalizer_process_workers}"
   --media-worker-finalizer-queue-capacity "${media_worker_finalizer_queue_capacity}"
   --media-worker-rolling-max-per-poll "${media_worker_rolling_max_per_poll}"
+  --pressure-rolling-cache-retention-s "${pressure_rolling_cache_retention_s}"
   --savant-ablation-stage "${ablation_stage}"
   --savant-output-mode "${output_mode}"
   --cpu-isolation-profile "${cpu_profile}"
@@ -419,6 +424,7 @@ printf 'media_worker_rolling_max_per_poll=%s\n' "${media_worker_rolling_max_per_
 printf 'pressure_pause_redis_rdb=%s\n' "${pressure_pause_redis_rdb}"
 printf 'pressure_tune_postgres_checkpoints=%s\n' "${pressure_tune_postgres_checkpoints}"
 printf 'pressure_cache_tmpfs=%s\n' "${pressure_cache_tmpfs}"
+printf 'pressure_rolling_cache_retention_s=%s\n' "${pressure_rolling_cache_retention_s}"
 printf 'rolling_cache_min_raw_fps=%s\n' "${rolling_cache_min_raw_fps}"
 printf 'preserve_warmup_results=%s\n' "${preserve_warmup_results}"
 printf 'rtsp_republish_output_base=%s\n' "${rtsp_republish_output_base}"

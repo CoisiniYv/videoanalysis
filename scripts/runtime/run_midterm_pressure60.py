@@ -482,6 +482,7 @@ class PressureConfig:
     pressure_tune_postgres_checkpoints: bool = False
     pressure_rolling_cache_host_root: str = ""
     pressure_rolling_cache_materialized_host_root: str = ""
+    pressure_rolling_cache_retention_s: int = 0
     preserve_warmup_results: bool = False
     pressure_sampling_start_event_ts_ms: int = 0
     pressure_sampling_end_event_ts_ms: int = 0
@@ -583,6 +584,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Optional pressure-scoped host directory bind-mounted as the shared "
             "rolling materialization root. Final evidence remains on EVIDENCE_ROOT."
+        ),
+    )
+    parser.add_argument(
+        "--pressure-rolling-cache-retention-s",
+        type=int,
+        default=0,
+        help=(
+            "Explicit pressure-only rolling retention. Zero preserves the "
+            "duration-derived contract; positive values support controlled "
+            "production-retention versus endurance-retention A/B runs."
         ),
     )
     parser.add_argument("--batch-size", type=int, default=4)
@@ -1165,6 +1176,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--media-worker-rolling-max-per-poll must be positive")
     if args.rolling_cache_min_raw_fps < 0:
         raise SystemExit("--rolling-cache-min-raw-fps must be non-negative")
+    if args.pressure_rolling_cache_retention_s < 0:
+        raise SystemExit(
+            "--pressure-rolling-cache-retention-s must be non-negative"
+        )
     if (
         args.rolling_cache_evidence
         and args.media_worker_materialization_max_active < 2
@@ -1403,6 +1418,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         pressure_rolling_cache_materialized_host_root=str(
             args.pressure_rolling_cache_materialized_host_root or ""
+        ),
+        pressure_rolling_cache_retention_s=int(
+            args.pressure_rolling_cache_retention_s or 0
         ),
         preserve_warmup_results=bool(args.preserve_warmup_results),
     )
@@ -4400,6 +4418,8 @@ def configure_media_worker_rolling_cache(
 def pressure_rolling_cache_retention_seconds(cfg: PressureConfig) -> int:
     """Keep sink cleanup and media-worker coverage on one pressure contract."""
 
+    if cfg.pressure_rolling_cache_retention_s > 0:
+        return int(cfg.pressure_rolling_cache_retention_s)
     return max(900, int(cfg.duration_s) + int(cfg.drain_s) + 120)
 
 
