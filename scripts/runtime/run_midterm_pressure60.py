@@ -475,6 +475,7 @@ class PressureConfig:
     adaface_roi_batch_timeout_ms: int = 10
     media_worker_materialization_max_active: int = 4
     media_worker_rolling_remux_workers: int = 1
+    media_worker_segment_index_io_concurrency: int = 2
     media_worker_finalizer_workers: int = 4
     media_worker_finalizer_process_workers: int = 4
     media_worker_finalizer_queue_capacity: int = 4
@@ -652,6 +653,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Rolling-cache remux lane worker count. Keep at 1 for the Phase 6 "
             "max_active matrix; vary only in a separately labeled remux-lane experiment."
+        ),
+    )
+    parser.add_argument(
+        "--media-worker-segment-index-io-concurrency",
+        type=int,
+        default=2,
+        help=(
+            "Maximum concurrent rolling segment-index discovery-through-pin "
+            "I/O jobs; ffmpeg/remux concurrency is unchanged."
         ),
     )
     parser.add_argument(
@@ -1163,6 +1173,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.media_worker_rolling_remux_workers < 1:
         raise SystemExit("--media-worker-rolling-remux-workers must be positive")
+    if args.media_worker_segment_index_io_concurrency < 1:
+        raise SystemExit(
+            "--media-worker-segment-index-io-concurrency must be positive"
+        )
     if args.media_worker_finalizer_workers < 1:
         raise SystemExit("--media-worker-finalizer-workers must be positive")
     if args.media_worker_finalizer_process_workers < 0:
@@ -1399,6 +1413,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         media_worker_rolling_remux_workers=int(
             args.media_worker_rolling_remux_workers
+        ),
+        media_worker_segment_index_io_concurrency=int(
+            args.media_worker_segment_index_io_concurrency
         ),
         media_worker_finalizer_workers=int(args.media_worker_finalizer_workers),
         media_worker_finalizer_process_workers=int(
@@ -4870,7 +4887,9 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S": "60",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES": "2048",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES": "268435456",
-        "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY": "2",
+        "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY": str(
+            cfg.media_worker_segment_index_io_concurrency
+        ),
         # Rolling evidence has its own image lane. Avoid scanning the legacy
         # post-Replay snapshot/annotation backlog every general scheduler poll;
         # DB-backed timeline/overlay/person_context indexing remains enabled.
