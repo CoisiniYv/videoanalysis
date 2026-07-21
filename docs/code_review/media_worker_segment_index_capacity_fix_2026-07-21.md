@@ -44,6 +44,8 @@ passed yet.
 | `6eb297b` | bounded-pin runtime proof documentation | Records the real container identity/retention/legacy smoke without claiming capacity |
 | `ab5b7ad`, `0bc6c82` | finalizer count-metric preservation | Keeps segment-index count fields, including pinned-segment cardinality, when remux diagnostics are flattened into finalizer metrics |
 | `db19d1f`, `1ec97fc` | changed-parent immutable membership reuse | A changed source parent probes only new/pending manifest leaves instead of resolving and probing every already cataloged immutable leaf |
+| `25d5fec` | same-catalog duplicate-refresh red test | Reproduces two concurrent callers parsing the same new manifest while retaining a direct stale-version fence test |
+| `b69575b` | per-catalog refresh/pin singleflight | Coalesces same-source refresh work before global I/O admission and publishes refresh/reconcile watermarks at completion |
 
 ## Measurement rounds
 
@@ -569,6 +571,36 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   retain the existing cross-source/snapshot non-blocking behavior. No WIP,
   remux, finalizer, retention, deadline, or admission-width value changes with
   this fix.
+- Red-to-green implementation: `25d5fec` first reproduced the duplicate parse;
+  `b69575b` adds a reentrant per-catalog I/O gate. Production pin callers wait
+  on that source/epoch gate before consuming a global I/O slot. The gate spans
+  refresh, identity snapshot, and marker publication, then releases before
+  ffmpeg/remux, so it neither serializes other sources nor the actual remux
+  lane. Direct lookup and forced reconciliation use the same gate; the COW
+  version check remains as a stale-publication fence. Refresh/reconcile
+  watermarks now use completion time, preventing a long refresh from being
+  stale at publication.
+- Verification: index/perf/rolling passed 106 tests; pressure harness/analyzer
+  passed 201; lifecycle/scheduler/finalizer/static suites passed 118 with one
+  expected environment skip. A disposable PostgreSQL initialized through
+  migrations 001-032 passed all eight materialization/finalizer contracts.
+  `py_compile`, critical Ruff, Compose rendering, and diff checks passed.
+- Bind-mounted container proof:
+  `/data/video-analytics/artifacts/segment_index_singleflight_smoke_20260721T204645Z`.
+  Eight dynamic cases passed: same-catalog callers performed one refresh and
+  one new-manifest parse with zero publish conflict; another source and metrics
+  snapshot remained non-blocking; bounded and legacy pins, active-marker
+  retention, refresh-to-pin atomicity, same-size/same-mtime inode fencing, and
+  finalizer count flatten/logging all remained intact. Marker residual and
+  database active task/lease/finalizer-pending counts were zero; media-worker
+  restart count remained zero.
+- A preceding harness artifact
+  `/data/video-analytics/artifacts/segment_index_singleflight_smoke_20260721T204548Z`
+  is retained. Its copied test module lacked the expected `harness/tests`
+  parent depth and exited during module import before fixture or DB mutation.
+  The corrected smoke restored that path layout.
+- The structural/runtime correctness proof is complete; capacity remains
+  unclaimed until the unchanged width-three r300 repeat passes.
 
 ## Recovery audit after Round 1
 
@@ -583,14 +615,13 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Add the concurrent same-catalog red test, implement per-catalog singleflight
-   plus completion-time refresh watermark, and run the full index/scheduler/
-   rolling and pressure-harness regression sets.
-2. Recreate only media-worker and run a bind-mounted concurrency/pin/retention/
-   identity/count-metric smoke, then repeat the unchanged width-three r300 gate.
-3. Only if that r300 gate passes every input, capacity, correctness, annotation,
+1. Repeat the unchanged width-three r300 gate at `b69575b`; compare actual
+   segment publications with `new_or_changed`, refresh/slot/lock wait, formal
+   arrival/completion slope, pinned cardinality, strict latency, visibility,
+   correctness, annotation, and residuals against Rounds 9 and 11.
+2. Only if that r300 gate passes every input, capacity, correctness, annotation,
    visibility, and residual gate, run r3840. Do not increase admission width or
    use the harness's watchlist-only failure list as a substitute for the strict
    latency gates.
-4. Only after both short gates pass, run two comparable one-hour acceptances
+3. Only after both short gates pass, run two comparable one-hour acceptances
    with the fixed fixture/hash and the full evidence/8090 validation set.

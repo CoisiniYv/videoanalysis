@@ -4,7 +4,7 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `1ec97fc`。
+exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `b69575b`。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -240,8 +240,10 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   ready/media/lifecycle p95 为 36.60s/57.03s/57.53s，metadata visibility p95=7.50s；
   正式窗口末仍有 79 active/39 ready，依赖 drain 才清零，因此容量门失败且 r3840 禁止；
 - 该轮 5,847 个实际 segment 对应 12,122 次 `new_or_changed`，显示同一 catalog 的并发
-  COW refresh 仍重复工作。下一结构门是 per-source/epoch singleflight 与完成时 refresh
-  watermark；它尚未实现，不能写成容量已改善；
+  COW refresh 仍重复工作。`b69575b` 已加入位于全局 width admission 之前的 per-source/epoch
+  singleflight，并把 refresh watermark 改为完成时；真实容器
+  `segment_index_singleflight_smoke_20260721T204645Z` 已通过同 catalog 单次 parse、跨 source
+  非阻塞、pin/retention/identity/count 边界。相同 r300 尚未复测，不能写成容量已改善；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
