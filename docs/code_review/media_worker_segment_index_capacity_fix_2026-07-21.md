@@ -37,6 +37,8 @@ acceptance runs have passed yet.
 | `db87559` | recovery/log-rotation tests | Covers group recreation and the effective Compose logging contract |
 | `cf64609` | pressure override tests | Specifies default, validation, profile override, pressure environment, and run-config audit behavior for index I/O admission |
 | `3f3abd9` | artifact-audited index I/O pressure override | Exposes the isolated discovery-through-pin admission width without changing remux, WIP, or finalizer capacity |
+| `2a55ce1` | bounded-pin correctness tests | Proves the real worker/index/materializer preserves dual source/mux clocks, invalid/unmatched windows fall back conservatively, and selected leaves remain retention-fenced |
+| `b7068b0` | source-window-bounded read-pin publication | Pins only source-window overlap plus one guard leaf on each side for complete modern manifests; mixed/legacy catalogs retain full-catalog pins |
 
 ## Measurement rounds
 
@@ -360,6 +362,53 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   enabled cameras, active tasks, leases, or finalizer-pending rows. About
   248GB remained free and the worktree was clean.
 
+### Round 8: source-window-bounded read-pin publication
+
+- Hypothesis: each 5+5 job was still publishing and identity-statting a read
+  pin for the entire source retention catalog even though dual-clock mapping
+  and remux read only a small local window. Reducing only that pin identity and
+  marker set should shorten publication without changing catalog refresh,
+  width three, remux, WIP, finalizer, or deadline policy.
+- Unique implementation variable: `b7068b0`. After the existing atomic catalog
+  refresh, modern manifests with complete immutable source-clock bounds select
+  every source-window overlap plus one guard leaf on each side. Missing/mixed
+  bounds, a missing/invalid request, or no overlap retain the full-catalog
+  behavior. The filesystem mutation flock, exact metadata/video identity
+  snapshot, read-pin marker, and retention fence are unchanged.
+- Tests: `2a55ce1` adds a real worker/index/materializer dual-clock integration
+  proof. A ten-segment catalog pins five leaves, maps the source-domain 5+5
+  request onto the distinct mux domain, and remux-selects three leaves. It also
+  covers legacy, invalid and unmatched fallback. The complete index/safety/
+  rolling set passed 103 tests; pressure harness/analyzer passed 201; lifecycle,
+  scheduler, finalizer and static-index tests passed 125 with one expected
+  environment skip. A disposable PostgreSQL initialized through migrations
+  001-032 then passed all eight repository/finalizer lease contracts.
+- Bind-mounted container proof:
+  `/data/video-analytics/artifacts/segment_index_window_pin_smoke_20260721T192612Z`.
+  The recreated media-worker loaded the bind-mounted `b7068b0` code. Its modern
+  ten-leaf catalog published a five-leaf marker (`0003`-`0007`), parsed only
+  the three remux-selected leaves (`0004`-`0006`), and mapped the source event
+  to mux PTS `122000000000` with requested mux bounds
+  `117000000000..127000000000`.
+- The real maintenance implementation ran while that marker was active: it
+  deleted five unrelated expired leaves, skipped all five pinned leaves, and
+  observed one active pin. Marker release left zero pin files. A legacy
+  ten-leaf catalog still pinned 10/10. A same-size, same-mtime inode replacement
+  was rejected with `SegmentPinRetryableError`, also leaving zero marker
+  residual. The retained metric log contains
+  `segment_index_pinned_segments=5` from the production formatter.
+- The first recreate/smoke attempt is retained as
+  `/data/video-analytics/artifacts/segment_index_window_pin_smoke_20260721T192405Z`.
+  It executed no fixture or DB mutation because the recreated container used
+  the base `host.docker.internal:5432` default and restarted before Docker
+  could execute the smoke. Recreating only media-worker with the explicit
+  Compose-network URL `postgres:5432` restored a stable worker with restart
+  count zero; the passing smoke then ran. Daily width two, disabled
+  materialization, 300s retention and zero active task/lease/finalizer-pending
+  state remained intact.
+- Pressure result: pending. This smoke establishes correctness and expected pin
+  cardinality only; it does not claim the r300 capacity gate.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -373,11 +422,12 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Keep pressure admission at width three and make one structural change that
-   reduces refresh or pin-publication work without weakening mutation flock,
-   read-pin durability, identity fences, or atomic publication.
-2. Prove the change with focused concurrency/failure tests and a real-container
-   interoperability smoke, then repeat the unchanged width-three r300 gate.
+1. Repeat the unchanged width-three r300 gate with `b7068b0`; Candidate B WIP,
+   remux, max-per-poll, finalizer dimensions, fixture hash and all other inputs
+   remain fixed.
+2. Use the retained `segment_index_pinned_segments` distribution together with
+   refresh/pin timing to decide whether pin publication was actually removed as
+   the service-rate constraint; do not infer capacity from the smoke alone.
 3. Only if the structural width-three r300 gate passes every input, capacity,
    correctness, annotation, visibility, and residual gate, run r3840.
 4. Only after both short gates pass, run two comparable one-hour acceptances

@@ -217,6 +217,12 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   37.21s/57.80s/58.30s，并让 1,007/1,007 retained video 的 annotation 全通过，但仍高于
   5s/10s/30s 目标且 metadata visibility p95=9.43s；four-slot 又退化到
   55.77s/76.73s/77.21s。后续不再扩 admission，回到 refresh/pin publication 结构修复；
+- 容量修复分支 `codex/segment-index-concurrency-fix-20260721` 的 `b7068b0` 已把 modern
+  manifest read pin 缩到 source-window overlap 加两侧 guard；legacy/无效/无 overlap
+  仍保守 pin 全 catalog。`segment_index_window_pin_smoke_20260721T192612Z` 在真实
+  bind-mounted media-worker 中证明 10 个 segment 只 pin 5 个、实际 remux 3 个，双时间域、
+  retention marker、identity fence 和日志指标均通过；width-three r300 尚未复测，不能据此
+  声明容量通过；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

@@ -7,6 +7,8 @@
 - 分支：`feat/roi-adaface-redis-20260711`；
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
+- 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
+  `b7068b0`，尚未合入或声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -24,7 +26,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission | 正确性通过；two/three/four-slot 300s retention 容量门均失败，refresh/pin 结构门打开 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 source-window-bounded read pin | bounded-pin 单测与真实容器 smoke 通过；two/three/four-slot 300s retention 历史容量门均失败，`b7068b0` width-three 复测待执行 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -98,12 +100,19 @@ lifecycle p95 退化到 55.77s/76.73s/77.21s，oldest-ready p95=62.93s，metadat
 p95=10.46s。slot-wait 略降而 refresh/pin/lock-hold 上升，确认增加并发放大 I/O convoy。
 不再测试 width 5；下一轮以 width 3 为对照做 refresh/pin publication 结构修复。
 
+该结构修复已在工作分支 `b7068b0` 落地：完整 modern source bounds 只发布请求窗口 overlap
+及两侧 guard 的 read pin，legacy/无效/无 overlap 保留全 catalog。真实 bind-mounted
+artifact `segment_index_window_pin_smoke_20260721T192612Z` 证明 10 个 catalog leaf pin 5 个、
+实际选择 3 个，source→mux 5+5 映射正确；同一 marker 下 retention 删除 5 个无关 leaf、
+跳过 5 个 pinned leaf，same-size/same-mtime inode replacement 仍被 fence，legacy 仍 pin 10/10，
+并输出 `segment_index_pinned_segments=5`。这只是结构正确性证明，尚不是 r300 容量结果。
+
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3，不再扩大 admission；先做单一 refresh/pin publication 结构修复并重跑
-  日常 300s retention 短门；
+- 保持 width 3，不再扩大 admission；用已完成的单一 bounded-pin 结构修复重跑日常 300s
+  retention 短门，并同时审计 pinned-segment 分布与 refresh/pin 时延；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
 - 独立处理 finalizer p95 5.244s / process-pool wait p95 5.576s，禁止与 index/WIP/remux
