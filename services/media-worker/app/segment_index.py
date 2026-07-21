@@ -924,11 +924,20 @@ class RollingSegmentIndex:
                         return
                     if not child.is_dir(follow_symlinks=False):
                         continue
-                    child_path = Path(child.path).resolve(strict=False)
+                    # ``container`` is already resolved and scandir does not
+                    # follow symlinked directories. Re-resolving every retained
+                    # leaf and statting its immutable manifest turns each new
+                    # segment publication into retention-wide filesystem work.
+                    child_path = Path(child.path)
                     child_directories.add(child_path)
-                    manifest_path = (
-                        child_path / SEGMENT_MANIFEST_FILE
-                    ).resolve(strict=False)
+                    manifest_path = child_path / SEGMENT_MANIFEST_FILE
+                    if (
+                        manifest_path in catalog.entries
+                        and manifest_path not in catalog.pending
+                    ):
+                        current_manifests.add(manifest_path)
+                        catalog.containers.pop(child_path, None)
+                        continue
                     if manifest_path.is_file():
                         current_manifests.add(manifest_path)
                         catalog.containers.pop(child_path, None)
