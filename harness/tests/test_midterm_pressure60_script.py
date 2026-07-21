@@ -1145,6 +1145,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ENABLED"] == "true"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S"] == "60"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES"] == "2048"
+    assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES"] == "268435456"
     assert values["MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED"] == "false"
     assert values["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == "4"
     event_values = captured["compose_recreate_event_worker_rolling_cache.log"]

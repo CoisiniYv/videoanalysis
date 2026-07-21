@@ -272,6 +272,202 @@ def test_operation_diagnostics_measure_global_lock_contention(tmp_path: Path) ->
     assert float(diagnostics["segment_index_lock_wait_ms"]) >= 20.0
 
 
+def test_slow_source_refresh_does_not_block_other_source_or_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    source_a = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-a",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-b",
+        name="0001",
+        pts_values=[3, 4],
+    )
+    index = _index(root)
+    assert len(index.find_segments(source_id="camera-a", runtime_epoch_id="epoch-a")) == 1
+    assert len(index.find_segments(source_id="camera-b", runtime_epoch_id="epoch-a")) == 1
+
+    metadata_a = source_a / "metadata.json"
+    metadata_a.write_text(
+        json.dumps({"frames": [{"pts": 1}, {"pts": 2}, {"pts": 5}]}),
+        encoding="utf-8",
+    )
+    refresh_entered = threading.Event()
+    allow_refresh = threading.Event()
+    source_b_finished = threading.Event()
+    snapshot_finished = threading.Event()
+    original_parse = index._parse_rows
+
+    def slow_parse(path: Path):
+        if path == metadata_a.resolve(strict=False):
+            refresh_entered.set()
+            assert allow_refresh.wait(timeout=2.0)
+        return original_parse(path)
+
+    index._parse_rows = slow_parse
+    source_a_thread = threading.Thread(
+        target=lambda: index.find_segments(
+            source_id="camera-a",
+            runtime_epoch_id="epoch-a",
+        )
+    )
+    source_a_thread.start()
+    assert refresh_entered.wait(timeout=1.0)
+    catalog_a = index._catalogs[("camera-a", "epoch-a")]
+    assert catalog_a.lock.acquire(timeout=0.1)
+    catalog_a.lock.release()
+
+    source_b_thread = threading.Thread(
+        target=lambda: (
+            index.find_segments(
+                source_id="camera-b",
+                runtime_epoch_id="epoch-a",
+            ),
+            source_b_finished.set(),
+        )
+    )
+    snapshot_thread = threading.Thread(
+        target=lambda: (index.snapshot(), snapshot_finished.set())
+    )
+    source_b_thread.start()
+    snapshot_thread.start()
+    try:
+        assert source_b_finished.wait(timeout=0.25)
+        assert snapshot_finished.wait(timeout=0.25)
+    finally:
+        allow_refresh.set()
+    for thread in (source_a_thread, source_b_thread, snapshot_thread):
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+
+def test_catalog_refresh_publishes_copy_on_write_version(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(root)
+    index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
+    catalog = index._catalogs[("camera-01", "epoch-a")]
+    entries_before = catalog.entries
+    version_before = catalog.version
+
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[3, 4],
+    )
+    parent = first.parent
+    parent_stat = parent.stat()
+    os.utime(
+        parent,
+        ns=(parent_stat.st_atime_ns, parent_stat.st_mtime_ns + 1_000_000_000),
+    )
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    )
+
+    assert [segment.segment_id for segment in segments] == ["0001", "0002"]
+    assert catalog.entries is not entries_before
+    assert catalog.version > version_before
+
+
+def test_concurrent_same_catalog_publish_uses_version_check(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    index = _index(root)
+    index.find_segments(source_id="camera-01", runtime_epoch_id="epoch-a")
+    _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=[3, 4],
+    )
+    parent = first.parent
+    parent_stat = parent.stat()
+    os.utime(
+        parent,
+        ns=(parent_stat.st_atime_ns, parent_stat.st_mtime_ns + 1_000_000_000),
+    )
+    publish_barrier = threading.Barrier(2)
+    original_publish = index._publish_catalog
+
+    def synchronized_publish(*args, **kwargs):
+        publish_barrier.wait(timeout=2.0)
+        return original_publish(*args, **kwargs)
+
+    index._publish_catalog = synchronized_publish
+    results: list[list[str]] = []
+
+    def lookup() -> None:
+        segments = index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            allow_fallback=False,
+        )
+        results.append([segment.segment_id for segment in segments])
+
+    threads = [threading.Thread(target=lookup) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+    assert sorted(results) == [["0001", "0002"], ["0001", "0002"]]
+    assert int(index.snapshot()["catalog_publish_conflicts"]) == 1
+
+
+def test_parsed_row_cache_is_bounded_by_entries_and_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "cache"
+    for index_value in range(4):
+        _write_segment(
+            root,
+            epoch="epoch-a",
+            source_id="camera-01",
+            name=f"000{index_value}",
+            pts_values=list(range(index_value * 50, index_value * 50 + 50)),
+        )
+    index = _index(
+        root,
+        row_cache_max_entries=10,
+        row_cache_max_bytes=1_000,
+    )
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+    )
+    for segment in segments:
+        index.rows_for_segment(segment)
+    snapshot = index.snapshot()
+
+    assert int(snapshot["row_cache_entries"]) < 4
+    assert int(snapshot["row_cache_bytes"]) <= 1_000
+    assert int(snapshot["row_cache_byte_evictions"]) >= 1
+
+
 def test_index_retains_compact_source_clock_bounds_after_row_cache_eviction(
     tmp_path: Path,
 ) -> None:
