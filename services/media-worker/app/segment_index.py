@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import uuid
+import zlib
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -64,7 +65,10 @@ class FileIdentity:
 
     @classmethod
     def from_path(cls, path: Path) -> "FileIdentity":
-        stat = path.stat()
+        return cls.from_stat(path.stat())
+
+    @classmethod
+    def from_stat(cls, stat: os.stat_result) -> "FileIdentity":
         return cls(
             device=int(stat.st_dev),
             inode=int(stat.st_ino),
@@ -120,6 +124,7 @@ class _Catalog:
     root_generation: tuple[int, int] = (0, 0)
     last_refresh_at: float = 0.0
     last_reconcile_at: float = 0.0
+    next_reconcile_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -137,6 +142,11 @@ class SegmentReadPin:
         root: Path,
         segments: Iterable[RollingSegment],
         ttl_s: float,
+        expected_identities: dict[
+            Path,
+            tuple[FileIdentity, FileIdentity],
+        ]
+        | None = None,
         on_open: Callable[[str], None] | None = None,
         on_close: Callable[[str], None] | None = None,
     ) -> None:
@@ -145,6 +155,10 @@ class SegmentReadPin:
         self.ttl_s = max(1.0, float(ttl_s))
         self.token = uuid.uuid4().hex
         self.marker_path = self.root / READ_PIN_DIR / f"{self.token}.json"
+        self._expected_identities = {
+            path.resolve(strict=False): identities
+            for path, identities in (expected_identities or {}).items()
+        }
         self._on_open = on_open
         self._on_close = on_close
         self._active = False
@@ -196,6 +210,16 @@ class SegmentReadPin:
                         f"segment disappeared before read pin: {segment.directory}"
                     ) from exc
                 if metadata_stat.st_size <= 0 or video_stat.st_size != segment.size_bytes:
+                    raise SegmentPinRetryableError(
+                        f"segment identity changed before read pin: {segment.directory}"
+                    )
+                expected = self._expected_identities.get(
+                    segment.directory.resolve(strict=False)
+                )
+                if expected is not None and (
+                    FileIdentity.from_stat(metadata_stat) != expected[0]
+                    or FileIdentity.from_stat(video_stat) != expected[1]
+                ):
                     raise SegmentPinRetryableError(
                         f"segment identity changed before read pin: {segment.directory}"
                     )
@@ -423,6 +447,7 @@ class RollingSegmentIndex:
             root_generation = catalog.root_generation
             last_refresh_at = catalog.last_refresh_at
             last_reconcile_at = catalog.last_reconcile_at
+            next_reconcile_at = catalog.next_reconcile_at
         return (
             _Catalog(
                 source_id=source_id,
@@ -437,6 +462,7 @@ class RollingSegmentIndex:
                 root_generation=root_generation,
                 last_refresh_at=last_refresh_at,
                 last_reconcile_at=last_reconcile_at,
+                next_reconcile_at=next_reconcile_at,
             ),
             version,
         )
@@ -464,6 +490,7 @@ class RollingSegmentIndex:
             catalog.root_generation = candidate.root_generation
             catalog.last_refresh_at = candidate.last_refresh_at
             catalog.last_reconcile_at = candidate.last_reconcile_at
+            catalog.next_reconcile_at = candidate.next_reconcile_at
             catalog.version += 1
             with self._metrics_lock:
                 self._catalog_entry_count += len(catalog.entries) - old_entries
@@ -492,8 +519,8 @@ class RollingSegmentIndex:
                 if not candidate.initialized:
                     self._rebuild(candidate, now=now, initial=True)
                     changed = True
-                elif now - candidate.last_reconcile_at >= self.reconcile_interval_s:
-                    self._rebuild(candidate, now=now, initial=False)
+                elif now >= candidate.next_reconcile_at:
+                    self._refresh(candidate, now=now, reconcile=True)
                     changed = True
                 elif (
                     root_generation != candidate.root_generation
@@ -552,14 +579,47 @@ class RollingSegmentIndex:
         segments: Iterable[RollingSegment],
         *,
         ttl_s: float | None = None,
+        _expected_identities: dict[
+            Path,
+            tuple[FileIdentity, FileIdentity],
+        ]
+        | None = None,
     ) -> SegmentReadPin:
         return SegmentReadPin(
             root=self.root,
             segments=tuple(segments),
             ttl_s=self.read_pin_ttl_s if ttl_s is None else ttl_s,
+            expected_identities=_expected_identities,
             on_open=self._pin_opened,
             on_close=self._pin_closed,
         )
+
+    def _catalog_segment_identities(
+        self,
+        *,
+        source_id: str,
+        runtime_epoch_id: str,
+        segments: Iterable[RollingSegment],
+    ) -> dict[Path, tuple[FileIdentity, FileIdentity]]:
+        wanted = {
+            segment.directory.resolve(strict=False)
+            for segment in segments
+        }
+        if not wanted:
+            return {}
+        with self._locked(self._map_lock):
+            catalog = self._catalogs.get((source_id, runtime_epoch_id))
+        if catalog is None:
+            return {}
+        with self._locked(catalog.lock):
+            return {
+                indexed.segment.directory.resolve(strict=False): (
+                    indexed.metadata_identity,
+                    indexed.video_identity,
+                )
+                for indexed in catalog.entries.values()
+                if indexed.segment.directory.resolve(strict=False) in wanted
+            }
 
     @contextmanager
     def pin_source_segments(
@@ -595,7 +655,16 @@ class RollingSegmentIndex:
                         source_id=source_id,
                         runtime_epoch_id=runtime_epoch_id,
                     )
-                    pin = self.pin_segments(segments, ttl_s=ttl_s)
+                    expected_identities = self._catalog_segment_identities(
+                        source_id=source_id,
+                        runtime_epoch_id=runtime_epoch_id,
+                        segments=segments,
+                    )
+                    pin = self.pin_segments(
+                        segments,
+                        ttl_s=ttl_s,
+                        _expected_identities=expected_identities,
+                    )
                     with self._timed("pin_publish_ms"):
                         pin._activate_locked()
                 finally:
@@ -648,6 +717,11 @@ class RollingSegmentIndex:
                 **self._operation_counts,
             }
 
+    def _initial_reconcile_delay(self, catalog: _Catalog) -> float:
+        identity = f"{catalog.source_id}\0{catalog.runtime_epoch_id}".encode("utf-8")
+        fraction = zlib.crc32(identity) / float(2**32)
+        return self.reconcile_interval_s * (0.5 + fraction)
+
     def _rebuild(self, catalog: _Catalog, *, now: float, initial: bool) -> None:
         with self._timed("rebuild_ms"):
             candidates: set[Path] = set()
@@ -675,64 +749,104 @@ class RollingSegmentIndex:
             catalog.containers = containers
             catalog.pending = set()
             catalog.failed_identities = {}
-            for metadata_path in candidates:
-                self._refresh_candidate(catalog, metadata_path)
+            for manifest_path in candidates:
+                self._refresh_candidate(catalog, manifest_path)
+                # Atomically published segment directories are immutable
+                # leaves. Tracking only their discovery parents keeps steady
+                # refresh work independent of retained segment count.
+                catalog.containers.pop(manifest_path.parent, None)
             missing = previous - candidates
-            for metadata_path in missing:
-                self._remove_entry(catalog, metadata_path)
+            for manifest_path in missing:
+                self._remove_entry(catalog, manifest_path)
             catalog.initialized = True
             catalog.generation += 1
             catalog.root_generation = self._read_root_generation()
             catalog.last_refresh_at = now
             catalog.last_reconcile_at = now
+            catalog.next_reconcile_at = now + (
+                self._initial_reconcile_delay(catalog)
+                if initial
+                else self.reconcile_interval_s
+            )
             self._increment_stat(
                 "initial_scans" if initial else "reconciliations"
             )
 
-    def _refresh(self, catalog: _Catalog, *, now: float) -> None:
+    def _refresh(
+        self,
+        catalog: _Catalog,
+        *,
+        now: float,
+        reconcile: bool = False,
+    ) -> None:
         with self._timed("refresh_ms"):
-            self._increment_stat("refreshes")
-            known_candidates = set(catalog.entries) | set(catalog.pending)
-            self._record_count("scanned_known", len(known_candidates))
-            for metadata_path in tuple(known_candidates):
-                self._refresh_candidate(catalog, metadata_path)
+            self._increment_stat("reconciliations" if reconcile else "refreshes")
+            # Final directories are immutable after atomic publication. Only
+            # incomplete/invalid manifests need payload identity retries on a
+            # steady refresh; selected segments are fenced again at read-pin
+            # publication.
+            pending_candidates = tuple(catalog.pending)
+            self._record_count("scanned_known", len(pending_candidates))
+            for manifest_path in pending_candidates:
+                self._refresh_candidate(catalog, manifest_path)
 
             queue: list[Path] = []
+            queued: set[Path] = set()
+
+            def enqueue(path: Path) -> None:
+                resolved = path.resolve(strict=False)
+                if resolved not in queued:
+                    queue.append(resolved)
+                    queued.add(resolved)
+
+            def remove_tree(path: Path) -> None:
+                resolved = path.resolve(strict=False)
+                for tracked in tuple(catalog.containers):
+                    if self._is_relative_to(tracked, resolved):
+                        catalog.containers.pop(tracked, None)
+                known = set(catalog.entries) | set(catalog.pending)
+                for manifest_path in known:
+                    if not self._is_relative_to(manifest_path, resolved):
+                        continue
+                    catalog.pending.discard(manifest_path)
+                    catalog.failed_identities.pop(manifest_path, None)
+                    self._remove_entry(catalog, manifest_path)
+
             known_roots = self._candidate_source_roots(
                 source_id=catalog.source_id,
                 runtime_epoch_id=catalog.runtime_epoch_id,
             )
             for source_root in known_roots:
                 if source_root.exists() and source_root not in catalog.containers:
-                    queue.append(source_root)
+                    enqueue(source_root)
             for container, previous_mtime in tuple(catalog.containers.items()):
                 current_mtime = self._directory_mtime(container)
                 if current_mtime == 0:
-                    catalog.containers.pop(container, None)
+                    remove_tree(container)
                     continue
-                if current_mtime != previous_mtime:
-                    queue.append(container)
+                if reconcile or current_mtime != previous_mtime:
+                    enqueue(container)
 
             visited = 0
-            queued = set(queue)
+            processed: set[Path] = set()
             while queue:
                 container = queue.pop(0)
                 queued.discard(container)
+                if container in processed:
+                    continue
+                processed.add(container)
                 current_mtime = self._directory_mtime(container)
                 if current_mtime == 0:
+                    remove_tree(container)
                     continue
                 catalog.containers[container] = current_mtime
-                manifest_path = container / SEGMENT_MANIFEST_FILE
-                if manifest_path.exists():
-                    self._refresh_candidate(
-                        catalog,
-                        manifest_path.resolve(strict=False),
-                    )
                 try:
                     children = list(os.scandir(container))
                 except OSError:
                     catalog.containers[container] = -1
                     continue
+                child_directories: set[Path] = set()
+                current_manifests: set[Path] = set()
                 for child in children:
                     visited += 1
                     if visited > self.max_scan_entries:
@@ -741,18 +855,50 @@ class RollingSegmentIndex:
                     if not child.is_dir(follow_symlinks=False):
                         continue
                     child_path = Path(child.path).resolve(strict=False)
-                    if child_path not in catalog.containers:
-                        catalog.containers[child_path] = self._directory_mtime(child_path)
-                        if child_path not in queued:
-                            queue.append(child_path)
-                            queued.add(child_path)
+                    child_directories.add(child_path)
+                    manifest_path = (
+                        child_path / SEGMENT_MANIFEST_FILE
+                    ).resolve(strict=False)
+                    if manifest_path.is_file():
+                        current_manifests.add(manifest_path)
+                        catalog.containers.pop(child_path, None)
+                        if (
+                            manifest_path not in catalog.entries
+                            or manifest_path in catalog.pending
+                        ):
+                            self._refresh_candidate(catalog, manifest_path)
+                        continue
+                    previous_child_mtime = catalog.containers.get(child_path)
+                    child_mtime = self._directory_mtime(child_path)
+                    if child_mtime == 0:
+                        remove_tree(child_path)
+                        continue
+                    catalog.containers[child_path] = child_mtime
+                    if (
+                        reconcile
+                        or previous_child_mtime is None
+                        or previous_child_mtime != child_mtime
+                    ):
+                        enqueue(child_path)
+
+                direct_known = {
+                    manifest_path
+                    for manifest_path in set(catalog.entries) | set(catalog.pending)
+                    if manifest_path.parent.parent == container
+                }
+                self._record_count("scanned_known", len(direct_known))
+                for missing_manifest in direct_known - current_manifests:
+                    catalog.pending.discard(missing_manifest)
+                    catalog.failed_identities.pop(missing_manifest, None)
+                    self._remove_entry(catalog, missing_manifest)
             # Retention advances one root-wide generation after deleting segments.
-            # Incremental refresh has already revalidated every known metadata path
-            # and walked changed containers, so acknowledge that generation here;
-            # otherwise every lookup would repeat the same refresh until the next
-            # full reconcile.
+            # Membership comparison on changed discovery parents has already
+            # removed deleted immutable leaves, so acknowledge that generation.
             catalog.root_generation = self._read_root_generation()
             catalog.last_refresh_at = now
+            if reconcile:
+                catalog.last_reconcile_at = now
+                catalog.next_reconcile_at = now + self.reconcile_interval_s
 
     def _refresh_candidate(self, catalog: _Catalog, manifest_path: Path) -> None:
         try:
