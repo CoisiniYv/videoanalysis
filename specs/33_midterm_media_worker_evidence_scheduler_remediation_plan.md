@@ -1453,3 +1453,29 @@ currently unused flag.
 Finish only after all Definition Of Done tokens and two comparable 60-source
 closure artifacts pass.
 ```
+
+## 15. 2026-07-21 Phase 4 Reopen And Phase 6 Checkpoint
+
+Candidate B 的 10 分钟短测通过，但同配置 1 小时正式测失败，不能关闭
+Phase 6。正式 artifact 为：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_admissionfix_1h_20260721T092938Z
+```
+
+正式窗口 5,778 个任务中 4,921 materialized、857 attempt=0 expired；
+oldest-ready p95=299.06s。输入 60/60、8.0246 fps、零 send/queue/raw loss，
+因此失败归于 media-worker 持续服务率。实测 tick-gap p95=7.40s、remux
+p95=12/12、WIP p95=20/20、真实 process-pool wait p95=3.65s。
+
+Phase 4 同时保持 reopened：一次正常 lane-full 已正确执行 0.523s fenced
+retry，但另一个已 admitted 的 remux handoff 在 handoff 事务提交前被新连接
+用 `SKIP LOCKED` claim，误判 busy，约 120s 后发生 lease-expiry recovery。
+修复必须把 remux 的原始 MaterializationLease 继续传到 finalizer job，并使用
+exact owner/token/generation 的阻塞式行锁转移；普通 recovered/unleased handoff
+仍保留 `lease_token IS NULL` 与 `SKIP LOCKED` 语义。
+
+下一容量候选为 WIP=32、remux=16、rolling max-per-poll=16、finalizer
+threads=8、queue=8、process workers=8。先通过 10–15 分钟 A/B，且满足
+handoff lease-expiry recovery=0、attempt=0 expiry=0、oldest-ready 不累积，
+再重跑 1 小时。Candidate B 不得成为默认容量结论。

@@ -175,6 +175,71 @@ def test_scheduler_v2_finalizer_admission_returns_without_waiting(
     runtime.close(wait=True)
 
 
+def test_transferred_handoff_passes_exact_lease_into_finalizer_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker()
+    runtime = _resources(worker)
+    scheduler = worker._FinalizerSchedulerV2(
+        cfg=_cfg(),
+        runtime_resources=runtime,
+    )
+    _patch_finalizer_discovery(monkeypatch, worker)
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="remux-v2",
+        token="exact-token",
+        generation=7,
+        phase=worker.MaterializationPhase.FINALIZER_PENDING.value,
+    )
+    permit = runtime.work_budget.try_acquire("remux", owner=EVENT_ID)
+    assert permit is not None
+    observed: list[object] = []
+
+    def finalize(admission: object, **_kwargs: object) -> dict[str, object]:
+        observed.append(getattr(admission, "handoff_lease", None))
+        return {"updated": 1, "processed": True, "status": "finalized"}
+
+    monkeypatch.setattr(worker, "_run_finalizer_admission_v2", finalize)
+    transfers = {
+        EVENT_ID: worker._FinalizerHandoffTransfer(
+            lease=lease,
+            work_permit=permit,
+        )
+    }
+    assert scheduler.admit_metadata(
+        object(),
+        sink_dir="/tmp/sink",
+        metadata_files=[
+            {
+                "event_id": EVENT_ID,
+                "_meta_dir": "/tmp/sink/event",
+                "_finalizer_phase": {
+                    "handoff_persisted_at": "2026-07-20T00:00:00+00:00"
+                },
+            }
+        ],
+        scan_stats={},
+        processed_dirs=set(),
+        processed_state_path=None,
+        candidate_dirs=None,
+        invalid_output_failures=None,
+        stability_checks=1,
+        cleanup_replay_sink_output_enabled=True,
+        replay_sink_output_max_bytes=0,
+        transferred_handoffs=transfers,
+    ) == 1
+
+    deadline = time.monotonic() + 2
+    while scheduler.snapshot()["active"] and time.monotonic() < deadline:
+        scheduler.drain_completed(object())
+        time.sleep(0.01)
+    assert observed == [lease]
+    assert transfers == {}
+    assert runtime.work_budget.snapshot()["active"] == 0
+    runtime.close(wait=True)
+
+
 def test_lifecycle_recovery_is_global_and_ignores_current_admission_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

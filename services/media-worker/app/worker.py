@@ -2302,6 +2302,7 @@ def _claim_media_finalization(
     event_id: str,
     sink_path: str,
     worker_id: str,
+    expected_lease: MaterializationLease | None = None,
 ) -> dict[str, object]:
     try:
         return claim_finalizer_task(
@@ -2314,6 +2315,7 @@ def _claim_media_finalization(
                 _materialization_timeout_s()
                 or float(os.getenv("ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS", "120")),
             ),
+            expected_lease=expected_lease,
         )
     except Exception as exc:
         logger.exception("media_finalization_claim_failed event_id=%s", event_id)
@@ -6298,6 +6300,7 @@ def _finalize_one(
     shutdown_controller: ShutdownController | None = None,
     bundle_process_pool: _FinalizerProcessPool | None = None,
     database_url: str = "",
+    handoff_lease: MaterializationLease | None = None,
 ) -> _FinalizeOneResult:
     finalize_started = time.monotonic()
     probe_before = _probe_metrics_snapshot()
@@ -6316,6 +6319,7 @@ def _finalize_one(
             event_id=event_id,
             sink_path=meta_dir,
             worker_id=finalizer_worker_id,
+            expected_lease=handoff_lease,
         )
         claim_wait_ms = int((time.monotonic() - claim_started) * 1000)
         claim_status = str(claim_result.get("status") or "")
@@ -8039,6 +8043,7 @@ class _FinalizerJob:
     worker_id: str
     phase_diagnostics: dict[str, object]
     schedule_row: dict
+    handoff_lease: MaterializationLease | None = None
 
 
 class _FinalizerProcessPool:
@@ -8116,6 +8121,7 @@ class _FinalizerAdmissionV2:
     phase_diagnostics: dict[str, object] | None
     finalizer_submitted_at: str
     finalizer_submitted_monotonic: float
+    handoff_lease: MaterializationLease | None = None
 
 
 @dataclass
@@ -8265,6 +8271,7 @@ def _run_finalizer_admission_v2(
             worker_id=admission.worker_id,
             phase_diagnostics=phase_diagnostics,
             schedule_row=admission.schedule_row,
+            handoff_lease=admission.handoff_lease,
         )
         raw_result = _process_single_finalizer_job(
             job,
@@ -8676,6 +8683,7 @@ class _FinalizerSchedulerV2:
                     phase_diagnostics=phase_diagnostics,
                     finalizer_submitted_at=submitted_at,
                     finalizer_submitted_monotonic=submitted_monotonic,
+                    handoff_lease=(transfer.lease if transfer is not None else None),
                 )
                 if (
                     transfer is not None
@@ -9549,6 +9557,7 @@ def _process_single_finalizer_job(
                     cleanup_replay_sink_output_statuses
                 ),
                 phase_diagnostics=phase_diagnostics,
+                handoff_lease=job.handoff_lease,
                 preacquired_work_permit=preacquired_work_permit,
                 lease_heartbeat_supervisor=lease_heartbeat_supervisor,
                 shutdown_controller=shutdown_controller,
@@ -9585,6 +9594,7 @@ def _run_single_finalizer_job_with_connection(
     cleanup_replay_sink_output_enabled: bool,
     cleanup_replay_sink_output_statuses: tuple[str, ...],
     phase_diagnostics: dict[str, object],
+    handoff_lease: MaterializationLease | None,
     preacquired_work_permit: WorkPermit | None,
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None,
     shutdown_controller: ShutdownController | None,
@@ -9739,6 +9749,7 @@ def _run_single_finalizer_job_with_connection(
                 shutdown_controller=shutdown_controller,
                 bundle_process_pool=bundle_process_pool,
                 database_url=database_url,
+                handoff_lease=handoff_lease,
             )
             if outcome.throttle_decision:
                 pacer.apply_decision(outcome.throttle_decision)

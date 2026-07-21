@@ -1147,6 +1147,7 @@ def claim_finalizer_task(
     sink_output_path: str,
     worker_id: str,
     lease_seconds: float,
+    expected_lease: MaterializationLease | None = None,
 ) -> dict[str, object]:
     """Claim/transfer one task into finalizing with a durable fence."""
     terminal = sorted(
@@ -1215,6 +1216,134 @@ def claim_finalizer_task(
             if status == "claimed"
             else None
         )
+        return {"status": status, "claimed": status == "claimed", "lease": lease}
+
+    if expected_lease is not None:
+        if expected_lease.event_id != event_id:
+            raise ValueError("finalizer expected lease event_id mismatch")
+        if not expected_lease.schema_v2:
+            raise ValueError("finalizer expected lease must use lifecycle v2")
+        if not expected_lease.token or expected_lease.generation <= 0:
+            raise ValueError("finalizer expected lease fence is incomplete")
+
+        # A remux completion persists its handoff in the scheduler connection
+        # and can submit the finalizer before that transaction boundary has
+        # committed.  The generic SKIP LOCKED claim below correctly reports
+        # that row as busy, but treating this known ownership transfer as
+        # generic contention strands the durable handoff until lease expiry.
+        #
+        # Lock by the already-visible exact fence first.  That predicate also
+        # matches the pre-handoff remux row, so PostgreSQL waits for a
+        # concurrent handoff update instead of skipping it.  Only after the
+        # lock is held do we check finalizer_pending + immutable handoff.  A
+        # rollback, stale owner/token/generation, or competing finalizer still
+        # fails closed.
+        claim_row: dict[str, Any] | None = None
+        status = "missing"
+        params = {
+            "event_id": event_id,
+            "sink_output_path": sink_output_path,
+            "worker_id": worker_id,
+            "expected_owner": expected_lease.owner,
+            "expected_token": expected_lease.token,
+            "expected_generation": expected_lease.generation,
+            "lease_seconds": lease_seconds,
+        }
+        with conn.transaction():
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT event_id
+                    FROM evidence_tasks
+                    WHERE event_id = %(event_id)s::uuid
+                      AND materialization_lease_owner = %(expected_owner)s
+                      AND materialization_lease_token = %(expected_token)s
+                      AND materialization_lease_generation = %(expected_generation)s
+                    FOR UPDATE
+                    """,
+                    params,
+                )
+                locked = cur.fetchone()
+                if locked:
+                    cur.execute(
+                        """
+                        UPDATE evidence_tasks
+                        SET status = 'finalizing',
+                            materialization_status = 'materializing',
+                            materialization_phase = 'finalizing',
+                            materialization_phase_updated_at = now(),
+                            materialization_owner = 'media_finalizer',
+                            sink_output_path = %(sink_output_path)s,
+                            materialization_next_attempt_at = NULL,
+                            materialization_retry_reason = NULL,
+                            materialization_defer_reason = NULL,
+                            materialization_lease_owner = %(worker_id)s,
+                            materialization_lease_token = %(expected_token)s,
+                            materialization_lease_generation = %(expected_generation)s,
+                            materialization_lease_expires_at =
+                                now() + %(lease_seconds)s::double precision * interval '1 second',
+                            materialization_lease_heartbeat_at = now(),
+                            materialization_audit = COALESCE(materialization_audit, '{}'::jsonb)
+                                || jsonb_build_object(
+                                    'lifecycle_v2_finalizer_claim',
+                                    jsonb_build_object(
+                                        'worker_id', %(worker_id)s::text,
+                                        'claimed_at', now(),
+                                        'claim_mode', 'exact_handoff_transfer'
+                                    )
+                                ),
+                            updated_at = now()
+                        WHERE event_id = %(event_id)s::uuid
+                          AND materialization_status = 'materializing'
+                          AND materialization_phase = 'finalizer_pending'
+                          AND materialization_handoff <> '{}'::jsonb
+                          AND materialization_handoff->>'attempt_token'
+                                = %(expected_token)s
+                          AND materialization_lease_owner = %(expected_owner)s
+                          AND materialization_lease_token = %(expected_token)s
+                          AND materialization_lease_generation = %(expected_generation)s
+                        RETURNING materialization_lease_token,
+                                  materialization_lease_generation
+                        """,
+                        params,
+                    )
+                    claim_row = cur.fetchone()
+                if claim_row:
+                    status = "claimed"
+                else:
+                    cur.execute(
+                        """
+                        SELECT materialization_status
+                        FROM evidence_tasks
+                        WHERE event_id = %(event_id)s::uuid
+                        """,
+                        params,
+                    )
+                    current = cur.fetchone()
+                    if current is None:
+                        status = "missing"
+                    elif str(current.get("materialization_status") or "") in terminal:
+                        status = "terminal"
+                    else:
+                        status = "busy"
+        lease = None
+        if claim_row and status == "claimed":
+            lease = MaterializationLease(
+                event_id=event_id,
+                owner=worker_id,
+                token=str(claim_row.get("materialization_lease_token") or ""),
+                generation=int(
+                    claim_row.get("materialization_lease_generation") or 0
+                ),
+                phase=MaterializationPhase.FINALIZING.value,
+            )
+            _project_event(
+                conn,
+                event_id=event_id,
+                materialization_status=MaterializationStatus.RUNNING.value,
+                phase=MaterializationPhase.FINALIZING.value,
+                sink_output_path=sink_output_path,
+            )
         return {"status": status, "claimed": status == "claimed", "lease": lease}
 
     new_token = str(uuid.uuid4())

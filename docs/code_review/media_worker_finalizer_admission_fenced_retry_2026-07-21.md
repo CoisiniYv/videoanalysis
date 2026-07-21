@@ -203,3 +203,100 @@ Broader targeted suite:                    346 passed, 6 skipped
 
 正式运行完成后，本文追加短测/1 小时 artifact、门禁结果、配置恢复和提交
 哈希。
+
+## 9. Candidate B 实测结果
+
+### 9.1 10 分钟短测
+
+Artifact：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_admissionfix_ab10m2_20260721T090841Z
+```
+
+正式采样 10 分钟，60/60 路可见，平均有效帧率 8.0447 fps。正式窗口
+976/976 个任务均 materialized；含 warmup/postfill 共 1,017/1,017 个视频通过
+窗口、帧率和 8090 detail/timeline/annotation/bbox/person-context 校验。短测
+candidates=1,017、admitted=1,017、handoff recovery=0、duplicate=0，
+oldest-ready p95=12.77s、max=20.50s。
+
+短测唯一业务门禁失败为 `adaface_roi_watchlist_events_zero`，与 2026-07-20
+基线相同，不属于 scheduler 变更。
+
+### 9.2 首次 1 小时正式测
+
+Artifact：
+
+```text
+/data/video-analytics/artifacts/pressure60_8p1_admissionfix_1h_20260721T092938Z
+```
+
+正式窗口为北京时间 `2026-07-21 17:32:48–18:32:48`，配置为 WIP=20、
+remux=12、finalizer threads=8、queue=8、process workers=4、rolling
+max-per-poll=8。输入门通过：60/60 路、平均有效帧率 8.0246 fps，Savant
+send failure、forwarder queue-full、raw fanout drop/failure 均为 0。
+
+正式窗口 5,778 个任务：
+
+- 4,921 materialized，85.17%；
+- 857 expired，14.83%，全部 `materialization_attempt_count=0`；
+- drain 后 active task/lease/finalizer_pending 均为 0。
+
+吞吐门失败的阶段证据：
+
+- ready-to-remux claim p50=215.23s、p95=285.70s；
+- scheduler tick gap p95=7.40s、max=17.37s；
+- remux lane p95=12/12，WIP p95=20/20；
+- finalizer process-pool wait p95=3.65s、max=9.15s；
+- oldest-ready p95=299.06s，随后通过 deadline 淘汰维持有界。
+
+含 warmup/postfill 共保留 5,002 个 bundle，5,002/5,002 通过视频窗口与
+帧率检查，也全部通过 8090 detail/timeline/annotation/bbox/person-context；
+轨迹持久化 578,373 条，60/60 source，loss=0，duplicate bundle=0。
+
+因此 Candidate B 只能证明短窗口正确，不能作为 60 路持续容量配置。
+
+## 10. 正式测发现的第二个 Phase 4 竞态
+
+本次真实命中两条互相独立的路径：
+
+1. `f488fced-a603-470f-9aa8-d38a3fd55f07` 在 finalizer lane full 时执行
+   fenced retry，退避 0.523s，lease 被立即归还，随后正常 materialized；
+2. `b16bf5ba-de5d-4e30-806d-3e84540de777` 的 handoff 于
+   `09:50:37.680716Z` 持久化，`09:50:38` 已进入 admitted batch，但
+   finalizer 新连接在 scheduler handoff 事务提交前使用 `SKIP LOCKED`
+   重新 claim，得到 `claim_busy`。flight 完成后没有 fenced convergence，
+   原 lease 于 `09:52:40.867895Z` 到期并被 recovery 回收。
+
+根因是原始 `MaterializationLease` 虽已随 WorkPermit 到达 admission scheduler，
+却没有继续传入 finalizer job 的 claim 边界。修复方式是：
+
+- `_FinalizerAdmissionV2` / `_FinalizerJob` 携带原始 handoff lease；
+- `claim_finalizer_task(..., expected_lease=...)` 先仅按
+  owner/token/generation 执行阻塞式 `SELECT ... FOR UPDATE`；
+- 获得行锁后再验证 `finalizer_pending`、immutable handoff 和 attempt token，
+  并沿相同 token/generation 转移 owner/phase；
+- 无 lease 的 recovered handoff 仍使用原有 `SKIP LOCKED` 普通领取，不允许
+  抢占其他有效 lease。
+
+真实双连接 PostgreSQL 回归测试覆盖“handoff 更新未提交时 claim 必须等待，
+提交后 exact fence 成功转移”，避免用普通 mock 掩盖事务竞态。
+
+## 11. Candidate C 容量依据
+
+下一组 10–15 分钟 A/B 使用：
+
+| 参数 | Candidate B | Candidate C |
+| --- | ---: | ---: |
+| shared WIP | 20 | 32 |
+| remux workers | 12 | 16 |
+| rolling max-per-poll | 8 | 16 |
+| finalizer threads | 8 | 8 |
+| finalizer queue | 8 | 8 |
+| finalizer process workers | 4 | 8 |
+
+queue 仍保持 8，PostgreSQL 继续是持久队列。max-per-poll=16 用于覆盖实测
+7.40s 的 p95 tick gap；WIP=32 允许 16 个 remux 与最多 16 个 finalizer
+lane owner 同时存在；process workers=8 则由已修正埋点的 3.65s p95 wait
+直接驱动。Candidate C 短测只有在 attempt=0 expiry=0、oldest-ready 不累积、
+handoff lease-expiry recovery=0 后才能进入新的 1 小时正式测。

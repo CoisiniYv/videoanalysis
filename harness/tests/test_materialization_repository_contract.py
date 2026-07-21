@@ -7,11 +7,13 @@ them after each test; it never targets the normal runtime database by default.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import importlib.util
 import os
 from pathlib import Path
 import sys
+import time
 import uuid
 
 import psycopg
@@ -304,10 +306,15 @@ def test_durable_handoff_survives_retry_and_fences_previous_owner(conn) -> None:
         sink_output_path="/tmp/phase1-attempt",
         worker_id="finalizer-a",
         lease_seconds=30,
+        expected_lease=rolling,
     )
     assert claimed["status"] == "claimed"
     finalizer = claimed["lease"]
     assert isinstance(finalizer, repository.MaterializationLease)
+    exact_claim = _task(connection, event_id)["materialization_audit"][
+        "lifecycle_v2_finalizer_claim"
+    ]
+    assert exact_claim["claim_mode"] == "exact_handoff_transfer"
     assert repository.fail_rolling_task(
         connection,
         rolling,
@@ -382,6 +389,66 @@ def test_durable_handoff_survives_retry_and_fences_previous_owner(conn) -> None:
         winner,
         reason="stable_metadata_invalid",
     ) is True
+
+
+def test_exact_handoff_claim_waits_for_persist_transaction(conn) -> None:
+    connection, created_events = conn
+    database_url = os.environ["MATERIALIZATION_REPOSITORY_TEST_DATABASE_URL"]
+    event_id = _seed_task(connection, created_events)
+    rolling = repository.claim_rolling_task(
+        connection,
+        event_id=event_id,
+        worker_id="rolling-race",
+        phase="remux_running",
+        lease_seconds=30,
+    )
+    assert rolling is not None
+    handoff = {
+        "attempt_token": rolling.token,
+        "source_id": "source-phase1",
+        "runtime_epoch_id": "epoch-phase1",
+        "requested_window": {"start_pts": 1, "end_pts": 2},
+        "selected_segment_ids": ["segment-race"],
+        "staging_path": "/tmp/phase1-race",
+        "canonical_path": "/tmp/phase1-race/raw_clip.mov",
+        "size": 321,
+        "mtime_ns": 654,
+    }
+    persist_conn = psycopg.connect(database_url, autocommit=False)
+    claim_conn = psycopg.connect(database_url, autocommit=True)
+    try:
+        assert repository.persist_finalizer_handoff(
+            persist_conn,
+            rolling,
+            sink_output_path="/tmp/phase1-race",
+            handoff=handoff,
+            lease_seconds=30,
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                repository.claim_finalizer_task,
+                claim_conn,
+                event_id=event_id,
+                sink_output_path="/tmp/phase1-race",
+                worker_id="finalizer-race",
+                lease_seconds=30,
+                expected_lease=rolling,
+            )
+            time.sleep(0.15)
+            assert future.done() is False
+            persist_conn.commit()
+            claimed = future.result(timeout=3)
+        assert claimed["status"] == "claimed"
+        exact_lease = claimed["lease"]
+        assert isinstance(exact_lease, repository.MaterializationLease)
+        assert exact_lease.token == rolling.token
+        assert exact_lease.generation == rolling.generation
+        assert exact_lease.owner == "finalizer-race"
+    finally:
+        if not persist_conn.closed:
+            persist_conn.rollback()
+        persist_conn.close()
+        claim_conn.close()
 
 
 def test_deadline_and_lease_recovery_decision_table(conn) -> None:
