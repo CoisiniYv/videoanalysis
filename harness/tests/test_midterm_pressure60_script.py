@@ -617,6 +617,31 @@ def test_profile_propagates_rolling_cache_publication_commit_slots() -> None:
     assert "--rolling-cache-publication-commit-slots 2" in completed.stdout
 
 
+def test_profile_propagates_rolling_cache_publication_final_parent_group_limit() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "publication-final-parent-group-dry-run",
+            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "16",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert (
+        "rolling_cache_publication_final_parent_group_limit=16"
+        in completed.stdout
+    )
+    assert (
+        "--rolling-cache-publication-final-parent-group-limit 16"
+        in completed.stdout
+    )
+
+
 def test_profile_propagates_rolling_cache_publication_file_sync_mode() -> None:
     completed = subprocess.run(
         ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
@@ -692,6 +717,29 @@ def test_pressure_cli_bounds_rolling_cache_publication_commit_slots() -> None:
         module.parse_args(["--rolling-cache-publication-commit-slots", "5"])
     with pytest.raises(SystemExit):
         module.parse_args(["--rolling-cache-publication-commit-slots", "-1"])
+
+
+def test_pressure_cli_bounds_rolling_cache_publication_final_parent_group_limit() -> None:
+    module = _load_module()
+
+    assert (
+        module.parse_args([]).rolling_cache_publication_final_parent_group_limit
+        == 1
+    )
+    assert (
+        module.parse_args(
+            ["--rolling-cache-publication-final-parent-group-limit", "16"]
+        ).rolling_cache_publication_final_parent_group_limit
+        == 16
+    )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            ["--rolling-cache-publication-final-parent-group-limit", "0"]
+        )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            ["--rolling-cache-publication-final-parent-group-limit", "33"]
+        )
 
 
 def test_pressure_cli_bounds_rolling_cache_publication_file_sync_mode() -> None:
@@ -6351,6 +6399,7 @@ def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_d
         rolling_cache_evidence=True,
         rolling_cache_publication_workers=2,
         rolling_cache_publication_commit_slots=2,
+        rolling_cache_publication_final_parent_group_limit=16,
         rolling_cache_publication_file_sync_mode="fdatasync",
         rolling_cache_publication_metadata_layout="metadata_only",
         pressure_rolling_cache_retention_s=3840,
@@ -6360,6 +6409,7 @@ def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_d
         "ROLLING_CACHE_SEGMENT_SECONDS": "8",
         "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
         "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
+        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "16",
         "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
         "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "metadata_only",
         "ROLLING_CACHE_FPS": "23.976024",
@@ -6371,6 +6421,7 @@ def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_d
         "ROLLING_CACHE_SEGMENT_SECONDS": "4",
         "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
         "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "0",
+        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "1",
         "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fsync",
         "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "split",
         "ROLLING_CACHE_FPS": "24",
@@ -6523,6 +6574,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         rolling_cache_evidence=True,
         rolling_cache_publication_workers=2,
         rolling_cache_publication_commit_slots=2,
+        rolling_cache_publication_final_parent_group_limit=16,
         rolling_cache_publication_file_sync_mode="fdatasync",
         rolling_cache_publication_metadata_layout="metadata_only",
         rtsp_uri="rtsp://shared.example/live/24fps",
@@ -6548,6 +6600,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
             "ROLLING_CACHE_RETENTION_SECONDS": str(expected_retention),
             "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
             "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
+            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "16",
             "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
             "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "metadata_only",
         },
@@ -6573,6 +6626,9 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     )
     assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_WORKERS"] == "2"
     assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS"] == "2"
+    assert calls[0]["env"][
+        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT"
+    ] == "16"
     assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"] == (
         "fdatasync"
     )
@@ -6584,6 +6640,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     assert summary["rolling_cache_retention_seconds"] == expected_retention
     assert summary["rolling_cache_publication_workers"] == 2
     assert summary["rolling_cache_publication_commit_slots"] == 2
+    assert summary["rolling_cache_publication_final_parent_group_limit"] == 16
     assert summary["rolling_cache_publication_file_sync_mode"] == "fdatasync"
     assert summary["rolling_cache_publication_metadata_layout"] == "metadata_only"
     assert summary["dependency_services"] == [
@@ -7258,7 +7315,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publication_queue_depth_at_submit=1 "
                     "publication_worker_index=1 "
                     "publication_prepare_group_size=1 "
-                    "publication_prepare_group_position=1",
+                    "publication_prepare_group_position=1 "
+                    "publication_final_parent_group_size=1 "
+                    "publication_final_parent_group_position=1 "
+                    "publication_final_parent_group_unique_parents=1 "
+                    "publication_final_parent_group_fsync_count=1 "
+                    "publication_final_parent_group_fsync_saved=0 "
+                    "publication_final_parent_fence_wait_ms=1",
                 "2026-07-22 02:03:12,901 INFO rolling_cache_sink.gst "
                 "segment published source=source-a epoch=epoch-a session=session-a "
                 "segment=segment-b frames=84 bytes=1000 "
@@ -7288,7 +7351,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publication_queue_depth_at_submit=36 "
                     "publication_worker_index=1 "
                     "publication_prepare_group_size=16 "
-                    "publication_prepare_group_position=12",
+                    "publication_prepare_group_position=12 "
+                    "publication_final_parent_group_size=16 "
+                    "publication_final_parent_group_position=12 "
+                    "publication_final_parent_group_unique_parents=15 "
+                    "publication_final_parent_group_fsync_count=15 "
+                    "publication_final_parent_group_fsync_saved=1 "
+                    "publication_final_parent_fence_wait_ms=18",
                 "2026-07-22 02:03:13,901 INFO rolling_cache_sink.gst "
                 "publication dispatcher stopped drained=True "
                 "publication_capacity=128 publication_worker_count=2 "
@@ -7308,6 +7377,11 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publication_prepare_group_limit=32 "
                 "publication_prepare_group_total=20 "
                 "publication_prepare_group_size_max=16 "
+                "publication_final_parent_group_limit=16 "
+                "publication_final_parent_group_total=20 "
+                "publication_final_parent_group_size_max=16 "
+                "publication_final_parent_fsync_total=180 "
+                "publication_final_parent_fsync_saved_total=20 "
                 "publication_prepare_service_ms_total=700 "
                 "publication_prepare_service_ms_max=4 "
                 "publication_commit_wait_ms_total=1500 "
@@ -7612,6 +7686,24 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         "rolling_cache_publication_prepare_group_position"
     ]["max"] == 12.0
     assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_size"
+    ]["max"] == 16.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_position"
+    ]["max"] == 12.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_unique_parents"
+    ]["max"] == 15.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_fsync_count"
+    ]["max"] == 15.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_fsync_saved"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_fence_wait_ms"
+    ]["max"] == 18.0
+    assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_worker_index"
     ]["max"] == 1.0
     assert summary["rolling_cache_sink_a"][
@@ -7632,6 +7724,21 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_prepare_group_size_max"
     ]["max"] == 16.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_limit"
+    ]["max"] == 16.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_total"
+    ]["max"] == 20.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_group_size_max"
+    ]["max"] == 16.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_fsync_total"
+    ]["max"] == 180.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_final_parent_fsync_saved_total"
+    ]["max"] == 20.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_prepare_service_ms_total"
     ]["max"] == 700.0

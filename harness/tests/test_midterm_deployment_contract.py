@@ -1119,6 +1119,9 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
             "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS"
         ] == "${ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS:-0}"
         assert service["environment"][
+            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT"
+        ] == "${ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT:-1}"
+        assert service["environment"][
             "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"
         ] == "${ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE:-fsync}"
         assert service["environment"][
@@ -1144,6 +1147,9 @@ def test_midterm_evidence_version_is_project_named() -> None:
     media_env = compose["services"]["media-worker"]["environment"]
 
     assert env_file["EVIDENCE_VERSION"] == "midterm"
+    assert (
+        env_file["ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT"] == "1"
+    )
     assert env_file["ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"] == "fsync"
     assert env_file["ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"] == "split"
     assert env_file["EVIDENCE_SCHEMA_VERSION"] == "2.0-midterm"

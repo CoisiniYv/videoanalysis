@@ -1929,6 +1929,293 @@ def test_publication_group_stage_error_keeps_fifo_error_continuation(
     ] == 0
 
 
+def test_final_parent_group_fsyncs_each_durable_item_before_fifo_renames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parent cohort is not the rejected multi-item preparation group.
+
+    Every item must finish its own regular-file and staging-directory fences
+    before the next item is staged.  Only then may the already-durable,
+    invisible directories be renamed in FIFO order and their distinct final
+    parents be fenced once each.  Callbacks remain blocked until the whole
+    cohort fence is complete.
+    """
+
+    def make_publisher(source_id: str, session_id: str) -> AtomicSegmentPublisher:
+        return AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=session_id,
+        )
+
+    blocker_publisher = make_publisher("camera-00", "s0000000000000000")
+    publisher_a = make_publisher("camera-01", "s1111111111111111")
+    publisher_b = make_publisher("camera-02", "s2222222222222222")
+
+    def make_fragment(publisher: AtomicSegmentPublisher, fragment_id: int):
+        fragment = publisher.prepare(fragment_id)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.extend(
+            [
+                {"source_id": publisher._source_id, "pts": fragment_id * 10 + 1},
+                {"source_id": publisher._source_id, "pts": fragment_id * 10 + 2},
+            ]
+        )
+        return fragment
+
+    blocker = make_fragment(blocker_publisher, 1)
+    fragments = [
+        make_fragment(publisher_a, 1),
+        make_fragment(publisher_b, 1),
+        make_fragment(publisher_a, 2),
+    ]
+    publishers = [publisher_a, publisher_b, publisher_a]
+    events: list[tuple[str, str]] = []
+    callbacks: list[str] = []
+    blocker_fsync_entered = threading.Event()
+    release_blocker_fsync = threading.Event()
+    blocker_callback_entered = threading.Event()
+    release_blocker_callback = threading.Event()
+    real_stage = publishing.AtomicSegmentPublisher.stage_publication
+    real_fsync = publishing.os.fsync
+    real_replace = publishing.os.replace
+
+    def record_stage(self, fragment):
+        events.append(("stage", fragment.segment_id))
+        return real_stage(self, fragment)
+
+    def record_fsync(fd: int) -> None:
+        path = str(Path(f"/proc/self/fd/{fd}").resolve())
+        events.append(("fsync", path))
+        if path == str(blocker.staging_dir / "metadata.json"):
+            blocker_fsync_entered.set()
+            assert release_blocker_fsync.wait(timeout=2)
+        real_fsync(fd)
+
+    def record_replace(source, destination) -> None:
+        events.append(("replace", f"{source}->{destination}"))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(
+        publishing.AtomicSegmentPublisher,
+        "stage_publication",
+        record_stage,
+    )
+    monkeypatch.setattr(publishing.os, "fsync", record_fsync)
+    monkeypatch.setattr(publishing.os, "replace", record_replace)
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        prepare_group_limit=1,
+        final_parent_group_limit=3,
+        worker_count=1,
+        thread_name="test-final-parent-group",
+    )
+    dispatcher.submit(
+        source_id="camera-00",
+        publisher=blocker_publisher,
+        fragment=blocker,
+        on_published=lambda _item, _path: (
+            events.clear(),
+            blocker_callback_entered.set(),
+            release_blocker_callback.wait(timeout=2),
+        ),
+    )
+    assert blocker_fsync_entered.wait(timeout=1)
+    for publisher, fragment in zip(publishers, fragments, strict=True):
+        dispatcher.submit(
+            source_id=publisher._source_id,
+            publisher=publisher,
+            fragment=fragment,
+            on_published=lambda item, _path: (
+                events.append(("callback", item.segment_id)),
+                callbacks.append(item.segment_id),
+            ),
+            on_publish_error=lambda _item, error: pytest.fail(str(error)),
+        )
+    release_blocker_fsync.set()
+    assert blocker_callback_entered.wait(timeout=1)
+    release_blocker_callback.set()
+
+    assert dispatcher.close(timeout_s=3) is True
+    segment_ids = [fragment.segment_id for fragment in fragments]
+    event_names = [kind for kind, _value in events]
+    stage_indexes = {
+        value: index
+        for index, (kind, value) in enumerate(events)
+        if kind == "stage"
+    }
+    partial_fsync_indexes = [
+        index
+        for index, (kind, value) in enumerate(events)
+        if kind == "fsync" and Path(value).name.endswith(".partial")
+    ]
+    replace_indexes = [
+        index for index, (kind, _value) in enumerate(events) if kind == "replace"
+    ]
+    parent_fsync_events = [
+        (index, value)
+        for index, (kind, value) in enumerate(events)
+        if kind == "fsync" and Path(value).name == "segments"
+    ]
+    callback_indexes = [
+        index for index, (kind, _value) in enumerate(events) if kind == "callback"
+    ]
+
+    assert list(stage_indexes) == segment_ids
+    assert len(partial_fsync_indexes) == 3
+    assert stage_indexes[segment_ids[0]] < partial_fsync_indexes[0]
+    assert partial_fsync_indexes[0] < stage_indexes[segment_ids[1]]
+    assert stage_indexes[segment_ids[1]] < partial_fsync_indexes[1]
+    assert partial_fsync_indexes[1] < stage_indexes[segment_ids[2]]
+    assert stage_indexes[segment_ids[2]] < partial_fsync_indexes[2]
+    assert partial_fsync_indexes[-1] < replace_indexes[0]
+    assert [
+        Path(value.split("->", 1)[1]).name
+        for kind, value in events
+        if kind == "replace"
+    ] == segment_ids
+    assert len(parent_fsync_events) == 2
+    assert replace_indexes[-1] < parent_fsync_events[0][0]
+    assert parent_fsync_events[-1][0] < callback_indexes[0]
+    assert callbacks == segment_ids
+    assert event_names.count("callback") == 3
+    assert all(fragment.final_dir.is_dir() for fragment in fragments)
+
+    for position, fragment in enumerate(fragments, start=1):
+        diagnostics = fragment.publication_diagnostics
+        assert diagnostics["publication_final_parent_group_size"] == 3
+        assert diagnostics["publication_final_parent_group_position"] == position
+        assert diagnostics["publication_final_parent_group_unique_parents"] == 2
+        assert diagnostics["publication_final_parent_group_fsync_count"] == 2
+        assert diagnostics["publication_final_parent_group_fsync_saved"] == 1
+        assert diagnostics["publication_final_parent_fence_wait_ms"] >= 0
+
+    snapshot = dispatcher.snapshot()
+    assert snapshot["final_parent_group_limit"] == 3
+    assert snapshot["final_parent_group_total"] == 2
+    assert snapshot["final_parent_group_size_max"] == 3
+    assert snapshot["final_parent_fsync_total"] == 3
+    assert snapshot["final_parent_fsync_saved_total"] == 1
+
+
+def test_final_parent_group_preserves_middle_rename_failure_and_fifo_continuation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def make_publisher(source_id: str, session_id: str) -> AtomicSegmentPublisher:
+        return AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=session_id,
+        )
+
+    blocker_publisher = make_publisher("camera-00", "s0000000000000000")
+    publishers = [
+        make_publisher("camera-01", "s1111111111111111"),
+        make_publisher("camera-02", "s2222222222222222"),
+        make_publisher("camera-03", "s3333333333333333"),
+    ]
+
+    def make_fragment(publisher: AtomicSegmentPublisher, fragment_id: int):
+        fragment = publisher.prepare(fragment_id)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append(
+            {"source_id": publisher._source_id, "pts": fragment_id + 1}
+        )
+        return fragment
+
+    blocker = make_fragment(blocker_publisher, 1)
+    fragments = [make_fragment(publisher, 1) for publisher in publishers]
+    bad = fragments[1]
+    blocker_fsync_entered = threading.Event()
+    release_blocker_fsync = threading.Event()
+    callbacks: list[str] = []
+    real_fsync = publishing.os.fsync
+    real_replace = publishing.os.replace
+
+    def blocking_fsync(fd: int) -> None:
+        path = str(Path(f"/proc/self/fd/{fd}").resolve())
+        if path == str(blocker.staging_dir / "metadata.json"):
+            blocker_fsync_entered.set()
+            assert release_blocker_fsync.wait(timeout=2)
+        real_fsync(fd)
+
+    def fail_middle_rename(source, destination) -> None:
+        if Path(source) == bad.staging_dir:
+            raise OSError("injected-middle-rename-failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "fsync", blocking_fsync)
+    monkeypatch.setattr(publishing.os, "replace", fail_middle_rename)
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        prepare_group_limit=1,
+        final_parent_group_limit=3,
+        worker_count=1,
+        thread_name="test-final-parent-group-error",
+    )
+    dispatcher.submit(
+        source_id="camera-00",
+        publisher=blocker_publisher,
+        fragment=blocker,
+    )
+    assert blocker_fsync_entered.wait(timeout=1)
+    for publisher, fragment in zip(publishers, fragments, strict=True):
+        dispatcher.submit(
+            source_id=publisher._source_id,
+            publisher=publisher,
+            fragment=fragment,
+            on_published=lambda item, _path: callbacks.append(
+                f"ok:{item.segment_id}"
+            ),
+            on_publish_error=lambda item, error: callbacks.append(
+                f"error:{item.segment_id}:{error}"
+            ),
+        )
+    release_blocker_fsync.set()
+
+    assert dispatcher.close(timeout_s=3) is True
+    assert callbacks == [
+        f"ok:{fragments[0].segment_id}",
+        f"error:{bad.segment_id}:injected-middle-rename-failure",
+        f"ok:{fragments[2].segment_id}",
+    ]
+    assert fragments[0].final_dir.is_dir()
+    assert bad.staging_dir.is_dir()
+    assert not bad.final_dir.exists()
+    assert fragments[2].final_dir.is_dir()
+    snapshot = dispatcher.snapshot()
+    assert snapshot["completed_total"] == 3
+    assert snapshot["failed_total"] == 1
+    assert snapshot["outstanding"] == 0
+    assert snapshot["active"] == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"prepare_group_limit": 2},
+        {"worker_count": 2},
+    ),
+)
+def test_final_parent_group_rejects_combined_grouping_or_worker_variables(
+    overrides: dict[str, int],
+) -> None:
+    with pytest.raises(ValueError, match="final_parent_group_limit"):
+        publishing.BoundedPublicationDispatcher(
+            capacity=8,
+            final_parent_group_limit=3,
+            **overrides,
+        )
+
+
 def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(
     tmp_path: Path,
 ) -> None:
@@ -2403,6 +2690,7 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
         "SOURCE_ID_PREFIX",
         "ROLLING_CACHE_PUBLICATION_WORKERS",
         "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
         "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
         "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
     ):
@@ -2412,6 +2700,7 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert config.http_port == 8080
     assert config.publication_workers == 1
     assert config.publication_commit_slots == 0
+    assert config.publication_final_parent_group_limit == 1
     assert config.publication_file_sync_mode == "fsync"
     assert config.publication_metadata_layout == "split"
 
@@ -2457,6 +2746,36 @@ def test_config_rejects_unbounded_publication_commit_slots(
     with pytest.raises(
         ValueError,
         match="ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+    ):
+        SinkConfig.from_env()
+
+
+def test_config_accepts_bounded_publication_final_parent_group_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv(
+        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
+        "16",
+    )
+
+    assert SinkConfig.from_env().publication_final_parent_group_limit == 16
+
+
+@pytest.mark.parametrize("value", ("0", "33", "not-an-integer"))
+def test_config_rejects_unbounded_publication_final_parent_group_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv(
+        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
+        value,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
     ):
         SinkConfig.from_env()
 
