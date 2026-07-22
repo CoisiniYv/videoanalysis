@@ -63,6 +63,27 @@ def test_scheduler_cycle_observability_accounts_for_hidden_tick_time() -> None:
     )["cycle_total_ms"] == "unavailable"
 
 
+def test_scheduler_stage_timings_attribute_body_without_changing_work() -> None:
+    worker = _activate("media-worker", "app.worker")
+    clock_values = iter((1.0, 1.002, 2.0, 2.003))
+    timings = worker._SchedulerStageTimings(
+        clock=lambda: next(clock_values)
+    )
+
+    with timings.measure("lifecycle_recovery"):
+        pass
+    with timings.measure("remux_admission"):
+        pass
+
+    snapshot = timings.snapshot(tick_body_ms=12)
+
+    assert snapshot["tick_stage_lifecycle_recovery_ms"] == 2.0
+    assert snapshot["tick_stage_remux_admission_ms"] == 3.0
+    assert snapshot["tick_stage_accounted_ms"] == 5.0
+    assert snapshot["tick_stage_unattributed_ms"] == 7.0
+    assert snapshot["tick_stage_finalizer_scan_admission_ms"] == 0.0
+
+
 def test_remux_job_preserves_pre_pin_and_index_diagnostics(
     monkeypatch: Any,
     tmp_path: Path,

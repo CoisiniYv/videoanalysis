@@ -1993,6 +1993,118 @@ def test_rolling_cache_segment_visibility_accepts_jsonl_metadata(
     assert summary["metadata_visible_lag_s"]["p50"] == 0.5
 
 
+def test_rolling_cache_segment_visibility_attributes_tail_by_source_and_time_bucket(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, run_id="rolling_canary")
+    base_pts = 1_783_329_600_000_000_000
+
+    def write_segment(source_id: str, segment_id: str, last_pts: int, lag_s: float) -> None:
+        metadata_path = (
+            tmp_path
+            / "midterm"
+            / "epochs"
+            / "epoch-a"
+            / source_id
+            / "segments"
+            / segment_id
+            / "metadata.json"
+        )
+        metadata_path.parent.mkdir(parents=True)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "frames": [
+                        {"type": "VideoFrame", "pts": last_pts - 1_000_000_000},
+                        {"type": "VideoFrame", "pts": last_pts},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        visible_at_s = last_pts / 1_000_000_000 + lag_s
+        os.utime(metadata_path, (visible_at_s, visible_at_s))
+
+    write_segment("rolling_canary_00", "0001", base_pts, 0.5)
+    write_segment(
+        "rolling_canary_00",
+        "0002",
+        base_pts + 31_000_000_000,
+        3.0,
+    )
+    write_segment(
+        "rolling_canary_01",
+        "0003",
+        base_pts + 32_000_000_000,
+        12.0,
+    )
+
+    summary = module.collect_rolling_cache_segment_visibility(cfg, root=tmp_path)
+
+    assert summary["metadata_visible_lag_s_by_source"]["rolling_canary_00"][
+        "count"
+    ] == 2
+    assert summary["metadata_visible_lag_s_by_source"]["rolling_canary_01"][
+        "p95"
+    ] == 12.0
+    assert summary["metadata_visible_lag_threshold_counts"] == {
+        "over_2s": 2,
+        "over_5s": 1,
+        "over_10s": 1,
+    }
+    buckets = summary["metadata_visible_lag_s_by_visible_at_30s"]
+    assert sum(item["segment_count"] for item in buckets) == 3
+    assert summary["slowest_segments"][0]["source_id"] == "rolling_canary_01"
+    assert summary["slowest_segments"][0]["segment_id"] == "0003"
+    assert summary["slowest_segments"][0]["lag_s"] == 12.0
+
+
+def test_rolling_schedule_latency_summary_separates_policy_first_claim_and_retry() -> None:
+    module = _load_module()
+
+    class Result:
+        def fetchone(self):
+            return {
+                "count": 1007,
+                "retry_count": 54,
+                "policy_wait_p50_s": 14.0,
+                "policy_wait_p95_s": 14.0,
+                "ready_to_claim_count": 1007,
+                "ready_to_claim_p50_s": 0.6,
+                "ready_to_claim_p95_s": 12.0,
+                "first_claim_count": 953,
+                "first_claim_ready_to_claim_p95_s": 4.0,
+                "retried_claim_count": 54,
+                "retried_ready_to_claim_p95_s": 19.0,
+                "retry_delay_p95_s": 2.2,
+            }
+
+    class Conn:
+        def __init__(self) -> None:
+            self.query = ""
+
+        def execute(self, query, _params):
+            self.query = " ".join(query.split())
+            return Result()
+
+    conn = Conn()
+    summary = module.rolling_cache_schedule_latency_summary(
+        conn,
+        "rolling_canary",
+        sampling_start_event_ts_ms=123,
+    )
+
+    assert summary["status"] == "measured"
+    assert summary["policy_wait_p95_s"] == 14.0
+    assert summary["first_claim_ready_to_claim_p95_s"] == 4.0
+    assert summary["retried_ready_to_claim_p95_s"] == 19.0
+    assert "lifecycle_v2_claim" in conn.query
+    assert "lifecycle_v2_retry" in conn.query
+    assert "materialization_attempt_count = 1" in conn.query
+    assert "materialization_attempt_count > 1" in conn.query
+
+
 def test_rolling_cache_segment_visibility_tolerates_retention_race(
     tmp_path: Path, monkeypatch
 ) -> None:

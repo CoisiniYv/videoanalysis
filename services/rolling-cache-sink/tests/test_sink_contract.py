@@ -90,6 +90,82 @@ def test_atomic_publication_matches_media_worker_layout_and_native_jsonl(
     assert list((tmp_path / "cache").rglob("*.partial")) == []
 
 
+def test_publication_phase_timings_account_for_measured_and_hidden_time() -> None:
+    import publishing
+
+    clock_values = iter(
+        (
+            0,
+            1_000_000,
+            4_000_000,
+            5_000_000,
+            10_000_000,
+            12_000_000,
+        )
+    )
+    timings = publishing._PublicationPhaseTimings(
+        clock_ns=lambda: next(clock_values)
+    )
+
+    with timings.measure("metadata_write_ms"):
+        pass
+    with timings.measure("metadata_fsync_ms"):
+        pass
+
+    assert timings.finish() == {
+        "metadata_write_ms": 3.0,
+        "metadata_fsync_ms": 5.0,
+        "publish_total_ms": 12.0,
+        "publish_accounted_ms": 8.0,
+        "publish_unattributed_ms": 4.0,
+    }
+
+
+def test_atomic_publication_exposes_complete_phase_diagnostics(
+    tmp_path: Path,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(8)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {"source_id": "camera-01", "pts": 10},
+            {"source_id": "camera-01", "pts": 20},
+        ]
+    )
+
+    publisher.publish(fragment)
+
+    diagnostics = fragment.publication_diagnostics
+    assert diagnostics["schema_version"] == "rolling-segment-publication-timing-v1"
+    assert diagnostics["first_pts"] == 10
+    assert diagnostics["last_pts"] == 20
+    expected_phases = {
+        "publish_validate_ms",
+        "publish_metadata_write_ms",
+        "publish_metadata_fsync_ms",
+        "publish_metadata_stat_ms",
+        "publish_manifest_write_ms",
+        "publish_manifest_fsync_ms",
+        "publish_manifest_stat_ms",
+        "publish_staging_dir_fsync_ms",
+        "publish_parent_prepare_ms",
+        "publish_rename_ms",
+        "publish_parent_dir_fsync_ms",
+        "publish_journal_append_ms",
+        "publish_total_ms",
+        "publish_accounted_ms",
+        "publish_unattributed_ms",
+    }
+    assert expected_phases <= diagnostics.keys()
+    assert all(float(diagnostics[name]) >= 0 for name in expected_phases)
+    assert diagnostics["publish_total_ms"] == pytest.approx(
+        diagnostics["publish_accounted_ms"]
+        + diagnostics["publish_unattributed_ms"],
+        abs=0.001,
+    )
+
+
 def test_missing_video_is_not_published_and_staging_is_preserved(
     tmp_path: Path,
 ) -> None:
