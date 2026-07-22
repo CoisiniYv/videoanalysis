@@ -921,6 +921,70 @@ def test_db_first_publish_skips_json_rewrite_before_sidecar_prune(
     assert rewrites == []
 
 
+def test_db_first_publish_does_not_traverse_bulk_annotation_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker = _worker()
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="token-db-rows",
+        generation=6,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    attempt = worker._finalizer_attempt_dir(
+        str(tmp_path), event_id=EVENT_ID, lease=lease
+    )
+    attempt.mkdir(parents=True)
+    raw_clip = attempt / "raw_clip.mov"
+    raw_clip.write_bytes(b"mov")
+
+    class BulkRows(list[dict[str, object]]):
+        def __iter__(self):
+            raise AssertionError("publish traversed DB-backed bulk rows")
+
+    timeline_rows = BulkRows(
+        [{"clip_frame_index": 0, "frame_uuid": "frame-1", "frame_pts": 100}]
+    )
+    overlay_rows = BulkRows(
+        [
+            {
+                "clip_frame_index": 0,
+                "frame_uuid": "frame-1",
+                "objects": [{"object_type": "person"}],
+            }
+        ]
+    )
+    monkeypatch.setattr(worker, "heartbeat_lease", lambda *_a, **_k: True)
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+
+    published = worker._publish_finalizer_attempt(
+        object(),
+        lease=lease,
+        event_id=EVENT_ID,
+        evidence_output_dir=str(tmp_path),
+        attempt_dir=attempt,
+        bundle={
+            "evidence_dir": str(attempt),
+            "raw_clip": str(raw_clip),
+            "_db_metadata": {"media": {"raw_clip_path": str(raw_clip)}},
+            "_db_summary": {"raw_clip_path": str(raw_clip)},
+            "_db_timeline_rows": timeline_rows,
+            "_db_overlay_rows": overlay_rows,
+        },
+        lease_seconds=30,
+    )
+
+    canonical_raw_clip = str(tmp_path / EVENT_ID / "raw_clip.mov")
+    assert published is not None
+    assert published["raw_clip"] == canonical_raw_clip
+    assert published["_db_metadata"]["media"]["raw_clip_path"] == canonical_raw_clip
+    assert published["_db_summary"]["raw_clip_path"] == canonical_raw_clip
+    assert published["_db_timeline_rows"] is timeline_rows
+    assert published["_db_overlay_rows"] is overlay_rows
+
+
 def test_publish_fence_loss_deletes_only_own_attempt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

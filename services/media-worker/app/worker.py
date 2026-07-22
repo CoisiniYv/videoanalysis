@@ -6267,6 +6267,31 @@ def _rebase_path_value(value: object, old_root: Path, new_root: Path) -> object:
     return value
 
 
+_DB_BACKED_BULK_ROW_KEYS = frozenset(
+    {
+        "_db_timeline_rows",
+        "_db_overlay_rows",
+    }
+)
+
+
+def _rebase_finalizer_bundle_paths(
+    bundle: dict,
+    *,
+    old_root: Path,
+    new_root: Path,
+) -> dict:
+    """Rebase published paths without rebuilding frame/object row payloads."""
+    return {
+        key: (
+            value
+            if key in _DB_BACKED_BULK_ROW_KEYS
+            else _rebase_path_value(value, old_root, new_root)
+        )
+        for key, value in bundle.items()
+    }
+
+
 def _rewrite_published_json_paths(
     canonical_dir: Path,
     *,
@@ -6404,10 +6429,11 @@ def _publish_finalizer_attempt(
     )
 
     rebase_started = time.monotonic()
-    rebased = {
-        key: _rebase_path_value(value, attempt_dir, canonical_dir)
-        for key, value in bundle.items()
-    }
+    rebased = _rebase_finalizer_bundle_paths(
+        bundle,
+        old_root=attempt_dir,
+        new_root=canonical_dir,
+    )
     rebased["evidence_dir"] = str(canonical_dir)
     if _evidence_db_index_expanded_rows_enabled():
         # DB-first bundles index timeline/overlay rows from the in-memory
