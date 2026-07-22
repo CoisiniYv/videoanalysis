@@ -4,10 +4,11 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量 checkpoint `f11f561`。
+exact-lease 修复 `2a57f20`，当前容量 checkpoint `a88472c`。
 selected-identity 结构 checkpoint 为 `72413a2`，metadata reuse 为 `fcbe2bd`，
-fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`。
-最新 exact r300 的 retained correctness 已通过，但 capacity/watchlist 门仍失败。
+fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`，finalizer
+attribution 为 `478bff5`。最新 exact r300 的 input/watchlist/retained correctness/residual 已通过，
+但 media queue 与 rolling metadata visibility 的 Spec 33 capacity 门仍失败。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -329,7 +330,7 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   也从 50.87s/70.17s/70.69s/72.86s 改善到 26.23s/48.30s/48.61s/50.53s。但 formal 尾部
   仍有 72 active（31 ready、13 finalizer-pending），依赖 quiescence/drain；严格容量门失败，
   r3840 禁止；
-- 当前压力已经移到 finalizer：WIP/remux/finalizer depth p95=20/8/12，finalizer lane 最大 16；
+- Round 20 当时压力已经移到 finalizer：WIP/remux/finalizer depth p95=20/8/12，finalizer lane 最大 16；
   pool wait/finalization/handoff-admission p95=4.658s/4.908s/6.340s，129 个 handoff 需 durable
   retry。per-event log 显示 fenced canonical publish p50/p95=1.890s/3.789s，bundle build 仅
   0.351s/1.409s，terminal 后直到 lane return 另占 0.230s/3.092s。下一步先以红测拆分 publish
@@ -338,6 +339,27 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   34,111 embeddings、DB 覆盖 60 source/30,696 observations、pending 0，但 face-worker 因 DB
   没有 active Reese/Finch targets 而 gallery query=0。下一 exact gate 前必须显式恢复图库前置条件，
   不降低 watchlist gate；
+- `f65120c`/`478bff5` 把 finalizer lane 拆为 heartbeat、prepare、rename、rebase、terminal commit、
+  event projection、DB index、cleanup、post-terminal 和 complete service。修正 DSN 的 120s canary
+  `pressure60_8p1_finalizerattrib_ioadm3_b2m_r300_20260722T013251Z` 显示 rebase p50/p95=
+  0.852s/2.129s，占 publish total 0.903s/2.253s 的主体；
+- `a88472c` 现在按 bundle contract 只不遍历 `_db_timeline_rows` 与 `_db_overlay_rows`。这两组
+  normalized frame/object records 没有 evidence filesystem path，后续仍以同一 list identity 交给
+  expanded DB index；`evidence_dir`、raw clip、metadata、summary 以及 path-bearing `_db_metadata` /
+  `_db_summary` 继续从 fenced attempt path rebase 到 canonical event directory。原子 rename、lease
+  fence、失败诊断 sidecar fallback 和 DB row 内容均未改变；
+- Reese/Finch 已经通过真实 ONNX registration path 注册为 active、primary、512 维、unit-normalized
+  且 `real_embedding_used=true`。post-fix exact r300
+  `pressure60_8p1_rebasefast_ioadm3_b10m_r300_20260722T020149Z` 因此包含 970 formal video 与
+  530 formal watchlist image，而不是图库为空的弱负载。1,500 formal 和 1,552 retained 全部
+  materialized；1,552 detail、1,007 video/timeline/annotation、bbox/person-context、person
+  persistence、watchlist query/emit、fence 和 residual 全通过；
+- 该 exact r300 的 rebase p50/p95 已降到 24/49ms，publish total 27/109ms，lane service
+  0.354s/1.249s，pool wait/finalization/handoff-admission p95=1ms/0.815s/60ms，且 1,007 handoff
+  全 immediate admission。因此 finalizer publish 不再是当前 p95 主约束。当前严格失败在
+  media queue p95=25.803s（release `<=15s`）与 rolling metadata visibility p95=19.008s
+  （`<=2s`）；ready-to-claim p95=12.006s 仅通过 release `<=15s`，尚未达到 closure `<=5s`。
+  r3840 继续禁止，下一结构变量必须先从 long-run metadata visibility/ready burst 归因；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

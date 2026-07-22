@@ -3,14 +3,16 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. Direct selected-leaf identity lookup, normal-path metadata
-reuse, fallback-overlay propagation and compact metadata publication all passed
-deterministic and real-container correctness proofs. Compact publication then
-improved the unchanged width-three r300 ready/media/lifecycle p95 materially,
-but the formal tail still relied on drain, finalizer admission saturated and
-the run also lacked active Reese/Finch gallery targets. The strict r300 gate
-therefore remains failed. Neither the 3,840-second-retention short gate nor the
-two one-hour acceptance runs are permitted yet.
+completion claim. Finalizer attribution isolated recursive canonical rebase as
+the dominant publish cost, and `a88472c` now leaves DB-backed timeline/overlay
+row payloads untouched while rebasing the small path-bearing bundle fields.
+Active Reese/Finch gallery targets were restored through the operational ONNX
+registration path. The unchanged width-three exact r300 then passed input,
+watchlist, retained correctness and all residual gates, and finalizer service
+fell sharply. The strict capacity gate nevertheless remains failed because
+media-queue p95 is 25.803s against the 15s release gate and rolling metadata
+visibility p95 is 19.008s against 2s. Neither the 3,840-second-retention short
+gate nor the two one-hour acceptance runs are permitted yet.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -65,6 +67,9 @@ two one-hour acceptance runs are permitted yet.
 | `7e01432` | fallback-overlay propagation fix | Retains recovered person-context rows in memory through finalizer DB indexing while preserving the diagnostic JSONL contract |
 | `faee207` | compact metadata serialization red test | Requires compact durable JSON with exact payload/recovery equivalence, zero normal reload and a material byte reduction |
 | `f11f561` | compact rolling metadata publication | Publishes compact JSON without changing payload semantics, handoff/recovery authority, capacity, retention, deadlines or index fences |
+| `f65120c` | finalizer publish/lane attribution red tests | Requires heartbeat, prepare, rename, rebase, terminal, projection, DB-index, cleanup, post-terminal and complete lane-service timings |
+| `478bff5` | finalizer publish/lane attribution | Carries the phase split through per-event logs and the `phase6-capacity-v4` pressure report without changing behavior |
+| `a88472c` | DB-backed bulk-row rebase bypass | Preserves timeline/overlay row-list identity during publish while retaining canonical paths in top-level and path-bearing metadata/summary fields |
 
 ## Measurement rounds
 
@@ -1013,32 +1018,119 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   PostgreSQL 001-032 plus real contracts eight passed. Critical Ruff, compile,
   Compose rendering and diff checks passed.
 
-## Recovery audit after Round 20
+### Round 21: finalizer attribution, canonical rebase bypass, and exact r300
 
-The failed artifact was preserved. A fresh live audit after harness completion
-confirmed the daily single branch, zero enabled cameras, no pressure source,
-ffmpeg publisher or local MediaMTX process/container, and zero active
-materialization task, lease or finalizer-pending row. Media-worker was running
-with restart count zero, `ROLLING_CACHE_MATERIALIZATION_ENABLED=false`, 300s
-retention and daily segment-index width two. Redis `save` returned to
+- The first attribution attempt is preserved at
+  `/data/video-analytics/artifacts/pressure60_8p1_finalizerattrib_ioadm3_b2m_r300_20260722T012220Z`
+  but is invalid: the container DSN override was omitted, so workers attempted
+  `host.docker.internal:5432` and the run was interrupted before sampling. It
+  is not attribution evidence.
+- The corrected 120s behavior-neutral canary is
+  `/data/video-analytics/artifacts/pressure60_8p1_finalizerattrib_ioadm3_b2m_r300_20260722T013251Z`.
+  It used host PostgreSQL `127.0.0.1:5439` and container PostgreSQL
+  `postgres:5432`, while retaining Candidate B `20/12/8`, finalizer `8/4/8`,
+  index width three and 300s retention. Across 245 video finalizations,
+  publish total p50/p95 was 903/2,253ms and canonical rebase alone was
+  852/2,129ms. Heartbeat, prepare and rename p95 were only 100/82/26ms.
+  Complete finalizer-lane service was 1,625/3,827ms; post-terminal p95 was
+  1,702ms, including DB-index p95 1,116ms. Rebase was therefore the isolated
+  next behavior variable.
+- Reese and Finch were absent from PostgreSQL, not merely inactive. They were
+  registered through the real ONNX operational path as
+  `demo:midterm:reese` and `demo:midterm:finch`; both embeddings are active,
+  primary, 512-dimensional, unit-normalized and record
+  `real_embedding_used=true`. The corrected canary produced 100 formal
+  `watchlist_hit` events, proving the hidden gallery precondition was repaired
+  without weakening acceptance.
+- `f65120c` first made the publish/lane attribution a deterministic contract;
+  `478bff5` implemented instrumentation only. The next red test then supplied
+  DB-backed timeline and overlay lists that fail on iteration during publish.
+  The old recursive rebase failed that test. `a88472c` skips only
+  `_db_timeline_rows` and `_db_overlay_rows`; it still recursively rebases the
+  small path-bearing metadata/summary objects and all canonical top-level
+  artifact paths. The row objects are passed unchanged to expanded DB indexing,
+  preserving overlay and timeline semantics.
+- The post-fix 120s representative smoke is
+  `/data/video-analytics/artifacts/pressure60_8p1_rebasefast_ioadm3_b2m_smoke120_20260722T014950Z`.
+  It passed with 303/303 formal and 375/375 retained evidence, including 100
+  watchlist images and 246 videos. Rebase p50/p95 fell to 24/40ms, publish
+  total to 26/66ms and complete lane service to 333/780ms. All video, 8090,
+  timeline, annotation, bbox, person-context and person-persistence checks
+  passed.
+- Exact unchanged r300 artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_rebasefast_ioadm3_b10m_r300_20260722T020149Z`.
+  It retained the fixed fixture/hash, width three, Candidate B `20/12/8`,
+  finalizer `8/4/8`, 600s sample, 25s postfill, 120s drain and disk-backed 300s
+  retention. The harness status is `passed` with only
+  `validate_seq_iq_expected_sampling_gap`; this means its encoded correctness
+  gates passed, not that the separate Spec 33 latency release gates passed.
+- Input passed at 60/60 and 8.0538 FPS against 7.92. Sampling-window Savant
+  send failures, queue-full samples, forwarder queue depth, raw-forwarder drops
+  and raw send failures were all zero. The formal window produced 1,500 tasks:
+  970 behavior videos and 530 real watchlist images. All 1,500 were materialized;
+  the retained set contained 1,552 bundles, including 1,007 videos and 545
+  watchlist images, with zero expiry, active lease or finalizer-pending residue.
+- Retained correctness passed end to end: 1,552/1,552 8090 details, 1,007/1,007
+  video duration/raw-FPS checks, timelines and annotations, with zero missing
+  bbox or person context. PostgreSQL holds 240,574 timeline rows, 63,414
+  overlay rows, 144,080 bbox objects and 66,306 person-context objects for the
+  run. Four one-row annotation-count differences are the accepted DB merge of
+  a duplicate clip-frame index. Person persistence passed at 100,893 stored
+  versus 100,891 exported, measured loss zero and final lag/pending 0/0.
+  Face-worker emitted 692 watchlist hits from 35,033 successful gallery queries
+  with zero query or emit failure.
+- The scoped finalizer fix was dynamically decisive. Across 1,007 videos,
+  rebase p50/p95 is 24/49ms, publish total 27/109ms, lane service 354/1,249ms,
+  finalizer pool wait 0/1ms, finalization 286/815ms and handoff-to-admission
+  4/60ms. All 1,007 handoffs were admitted immediately with zero rejection,
+  retry failure or recovery. Pins were created/released 1,068/1,068; fallback
+  scans, publication errors/reconciles and final active pins were zero.
+- The strict Spec 33 release comparison is:
+
+  | Metric | Release gate | Observed p95 | Verdict |
+  | --- | ---: | ---: | --- |
+  | ready-to-claim | <=15s and >=50% better than 33.95s | 12.006s | release pass; misses <=5s closure |
+  | finalizer queue/pool wait | <=5s | 0.001s | pass |
+  | media queue | <=15s | 25.803s | fail |
+  | evidence lifecycle | <=35s | 26.140s | pass |
+  | DB claim wait | <=1s | 0.093s | pass |
+  | rolling metadata visibility | <=2s | 19.008s | fail |
+
+  DB lifecycle p95 was 24.864s and observed media-worker CPU was 296.42%,
+  about 79.9% below the 1,475.75% baseline. At the formal cutoff 25 video
+  tasks were still active; all completed within the 25s postfill, the latest
+  15.82s after cutoff. This is much smaller than Round 20's 72-task tail and
+  needs no 120s drain, but it does not waive the media-queue and visibility
+  failures. r3840 remains prohibited.
+
+## Recovery audit after Round 21
+
+Both the failed attribution artifact and the two valid post-fix artifacts were
+preserved. A fresh live audit after exact-r300 completion confirmed the daily
+single branch, zero enabled cameras, no pressure source, ffmpeg publisher or
+local MediaMTX process/container, and zero active materialization task, lease,
+Replay slot or finalizer-pending row. Media/event/clip/face workers all use
+`postgres:5432`, are running with restart count zero, and the two real gallery
+targets remain active. Media-worker returned to max-active/remux/finalizer
+`4/4/32`, process-finalizer `0`, rolling materialization disabled, 300s
+retention, 256-row cache and segment-index width two. Redis `save` returned to
 `3600 1 300 100 60 10000`; PostgreSQL returned to
-`checkpoint_timeout=5min`, `max_wal_size=1GB`, and `min_wal_size=80MB`.
+`checkpoint_timeout=5min`, `max_wal_size=1GB`, `min_wal_size=80MB` and
+`wal_compression=off`.
 
 ## Next gates
 
-1. Restore or freshly register active Reese/Finch gallery targets through the
-   operational registration path and prove the pressure preflight sees them;
-   do not weaken the watchlist gate.
-2. Add a deterministic red attribution contract for the dominant finalizer
-   interval: split fenced attempt publication into lease-heartbeat, canonical
-   prepare/rename and rebase time, and measure complete finalizer-lane service
-   through event projection, DB index, sidecar prune and cleanup. This first
-   change is instrumentation-only.
-3. Use that attribution to select one structural finalizer variable. Do not
-   raise process workers, queue, WIP or remux together, and do not widen the
-   deadline.
-4. Repeat the exact width-three r300 gate with the fixed fixture/hash. Only a
-   full input, capacity, visibility, watchlist, annotation and residual pass
-   permits the 3,840-second-retention short gate.
-5. Only after both short retention gates pass, run two comparable one-hour
+1. Keep r3840 and the one-hour acceptances blocked; the harness `passed` status
+   does not override the failed Spec 33 media-queue and visibility gates.
+2. Attribute the long-run rolling metadata-visibility tail and the remaining
+   ready-to-claim burst before selecting another behavior variable. Preserve
+   the p50/p95 split (0.589/19.008s visibility), rare 14.077s poll-gap maximum,
+   12.006s ready p95 and zero finalizer admission pressure in that analysis.
+3. Do not increase process workers, WIP, remux, finalizer queue or index width,
+   and do not widen deadlines while the measured limiter is upstream of the
+   now-fast finalizer publish path.
+4. Repeat the exact width-three r300 gate with the fixed fixture/hash after one
+   attributed structural change. Only a full input, capacity, visibility,
+   watchlist, annotation and residual pass permits the 3,840s-retention gate.
+5. Only after both short-retention gates pass, run two comparable one-hour
    acceptances with full evidence/8090 validation.

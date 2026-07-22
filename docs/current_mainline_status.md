@@ -8,7 +8,8 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `f11f561`，fallback-overlay 修复 `7e01432`，尚未合入或声明为 60 路默认容量；
+  `a88472c`，finalizer attribution `478bff5`，fallback-overlay 修复 `7e01432`；尚未合入，
+  且 exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -26,8 +27,8 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership、per-catalog singleflight、crash-safe publication journal、journal-first reconcile、selected-identity direct lookup、normal metadata reuse 与 compact publication | index/journal/pin/reuse/compact 单测和真实容器 smoke 通过；`f11f561` 同口径 width-three r300 correctness 通过但 capacity/watchlist 仍失败 |
-| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；Candidate B/C 的 60 路一小时容量门均失败 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest 发布、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支增加 bounded pin、immutable membership、per-catalog singleflight、crash-safe publication journal、journal-first reconcile、selected-identity direct lookup、normal metadata reuse、compact publication 与 DB bulk-row rebase bypass | exact r300 input/watchlist/correctness/residual 全通过；finalizer 明显改善，但 media queue/metadata visibility 容量门仍失败 |
+| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
 | Evidence UI | DB-backed list/detail/timeline/overlay；视频 HTTP Range | T4 审计通过；文件接口仅兼容 |
@@ -249,19 +250,57 @@ publish heartbeat/rename/rebase 与完整 lane service，不先加 process worke
 是因为数据库没有 active Reese/Finch targets，并持续记录 `watchlist rule has no active targets`。
 下一 exact gate 必须先恢复图库前置条件；不能降低 watchlist gate，也不能用它替代独立容量失败。
 
+`f65120c`/`478bff5` 已补齐 finalizer publish 与 complete lane-service attribution。遗漏 container
+DSN 的 `pressure60_8p1_finalizerattrib_ioadm3_b2m_r300_20260722T012220Z` 在 sampling 前中断，禁止
+作为证据；修正 DSN 的 120s canary
+`pressure60_8p1_finalizerattrib_ioadm3_b2m_r300_20260722T013251Z` 显示 245 个 video 的 publish
+total p50/p95=0.903s/2.253s，其中 canonical rebase 单独占 0.852s/2.129s，heartbeat/prepare/rename
+p95 仅 100/82/26ms，complete lane service 为 1.625s/3.827s。因此下一单变量明确落在 rebase，
+而不是继续加 worker。
+
+Reese/Finch 已通过真实 ONNX operational registration path 注册为 active、primary、512 维、
+unit-normalized 且 `real_embedding_used=true` 的图库向量。`a88472c` 的红测先证明旧 publish 会递归
+遍历 DB-backed timeline/overlay 大列表；实现只跳过 `_db_timeline_rows`/`_db_overlay_rows`，其余
+top-level 与 metadata/summary path 仍 canonical rebase。post-fix 120s smoke
+`pressure60_8p1_rebasefast_ioadm3_b2m_smoke120_20260722T014950Z` 通过 303 formal、375 retained
+与 100 watchlist image；rebase p50/p95 降至 24/40ms，lane service 降至 0.333s/0.780s。
+
+exact r300
+`pressure60_8p1_rebasefast_ioadm3_b10m_r300_20260722T020149Z` 保持 width 3、Candidate B
+`20/12/8`、finalizer `8/4/8`、600s/25s postfill/120s drain、300s retention 和固定 fixture/hash。
+输入通过 60/60、8.0538 FPS、零 send/queue/raw loss。图库修复后正式负载更强：1,500 formal=
+970 video+530 watchlist image；1,552 retained=1,007 video+545 watchlist image，全部 materialized。
+1,552/1,552 detail、1,007/1,007 video/timeline/annotation 全通过，bbox/person-context 缺失 0；
+DB 有 240,574 timeline、63,414 overlay、144,080 bbox object、66,306 person-context object。
+person persistence 100,893/100,891、measured loss 0；35,033 gallery query 与 692 emitted hit 均
+零失败，末态 task/lease/Replay-slot/finalizer/pin/Redis pending 全为 0。
+
+finalizer 结构修复动态有效：rebase p50/p95=24/49ms、publish total=27/109ms、lane service=
+0.354s/1.249s、pool wait/finalization/handoff-admission p95=1ms/0.815s/60ms；1,007/1,007
+handoff immediate admission，零 reject/retry/recovery。ready-to-claim p95 12.006s 已通过 Spec 33
+release `<=15s`，lifecycle 26.140s、DB claim 93ms 与 CPU 296.42% 也通过各自 release 门；但
+media queue p95 25.803s 仍高于 `<=15s`，rolling metadata visibility p95 19.008s 仍高于
+`<=2s`，且 ready 尚未达到 final closure `<=5s`。formal cutoff 后仍有 25 个 video task，虽在
+25s postfill 内全部完成（最晚 +15.82s），也不能覆盖上述失败。harness `status=passed` 只代表其
+已编码 correctness gate；严格 r300 仍失败，r3840 与一小时验收继续禁止。
+
+exact 结束后的 live audit 已恢复 daily single branch、零 enabled camera、零 pressure process、
+worker DSN `postgres:5432`、max-active/remux `4/4`、finalizer `32/0/4`、rolling disabled、300s
+retention、256-row cache、index width 2、Redis save 与 PostgreSQL checkpoint 默认值；相关 worker
+restart count 均为 0，Reese/Finch 图库注册仍保留。
+
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3 和 Candidate B 其余参数不变；先以 deterministic red test 拆分 finalizer fenced
-  publish 的 heartbeat/canonical rename/rebase 与 terminal 后 projection/DB-index/prune/cleanup，补齐
-  complete lane-service attribution 后只改一个实测主导结构变量；
-- 通过 8090/注册工具恢复 active Reese/Finch gallery targets，并在下一轮 preflight 明确证明存在；
-  不把图库内容隐式当作机器前置状态，也不弱化 watchlist gate；
-- 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
-  才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
-- 最新 r300 的 finalizer-pool/finalization/handoff-admission p95 为 4.658s/4.908s/6.340s；
-  在 publish/lane attribution 完成前不增加 process workers，也不同时改变 queue/WIP/remux；
+- 保持 width 3 与 Candidate B 其余参数不变，先归因 long-run rolling metadata visibility
+  `0.589/19.008s` 的 p50/p95 分裂和剩余 ready burst；不要把已闭合的 finalizer publish 再当主因；
+- r3840 和一小时验收继续禁止；只有下一轮 exact r300 的 input、Spec 33 capacity/visibility、
+  watchlist、correctness、annotation 与 residual 全通过，才允许进入 3,840s retention 短门；
+- 不同时增加 process workers、WIP、remux、finalizer queue 或 index width，也不放宽 deadline；
+  当前 finalizer pool/finalization/handoff-admission p95 已仅 1ms/0.815s/60ms；
+- 把 Reese/Finch active operational registration 纳入压测前置审计，保持真实 embedding 与
+  watchlist gate，不把图库内容再次当成隐式机器状态；
 - 完成真实混合 RTSP 的断流、重连和长 soak；
 - 完成 event/person/face/media worker restart/recovery soak；
 - 继续观察生产 T4 84–85°C、70W power cap 和 evidence 波峰排队。
