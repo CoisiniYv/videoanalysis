@@ -13,6 +13,7 @@ from config import EpochResolver, SinkConfig, safe_component
 from observability import SinkMetrics
 from publishing import (
     SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+    SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
     AtomicSegmentPublisher,
     BoundedPublicationDispatcher,
     Fragment,
@@ -383,7 +384,8 @@ class SourcePipeline:
         LOGGER.info(
             "segment published source=%s epoch=%s session=%s segment=%s "
             "frames=%d bytes=%d first_pts=%s last_pts=%s "
-            "publish_total_ms=%s publish_validate_ms=%s "
+            "publish_total_ms=%s publish_stage_ms=%s publish_commit_ms=%s "
+            "publish_validate_ms=%s "
             "publish_metadata_write_ms=%s publish_metadata_fsync_ms=%s "
             "publish_metadata_stat_ms=%s publish_manifest_write_ms=%s "
             "publish_manifest_fsync_ms=%s publish_manifest_stat_ms=%s "
@@ -393,10 +395,14 @@ class SourcePipeline:
             "publish_unattributed_ms=%s "
             "publication_capacity_wait_ms=%s "
             "publication_queue_residence_ms=%s "
+            "publication_prepare_service_ms=%s "
+            "publication_commit_wait_ms=%s "
             "publication_worker_service_ms=%s "
             "publication_dispatch_total_ms=%s "
             "publication_outstanding_at_submit=%s "
-            "publication_queue_depth_at_submit=%s",
+            "publication_queue_depth_at_submit=%s "
+            "publication_prepare_group_size=%s "
+            "publication_prepare_group_position=%s",
             self.source_id,
             self.runtime_epoch_id,
             self.session_id,
@@ -406,6 +412,8 @@ class SourcePipeline:
             timings.get("first_pts", "unavailable"),
             timings.get("last_pts", "unavailable"),
             timings.get("publish_total_ms", "unavailable"),
+            timings.get("publish_stage_ms", "unavailable"),
+            timings.get("publish_commit_ms", "unavailable"),
             timings.get("publish_validate_ms", "unavailable"),
             timings.get("publish_metadata_write_ms", "unavailable"),
             timings.get("publish_metadata_fsync_ms", "unavailable"),
@@ -422,10 +430,14 @@ class SourcePipeline:
             timings.get("publish_unattributed_ms", "unavailable"),
             timings.get("publication_capacity_wait_ms", "unavailable"),
             timings.get("publication_queue_residence_ms", "unavailable"),
+            timings.get("publication_prepare_service_ms", "unavailable"),
+            timings.get("publication_commit_wait_ms", "unavailable"),
             timings.get("publication_worker_service_ms", "unavailable"),
             timings.get("publication_dispatch_total_ms", "unavailable"),
             timings.get("publication_outstanding_at_submit", "unavailable"),
             timings.get("publication_queue_depth_at_submit", "unavailable"),
+            timings.get("publication_prepare_group_size", "unavailable"),
+            timings.get("publication_prepare_group_position", "unavailable"),
         )
 
     def _on_publish_error(self, fragment: Fragment, error: Exception) -> None:
@@ -490,12 +502,15 @@ class RollingCacheSink:
         self._stopping = False
         self._publication_dispatcher = BoundedPublicationDispatcher(
             capacity=SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+            prepare_group_limit=SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
             metrics=metrics,
             thread_name="rolling-cache-publication",
         )
         LOGGER.info(
-            "publication dispatcher started workers=1 outstanding_limit=%d",
+            "publication dispatcher started workers=1 outstanding_limit=%d "
+            "prepare_group_limit=%d",
             SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+            SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
         )
 
         Gst.init(None)
@@ -627,6 +642,13 @@ class RollingCacheSink:
             "publication_queue_wait_ms_total=%.3f "
             "publication_queue_wait_ms_max=%.3f "
             "publication_queue_wait_events_total=%d "
+            "publication_prepare_group_limit=%d "
+            "publication_prepare_group_total=%d "
+            "publication_prepare_group_size_max=%d "
+            "publication_prepare_service_ms_total=%.3f "
+            "publication_prepare_service_ms_max=%.3f "
+            "publication_commit_wait_ms_total=%.3f "
+            "publication_commit_wait_ms_max=%.3f "
             "publication_queue_residence_ms_total=%.3f "
             "publication_queue_residence_ms_max=%.3f "
             "publication_queue_residence_events_total=%d "
@@ -652,6 +674,13 @@ class RollingCacheSink:
             float(publication_state["queue_wait_ms_total"]),
             float(publication_state["queue_wait_ms_max"]),
             int(publication_state["queue_wait_events_total"]),
+            int(publication_state["prepare_group_limit"]),
+            int(publication_state["prepare_group_total"]),
+            int(publication_state["prepare_group_size_max"]),
+            float(publication_state["prepare_service_ms_total"]),
+            float(publication_state["prepare_service_ms_max"]),
+            float(publication_state["commit_wait_ms_total"]),
+            float(publication_state["commit_wait_ms_max"]),
             float(publication_state["queue_residence_ms_total"]),
             float(publication_state["queue_residence_ms_max"]),
             int(publication_state["queue_residence_events_total"]),

@@ -10296,6 +10296,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             )
             for field in (
                 "publish_total_ms",
+                "publish_stage_ms",
+                "publish_commit_ms",
                 "publish_validate_ms",
                 "publish_metadata_write_ms",
                 "publish_metadata_fsync_ms",
@@ -10312,10 +10314,14 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_unattributed_ms",
                 "publication_capacity_wait_ms",
                 "publication_queue_residence_ms",
+                "publication_prepare_service_ms",
+                "publication_commit_wait_ms",
                 "publication_worker_service_ms",
                 "publication_dispatch_total_ms",
                 "publication_outstanding_at_submit",
                 "publication_queue_depth_at_submit",
+                "publication_prepare_group_size",
+                "publication_prepare_group_position",
             )
         }
         rolling_cache_publication_dispatcher_metrics = {
@@ -10338,6 +10344,13 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_queue_wait_ms_total",
                 "publication_queue_wait_ms_max",
                 "publication_queue_wait_events_total",
+                "publication_prepare_group_limit",
+                "publication_prepare_group_total",
+                "publication_prepare_group_size_max",
+                "publication_prepare_service_ms_total",
+                "publication_prepare_service_ms_max",
+                "publication_commit_wait_ms_total",
+                "publication_commit_wait_ms_max",
                 "publication_queue_residence_ms_total",
                 "publication_queue_residence_ms_max",
                 "publication_queue_residence_events_total",

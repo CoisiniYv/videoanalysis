@@ -27,6 +27,7 @@ SEGMENT_PUBLICATION_SCHEMA_VERSION = "rolling-segment-publication-v1"
 SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
 SEGMENT_PUBLICATION_OUTSTANDING_LIMIT = 128
+SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT = 32
 
 LOGGER = logging.getLogger("rolling_cache_sink.publisher")
 
@@ -59,8 +60,13 @@ class _PublicationPhaseTimings:
             duration_ms = max(0.0, (self._clock_ns() - started_ns) / 1_000_000.0)
             self._durations_ms[name] = self._durations_ms.get(name, 0.0) + duration_ms
 
-    def finish(self) -> dict[str, float]:
-        total_ms = max(0.0, (self._clock_ns() - self._started_ns) / 1_000_000.0)
+    def elapsed_ms(self) -> float:
+        return max(0.0, (self._clock_ns() - self._started_ns) / 1_000_000.0)
+
+    def finish(self, *, total_ms: float | None = None) -> dict[str, float]:
+        if total_ms is None:
+            total_ms = self.elapsed_ms()
+        total_ms = max(0.0, float(total_ms))
         accounted_ms = sum(self._durations_ms.values())
         result = {
             name: round(value, 3)
@@ -77,6 +83,19 @@ class _PublicationPhaseTimings:
             }
         )
         return result
+
+
+@dataclass(frozen=True)
+class _StagedPublication:
+    fragment: Fragment
+    timings: _PublicationPhaseTimings
+    manifest: dict[str, Any]
+    manifest_stat: os.stat_result
+    metadata_stat: os.stat_result
+    video_stat: os.stat_result
+    first_pts: int
+    last_pts: int
+    stage_service_ms: float
 
 
 class AtomicSegmentPublisher:
@@ -122,7 +141,9 @@ class AtomicSegmentPublisher:
             video_path=staging_dir / "video.mov",
         )
 
-    def publish(self, fragment: Fragment) -> Path:
+    def stage_publication(self, fragment: Fragment) -> _StagedPublication:
+        """Write and flush one segment's metadata without making it durable."""
+
         timings = _PublicationPhaseTimings()
         with timings.measure("validate_ms"):
             if not fragment.video_path.is_file():
@@ -156,8 +177,6 @@ class AtomicSegmentPublisher:
                     handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
                     handle.write("\n")
                 handle.flush()
-            with timings.measure("metadata_fsync_ms"):
-                os.fsync(handle.fileno())
         with timings.measure("metadata_stat_ms"):
             metadata_stat = metadata_path.stat()
         video_size_bytes = video_stat.st_size
@@ -189,10 +208,35 @@ class AtomicSegmentPublisher:
                 )
                 handle.write("\n")
                 handle.flush()
-            with timings.measure("manifest_fsync_ms"):
-                os.fsync(handle.fileno())
         with timings.measure("manifest_stat_ms"):
             manifest_stat = manifest_path.stat()
+
+        return _StagedPublication(
+            fragment=fragment,
+            timings=timings,
+            manifest=manifest,
+            manifest_stat=manifest_stat,
+            metadata_stat=metadata_stat,
+            video_stat=video_stat,
+            first_pts=min(pts_values),
+            last_pts=max(pts_values),
+            stage_service_ms=timings.elapsed_ms(),
+        )
+
+    def commit_publication(self, staged: _StagedPublication) -> Path:
+        """Durably commit one staged segment through the original fence order."""
+
+        fragment = staged.fragment
+        timings = staged.timings
+        commit_started_ns = time.monotonic_ns()
+        metadata_path = fragment.staging_dir / "metadata.json"
+        manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
+        with metadata_path.open("rb") as handle:
+            with timings.measure("metadata_fsync_ms"):
+                os.fsync(handle.fileno())
+        with manifest_path.open("rb") as handle:
+            with timings.measure("manifest_fsync_ms"):
+                os.fsync(handle.fileno())
         with timings.measure("staging_dir_fsync_ms"):
             _fsync_directory(fragment.staging_dir)
 
@@ -210,10 +254,10 @@ class AtomicSegmentPublisher:
             try:
                 _append_publication_record(
                     segments_root=fragment.final_dir.parent,
-                    manifest=manifest,
-                    manifest_stat=manifest_stat,
-                    metadata_stat=metadata_stat,
-                    video_stat=video_stat,
+                    manifest=staged.manifest,
+                    manifest_stat=staged.manifest_stat,
+                    metadata_stat=staged.metadata_stat,
+                    video_stat=staged.video_stat,
                 )
             except Exception as exc:
                 # The atomic segment directory is authoritative. The journal is a
@@ -229,17 +273,30 @@ class AtomicSegmentPublisher:
                     fragment.final_dir,
                     exc,
                 )
-        phase_diagnostics = timings.finish()
+        commit_service_ms = max(
+            0.0,
+            (time.monotonic_ns() - commit_started_ns) / 1_000_000.0,
+        )
+        phase_diagnostics = timings.finish(
+            total_ms=staged.stage_service_ms + commit_service_ms
+        )
         fragment.publication_diagnostics = {
             "schema_version": "rolling-segment-publication-timing-v1",
-            "first_pts": min(pts_values),
-            "last_pts": max(pts_values),
+            "first_pts": staged.first_pts,
+            "last_pts": staged.last_pts,
+            "publish_stage_ms": round(staged.stage_service_ms, 3),
+            "publish_commit_ms": round(commit_service_ms, 3),
             **{
                 (name if name.startswith("publish_") else f"publish_{name}"): value
                 for name, value in phase_diagnostics.items()
             },
         }
         return fragment.final_dir
+
+    def publish(self, fragment: Fragment) -> Path:
+        """Compatibility path for callers that publish one segment inline."""
+
+        return self.commit_publication(self.stage_publication(fragment))
 
 
 def _identity_payload(stat: os.stat_result) -> dict[str, int]:
@@ -384,14 +441,27 @@ class _QueuedPublication:
     queue_depth_at_submit: int
 
 
-class BoundedPublicationDispatcher:
-    """Run durable segment publication on one bounded FIFO worker.
+@dataclass(frozen=True)
+class _PreparedPublication:
+    queued: _QueuedPublication
+    staged: Any
+    split_publication: bool
+    stage_error: Exception | None
+    queue_residence_ms: float
+    prepare_service_ms: float
+    stage_completed_at_ns: int
+    group_size: int
+    group_position: int
 
-    One worker intentionally preserves the sink's existing publication
-    concurrency and global/per-source order. The finite outstanding semaphore
-    absorbs rare fsync stalls; once full, the GLib callback blocks at submit as
-    explicit backpressure instead of dropping a finalized fragment or growing
-    an unbounded executor queue.
+
+class BoundedPublicationDispatcher:
+    """Prepare bounded FIFO groups, then durably commit them on one worker.
+
+    Preparation writes and flushes metadata/manifest files for one natural
+    queue cohort. The same worker then commits every item in exact FIFO order,
+    preserving the sink's existing durable publication concurrency. The finite
+    outstanding semaphore remains explicit callback backpressure under a
+    sustained storage stall.
     """
 
     _STOP = object()
@@ -400,12 +470,17 @@ class BoundedPublicationDispatcher:
         self,
         *,
         capacity: int = SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+        prepare_group_limit: int = SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
         metrics: Any | None = None,
         thread_name: str = "rolling-cache-publication",
         clock_ns: Callable[[], int] = time.monotonic_ns,
         wall_clock_ns: Callable[[], int] = time.time_ns,
     ) -> None:
         self.capacity = max(1, int(capacity))
+        self.prepare_group_limit = min(
+            self.capacity,
+            max(1, int(prepare_group_limit)),
+        )
         self.worker_count = 1
         self._metrics = metrics
         self._clock_ns = clock_ns
@@ -428,6 +503,12 @@ class BoundedPublicationDispatcher:
         self._queue_wait_ms_total = 0.0
         self._queue_wait_ms_max = 0.0
         self._queue_wait_events_total = 0
+        self._prepare_group_total = 0
+        self._prepare_group_size_max = 0
+        self._prepare_service_ms_total = 0.0
+        self._prepare_service_ms_max = 0.0
+        self._commit_wait_ms_total = 0.0
+        self._commit_wait_ms_max = 0.0
         self._queue_residence_ms_total = 0.0
         self._queue_residence_ms_max = 0.0
         self._queue_residence_events_total = 0
@@ -563,116 +644,198 @@ class BoundedPublicationDispatcher:
 
     def _run(self) -> None:
         while True:
-            queued = self._queue.get()
-            if queued is self._STOP:
+            first = self._queue.get()
+            if first is self._STOP:
                 self._queue.task_done()
                 return
-            assert isinstance(queued, _QueuedPublication)
-            worker_started_at_ns = self._clock_ns()
-            queue_residence_ms = max(
-                0.0,
-                (worker_started_at_ns - queued.accepted_at_ns) / 1_000_000.0,
-            )
+            assert isinstance(first, _QueuedPublication)
+            group = [first]
+            while len(group) < self.prepare_group_limit:
+                try:
+                    queued = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                assert isinstance(queued, _QueuedPublication)
+                group.append(queued)
+
             with self._state_lock:
                 self._active = 1
+                self._prepare_group_total += 1
+                self._prepare_group_size_max = max(
+                    self._prepare_group_size_max,
+                    len(group),
+                )
                 state = self._snapshot_locked()
             self._sync_metrics(state)
-            failed = False
-            worker_completed_at_ns = worker_started_at_ns
-            try:
-                final_dir = queued.publisher.publish(queued.fragment)
-            except Exception as exc:
-                worker_completed_at_ns = self._clock_ns()
-                self._attach_dispatch_diagnostics(
-                    queued,
-                    queue_residence_ms=queue_residence_ms,
-                    worker_completed_at_ns=worker_completed_at_ns,
-                )
-                failed = True
-                if queued.on_publish_error is not None:
-                    try:
-                        queued.on_publish_error(queued.fragment, exc)
-                    except Exception:
-                        LOGGER.exception(
-                            "segment publication error callback failed "
-                            "source=%s segment=%s",
-                            queued.source_id,
-                            queued.fragment.segment_id,
-                        )
-            else:
-                worker_completed_at_ns = self._clock_ns()
-                self._attach_dispatch_diagnostics(
-                    queued,
-                    queue_residence_ms=queue_residence_ms,
-                    worker_completed_at_ns=worker_completed_at_ns,
-                )
-                if queued.on_published is not None:
-                    try:
-                        queued.on_published(queued.fragment, final_dir)
-                    except Exception:
-                        failed = True
-                        LOGGER.exception(
-                            "segment publication success callback failed "
-                            "source=%s segment=%s",
-                            queued.source_id,
-                            queued.fragment.segment_id,
-                        )
-            finally:
-                worker_service_ms = max(
-                    0.0,
-                    (worker_completed_at_ns - worker_started_at_ns) / 1_000_000.0,
-                )
-                dispatch_total_ms = max(
-                    0.0,
-                    (worker_completed_at_ns - queued.requested_at_ns) / 1_000_000.0,
-                )
-                with self._state_lock:
-                    self._active = 0
-                    self._outstanding = max(0, self._outstanding - 1)
-                    if failed:
-                        self._failed_total += 1
-                    else:
-                        self._completed_total += 1
-                    self._queue_residence_ms_total += queue_residence_ms
-                    self._queue_residence_ms_max = max(
-                        self._queue_residence_ms_max,
-                        queue_residence_ms,
-                    )
-                    if queue_residence_ms >= 1.0:
-                        self._queue_residence_events_total += 1
-                    self._worker_service_ms_total += worker_service_ms
-                    self._worker_service_ms_max = max(
-                        self._worker_service_ms_max,
-                        worker_service_ms,
-                    )
-                    self._dispatch_total_ms_total += dispatch_total_ms
-                    self._dispatch_total_ms_max = max(
-                        self._dispatch_total_ms_max,
-                        dispatch_total_ms,
-                    )
-                    if self._outstanding == 0:
-                        self._idle.set()
-                    state = self._snapshot_locked()
-                self._slots.release()
-                self._queue.task_done()
-                self._sync_metrics(state)
 
-    def _attach_dispatch_diagnostics(
-        self,
-        queued: _QueuedPublication,
-        *,
-        queue_residence_ms: float,
-        worker_completed_at_ns: int,
-    ) -> None:
+            prepared: list[_PreparedPublication] = []
+            group_size = len(group)
+            for group_position, queued in enumerate(group, start=1):
+                stage_started_at_ns = self._clock_ns()
+                queue_residence_ms = max(
+                    0.0,
+                    (stage_started_at_ns - queued.accepted_at_ns) / 1_000_000.0,
+                )
+                stage_error: Exception | None = None
+                staged: Any = queued.fragment
+                stage_method = getattr(
+                    queued.publisher,
+                    "stage_publication",
+                    None,
+                )
+                commit_method = getattr(
+                    queued.publisher,
+                    "commit_publication",
+                    None,
+                )
+                split_publication = callable(stage_method) and callable(
+                    commit_method
+                )
+                try:
+                    if split_publication:
+                        staged = stage_method(queued.fragment)
+                except Exception as exc:
+                    stage_error = exc
+                stage_completed_at_ns = self._clock_ns()
+                prepared.append(
+                    _PreparedPublication(
+                        queued=queued,
+                        staged=staged,
+                        split_publication=split_publication,
+                        stage_error=stage_error,
+                        queue_residence_ms=queue_residence_ms,
+                        prepare_service_ms=max(
+                            0.0,
+                            (
+                                stage_completed_at_ns - stage_started_at_ns
+                            )
+                            / 1_000_000.0,
+                        ),
+                        stage_completed_at_ns=stage_completed_at_ns,
+                        group_size=group_size,
+                        group_position=group_position,
+                    )
+                )
+
+            for item in prepared:
+                self._commit_prepared(item)
+
+            with self._state_lock:
+                self._active = 0
+                state = self._snapshot_locked()
+            self._sync_metrics(state)
+
+    def _commit_prepared(self, item: _PreparedPublication) -> None:
+        queued = item.queued
+        commit_started_at_ns = self._clock_ns()
+        commit_wait_ms = max(
+            0.0,
+            (commit_started_at_ns - item.stage_completed_at_ns) / 1_000_000.0,
+        )
+        failed = item.stage_error is not None
+        error = item.stage_error
+        final_dir: Path | None = None
+        worker_completed_at_ns = commit_started_at_ns
+        if not failed:
+            try:
+                if item.split_publication:
+                    final_dir = queued.publisher.commit_publication(item.staged)
+                else:
+                    final_dir = queued.publisher.publish(queued.fragment)
+            except Exception as exc:
+                failed = True
+                error = exc
+            worker_completed_at_ns = self._clock_ns()
+
         worker_service_ms = max(
             0.0,
-            (worker_completed_at_ns - queued.accepted_at_ns) / 1_000_000.0
-            - queue_residence_ms,
+            (worker_completed_at_ns - commit_started_at_ns) / 1_000_000.0,
         )
         dispatch_total_ms = max(
             0.0,
             (worker_completed_at_ns - queued.requested_at_ns) / 1_000_000.0,
         )
+        self._attach_dispatch_diagnostics(
+            item,
+            commit_wait_ms=commit_wait_ms,
+            worker_service_ms=worker_service_ms,
+            dispatch_total_ms=dispatch_total_ms,
+        )
+
+        if failed:
+            assert error is not None
+            if queued.on_publish_error is not None:
+                try:
+                    queued.on_publish_error(queued.fragment, error)
+                except Exception:
+                    LOGGER.exception(
+                        "segment publication error callback failed "
+                        "source=%s segment=%s",
+                        queued.source_id,
+                        queued.fragment.segment_id,
+                    )
+        elif queued.on_published is not None:
+            assert final_dir is not None
+            try:
+                queued.on_published(queued.fragment, final_dir)
+            except Exception:
+                failed = True
+                LOGGER.exception(
+                    "segment publication success callback failed "
+                    "source=%s segment=%s",
+                    queued.source_id,
+                    queued.fragment.segment_id,
+                )
+
+        with self._state_lock:
+            self._outstanding = max(0, self._outstanding - 1)
+            if failed:
+                self._failed_total += 1
+            else:
+                self._completed_total += 1
+            self._prepare_service_ms_total += item.prepare_service_ms
+            self._prepare_service_ms_max = max(
+                self._prepare_service_ms_max,
+                item.prepare_service_ms,
+            )
+            self._commit_wait_ms_total += commit_wait_ms
+            self._commit_wait_ms_max = max(
+                self._commit_wait_ms_max,
+                commit_wait_ms,
+            )
+            self._queue_residence_ms_total += item.queue_residence_ms
+            self._queue_residence_ms_max = max(
+                self._queue_residence_ms_max,
+                item.queue_residence_ms,
+            )
+            if item.queue_residence_ms >= 1.0:
+                self._queue_residence_events_total += 1
+            self._worker_service_ms_total += worker_service_ms
+            self._worker_service_ms_max = max(
+                self._worker_service_ms_max,
+                worker_service_ms,
+            )
+            self._dispatch_total_ms_total += dispatch_total_ms
+            self._dispatch_total_ms_max = max(
+                self._dispatch_total_ms_max,
+                dispatch_total_ms,
+            )
+            if self._outstanding == 0:
+                self._idle.set()
+            state = self._snapshot_locked()
+        self._slots.release()
+        self._queue.task_done()
+        self._sync_metrics(state)
+
+    def _attach_dispatch_diagnostics(
+        self,
+        item: _PreparedPublication,
+        *,
+        commit_wait_ms: float,
+        worker_service_ms: float,
+        dispatch_total_ms: float,
+    ) -> None:
+        queued = item.queued
         diagnostics = dict(
             getattr(queued.fragment, "publication_diagnostics", {}) or {}
         )
@@ -683,7 +846,15 @@ class BoundedPublicationDispatcher:
                     3,
                 ),
                 "publication_queue_residence_ms": round(
-                    queue_residence_ms,
+                    item.queue_residence_ms,
+                    3,
+                ),
+                "publication_prepare_service_ms": round(
+                    item.prepare_service_ms,
+                    3,
+                ),
+                "publication_commit_wait_ms": round(
+                    commit_wait_ms,
                     3,
                 ),
                 "publication_worker_service_ms": round(
@@ -698,6 +869,8 @@ class BoundedPublicationDispatcher:
                     queued.outstanding_at_submit
                 ),
                 "publication_queue_depth_at_submit": queued.queue_depth_at_submit,
+                "publication_prepare_group_size": item.group_size,
+                "publication_prepare_group_position": item.group_position,
             }
         )
         queued.fragment.publication_diagnostics = diagnostics
@@ -718,6 +891,19 @@ class BoundedPublicationDispatcher:
             "queue_wait_ms_total": round(self._queue_wait_ms_total, 3),
             "queue_wait_ms_max": round(self._queue_wait_ms_max, 3),
             "queue_wait_events_total": self._queue_wait_events_total,
+            "prepare_group_limit": self.prepare_group_limit,
+            "prepare_group_total": self._prepare_group_total,
+            "prepare_group_size_max": self._prepare_group_size_max,
+            "prepare_service_ms_total": round(
+                self._prepare_service_ms_total,
+                3,
+            ),
+            "prepare_service_ms_max": round(
+                self._prepare_service_ms_max,
+                3,
+            ),
+            "commit_wait_ms_total": round(self._commit_wait_ms_total, 3),
+            "commit_wait_ms_max": round(self._commit_wait_ms_max, 3),
             "queue_residence_ms_total": round(
                 self._queue_residence_ms_total,
                 3,
