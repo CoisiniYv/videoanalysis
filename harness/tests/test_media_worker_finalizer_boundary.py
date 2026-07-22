@@ -395,6 +395,7 @@ def test_success_holds_permit_through_terminal_index_and_cleanup(
         phase=worker.MaterializationPhase.FINALIZING.value,
     )
     call_order: list[str] = []
+    lane_metrics: list[dict[str, Any]] = []
     monkeypatch.setattr(
         worker,
         "_claim_media_finalization",
@@ -451,6 +452,11 @@ def test_success_holds_permit_through_terminal_index_and_cleanup(
     monkeypatch.setattr(worker, "_log_finalize_one_metrics", lambda **_k: None)
     monkeypatch.setattr(
         worker,
+        "_log_finalizer_lane_metrics",
+        lambda **kwargs: lane_metrics.append(kwargs),
+    )
+    monkeypatch.setattr(
+        worker,
         "_persist_finalized_event_details",
         held("event", True),
     )
@@ -472,6 +478,13 @@ def test_success_holds_permit_through_terminal_index_and_cleanup(
     assert result.processed is True
     assert result.terminal_committed is True
     assert call_order == ["terminal", "event", "index", "cleanup"]
+    assert len(lane_metrics) == 1
+    assert lane_metrics[0]["event_id"] == EVENT_ID
+    assert lane_metrics[0]["stage_timings"]["finalizer_event_projection_ms"] >= 0
+    assert lane_metrics[0]["stage_timings"]["finalizer_db_index_ms"] >= 0
+    assert lane_metrics[0]["stage_timings"]["finalizer_cleanup_ms"] >= 0
+    assert lane_metrics[0]["stage_timings"]["finalizer_post_terminal_ms"] >= 0
+    assert lane_metrics[0]["stage_timings"]["finalizer_lane_service_ms"] >= 0
     assert permit.released is True
     assert guard.snapshot()["active"] == 0
 
@@ -810,6 +823,54 @@ def test_publish_attempt_renames_atomically_after_fence(
     assert not attempt.exists()
     metadata = json.loads((canonical / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["path"] == str(canonical / "raw_clip.mov")
+
+
+def test_publish_attempt_attributes_fence_prepare_rename_and_rebase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker = _worker()
+    lease = worker.MaterializationLease(
+        event_id=EVENT_ID,
+        owner="finalizer-test",
+        token="token-timing",
+        generation=5,
+        phase=worker.MaterializationPhase.FINALIZING.value,
+    )
+    attempt = worker._finalizer_attempt_dir(
+        str(tmp_path), event_id=EVENT_ID, lease=lease
+    )
+    attempt.mkdir(parents=True)
+    raw_clip = attempt / "raw_clip.mov"
+    raw_clip.write_bytes(b"mov")
+    monotonic_values = iter(float(value) for value in range(10))
+    monkeypatch.setattr(worker.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(worker, "heartbeat_lease", lambda *_a, **_k: True)
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+    stage_timings: dict[str, int] = {}
+
+    published = worker._publish_finalizer_attempt(
+        object(),
+        lease=lease,
+        event_id=EVENT_ID,
+        evidence_output_dir=str(tmp_path),
+        attempt_dir=attempt,
+        bundle={
+            "evidence_dir": str(attempt),
+            "raw_clip": str(raw_clip),
+        },
+        lease_seconds=30,
+        stage_timings=stage_timings,
+    )
+
+    assert published is not None
+    assert stage_timings == {
+        "finalizer_publish_heartbeat_ms": 1000,
+        "finalizer_publish_prepare_ms": 1000,
+        "finalizer_publish_rename_ms": 1000,
+        "finalizer_publish_rebase_ms": 1000,
+        "finalizer_publish_total_ms": 9000,
+    }
 
 
 def test_db_first_publish_skips_json_rewrite_before_sidecar_prune(

@@ -6510,6 +6510,28 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
                 "imageio_ffmpeg_fallback_count=2 imageio_ffmpeg_fallback_duration_ms=0",
+                "media_finalizer_lane_completed event_id=e1 "
+                "finalizer_pre_bundle_ms=10 finalizer_bundle_ms=40 "
+                "finalizer_publish_total_ms=50 "
+                "finalizer_publish_heartbeat_ms=20 "
+                "finalizer_publish_prepare_ms=5 "
+                "finalizer_publish_rename_ms=10 "
+                "finalizer_publish_rebase_ms=15 "
+                "finalizer_terminal_commit_ms=5 "
+                "finalizer_event_projection_ms=6 finalizer_db_index_ms=40 "
+                "finalizer_cleanup_ms=4 finalizer_post_terminal_ms=50 "
+                "finalizer_lane_service_ms=105",
+                "media_finalizer_lane_completed event_id=e2 "
+                "finalizer_pre_bundle_ms=20 finalizer_bundle_ms=80 "
+                "finalizer_publish_total_ms=100 "
+                "finalizer_publish_heartbeat_ms=70 "
+                "finalizer_publish_prepare_ms=10 "
+                "finalizer_publish_rename_ms=10 "
+                "finalizer_publish_rebase_ms=10 "
+                "finalizer_terminal_commit_ms=10 "
+                "finalizer_event_projection_ms=12 finalizer_db_index_ms=60 "
+                "finalizer_cleanup_ms=8 finalizer_post_terminal_ms=80 "
+                "finalizer_lane_service_ms=210",
                 "media_materialization_paced event_id=e3 reason=max_per_poll_reached",
                 "media_finalization_claim_busy event_id=e4",
                 "replay_slot_released event_id=e2 "
@@ -6672,6 +6694,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["clip_worker"]["clip_replay_job_create_ms"]["max"] == 9.0
     assert summary["media_worker"]["media_replay_to_sink_metadata_ms"]["p50"] == 60.0
     assert summary["media_worker"]["media_finalizer_pool_wait_ms"]["max"] == 6.0
+    assert summary["media_worker"]["media_finalizer_lane_service_ms"]["p50"] == 157.5
+    assert summary["media_worker"]["media_finalizer_publish_total_ms"]["max"] == 100.0
+    assert summary["media_worker"]["media_finalizer_publish_heartbeat_ms"]["p50"] == 45.0
+    assert summary["media_worker"]["media_finalizer_publish_rename_ms"]["max"] == 10.0
+    assert summary["media_worker"]["media_finalizer_post_terminal_ms"]["p50"] == 65.0
+    assert summary["media_worker"]["media_finalizer_db_index_ms"]["max"] == 60.0
     assert summary["media_worker"]["media_ready_to_remux_claim_ms"]["p50"] == 17.0
     assert summary["media_worker"]["media_remux_ms"]["max"] == 900.0
     assert summary["media_worker"]["media_remux_exec_ms"]["max"] == 900.0
@@ -6783,8 +6811,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     observable = module.media_worker_observability_summary(
         {"log_summary": summary}
     )
-    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v3"
+    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v4"
     assert observable["scheduler"]["cycle"]["work_ms"]["max"] == 1195.0
+    assert observable["finalizer_lane"]["service_ms"]["p50"] == 157.5
+    assert observable["finalizer_lane"]["publish"]["total_ms"]["max"] == 100.0
+    assert observable["finalizer_lane"]["publish"]["heartbeat_ms"]["p50"] == 45.0
+    assert observable["finalizer_lane"]["post_terminal_ms"]["p50"] == 65.0
+    assert observable["finalizer_lane"]["db_index_ms"]["max"] == 60.0
     assert observable["remux_total_ms"]["max"] == 2100.0
     assert observable["remux_metadata_publish_ms"]["p50"] == 250.0
     assert observable["remux_metadata_bytes"]["max"] == 15000.0
@@ -6817,6 +6850,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
             "max"
         ]
         == 2.0
+    )
+    phase = module.evidence_phase_latency_summary({"log_summary": summary})
+    assert phase["media_worker"]["finalizer_lane"]["service_ms"]["max"] == 210.0
+    assert (
+        phase["media_worker"]["finalizer_lane"]["publish"]["heartbeat_ms"][
+            "max"
+        ]
+        == 70.0
     )
     assert observable["db_index"]["overlay_ms"]["max"] == 16.0
     sink_summary = summary["video_file_sink"]
