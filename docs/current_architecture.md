@@ -7,7 +7,8 @@
 exact-lease 修复 `2a57f20`，当前容量 checkpoint `a88472c`。
 selected-identity 结构 checkpoint 为 `72413a2`，metadata reuse 为 `fcbe2bd`，
 fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`，finalizer
-attribution 为 `478bff5`。最新 exact r300 的 input/watchlist/retained correctness/residual 已通过，
+attribution 为 `478bff5`，bounded publication dispatcher checkpoint 为 `647dd2f`。
+最新 exact r300 的 input/watchlist/retained correctness/residual 已通过，
 但 media queue 与 rolling metadata visibility 的 Spec 33 capacity 门仍失败。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
@@ -153,7 +154,7 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、原子 fragment/compact manifest 发布、原子 rename 后的有界校验 publication journal、健康指标 |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
 
@@ -360,6 +361,20 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   media queue p95=25.803s（release `<=15s`）与 rolling metadata visibility p95=19.008s
   （`<=2s`）；ready-to-claim p95=12.006s 仅通过 release `<=15s`，尚未达到 closure `<=5s`。
   r3840 继续禁止，下一结构变量必须先从 long-run metadata visibility/ready burst 归因；
+- 后续 360s Round 23 diagnostic
+  `pressure60_8p1_remuxattrib_ioadm3_b6m_r300_20260722T034818Z` 将 visibility/media queue
+  p95 收窄到 7.610s/19.910s，并把一次 8.331s runner poll 分解为 prepare/claim 5.195s 与
+  handoff persist 3.120s；同时 sink A/B 的 4.060s/4.478s durable publish 几乎全部消耗在
+  既有 fsync。这动态排除了 candidate query/finalizer admission，证明共享 GLib callback 上的
+  同步 durable publish 会把 host storage stall 扩散到全部 source；
+- `b92876c`/`104472d`/`c86430e`/`647dd2f` 已先红后绿实现每 sink 一个进程生命周期、单 worker、
+  128 outstanding 的 FIFO dispatcher。全部 fsync、atomic rename、journal、全局/每 source order
+  保持不变；满队列显式 backpressure，不 drop。真实 bind-mounted
+  `rolling_publication_dispatcher_smoke_20260722T042517Z` 证明两 source 三 segment exact order、
+  bound=2 时第三次 submit 阻塞 155.993ms、error 后继续、active source failed 和 shutdown drain；
+  两个真实 sink 均输出 production capacity=128、`drained=True` 与 final queue/outstanding/active/
+  failure/timeout=0。该 smoke 只关闭 dispatcher correctness，不是 capacity pass；下一步仍须用
+  不变 Candidate B/width-three/r300 做 60-route retention-crossing causal diagnostic；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

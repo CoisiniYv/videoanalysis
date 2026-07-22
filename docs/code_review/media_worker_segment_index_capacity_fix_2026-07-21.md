@@ -14,11 +14,12 @@ almost entirely in required fsync boundaries. Candidate query and finalizer
 admission remained milliseconds. The 360-second diagnostic passed harness
 correctness, input and retained-evidence gates, but strict metadata visibility
 p95 was 7.610 seconds and media queue p95 was 19.910 seconds. It is not the
-exact 600-second r300 acceptance. The next behavior variable is therefore one
-fixed, bounded asynchronous publication dispatcher that preserves every
-durability and ordering fence while removing fsync execution from the
-sink-wide GLib callback. The exact r300 gate remains pending; r3840 and both
-one-hour acceptance runs are still prohibited.
+exact 600-second r300 acceptance. Round 24 implements the selected fixed,
+single-worker, 128-outstanding FIFO publication dispatcher and passes its
+real-container durability/order/backpressure/error/shutdown smoke without
+changing an fsync, rename, capacity, retention or deadline. The required short
+60-route causal diagnostic is still pending. The exact r300 gate remains
+pending; r3840 and both one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -83,6 +84,10 @@ one-hour acceptance runs are still prohibited.
 | `6d3753a` | retention-safe visibility discovery | Uses error-tolerant directory walking and counts vanished metadata while retention continues |
 | `21e2438` | remux-admission attribution tests | Requires non-overlapping runner subphases and retained pressure-summary fields before implementation |
 | `c128073` | remux-admission attribution | Splits completion/handoff, candidate, prepare/claim, reservation and finalizer-transfer work without changing admission behavior |
+| `b92876c` | bounded publication dispatcher correctness tests | Requires off-callback execution, exact FIFO order, hard backpressure, error continuation and shutdown drain |
+| `104472d` | dispatcher pressure-artifact red contract | Requires final queue/outstanding/failure/timeout and peak state to survive retained log aggregation |
+| `c86430e` | bounded asynchronous segment publication | Moves the unchanged durable publish sequence to one process-lifetime FIFO worker per sink with a 128-outstanding bound and source error propagation |
+| `647dd2f` | dispatcher artifact retention | Emits one structured shutdown snapshot and retains every dispatcher bound/backpressure/drain metric in pressure summaries |
 
 ## Measurement rounds
 
@@ -1264,6 +1269,55 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   drain queued publications before exit. Do not add publisher parallelism or
   change any fsync in this variable.
 
+### Round 24: bounded publication dispatcher and runtime smoke
+
+- Red contracts were committed separately. `b92876c` requires the GLib-facing
+  ledger close to return before an injected slow durable publish, exact global
+  and per-source FIFO order, a hard outstanding limit with blocking
+  backpressure, no fragment drop, publish-error continuation/source failure
+  and bounded shutdown drain. `104472d` requires terminal dispatcher state to
+  survive the retained pressure-log summary.
+- `c86430e` adds one process-lifetime dispatcher per rolling sink. Its only
+  worker calls the unchanged `AtomicSegmentPublisher.publish()` sequence, so
+  metadata/manifest/staging/parent fsyncs, same-filesystem atomic rename and
+  journal behavior are unchanged. A semaphore bounds active plus queued work
+  at 128; a full bound blocks the submitting callback rather than dropping or
+  creating an unbounded executor queue. Publication failure invokes the source
+  callback, and sink shutdown stops admission then drains before exit.
+- `647dd2f` emits one structured terminal snapshot with capacity/worker count,
+  current and peak queue/outstanding, active, submitted/completed/failed,
+  capacity-wait total/max/events and shutdown-timeout count. The pressure
+  summary retains every numeric field plus the stopped/drained marker.
+- Unique validation was 386 passing tests: sink/pressure/analyzer 237,
+  lifecycle/scheduler/performance 89, rolling/index/DB-index 31 and deployment
+  contract 29. Compile, Compose rendering and diff checks passed. The local
+  Python environment did not contain the optional Ruff module, so no Ruff pass
+  is claimed.
+- Real bind-mounted artifact:
+  `/data/video-analytics/artifacts/rolling_publication_dispatcher_smoke_20260722T042517Z`.
+  Both affected dual sink services were force-recreated without rebuilding and
+  became healthy. Inside the real sink image, three actual atomic segments from
+  two sources published and invoked callbacks in the exact submitted order.
+  With smoke capacity two, the third submit blocked for 155.993ms while the
+  first publish was held, outstanding peak stayed two, and all three durable
+  manifests/videos completed with no failure or timeout.
+- The injected error path recorded exactly one failed publication, continued
+  to publish the following good segment, and marked the active source pipeline
+  failed. Both dispatchers ended at queue/outstanding/active zero. The two real
+  service shutdown logs independently reported `drained=True`, production
+  capacity 128, worker count one and zero final queue/outstanding/active/
+  failure/timeout.
+- Restoration after the smoke left both temporary dual sinks stopped, zero
+  enabled cameras, active tasks, leases and finalizer-pending rows, no pressure
+  publishers/MediaMTX/ffmpeg process, 300-second retention and about 206GB
+  free. The pre-existing runtime doctor still reports unrelated env/source-
+  adapter drift; this loop did not modify it.
+- This closes only deterministic and real-container dispatcher correctness.
+  It does not prove the 60-route GLib publication-gap causal hypothesis or any
+  latency gate. The next unique run is a short retention-crossing 60-route
+  diagnostic at the unchanged fixed input, Candidate B `20/12/8`, finalizer
+  `8/4/8`, index width three and r300.
+
 ## Recovery audit after Round 21
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1284,23 +1338,14 @@ retention, 256-row cache and segment-index width two. Redis `save` returned to
 1. Keep r3840 and both one-hour acceptances blocked. Round 22 is a failed
    diagnostic and Round 23 is only 360 seconds; neither replaces the exact
    width-three 600-second r300 gate.
-2. Add deterministic red tests for a single-worker bounded FIFO publication
-   dispatcher: the GLib-facing submit must return before an injected slow
-   fsync, global/per-source order must be exact, outstanding work must never
-   exceed its fixed bound, a full queue must backpressure without dropping a
-   fragment, publish errors must surface, and shutdown must drain.
-3. Implement only that dispatcher around the unchanged
-   `AtomicSegmentPublisher.publish()` call. Expose queue/outstanding/active,
-   wait, completion, failure and shutdown metrics. Do not add publisher
-   parallelism or change WIP, remux, max-per-poll, finalizer, index width,
-   retention, deadlines, fsyncs or atomic rename.
-4. Recreate only the affected rolling sinks and run a one-/two-source
-   durability/order/error/shutdown smoke, then a short 60-route
-   retention-crossing diagnostic to confirm the GLib gap no longer follows a
-   slow publication and the bounded backlog drains to zero.
-5. Repeat the exact r300 gate with the fixed fixture/hash. Only a complete
+2. Run the short 60-route retention-crossing diagnostic with no capacity,
+   retention, deadline, fsync or rename change. Confirm source publication
+   gaps no longer follow slow fsync execution on the GLib callback, production
+   outstanding peak stays at or below 128, and terminal queue/outstanding/
+   active/failure/timeout are zero.
+3. Repeat the exact r300 gate with the fixed fixture/hash. Only a complete
    input, capacity, visibility, watchlist, annotation and residual pass permits
    the 3,840-second-retention short gate.
-6. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+4. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.
