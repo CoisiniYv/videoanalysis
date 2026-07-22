@@ -539,6 +539,20 @@ def test_bounded_publication_dispatcher_backpressures_without_reordering_or_drop
     assert snapshot["dispatch_total_ms_max"] >= 100
 
 
+def test_publication_dispatcher_disables_group_preparation_by_default() -> None:
+    assert publishing.SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT == 1
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        thread_name="test-publication-group-default",
+    )
+    try:
+        assert dispatcher.prepare_group_limit == 1
+        assert dispatcher.snapshot()["prepare_group_limit"] == 1
+    finally:
+        assert dispatcher.close(timeout_s=1) is True
+
+
 def test_publication_dispatcher_prepares_one_bounded_group_before_fifo_commit(
     tmp_path: Path,
 ) -> None:
