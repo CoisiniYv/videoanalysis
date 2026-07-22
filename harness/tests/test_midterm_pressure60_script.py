@@ -6291,6 +6291,7 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "sink_stable_to_ffprobe_ready_ms": module._not_enough_data("synthetic"),
             "sink_ffprobe_ready_to_finalizer_start_ms": module._not_enough_data("synthetic"),
             "finalizer_pool_wait_ms": module._not_enough_data("synthetic"),
+            "finalizer_lane": module._not_enough_data("synthetic"),
             "ready_to_remux_claim_ms": module._not_enough_data("synthetic"),
             "remux_ms": module._not_enough_data("synthetic"),
             "remux_exec_ms": module._not_enough_data("synthetic"),

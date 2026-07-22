@@ -10043,6 +10043,28 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "remux_unattributed_ms",
             )
         }
+        media_finalizer_lane_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_finalizer_lane_completed",
+                field=field,
+            )
+            for field in (
+                "finalizer_pre_bundle_ms",
+                "finalizer_bundle_ms",
+                "finalizer_publish_total_ms",
+                "finalizer_publish_heartbeat_ms",
+                "finalizer_publish_prepare_ms",
+                "finalizer_publish_rename_ms",
+                "finalizer_publish_rebase_ms",
+                "finalizer_terminal_commit_ms",
+                "finalizer_event_projection_ms",
+                "finalizer_db_index_ms",
+                "finalizer_cleanup_ms",
+                "finalizer_post_terminal_ms",
+                "finalizer_lane_service_ms",
+            )
+        }
         media_segment_index_job_metrics = {
             field: _log_metric_numbers_for_lines(
                 text,
@@ -10421,6 +10443,10 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             **{
                 f"media_{field}": _numeric_distribution(values)
                 for field, values in media_remux_job_metrics.items()
+            },
+            **{
+                f"media_{field}": _numeric_distribution(values)
+                for field, values in media_finalizer_lane_metrics.items()
             },
             **{
                 f"media_{field}": _numeric_distribution(values)
@@ -12967,6 +12993,42 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
         or _not_enough_data("finalizer start readiness logs unavailable"),
         "finalizer_pool_wait_ms": logs.get("media_finalizer_pool_wait_ms")
         or _not_enough_data("finalizer pool wait logs unavailable"),
+        "finalizer_lane": {
+            "service_ms": logs.get("media_finalizer_lane_service_ms")
+            or _not_enough_data("finalizer lane service timing unavailable"),
+            "pre_bundle_ms": logs.get("media_finalizer_pre_bundle_ms")
+            or _not_enough_data("finalizer pre-bundle timing unavailable"),
+            "bundle_ms": logs.get("media_finalizer_bundle_ms")
+            or _not_enough_data("finalizer bundle timing unavailable"),
+            "publish": {
+                "total_ms": logs.get("media_finalizer_publish_total_ms")
+                or _not_enough_data("finalizer publish timing unavailable"),
+                "heartbeat_ms": logs.get(
+                    "media_finalizer_publish_heartbeat_ms"
+                )
+                or _not_enough_data("finalizer publish heartbeat unavailable"),
+                "prepare_ms": logs.get("media_finalizer_publish_prepare_ms")
+                or _not_enough_data("finalizer publish prepare unavailable"),
+                "rename_ms": logs.get("media_finalizer_publish_rename_ms")
+                or _not_enough_data("finalizer publish rename unavailable"),
+                "rebase_ms": logs.get("media_finalizer_publish_rebase_ms")
+                or _not_enough_data("finalizer publish rebase unavailable"),
+            },
+            "terminal_commit_ms": logs.get(
+                "media_finalizer_terminal_commit_ms"
+            )
+            or _not_enough_data("finalizer terminal commit timing unavailable"),
+            "event_projection_ms": logs.get(
+                "media_finalizer_event_projection_ms"
+            )
+            or _not_enough_data("finalizer event projection timing unavailable"),
+            "db_index_ms": logs.get("media_finalizer_db_index_ms")
+            or _not_enough_data("finalizer DB index lane timing unavailable"),
+            "cleanup_ms": logs.get("media_finalizer_cleanup_ms")
+            or _not_enough_data("finalizer cleanup timing unavailable"),
+            "post_terminal_ms": logs.get("media_finalizer_post_terminal_ms")
+            or _not_enough_data("finalizer post-terminal timing unavailable"),
+        },
         "ready_to_remux_claim_ms": logs.get("media_ready_to_remux_claim_ms")
         or _not_enough_data("ready-to-remux claim logs unavailable"),
         "remux_ms": logs.get("media_remux_ms")
@@ -13032,7 +13094,7 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
             or _not_enough_data("sidecar prune timing logs unavailable"),
         },
         "scheduler": {
-            "schema_version": "phase6-capacity-v3",
+            "schema_version": "phase6-capacity-v4",
             "modes": logs.get("media_scheduler_modes") or {},
             "poll_duration_ms": logs.get("media_scheduler_tick_duration_ms")
             or _not_enough_data("scheduler tick logs unavailable"),
@@ -13421,6 +13483,60 @@ def evidence_phase_latency_summary(diagnostics: dict[str, Any]) -> dict[str, Any
             or _not_enough_data("finalizer start readiness logs unavailable"),
             "finalizer_pool_wait_ms": media_logs.get("media_finalizer_pool_wait_ms")
             or _not_enough_data("finalizer pool wait logs unavailable"),
+            "finalizer_lane": {
+                "service_ms": media_logs.get("media_finalizer_lane_service_ms")
+                or _not_enough_data("finalizer lane service timing unavailable"),
+                "pre_bundle_ms": media_logs.get(
+                    "media_finalizer_pre_bundle_ms"
+                )
+                or _not_enough_data("finalizer pre-bundle timing unavailable"),
+                "bundle_ms": media_logs.get("media_finalizer_bundle_ms")
+                or _not_enough_data("finalizer bundle timing unavailable"),
+                "publish": {
+                    "total_ms": media_logs.get(
+                        "media_finalizer_publish_total_ms"
+                    )
+                    or _not_enough_data("finalizer publish timing unavailable"),
+                    "heartbeat_ms": media_logs.get(
+                        "media_finalizer_publish_heartbeat_ms"
+                    )
+                    or _not_enough_data(
+                        "finalizer publish heartbeat unavailable"
+                    ),
+                    "prepare_ms": media_logs.get(
+                        "media_finalizer_publish_prepare_ms"
+                    )
+                    or _not_enough_data("finalizer publish prepare unavailable"),
+                    "rename_ms": media_logs.get(
+                        "media_finalizer_publish_rename_ms"
+                    )
+                    or _not_enough_data("finalizer publish rename unavailable"),
+                    "rebase_ms": media_logs.get(
+                        "media_finalizer_publish_rebase_ms"
+                    )
+                    or _not_enough_data("finalizer publish rebase unavailable"),
+                },
+                "terminal_commit_ms": media_logs.get(
+                    "media_finalizer_terminal_commit_ms"
+                )
+                or _not_enough_data(
+                    "finalizer terminal commit timing unavailable"
+                ),
+                "event_projection_ms": media_logs.get(
+                    "media_finalizer_event_projection_ms"
+                )
+                or _not_enough_data(
+                    "finalizer event projection timing unavailable"
+                ),
+                "db_index_ms": media_logs.get("media_finalizer_db_index_ms")
+                or _not_enough_data("finalizer DB index lane timing unavailable"),
+                "cleanup_ms": media_logs.get("media_finalizer_cleanup_ms")
+                or _not_enough_data("finalizer cleanup timing unavailable"),
+                "post_terminal_ms": media_logs.get(
+                    "media_finalizer_post_terminal_ms"
+                )
+                or _not_enough_data("finalizer post-terminal timing unavailable"),
+            },
             "ready_to_remux_claim_ms": media_logs.get(
                 "media_ready_to_remux_claim_ms"
             )
@@ -13784,6 +13900,7 @@ def validate_downstream_observability_schema(summary: dict[str, Any]) -> bool:
             "sink_stable_to_ffprobe_ready_ms",
             "sink_ffprobe_ready_to_finalizer_start_ms",
             "finalizer_pool_wait_ms",
+            "finalizer_lane",
             "ready_to_remux_claim_ms",
             "remux_ms",
             "remux_exec_ms",

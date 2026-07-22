@@ -161,6 +161,24 @@ REMUX_JOB_METRIC_FIELDS = (
     "remux_handoff_build_ms",
     "remux_unattributed_ms",
 )
+FINALIZER_PUBLISH_METRIC_FIELDS = (
+    "finalizer_publish_heartbeat_ms",
+    "finalizer_publish_prepare_ms",
+    "finalizer_publish_rename_ms",
+    "finalizer_publish_rebase_ms",
+    "finalizer_publish_total_ms",
+)
+FINALIZER_LANE_METRIC_FIELDS = (
+    "finalizer_pre_bundle_ms",
+    "finalizer_bundle_ms",
+    *FINALIZER_PUBLISH_METRIC_FIELDS,
+    "finalizer_terminal_commit_ms",
+    "finalizer_event_projection_ms",
+    "finalizer_db_index_ms",
+    "finalizer_cleanup_ms",
+    "finalizer_post_terminal_ms",
+    "finalizer_lane_service_ms",
+)
 
 
 class ImageExtractionRetryableError(RuntimeError):
@@ -6147,6 +6165,47 @@ def _log_finalize_one_metrics(
     )
 
 
+def _log_finalizer_lane_metrics(
+    *,
+    event_id: str,
+    finalizer_worker_id: str,
+    source_id: str,
+    replay_shard_id: str,
+    stage_timings: dict[str, int],
+) -> None:
+    logger.info(
+        "media_finalizer_lane_completed event_id=%s worker_id=%s "
+        "source_id=%s replay_shard_id=%s "
+        "finalizer_pre_bundle_ms=%s finalizer_bundle_ms=%s "
+        "finalizer_publish_total_ms=%s "
+        "finalizer_publish_heartbeat_ms=%s "
+        "finalizer_publish_prepare_ms=%s "
+        "finalizer_publish_rename_ms=%s "
+        "finalizer_publish_rebase_ms=%s "
+        "finalizer_terminal_commit_ms=%s "
+        "finalizer_event_projection_ms=%s finalizer_db_index_ms=%s "
+        "finalizer_cleanup_ms=%s finalizer_post_terminal_ms=%s "
+        "finalizer_lane_service_ms=%s",
+        event_id,
+        finalizer_worker_id,
+        source_id,
+        replay_shard_id,
+        stage_timings.get("finalizer_pre_bundle_ms", 0),
+        stage_timings.get("finalizer_bundle_ms", 0),
+        stage_timings.get("finalizer_publish_total_ms", 0),
+        stage_timings.get("finalizer_publish_heartbeat_ms", 0),
+        stage_timings.get("finalizer_publish_prepare_ms", 0),
+        stage_timings.get("finalizer_publish_rename_ms", 0),
+        stage_timings.get("finalizer_publish_rebase_ms", 0),
+        stage_timings.get("finalizer_terminal_commit_ms", 0),
+        stage_timings.get("finalizer_event_projection_ms", 0),
+        stage_timings.get("finalizer_db_index_ms", 0),
+        stage_timings.get("finalizer_cleanup_ms", 0),
+        stage_timings.get("finalizer_post_terminal_ms", 0),
+        stage_timings.get("finalizer_lane_service_ms", 0),
+    )
+
+
 def _finalizer_attempt_dir(
     evidence_output_dir: str,
     *,
@@ -6267,12 +6326,20 @@ def _publish_finalizer_attempt(
     attempt_dir: Path,
     bundle: dict,
     lease_seconds: float,
+    stage_timings: dict[str, int] | None = None,
 ) -> dict | None:
-    if not heartbeat_lease(
+    timings = stage_timings if stage_timings is not None else {}
+    publish_started = time.monotonic()
+    heartbeat_started = time.monotonic()
+    heartbeat_ok = heartbeat_lease(
         pg_conn,
         lease,
         lease_seconds=max(1.0, float(lease_seconds or 0.0)),
-    ):
+    )
+    timings["finalizer_publish_heartbeat_ms"] = int(
+        (time.monotonic() - heartbeat_started) * 1000
+    )
+    if not heartbeat_ok:
         logger.warning(
             "finalizer_publish_fence_lost event_id=%s token=%s generation=%s",
             event_id,
@@ -6283,36 +6350,60 @@ def _publish_finalizer_attempt(
             attempt_dir,
             evidence_output_dir=evidence_output_dir,
         )
+        timings["finalizer_publish_total_ms"] = int(
+            (time.monotonic() - publish_started) * 1000
+        )
         return None
+
+    prepare_started = time.monotonic()
     if not attempt_dir.is_dir():
         logger.error(
             "finalizer_attempt_missing event_id=%s path=%s",
             event_id,
             attempt_dir,
         )
+        timings["finalizer_publish_prepare_ms"] = int(
+            (time.monotonic() - prepare_started) * 1000
+        )
+        timings["finalizer_publish_total_ms"] = int(
+            (time.monotonic() - publish_started) * 1000
+        )
         return None
 
     canonical_dir = Path(evidence_output_dir) / event_id
     canonical_dir.parent.mkdir(parents=True, exist_ok=True)
-    if canonical_dir.exists() and _canonical_attempt_is_complete(
+    canonical_exists = canonical_dir.exists()
+    canonical_complete = canonical_exists and _canonical_attempt_is_complete(
         canonical_dir,
         bundle,
         attempt_dir=attempt_dir,
-    ):
+    )
+    quarantine_path: Path | None = None
+    if canonical_exists and not canonical_complete:
+        quarantine_root = Path(evidence_output_dir) / ".quarantine" / event_id
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        quarantine_path = quarantine_root / (
+            f"replaced-{lease.generation}-{int(time.time() * 1000)}"
+        )
+    timings["finalizer_publish_prepare_ms"] = int(
+        (time.monotonic() - prepare_started) * 1000
+    )
+
+    rename_started = time.monotonic()
+    if canonical_complete:
         _discard_finalizer_attempt(
             attempt_dir,
             evidence_output_dir=evidence_output_dir,
         )
     else:
-        if canonical_dir.exists():
-            quarantine_root = Path(evidence_output_dir) / ".quarantine" / event_id
-            quarantine_root.mkdir(parents=True, exist_ok=True)
-            quarantine_path = quarantine_root / (
-                f"replaced-{lease.generation}-{int(time.time() * 1000)}"
-            )
+        if quarantine_path is not None:
             os.replace(canonical_dir, quarantine_path)
         os.replace(attempt_dir, canonical_dir)
+    timings["finalizer_publish_rename_ms"] = int(
+        (time.monotonic() - rename_started) * 1000
+    )
 
+    rebase_started = time.monotonic()
     rebased = {
         key: _rebase_path_value(value, attempt_dir, canonical_dir)
         for key, value in bundle.items()
@@ -6329,6 +6420,12 @@ def _publish_finalizer_attempt(
         )
     else:
         _rewrite_published_json_paths(canonical_dir, old_root=attempt_dir)
+    timings["finalizer_publish_rebase_ms"] = int(
+        (time.monotonic() - rebase_started) * 1000
+    )
+    timings["finalizer_publish_total_ms"] = int(
+        (time.monotonic() - publish_started) * 1000
+    )
     return rebased
 
 
@@ -6406,6 +6503,12 @@ def _finalize_one(
     handoff_lease: MaterializationLease | None = None,
 ) -> _FinalizeOneResult:
     finalize_started = time.monotonic()
+    lane_started_value = phase_diagnostics.get("finalizer_started_monotonic")
+    lane_started = (
+        float(lane_started_value)
+        if isinstance(lane_started_value, (int, float))
+        else finalize_started
+    )
     probe_before = _probe_metrics_snapshot()
     claim_result: dict[str, object] = {"status": "claim_error", "claimed": False}
     claim_wait_ms = 0
@@ -6517,6 +6620,7 @@ def _finalize_one(
         stage_timings["pre_bundle_ms"] = int(
             (time.monotonic() - finalize_started) * 1000
         )
+        stage_timings["finalizer_pre_bundle_ms"] = stage_timings["pre_bundle_ms"]
         bundle_started = time.monotonic()
         finalize_kwargs: dict[str, object] = {
             "event_id": event_id,
@@ -6553,6 +6657,7 @@ def _finalize_one(
             stage_timings["bundle_ms"] = int(
                 (time.monotonic() - bundle_started) * 1000
             )
+            stage_timings["finalizer_bundle_ms"] = stage_timings["bundle_ms"]
         except Exception as exc:
             error_message = f"{type(exc).__name__}:{exc}"
             logger.exception(
@@ -6632,6 +6737,7 @@ def _finalize_one(
             attempt_dir=attempt_dir,
             bundle=bundle,
             lease_seconds=materialization_timeout_s,
+            stage_timings=stage_timings,
         )
         if published_bundle is None:
             return _FinalizeOneResult(claim_status=claim_status)
@@ -6669,6 +6775,9 @@ def _finalize_one(
         stage_timings["terminal_commit_ms"] = int(
             (time.monotonic() - terminal_commit_started) * 1000
         )
+        stage_timings["finalizer_terminal_commit_ms"] = stage_timings[
+            "terminal_commit_ms"
+        ]
         if not terminal_committed:
             logger.warning(
                 "media_terminal_transition_fence_lost "
@@ -6679,6 +6788,7 @@ def _finalize_one(
             )
             return _FinalizeOneResult(claim_status=claim_status)
 
+        post_terminal_started = time.monotonic()
         finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
         _record_replay_slot_finalization_duration(
             pg_conn,
@@ -6697,6 +6807,19 @@ def _finalize_one(
             if isinstance(materialization_metrics, dict)
             else {}
         )
+        materialization_metrics.update(
+            {
+                name: stage_timings.get(name)
+                for name in (
+                    "finalizer_pre_bundle_ms",
+                    "finalizer_bundle_ms",
+                    *FINALIZER_PUBLISH_METRIC_FIELDS,
+                    "finalizer_terminal_commit_ms",
+                )
+                if stage_timings.get(name) is not None
+            }
+        )
+        bundle["materialization_metrics"] = materialization_metrics
         _log_finalize_one_metrics(
             event_id=event_id,
             meta_dir=meta_dir,
@@ -6713,7 +6836,8 @@ def _finalize_one(
             stage_timings=stage_timings,
         )
         replay_job_id = str(meta.get("job_id") or meta.get("new_job") or "")
-        if not _persist_finalized_event_details(
+        event_projection_started = time.monotonic()
+        projection_persisted = _persist_finalized_event_details(
             pg_conn,
             event_id=event_id,
             clip_path=clip_path,
@@ -6721,14 +6845,23 @@ def _finalize_one(
             replay_job_id=replay_job_id,
             sink_path=meta_dir,
             bundle=bundle,
-        ):
+        )
+        stage_timings["finalizer_event_projection_ms"] = int(
+            (time.monotonic() - event_projection_started) * 1000
+        )
+        if not projection_persisted:
             logger.error("media_finalized_event_projection_missing event_id=%s", event_id)
+        db_index_started = time.monotonic()
         _index_finalized_bundle(
             pg_conn,
             event_id=event_id,
             evidence_state=evidence_state,
             bundle=bundle,
         )
+        stage_timings["finalizer_db_index_ms"] = int(
+            (time.monotonic() - db_index_started) * 1000
+        )
+        cleanup_started = time.monotonic()
         cleanup = _attempt_terminal_sink_cleanup(
             pg_conn,
             event_id=event_id,
@@ -6737,6 +6870,22 @@ def _finalize_one(
             clip_status=clip_status,
             enabled=cleanup_replay_sink_output_enabled,
             allowed_statuses=cleanup_replay_sink_output_statuses,
+        )
+        stage_timings["finalizer_cleanup_ms"] = int(
+            (time.monotonic() - cleanup_started) * 1000
+        )
+        stage_timings["finalizer_post_terminal_ms"] = int(
+            (time.monotonic() - post_terminal_started) * 1000
+        )
+        stage_timings["finalizer_lane_service_ms"] = int(
+            (time.monotonic() - lane_started) * 1000
+        )
+        _log_finalizer_lane_metrics(
+            event_id=event_id,
+            finalizer_worker_id=finalizer_worker_id,
+            source_id=source_id,
+            replay_shard_id=replay_shard_id,
+            stage_timings=stage_timings,
         )
         logger.info(
             "media_event_updated event_id=%s clip_path=%s sink_path=%s "
