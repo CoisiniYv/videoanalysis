@@ -634,6 +634,79 @@ def test_evidence_db_index_expanded_rows_can_be_disabled(monkeypatch: Any) -> No
     assert worker._evidence_db_index_expanded_rows_enabled() is True
 
 
+def test_person_bbox_db_fallback_returns_written_rows_for_expanded_index(
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    observations = [
+        {
+            "source_observation_id": "obs-1",
+            "track_id": "track-1",
+            "frame_pts": 100,
+            "frame_num": 10,
+            "person_bbox": [1.0, 2.0, 30.0, 40.0],
+            "person_confidence": 0.9,
+        },
+        {
+            "source_observation_id": "obs-2",
+            "track_id": "track-2",
+            "frame_pts": 200,
+            "frame_num": 11,
+            "person_bbox": [3.0, 4.0, 33.0, 44.0],
+            "person_confidence": 0.8,
+        },
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, _query: str, params: tuple[object, ...]) -> None:
+            assert params == ("source-1", 100, 200)
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return observations
+
+    class FakeConnection:
+        @staticmethod
+        def cursor(**_kwargs: object) -> FakeCursor:
+            return FakeCursor()
+
+    recovered = worker._write_person_bbox_db_sidecar_fallback(
+        FakeConnection(),
+        event_context={"event_id": EVENT_ID, "source_id": "source-1"},
+        output_dir=tmp_path,
+        sink_metadata_rows=[
+            {"frame_pts": 100, "frame_uuid": "frame-1"},
+            {"frame_pts": 200, "frame_uuid": "frame-2"},
+        ],
+    )
+
+    assert recovered is not None
+    summary, sidecar = recovered
+    disk_rows = [
+        json.loads(line)
+        for line in (tmp_path / "annotations.frame_cache.identity.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert summary["annotations_written"] == 2
+    assert len(disk_rows) == 2
+    assert sidecar["annotations"] == disk_rows
+    payload = worker._db_index_payload_kwargs(
+        {"_db_overlay_rows": list(sidecar["annotations"])},
+        expanded_rows_enabled=True,
+    )
+    assert payload["overlay_rows"] == disk_rows
+    assert all(
+        row["objects"][0]["annotation_role"] == "person_context"
+        for row in disk_rows
+    )
+
+
 def test_materialized_bundle_indexes_in_memory_rows_without_sidecar_files(
     monkeypatch: Any,
     tmp_path: Path,
