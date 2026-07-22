@@ -10312,6 +10312,29 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_unattributed_ms",
             )
         }
+        rolling_cache_publication_dispatcher_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="publication dispatcher stopped",
+                field=field,
+            )
+            for field in (
+                "publication_capacity",
+                "publication_worker_count",
+                "publication_queue_depth",
+                "publication_queue_depth_peak",
+                "publication_outstanding",
+                "publication_outstanding_peak",
+                "publication_active",
+                "publication_submitted_total",
+                "publication_completed_total",
+                "publication_failed_total",
+                "publication_queue_wait_ms_total",
+                "publication_queue_wait_ms_max",
+                "publication_queue_wait_events_total",
+                "publication_shutdown_timeout_total",
+            )
+        }
         media_scheduler_remux_lane_depth = _log_metric_numbers_for_lines(
             text,
             marker="media_scheduler_tick",
@@ -10657,6 +10680,18 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 f"rolling_cache_{field}": _numeric_distribution(values)
                 for field, values in rolling_cache_publish_metrics.items()
             },
+            **{
+                f"rolling_cache_{field}": _numeric_distribution(values)
+                for field, values in (
+                    rolling_cache_publication_dispatcher_metrics.items()
+                )
+            },
+            "rolling_cache_publication_dispatcher_stopped": text.count(
+                "publication dispatcher stopped"
+            ),
+            "rolling_cache_publication_dispatcher_drained": text.count(
+                "publication dispatcher stopped drained=True"
+            ),
             "media_scheduler_remux_lane_depth": _numeric_distribution(
                 media_scheduler_remux_lane_depth
             ),
