@@ -169,6 +169,61 @@ def test_atomic_publication_exposes_complete_phase_diagnostics(
     )
 
 
+def test_atomic_publication_stages_before_the_unchanged_durable_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(9)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {"source_id": "camera-01", "pts": 10},
+            {"source_id": "camera-01", "pts": 20},
+        ]
+    )
+    events: list[tuple[str, str]] = []
+    real_fsync = publishing.os.fsync
+    real_replace = publishing.os.replace
+
+    def record_fsync(fd: int) -> None:
+        events.append(("fsync", str(Path(f"/proc/self/fd/{fd}").resolve())))
+        real_fsync(fd)
+
+    def record_replace(source, destination) -> None:
+        events.append(("replace", f"{source}->{destination}"))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "fsync", record_fsync)
+    monkeypatch.setattr(publishing.os, "replace", record_replace)
+
+    staged = publisher.stage_publication(fragment)
+
+    assert events == []
+    assert fragment.staging_dir.is_dir()
+    assert (fragment.staging_dir / "metadata.json").is_file()
+    assert (fragment.staging_dir / "segment_manifest.json").is_file()
+    assert not fragment.final_dir.exists()
+
+    final_dir = publisher.commit_publication(staged)
+
+    assert final_dir == fragment.final_dir
+    assert final_dir.is_dir()
+    assert [kind for kind, _value in events] == [
+        "fsync",
+        "fsync",
+        "fsync",
+        "replace",
+        "fsync",
+    ]
+    assert Path(events[0][1]).name == "metadata.json"
+    assert Path(events[1][1]).name == "segment_manifest.json"
+    assert Path(events[2][1]).name.endswith(".partial")
+    assert Path(events[4][1]).name == "segments"
+    assert fragment.publication_diagnostics["publish_stage_ms"] >= 0
+    assert fragment.publication_diagnostics["publish_commit_ms"] >= 0
+
+
 def test_missing_video_is_not_published_and_staging_is_preserved(
     tmp_path: Path,
 ) -> None:
@@ -482,6 +537,189 @@ def test_bounded_publication_dispatcher_backpressures_without_reordering_or_drop
     assert snapshot["queue_residence_ms_max"] >= 100
     assert snapshot["worker_service_ms_max"] >= 100
     assert snapshot["dispatch_total_ms_max"] >= 100
+
+
+def test_publication_dispatcher_prepares_one_bounded_group_before_fifo_commit(
+    tmp_path: Path,
+) -> None:
+    first_commit_started = threading.Event()
+    release_first_commit = threading.Event()
+    events: list[tuple[str, str]] = []
+    callbacks: list[str] = []
+
+    class GroupPublisher:
+        @staticmethod
+        def stage_publication(fragment):
+            events.append(("stage", fragment.segment_id))
+            return fragment
+
+        @staticmethod
+        def commit_publication(fragment):
+            events.append(("commit", fragment.segment_id))
+            if fragment.segment_id == "segment-1":
+                first_commit_started.set()
+                assert release_first_commit.wait(timeout=2)
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    metrics = SinkMetrics()
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        prepare_group_limit=3,
+        metrics=metrics,
+        thread_name="test-publication-group",
+    )
+    fragments = [
+        SimpleNamespace(
+            segment_id=f"segment-{index}",
+            final_dir=tmp_path / f"segment-{index}",
+        )
+        for index in range(1, 6)
+    ]
+
+    def submit(fragment) -> None:
+        dispatcher.submit(
+            source_id="camera-01",
+            publisher=GroupPublisher(),
+            fragment=fragment,
+            on_published=lambda item, _path: callbacks.append(item.segment_id),
+            on_publish_error=lambda _item, error: pytest.fail(str(error)),
+        )
+
+    submit(fragments[0])
+    assert first_commit_started.wait(timeout=1)
+    for fragment in fragments[1:]:
+        submit(fragment)
+    release_first_commit.set()
+
+    assert dispatcher.close(timeout_s=2) is True
+    assert events == [
+        ("stage", "segment-1"),
+        ("commit", "segment-1"),
+        ("stage", "segment-2"),
+        ("stage", "segment-3"),
+        ("stage", "segment-4"),
+        ("commit", "segment-2"),
+        ("commit", "segment-3"),
+        ("commit", "segment-4"),
+        ("stage", "segment-5"),
+        ("commit", "segment-5"),
+    ]
+    assert callbacks == [fragment.segment_id for fragment in fragments]
+    assert fragments[1].publication_diagnostics[
+        "publication_prepare_group_size"
+    ] == 3
+    assert fragments[1].publication_diagnostics[
+        "publication_prepare_group_position"
+    ] == 1
+    assert fragments[3].publication_diagnostics[
+        "publication_prepare_group_position"
+    ] == 3
+    assert fragments[4].publication_diagnostics[
+        "publication_prepare_group_size"
+    ] == 1
+    for fragment in fragments:
+        diagnostics = fragment.publication_diagnostics
+        assert diagnostics["publication_prepare_service_ms"] >= 0
+        assert diagnostics["publication_commit_wait_ms"] >= 0
+        assert diagnostics["publication_dispatch_total_ms"] >= (
+            diagnostics["publication_capacity_wait_ms"]
+            + diagnostics["publication_queue_residence_ms"]
+            + diagnostics["publication_prepare_service_ms"]
+            + diagnostics["publication_commit_wait_ms"]
+            + diagnostics["publication_worker_service_ms"]
+            - 1.0
+        )
+    snapshot = dispatcher.snapshot()
+    assert snapshot["prepare_group_limit"] == 3
+    assert snapshot["prepare_group_total"] == 3
+    assert snapshot["prepare_group_size_max"] == 3
+    assert snapshot["prepare_service_ms_total"] >= 0
+    assert snapshot["commit_wait_ms_total"] >= 0
+
+
+def test_publication_group_stage_error_keeps_fifo_error_continuation(
+    tmp_path: Path,
+) -> None:
+    first_commit_started = threading.Event()
+    release_first_commit = threading.Event()
+    events: list[tuple[str, str]] = []
+    callbacks: list[str] = []
+
+    class GroupPublisher:
+        @staticmethod
+        def stage_publication(fragment):
+            events.append(("stage", fragment.segment_id))
+            if fragment.segment_id == "bad":
+                raise OSError("injected-stage-failure")
+            return fragment
+
+        @staticmethod
+        def commit_publication(fragment):
+            events.append(("commit", fragment.segment_id))
+            if fragment.segment_id == "first":
+                first_commit_started.set()
+                assert release_first_commit.wait(timeout=2)
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=4,
+        prepare_group_limit=3,
+        thread_name="test-publication-group-error",
+    )
+    fragments = {
+        segment_id: SimpleNamespace(
+            segment_id=segment_id,
+            final_dir=tmp_path / segment_id,
+        )
+        for segment_id in ("first", "good-1", "bad", "good-2")
+    }
+
+    def submit(segment_id: str) -> None:
+        dispatcher.submit(
+            source_id="camera-01",
+            publisher=GroupPublisher(),
+            fragment=fragments[segment_id],
+            on_published=lambda item, _path: callbacks.append(
+                f"ok:{item.segment_id}"
+            ),
+            on_publish_error=lambda item, error: callbacks.append(
+                f"error:{item.segment_id}:{error}"
+            ),
+        )
+
+    submit("first")
+    assert first_commit_started.wait(timeout=1)
+    for segment_id in ("good-1", "bad", "good-2"):
+        submit(segment_id)
+    release_first_commit.set()
+
+    assert dispatcher.close(timeout_s=2) is True
+    assert events == [
+        ("stage", "first"),
+        ("commit", "first"),
+        ("stage", "good-1"),
+        ("stage", "bad"),
+        ("stage", "good-2"),
+        ("commit", "good-1"),
+        ("commit", "good-2"),
+    ]
+    assert callbacks == [
+        "ok:first",
+        "ok:good-1",
+        "error:bad:injected-stage-failure",
+        "ok:good-2",
+    ]
+    assert dispatcher.snapshot()["completed_total"] == 3
+    assert dispatcher.snapshot()["failed_total"] == 1
+    assert dispatcher.snapshot()["outstanding"] == 0
+    assert fragments["bad"].publication_diagnostics[
+        "publication_prepare_group_position"
+    ] == 2
+    assert fragments["bad"].publication_diagnostics[
+        "publication_worker_service_ms"
+    ] == 0
 
 
 def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(

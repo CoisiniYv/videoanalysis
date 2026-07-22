@@ -6827,7 +6827,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "2026-07-22 02:03:08,901 INFO rolling_cache_sink.gst "
                 "segment published source=source-a epoch=epoch-a session=session-a "
                 "segment=segment-a frames=84 bytes=1000 "
-                "publish_total_ms=12 publish_validate_ms=1 "
+                "publish_total_ms=12 publish_stage_ms=3 publish_commit_ms=9 "
+                "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=3 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
                 "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
@@ -6837,14 +6838,19 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publish_unattributed_ms=0 "
                     "publication_capacity_wait_ms=0.01 "
                     "publication_queue_residence_ms=4 "
+                    "publication_prepare_service_ms=3 "
+                    "publication_commit_wait_ms=0.5 "
                     "publication_worker_service_ms=12 "
                     "publication_dispatch_total_ms=16.01 "
                     "publication_outstanding_at_submit=2 "
-                    "publication_queue_depth_at_submit=1",
+                    "publication_queue_depth_at_submit=1 "
+                    "publication_prepare_group_size=1 "
+                    "publication_prepare_group_position=1",
                 "2026-07-22 02:03:12,901 INFO rolling_cache_sink.gst "
                 "segment published source=source-a epoch=epoch-a session=session-a "
                 "segment=segment-b frames=84 bytes=1000 "
-                "publish_total_ms=40 publish_validate_ms=1 "
+                "publish_total_ms=40 publish_stage_ms=4 publish_commit_ms=36 "
+                "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=30 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
                 "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
@@ -6854,10 +6860,14 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publish_unattributed_ms=1 "
                     "publication_capacity_wait_ms=0.02 "
                     "publication_queue_residence_ms=20 "
+                    "publication_prepare_service_ms=4 "
+                    "publication_commit_wait_ms=12 "
                     "publication_worker_service_ms=40 "
                     "publication_dispatch_total_ms=60.02 "
                     "publication_outstanding_at_submit=37 "
-                    "publication_queue_depth_at_submit=36",
+                    "publication_queue_depth_at_submit=36 "
+                    "publication_prepare_group_size=16 "
+                    "publication_prepare_group_position=12",
                 "2026-07-22 02:03:13,901 INFO rolling_cache_sink.gst "
                 "publication dispatcher stopped drained=True "
                 "publication_capacity=128 publication_worker_count=1 "
@@ -6868,6 +6878,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publication_queue_wait_ms_total=0.5 "
                 "publication_queue_wait_ms_max=0.1 "
                 "publication_queue_wait_events_total=0 "
+                "publication_prepare_group_limit=32 "
+                "publication_prepare_group_total=20 "
+                "publication_prepare_group_size_max=16 "
+                "publication_prepare_service_ms_total=700 "
+                "publication_prepare_service_ms_max=4 "
+                "publication_commit_wait_ms_total=1500 "
+                "publication_commit_wait_ms_max=12 "
                 "publication_queue_residence_ms_total=2000 "
                 "publication_queue_residence_ms_max=20 "
                 "publication_queue_residence_events_total=1 "
@@ -7081,6 +7098,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["rolling_cache_sink_a"]["rolling_cache_publish_total_ms"][
         "max"
     ] == 40.0
+    assert summary["rolling_cache_sink_a"]["rolling_cache_publish_stage_ms"][
+        "max"
+    ] == 4.0
+    assert summary["rolling_cache_sink_a"]["rolling_cache_publish_commit_ms"][
+        "max"
+    ] == 36.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publish_metadata_fsync_ms"
     ]["max"] == 30.0
@@ -7100,6 +7123,18 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         "rolling_cache_publication_queue_residence_ms"
     ]["max"] == 20.0
     assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_prepare_service_ms"
+    ]["max"] == 4.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_commit_wait_ms"
+    ]["max"] == 12.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_prepare_group_size"
+    ]["max"] == 16.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_prepare_group_position"
+    ]["max"] == 12.0
+    assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_worker_service_ms"
     ]["max"] == 40.0
     assert summary["rolling_cache_sink_a"][
@@ -7111,6 +7146,18 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_queue_residence_ms_total"
     ]["max"] == 2000.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_prepare_group_limit"
+    ]["max"] == 32.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_prepare_group_size_max"
+    ]["max"] == 16.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_prepare_service_ms_total"
+    ]["max"] == 700.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_commit_wait_ms_total"
+    ]["max"] == 1500.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_outstanding_peak_at_epoch_ms"
     ]["max"] == 1784695393901.0
