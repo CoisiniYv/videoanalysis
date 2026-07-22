@@ -6915,7 +6915,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publication_prepare_group_position=12",
                 "2026-07-22 02:03:13,901 INFO rolling_cache_sink.gst "
                 "publication dispatcher stopped drained=True "
-                "publication_capacity=128 publication_worker_count=1 "
+                "publication_capacity=128 publication_worker_count=2 "
                 "publication_queue_depth=0 publication_queue_depth_peak=36 "
                 "publication_outstanding=0 publication_outstanding_peak=37 "
                 "publication_active=0 publication_active_peak=2 "
@@ -7173,6 +7173,9 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_queue_depth_peak"
     ]["max"] == 36.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_worker_count"
+    ]["max"] == 2.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_active_peak"
     ]["max"] == 2.0

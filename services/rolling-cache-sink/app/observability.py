@@ -43,6 +43,7 @@ class SinkMetrics:
             "publication_outstanding": 0,
             "publication_outstanding_peak": 0,
             "publication_active": 0,
+            "publication_active_peak": 0,
             "publication_submitted_total": 0,
             "publication_completed_total": 0,
             "publication_failed_total": 0,

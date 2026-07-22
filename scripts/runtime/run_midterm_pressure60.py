@@ -488,6 +488,7 @@ class PressureConfig:
     preserve_warmup_results: bool = False
     pressure_sampling_start_event_ts_ms: int = 0
     pressure_sampling_end_event_ts_ms: int = 0
+    rolling_cache_publication_workers: int = 1
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -662,6 +663,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Maximum concurrent rolling segment-index discovery-through-pin "
             "I/O jobs; ffmpeg/remux concurrency is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-publication-workers",
+        type=int,
+        choices=range(1, 5),
+        default=1,
+        help=(
+            "Per-sink source-sharded rolling segment publication workers. "
+            "The daily default is one; bounded diagnostics may use up to four."
         ),
     )
     parser.add_argument(
@@ -1439,6 +1450,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         pressure_rolling_cache_retention_s=int(
             args.pressure_rolling_cache_retention_s or 0
+        ),
+        rolling_cache_publication_workers=int(
+            args.rolling_cache_publication_workers
         ),
         preserve_warmup_results=bool(args.preserve_warmup_results),
     )
@@ -4469,6 +4483,9 @@ def start_rolling_cache_sinks_for_pressure(
         {
             "ROLLING_CACHE_ROOT": "/media/rolling-cache",
             "ROLLING_CACHE_SEGMENT_SECONDS": "4",
+            "ROLLING_CACHE_PUBLICATION_WORKERS": str(
+                cfg.rolling_cache_publication_workers
+            ),
             "ROLLING_CACHE_FPS": _format_fps_float(rolling_cache_input_fps),
             "ROLLING_CACHE_RUNTIME_EPOCH_ID": runtime_epoch_id,
             "ROLLING_CACHE_RETENTION_SECONDS": str(
@@ -4546,6 +4563,9 @@ def start_rolling_cache_sinks_for_pressure(
         "input_fps_probe": input_fps_probe,
         "rolling_cache_expected_raw_fps": rolling_cache_input_fps,
         "rolling_cache_retention_seconds": expected_retention_s,
+        "rolling_cache_publication_workers": (
+            cfg.rolling_cache_publication_workers
+        ),
         "observed_env": observed_env,
         "states": service_states,
         "dependency_states": dependency_states,
@@ -4567,6 +4587,17 @@ def start_rolling_cache_sinks_for_pressure(
         raise RuntimeError(
             "rolling-cache sink retention was not applied after compose recreate: "
             f"{retention_mismatches}"
+        )
+    publication_worker_mismatches = {
+        service: values.get("ROLLING_CACHE_PUBLICATION_WORKERS", "")
+        for service, values in observed_env.items()
+        if values.get("ROLLING_CACHE_PUBLICATION_WORKERS", "")
+        != str(cfg.rolling_cache_publication_workers)
+    }
+    if publication_worker_mismatches:
+        raise RuntimeError(
+            "rolling-cache publication worker count was not applied after "
+            f"compose recreate: {publication_worker_mismatches}"
         )
     return summary
 
@@ -10322,6 +10353,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_dispatch_total_ms",
                 "publication_outstanding_at_submit",
                 "publication_queue_depth_at_submit",
+                "publication_worker_index",
                 "publication_prepare_group_size",
                 "publication_prepare_group_position",
             )
@@ -10340,6 +10372,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_outstanding",
                 "publication_outstanding_peak",
                 "publication_active",
+                "publication_active_peak",
                 "publication_submitted_total",
                 "publication_completed_total",
                 "publication_failed_total",

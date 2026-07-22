@@ -407,6 +407,7 @@ class SourcePipeline:
             "publication_dispatch_total_ms=%s "
             "publication_outstanding_at_submit=%s "
             "publication_queue_depth_at_submit=%s "
+            "publication_worker_index=%s "
             "publication_prepare_group_size=%s "
             "publication_prepare_group_position=%s",
             self.source_id,
@@ -444,6 +445,7 @@ class SourcePipeline:
             timings.get("publication_dispatch_total_ms", "unavailable"),
             timings.get("publication_outstanding_at_submit", "unavailable"),
             timings.get("publication_queue_depth_at_submit", "unavailable"),
+            timings.get("publication_worker_index", "unavailable"),
             timings.get("publication_prepare_group_size", "unavailable"),
             timings.get("publication_prepare_group_position", "unavailable"),
         )
@@ -511,12 +513,14 @@ class RollingCacheSink:
         self._publication_dispatcher = BoundedPublicationDispatcher(
             capacity=SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
             prepare_group_limit=SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
+            worker_count=config.publication_workers,
             metrics=metrics,
             thread_name="rolling-cache-publication",
         )
         LOGGER.info(
-            "publication dispatcher started workers=1 outstanding_limit=%d "
+            "publication dispatcher started workers=%d outstanding_limit=%d "
             "prepare_group_limit=%d commit_arbitration_enabled=%s",
+            config.publication_workers,
             SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
             SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
             SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
@@ -646,7 +650,8 @@ class RollingCacheSink:
             "publication_capacity=%d publication_worker_count=%d "
             "publication_queue_depth=%d publication_queue_depth_peak=%d "
             "publication_outstanding=%d publication_outstanding_peak=%d "
-            "publication_active=%d publication_submitted_total=%d "
+            "publication_active=%d publication_active_peak=%d "
+            "publication_submitted_total=%d "
             "publication_completed_total=%d publication_failed_total=%d "
             "publication_queue_wait_ms_total=%.3f "
             "publication_queue_wait_ms_max=%.3f "
@@ -682,6 +687,7 @@ class RollingCacheSink:
             int(publication_state["outstanding"]),
             int(publication_state["outstanding_peak"]),
             int(publication_state["active"]),
+            int(publication_state["active_peak"]),
             int(publication_state["submitted_total"]),
             int(publication_state["completed_total"]),
             int(publication_state["failed_total"]),

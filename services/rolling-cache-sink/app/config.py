@@ -13,6 +13,7 @@ from pathlib import Path
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
+MAX_ROLLING_CACHE_PUBLICATION_WORKERS = 4
 
 
 def safe_component(value: str, *, field: str) -> str:
@@ -51,6 +52,13 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _bounded_positive_int(name: str, default: int, *, maximum: int) -> int:
+    value = _positive_int(name, default)
+    if value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}, got {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class SinkConfig:
     zmq_endpoint: str
@@ -61,6 +69,7 @@ class SinkConfig:
     pts_regression_tolerance_s: float
     http_host: str
     http_port: int
+    publication_workers: int
     source_id: str | None
     source_id_prefix: str | None
     explicit_epoch_id: str
@@ -97,6 +106,11 @@ class SinkConfig:
             http_host=os.getenv("ROLLING_CACHE_SINK_HTTP_HOST", "0.0.0.0").strip()
             or "0.0.0.0",
             http_port=_positive_int("ROLLING_CACHE_SINK_HTTP_PORT", 8080),
+            publication_workers=_bounded_positive_int(
+                "ROLLING_CACHE_PUBLICATION_WORKERS",
+                1,
+                maximum=MAX_ROLLING_CACHE_PUBLICATION_WORKERS,
+            ),
             source_id=source_id,
             source_id_prefix=source_id_prefix,
             explicit_epoch_id=explicit_epoch,

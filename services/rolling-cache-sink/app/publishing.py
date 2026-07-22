@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from config import safe_component
+from config import MAX_ROLLING_CACHE_PUBLICATION_WORKERS, safe_component
 
 
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
@@ -486,6 +486,7 @@ def _append_publication_record(
 @dataclass(frozen=True)
 class _QueuedPublication:
     source_id: str
+    worker_index: int
     publisher: Any
     fragment: Fragment
     on_published: Callable[[Fragment, Path], None] | None
@@ -519,13 +520,12 @@ def _diagnostic_duration_ms(fragment: Any, name: str) -> float:
 
 
 class BoundedPublicationDispatcher:
-    """Prepare bounded FIFO groups, then durably commit them on one worker.
+    """Durably publish through bounded, source-stable FIFO worker shards.
 
-    Preparation writes and flushes metadata/manifest files for one natural
-    queue cohort. The same worker then commits every item in exact FIFO order,
-    preserving the sink's existing durable publication concurrency. The finite
-    outstanding semaphore remains explicit callback backpressure under a
-    sustained storage stall.
+    ``crc32(source_id) % worker_count`` keeps every source on one FIFO while
+    allowing unrelated sources on different shards to overlap slow durability
+    work. The finite outstanding semaphore is global across all shard queues,
+    preserving explicit callback backpressure under a sustained storage stall.
     """
 
     _STOP = object()
@@ -535,6 +535,7 @@ class BoundedPublicationDispatcher:
         *,
         capacity: int = SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
         prepare_group_limit: int = SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
+        worker_count: int = 1,
         metrics: Any | None = None,
         thread_name: str = "rolling-cache-publication",
         clock_ns: Callable[[], int] = time.monotonic_ns,
@@ -545,12 +546,17 @@ class BoundedPublicationDispatcher:
             self.capacity,
             max(1, int(prepare_group_limit)),
         )
-        self.worker_count = 1
+        self.worker_count = int(worker_count)
+        if not 1 <= self.worker_count <= MAX_ROLLING_CACHE_PUBLICATION_WORKERS:
+            raise ValueError(
+                "worker_count must be between 1 and "
+                f"{MAX_ROLLING_CACHE_PUBLICATION_WORKERS}, got {self.worker_count}"
+            )
         self._metrics = metrics
         self._clock_ns = clock_ns
         self._wall_clock_ns = wall_clock_ns
-        self._queue: queue.Queue[_QueuedPublication | object] = queue.Queue(
-            maxsize=self.capacity
+        self._queues: tuple[queue.Queue[_QueuedPublication | object], ...] = tuple(
+            queue.Queue(maxsize=self.capacity) for _ in range(self.worker_count)
         )
         self._slots = threading.BoundedSemaphore(self.capacity)
         self._state_lock = threading.Lock()
@@ -560,6 +566,7 @@ class BoundedPublicationDispatcher:
         self._outstanding = 0
         self._outstanding_peak = 0
         self._active = 0
+        self._active_peak = 0
         self._queue_depth_peak = 0
         self._submitted_total = 0
         self._completed_total = 0
@@ -590,12 +597,21 @@ class BoundedPublicationDispatcher:
         self._outstanding_peak_source_id = "none"
         self._outstanding_peak_segment_id = "none"
         self._outstanding_peak_queue_depth = 0
-        self._thread = threading.Thread(
-            target=self._run,
-            name=thread_name,
-            daemon=True,
+        self._threads = tuple(
+            threading.Thread(
+                target=self._run,
+                args=(worker_index,),
+                name=(
+                    thread_name
+                    if self.worker_count == 1
+                    else f"{thread_name}-{worker_index}"
+                ),
+                daemon=True,
+            )
+            for worker_index in range(self.worker_count)
         )
-        self._thread.start()
+        for thread in self._threads:
+            thread.start()
         self._sync_metrics(self.snapshot())
 
     def submit(
@@ -607,6 +623,10 @@ class BoundedPublicationDispatcher:
         on_published: Callable[[Fragment, Path], None] | None = None,
         on_publish_error: Callable[[Fragment, Exception], None] | None = None,
     ) -> None:
+        source_id = str(source_id)
+        worker_index = (
+            zlib.crc32(source_id.encode("utf-8")) % self.worker_count
+        )
         with self._state_lock:
             if not self._accepting:
                 raise RuntimeError("rolling_segment_publication_dispatcher_closed")
@@ -639,7 +659,8 @@ class BoundedPublicationDispatcher:
             self._idle.clear()
             state = self._snapshot_locked()
         task = _QueuedPublication(
-            source_id=str(source_id),
+            source_id=source_id,
+            worker_index=worker_index,
             publisher=publisher,
             fragment=fragment,
             on_published=on_published,
@@ -651,7 +672,7 @@ class BoundedPublicationDispatcher:
             queue_depth_at_submit=queue_depth,
         )
         try:
-            self._queue.put_nowait(task)
+            self._queues[worker_index].put_nowait(task)
         except Exception:
             with self._state_lock:
                 self._outstanding -= 1
@@ -691,19 +712,24 @@ class BoundedPublicationDispatcher:
                 state = self._snapshot_locked()
             self._sync_metrics(state)
             return False
-        if not self._thread.is_alive():
+        live_threads = [thread for thread in self._threads if thread.is_alive()]
+        if not live_threads:
             return True
-        try:
-            self._queue.put_nowait(self._STOP)
-        except queue.Full:
-            with self._state_lock:
-                self._shutdown_timeout_total += 1
-                state = self._snapshot_locked()
-            self._sync_metrics(state)
-            return False
-        remaining_s = max(0.0, timeout_s - (time.monotonic() - started_at))
-        self._thread.join(remaining_s)
-        if self._thread.is_alive():
+        for worker_index, thread in enumerate(self._threads):
+            if not thread.is_alive():
+                continue
+            try:
+                self._queues[worker_index].put_nowait(self._STOP)
+            except queue.Full:
+                with self._state_lock:
+                    self._shutdown_timeout_total += 1
+                    state = self._snapshot_locked()
+                self._sync_metrics(state)
+                return False
+        for thread in live_threads:
+            remaining_s = max(0.0, timeout_s - (time.monotonic() - started_at))
+            thread.join(remaining_s)
+        if any(thread.is_alive() for thread in live_threads):
             with self._state_lock:
                 self._shutdown_timeout_total += 1
                 state = self._snapshot_locked()
@@ -711,24 +737,26 @@ class BoundedPublicationDispatcher:
             return False
         return True
 
-    def _run(self) -> None:
+    def _run(self, worker_index: int) -> None:
+        worker_queue = self._queues[worker_index]
         while True:
-            first = self._queue.get()
+            first = worker_queue.get()
             if first is self._STOP:
-                self._queue.task_done()
+                worker_queue.task_done()
                 return
             assert isinstance(first, _QueuedPublication)
             group = [first]
             while len(group) < self.prepare_group_limit:
                 try:
-                    queued = self._queue.get_nowait()
+                    queued = worker_queue.get_nowait()
                 except queue.Empty:
                     break
                 assert isinstance(queued, _QueuedPublication)
                 group.append(queued)
 
             with self._state_lock:
-                self._active = 1
+                self._active += 1
+                self._active_peak = max(self._active_peak, self._active)
                 self._prepare_group_total += 1
                 self._prepare_group_size_max = max(
                     self._prepare_group_size_max,
@@ -790,7 +818,7 @@ class BoundedPublicationDispatcher:
                 self._commit_prepared(item)
 
             with self._state_lock:
-                self._active = 0
+                self._active = max(0, self._active - 1)
                 state = self._snapshot_locked()
             self._sync_metrics(state)
 
@@ -913,7 +941,7 @@ class BoundedPublicationDispatcher:
                 self._idle.set()
             state = self._snapshot_locked()
         self._slots.release()
-        self._queue.task_done()
+        self._queues[queued.worker_index].task_done()
         self._sync_metrics(state)
 
     def _attach_dispatch_diagnostics(
@@ -958,6 +986,7 @@ class BoundedPublicationDispatcher:
                     queued.outstanding_at_submit
                 ),
                 "publication_queue_depth_at_submit": queued.queue_depth_at_submit,
+                "publication_worker_index": queued.worker_index,
                 "publication_prepare_group_size": item.group_size,
                 "publication_prepare_group_position": item.group_position,
             }
@@ -974,6 +1003,7 @@ class BoundedPublicationDispatcher:
             "outstanding": self._outstanding,
             "outstanding_peak": self._outstanding_peak,
             "active": self._active,
+            "active_peak": self._active_peak,
             "submitted_total": self._submitted_total,
             "completed_total": self._completed_total,
             "failed_total": self._failed_total,

@@ -75,6 +75,8 @@ Environment overrides:
                       Rolling remux lane width.
   MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY=<profile default>
                       Rolling segment-index discovery-through-pin I/O width.
+  ROLLING_CACHE_PUBLICATION_WORKERS=<profile default>
+                      Per-sink source-sharded durable publication workers.
   MEDIA_WORKER_FINALIZER_WORKERS=<profile default>
                       Finalizer thread count.
   MEDIA_WORKER_FINALIZER_PROCESS_WORKERS=<profile default>
@@ -125,6 +127,7 @@ case "${profile}" in
     media_worker_materialization_max_active_default="20"
     media_worker_rolling_remux_workers_default="12"
     media_worker_segment_index_io_concurrency_default="2"
+    rolling_cache_publication_workers_default="1"
     media_worker_finalizer_workers_default="8"
     media_worker_finalizer_process_workers_default="4"
     media_worker_finalizer_queue_capacity_default="8"
@@ -162,6 +165,7 @@ case "${profile}" in
     media_worker_materialization_max_active_default="4"
     media_worker_rolling_remux_workers_default="1"
     media_worker_segment_index_io_concurrency_default="2"
+    rolling_cache_publication_workers_default="1"
     media_worker_finalizer_workers_default="4"
     media_worker_finalizer_process_workers_default="4"
     media_worker_finalizer_queue_capacity_default="4"
@@ -216,6 +220,7 @@ roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
 media_worker_materialization_max_active="${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-${media_worker_materialization_max_active_default}}"
 media_worker_rolling_remux_workers="${MEDIA_WORKER_ROLLING_REMUX_WORKERS:-${media_worker_rolling_remux_workers_default}}"
 media_worker_segment_index_io_concurrency="${MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY:-${media_worker_segment_index_io_concurrency_default}}"
+rolling_cache_publication_workers="${ROLLING_CACHE_PUBLICATION_WORKERS:-${rolling_cache_publication_workers_default}}"
 media_worker_finalizer_workers="${MEDIA_WORKER_FINALIZER_WORKERS:-${media_worker_finalizer_workers_default}}"
 media_worker_finalizer_process_workers="${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-${media_worker_finalizer_process_workers_default}}"
 media_worker_finalizer_queue_capacity="${MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY:-${media_worker_finalizer_queue_capacity_default}}"
@@ -272,6 +277,7 @@ cmd=(
   --media-worker-materialization-max-active "${media_worker_materialization_max_active}"
   --media-worker-rolling-remux-workers "${media_worker_rolling_remux_workers}"
   --media-worker-segment-index-io-concurrency "${media_worker_segment_index_io_concurrency}"
+  --rolling-cache-publication-workers "${rolling_cache_publication_workers}"
   --media-worker-finalizer-workers "${media_worker_finalizer_workers}"
   --media-worker-finalizer-process-workers "${media_worker_finalizer_process_workers}"
   --media-worker-finalizer-queue-capacity "${media_worker_finalizer_queue_capacity}"
@@ -424,6 +430,7 @@ printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
 printf 'media_worker_materialization_max_active=%s\n' "${media_worker_materialization_max_active}"
 printf 'media_worker_rolling_remux_workers=%s\n' "${media_worker_rolling_remux_workers}"
 printf 'media_worker_segment_index_io_concurrency=%s\n' "${media_worker_segment_index_io_concurrency}"
+printf 'rolling_cache_publication_workers=%s\n' "${rolling_cache_publication_workers}"
 printf 'media_worker_finalizer_workers=%s\n' "${media_worker_finalizer_workers}"
 printf 'media_worker_finalizer_process_workers=%s\n' "${media_worker_finalizer_process_workers}"
 printf 'media_worker_finalizer_queue_capacity=%s\n' "${media_worker_finalizer_queue_capacity}"
