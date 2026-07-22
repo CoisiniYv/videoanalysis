@@ -244,6 +244,118 @@ def test_atomic_publication_stages_before_the_unchanged_durable_commit(
     assert Path(events[4][1]).name == "segments"
     assert fragment.publication_diagnostics["publish_stage_ms"] >= 0
     assert fragment.publication_diagnostics["publish_commit_ms"] >= 0
+    assert fragment.publication_diagnostics["publish_file_sync_mode"] == "fsync"
+    assert fragment.publication_diagnostics[
+        "publish_file_fdatasync_enabled"
+    ] == 0
+
+
+def test_atomic_publication_fdatasync_mode_keeps_directory_fsync_and_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        file_sync_mode="fdatasync",
+    )
+    fragment = publisher.prepare(91)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {"source_id": "camera-01", "pts": 10},
+            {"source_id": "camera-01", "pts": 20},
+        ]
+    )
+    events: list[tuple[str, str]] = []
+    real_fsync = publishing.os.fsync
+    real_fdatasync = publishing.os.fdatasync
+    real_replace = publishing.os.replace
+
+    def record_fsync(fd: int) -> None:
+        events.append(("fsync", str(Path(f"/proc/self/fd/{fd}").resolve())))
+        real_fsync(fd)
+
+    def record_fdatasync(fd: int) -> None:
+        events.append(("fdatasync", str(Path(f"/proc/self/fd/{fd}").resolve())))
+        real_fdatasync(fd)
+
+    def record_replace(source, destination) -> None:
+        events.append(("replace", f"{source}->{destination}"))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "fsync", record_fsync)
+    monkeypatch.setattr(publishing.os, "fdatasync", record_fdatasync)
+    monkeypatch.setattr(publishing.os, "replace", record_replace)
+
+    staged = publisher.stage_publication(fragment)
+
+    assert events == []
+    final_dir = publisher.commit_publication(staged)
+
+    assert final_dir == fragment.final_dir
+    assert [kind for kind, _value in events] == [
+        "fdatasync",
+        "fdatasync",
+        "fsync",
+        "replace",
+        "fsync",
+    ]
+    assert Path(events[0][1]).name == "metadata.json"
+    assert Path(events[1][1]).name == "segment_manifest.json"
+    assert Path(events[2][1]).name.endswith(".partial")
+    assert Path(events[4][1]).name == "segments"
+    assert fragment.publication_diagnostics["publish_file_sync_mode"] == (
+        "fdatasync"
+    )
+    assert fragment.publication_diagnostics[
+        "publish_file_fdatasync_enabled"
+    ] == 1
+
+
+def test_fdatasync_failure_preserves_staging_and_never_renames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        file_sync_mode="fdatasync",
+    )
+    fragment = publisher.prepare(92)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 10})
+    staged = publisher.stage_publication(fragment)
+    replace_called = False
+
+    def fail_fdatasync(_fd: int) -> None:
+        raise OSError("injected fdatasync failure")
+
+    def record_replace(_source, _destination) -> None:
+        nonlocal replace_called
+        replace_called = True
+
+    monkeypatch.setattr(publishing.os, "fdatasync", fail_fdatasync)
+    monkeypatch.setattr(publishing.os, "replace", record_replace)
+
+    with pytest.raises(OSError, match="injected fdatasync failure"):
+        publisher.commit_publication(staged)
+
+    assert replace_called is False
+    assert fragment.staging_dir.is_dir()
+    assert fragment.final_dir.exists() is False
+    assert fragment.publication_diagnostics["publish_file_sync_mode"] == (
+        "fdatasync"
+    )
+    assert fragment.publication_diagnostics[
+        "publish_file_fdatasync_enabled"
+    ] == 1
 
 
 def test_epoch_commit_arbitration_is_disabled_by_default(
@@ -1965,6 +2077,7 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
         "SOURCE_ID_PREFIX",
         "ROLLING_CACHE_PUBLICATION_WORKERS",
         "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+        "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
     ):
         monkeypatch.delenv(name, raising=False)
     config = SinkConfig.from_env()
@@ -1972,6 +2085,7 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert config.http_port == 8080
     assert config.publication_workers == 1
     assert config.publication_commit_slots == 0
+    assert config.publication_file_sync_mode == "fsync"
 
 
 def test_config_accepts_bounded_publication_workers(
@@ -2015,5 +2129,27 @@ def test_config_rejects_unbounded_publication_commit_slots(
     with pytest.raises(
         ValueError,
         match="ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+    ):
+        SinkConfig.from_env()
+
+
+def test_config_accepts_fdatasync_publication_file_sync_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE", "fdatasync")
+
+    assert SinkConfig.from_env().publication_file_sync_mode == "fdatasync"
+
+
+def test_config_rejects_unknown_publication_file_sync_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE", "syncfs")
+
+    with pytest.raises(
+        ValueError,
+        match="ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
     ):
         SinkConfig.from_env()
