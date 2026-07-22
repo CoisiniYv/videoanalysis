@@ -66,11 +66,15 @@ capacity-wait events from 55 to 233, and moves metadata visibility p95 from
 3.256 seconds to 14.787 seconds. Regular-file and directory-sync cumulative
 time both worsen, proving that `fdatasync` still induces the same ext4 device
 durability episodes on this host. Exact r300 remains pending; r3840 and both
-one-hour acceptance runs are still prohibited. Round 32 implements the next
-default-off single-inode metadata/manifest diagnostic with one regular-file
-`fsync` and the unchanged two directory fences. Its test, static and dual-image
-publication/index/recovery smoke gates pass; the unchanged 360-second causal
-pressure diagnostic is the next gate.
+one-hour acceptance runs are still prohibited. Round 32 then implemented and
+rejected the default-off single-inode metadata/manifest diagnostic. Its test,
+static, dual-image smoke and pressure correctness gates pass, and regular-file
+sync time falls below Round 26, but directory-sync time more than doubles,
+residence/dispatch p95 roughly doubles, capacity-wait events rise from 55 to
+200 and metadata visibility rises from 3.256 to 14.251 seconds. The hard-link
+alias therefore moved the ext4 durability cost rather than removing it. The
+next isolated contract removes only that alias while preserving the embedded
+control record, one file fsync, both directory fsyncs and atomic rename.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -161,6 +165,9 @@ pressure diagnostic is the next gate.
 | `0f0efb6` | fdatasync implementation proof | Records the static and real-container durability/failure/shutdown proof without claiming pressure capacity |
 | `640538c` | single-inode publication red contracts | Requires one aliased inode/file fence, legacy compatibility, bounded v2 discovery, exact frame rows, journal/reconcile recovery, failure staging, pressure/deployment audit and daily split default |
 | `fa7731f` | default-off single-inode publication layout | Adds the v2 manifest control record and hard-linked historical paths while retaining staging/rename/directory fences and rejecting cross-inode v2 identities |
+| `c4e54e6` | single-inode implementation proof | Records the static and dual-image durability/index/recovery smoke without claiming pressure capacity |
+| `2e5c173` | pressure sink restore red contracts | Requires diagnostic containers to be recreated from daily Compose while preserving their original running/stopped state |
+| `da35730` | pressure sink config restoration | Recreates only the affected sinks without dependencies, verifies state and prevents a diagnostic metadata layout from surviving cleanup |
 
 ## Measurement rounds
 
@@ -1985,6 +1992,59 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   `split -> single_inode` with regular-file mode restored to `fsync`, one
   publication worker and zero commit slots. It must beat Round 26 before exact
   r300 can advance.
+- Causal diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pubsingleinode_ioadm3_b6m_r300_20260722T0952Z`.
+  It retained the fixed fixture/hash, 60 routes, disk r300, Candidate B
+  `20/12/8`, finalizer `8/4/8`, index width three, one publication worker,
+  zero commit slots, regular-file `fsync`, 360-second sample, 25-second
+  pre/postfill and 120-second drain. Metadata layout was the only behavior
+  variable against Round 26.
+- Harness, input and retained correctness passed. Both branches observed 60/60
+  sources at 8.0375 effective FPS with zero send failure, queue-full or raw
+  loss. All 922 formal tasks materialized. All 992 retained 8090 details and
+  all 639 retained videos passed the 5+5 duration, raw-FPS, timeline,
+  annotation, bbox and person-context checks; 353 retained items were images.
+  Person persistence passed at 77,707 stored versus 77,702 exported rows over
+  60 sources. Expiry, duplicate, claim-busy, finalizer failure, task, lease,
+  WIP, lane and finalizer-pending residuals were zero.
+- The intended representation was exercised exactly. Sink A/B each reported
+  metadata layout `single_inode`, regular-file sync count one, manifest-file
+  sync zero, worker/active peak one, zero commit slots, zero publication
+  failure and a clean drain. They completed 4,289/4,322 publications.
+- The barrier-count reduction is real but insufficient. Combined regular-file
+  sync time fell from Round 26's `80.352s` to `74.568s`. In contrast, the two
+  directory sync phases rose from `47.179s` to `98.547s`, total worker service
+  rose from `176.954s` to `188.904s`, and services at or above one second rose
+  from 25 to 52. The hard-link directory entry and inode link-count update
+  therefore shifted journal/flush work into the unchanged directory fences.
+- Capacity regressed. Sink A/B residence p95 moved from
+  `5.172/4.916s` to `10.107/9.956s`; dispatch p95 moved from
+  `5.275/5.188s` to `10.209/10.154s`. Capacity-wait events rose from 55 to
+  200 and cumulative wait from 6.215 to 25.836 seconds. Ready-to-claim, media
+  queue, lifecycle and metadata visibility p95 were
+  `9.745/27.291/24.945/14.251s`; only lifecycle remained inside its closure
+  bound. Scheduler-cycle p95 stayed one second, but its 17.649-second maximum
+  again split into storage-stalled prepare/claim and handoff persistence.
+  Segment-index parse/refresh p95 did not regress, so metadata parsing did not
+  absorb the missing time.
+- Reproducible analyses are retained as
+  `publication_single_inode_timing_analysis.json`,
+  `publication_single_inode_phase_analysis.json` and
+  `round26_vs_round32_comparison.json` in the artifact. Round 32 is rejected;
+  exact 600-second r300, r3840 and both one-hour runs remain blocked.
+- Cleanup exposed and closed a harness-only restoration defect: stopped sink
+  containers retained the pressure layout even though daily Compose rendered
+  `split`. `2e5c173` captures the failure and `da35730` now recreates only the
+  affected services from daily Compose with `--no-deps`, preserves original
+  running/stopped state and fails on a state mismatch. The current stopped A/B
+  sink containers were recreated with split/fsync/one-worker/zero-slot/r300.
+- The next test-first single variable is a metadata-only v3 representation:
+  retain the bounded first manifest record plus exact native rows in
+  `metadata.json`, but create no `segment_manifest.json` hard-link alias.
+  Legacy split and v2 hard-link readers/recovery remain supported. One
+  regular-file fsync, staging-directory fsync, atomic directory rename,
+  final-parent fsync, journal/reconcile authority, failure staging, FIFO bound
+  and daily split default remain unchanged.
 
 ## Runtime recovery audit
 
@@ -2063,6 +2123,17 @@ zero and file mode `fsync`; the not-yet-recreated daily containers therefore
 continue the historical split layout by default. Redis `save` remains
 `3600 1 300 100 60 10000`.
 
+The post-Round-32 pressure audit reports 0/60 enabled pressure cameras and zero
+active task, lease, Replay slot or finalizer-pending row. No pressure source,
+local MediaMTX, pressure ffmpeg, dual Savant or rolling-sink process remains;
+the daily single branch is running. Media-worker is back at WIP/remux/finalizer
+`4/4/32`, process finalizers zero, index width two, rolling materialization
+disabled and r300. The stopped A/B sink containers now render publication
+workers one, commit slots zero, file mode `fsync` and metadata layout `split`.
+Redis `save` is `3600 1 300 100 60 10000`; PostgreSQL is back at checkpoint
+timeout 5min, WAL `1GB/80MB` and compression off. The completion status file is
+absent, all pressure artifacts are retained and about 184GB is free.
+
 ## Next gates
 
 1. Keep production/default preparation at one, commit arbitration/slots
@@ -2077,26 +2148,27 @@ continue the historical split layout by default. Redis `save` remains
    the same ext4 mount, so filesystem-wide sync would flush unrelated database
    and container writes; directory fsync alone does not durably order regular
    file contents. Neither has an acceptable isolated crash contract here.
-4. Retain the now-green single-inode red contracts, static suites and dual-image
-   proof. Run one unchanged 360-second Candidate B r300 diagnostic with
-   regular-file mode `fsync`, publication workers one, commit slots zero and
-   `ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=single_inode` as the sole behavior
-   change from Round 26. Do not change WIP, remux, max-per-poll, finalizer,
-   index width, retention, deadlines or fixture/hash.
-5. Require both sinks to report single-inode enabled, one regular-file sync,
-   zero manifest-file sync, the unchanged two directory fences and clean drain.
-   Require every input/correctness/bundle/residual gate plus regular-file sync
-   total below 80.352 seconds, residence/dispatch p95 below the corresponding
-   Round 26 sink, fewer than 55 capacity-wait events and visibility below
-   3.256 seconds. Moving time into directory fsync, callback backpressure,
-   metadata parsing or scheduler/DB work is a rejection.
-6. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
-   gate passes. Rounds 27-31 are negative 360-second causal evidence and do not
+4. Retain Round 32 as negative causal evidence. It passed correctness and
+   reduced regular-file sync time, but failed residence, dispatch,
+   capacity-wait, visibility and no-directory-shift gates. `single_inode` must
+   remain diagnostic-only and cannot advance exact r300.
+5. Add red contracts for a default-off metadata-only v3 layout with no hard-link
+   alias. Preserve bounded first-record discovery, exact native rows,
+   journal-only discovery, filesystem crash-window reconciliation, legacy split
+   and v2 support, read-pin identity fencing, failure staging and pressure/
+   deployment audit. Keep both directory fsyncs and atomic rename unchanged.
+6. After static and real-container proof, run one unchanged 360-second
+   Candidate B r300 diagnostic with that layout as the sole behavior variable.
+   It must beat Round 26 regular-file/directory service, residence/dispatch,
+   fewer-than-55 capacity waits and 3.256-second visibility without moving work
+   into callback backpressure, parsing or scheduler/DB phases.
+7. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
+   gate passes. Rounds 27-32 are negative 360-second causal evidence and do not
    replace the exact width-three 600-second r300 gate.
-7. Repeat the exact r300 gate with the fixed fixture/hash only after the new
+8. Repeat the exact r300 gate with the fixed fixture/hash only after the new
    short diagnostic passes. Only a complete input, capacity, visibility,
    watchlist, annotation and residual pass permits the 3,840-second-retention
    short gate.
-8. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+9. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.

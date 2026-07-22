@@ -8,9 +8,9 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `c86430e`，dispatcher observability `647dd2f`/`3c80722`，group preparation experiment
-  `f4bf094`，production grouping disable `555afef`，finalizer attribution `478bff5`；尚未合入，且
-  exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
+  `fa7731f`，pressure restore 修复 `da35730`，dispatcher observability
+  `647dd2f`/`3c80722`，production grouping disable `555afef`，finalizer attribution
+  `478bff5`；尚未合入，且 exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -28,7 +28,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass 与 default-off single-inode v2 publication | Rounds 27-31 的 grouping/arbitration/并发/fdatasync 容量诊断均被拒绝；single-inode 的 test/static/双 image durability+journal/reconcile smoke 已通过，但 360s causal pressure、exact r300 与后续门仍未解锁 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass 与 default-off single-inode v2 publication | Rounds 27-32 的 grouping/arbitration/并发/fdatasync/single-inode 容量诊断均被拒绝；single-inode correctness 通过且 file sync 下降，但 directory sync、FIFO residence 和 visibility 退化，exact r300 与后续门仍未解锁 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -358,8 +358,17 @@ arbiter 正确消除了跨 sink 慢 lock-hold overlap，但产生 74.592s peer l
 堆在同一全局慢 holder 后，扩大 residence、dispatch、visibility 与 callback backpressure。该假设已
 拒绝。`a0b7f63`/`e590f9b` 将生产/default arbitration 固化为 `False`：普通 publisher 不打开
 epoch commit-lock 且 wait/hold 精确为 0，显式 opt-in 与全部诊断仅保留历史复现；完整 sink suite
-42 passed、pressure harness 201 passed、rendered deployment smoke 29 passed。exact r300、r3840
-与一小时验收继续禁止，Round 28 未完成因果评审并确定一个新的单变量前，不授权下一容量实验。
+42 passed、pressure harness 201 passed、rendered deployment smoke 29 passed。该时点 exact r300、
+r3840 与一小时验收继续禁止；后续因果轮次与当前准入边界如下。
+
+Round 29-31 后续分别拒绝了 two-worker sharding、two-slot commit lanes 和 regular-file
+`fdatasync`。Round 32 的 default-off single-inode v2 又通过 60/60 输入、922/922 formal、
+992/992 retained 与全部媒体/8090/annotation/person/fence/residual 门，并把 regular-file sync
+从 80.352s 降到 74.568s；但 directory sync 从 47.179s 升到 98.547s，residence/dispatch p95
+约翻倍，capacity-wait 55→200，visibility p95 3.256s→14.251s。因此该变量也被拒绝。下一单变量
+只删除 v3 metadata-only 表示中的 hard-link alias，保留一个 file fsync、两道 directory fsync、
+atomic rename、journal/reconcile 和 daily split default。`da35730` 同时确保 pressure cleanup 真正
+从 daily Compose 重建 sink 配置，不再只停掉带诊断环境的容器。
 
 ## 已知开放项
 
@@ -367,8 +376,9 @@ epoch commit-lock 且 wait/hold 精确为 0，显式 opt-in 与全部诊断仅�
 
 - 保持 production preparation limit=1、commit arbitration=False；显式 group/arbiter 只用于历史复现，
   不在生产 sink 启用；
-- 先完成 Round 28 与 Round 26 的因果对照，再固化一个新的单变量和可证伪改善标准；评审完成前不运行
-  下一容量实验，不组合调整 worker、queue、retention、index width、finalizer 或 deadline；
+- 先以红测和真实容器证明 metadata-only v3 无 hard-link alias 的 crash/recovery/index 合同，再用
+  不变 360s r300 做唯一变量诊断；不组合调整 worker、queue、retention、index width、finalizer
+  或 deadline；
 - 全部既有 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 Candidate B/width 3/
   retention/deadline 保持不变；
 - r3840 和一小时验收继续禁止；只有后续 exact r300 的 input、Spec 33 capacity/visibility、

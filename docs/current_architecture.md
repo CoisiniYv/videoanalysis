@@ -4,12 +4,14 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量 checkpoint `555afef`。
+exact-lease 修复 `2a57f20`，当前容量结构 checkpoint `fa7731f`，pressure restore
+修复 `da35730`。
 selected-identity 结构 checkpoint 为 `72413a2`，metadata reuse 为 `fcbe2bd`，
 fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`，finalizer
 attribution 为 `478bff5`，bounded publication dispatcher checkpoint 为 `647dd2f`，
 dispatcher timing attribution 为 `3c80722`，bounded preparation 实验为 `f4bf094`，
-production grouping disable 为 `555afef`。
+production grouping disable 为 `555afef`。Round 32 single-inode v2 已通过正确性但因
+directory-sync/FIFO/visibility 退化而被拒绝；日常 metadata layout 仍为 `split`。
 最新 exact r300 的 input/watchlist/retained correctness/residual 已通过，
 但 media queue 与 rolling metadata visibility 的 Spec 33 capacity 门仍失败；Round 27
 group preparation causal diagnostic 又发生显著容量退化，因此生产 preparation limit 为 1。
@@ -157,7 +159,7 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation group limit=1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标；日常 metadata layout 仍为 split，工作分支另有 default-off single-inode v2 诊断以减少一个 regular-file fence |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation group limit=1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标；日常 metadata layout 为 split；default-off single-inode v2 虽减少一个 file fence，但已因 directory-sync/FIFO/visibility 退化而拒绝 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
 
