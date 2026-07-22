@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `c86430e`，dispatcher observability `647dd2f`，finalizer attribution `478bff5`；尚未合入，
+  `c86430e`，dispatcher observability `647dd2f`/`3c80722`，finalizer attribution `478bff5`；尚未合入，
   且 exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
@@ -27,7 +27,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse 与 DB bulk-row rebase bypass | dispatcher real-container order/backpressure/error/drain smoke 通过；60-route causal diagnostic 和 exact r300 仍待验证，不能声明 capacity pass |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、queue-residence/service attribution、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse 与 DB bulk-row rebase bypass | dispatcher timing/error/drain smoke 与 60-route direct attribution 已通过；严格短容量门仍失败，exact r300 未解锁 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -308,16 +308,31 @@ image 的 8090/timeline/annotation/bbox/person-context、person persistence、ex
 但 media queue p95=19.316s、metadata visibility p95=7.901s，严格门失败；对应 10.298s scheduler
 tick 仍与两 sink 一串 1.6-3.15s fsync-heavy publication 同时发生。slowest segments 自身 publish
 仅 8-100ms，却在 shared FIFO 前等待约 11s。因此本轮 falsify“只移出 GLib 即可通过”的假设；
-下一步只补 submit→worker-start queue residence 与 submit→complete attribution，不运行 exact r300。
+该轮之后先补 submit→worker-start queue residence 与 submit→complete attribution，未运行 exact r300。
+
+`3fb27f0`/`3c80722` 已完成上述 instrumentation-only attribution。真实容器
+`rolling_publication_dispatcher_timing_smoke_20260722T051218Z` 证明 per-segment capacity wait、
+FIFO residence、durable service、dispatch total、peak identity、error continuation 与 shutdown
+terminal totals。随后不变的 360s causal diagnostic
+`pressure60_8p1_pubtiming_ioadm3_b6m_r300_20260722T051559Z` 通过 60/60 输入、930/930 formal、
+1,000/1,000 retained、639 video 与 361 watchlist image 的媒体/8090/annotation/person/fence/
+residual 门，但严格 ready/media/visibility p95 为 6.668s/23.426s/3.256s，仍失败。
+
+直接归因显示 A/B durable-service p95 仅 28.8/33.2ms，worker 平均 busy 约 16.4%；FIFO
+residence p95 却为 5.172/4.916s、p99 13.768/13.724s，两个队列都达到 outstanding 128。
+dispatch total 与 residence 相关系数 0.998，而与自身 service 仅约 0.18；最慢 visible segment
+自身 service 5-33ms，却等待 13.5-14.1s。下一单变量收窄为 bounded FIFO group preparation：
+先 stage 一个自然 cohort，再按原顺序逐 segment 执行所有既有 fsync/rename/journal fence；不得
+增加 durable publisher worker、删除 fence 或把等待移到未观测 callback backpressure。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3 与 Candidate B 其余参数不变，先补并验证 dispatcher submit→worker-start queue
-  residence、worker service、submit→complete total 与 peak-transition identity；Round 25 已证明
-  correctness/bound 通过但 fsync/FIFO latency 不通过，不增加 publisher/media 并发、不删 fsync、
-  不改 retention/deadline；
+- 保持 width 3 与 Candidate B 其余参数不变，先以红测固化 bounded FIFO group preparation 的
+  hard bound、order、per-item error、crash/shutdown 和 preparation metrics，再做一个不变 short
+  r300 causal run；全部既有 fsync/rename/journal fence 保留，不增加 publisher/media 并发、不改
+  retention/deadline；
 - r3840 和一小时验收继续禁止；只有下一轮 exact r300 的 input、Spec 33 capacity/visibility、
   watchlist、correctness、annotation 与 residual 全通过，才允许进入 3,840s retention 短门；
 - 不同时增加 process workers、WIP、remux、finalizer queue 或 index width，也不放宽 deadline；

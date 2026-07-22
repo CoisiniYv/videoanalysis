@@ -7,7 +7,8 @@
 exact-lease 修复 `2a57f20`，当前容量 checkpoint `a88472c`。
 selected-identity 结构 checkpoint 为 `72413a2`，metadata reuse 为 `fcbe2bd`，
 fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`，finalizer
-attribution 为 `478bff5`，bounded publication dispatcher checkpoint 为 `647dd2f`。
+attribution 为 `478bff5`，bounded publication dispatcher checkpoint 为 `647dd2f`，
+dispatcher timing attribution 为 `3c80722`。
 最新 exact r300 的 input/watchlist/retained correctness/residual 已通过，
 但 media queue 与 rolling metadata visibility 的 Spec 33 capacity 门仍失败。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
@@ -154,7 +155,7 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标 |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、queue-residence/service/total attribution、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
 
@@ -384,6 +385,17 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   4.015s prepare/claim 形成 10.298s tick；slowest segment 自身 publish 仅 8-100ms，却在 FIFO 前
   等约 11s。结论改为：GLib 解耦正确但不足，host-wide flush 与 shared FIFO residence 仍是容量面；
   先补 submit→worker-start queue-residence/total 指标，不解锁 exact r300/r3840；
+- `3fb27f0`/`3c80722` 已完成该 timing attribution；真实容器
+  `rolling_publication_dispatcher_timing_smoke_20260722T051218Z` 通过 capacity wait、FIFO residence、
+  durable service、total、peak identity、error 与 drain。对应不变 360s diagnostic
+  `pressure60_8p1_pubtiming_ioadm3_b6m_r300_20260722T051559Z` 的 60/60、930 formal、1,000 retained、
+  video/image/8090/annotation/person/fence/residual 全通过，但 ready/media/visibility p95=
+  6.668s/23.426s/3.256s，严格门仍失败；
+- 该轮直接证明 average service capacity 不是主因：A/B durable-service p95 仅 28.8/33.2ms，
+  worker busy 约 16.4%，但 FIFO residence p95=5.172/4.916s、p99=13.768/13.724s，两个队列都
+  达到 outstanding 128；dispatch total 与 residence 相关系数约 0.998，而 slowest visible
+  segment 自身 service 仅 5-33ms。下一单变量为 bounded FIFO group preparation，再按 exact FIFO
+  逐 segment 执行全部现有 fsync/rename/journal fence；该变量尚未实现或通过 short r300；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

@@ -22,8 +22,14 @@ changing an fsync, rename, capacity, retention or deadline. The required short
 correctness and reduces some extreme source gaps, but does not pass the causal
 capacity gate: the shared FIFO reaches 92/97 outstanding, host-wide fsync
 stalls still block PostgreSQL, metadata visibility p95 is 7.901 seconds and
-media queue p95 is 19.316 seconds. The next change is instrumentation-only
-queue-residence attribution. The exact r300 gate remains pending; r3840 and
+media queue p95 is 19.316 seconds. Round 26 adds exact queue-residence/service
+attribution and repeats the unchanged 360-second diagnostic. Both sink queues
+reach the hard 128 bound; queue-residence p95 is 5.172/4.916 seconds while
+durable-service p95 is only 28.8/33.2ms, and the slowest visible segments spend
+13.5-14.1 seconds queued before their own 5-33ms service. This dynamically
+confirms a rare fsync-service burst followed by FIFO head-of-line residence,
+not insufficient average service rate. Strict ready/media/visibility p95 is
+6.668/23.426/3.256 seconds, so the exact r300 gate remains pending; r3840 and
 both one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
@@ -93,6 +99,9 @@ both one-hour acceptance runs are still prohibited.
 | `104472d` | dispatcher pressure-artifact red contract | Requires final queue/outstanding/failure/timeout and peak state to survive retained log aggregation |
 | `c86430e` | bounded asynchronous segment publication | Moves the unchanged durable publish sequence to one process-lifetime FIFO worker per sink with a 128-outstanding bound and source error propagation |
 | `647dd2f` | dispatcher artifact retention | Emits one structured shutdown snapshot and retains every dispatcher bound/backpressure/drain metric in pressure summaries |
+| `d12bc70`, `f816202` | dispatcher smoke and Round 25 documentation | Records the real-container contract and failed short causal capacity result without widening its claim |
+| `3fb27f0` | dispatcher timing red contracts | Requires per-segment capacity wait, FIFO residence, durable service, dispatch total and peak identity to survive pressure aggregation |
+| `3c80722` | dispatcher queue-residence attribution | Carries monotonic per-segment timing, cumulative/maximum service state and peak transition identity through real sink logs and retained artifacts |
 
 ## Measurement rounds
 
@@ -1387,6 +1396,83 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   finalizer-pending rows. About 204GB remained free and the worktree was clean
   before this documentation update.
 
+### Round 26: direct dispatcher queue-residence attribution
+
+- Tests-only `3fb27f0` first required per-segment capacity acquisition wait,
+  submit-to-worker-start FIFO residence, worker-start-to-durable-complete
+  service, submit-to-complete total, submit depth and peak transition identity.
+  Instrumentation-only `3c80722` uses monotonic clocks for durations and a wall
+  clock only for the peak timestamp; it attaches diagnostics before success or
+  error callbacks and changes no queue, worker, fsync, rename, retention,
+  deadline or scheduling behavior.
+- Validation before runtime was 237/237 sink/pressure tests plus 287 passed and
+  one expected skip across lifecycle, scheduler, finalizer, segment-index,
+  DB-index, deployment and topology suites. Compile, Compose rendering,
+  deployment smoke and diff checks passed.
+- Real-container timing smoke:
+  `/data/video-analytics/artifacts/rolling_publication_dispatcher_timing_smoke_20260722T051218Z`.
+  The exact two-source FIFO and callbacks matched; a capacity-two third submit
+  waited 157.108ms, the queued second fragment resided 157.059ms, every task's
+  total decomposed into capacity wait + residence + durable service, the error
+  task retained diagnostics and the following good task published. Both real
+  production services then logged `drained=True`, capacity 128, one worker and
+  zero final queue/outstanding/active/failure/timeout.
+- A first pressure launch is retained as
+  `pressure60_8p1_pubtiming_ioadm3_b6m_r300_20260722T051537Z`; it stopped before
+  runtime mutation because the host DSN defaulted to closed port 5432. The
+  valid launch explicitly fixed host PostgreSQL at `127.0.0.1:5439` and the
+  container DSN at `postgres:5432`.
+- Valid diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pubtiming_ioadm3_b6m_r300_20260722T051559Z`.
+  It retained the fixed fixture/hash, 60 routes, disk-backed r300, Candidate B
+  `20/12/8`, finalizer `8/4/8`, index width three, 360-second sample, 25-second
+  postfill and 120-second drain. This remains a causal diagnostic, not the
+  exact 600-second r300 acceptance.
+- Harness, input and correctness passed: 60/60 sources with zero restart,
+  8fps minimum/input-loss gates, all 930 formal tasks and all 1,000 retained
+  tasks materialized, and 639 video plus 361 watchlist-image bundles survived.
+  All 639 videos passed exact 5+5 duration/raw-FPS/timeline/annotation/bbox/
+  person-context, all 1,000 8090 details passed, and person persistence was
+  74,260 rows versus 74,252 exports over 60 sources with measured loss zero.
+  Expiry, recovery, retry failure, claim-busy, duplicate, finalizer failure and
+  final task/lease/WIP/lane/finalizer-pending residuals were zero.
+- Strict capacity still failed. DB-backed ready-to-claim p95 was 6.668s versus
+  the 5s closure gate, media queue p95 23.426s versus 10s, and rolling metadata
+  visibility p95 3.256s versus 2s. Finalizer pool wait 1ms, DB claim wait
+  84.1ms, lifecycle 19.923s and media-worker CPU 126.88% passed their closure
+  bounds. The scheduler poll-gap p95 remained 1.000s, but two storage episodes
+  produced 12.090s and 14.430s maximum cycles through prepare/claim and handoff
+  persistence.
+- Direct sink attribution is decisive. Sink A/B processed 4,100/4,114
+  publications. Durable-service p50/p95/max was
+  `6.455/28.782/4761.355ms` and `6.392/33.226/6413.449ms`; each worker was busy
+  only about 16.4% of the observed span, so average service capacity exceeded
+  arrival. In contrast FIFO residence p50/p95/p99/max was
+  `0.524/5171.767/13768.015/17584.347ms` and
+  `0.508/4916.136/13724.345/17487.711ms`. Both reached outstanding 128 and
+  queue depth 127; 28/27 submits incurred >=1ms capacity backpressure, with
+  maxima 2.490/2.379s.
+- Dispatch total correlates 0.9979/0.9975 with queue residence but only
+  0.1878/0.1778 with the segment's own service. The slowest visibility records
+  had the normal approximately 0.59s close-to-submit delay, then
+  13.5-14.1s residence and only 5-33ms own durable service. Twenty overlapping
+  cross-sink >=1s service intervals were retained; the largest paired episode
+  included A's 4.761s and B's 6.413s services, each split across the unchanged
+  metadata, manifest, staging-directory and parent-directory fsync fences.
+  The causal analysis is retained as
+  `publication_dispatcher_timing_analysis.json` in the artifact.
+- The next single behavior hypothesis is bounded FIFO group preparation: stage
+  a natural publication cohort's metadata/manifest before committing it in
+  exact FIFO order through the unchanged per-segment fsync/rename sequence.
+  The intended mechanism is filesystem group commit/writeback smoothing, not
+  extra durable workers or a removed fence. It must first be frozen by tests
+  for hard bounds, order, per-item error continuation, crash windows and
+  shutdown; a short unchanged r300 diagnostic must then prove lower service
+  burst area and residence without moving delay into callback backpressure.
+- Cleanup restored daily single-branch services, rolling materialization off,
+  r300, index width two, Redis/PostgreSQL defaults, zero enabled cameras,
+  pressure processes and lifecycle residuals. About 202GB remained free.
+
 ## Recovery audit after Round 21
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1404,18 +1490,20 @@ retention, 256-row cache and segment-index width two. Redis `save` returned to
 
 ## Next gates
 
-1. Keep r3840 and both one-hour acceptances blocked. Round 22 is a failed
-   diagnostic and Round 23 is only 360 seconds; neither replaces the exact
-   width-three 600-second r300 gate.
-2. Add measurement-only submit-to-worker-start queue-residence and
-   submit-to-complete attribution, including peak transition identity, and
-   retain it in pressure artifacts. The Round 25 correctness/128-bound pass
-   does not waive its latency failure.
-3. Use that measurement to choose one structural durability-arrival/service
-   variable. Do not add publisher concurrency, remove durability fences,
-   widen media capacity, change retention/deadlines or run r3840 blindly.
-4. Repeat the exact r300 gate with the fixed fixture/hash only after the next
-   short gate passes. Only a complete
+1. Keep r3840 and both one-hour acceptances blocked. Round 26 is only a
+   360-second causal diagnostic and does not replace the exact width-three
+   600-second r300 gate.
+2. Add tests for one bounded FIFO preparation group ahead of the unchanged
+   per-segment durable commit. Preserve single-worker commit order, hard
+   outstanding backpressure, every fsync/rename/journal fence, per-item error
+   continuation and bounded shutdown; expose preparation depth/time so the
+   change cannot hide residence in an unmeasured stage.
+3. Run one unchanged short r300 diagnostic and require lower durable-service
+   burst area plus lower FIFO residence without new capacity wait or callback
+   stalls. Do not add publisher concurrency, widen media capacity, change
+   retention/deadlines or run r3840 blindly.
+4. Repeat the exact r300 gate with the fixed fixture/hash only after that short
+   gate passes. Only a complete
    input, capacity, visibility, watchlist, annotation and residual pass permits
    the 3,840-second-retention short gate.
 5. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
