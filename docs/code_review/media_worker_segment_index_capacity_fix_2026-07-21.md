@@ -3,16 +3,19 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. Finalizer attribution isolated recursive canonical rebase as
-the dominant publish cost, and `a88472c` now leaves DB-backed timeline/overlay
-row payloads untouched while rebasing the small path-bearing bundle fields.
-Active Reese/Finch gallery targets were restored through the operational ONNX
-registration path. The unchanged width-three exact r300 then passed input,
-watchlist, retained correctness and all residual gates, and finalizer service
-fell sharply. The strict capacity gate nevertheless remains failed because
-media-queue p95 is 25.803s against the 15s release gate and rolling metadata
-visibility p95 is 19.008s against 2s. Neither the 3,840-second-retention short
-gate nor the two one-hour acceptance runs are permitted yet.
+completion claim. The Round 21 finalizer fix remains dynamically effective,
+but the strict capacity gate still fails. Round 22 attributed the remaining
+rare visibility tail to synchronized rolling-sink durability stalls: six of
+7,403 publications exceeded one second, two exceeded five seconds, and the
+worst publication spent 6.330s almost entirely in the existing metadata,
+manifest, staging-directory and parent-directory fsync boundaries. One live
+media-worker cycle at the same tail spent 13.079s of 13.081s in the broad
+remux-admission stage. The run then failed during post-sample visibility
+discovery when retention removed a directory being walked, so it is retained
+as diagnostic evidence rather than an acceptance result. That discovery race
+is fixed, but no scheduling or durability behavior has changed yet. The exact
+r300 gate remains pending; the 3,840-second-retention short gate and both
+one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -70,6 +73,11 @@ gate nor the two one-hour acceptance runs are permitted yet.
 | `f65120c` | finalizer publish/lane attribution red tests | Requires heartbeat, prepare, rename, rebase, terminal, projection, DB-index, cleanup, post-terminal and complete lane-service timings |
 | `478bff5` | finalizer publish/lane attribution | Carries the phase split through per-event logs and the `phase6-capacity-v4` pressure report without changing behavior |
 | `a88472c` | DB-backed bulk-row rebase bypass | Preserves timeline/overlay row-list identity during publish while retaining canonical paths in top-level and path-bearing metadata/summary fields |
+| `7da69fe` | rolling visibility attribution tests | Requires per-source/bucket/threshold/slowest-segment visibility evidence and the corrected lifecycle-claim timing source |
+| `f904569` | scheduler/sink stall-retention tests | Requires non-overlapping scheduler body stages and durable rolling-sink publication phase aggregation in pressure artifacts |
+| `6ce26c2` | visibility, scheduler-cycle and sink-publication attribution | Adds behavior-neutral phase timing from each durable sink boundary through retained pressure summaries |
+| `a358b43` | retention-discovery race test | Reproduces a segment directory disappearing while post-run visibility discovery traverses it |
+| `6d3753a` | retention-safe visibility discovery | Uses error-tolerant directory walking and counts vanished metadata while retention continues |
 
 ## Measurement rounds
 
@@ -1103,6 +1111,83 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   needs no 120s drain, but it does not waive the media-queue and visibility
   failures. r3840 remains prohibited.
 
+### Round 22: rolling visibility stall attribution and failed diagnostic
+
+- Tests-only commits `7da69fe` and `f904569` first required per-source and
+  30-second-bucket visibility distributions, slowest-segment evidence,
+  non-overlapping scheduler body stages, and every durable rolling-sink
+  publication phase to survive pressure-log aggregation. Instrumentation-only
+  `6ce26c2` added those measurements without changing publication order,
+  fsyncs, rename, scheduling, retention, capacity or deadlines. The combined
+  sink/scheduler/pressure selection passed 307 tests.
+- Diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_stallattrib_ioadm3_b6m_r300_20260722T031015Z`.
+  It retained the fixed 4,800-second fixture and SHA256
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`,
+  60 routes, Candidate B WIP/remux/max-per-poll `20/12/8`, finalizer
+  threads/processes/queue `8/4/8`, index width three, disk-backed cache,
+  300-second retention, 360-second diagnostic sample and configured
+  120-second drain.
+- Result: failed diagnostic, not an exact r300 or acceptance result. Sampling
+  completed, but post-sample `Path.rglob()` visibility discovery traversed a
+  segment directory while retention removed it and raised
+  `FileNotFoundError`. Red test `a358b43` reproduces that race; `6d3753a`
+  replaces the traversal with error-tolerant `os.walk()` handling and counts
+  vanished metadata. The pressure-harness suite passed 201 tests after the
+  fix. No failed artifact was deleted or relabeled.
+- Before the stopped pressure containers could be replaced, complete sink logs
+  were copied into `rolling_cache_sink_a_logs_since_start.txt` and
+  `rolling_cache_sink_b_logs_since_start.txt`. Across 7,403 published
+  segments, publish-total p50/p95/p99/max was
+  `5.918/19.991/43.058/6330.332ms`; six publications exceeded one second and
+  two exceeded five seconds. Per-source publication-gap p50/p95/p99/max was
+  `3.504/3.528/3.671/17.161s`; 59 gaps exceeded ten seconds across 59 of 60
+  sources, showing one shared-loop stall per affected sink rather than 59
+  independent source failures.
+- The decisive Sink A publication at `2026-07-22 03:17:06.379` took
+  `6330.332ms`: metadata fsync `1692.064ms`, manifest fsync `1190.978ms`,
+  staging-directory fsync `668.315ms`, rename `0.024ms`, and parent-directory
+  fsync `2776.694ms`. Sink B simultaneously published one segment in
+  `5034.729ms`. Correlation with total publication time was `0.9694` for
+  metadata fsync, `0.9344` for manifest fsync, `0.9055` for parent-directory
+  fsync and `0.8656` for staging-directory fsync. Every existing durability
+  boundary remains required; the evidence supports moving this work off the
+  shared GLib callback, not deleting fsyncs.
+- A live media-worker log line captured during the same synchronized tail
+  reported scheduler cycle `13081ms` and
+  `tick_stage_remux_admission_ms=13078.9`; every other scheduler stage was
+  negligible. This broad stage still combines completed-remux handoff DB work,
+  candidate discovery/claim and finalizer transfer, so it does not yet identify
+  which individual main-loop operation inherited the filesystem stall. The
+  next instrumentation variable must split `_RollingCacheMaterializationRunner.process()`
+  before changing behavior.
+- Retention itself was secondary. Across 15 maintenance passes, duration p95
+  was `1036.1ms`, discovery p95 `898.9ms`, mutation-lock hold p95 `137.1ms`
+  and lock wait remained zero. The largest maintenance pass was `1055ms`, far
+  below the paired five-to-six-second publication stalls.
+- The corrected PostgreSQL latency query now reads the actual
+  `materialization_audit.lifecycle_v2_claim` record. For the retained prior
+  exact-r300 rows it measured 1,007 video tasks, including 54
+  `coverage_not_complete` retries: fixed policy wait p95 `14.0s`, overall
+  ready-to-claim p95 `11.584s`, first-claim p95 `6.722s`, retried p95
+  `19.716s`, retry-delay p95 `2.226s`, and claim-to-materialized p95 `5.743s`.
+  The previous audit-key query returned no samples and must not be used.
+- Failure cleanup and restoration completed. The daily single branch is
+  active; pressure cameras, source publishers, ffmpeg and MediaMTX processes
+  are zero; active materialization tasks, leases and finalizer-pending rows are
+  zero; workers use Compose-network PostgreSQL `postgres:5432`; rolling
+  materialization is disabled; index width two, Redis RDB settings,
+  PostgreSQL checkpoint settings and 300-second retention are restored. About
+  209GB remained free, and the worktree was clean at `6d3753a`.
+- Conclusion: the visibility tail is now dynamically tied to rare host-storage
+  durability spikes, and synchronous publication on a sink-wide GLib main loop
+  amplifies one slow segment into source-wide visibility gaps. The next safe
+  behavior candidate is a fixed, bounded publication dispatcher that preserves
+  every fsync, atomic rename, per-source order, explicit backlog/backpressure,
+  error propagation and shutdown drain. It may be implemented only after the
+  remux-admission subphases show which main-loop operation inherited the same
+  stall and deterministic red tests freeze those guarantees.
+
 ## Recovery audit after Round 21
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1120,17 +1205,24 @@ retention, 256-row cache and segment-index width two. Redis `save` returned to
 
 ## Next gates
 
-1. Keep r3840 and the one-hour acceptances blocked; the harness `passed` status
-   does not override the failed Spec 33 media-queue and visibility gates.
-2. Attribute the long-run rolling metadata-visibility tail and the remaining
-   ready-to-claim burst before selecting another behavior variable. Preserve
-   the p50/p95 split (0.589/19.008s visibility), rare 14.077s poll-gap maximum,
-   12.006s ready p95 and zero finalizer admission pressure in that analysis.
-3. Do not increase process workers, WIP, remux, finalizer queue or index width,
-   and do not widen deadlines while the measured limiter is upstream of the
-   now-fast finalizer publish path.
-4. Repeat the exact width-three r300 gate with the fixed fixture/hash after one
-   attributed structural change. Only a full input, capacity, visibility,
-   watchlist, annotation and residual pass permits the 3,840s-retention gate.
-5. Only after both short-retention gates pass, run two comparable one-hour
-   acceptances with full evidence/8090 validation.
+1. Keep r3840 and both one-hour acceptances blocked. Round 22 is a failed
+   diagnostic and cannot replace the exact width-three r300 gate.
+2. Split `_RollingCacheMaterializationRunner.process()` into drain-completed,
+   candidate-query, lane/source/WIP reservation, per-row prepare/claim,
+   executor-submit, second drain, handoff-persist and finalizer-admission
+   timings. Add deterministic aggregation tests before a runtime diagnostic.
+3. Run one short retention-crossing diagnostic with the same fixture and
+   Candidate B dimensions. Preserve media-worker and both sink logs before
+   restore so the 13-second remux-admission stall is attributable rather than
+   inferred from a broad stage.
+4. If the diagnostic retains the sink-wide fsync/main-loop attribution,
+   implement exactly one fixed, bounded asynchronous publication dispatcher.
+   Keep every fsync and atomic rename; require per-source order, bounded
+   backlog/backpressure, publish-error propagation, and shutdown drain. Do not
+   change WIP, remux, max-per-poll, finalizer, index width or deadlines.
+5. Repeat the exact r300 gate with the fixed fixture/hash. Only a complete
+   input, capacity, visibility, watchlist, annotation and residual pass permits
+   the 3,840-second-retention short gate.
+6. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+   full evidence/8090 validation, restore the daily runtime, and then consider
+   Phase 7 legacy removal and completion.
