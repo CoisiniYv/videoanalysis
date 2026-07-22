@@ -8,9 +8,10 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `f075b46`，pressure restore 修复 `da35730`，dispatcher observability
-  `647dd2f`/`3c80722`，production grouping disable `555afef`，finalizer attribution
-  `478bff5`；尚未合入，且 exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
+  `f075b46`，pressure restore 基础修复 `da35730`、launcher-env 隔离修复 `3e35f16`，
+  dispatcher observability `647dd2f`/`3c80722`，production grouping disable `555afef`，
+  finalizer attribution `478bff5`；尚未合入，且 exact r300 仍未通过全部 Spec 33 容量门，
+  不能声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -28,7 +29,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass、default-off single-inode v2 与 alias-free metadata-only v3 publication | Rounds 27-32 的 grouping/arbitration/并发/fdatasync/single-inode 容量诊断均被拒绝；metadata-only v3 静态和真实双镜像正确性通过，但压力容量尚未测，exact r300 与后续门仍未解锁 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass、default-off single-inode v2 与 alias-free metadata-only v3 publication | Rounds 27-33 的 grouping/arbitration/并发/fdatasync/single-inode/metadata-only 容量诊断均被拒绝；v3 correctness 通过但 residence/dispatch/backpressure/visibility 未胜过 Round 26，exact r300 与后续门仍未解锁 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -377,8 +378,23 @@ atomic rename、journal/reconcile 和 daily split default。`da35730` 同时确�
 兼容均保留。静态门为 191 + 243 + 47 passed（另 1 expected skip），focused selection 329
 passed。真实双镜像 artifact
 `rolling_publication_metadata_only_smoke_20260722T104522Z` 的 sink/index marker 均通过；它只关闭
-实现正确性，不代表 ext4/FIFO/visibility 容量改善。下一步仍是唯一变量的 360 秒 Candidate B
-width-three r300 因果诊断。
+实现正确性，不代表 ext4/FIFO/visibility 容量改善。
+
+对应唯一变量 360 秒 artifact
+`pressure60_8p1_pubmetadataonly_ioadm3_b6m_r300_20260722T1055Z` 已完成并拒绝该容量假设。
+60/60、8.0822 FPS、927/927 formal、993/993 retained（638 video/355 image）以及 8090/
+timeline/annotation/bbox/person/persistence/fence/residual 全通过；但相对 Round 26，A/B residence
+p95 从 5.172/4.916s 变为 6.739/6.746s，dispatch 从 5.275/5.188s 变为 7.162/7.325s，
+capacity-wait 从 55 增到 165，visibility 从 3.256s 变为 12.040s。虽然 regular-file sync
+降至 57.439s、total service 降至 142.397s，directory sync 仍为 70.838s（Round 26 为
+47.179s），>=1s service 从 25 增到 42。parse/scheduler/DB headline p95 未吸收缺失时间；
+metadata-only v3 保持 default-off，不能解锁后续门。
+
+cleanup live audit 还发现 launcher shell 的诊断值会压过 `--env-file`，使停止的 A/B sink
+曾被重建为 `metadata_only`。`af29c21` 先复现，`3e35f16` 再清除九个 pressure-controlled
+interpolation key，并逐项校验重建 env。真实 hostile-env restore 已把两容器恢复到
+split/fsync/one-worker/zero-slot/r300；0 enabled camera、active task/lease/Replay/finalizer row、
+pressure process/container，Redis/PostgreSQL 也均回到日常值，completion sentinel 仍不存在。
 
 ## 已知开放项
 
@@ -386,15 +402,16 @@ width-three r300 因果诊断。
 
 - 保持 production preparation limit=1、commit arbitration=False；显式 group/arbiter 只用于历史复现，
   不在生产 sink 启用；
-- metadata-only v3 的红测、静态与真实双镜像 crash/recovery/index 合同已通过；下一步只运行
-  不变 360s r300 唯一变量诊断，不组合调整 worker、queue、retention、index width、finalizer
-  或 deadline；
+- metadata-only v3 的红测、静态、真实双镜像与 60 路 correctness 已通过，但 Round 33 因果门已
+  失败；保持 default-off，不再把 representation-only 变化当成已证明容量修复；
+- 下一变量必须先解释残余 directory/writeback convoy 并以红测冻结；不得删除 directory fence，
+  也不得组合调整 worker、queue、retention、index width、finalizer 或 deadline；
 - 全部既有 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 Candidate B/width 3/
   retention/deadline 保持不变；
 - r3840 和一小时验收继续禁止；只有后续 exact r300 的 input、Spec 33 capacity/visibility、
   watchlist、correctness、annotation 与 residual 全通过，才允许进入 3,840s retention 短门；
 - 不同时增加 process workers、WIP、remux、finalizer queue 或 index width，也不放宽 deadline；
-  当前 finalizer pool/finalization/handoff-admission p95 已仅 1ms/0.815s/60ms；
+  Round 33 finalizer pool/finalization/handoff-admission p95 为 1ms/0.717s/41ms；
 - 把 Reese/Finch active operational registration 纳入压测前置审计，保持真实 embedding 与
   watchlist gate，不把图库内容再次当成隐式机器状态；
 - 完成真实混合 RTSP 的断流、重连和长 soak；

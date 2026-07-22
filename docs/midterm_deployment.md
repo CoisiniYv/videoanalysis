@@ -192,7 +192,14 @@ rolling publication 的日常布局固定为
 `ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=split`。`single_inode` 与
 `metadata_only` 只供带 artifact 的容量诊断显式选择；后者使用无 hard-link alias 的 v3
 `metadata.json` 首行 control record。二者都不是 8090 运行预设，也不能因实现/容器 smoke
-通过而改成部署默认值。
+通过而改成部署默认值。Round 33 的 60 路短诊断也已因 residence/dispatch/backpressure/
+visibility 未胜过 Round 26 而拒绝，不能解锁 exact r300 或后续运行。
+
+pressure cleanup 重建停止的 rolling sink 时，必须从子进程环境清除 pressure-controlled
+`ROLLING_CACHE_*` interpolation key，让 `infra/env/midterm.env` 的日常值生效，并逐项核对
+root/segment/publication/file-sync/layout/FPS/epoch/retention 九个值。只看到容器处于 stopped/
+created 不能证明恢复成功；当前安全日常结果是 split/fsync/one-worker/zero-slot/r300、24 FPS、
+空 pressure epoch。
 
 ## 9. 端口
 

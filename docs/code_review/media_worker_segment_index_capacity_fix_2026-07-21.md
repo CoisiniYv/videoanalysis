@@ -75,11 +75,19 @@ residence/dispatch p95 roughly doubles, capacity-wait events rise from 55 to
 alias therefore moved the ext4 durability cost rather than removing it. The
 next isolated contract removes only that alias while preserving the embedded
 control record, one file fsync, both directory fsyncs and atomic rename. Round
-33 now implements that default-off metadata-only v3 representation. Its red
-contracts, focused and broad static suites, and real dual-image publication/
-index/recovery smoke pass; the unchanged 360-second causal diagnostic remains
-pending, so no capacity claim or later-run authorization follows from the
-implementation proof.
+33 implements that default-off metadata-only v3 representation, passes its red
+contracts, static suites and real dual-image publication/index/recovery smoke,
+then rejects it with the unchanged 360-second causal diagnostic. All input and
+correctness gates pass, including 927/927 formal and 993/993 retained tasks,
+but Round 26 -> Round 33 residence becomes 5.172/4.916 -> 6.739/6.746 seconds,
+dispatch becomes 5.275/5.188 -> 7.162/7.325 seconds, capacity waits become
+55 -> 165 and visibility becomes 3.256 -> 12.040 seconds. Regular-file sync
+falls 80.352 -> 57.439 seconds and total worker service falls
+176.954 -> 142.397 seconds, but directory sync remains worse at
+47.179 -> 70.838 seconds and >=1-second services rise 25 -> 42. Parsing and
+scheduler/DB headline p95 do not absorb the missing time. Metadata-only v3 is
+therefore diagnostic-only; exact r300, r3840 and both one-hour runs remain
+blocked.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -175,6 +183,9 @@ implementation proof.
 | `da35730` | pressure sink config restoration | Recreates only the affected sinks without dependencies, verifies state and prevents a diagnostic metadata layout from surviving cleanup |
 | `22aa940` | metadata-only v3 red contracts | Requires alias-free one-fence publication, metadata-keyed journal/reconcile/fallback discovery, exact native rows, v1/v2 compatibility, failure staging and pressure observability |
 | `f075b46` | default-off metadata-only v3 layout | Embeds the bounded v3 control record in `metadata.json`, omits the hard-link alias and preserves every directory, rename, journal, read-pin, FIFO and daily-default fence |
+| `8e39094` | metadata-only implementation proof | Records static and real dual-image durability/index/recovery correctness without claiming pressure capacity |
+| `af29c21` | sink-restore environment red contract | Reproduces diagnostic shell interpolation overriding the daily env file during stopped-container recreation |
+| `3e35f16` | isolated daily sink restoration | Removes pressure-controlled interpolation keys for daily Compose, verifies nine recreated env values and fails cleanup on drift |
 
 ## Measurement rounds
 
@@ -2053,7 +2064,7 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   final-parent fsync, journal/reconcile authority, failure staging, FIFO bound
   and daily split default remain unchanged.
 
-### Round 33: metadata-only v3 implementation proof
+### Round 33: metadata-only v3 implementation and causal rejection
 
 - Tests-only `22aa940` freezes the alias-free contract. `metadata.json` begins
   with one bounded `rolling-segment-manifest-v3` record followed by the exact
@@ -2091,11 +2102,66 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   exact frame rows, and rejected a changed v3 identity at read-pin publication
   with zero marker residue. Marker:
   `PASS_PUBLICATION_METADATA_ONLY_INDEX_CONTAINER_SMOKE`.
-- This closes only implementation correctness. It does not compare ext4
-  regular/directory service, FIFO residence/dispatch, capacity waits,
-  visibility, callback pressure, scheduler/DB phases or parsing under 60-route
-  pressure. The next sole runtime variable remains `split -> metadata_only` in
-  one unchanged 360-second Candidate B width-three r300 diagnostic.
+- Causal diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pubmetadataonly_ioadm3_b6m_r300_20260722T1055Z`.
+  It retained the fixed 4,800-second fixture/hash, 60 routes, disk r300,
+  Candidate B `20/12/8`, finalizer `8/4/8`, index width three, one publication
+  worker, zero commit slots, regular-file `fsync`, 360-second sample, 25-second
+  pre/postfill and 120-second drain. The sole intended behavior variable
+  against Round 26 was `split -> metadata_only`; this remains a causal
+  diagnostic, not the exact 600-second r300 acceptance.
+- Harness, input and correctness passed. Both branches reached 60/60 at 8.0822
+  effective FPS with zero Savant-send, queue-full, raw-drop or raw-send failure.
+  All 927 formal tasks and all 993 retained tasks materialized. The retained
+  set contains 638 videos and 355 images; all 638 videos passed 5+5 duration,
+  raw FPS, DB-backed timeline, annotation, bbox and person-context checks, and
+  all 993 items passed 8090 detail checks. Person persistence passed at 73,849
+  stored rows versus 73,844 exports over all 60 sources with measured loss
+  zero. Task/lease/Replay/WIP/lane/finalizer-pending residuals were zero. The
+  only warning was the expected `validate_seq_iq` sampling gap.
+- The intended representation was exercised exactly. Sink A/B completed
+  4,079/4,091 publications with metadata layout `metadata_only`, one
+  regular-file sync, zero manifest write/sync, one worker, zero commit slots,
+  zero publication failure and clean terminal drain.
+- The representation saving is real but does not pass the causal gate.
+  Regular-file sync falls from Round 26's `80.352s` to `57.439s`, combined
+  worker service falls `176.954s -> 142.397s`, and service p95 falls
+  `31.621ms -> 16.904ms`. The two required directory sync phases nevertheless
+  consume `70.838s` versus Round 26's `47.179s`, and >=1-second services rise
+  `25 -> 42`. Removing the hard-link alias improves Round 32, but rare ext4
+  directory/writeback convoys remain.
+- Capacity therefore fails. Sink A/B residence p95 changes from
+  `5.172/4.916s` to `6.739/6.746s`; dispatch p95 changes from
+  `5.275/5.188s` to `7.162/7.325s`. Both queues still reach 128 outstanding.
+  Capacity-wait events at or above one millisecond rise `55 -> 165`, cumulative
+  callback wait rises `6.215s -> 19.444s`, and metadata visibility changes
+  `3.256s -> 12.040s`. Ready-to-claim/media-queue/lifecycle p95 is
+  `6.225/21.789/21.055s`; the first two still miss closure.
+- The missing time did not move into v3 parsing or headline scheduler/DB work.
+  Segment-index full-row/manifest parse p95 improves
+  `19.451/3.384ms -> 15.159/1.492ms`; scheduler poll p95/max improves
+  `63ms/14.327s -> 59ms/12.156s`; DB claim p95 improves
+  `84.1ms -> 66.15ms`, with zero checkout timeout. Dispatch remains correlated
+  0.9988/0.9987 with residence and only about 0.20/0.19 with own service. The
+  failed directory-shift, callback, FIFO and visibility gates retain the rare
+  durability-convoy attribution.
+- Reproducible analyses are retained as
+  `publication_metadata_only_timing_analysis.json`,
+  `publication_metadata_only_phase_analysis.json`,
+  `round26_vs_round33_comparison.json` and
+  `analyze_metadata_only_comparison.py` in the artifact. Round 33 is rejected;
+  `metadata_only` remains default-off and does not authorize exact r300,
+  r3840 or either one-hour run.
+- Cleanup exposed a second restoration boundary missed by `da35730`: launcher
+  shell values outrank `--env-file`, so stopped A/B containers were recreated
+  in `metadata_only` even though daily `midterm.env` says `split`. Tests-only
+  `af29c21` reproduces the leak; `3e35f16` removes all nine pressure-controlled
+  sink interpolation keys before daily Compose and validates the recreated
+  env, not only stopped/running state. Real proof
+  `compose_restore_rolling_cache_sinks_after_fix.json` deliberately injected
+  all nine hostile values and restored both stopped sinks to
+  split/fsync/one-worker/zero-slot/r300 with empty pressure epoch and zero
+  mismatch.
 
 ## Runtime recovery audit
 
@@ -2185,6 +2251,21 @@ Redis `save` is `3600 1 300 100 60 10000`; PostgreSQL is back at checkpoint
 timeout 5min, WAL `1GB/80MB` and compression off. The completion status file is
 absent, all pressure artifacts are retained and about 184GB is free.
 
+The post-Round-33 audit first caught the launcher-env restoration leak above,
+then reran the corrected restore under deliberately hostile pressure values.
+At 2026-07-22T11:30:26Z the stopped A/B sink containers were freshly recreated
+with split/fsync/one-worker/zero-slot/r300, 24 FPS and empty pressure epoch.
+The daily media-worker is running with restart count zero at
+WIP/remux-queue/finalizer `4/4/32`, process finalizers zero, index width two and
+rolling materialization disabled. The database has 0/60 enabled pressure
+cameras and zero active task, lease, Replay slot or finalizer-pending row; no
+pressure/MediaMTX/fixture publisher container or process remains. Redis `save`
+is `3600 1 300 100 60 10000`; PostgreSQL is `5min/1GB/80MB/off`; about 186GB
+is free and the completion status file remains absent. The legacy runtime
+doctor still reports `ok=false` for its pre-existing expectation drift
+(`MAX_FPS_CONTROL`, pose threshold, replay-config surface and absent optional
+source-adapter), not for pressure cleanup or durability restoration.
+
 ## Next gates
 
 1. Keep production/default preparation at one, commit arbitration/slots
@@ -2203,21 +2284,25 @@ absent, all pressure artifacts are retained and about 184GB is free.
    reduced regular-file sync time, but failed residence, dispatch,
    capacity-wait, visibility and no-directory-shift gates. `single_inode` must
    remain diagnostic-only and cannot advance exact r300.
-5. Keep the committed metadata-only v3 implementation default-off. Its static
-   and dual-image correctness proof passes, but that does not establish causal
-   capacity or authorize a daily-default change.
-6. Run one unchanged 360-second
-   Candidate B r300 diagnostic with that layout as the sole behavior variable.
-   It must beat Round 26 regular-file/directory service, residence/dispatch,
-   fewer-than-55 capacity waits and 3.256-second visibility without moving work
-   into callback backpressure, parsing or scheduler/DB phases.
-7. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
-   gate passes. Rounds 27-32 are negative 360-second causal evidence and do not
-   replace the exact width-three 600-second r300 gate.
-8. Repeat the exact r300 gate with the fixed fixture/hash only after the new
-   short diagnostic passes. Only a complete input, capacity, visibility,
-   watchlist, annotation and residual pass permits the 3,840-second-retention
-   short gate.
-9. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
-   full evidence/8090 validation, restore the daily runtime, and then consider
-   Phase 7 legacy removal and completion.
+5. Retain Round 33 as negative causal evidence. Metadata-only v3 passes static,
+   dual-image and pressure correctness and lowers file-sync/total service, but
+   fails directory-shift, residence, dispatch, capacity-wait and visibility
+   gates. It remains default-off and cannot become a daily layout.
+6. Keep the `af29c21`/`3e35f16` restore fence: diagnostic launcher environment
+   must not outrank daily Compose during cleanup, and recreation must fail on
+   any of the nine sink env mismatches. Stopped state alone is not restoration
+   proof.
+7. Do not select another behavior variable merely because Round 33 is negative.
+   First explain the remaining rare directory/writeback convoy and freeze one
+   falsifiable, test-first mechanism. Do not remove either directory fence or
+   combine worker, queue, retention, index, finalizer or deadline changes.
+8. Keep exact r300, r3840 and both one-hour acceptances blocked. Rounds 27-33
+   are negative 360-second causal evidence and do not replace the exact
+   width-three 600-second r300 gate.
+9. Repeat exact r300 with the fixed fixture/hash only after a future unchanged
+   short diagnostic beats Round 26 on file/directory service, both residence/
+   dispatch p95 values, fewer-than-55 capacity waits and 3.256-second
+   visibility without shifting work into callback, parsing or scheduler/DB.
+10. Only a complete exact-r300 input/capacity/visibility/watchlist/annotation/
+    residual pass permits r3840. Only after both short gates pass may two
+    comparable one-hour acceptances and Phase 7 legacy removal be considered.
