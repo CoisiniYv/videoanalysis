@@ -173,6 +173,7 @@ def test_atomic_publication_exposes_complete_phase_diagnostics(
         "publish_manifest_stat_ms",
         "publish_commit_lock_wait_ms",
         "publish_commit_lock_hold_ms",
+        "publish_commit_wall_ms",
         "publish_staging_dir_fsync_ms",
         "publish_parent_prepare_ms",
         "publish_rename_ms",
@@ -2093,6 +2094,9 @@ def test_final_parent_group_fsyncs_each_durable_item_before_fifo_renames(
         assert diagnostics["publication_final_parent_group_fsync_count"] == 2
         assert diagnostics["publication_final_parent_group_fsync_saved"] == 1
         assert diagnostics["publication_final_parent_fence_wait_ms"] >= 0
+        assert diagnostics["publish_commit_wall_ms"] >= diagnostics[
+            "publish_commit_ms"
+        ]
 
     snapshot = dispatcher.snapshot()
     assert snapshot["final_parent_group_limit"] == 3
@@ -2214,6 +2218,208 @@ def test_final_parent_group_rejects_combined_grouping_or_worker_variables(
             final_parent_group_limit=3,
             **overrides,
         )
+
+
+def test_final_parent_group_rejects_commit_slot_publisher(
+    tmp_path: Path,
+) -> None:
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s1111111111111111",
+        commit_slot_count=1,
+    )
+    fragment = publisher.prepare(1)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 1})
+    staged = publisher.stage_publication(fragment)
+
+    with pytest.raises(
+        RuntimeError,
+        match="final_parent_group_limit cannot be combined with commit slots",
+    ):
+        publisher._begin_final_parent_commit(staged)
+
+    assert fragment.staging_dir.is_dir()
+    assert not fragment.final_dir.exists()
+
+
+def test_final_parent_group_parent_fsync_failure_isolated_by_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publishers = [
+        AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=session_id,
+        )
+        for source_id, session_id in (
+            ("camera-01", "s1111111111111111"),
+            ("camera-02", "s2222222222222222"),
+            ("camera-01", "s1111111111111111"),
+        )
+    ]
+    # Reuse one publisher for both camera-01 fragments so their two renames
+    # share one explicit final-parent fence.
+    publishers[2] = publishers[0]
+    fragments = []
+    for fragment_id, publisher in enumerate(publishers, start=1):
+        fragment = publisher.prepare(fragment_id)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append(
+            {"source_id": publisher._source_id, "pts": fragment_id}
+        )
+        fragments.append(fragment)
+
+    start_worker = threading.Event()
+    real_run = publishing.BoundedPublicationDispatcher._run
+    real_fsync_directory = publishing._fsync_directory
+    parent_fsync_attempts: list[Path] = []
+    callbacks: list[str] = []
+
+    def gated_run(self, worker_index: int) -> None:
+        assert start_worker.wait(timeout=2)
+        real_run(self, worker_index)
+
+    def fail_camera_two_parent(path: Path) -> None:
+        path = Path(path)
+        if path.name == "segments":
+            parent_fsync_attempts.append(path)
+        if path == publishers[1]._segments_root:
+            raise OSError("injected-final-parent-fsync-failure")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(
+        publishing.BoundedPublicationDispatcher,
+        "_run",
+        gated_run,
+    )
+    monkeypatch.setattr(publishing, "_fsync_directory", fail_camera_two_parent)
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        final_parent_group_limit=3,
+        thread_name="test-final-parent-fsync-error",
+    )
+    for publisher, fragment in zip(publishers, fragments, strict=True):
+        dispatcher.submit(
+            source_id=publisher._source_id,
+            publisher=publisher,
+            fragment=fragment,
+            on_published=lambda item, _path: callbacks.append(
+                f"ok:{item.segment_id}"
+            ),
+            on_publish_error=lambda item, error: callbacks.append(
+                f"error:{item.segment_id}:{error}"
+            ),
+        )
+    start_worker.set()
+
+    assert dispatcher.close(timeout_s=3) is True
+    assert callbacks == [
+        f"ok:{fragments[0].segment_id}",
+        (
+            f"error:{fragments[1].segment_id}:"
+            "injected-final-parent-fsync-failure"
+        ),
+        f"ok:{fragments[2].segment_id}",
+    ]
+    assert parent_fsync_attempts == [
+        publishers[0]._segments_root,
+        publishers[1]._segments_root,
+    ]
+    assert all(fragment.final_dir.is_dir() for fragment in fragments)
+    assert not (
+        publishers[1]._segments_root / publishing.SEGMENT_PUBLICATION_JOURNAL_FILE
+    ).exists()
+    camera_one_records = (
+        publishers[0]._segments_root / publishing.SEGMENT_PUBLICATION_JOURNAL_FILE
+    ).read_text(encoding="utf-8").splitlines()
+    assert len(camera_one_records) == 2
+    assert dispatcher.snapshot()["completed_total"] == 2
+    assert dispatcher.snapshot()["failed_total"] == 1
+
+
+def test_final_parent_group_shutdown_timeout_preserves_later_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publishers = [
+        AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=f"camera-{index:02d}",
+            session_id=f"s{index:016d}",
+        )
+        for index in range(1, 4)
+    ]
+    fragments = []
+    for index, publisher in enumerate(publishers, start=1):
+        fragment = publisher.prepare(index)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append({"source_id": publisher._source_id, "pts": index})
+        fragments.append(fragment)
+
+    start_worker = threading.Event()
+    fence_entered = threading.Event()
+    release_fence = threading.Event()
+    real_run = publishing.BoundedPublicationDispatcher._run
+    real_fsync_directory = publishing._fsync_directory
+    callbacks: list[str] = []
+
+    def gated_run(self, worker_index: int) -> None:
+        assert start_worker.wait(timeout=2)
+        real_run(self, worker_index)
+
+    def block_first_final_parent(path: Path) -> None:
+        path = Path(path)
+        if path == publishers[0]._segments_root:
+            fence_entered.set()
+            assert release_fence.wait(timeout=2)
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(
+        publishing.BoundedPublicationDispatcher,
+        "_run",
+        gated_run,
+    )
+    monkeypatch.setattr(publishing, "_fsync_directory", block_first_final_parent)
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=3,
+        final_parent_group_limit=3,
+        thread_name="test-final-parent-shutdown",
+    )
+    for publisher, fragment in zip(publishers, fragments, strict=True):
+        dispatcher.submit(
+            source_id=publisher._source_id,
+            publisher=publisher,
+            fragment=fragment,
+            on_published=lambda item, _path: callbacks.append(item.segment_id),
+        )
+    start_worker.set()
+    assert fence_entered.wait(timeout=1)
+
+    assert dispatcher.close(timeout_s=0.01) is False
+    timed_out = dispatcher.snapshot()
+    assert timed_out["accepting"] is False
+    assert timed_out["outstanding"] == 3
+    assert timed_out["shutdown_timeout_total"] == 1
+
+    release_fence.set()
+    assert dispatcher.close(timeout_s=3) is True
+    assert callbacks == [fragment.segment_id for fragment in fragments]
+    final = dispatcher.snapshot()
+    assert final["outstanding"] == 0
+    assert final["active"] == 0
+    assert final["completed_total"] == 3
+    assert all(not thread.is_alive() for thread in dispatcher._threads)
 
 
 def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(

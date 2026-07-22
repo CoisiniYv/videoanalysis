@@ -392,6 +392,7 @@ class SourcePipeline:
             "segment published source=%s epoch=%s session=%s segment=%s "
             "frames=%d bytes=%d first_pts=%s last_pts=%s "
             "publish_total_ms=%s publish_stage_ms=%s publish_commit_ms=%s "
+            "publish_commit_wall_ms=%s "
             "publish_commit_lock_wait_ms=%s "
             "publish_commit_lock_hold_ms=%s "
             "publish_commit_slot_count=%s publish_commit_slot_index=%s "
@@ -417,7 +418,13 @@ class SourcePipeline:
             "publication_queue_depth_at_submit=%s "
             "publication_worker_index=%s "
             "publication_prepare_group_size=%s "
-            "publication_prepare_group_position=%s",
+            "publication_prepare_group_position=%s "
+            "publication_final_parent_group_size=%s "
+            "publication_final_parent_group_position=%s "
+            "publication_final_parent_group_unique_parents=%s "
+            "publication_final_parent_group_fsync_count=%s "
+            "publication_final_parent_group_fsync_saved=%s "
+            "publication_final_parent_fence_wait_ms=%s",
             self.source_id,
             self.runtime_epoch_id,
             self.session_id,
@@ -429,6 +436,7 @@ class SourcePipeline:
             timings.get("publish_total_ms", "unavailable"),
             timings.get("publish_stage_ms", "unavailable"),
             timings.get("publish_commit_ms", "unavailable"),
+            timings.get("publish_commit_wall_ms", "unavailable"),
             timings.get("publish_commit_lock_wait_ms", "unavailable"),
             timings.get("publish_commit_lock_hold_ms", "unavailable"),
             timings.get("publish_commit_slot_count", "unavailable"),
@@ -464,6 +472,27 @@ class SourcePipeline:
             timings.get("publication_worker_index", "unavailable"),
             timings.get("publication_prepare_group_size", "unavailable"),
             timings.get("publication_prepare_group_position", "unavailable"),
+            timings.get("publication_final_parent_group_size", "unavailable"),
+            timings.get(
+                "publication_final_parent_group_position",
+                "unavailable",
+            ),
+            timings.get(
+                "publication_final_parent_group_unique_parents",
+                "unavailable",
+            ),
+            timings.get(
+                "publication_final_parent_group_fsync_count",
+                "unavailable",
+            ),
+            timings.get(
+                "publication_final_parent_group_fsync_saved",
+                "unavailable",
+            ),
+            timings.get(
+                "publication_final_parent_fence_wait_ms",
+                "unavailable",
+            ),
         )
 
     def _on_publish_error(self, fragment: Fragment, error: Exception) -> None:
@@ -526,9 +555,20 @@ class RollingCacheSink:
         self._h264_codec = Codec.H264
         self._contexts: dict[str, SourcePipeline] = {}
         self._stopping = False
+        if (
+            config.publication_final_parent_group_limit > 1
+            and config.publication_commit_slots > 0
+        ):
+            raise ValueError(
+                "publication_final_parent_group_limit cannot be combined with "
+                "publication_commit_slots > 0"
+            )
         self._publication_dispatcher = BoundedPublicationDispatcher(
             capacity=SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
             prepare_group_limit=SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
+            final_parent_group_limit=(
+                config.publication_final_parent_group_limit
+            ),
             worker_count=config.publication_workers,
             metrics=metrics,
             thread_name="rolling-cache-publication",
@@ -555,13 +595,15 @@ class RollingCacheSink:
         )
         LOGGER.info(
             "publication dispatcher started workers=%d outstanding_limit=%d "
-            "prepare_group_limit=%d commit_arbitration_enabled=%s "
+            "prepare_group_limit=%d final_parent_group_limit=%d "
+            "commit_arbitration_enabled=%s "
             "commit_slot_count=%d file_sync_mode=%s metadata_layout=%s "
             "metadata_only_enabled=%d "
             "regular_file_sync_count=%d",
             config.publication_workers,
             SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
             SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
+            config.publication_final_parent_group_limit,
             SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
             config.publication_commit_slots,
             config.publication_file_sync_mode,
@@ -708,6 +750,11 @@ class RollingCacheSink:
             "publication_prepare_group_limit=%d "
             "publication_prepare_group_total=%d "
             "publication_prepare_group_size_max=%d "
+            "publication_final_parent_group_limit=%d "
+            "publication_final_parent_group_total=%d "
+            "publication_final_parent_group_size_max=%d "
+            "publication_final_parent_fsync_total=%d "
+            "publication_final_parent_fsync_saved_total=%d "
             "publication_prepare_service_ms_total=%.3f "
             "publication_prepare_service_ms_max=%.3f "
             "publication_commit_wait_ms_total=%.3f "
@@ -751,6 +798,11 @@ class RollingCacheSink:
             int(publication_state["prepare_group_limit"]),
             int(publication_state["prepare_group_total"]),
             int(publication_state["prepare_group_size_max"]),
+            int(publication_state["final_parent_group_limit"]),
+            int(publication_state["final_parent_group_total"]),
+            int(publication_state["final_parent_group_size_max"]),
+            int(publication_state["final_parent_fsync_total"]),
+            int(publication_state["final_parent_fsync_saved_total"]),
             float(publication_state["prepare_service_ms_total"]),
             float(publication_state["prepare_service_ms_max"]),
             float(publication_state["commit_wait_ms_total"]),

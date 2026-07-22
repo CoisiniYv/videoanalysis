@@ -15,6 +15,7 @@ from pathlib import Path
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
 MAX_ROLLING_CACHE_PUBLICATION_WORKERS = 4
 MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS = 4
+MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT = 32
 
 
 def safe_component(value: str, *, field: str) -> str:
@@ -91,6 +92,7 @@ class SinkConfig:
     http_port: int
     publication_workers: int
     publication_commit_slots: int
+    publication_final_parent_group_limit: int
     publication_file_sync_mode: str
     publication_metadata_layout: str
     source_id: str | None
@@ -138,6 +140,11 @@ class SinkConfig:
                 "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
                 0,
                 maximum=MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS,
+            ),
+            publication_final_parent_group_limit=_bounded_positive_int(
+                "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
+                1,
+                maximum=MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT,
             ),
             publication_file_sync_mode=_choice(
                 "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",

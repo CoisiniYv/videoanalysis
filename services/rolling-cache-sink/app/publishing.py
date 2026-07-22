@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterator
 
 from config import (
     MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS,
+    MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT,
     MAX_ROLLING_CACHE_PUBLICATION_WORKERS,
     safe_component,
 )
@@ -109,6 +110,17 @@ class _StagedPublication:
     first_pts: int
     last_pts: int
     stage_service_ms: float
+
+
+@dataclass
+class _FinalParentCommit:
+    """One independently durable, still-invisible cohort member."""
+
+    staged: _StagedPublication
+    commit_started_ns: int
+    service_ms: float = 0.0
+    rename_completed_at_ns: int | None = None
+    parent_fence_completed_at_ns: int | None = None
 
 
 def _json_line(payload: dict[str, Any]) -> bytes:
@@ -363,6 +375,171 @@ class AtomicSegmentPublisher:
             stage_service_ms=timings.elapsed_ms(),
         )
 
+    def _begin_final_parent_commit(
+        self,
+        staged: _StagedPublication,
+    ) -> _FinalParentCommit:
+        """Begin a default-off cohort commit without weakening any fence."""
+
+        if self._commit_lock_path is not None:
+            raise RuntimeError(
+                "final_parent_group_limit cannot be combined with commit slots"
+            )
+        staged.timings.record("commit_lock_wait_ms", 0.0)
+        return _FinalParentCommit(
+            staged=staged,
+            commit_started_ns=time.monotonic_ns(),
+        )
+
+    def _prepare_final_parent_commit(
+        self,
+        commit: _FinalParentCommit,
+    ) -> None:
+        """Fence one item completely while it remains under staging."""
+
+        staged = commit.staged
+        fragment = staged.fragment
+        timings = staged.timings
+        metadata_path = fragment.staging_dir / "metadata.json"
+        manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
+        started_ns = time.monotonic_ns()
+        try:
+            file_sync = (
+                os.fdatasync
+                if self._file_sync_mode == "fdatasync"
+                else os.fsync
+            )
+            with metadata_path.open("rb") as handle:
+                with timings.measure("metadata_fsync_ms"):
+                    file_sync(handle.fileno())
+            if self._metadata_layout == "split":
+                with manifest_path.open("rb") as handle:
+                    with timings.measure("manifest_fsync_ms"):
+                        file_sync(handle.fileno())
+            with timings.measure("staging_dir_fsync_ms"):
+                _fsync_directory(fragment.staging_dir)
+            with timings.measure("parent_prepare_ms"):
+                fragment.final_dir.parent.mkdir(parents=True, exist_ok=True)
+                if fragment.final_dir.exists():
+                    raise FileExistsError(
+                        "rolling_segment_final_collision:"
+                        f"{fragment.segment_id}"
+                    )
+        finally:
+            commit.service_ms += max(
+                0.0,
+                (time.monotonic_ns() - started_ns) / 1_000_000.0,
+            )
+
+    def _rename_final_parent_commit(
+        self,
+        commit: _FinalParentCommit,
+    ) -> None:
+        fragment = commit.staged.fragment
+        started_ns = time.monotonic_ns()
+        try:
+            with commit.staged.timings.measure("rename_ms"):
+                os.replace(fragment.staging_dir, fragment.final_dir)
+            commit.rename_completed_at_ns = time.monotonic_ns()
+        finally:
+            commit.service_ms += max(
+                0.0,
+                (time.monotonic_ns() - started_ns) / 1_000_000.0,
+            )
+
+    def _fence_final_parent_commit(
+        self,
+        commit: _FinalParentCommit,
+    ) -> None:
+        """Explicitly fence one distinct final parent after cohort renames."""
+
+        started_ns = time.monotonic_ns()
+        try:
+            with commit.staged.timings.measure("parent_dir_fsync_ms"):
+                _fsync_directory(commit.staged.fragment.final_dir.parent)
+        finally:
+            commit.service_ms += max(
+                0.0,
+                (time.monotonic_ns() - started_ns) / 1_000_000.0,
+            )
+
+    def _append_final_parent_commit_journal(
+        self,
+        commit: _FinalParentCommit,
+    ) -> None:
+        staged = commit.staged
+        fragment = staged.fragment
+        started_ns = time.monotonic_ns()
+        try:
+            with staged.timings.measure("journal_append_ms"):
+                try:
+                    _append_publication_record(
+                        segments_root=fragment.final_dir.parent,
+                        manifest=staged.manifest,
+                        manifest_stat=staged.manifest_stat,
+                        metadata_stat=staged.metadata_stat,
+                        video_stat=staged.video_stat,
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "segment publication journal append failed "
+                        "source=%s epoch=%s segment=%s path=%s error=%s",
+                        self._source_id,
+                        self._runtime_epoch_id,
+                        fragment.segment_id,
+                        fragment.final_dir,
+                        exc,
+                    )
+        finally:
+            commit.service_ms += max(
+                0.0,
+                (time.monotonic_ns() - started_ns) / 1_000_000.0,
+            )
+
+    def _finish_final_parent_commit(
+        self,
+        commit: _FinalParentCommit,
+    ) -> Path:
+        staged = commit.staged
+        fragment = staged.fragment
+        commit_wall_ms = max(
+            0.0,
+            (time.monotonic_ns() - commit.commit_started_ns) / 1_000_000.0,
+        )
+        phase_diagnostics = staged.timings.finish(
+            total_ms=staged.stage_service_ms + commit.service_ms
+        )
+        fragment.publication_diagnostics = {
+            "schema_version": "rolling-segment-publication-timing-v1",
+            "first_pts": staged.first_pts,
+            "last_pts": staged.last_pts,
+            "publish_stage_ms": round(staged.stage_service_ms, 3),
+            "publish_commit_ms": round(commit.service_ms, 3),
+            "publish_commit_wall_ms": round(commit_wall_ms, 3),
+            "publish_commit_lock_hold_ms": 0.0,
+            "publish_commit_slot_count": self._commit_slot_count,
+            "publish_commit_slot_index": self._commit_slot_index,
+            "publish_file_sync_mode": self._file_sync_mode,
+            "publish_file_fdatasync_enabled": int(
+                self._file_sync_mode == "fdatasync"
+            ),
+            "publish_metadata_layout": self._metadata_layout,
+            "publish_single_inode_enabled": int(
+                self._metadata_layout == "single_inode"
+            ),
+            "publish_metadata_only_enabled": int(
+                self._metadata_layout == "metadata_only"
+            ),
+            "publish_regular_file_sync_count": (
+                1 if self._metadata_layout != "split" else 2
+            ),
+            **{
+                (name if name.startswith("publish_") else f"publish_{name}"): value
+                for name, value in phase_diagnostics.items()
+            },
+        }
+        return fragment.final_dir
+
     def commit_publication(self, staged: _StagedPublication) -> Path:
         """Durably commit one staged segment through the original fence order."""
 
@@ -474,6 +651,7 @@ class AtomicSegmentPublisher:
                 "last_pts": staged.last_pts,
                 "publish_stage_ms": round(staged.stage_service_ms, 3),
                 "publish_commit_ms": round(commit_service_ms, 3),
+                "publish_commit_wall_ms": round(commit_service_ms, 3),
                 "publish_commit_lock_hold_ms": round(commit_lock_hold_ms, 3),
                 "publish_commit_slot_count": self._commit_slot_count,
                 "publish_commit_slot_index": self._commit_slot_index,
@@ -662,6 +840,23 @@ class _PreparedPublication:
     group_position: int
 
 
+@dataclass
+class _FinalParentGroupWork:
+    queued: _QueuedPublication
+    queue_residence_ms: float
+    prepare_service_ms: float
+    stage_completed_at_ns: int
+    group_size: int
+    group_position: int
+    commit: _FinalParentCommit | None = None
+    error: Exception | None = None
+    final_dir: Path | None = None
+    commit_wait_ms: float = 0.0
+    worker_service_ms: float = 0.0
+    dispatch_total_ms: float = 0.0
+    fence_wait_ms: float = 0.0
+
+
 def _diagnostic_duration_ms(fragment: Any, name: str) -> float:
     diagnostics = getattr(fragment, "publication_diagnostics", {}) or {}
     try:
@@ -686,6 +881,7 @@ class BoundedPublicationDispatcher:
         *,
         capacity: int = SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
         prepare_group_limit: int = SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
+        final_parent_group_limit: int = 1,
         worker_count: int = 1,
         metrics: Any | None = None,
         thread_name: str = "rolling-cache-publication",
@@ -697,11 +893,33 @@ class BoundedPublicationDispatcher:
             self.capacity,
             max(1, int(prepare_group_limit)),
         )
+        requested_final_parent_group_limit = int(final_parent_group_limit)
+        if not 1 <= requested_final_parent_group_limit <= (
+            MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT
+        ):
+            raise ValueError(
+                "final_parent_group_limit must be between 1 and "
+                f"{MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT}, got "
+                f"{requested_final_parent_group_limit}"
+            )
+        self.final_parent_group_limit = min(
+            self.capacity,
+            requested_final_parent_group_limit,
+        )
         self.worker_count = int(worker_count)
         if not 1 <= self.worker_count <= MAX_ROLLING_CACHE_PUBLICATION_WORKERS:
             raise ValueError(
                 "worker_count must be between 1 and "
                 f"{MAX_ROLLING_CACHE_PUBLICATION_WORKERS}, got {self.worker_count}"
+            )
+        if self.final_parent_group_limit > 1 and self.prepare_group_limit > 1:
+            raise ValueError(
+                "final_parent_group_limit cannot be combined with "
+                "prepare_group_limit > 1"
+            )
+        if self.final_parent_group_limit > 1 and self.worker_count > 1:
+            raise ValueError(
+                "final_parent_group_limit cannot be combined with worker_count > 1"
             )
         self._metrics = metrics
         self._clock_ns = clock_ns
@@ -729,6 +947,10 @@ class BoundedPublicationDispatcher:
         self._prepare_group_size_max = 0
         self._prepare_service_ms_total = 0.0
         self._prepare_service_ms_max = 0.0
+        self._final_parent_group_total = 0
+        self._final_parent_group_size_max = 0
+        self._final_parent_fsync_total = 0
+        self._final_parent_fsync_saved_total = 0
         self._commit_wait_ms_total = 0.0
         self._commit_wait_ms_max = 0.0
         self._commit_lock_wait_ms_total = 0.0
@@ -897,7 +1119,12 @@ class BoundedPublicationDispatcher:
                 return
             assert isinstance(first, _QueuedPublication)
             group = [first]
-            while len(group) < self.prepare_group_limit:
+            group_limit = (
+                self.final_parent_group_limit
+                if self.final_parent_group_limit > 1
+                else self.prepare_group_limit
+            )
+            while len(group) < group_limit:
                 try:
                     queued = worker_queue.get_nowait()
                 except queue.Empty:
@@ -908,13 +1135,28 @@ class BoundedPublicationDispatcher:
             with self._state_lock:
                 self._active += 1
                 self._active_peak = max(self._active_peak, self._active)
-                self._prepare_group_total += 1
-                self._prepare_group_size_max = max(
-                    self._prepare_group_size_max,
-                    len(group),
-                )
+                if self.final_parent_group_limit > 1:
+                    self._prepare_group_total += len(group)
+                    self._prepare_group_size_max = max(
+                        self._prepare_group_size_max,
+                        1,
+                    )
+                else:
+                    self._prepare_group_total += 1
+                    self._prepare_group_size_max = max(
+                        self._prepare_group_size_max,
+                        len(group),
+                    )
                 state = self._snapshot_locked()
             self._sync_metrics(state)
+
+            if self.final_parent_group_limit > 1:
+                self._commit_final_parent_group(group)
+                with self._state_lock:
+                    self._active = max(0, self._active - 1)
+                    state = self._snapshot_locked()
+                self._sync_metrics(state)
+                continue
 
             prepared: list[_PreparedPublication] = []
             group_size = len(group)
@@ -972,6 +1214,297 @@ class BoundedPublicationDispatcher:
                 self._active = max(0, self._active - 1)
                 state = self._snapshot_locked()
             self._sync_metrics(state)
+
+    def _commit_final_parent_group(
+        self,
+        group: list[_QueuedPublication],
+    ) -> None:
+        """Commit a natural cohort without repeating Round 27 prewrite.
+
+        Each item is staged and fully fenced under its invisible staging path
+        before the next item is touched.  Only the final-parent rename/fence
+        phase is shared: renames stay FIFO, every distinct parent receives an
+        explicit fsync, and callbacks wait for the complete cohort fence.
+        """
+
+        works: list[_FinalParentGroupWork] = []
+        group_size = len(group)
+        for group_position, queued in enumerate(group, start=1):
+            stage_started_at_ns = self._clock_ns()
+            queue_residence_ms = max(
+                0.0,
+                (stage_started_at_ns - queued.accepted_at_ns) / 1_000_000.0,
+            )
+            staged: _StagedPublication | None = None
+            commit: _FinalParentCommit | None = None
+            error: Exception | None = None
+            stage_completed_at_ns = stage_started_at_ns
+            commit_wait_ms = 0.0
+            try:
+                stage_method = getattr(queued.publisher, "stage_publication", None)
+                begin_method = getattr(
+                    queued.publisher,
+                    "_begin_final_parent_commit",
+                    None,
+                )
+                prepare_method = getattr(
+                    queued.publisher,
+                    "_prepare_final_parent_commit",
+                    None,
+                )
+                if not (
+                    callable(stage_method)
+                    and callable(begin_method)
+                    and callable(prepare_method)
+                ):
+                    raise RuntimeError(
+                        "final_parent_group_limit requires phased atomic publisher"
+                    )
+                staged = stage_method(queued.fragment)
+                stage_completed_at_ns = self._clock_ns()
+                commit_started_at_ns = self._clock_ns()
+                commit_wait_ms = max(
+                    0.0,
+                    (commit_started_at_ns - stage_completed_at_ns) / 1_000_000.0,
+                )
+                commit = begin_method(staged)
+                prepare_method(commit)
+            except Exception as exc:
+                error = exc
+                stage_completed_at_ns = self._clock_ns()
+            works.append(
+                _FinalParentGroupWork(
+                    queued=queued,
+                    queue_residence_ms=queue_residence_ms,
+                    prepare_service_ms=max(
+                        0.0,
+                        (stage_completed_at_ns - stage_started_at_ns)
+                        / 1_000_000.0,
+                    ),
+                    stage_completed_at_ns=stage_completed_at_ns,
+                    group_size=group_size,
+                    group_position=group_position,
+                    commit=commit,
+                    error=error,
+                    commit_wait_ms=commit_wait_ms,
+                )
+            )
+
+        for work in works:
+            if work.error is not None or work.commit is None:
+                continue
+            try:
+                work.queued.publisher._rename_final_parent_commit(work.commit)
+            except Exception as exc:
+                work.error = exc
+
+        parents: dict[Path, list[_FinalParentGroupWork]] = {}
+        for work in works:
+            if work.error is not None or work.commit is None:
+                continue
+            parent = work.commit.staged.fragment.final_dir.parent
+            parents.setdefault(parent, []).append(work)
+
+        final_parent_fsync_count = 0
+        for parent_works in parents.values():
+            representative = parent_works[0]
+            assert representative.commit is not None
+            final_parent_fsync_count += 1
+            parent_error: Exception | None = None
+            try:
+                representative.queued.publisher._fence_final_parent_commit(
+                    representative.commit
+                )
+            except Exception as exc:
+                parent_error = exc
+            fence_completed_at_ns = time.monotonic_ns()
+            for index, work in enumerate(parent_works):
+                assert work.commit is not None
+                work.commit.parent_fence_completed_at_ns = fence_completed_at_ns
+                if index > 0:
+                    work.commit.staged.timings.record("parent_dir_fsync_ms", 0.0)
+                if work.commit.rename_completed_at_ns is not None:
+                    work.fence_wait_ms = max(
+                        0.0,
+                        (
+                            fence_completed_at_ns
+                            - work.commit.rename_completed_at_ns
+                        )
+                        / 1_000_000.0,
+                    )
+                if parent_error is not None:
+                    work.error = parent_error
+
+        renamed_count = sum(
+            1
+            for work in works
+            if work.commit is not None
+            and work.commit.rename_completed_at_ns is not None
+        )
+        final_parent_fsync_saved = max(
+            0,
+            renamed_count - len(parents),
+        )
+
+        for work in works:
+            if work.error is not None or work.commit is None:
+                continue
+            work.queued.publisher._append_final_parent_commit_journal(work.commit)
+
+        for work in works:
+            queued = work.queued
+            if work.commit is not None:
+                try:
+                    finished_dir = queued.publisher._finish_final_parent_commit(
+                        work.commit
+                    )
+                    if work.error is None:
+                        work.final_dir = finished_dir
+                except Exception as exc:
+                    if work.error is None:
+                        work.error = exc
+                work.worker_service_ms = max(0.0, work.commit.service_ms)
+            worker_completed_at_ns = self._clock_ns()
+            work.dispatch_total_ms = max(
+                0.0,
+                (worker_completed_at_ns - queued.requested_at_ns) / 1_000_000.0,
+            )
+            prepared = _PreparedPublication(
+                queued=queued,
+                staged=(work.commit.staged if work.commit is not None else queued.fragment),
+                split_publication=True,
+                stage_error=work.error,
+                queue_residence_ms=work.queue_residence_ms,
+                prepare_service_ms=work.prepare_service_ms,
+                stage_completed_at_ns=work.stage_completed_at_ns,
+                group_size=1,
+                group_position=1,
+            )
+            self._attach_dispatch_diagnostics(
+                prepared,
+                commit_wait_ms=work.commit_wait_ms,
+                worker_service_ms=work.worker_service_ms,
+                dispatch_total_ms=work.dispatch_total_ms,
+                final_parent_group_size=group_size,
+                final_parent_group_position=work.group_position,
+                final_parent_group_unique_parents=len(parents),
+                final_parent_group_fsync_count=final_parent_fsync_count,
+                final_parent_group_fsync_saved=final_parent_fsync_saved,
+                final_parent_fence_wait_ms=work.fence_wait_ms,
+            )
+            self._complete_final_parent_group_work(
+                work,
+                record_group_summary=work.group_position == 1,
+                final_parent_group_fsync_count=final_parent_fsync_count,
+                final_parent_group_fsync_saved=final_parent_fsync_saved,
+            )
+
+    def _complete_final_parent_group_work(
+        self,
+        work: _FinalParentGroupWork,
+        *,
+        record_group_summary: bool,
+        final_parent_group_fsync_count: int,
+        final_parent_group_fsync_saved: int,
+    ) -> None:
+        queued = work.queued
+        failed = work.error is not None
+        if failed:
+            assert work.error is not None
+            if queued.on_publish_error is not None:
+                try:
+                    queued.on_publish_error(queued.fragment, work.error)
+                except Exception:
+                    LOGGER.exception(
+                        "segment publication error callback failed "
+                        "source=%s segment=%s",
+                        queued.source_id,
+                        queued.fragment.segment_id,
+                    )
+        elif queued.on_published is not None:
+            assert work.final_dir is not None
+            try:
+                queued.on_published(queued.fragment, work.final_dir)
+            except Exception:
+                failed = True
+                LOGGER.exception(
+                    "segment publication success callback failed "
+                    "source=%s segment=%s",
+                    queued.source_id,
+                    queued.fragment.segment_id,
+                )
+
+        commit_lock_wait_ms = _diagnostic_duration_ms(
+            queued.fragment,
+            "publish_commit_lock_wait_ms",
+        )
+        commit_lock_hold_ms = _diagnostic_duration_ms(
+            queued.fragment,
+            "publish_commit_lock_hold_ms",
+        )
+        with self._state_lock:
+            self._outstanding = max(0, self._outstanding - 1)
+            if failed:
+                self._failed_total += 1
+            else:
+                self._completed_total += 1
+            self._prepare_service_ms_total += work.prepare_service_ms
+            self._prepare_service_ms_max = max(
+                self._prepare_service_ms_max,
+                work.prepare_service_ms,
+            )
+            self._commit_wait_ms_total += work.commit_wait_ms
+            self._commit_wait_ms_max = max(
+                self._commit_wait_ms_max,
+                work.commit_wait_ms,
+            )
+            self._commit_lock_wait_ms_total += commit_lock_wait_ms
+            self._commit_lock_wait_ms_max = max(
+                self._commit_lock_wait_ms_max,
+                commit_lock_wait_ms,
+            )
+            if commit_lock_wait_ms >= 1.0:
+                self._commit_lock_wait_events_total += 1
+            self._commit_lock_hold_ms_total += commit_lock_hold_ms
+            self._commit_lock_hold_ms_max = max(
+                self._commit_lock_hold_ms_max,
+                commit_lock_hold_ms,
+            )
+            self._queue_residence_ms_total += work.queue_residence_ms
+            self._queue_residence_ms_max = max(
+                self._queue_residence_ms_max,
+                work.queue_residence_ms,
+            )
+            if work.queue_residence_ms >= 1.0:
+                self._queue_residence_events_total += 1
+            self._worker_service_ms_total += work.worker_service_ms
+            self._worker_service_ms_max = max(
+                self._worker_service_ms_max,
+                work.worker_service_ms,
+            )
+            self._dispatch_total_ms_total += work.dispatch_total_ms
+            self._dispatch_total_ms_max = max(
+                self._dispatch_total_ms_max,
+                work.dispatch_total_ms,
+            )
+            if record_group_summary:
+                self._final_parent_group_total += 1
+                self._final_parent_group_size_max = max(
+                    self._final_parent_group_size_max,
+                    work.group_size,
+                )
+                self._final_parent_fsync_total += (
+                    final_parent_group_fsync_count
+                )
+                self._final_parent_fsync_saved_total += (
+                    final_parent_group_fsync_saved
+                )
+            if self._outstanding == 0:
+                self._idle.set()
+            state = self._snapshot_locked()
+        self._slots.release()
+        self._queues[queued.worker_index].task_done()
+        self._sync_metrics(state)
 
     def _commit_prepared(self, item: _PreparedPublication) -> None:
         queued = item.queued
@@ -1088,6 +1621,13 @@ class BoundedPublicationDispatcher:
                 self._dispatch_total_ms_max,
                 dispatch_total_ms,
             )
+            self._final_parent_group_total += 1
+            self._final_parent_group_size_max = max(
+                self._final_parent_group_size_max,
+                1,
+            )
+            if queued.fragment.final_dir.exists():
+                self._final_parent_fsync_total += 1
             if self._outstanding == 0:
                 self._idle.set()
             state = self._snapshot_locked()
@@ -1102,6 +1642,12 @@ class BoundedPublicationDispatcher:
         commit_wait_ms: float,
         worker_service_ms: float,
         dispatch_total_ms: float,
+        final_parent_group_size: int = 1,
+        final_parent_group_position: int = 1,
+        final_parent_group_unique_parents: int = 1,
+        final_parent_group_fsync_count: int = 1,
+        final_parent_group_fsync_saved: int = 0,
+        final_parent_fence_wait_ms: float = 0.0,
     ) -> None:
         queued = item.queued
         diagnostics = dict(
@@ -1140,6 +1686,25 @@ class BoundedPublicationDispatcher:
                 "publication_worker_index": queued.worker_index,
                 "publication_prepare_group_size": item.group_size,
                 "publication_prepare_group_position": item.group_position,
+                "publication_final_parent_group_size": (
+                    final_parent_group_size
+                ),
+                "publication_final_parent_group_position": (
+                    final_parent_group_position
+                ),
+                "publication_final_parent_group_unique_parents": (
+                    final_parent_group_unique_parents
+                ),
+                "publication_final_parent_group_fsync_count": (
+                    final_parent_group_fsync_count
+                ),
+                "publication_final_parent_group_fsync_saved": (
+                    final_parent_group_fsync_saved
+                ),
+                "publication_final_parent_fence_wait_ms": round(
+                    final_parent_fence_wait_ms,
+                    3,
+                ),
             }
         )
         queued.fragment.publication_diagnostics = diagnostics
@@ -1164,6 +1729,13 @@ class BoundedPublicationDispatcher:
             "prepare_group_limit": self.prepare_group_limit,
             "prepare_group_total": self._prepare_group_total,
             "prepare_group_size_max": self._prepare_group_size_max,
+            "final_parent_group_limit": self.final_parent_group_limit,
+            "final_parent_group_total": self._final_parent_group_total,
+            "final_parent_group_size_max": self._final_parent_group_size_max,
+            "final_parent_fsync_total": self._final_parent_fsync_total,
+            "final_parent_fsync_saved_total": (
+                self._final_parent_fsync_saved_total
+            ),
             "prepare_service_ms_total": round(
                 self._prepare_service_ms_total,
                 3,

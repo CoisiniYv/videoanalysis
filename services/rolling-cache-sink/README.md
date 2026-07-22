@@ -55,3 +55,15 @@ Worker keys v3 catalog entries by `metadata.json` and keeps journal,
 filesystem reconciliation, fallback discovery, read-pin and v1/v2
 compatibility intact. This mode is also default-off; `split` remains the daily
 layout.
+
+`ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT` defaults to `1`. Values
+`2..32` enable a bounded diagnostic cohort without changing the file or
+staging-directory fences: each item is written and fully fsynced while still
+invisible before the next item is staged, then the cohort is renamed in exact
+FIFO order, every distinct final parent is explicitly fsynced, journals are
+appended in FIFO order, and callbacks run only after the complete cohort
+fence. This is intentionally different from the rejected multi-item
+preparation experiment, which dirtied a whole group before its first file
+fence. Cohort mode is incompatible with multiple publication workers,
+preparation grouping, or commit slots and remains outside the daily preset
+until a retained pressure artifact proves the capacity gate.

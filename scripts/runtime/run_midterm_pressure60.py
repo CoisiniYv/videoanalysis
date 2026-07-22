@@ -79,6 +79,7 @@ ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS = {
     "ROLLING_CACHE_SEGMENT_SECONDS": "4",
     "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
     "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "0",
+    "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "1",
     "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fsync",
     "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "split",
     "ROLLING_CACHE_FPS": "24",
@@ -504,6 +505,7 @@ class PressureConfig:
     pressure_sampling_end_event_ts_ms: int = 0
     rolling_cache_publication_workers: int = 1
     rolling_cache_publication_commit_slots: int = 0
+    rolling_cache_publication_final_parent_group_limit: int = 1
     rolling_cache_publication_file_sync_mode: str = "fsync"
     rolling_cache_publication_metadata_layout: str = "split"
 
@@ -700,6 +702,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Host-wide deterministic rolling publication commit lanes. Zero "
             "keeps the daily unarbitrated default; diagnostics may use 1-4."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-publication-final-parent-group-limit",
+        type=int,
+        choices=range(1, 33),
+        default=1,
+        help=(
+            "Bounded natural cohort for already-durable segment renames and "
+            "explicit distinct-final-parent fsync. One keeps the daily "
+            "per-segment path; diagnostics may use 2-32."
         ),
     )
     parser.add_argument(
@@ -1255,6 +1268,22 @@ def main(argv: list[str] | None = None) -> int:
             "--pressure-rolling-cache-retention-s must be non-negative"
         )
     if (
+        args.rolling_cache_publication_final_parent_group_limit > 1
+        and args.rolling_cache_publication_workers != 1
+    ):
+        raise SystemExit(
+            "--rolling-cache-publication-final-parent-group-limit > 1 "
+            "requires --rolling-cache-publication-workers 1"
+        )
+    if (
+        args.rolling_cache_publication_final_parent_group_limit > 1
+        and args.rolling_cache_publication_commit_slots != 0
+    ):
+        raise SystemExit(
+            "--rolling-cache-publication-final-parent-group-limit > 1 "
+            "requires --rolling-cache-publication-commit-slots 0"
+        )
+    if (
         args.rolling_cache_evidence
         and args.media_worker_materialization_max_active < 2
     ):
@@ -1504,6 +1533,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         rolling_cache_publication_commit_slots=int(
             args.rolling_cache_publication_commit_slots
+        ),
+        rolling_cache_publication_final_parent_group_limit=int(
+            args.rolling_cache_publication_final_parent_group_limit
         ),
         rolling_cache_publication_file_sync_mode=str(
             args.rolling_cache_publication_file_sync_mode
@@ -4578,6 +4610,9 @@ def start_rolling_cache_sinks_for_pressure(
             "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": str(
                 cfg.rolling_cache_publication_commit_slots
             ),
+            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": str(
+                cfg.rolling_cache_publication_final_parent_group_limit
+            ),
             "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": (
                 cfg.rolling_cache_publication_file_sync_mode
             ),
@@ -4667,6 +4702,9 @@ def start_rolling_cache_sinks_for_pressure(
         "rolling_cache_publication_commit_slots": (
             cfg.rolling_cache_publication_commit_slots
         ),
+        "rolling_cache_publication_final_parent_group_limit": (
+            cfg.rolling_cache_publication_final_parent_group_limit
+        ),
         "rolling_cache_publication_file_sync_mode": (
             cfg.rolling_cache_publication_file_sync_mode
         ),
@@ -4716,6 +4754,24 @@ def start_rolling_cache_sinks_for_pressure(
         raise RuntimeError(
             "rolling-cache publication commit slot count was not applied "
             f"after compose recreate: {commit_slot_mismatches}"
+        )
+    final_parent_group_mismatches = {
+        service: values.get(
+            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
+            "",
+        )
+        for service, values in observed_env.items()
+        if values.get(
+            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
+            "",
+        )
+        != str(cfg.rolling_cache_publication_final_parent_group_limit)
+    }
+    if final_parent_group_mismatches:
+        raise RuntimeError(
+            "rolling-cache publication final-parent group limit was not "
+            "applied after compose recreate: "
+            f"{final_parent_group_mismatches}"
         )
     file_sync_mode_mismatches = {
         service: values.get("ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE", "")
@@ -10556,6 +10612,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_total_ms",
                 "publish_stage_ms",
                 "publish_commit_ms",
+                "publish_commit_wall_ms",
                 "publish_commit_lock_wait_ms",
                 "publish_commit_lock_hold_ms",
                 "publish_commit_slot_count",
@@ -10589,6 +10646,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_worker_index",
                 "publication_prepare_group_size",
                 "publication_prepare_group_position",
+                "publication_final_parent_group_size",
+                "publication_final_parent_group_position",
+                "publication_final_parent_group_unique_parents",
+                "publication_final_parent_group_fsync_count",
+                "publication_final_parent_group_fsync_saved",
+                "publication_final_parent_fence_wait_ms",
             )
         }
         rolling_cache_publication_dispatcher_metrics = {
@@ -10620,6 +10683,11 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_prepare_group_limit",
                 "publication_prepare_group_total",
                 "publication_prepare_group_size_max",
+                "publication_final_parent_group_limit",
+                "publication_final_parent_group_total",
+                "publication_final_parent_group_size_max",
+                "publication_final_parent_fsync_total",
+                "publication_final_parent_fsync_saved_total",
                 "publication_prepare_service_ms_total",
                 "publication_prepare_service_ms_max",
                 "publication_commit_wait_ms_total",
