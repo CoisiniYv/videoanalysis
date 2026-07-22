@@ -29,8 +29,15 @@ durable-service p95 is only 28.8/33.2ms, and the slowest visible segments spend
 13.5-14.1 seconds queued before their own 5-33ms service. This dynamically
 confirms a rare fsync-service burst followed by FIFO head-of-line residence,
 not insufficient average service rate. Strict ready/media/visibility p95 is
-6.668/23.426/3.256 seconds, so the exact r300 gate remains pending; r3840 and
-both one-hour acceptance runs are still prohibited.
+6.668/23.426/3.256 seconds. Round 27 then tested one bounded natural FIFO
+preparation cohort before the unchanged serial durable commits. All correctness
+gates passed, but ready/media/visibility p95 regressed to
+19.265/33.298/22.799 seconds, dispatcher residence p95 rose from 5.041 to
+14.004 seconds, and dispatch-total p95 rose from 5.216 to 18.385 seconds.
+Grouping is therefore rejected and the production preparation limit is one;
+explicit multi-item grouping remains only as a diagnostic/test mechanism. The
+exact r300 gate remains pending; r3840 and both one-hour acceptance runs are
+still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -102,6 +109,10 @@ both one-hour acceptance runs are still prohibited.
 | `d12bc70`, `f816202` | dispatcher smoke and Round 25 documentation | Records the real-container contract and failed short causal capacity result without widening its claim |
 | `3fb27f0` | dispatcher timing red contracts | Requires per-segment capacity wait, FIFO residence, durable service, dispatch total and peak identity to survive pressure aggregation |
 | `3c80722` | dispatcher queue-residence attribution | Carries monotonic per-segment timing, cumulative/maximum service state and peak transition identity through real sink logs and retained artifacts |
+| `0479f07` | bounded FIFO preparation red contracts | Requires stage/commit separation, bounded natural cohorts, exact FIFO callbacks, per-item stage-error continuation, backpressure, shutdown and retained diagnostics |
+| `f4bf094` | bounded FIFO preparation experiment | Stages at most 32 queued items, then commits each through every original fsync/rename/journal fence on the same single worker |
+| `db20d24` | production-disable red contract | Requires the effective/default preparation group limit to remain one while explicit grouping stays supported |
+| `555afef` | production grouping disable | Sets the production/default preparation limit to one without removing the stage/commit diagnostics or explicit multi-item test path |
 
 ## Measurement rounds
 
@@ -1473,7 +1484,69 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   r300, index width two, Redis/PostgreSQL defaults, zero enabled cameras,
   pressure processes and lifecycle residuals. About 202GB remained free.
 
-## Recovery audit after Round 21
+### Round 27: bounded FIFO preparation is rejected
+
+- Tests-only `0479f07` first required separate stage/commit phases, a bounded
+  natural FIFO cohort, exact serial commit and callback order, hard outstanding
+  backpressure, middle-stage-error continuation, preserved per-item failure,
+  and clean shutdown. `f4bf094` implemented a maximum preparation group of 32
+  on the existing single worker. Metadata and manifest writes occur during
+  stage; metadata/manifest/directory/parent fsync, atomic rename and journal
+  append remain in every per-segment commit and keep exact FIFO order.
+- Static validation passed 237 sink/pressure tests; broader selections passed
+  89, 31, 156 with one expected skip, and 167 tests. Analyzer/deployment
+  selections passed 32 tests. Compile, Compose render, deployment smoke and
+  diff checks also passed.
+- Real-container smoke:
+  `/data/video-analytics/artifacts/rolling_publication_group_smoke_20260722T060238Z`.
+  It proved natural group sizes `1/3/1`, exact stage/commit/callback order,
+  bounded capacity wait, continuation after an injected middle stage error,
+  source failure propagation and clean production sink drain. This closed only
+  the grouping correctness contract.
+- The unchanged 360-second diagnostic artifact is
+  `/data/video-analytics/artifacts/pressure60_8p1_pubgroup_ioadm3_b6m_r300_20260722T060611Z`.
+  It retained the fixed fixture/hash, 60 routes, disk r300, Candidate B
+  `20/12/8`, finalizer `8/4/8`, index width three, 25-second postfill and
+  120-second drain. It is not the exact 600-second r300 acceptance.
+- Input and correctness passed: 60/60 sources, zero send failure, queue-full or
+  raw loss, 915/915 formal tasks materialized, and 986/986 retained details
+  passed. All 636 videos passed duration/FPS/timeline/annotation/bbox/
+  person-context; 350 retained items were images. Expiry-without-attempt,
+  duplicate, claim-busy, finalizer failure, lease and final residual counts
+  were zero.
+- Capacity regressed materially against Round 26. Ready-to-claim p95 moved
+  `6.668s -> 19.265s`, media queue `23.426s -> 33.298s`, lifecycle
+  `19.923s -> 33.987s`, and metadata visibility `3.256s -> 22.799s`.
+  Dispatcher residence p95/p99 moved `5.041s/13.761s ->
+  14.004s/31.765s`; dispatch-total p95 moved `5.216s -> 18.385s`; commit
+  service p95 moved `31.6ms -> 51.2ms`.
+- Once saturation began, size-32 groups became common. Commit-wait p95/p99 was
+  `0.619s/15.771s`; grouped-item dispatch p95 was 33.362s versus 31.55ms for
+  singleton items. Capacity-wait events rose from `28/27` to `339/341` across
+  sinks. Combined service time rose 62.9%, service events over one second rose
+  from 25 to 81, and 68 cross-sink >=1s service pairs overlapped. Per-sink busy
+  ratio rose from about 16.4% to 28.8-29.2% without gaining useful throughput.
+- The mechanism is negative causal evidence: staging 32 metadata/manifest
+  pairs dirtied more filesystem state before the first retained per-item fsync,
+  then every serial durability fence remained. A rare stall therefore grew
+  into a larger writeback/flush convoy instead of smoothing it. The hypothesis
+  is rejected; exact r300, r3840 and one-hour runs are not authorized from this
+  result.
+- `db20d24` added a red production contract for preparation limit one, and
+  `555afef` changed only the effective/default constant from 32 to 1. Explicit
+  multi-item construction and every stage/commit/group diagnostic remain for
+  historical reproduction. The focused sink suite passed 37 tests, the
+  pressure aggregation check passed, compile and diff checks passed.
+- The next evidence-backed single variable is cross-sink durable-commit
+  arbitration: one shared epoch-root filesystem `flock` across sink A/B commit
+  sections, with no additional publisher worker and no removed fsync/rename/
+  journal fence. Lock wait and hold must be measured separately. Concurrent
+  same-process, real cross-process, error and shutdown contracts must go red
+  first, followed by a real-container smoke and one unchanged 360-second r300
+  diagnostic. It advances only if service burst area, total dispatch latency,
+  visibility and capacity backpressure all improve materially.
+
+## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
 preserved. A fresh live audit after exact-r300 completion confirmed the daily
@@ -1488,24 +1561,32 @@ retention, 256-row cache and segment-index width two. Redis `save` returned to
 `checkpoint_timeout=5min`, `max_wal_size=1GB`, `min_wal_size=80MB` and
 `wal_compression=off`.
 
+The post-Round-27 audit reconfirmed the same daily state: 0/60 enabled cameras,
+no active tasks, leases or finalizer-pending rows, daily single branch running,
+dual branches and rolling sinks stopped, rolling materialization disabled,
+r300, index width two, media WIP/remux/finalizer `4/4/32`, process finalizers
+zero, Redis/PostgreSQL defaults restored, no pressure/source/MediaMTX/ffmpeg
+processes, and about 199GB free.
+
 ## Next gates
 
-1. Keep r3840 and both one-hour acceptances blocked. Round 26 is only a
-   360-second causal diagnostic and does not replace the exact width-three
-   600-second r300 gate.
-2. Add tests for one bounded FIFO preparation group ahead of the unchanged
-   per-segment durable commit. Preserve single-worker commit order, hard
-   outstanding backpressure, every fsync/rename/journal fence, per-item error
-   continuation and bounded shutdown; expose preparation depth/time so the
-   change cannot hide residence in an unmeasured stage.
-3. Run one unchanged short r300 diagnostic and require lower durable-service
-   burst area plus lower FIFO residence without new capacity wait or callback
-   stalls. Do not add publisher concurrency, widen media capacity, change
-   retention/deadlines or run r3840 blindly.
-4. Repeat the exact r300 gate with the fixed fixture/hash only after that short
+1. Keep r3840 and both one-hour acceptances blocked. Round 27 is negative
+   360-second causal evidence and does not replace the exact width-three
+   600-second r300 gate. Keep production/default preparation at one.
+2. Add red contracts for one shared epoch-root filesystem `flock` around the
+   existing durable commit sections of sink A/B. Cover concurrent threads,
+   cross-process exclusion, lock-open/acquire failure, commit error release and
+   bounded shutdown. Measure lock wait and hold explicitly.
+3. Preserve one worker per sink, the 128 outstanding bound, exact per-sink FIFO
+   order, and every metadata/manifest/directory/parent fsync, atomic rename and
+   journal fence. Do not widen media/publisher capacity, retention or deadline.
+4. Run a real-container arbitration smoke, then one unchanged 360-second r300
+   diagnostic. Require materially lower service burst area, dispatch total,
+   metadata visibility and capacity wait without correctness or residual loss.
+5. Repeat the exact r300 gate with the fixed fixture/hash only after that short
    gate passes. Only a complete
    input, capacity, visibility, watchlist, annotation and residual pass permits
    the 3,840-second-retention short gate.
-5. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+6. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.

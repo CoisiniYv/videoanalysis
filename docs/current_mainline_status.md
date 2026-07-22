@@ -8,8 +8,9 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `c86430e`，dispatcher observability `647dd2f`/`3c80722`，finalizer attribution `478bff5`；尚未合入，
-  且 exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
+  `c86430e`，dispatcher observability `647dd2f`/`3c80722`，group preparation experiment
+  `f4bf094`，production grouping disable `555afef`，finalizer attribution `478bff5`；尚未合入，且
+  exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -27,7 +28,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、queue-residence/service attribution、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse 与 DB bulk-row rebase bypass | dispatcher timing/error/drain smoke 与 60-route direct attribution 已通过；严格短容量门仍失败，exact r300 未解锁 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse 与 DB bulk-row rebase bypass | dispatcher/group correctness smoke 与 60-route attribution 已通过；Round 27 group preparation 容量显著退化并已默认禁用，exact r300 未解锁 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -321,19 +322,34 @@ residual 门，但严格 ready/media/visibility p95 为 6.668s/23.426s/3.256s，
 直接归因显示 A/B durable-service p95 仅 28.8/33.2ms，worker 平均 busy 约 16.4%；FIFO
 residence p95 却为 5.172/4.916s、p99 13.768/13.724s，两个队列都达到 outstanding 128。
 dispatch total 与 residence 相关系数 0.998，而与自身 service 仅约 0.18；最慢 visible segment
-自身 service 5-33ms，却等待 13.5-14.1s。下一单变量收窄为 bounded FIFO group preparation：
-先 stage 一个自然 cohort，再按原顺序逐 segment 执行所有既有 fsync/rename/journal fence；不得
-增加 durable publisher worker、删除 fence 或把等待移到未观测 callback backpressure。
+自身 service 5-33ms，却等待 13.5-14.1s。
+
+`0479f07`/`f4bf094` 随后把 bounded FIFO group preparation 先红后绿：同一 worker 最多 stage 32
+个 natural cohort item，再按 exact FIFO 逐项执行所有原 fsync/rename/journal fence。真实容器
+`rolling_publication_group_smoke_20260722T060238Z` 通过 `1/3/1` group、顺序、middle-stage-error
+continuation、hard backpressure 与 clean drain。
+
+不变的 Round 27 360s causal diagnostic
+`pressure60_8p1_pubgroup_ioadm3_b6m_r300_20260722T060611Z` 保持 60 路、Candidate B、width 3、
+r300 和固定 fixture/hash。60/60 输入、915/915 formal、986/986 retained、636 video/350 image、
+8090/annotation/person/fence/residual 全通过，但 ready/media/lifecycle/visibility p95 退化到
+19.265s/33.298s/33.987s/22.799s。dispatcher residence p95/p99 从 5.041s/13.761s 退化到
+14.004s/31.765s，dispatch-total p95 从 5.216s 退化到 18.385s，capacity-wait events 从
+A/B `28/27` 增到 `339/341`。size-32 prewrite 在第一次 retained per-item fsync 前制造更多 dirty
+metadata，并放大跨 sink flush convoy，因此该假设已拒绝。`db20d24`/`555afef` 已把生产/default
+preparation limit 固化为 1，同时保留显式 multi-item 诊断和全部 stage/commit metrics。
 
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3 与 Candidate B 其余参数不变，先以红测固化 bounded FIFO group preparation 的
-  hard bound、order、per-item error、crash/shutdown 和 preparation metrics，再做一个不变 short
-  r300 causal run；全部既有 fsync/rename/journal fence 保留，不增加 publisher/media 并发、不改
-  retention/deadline；
-- r3840 和一小时验收继续禁止；只有下一轮 exact r300 的 input、Spec 33 capacity/visibility、
+- 保持 production preparation limit=1。下一单变量是在 sink A/B durable commit 外使用一个共享
+  epoch-root filesystem `flock`；先固化 concurrent thread、真实 cross-process、lock/commit error、
+  shutdown 和 lock wait/hold metrics，再做真实容器 smoke 与一个不变 360s r300 causal run；
+- 全部既有 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 Candidate B/width 3/
+  retention/deadline 保持不变；只有 service burst area、dispatch total、visibility 和 capacity wait
+  均实质改善才允许 exact r300；
+- r3840 和一小时验收继续禁止；只有后续 exact r300 的 input、Spec 33 capacity/visibility、
   watchlist、correctness、annotation 与 residual 全通过，才允许进入 3,840s retention 短门；
 - 不同时增加 process workers、WIP、remux、finalizer queue 或 index width，也不放宽 deadline；
   当前 finalizer pool/finalization/handoff-admission p95 已仅 1ms/0.815s/60ms；

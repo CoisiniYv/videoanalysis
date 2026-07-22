@@ -4,13 +4,15 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量 checkpoint `a88472c`。
+exact-lease 修复 `2a57f20`，当前容量 checkpoint `555afef`。
 selected-identity 结构 checkpoint 为 `72413a2`，metadata reuse 为 `fcbe2bd`，
 fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`，finalizer
 attribution 为 `478bff5`，bounded publication dispatcher checkpoint 为 `647dd2f`，
-dispatcher timing attribution 为 `3c80722`。
+dispatcher timing attribution 为 `3c80722`，bounded preparation 实验为 `f4bf094`，
+production grouping disable 为 `555afef`。
 最新 exact r300 的 input/watchlist/retained correctness/residual 已通过，
-但 media queue 与 rolling metadata visibility 的 Spec 33 capacity 门仍失败。
+但 media queue 与 rolling metadata visibility 的 Spec 33 capacity 门仍失败；Round 27
+group preparation causal diagnostic 又发生显著容量退化，因此生产 preparation limit 为 1。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -155,7 +157,7 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、queue-residence/service/total attribution、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标 |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation group limit=1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
 
@@ -394,8 +396,23 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
 - 该轮直接证明 average service capacity 不是主因：A/B durable-service p95 仅 28.8/33.2ms，
   worker busy 约 16.4%，但 FIFO residence p95=5.172/4.916s、p99=13.768/13.724s，两个队列都
   达到 outstanding 128；dispatch total 与 residence 相关系数约 0.998，而 slowest visible
-  segment 自身 service 仅 5-33ms。下一单变量为 bounded FIFO group preparation，再按 exact FIFO
-  逐 segment 执行全部现有 fsync/rename/journal fence；该变量尚未实现或通过 short r300；
+  segment 自身 service 仅 5-33ms；
+- `0479f07`/`f4bf094` 已先红后绿实现显式 bounded FIFO group preparation：同一 worker 先 stage
+  最多 32 个 natural cohort item，再按 exact FIFO 逐 segment 执行全部既有 fsync/rename/journal
+  fence。真实容器 `rolling_publication_group_smoke_20260722T060238Z` 通过 `1/3/1` group、顺序、
+  middle-stage-error continuation、backpressure 与 clean drain；
+- 对应不变 360s Round 27 diagnostic
+  `pressure60_8p1_pubgroup_ioadm3_b6m_r300_20260722T060611Z` 的 60/60、915 formal、986 retained、
+  636 video/350 image、8090/annotation/person/fence/residual 全通过，但 ready/media/lifecycle/
+  visibility p95 退化到 19.265s/33.298s/33.987s/22.799s。dispatcher residence p95/p99 从
+  5.041s/13.761s 退化到 14.004s/31.765s，dispatch-total p95 从 5.216s 退化到 18.385s；
+  size-32 group、commit-wait p99=15.771s、68 组跨 sink 慢 service overlap 和明显增加的 capacity
+  wait 证明 prewrite 放大了 writeback/flush convoy。该假设已拒绝；`db20d24`/`555afef` 将生产/
+  默认 preparation limit 固化为 1，同时保留显式 multi-item 诊断能力；
+- 下一单变量仅允许在 sink A/B durable commit 外增加一个共享 epoch-root filesystem `flock`，
+  明确记录 lock wait/hold；不增加 worker、不删 fsync/rename/journal fence。必须先通过并发、跨进程、
+  error/shutdown 红绿测试与真实容器 smoke，再运行一个不变 360s r300 causal diagnostic；只有 service
+  burst area、dispatch total、visibility 与 capacity wait 均实质改善，才可解锁 exact r300；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
