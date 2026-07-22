@@ -9642,6 +9642,35 @@ def _percentile(sorted_values: list[float], quantile: float) -> float:
     return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
 
 
+def _retention_safe_metadata_paths(root: Path) -> tuple[list[Path], int]:
+    """List metadata while tolerating retention deleting a walked directory."""
+
+    if not root.exists():
+        return [], 0
+    vanished_directories = 0
+
+    def handle_walk_error(error: OSError) -> None:
+        nonlocal vanished_directories
+        if isinstance(error, FileNotFoundError):
+            vanished_directories += 1
+            return
+        raise error
+
+    paths: list[Path] = []
+    for directory, directory_names, filenames in os.walk(
+        root,
+        topdown=True,
+        onerror=handle_walk_error,
+    ):
+        directory_path = Path(directory)
+        if "materialized" in directory_path.parts:
+            directory_names.clear()
+            continue
+        if "metadata.json" in filenames:
+            paths.append(directory_path / "metadata.json")
+    return sorted(paths), vanished_directories
+
+
 def collect_rolling_cache_segment_visibility(
     cfg: PressureConfig,
     *,
@@ -9670,8 +9699,7 @@ def collect_rolling_cache_segment_visibility(
     sampled_paths: list[str] = []
     skipped_clock_domain = 0
     parse_errors = 0
-    metadata_files_vanished = 0
-    metadata_paths = sorted(root.rglob("metadata.json")) if root.exists() else []
+    metadata_paths, metadata_files_vanished = _retention_safe_metadata_paths(root)
     for metadata_path in metadata_paths:
         if "materialized" in metadata_path.parts:
             continue
