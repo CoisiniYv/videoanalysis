@@ -375,6 +375,15 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   两个真实 sink 均输出 production capacity=128、`drained=True` 与 final queue/outstanding/active/
   failure/timeout=0。该 smoke 只关闭 dispatcher correctness，不是 capacity pass；下一步仍须用
   不变 Candidate B/width-three/r300 做 60-route retention-crossing causal diagnostic；
+- 该 causal diagnostic 已保留为
+  `pressure60_8p1_pubdispatch_ioadm3_b6m_r300_20260722T043320Z`。输入 60/60、8.0751 FPS、
+  918/918 formal 与 989 retained 全 materialized，视频/8090/annotation/person/watchlist/fence/
+  residual 全通过；dispatcher A/B peak outstanding 为 92/97 且 final state 全 0。但 media queue/
+  metadata visibility p95 仍为 19.316s/7.901s，严格门失败。`04:39:53-04:40:03Z` 两 sink
+  worker 仍连续命中 1.6-3.15s fsync-heavy publish，同时 media scheduler 用 6.275s handoff persist+
+  4.015s prepare/claim 形成 10.298s tick；slowest segment 自身 publish 仅 8-100ms，却在 FIFO 前
+  等约 11s。结论改为：GLib 解耦正确但不足，host-wide flush 与 shared FIFO residence 仍是容量面；
+  先补 submit→worker-start queue-residence/total 指标，不解锁 exact r300/r3840；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

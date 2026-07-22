@@ -18,8 +18,13 @@ exact 600-second r300 acceptance. Round 24 implements the selected fixed,
 single-worker, 128-outstanding FIFO publication dispatcher and passes its
 real-container durability/order/backpressure/error/shutdown smoke without
 changing an fsync, rename, capacity, retention or deadline. The required short
-60-route causal diagnostic is still pending. The exact r300 gate remains
-pending; r3840 and both one-hour acceptance runs are still prohibited.
+60-route causal diagnostic in Round 25 proves that the dispatcher preserves
+correctness and reduces some extreme source gaps, but does not pass the causal
+capacity gate: the shared FIFO reaches 92/97 outstanding, host-wide fsync
+stalls still block PostgreSQL, metadata visibility p95 is 7.901 seconds and
+media queue p95 is 19.316 seconds. The next change is instrumentation-only
+queue-residence attribution. The exact r300 gate remains pending; r3840 and
+both one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -1318,6 +1323,70 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   diagnostic at the unchanged fixed input, Candidate B `20/12/8`, finalizer
   `8/4/8`, index width three and r300.
 
+### Round 25: bounded-dispatcher retention-crossing diagnostic
+
+- Artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pubdispatch_ioadm3_b6m_r300_20260722T043320Z`.
+  It retained the fixed 4,800-second fixture/SHA256, 60 routes, disk-backed
+  300-second retention, Candidate B WIP/remux/max-per-poll `20/12/8`,
+  finalizer threads/processes/queue `8/4/8`, index width three, 360-second
+  sample, 25-second postfill and configured 120-second drain. It is a causal
+  diagnostic, not the exact 600-second r300 gate.
+- Harness/input/correctness passed: 60/60 sources with zero restart, steady
+  effective FPS 8.0751 against 7.92, zero sampling send-failure delta,
+  queue-full, raw drop or raw send failure. All 918 formal tasks and all 989
+  warmup/postfill-inclusive tasks materialized. The retained set was 636
+  behavior videos plus 353 watchlist images; 989/989 8090 detail, 636/636
+  duration/raw-FPS/timeline/annotation, bbox and person-context checks passed.
+  Person persistence was 73,806 rows versus 73,793 exports over 60 sources
+  with measured loss zero. Gallery query/emission, duplicate, claim-busy,
+  finalizer failure, expiry, lease and all drain residual gates passed.
+- Dispatcher correctness held under real pressure. Sink A/B submitted and
+  completed `4070/4083` publications, outstanding peaks were `92/97` of 128,
+  queue-depth peaks `91/96`, and both final logs reported `drained=True` with
+  queue/outstanding/active/failure/shutdown-timeout zero. Maximum capacity-
+  acquisition wait was only `0.056/0.110ms`, so no submit reached the one-
+  millisecond backpressure-event threshold.
+- Strict latency partly passed: DB-backed ready-to-claim p95 was 3.748s,
+  finalizer pool wait 1ms, media-worker claim wait 269ms, lifecycle 19.892s,
+  DB lifecycle 17.444s and media-worker CPU 153.58%. Media queue p95 remained
+  19.316s, failing both the 15-second release and 10-second closure bounds.
+  Rolling metadata visibility p50/p95/p99/max was
+  `0.589/7.901/10.383/11.622s`; 809/413/103 segments exceeded 2/5/10 seconds,
+  so the 2-second gate failed. Exact r300 and r3840 remain prohibited.
+- The dispatcher improved only some extremes. Compared with Round 23, source
+  publication gaps above eight seconds fell from 257 to 180 and visibility
+  max fell from 15.596s to 11.622s. However gap p95 rose from about 3.56s to
+  about 5.1s, visibility p95 moved from 7.610s to 7.901s, and media queue p95
+  only moved from 19.910s to 19.316s. This is not an accepted improvement.
+- The causal hypothesis that GLib callback execution was the remaining primary
+  boundary is falsified. At `04:39:53-04:40:03Z`, each sink's single worker
+  performed a series of 1.6-3.15-second publications dominated by required
+  metadata/manifest/staging/parent fsyncs. The matching media scheduler tick
+  lasted 10.298 seconds: 6.275 seconds handoff persistence plus 4.015 seconds
+  prepare/claim. The next cycle reported the 10.401-second poll gap. Moving
+  the calls off GLib did not isolate PostgreSQL from the same host-wide flush.
+- The slowest visible segments make the new FIFO delay explicit even without
+  a queue-residence timestamp. Their last frame PTS clustered near
+  `04:39:52Z`; they became visible/published near `04:40:03.6-04:40:04.0Z`,
+  yet their own `publish()` calls took only 8-100ms. Delay therefore accumulated
+  before each segment's own publish while the shared worker drained earlier
+  fsync-heavy items. The low correlation between a segment's own publish time
+  and its completion lag (`0.077-0.107`) agrees with upstream FIFO residence.
+- Retained comparison analysis is
+  `publication_dispatcher_comparison.json` in the artifact. The next unique
+  variable is instrumentation only: record submit-to-worker-start queue
+  residence, worker-start-to-durable-complete service, submit-to-complete total
+  and peak-transition time/source/segment. Carry them through segment logs and
+  the pressure artifact before selecting another behavior variable. Do not
+  add publisher workers, remove fsyncs, widen media capacity, change retention/
+  deadlines or run exact r300 based on this failed result.
+- Cleanup restored daily single-branch services, rolling materialization off,
+  300-second retention, index width two, Redis/PostgreSQL defaults and zero
+  enabled cameras, pressure processes, active tasks, leases or
+  finalizer-pending rows. About 204GB remained free and the worktree was clean
+  before this documentation update.
+
 ## Recovery audit after Round 21
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1338,14 +1407,17 @@ retention, 256-row cache and segment-index width two. Redis `save` returned to
 1. Keep r3840 and both one-hour acceptances blocked. Round 22 is a failed
    diagnostic and Round 23 is only 360 seconds; neither replaces the exact
    width-three 600-second r300 gate.
-2. Run the short 60-route retention-crossing diagnostic with no capacity,
-   retention, deadline, fsync or rename change. Confirm source publication
-   gaps no longer follow slow fsync execution on the GLib callback, production
-   outstanding peak stays at or below 128, and terminal queue/outstanding/
-   active/failure/timeout are zero.
-3. Repeat the exact r300 gate with the fixed fixture/hash. Only a complete
+2. Add measurement-only submit-to-worker-start queue-residence and
+   submit-to-complete attribution, including peak transition identity, and
+   retain it in pressure artifacts. The Round 25 correctness/128-bound pass
+   does not waive its latency failure.
+3. Use that measurement to choose one structural durability-arrival/service
+   variable. Do not add publisher concurrency, remove durability fences,
+   widen media capacity, change retention/deadlines or run r3840 blindly.
+4. Repeat the exact r300 gate with the fixed fixture/hash only after the next
+   short gate passes. Only a complete
    input, capacity, visibility, watchlist, annotation and residual pass permits
    the 3,840-second-retention short gate.
-4. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+5. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.

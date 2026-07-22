@@ -300,13 +300,24 @@ backpressure、error continuation/source failure 和 shutdown drain，两个服�
 `drained=True` 与 final queue/outstanding/active/failure/timeout=0。该结论不是 60-route capacity
 证明；exact r300、r3840 和一小时验收仍未解锁。
 
+对应 360s causal diagnostic
+`pressure60_8p1_pubdispatch_ioadm3_b6m_r300_20260722T043320Z` 已完成：60/60、8.0751 FPS、零
+send/queue/raw loss，918/918 formal 与 989 retained 全 materialized，636 video 与 353 watchlist
+image 的 8090/timeline/annotation/bbox/person-context、person persistence、exact fence 和 residual
+全通过。dispatcher A/B outstanding peak 92/97、final queue/outstanding/active/failure/timeout 全 0。
+但 media queue p95=19.316s、metadata visibility p95=7.901s，严格门失败；对应 10.298s scheduler
+tick 仍与两 sink 一串 1.6-3.15s fsync-heavy publication 同时发生。slowest segments 自身 publish
+仅 8-100ms，却在 shared FIFO 前等待约 11s。因此本轮 falsify“只移出 GLib 即可通过”的假设；
+下一步只补 submit→worker-start queue residence 与 submit→complete attribution，不运行 exact r300。
+
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3 与 Candidate B 其余参数不变，先跑短 60-route retention-crossing diagnostic，
-  验证 slow fsync 已不再阻塞 GLib publication gap，dispatcher peak `<=128` 且 final queue/
-  outstanding/active/failure/timeout 全为 0；不要把已闭合的 finalizer publish 再当主因；
+- 保持 width 3 与 Candidate B 其余参数不变，先补并验证 dispatcher submit→worker-start queue
+  residence、worker service、submit→complete total 与 peak-transition identity；Round 25 已证明
+  correctness/bound 通过但 fsync/FIFO latency 不通过，不增加 publisher/media 并发、不删 fsync、
+  不改 retention/deadline；
 - r3840 和一小时验收继续禁止；只有下一轮 exact r300 的 input、Spec 33 capacity/visibility、
   watchlist、correctness、annotation 与 residual 全通过，才允许进入 3,840s retention 短门；
 - 不同时增加 process workers、WIP、remux、finalizer queue 或 index width，也不放宽 deadline；
