@@ -6696,6 +6696,26 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "media_finalization_claim_busy event_id=e4",
                 "replay_slot_released event_id=e2 "
                 "release_reason=sink_video_stable sink_video_to_stable_ms=31000",
+                "rolling_cache_remux_admission_tick "
+                "schema_version=rolling-remux-admission-timing-v1 "
+                "remux_admission_total_ms=13000 "
+                "remux_admission_stage_completion_scan_ms=50 "
+                "remux_admission_stage_completion_result_ms=25 "
+                "remux_admission_stage_handoff_persist_ms=10500 "
+                "remux_admission_stage_completion_convergence_ms=0 "
+                "remux_admission_stage_completion_release_ms=5 "
+                "remux_admission_stage_finalizer_admission_ms=400 "
+                "remux_admission_stage_candidate_query_ms=1200 "
+                "remux_admission_stage_capacity_reservation_ms=10 "
+                "remux_admission_stage_prepare_claim_ms=600 "
+                "remux_admission_stage_heartbeat_register_ms=5 "
+                "remux_admission_stage_executor_submit_ms=5 "
+                "remux_admission_accounted_ms=12800 "
+                "remux_admission_unattributed_ms=200 "
+                "remux_admission_candidate_count=8 "
+                "remux_admission_prepared_count=8 "
+                "remux_admission_submitted_count=8 "
+                "remux_admission_completed_count=8",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=1 tick_duration_ms=1200 "
                 "tick_gap_ms=unavailable "
@@ -6981,6 +7001,16 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"][
         "media_scheduler_tick_stage_unattributed_ms"
     ]["max"] == 180.0
+    assert summary["media_worker"]["media_remux_admission_total_ms"]["max"] == 13000.0
+    assert summary["media_worker"][
+        "media_remux_admission_stage_handoff_persist_ms"
+    ]["max"] == 10500.0
+    assert summary["media_worker"][
+        "media_remux_admission_stage_candidate_query_ms"
+    ]["max"] == 1200.0
+    assert summary["media_worker"]["media_remux_admission_candidate_count"][
+        "max"
+    ] == 8.0
     assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 2.0
     assert summary["media_worker"]["media_scheduler_image_lane_depth"]["max"] == 3.0
     assert summary["media_worker"]["media_scheduler_finalizer_lane_depth"]["max"] == 1.0
@@ -7043,6 +7073,13 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     )
     assert observable["scheduler"]["schema_version"] == "phase6-capacity-v4"
     assert observable["scheduler"]["cycle"]["work_ms"]["max"] == 1195.0
+    assert observable["scheduler"]["remux_admission"]["total_ms"]["max"] == 13000.0
+    assert observable["scheduler"]["remux_admission"]["stages"][
+        "handoff_persist_ms"
+    ]["max"] == 10500.0
+    assert observable["scheduler"]["remux_admission"]["candidate_count"][
+        "max"
+    ] == 8.0
     assert observable["finalizer_lane"]["service_ms"]["p50"] == 157.5
     assert observable["finalizer_lane"]["publish"]["total_ms"]["max"] == 100.0
     assert observable["finalizer_lane"]["publish"]["heartbeat_ms"]["p50"] == 45.0

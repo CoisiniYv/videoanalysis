@@ -84,6 +84,28 @@ def test_scheduler_stage_timings_attribute_body_without_changing_work() -> None:
     assert snapshot["tick_stage_finalizer_scan_admission_ms"] == 0.0
 
 
+def test_remux_admission_stage_timings_attribute_process_without_overlap() -> None:
+    worker = _activate("media-worker", "app.worker")
+    clock_values = iter((1.0, 1.002, 2.0, 2.003))
+    timings = worker._RemuxAdmissionStageTimings(
+        clock=lambda: next(clock_values)
+    )
+
+    with timings.measure("candidate_query"):
+        pass
+    with timings.measure("handoff_persist"):
+        pass
+
+    snapshot = timings.snapshot(total_ms=12)
+
+    assert snapshot["remux_admission_stage_candidate_query_ms"] == 2.0
+    assert snapshot["remux_admission_stage_handoff_persist_ms"] == 3.0
+    assert snapshot["remux_admission_accounted_ms"] == 5.0
+    assert snapshot["remux_admission_unattributed_ms"] == 7.0
+    assert snapshot["remux_admission_total_ms"] == 12.0
+    assert snapshot["remux_admission_stage_finalizer_admission_ms"] == 0.0
+
+
 def test_remux_job_preserves_pre_pin_and_index_diagnostics(
     monkeypatch: Any,
     tmp_path: Path,
