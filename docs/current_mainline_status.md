@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `f075b46`，pressure restore 基础修复 `da35730`、launcher-env 隔离修复 `3e35f16`，
+  `3382f7e`，pressure restore 基础修复 `da35730`、launcher-env 隔离修复 `3e35f16`，
   dispatcher observability `647dd2f`/`3c80722`，production grouping disable `555afef`，
   finalizer attribution `478bff5`；尚未合入，且 exact r300 仍未通过全部 Spec 33 容量门，
   不能声明为 60 路默认容量；
@@ -29,8 +29,8 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass、default-off single-inode v2 与 alias-free metadata-only v3 publication | Rounds 27-33 的 grouping/arbitration/并发/fdatasync/single-inode/metadata-only 容量诊断均被拒绝；v3 correctness 通过但 residence/dispatch/backpressure/visibility 未胜过 Round 26，exact r300 与后续门仍未解锁 |
-| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation/final-parent group limit 均为 1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass、default-off single-inode v2、alias-free metadata-only v3 与 final-parent cohort diagnostic | Rounds 27-34 的 grouping/arbitration/并发/fdatasync/representation/final-parent cohort 容量诊断均被拒绝；correctness 通过但 file/directory service 与 residence/dispatch 未共同胜过 Round 26，exact r300 与后续门仍未解锁 |
+| evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool；工作分支新增 process-lifetime expanded-row DB-index I/O gate，日常值 0 表示只受 shared WIP 约束 | exact-lease 正确性通过；DB-index gate=1 仅是下一轮单变量诊断，尚无压力容量结论，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
 | Evidence UI | DB-backed list/detail/timeline/overlay；视频 HTTP Range | T4 审计通过；文件接口仅兼容 |
@@ -396,16 +396,41 @@ interpolation key，并逐项校验重建 env。真实 hostile-env restore 已�
 split/fsync/one-worker/zero-slot/r300；0 enabled camera、active task/lease/Replay/finalizer row、
 pressure process/container，Redis/PostgreSQL 也均回到日常值，completion sentinel 仍不存在。
 
+`008fe10`/`09e9cc8` 随后加入 default-off final-parent cohort：每项先独立完成两个 regular-file
+fsync 与 staging-directory fsync，再按 FIFO rename，显式 fsync 每个 distinct final parent，最后
+按 FIFO 放行 callback；日常 limit 保持 1。真实镜像
+`rolling_publication_final_parent_group_smoke_20260722T121401Z` 通过 multi-parent fence、middle
+rename failure、parent-fsync isolation、successor progress 与 shutdown drain。
+
+对应 Round 34 artifact
+`pressure60_8p1_pubparentgrp8_ioadm3_b6m_r300_20260722T1222Z` 的 60/60、921 formal、994 retained
+与全部媒体/8090/annotation/person/fence/residual 正确性通过，但容量因果门失败。Round 26→34
+A/B residence p95 为 `5.172/4.916s -> 9.140/9.502s`，dispatch 为
+`5.275/5.188s -> 10.292/9.929s`；regular-file fsync 每 publication 增加 25.7%，directory fsync
+增加 4.6%，>=1s own service `25 -> 42`。capacity-wait event 虽 `55 -> 42`，累计 wait 却
+`6.215s -> 35.691s`；visibility 改善到 2.096s 仍略高于 final 2s 门。最慢同步双 sink cohort
+中 regular-file+staging fences 占约 13.6/14.0s，final-parent fence 各约 1.88s，证明该机制瞄准
+次要阶段；Round 34 已拒绝，不能调 group size 后重贴容量标签。
+
+下一单变量由 `fc047f2` 红测冻结、`3382f7e` 实现：不改变 WIP=20、remux=12、
+max-per-poll=8、finalizer `8/4/8`、sink 或 durability fence，只为 finalizer expanded-row DB index 增加 process-lifetime
+I/O gate。`MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY=0` 继承 shared-WIP 上限并保持日常行为；短诊断
+仅使用 `1`，串行 bundle/artifact/timeline/overlay upsert 并记录 per-job wait/service 与全局
+active/peak/累计 wait。选择依据是 Round 26→33→34 的 DB-index p99
+`0.558s -> 2.761s -> 2.933s`、post-terminal p99
+`0.721s -> 4.794s -> 5.113s` 与双 sink stall 同向变化，且 Round 34 期间 PostgreSQL 无 checkpoint、
+Redis 无 RDB。该实现当前只关闭静态/并发合同；未通过不变 360s 因果短压前不得声明容量改善。
+
 ## 已知开放项
 
 ### P0/P1
 
 - 保持 production preparation limit=1、commit arbitration=False；显式 group/arbiter 只用于历史复现，
   不在生产 sink 启用；
-- metadata-only v3 的红测、静态、真实双镜像与 60 路 correctness 已通过，但 Round 33 因果门已
-  失败；保持 default-off，不再把 representation-only 变化当成已证明容量修复；
-- 下一变量必须先解释残余 directory/writeback convoy 并以红测冻结；不得删除 directory fence，
-  也不得组合调整 worker、queue、retention、index width、finalizer 或 deadline；
+- metadata-only v3 与 final-parent cohort 的红测、真实镜像和 60 路 correctness 均通过，但
+  Round 33/34 因果门失败；两者保持 default-off，不再调表示或 group size 冒充容量修复；
+- 下一轮只允许 `MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY=1` 相对默认 `0` 的单变量短压；不得删除
+  directory fence，也不得组合调整 worker、queue、retention、index width 或 deadline；
 - 全部既有 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 Candidate B/width 3/
   retention/deadline 保持不变；
 - r3840 和一小时验收继续禁止；只有后续 exact r300 的 input、Spec 33 capacity/visibility、

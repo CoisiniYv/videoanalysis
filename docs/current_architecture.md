@@ -166,9 +166,9 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation group limit=1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标；日常 metadata layout 为 split；default-off single-inode v2 与 alias-free metadata-only v3 均已通过正确性但被容量诊断拒绝 |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation/final-parent group limit 均为 1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标；日常 metadata layout 为 split；default-off single-inode v2、alias-free metadata-only v3 与 final-parent cohort 均已通过正确性但被容量诊断拒绝 |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
-| 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
+| 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理；expanded-row DB index 有 process-lifetime I/O gate，日常值 0 只继承 shared WIP，诊断值 1 尚待 60 路因果验证 |
 
 `person-observation-worker` 与 `face-worker` 是高率 Redis consumer。它们在
 stream/group 被运行清理删除后会从 retained stream row 重新创建 group，而不是持续
@@ -433,9 +433,24 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   两个独立 FIFO queue 堆在同一个全局慢 holder 后，visibility、dispatch 和 backpressure 同时恶化。
   该假设已拒绝；`a0b7f63`/`e590f9b` 将生产/默认 arbitration 固化为关闭，普通 publisher 不创建
   commit-lock 文件且 wait/hold 精确为 0；显式 opt-in 与诊断仅保留作历史复现；
-- exact r300、r3840 和一小时验收继续禁止。Round 28 artifact 未完成进一步因果评审并固化一个新的
-  单变量与可证伪改善标准前，不授权下一次容量实验；不得组合修改 worker、queue、retention、width、
-  finalizer 或 deadline；
+- Round 29-33 又分别拒绝 two-worker sharding、two-slot commit、regular-file fdatasync、single-inode
+  v2 与 alias-free metadata-only v3。Round 34 的 default-off final-parent cohort 保留每项 regular-file/
+  staging fence，只合并 FIFO rename 后的 distinct-parent fence。真实 smoke 通过，但不变 360s
+  artifact `pressure60_8p1_pubparentgrp8_ioadm3_b6m_r300_20260722T1222Z` 的 A/B residence/
+  dispatch p95 退化到 `9.140/9.502s` 与 `10.292/9.929s`，regular-file/directory service 每 publication
+  比 Round 26 高 25.7%/4.6%。capacity-wait count 改善但累计 wait 增至 35.691s，故 group limit
+  保持日常 1，不能解锁 exact gate；
+- Round 34 的同步 16.5s 双 sink cohort 中，regular-file+staging fence 占约 13.6/14.0s，final-parent
+  fence 各约 1.88s；同时 DB-index/post-terminal p99 在 Round 26→33→34 从
+  `0.558/0.721s` 增至 `2.761/4.794s`、再到 `2.933/5.113s`，且无 PostgreSQL checkpoint 或 Redis
+  RDB。这把下一可证伪变量收窄为 finalizer expanded-row DB-index I/O gate，而不是继续改 sink
+  durability；
+- `3382f7e` 的 `MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY=0` 不附加小于 shared-WIP 的限制；
+  诊断值 `1` 在完整 bundle/artifact/timeline/overlay upsert 外持有 process-lifetime semaphore，并记录 per-job
+  wait/service 及全局 limit/active/peak/累计 wait。它不改变任务、证据行、terminal/fence、WIP、
+  finalizer worker/process/queue 或 sink 配置；未完成 360s 对照前只有实现合同，没有容量结论；
+- exact r300、r3840 和一小时验收继续禁止。DB-index gate 的不变短压未击败 Round 26 全部因果门前，
+  不授权下一正式容量实验；不得组合修改 worker、queue、retention、width 或 deadline；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

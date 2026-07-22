@@ -186,6 +186,11 @@ blocked.
 | `8e39094` | metadata-only implementation proof | Records static and real dual-image durability/index/recovery correctness without claiming pressure capacity |
 | `af29c21` | sink-restore environment red contract | Reproduces diagnostic shell interpolation overriding the daily env file during stopped-container recreation |
 | `3e35f16` | isolated daily sink restoration | Removes pressure-controlled interpolation keys for daily Compose, verifies nine recreated env values and fails cleanup on drift |
+| `008fe10` | final-parent cohort red contracts | Freezes FIFO rename, distinct-parent fence, failure isolation, shutdown and daily-default behavior |
+| `09e9cc8` | default-off final-parent cohort | Adds bounded final-parent fence grouping without removing regular-file or staging-directory durability |
+| `b424d89` | final-parent cohort rejection | Records the Round 34 correctness pass and causal capacity regression |
+| `fc047f2` | finalizer DB-index I/O gate red contracts | Freezes the process-lifetime, WIP-bounded gate and pressure/deployment observability contract |
+| `3382f7e` | bounded finalizer DB-index I/O | Implements the default-neutral expanded-row gate, per-job timing and scheduler-wide diagnostics |
 
 ## Measurement rounds
 
@@ -2242,6 +2247,48 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   `analyze_final_parent_group_comparison.py` in the artifact. Round 34 is
   rejected; group mode remains default-off with daily limit one. Exact r300,
   r3840 and both one-hour runs remain blocked.
+
+### Round 35: finalizer expanded-row DB-index I/O gate hypothesis
+
+- Round 34's strongest convoy is system-wide rather than a remaining
+  final-parent-only stall. The two sinks complete synchronized 16.53/16.59s
+  cohorts while Media Worker also reports multi-second bundle/index/DB stages;
+  PostgreSQL recorded no checkpoint and Redis recorded no RDB during the run.
+  Across Round 26 -> 33 -> 34, DB-index p99 changes
+  `0.558s -> 2.761s -> 2.933s` and finalizer post-terminal p99 changes
+  `0.721s -> 4.794s -> 5.113s`, in the same direction as publication
+  residence. Expanded timeline/overlay upserts remain required correctness
+  output; disabling or dropping them is not an allowed fix.
+- Tests-only `fc047f2` freezes one new variable without changing Candidate B,
+  finalizer `8/4/8`, sink publication, retention, deadlines or evidence types.
+  A process-lifetime `BoundedIoGate` must serialize concurrent expanded-row DB
+  index writes at diagnostic limit one, expose active/waiting/peak/acquisition/
+  wait/service totals, preserve per-job wait/service attribution, and remain
+  bounded by shared WIP. A configured value of zero means no additional limit
+  below shared WIP; it is the daily default and preserves existing behavior.
+- Implementation `3382f7e` wraps the complete idempotent bundle/artifact/timeline/
+  overlay upsert, alias publication, sidecar prune and DB-index status update.
+  It remains inside the finalizer lane and shared WIP boundary, so terminal,
+  lease/fence, cleanup and shutdown ownership do not change. Scheduler logs,
+  per-finalizer logs, pressure JSON, Compose/env, profile arguments and restore
+  snapshots all carry the configured/effective gate and its diagnostics.
+- Bind-mounted real-container smoke:
+  `/data/video-analytics/artifacts/media_worker_db_index_io_gate_smoke_20260722T131427Z`.
+  Marker `PASS_MEDIA_WORKER_DB_INDEX_IO_GATE_CONTAINER_SMOKE` proves that a
+  limit-one gate exposes one active and one waiting caller, reaches peak one,
+  records two acquisitions and one contended wait, releases cleanly to zero,
+  and clamps an oversized request to shared WIP four. The smoke used the
+  current worktree against image
+  `sha256:5b451db0c4859a01471d2d05a183b3cc81f6109712e12592e42535162afa5c84`
+  without changing the live database or daily sink configuration.
+- The focused finalizer, scheduler, pressure, deployment, DB-index and Phase 2+
+  regression selection first passed 383 tests with one expected skip; the
+  fresh pre-commit superset passes 392 with the same one expected skip. Python
+  compile and profile shell syntax pass. This only closes the static/
+  concurrency and observability contract; it does not yet authorize exact r300. The next run
+  must be the unchanged 360-second r300 causal diagnostic with DB-index gate
+  `1` as the sole behavioral variable and final-parent group limit restored to
+  `1`.
 
 ## Runtime recovery audit
 
