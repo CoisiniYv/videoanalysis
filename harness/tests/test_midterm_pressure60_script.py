@@ -2147,6 +2147,53 @@ def test_rolling_cache_segment_visibility_tolerates_retention_race(
     assert summary["metadata_visible_lag_s"]["status"] == "not_enough_data"
 
 
+def test_rolling_cache_segment_visibility_tolerates_discovery_directory_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    cfg = _config(module, run_id="rolling_canary")
+    metadata_path = (
+        tmp_path
+        / "midterm"
+        / "epochs"
+        / "epoch-a"
+        / "rolling_canary_00"
+        / "segments"
+        / "0001"
+        / "metadata.json"
+    )
+    metadata_path.parent.mkdir(parents=True)
+    first_pts = 1_783_329_600_000_000_000
+    last_pts = first_pts + 1_000_000_000
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "frames": [
+                    {"type": "VideoFrame", "pts": first_pts},
+                    {"type": "VideoFrame", "pts": last_pts},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    visible_at_s = last_pts / 1_000_000_000 + 0.5
+    os.utime(metadata_path, (visible_at_s, visible_at_s))
+    walk_calls: list[Path] = []
+
+    def retention_racing_walk(root, *, topdown, onerror):
+        walk_calls.append(Path(root))
+        onerror(FileNotFoundError(2, "retention removed directory", "gone"))
+        yield str(metadata_path.parent), [], [metadata_path.name]
+
+    monkeypatch.setattr(module.os, "walk", retention_racing_walk)
+
+    summary = module.collect_rolling_cache_segment_visibility(cfg, root=tmp_path)
+
+    assert walk_calls == [tmp_path]
+    assert summary["metadata_files_vanished"] == 1
+    assert summary["metadata_visible_lag_s"]["p50"] == 0.5
+
+
 def test_rolling_cache_full_rate_gate_requires_all_sources_and_fps() -> None:
     module = _load_module()
     cfg = _config(module, stream_count=2, fps="8/1")
