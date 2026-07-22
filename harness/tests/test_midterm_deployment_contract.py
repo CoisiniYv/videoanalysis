@@ -1112,6 +1112,9 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
         "rolling-cache-sink-b",
     ):
         service = services[service_name]
+        assert service["environment"]["ROLLING_CACHE_PUBLICATION_WORKERS"] == (
+            "${ROLLING_CACHE_PUBLICATION_WORKERS:-1}"
+        )
         assert service["image"] == "video-analytics-midterm-rolling-cache-sink:latest"
         assert service["build"]["context"] == ".."
         assert service["build"]["dockerfile"] == (

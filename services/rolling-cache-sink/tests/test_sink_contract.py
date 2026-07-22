@@ -834,6 +834,269 @@ def test_publication_dispatcher_disables_group_preparation_by_default() -> None:
         assert dispatcher.close(timeout_s=1) is True
 
 
+def test_publication_dispatcher_runs_different_source_shards_concurrently(
+    tmp_path: Path,
+) -> None:
+    assert zlib.crc32(b"camera-00") % 2 == 1
+    assert zlib.crc32(b"camera-04") % 2 == 0
+    rendezvous = threading.Barrier(2)
+    callbacks: list[str] = []
+    errors: list[tuple[str, str]] = []
+    metrics = SinkMetrics()
+
+    class ConcurrentPublisher:
+        @staticmethod
+        def publish(fragment):
+            rendezvous.wait(timeout=2)
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=4,
+        worker_count=2,
+        metrics=metrics,
+        thread_name="test-publication-shards",
+    )
+    fragments = {
+        source_id: SimpleNamespace(
+            segment_id=f"segment-{source_id}",
+            final_dir=tmp_path / source_id,
+        )
+        for source_id in ("camera-00", "camera-04")
+    }
+    for source_id, fragment in fragments.items():
+        dispatcher.submit(
+            source_id=source_id,
+            publisher=ConcurrentPublisher(),
+            fragment=fragment,
+            on_published=lambda item, _path: callbacks.append(item.segment_id),
+            on_publish_error=lambda item, error: errors.append(
+                (item.segment_id, str(error))
+            ),
+        )
+
+    assert dispatcher.close(timeout_s=2) is True
+    assert errors == []
+    assert sorted(callbacks) == sorted(
+        fragment.segment_id for fragment in fragments.values()
+    )
+    assert fragments["camera-00"].publication_diagnostics[
+        "publication_worker_index"
+    ] == 1
+    assert fragments["camera-04"].publication_diagnostics[
+        "publication_worker_index"
+    ] == 0
+    snapshot = dispatcher.snapshot()
+    assert snapshot["worker_count"] == 2
+    assert snapshot["active_peak"] == 2
+    assert metrics.snapshot()["publication_active_peak"] == 2
+
+
+def test_publication_dispatcher_keeps_same_source_serial_and_callback_ordered(
+    tmp_path: Path,
+) -> None:
+    active = 0
+    active_peak = 0
+    active_lock = threading.Lock()
+    publication_order: list[str] = []
+    callback_order: list[str] = []
+
+    class OrderedPublisher:
+        @staticmethod
+        def publish(fragment):
+            nonlocal active, active_peak
+            with active_lock:
+                active += 1
+                active_peak = max(active_peak, active)
+            try:
+                publication_order.append(fragment.segment_id)
+                time.sleep(0.01)
+                fragment.final_dir.mkdir(parents=True)
+                return fragment.final_dir
+            finally:
+                with active_lock:
+                    active -= 1
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        worker_count=2,
+        thread_name="test-publication-same-source",
+    )
+    fragments = [
+        SimpleNamespace(
+            segment_id=f"segment-{index}",
+            final_dir=tmp_path / f"segment-{index}",
+        )
+        for index in range(4)
+    ]
+    for fragment in fragments:
+        dispatcher.submit(
+            source_id="camera-00",
+            publisher=OrderedPublisher(),
+            fragment=fragment,
+            on_published=lambda item, _path: callback_order.append(item.segment_id),
+        )
+
+    assert dispatcher.close(timeout_s=2) is True
+    expected = [fragment.segment_id for fragment in fragments]
+    assert publication_order == expected
+    assert callback_order == expected
+    assert active_peak == 1
+    assert {
+        fragment.publication_diagnostics["publication_worker_index"]
+        for fragment in fragments
+    } == {1}
+
+
+def test_publication_dispatcher_keeps_capacity_global_across_source_shards(
+    tmp_path: Path,
+) -> None:
+    started = 0
+    started_lock = threading.Lock()
+    both_started = threading.Event()
+    release = threading.Event()
+    third_submitted = threading.Event()
+
+    class BlockingPublisher:
+        @staticmethod
+        def publish(fragment):
+            nonlocal started
+            with started_lock:
+                started += 1
+                if started == 2:
+                    both_started.set()
+            assert release.wait(timeout=2)
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=2,
+        worker_count=2,
+        thread_name="test-publication-global-capacity",
+    )
+
+    def submit(source_id: str, segment_id: str) -> None:
+        dispatcher.submit(
+            source_id=source_id,
+            publisher=BlockingPublisher(),
+            fragment=SimpleNamespace(
+                segment_id=segment_id,
+                final_dir=tmp_path / segment_id,
+            ),
+        )
+
+    submit("camera-00", "segment-0")
+    submit("camera-04", "segment-1")
+    assert both_started.wait(timeout=1)
+    third_thread = threading.Thread(
+        target=lambda: (submit("camera-00", "segment-2"), third_submitted.set()),
+        daemon=True,
+    )
+    third_thread.start()
+    assert not third_submitted.wait(timeout=0.1)
+    snapshot = dispatcher.snapshot()
+    assert snapshot["outstanding"] == 2
+    assert snapshot["outstanding_peak"] == 2
+    assert snapshot["active"] == 2
+
+    release.set()
+    assert third_submitted.wait(timeout=1)
+    third_thread.join(timeout=1)
+    assert dispatcher.close(timeout_s=2) is True
+    snapshot = dispatcher.snapshot()
+    assert snapshot["submitted_total"] == 3
+    assert snapshot["completed_total"] == 3
+    assert snapshot["outstanding"] == 0
+
+
+def test_publication_dispatcher_cross_shard_failure_does_not_block_peer(
+    tmp_path: Path,
+) -> None:
+    bad_started = threading.Event()
+    peer_completed = threading.Event()
+    callbacks: list[str] = []
+
+    class IsolatedFailurePublisher:
+        @staticmethod
+        def publish(fragment):
+            if fragment.segment_id == "bad":
+                bad_started.set()
+                assert peer_completed.wait(timeout=2)
+                raise OSError("injected-shard-failure")
+            assert bad_started.wait(timeout=1)
+            fragment.final_dir.mkdir(parents=True)
+            peer_completed.set()
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=4,
+        worker_count=2,
+        thread_name="test-publication-shard-failure",
+    )
+    dispatcher.submit(
+        source_id="camera-04",
+        publisher=IsolatedFailurePublisher(),
+        fragment=SimpleNamespace(segment_id="bad", final_dir=tmp_path / "bad"),
+        on_publish_error=lambda item, error: callbacks.append(
+            f"error:{item.segment_id}:{error}"
+        ),
+    )
+    dispatcher.submit(
+        source_id="camera-00",
+        publisher=IsolatedFailurePublisher(),
+        fragment=SimpleNamespace(segment_id="good", final_dir=tmp_path / "good"),
+        on_published=lambda item, _path: callbacks.append(f"ok:{item.segment_id}"),
+    )
+
+    assert dispatcher.close(timeout_s=2) is True
+    assert peer_completed.is_set()
+    assert sorted(callbacks) == [
+        "error:bad:injected-shard-failure",
+        "ok:good",
+    ]
+    assert dispatcher.snapshot()["failed_total"] == 1
+    assert dispatcher.snapshot()["completed_total"] == 1
+
+
+def test_publication_dispatcher_multi_worker_shutdown_drains_all_shards(
+    tmp_path: Path,
+) -> None:
+    published: list[str] = []
+
+    class SlowPublisher:
+        @staticmethod
+        def publish(fragment):
+            time.sleep(0.01)
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=8,
+        worker_count=2,
+        thread_name="test-publication-multi-shutdown",
+    )
+    for index in range(6):
+        dispatcher.submit(
+            source_id="camera-00" if index % 2 == 0 else "camera-04",
+            publisher=SlowPublisher(),
+            fragment=SimpleNamespace(
+                segment_id=f"segment-{index}",
+                final_dir=tmp_path / f"segment-{index}",
+            ),
+            on_published=lambda item, _path: published.append(item.segment_id),
+        )
+
+    assert dispatcher.close(timeout_s=2) is True
+    assert sorted(published) == [f"segment-{index}" for index in range(6)]
+    snapshot = dispatcher.snapshot()
+    assert snapshot["worker_count"] == 2
+    assert snapshot["submitted_total"] == 6
+    assert snapshot["completed_total"] == 6
+    assert snapshot["outstanding"] == 0
+    assert snapshot["active"] == 0
+    assert all(not thread.is_alive() for thread in dispatcher._threads)
+
+
 def test_publication_dispatcher_prepares_one_bounded_group_before_fifo_commit(
     tmp_path: Path,
 ) -> None:
@@ -1489,8 +1752,31 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
         "RUNTIME_EPOCH_STATE_PATH",
         "SOURCE_ID",
         "SOURCE_ID_PREFIX",
+        "ROLLING_CACHE_PUBLICATION_WORKERS",
     ):
         monkeypatch.delenv(name, raising=False)
     config = SinkConfig.from_env()
     assert config.segment_seconds == 4.0
     assert config.http_port == 8080
+    assert config.publication_workers == 1
+
+
+def test_config_accepts_bounded_publication_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_WORKERS", "2")
+
+    assert SinkConfig.from_env().publication_workers == 2
+
+
+@pytest.mark.parametrize("value", ("0", "5", "not-an-integer"))
+def test_config_rejects_unbounded_publication_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_WORKERS", value)
+
+    with pytest.raises(ValueError, match="ROLLING_CACHE_PUBLICATION_WORKERS"):
+        SinkConfig.from_env()
