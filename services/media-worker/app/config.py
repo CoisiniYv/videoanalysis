@@ -61,6 +61,7 @@ class Config:
     materialization_reserved_non_image: int = 1
     media_worker_db_pool_enabled: bool = False
     media_worker_db_pool_timeout_s: float = 5.0
+    media_worker_db_index_io_concurrency: int = 0
     media_worker_scheduler_v2_enabled: bool = False
     media_worker_segment_index_enabled: bool = False
     media_worker_segment_index_refresh_interval_s: float = 0.5
@@ -308,6 +309,10 @@ def load_config() -> Config:
         media_worker_db_pool_timeout_s=max(
             0.05,
             float(os.getenv("MEDIA_WORKER_DB_POOL_TIMEOUT_S", "5")),
+        ),
+        media_worker_db_index_io_concurrency=max(
+            0,
+            int(os.getenv("MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY", "0")),
         ),
         media_worker_scheduler_v2_enabled=os.getenv(
             "MEDIA_WORKER_SCHEDULER_V2_ENABLED", "false"

@@ -356,6 +356,90 @@ class LaneReservation:
             self.cancel()
 
 
+class BoundedIoGate:
+    """Process-lifetime semaphore with cumulative wait/service diagnostics."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        limit: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.name = str(name)
+        self.limit = int(limit)
+        if self.limit < 1:
+            raise ValueError("bounded I/O gate limit must be positive")
+        self._clock = clock
+        self._semaphore = BoundedSemaphore(self.limit)
+        self._lock = Lock()
+        self._active = 0
+        self._waiting = 0
+        self._active_peak = 0
+        self._acquired_total = 0
+        self._wait_events_total = 0
+        self._wait_ms_total = 0.0
+        self._wait_ms_max = 0.0
+        self._service_ms_total = 0.0
+        self._service_ms_max = 0.0
+
+    @contextmanager
+    def slot(self) -> Iterator[dict[str, int | float]]:
+        wait_started_at = self._clock()
+        contended = not self._semaphore.acquire(blocking=False)
+        if contended:
+            with self._lock:
+                self._waiting += 1
+            try:
+                self._semaphore.acquire()
+            finally:
+                with self._lock:
+                    self._waiting = max(0, self._waiting - 1)
+        wait_ms = max(0.0, (self._clock() - wait_started_at) * 1000)
+        service_started_at = self._clock()
+        with self._lock:
+            self._active += 1
+            self._active_peak = max(self._active_peak, self._active)
+            self._acquired_total += 1
+            self._wait_ms_total += wait_ms
+            self._wait_ms_max = max(self._wait_ms_max, wait_ms)
+            if contended:
+                self._wait_events_total += 1
+            active_at_acquire = self._active
+        timing: dict[str, int | float] = {
+            "limit": self.limit,
+            "wait_ms": round(wait_ms, 3),
+            "service_ms": 0.0,
+            "active_at_acquire": active_at_acquire,
+        }
+        try:
+            yield timing
+        finally:
+            service_ms = max(0.0, (self._clock() - service_started_at) * 1000)
+            timing["service_ms"] = round(service_ms, 3)
+            with self._lock:
+                self._active = max(0, self._active - 1)
+                self._service_ms_total += service_ms
+                self._service_ms_max = max(self._service_ms_max, service_ms)
+            self._semaphore.release()
+
+    def snapshot(self) -> dict[str, int | float | str]:
+        with self._lock:
+            return {
+                "name": self.name,
+                "limit": self.limit,
+                "active": self._active,
+                "waiting": self._waiting,
+                "active_peak": self._active_peak,
+                "acquired_total": self._acquired_total,
+                "wait_events_total": self._wait_events_total,
+                "wait_ms_total": round(self._wait_ms_total, 3),
+                "wait_ms_max": round(self._wait_ms_max, 3),
+                "service_ms_total": round(self._service_ms_total, 3),
+                "service_ms_max": round(self._service_ms_max, 3),
+            }
+
+
 class BoundedExecutorLane:
     """One long-lived executor with explicit bounded pre-submit admission."""
 
@@ -863,6 +947,7 @@ class MaterializationResources:
         finalizer_queue_capacity: int = 0,
         db_pool_enabled: bool = False,
         db_pool_timeout_s: float = 5.0,
+        db_index_io_concurrency: int = 0,
         shutdown_grace_s: float = 45.0,
         shutdown_kill_timeout_s: float = 5.0,
         source_limit: int = 1,
@@ -881,6 +966,7 @@ class MaterializationResources:
         self.image_lane: BoundedExecutorLane | None = None
         self.remux_lane: BoundedExecutorLane | None = None
         self.finalizer_lane: BoundedExecutorLane | None = None
+        self.db_index_io_gate: BoundedIoGate | None = None
         self.db_pool: PooledConnectionProvider | None = None
         self.lease_heartbeats: LeaseHeartbeatSupervisor | None = None
         self._closed = False
@@ -898,6 +984,16 @@ class MaterializationResources:
             return min(self.max_active, max(0, int(value)))
 
         try:
+            requested_db_index_io_concurrency = int(db_index_io_concurrency)
+            effective_db_index_io_concurrency = workers(
+                requested_db_index_io_concurrency
+                if requested_db_index_io_concurrency > 0
+                else self.max_active
+            )
+            self.db_index_io_gate = BoundedIoGate(
+                name="finalizer-db-index",
+                limit=effective_db_index_io_concurrency,
+            )
             if db_pool_enabled:
                 self.db_pool = PooledConnectionProvider(
                     database_url,
@@ -1014,6 +1110,11 @@ class MaterializationResources:
             "remux_lane": self.remux_lane.snapshot() if self.remux_lane else None,
             "finalizer_lane": (
                 self.finalizer_lane.snapshot() if self.finalizer_lane else None
+            ),
+            "db_index_io_gate": (
+                self.db_index_io_gate.snapshot()
+                if self.db_index_io_gate is not None
+                else None
             ),
             "db_pool": self.db_pool.snapshot() if self.db_pool else None,
             "lease_heartbeats": (

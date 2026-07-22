@@ -491,6 +491,7 @@ class PressureConfig:
     media_worker_materialization_max_active: int = 4
     media_worker_rolling_remux_workers: int = 1
     media_worker_segment_index_io_concurrency: int = 2
+    media_worker_db_index_io_concurrency: int = 0
     media_worker_finalizer_workers: int = 4
     media_worker_finalizer_process_workers: int = 4
     media_worker_finalizer_queue_capacity: int = 4
@@ -682,6 +683,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Maximum concurrent rolling segment-index discovery-through-pin "
             "I/O jobs; ffmpeg/remux concurrency is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--media-worker-db-index-io-concurrency",
+        type=int,
+        default=0,
+        help=(
+            "Maximum concurrent finalizer expanded-row DB index writes. "
+            "Zero adds no limit beyond shared WIP; use a positive value only "
+            "for a separately labeled storage-I/O diagnostic."
         ),
     )
     parser.add_argument(
@@ -1249,6 +1260,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--media-worker-segment-index-io-concurrency must be positive"
         )
+    if args.media_worker_db_index_io_concurrency < 0:
+        raise SystemExit(
+            "--media-worker-db-index-io-concurrency must be non-negative"
+        )
     if args.media_worker_finalizer_workers < 1:
         raise SystemExit("--media-worker-finalizer-workers must be positive")
     if args.media_worker_finalizer_process_workers < 0:
@@ -1504,6 +1519,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         media_worker_segment_index_io_concurrency=int(
             args.media_worker_segment_index_io_concurrency
+        ),
+        media_worker_db_index_io_concurrency=int(
+            args.media_worker_db_index_io_concurrency
         ),
         media_worker_finalizer_workers=int(args.media_worker_finalizer_workers),
         media_worker_finalizer_process_workers=int(
@@ -4428,6 +4446,7 @@ def media_worker_rolling_cache_env_snapshot() -> dict[str, str]:
         "MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY",
         "MEDIA_WORKER_SCHEDULER_V2_ENABLED",
         "MEDIA_WORKER_DB_POOL_ENABLED",
+        "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY",
         "MEDIA_WORKER_SEGMENT_INDEX_ENABLED",
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
@@ -5197,6 +5216,9 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
         ),
         "MEDIA_WORKER_SCHEDULER_V2_ENABLED": "true",
         "MEDIA_WORKER_DB_POOL_ENABLED": "true",
+        "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY": str(
+            cfg.media_worker_db_index_io_concurrency
+        ),
         "MEDIA_WORKER_SEGMENT_INDEX_ENABLED": "true",
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S": "60",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES": "2048",
@@ -10467,6 +10489,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "finalizer_terminal_commit_ms",
                 "finalizer_event_projection_ms",
                 "finalizer_db_index_ms",
+                "finalizer_db_index_gate_wait_ms",
+                "finalizer_db_index_gate_service_ms",
                 "finalizer_cleanup_ms",
                 "finalizer_post_terminal_ms",
                 "finalizer_lane_service_ms",
@@ -10750,6 +10774,16 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "db_pool_checkout_errors",
                 "db_pool_resets",
                 "db_pool_connections_lost",
+                "db_index_io_gate_limit",
+                "db_index_io_gate_active",
+                "db_index_io_gate_waiting",
+                "db_index_io_gate_active_peak",
+                "db_index_io_gate_acquired_total",
+                "db_index_io_gate_wait_ms_total",
+                "db_index_io_gate_wait_ms_max",
+                "db_index_io_gate_wait_events_total",
+                "db_index_io_gate_service_ms_total",
+                "db_index_io_gate_service_ms_max",
                 "lease_heartbeat_active",
                 "lease_heartbeat_total",
                 "lease_heartbeat_lost",
@@ -10811,6 +10845,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "segment_index_row_cache_entries",
                 "segment_index_row_cache_max_bytes",
                 "segment_index_io_concurrency",
+                "db_index_io_concurrency",
             )
         }
         media_resource_capacity_metrics["cpu_thread_limit"] = (
@@ -13742,6 +13777,16 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
             or _not_enough_data("finalizer event projection timing unavailable"),
             "db_index_ms": logs.get("media_finalizer_db_index_ms")
             or _not_enough_data("finalizer DB index lane timing unavailable"),
+            "db_index_gate": {
+                "wait_ms": logs.get(
+                    "media_finalizer_db_index_gate_wait_ms"
+                )
+                or _not_enough_data("finalizer DB index gate wait unavailable"),
+                "service_ms": logs.get(
+                    "media_finalizer_db_index_gate_service_ms"
+                )
+                or _not_enough_data("finalizer DB index gate service unavailable"),
+            },
             "cleanup_ms": logs.get("media_finalizer_cleanup_ms")
             or _not_enough_data("finalizer cleanup timing unavailable"),
             "post_terminal_ms": logs.get("media_finalizer_post_terminal_ms")
@@ -13999,6 +14044,22 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "media_scheduler_db_pool_connections_lost"
                 )
                 or _not_enough_data("DB pool loss metrics unavailable"),
+            },
+            "db_index_io_gate": {
+                name: logs.get(f"media_scheduler_db_index_io_gate_{name}")
+                or _not_enough_data(f"DB index I/O gate {name} unavailable")
+                for name in (
+                    "limit",
+                    "active",
+                    "waiting",
+                    "active_peak",
+                    "acquired_total",
+                    "wait_ms_total",
+                    "wait_ms_max",
+                    "wait_events_total",
+                    "service_ms_total",
+                    "service_ms_max",
+                )
             },
             "segment_index": {
                 "modes": logs.get("media_segment_index_modes") or {},

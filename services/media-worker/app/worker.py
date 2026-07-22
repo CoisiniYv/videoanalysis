@@ -51,6 +51,7 @@ from app.legacy_observability import (
     materialization_correlation,
 )
 from app.materialization_scheduler import (
+    BoundedIoGate,
     LaneReservation,
     LeaseHeartbeatHandle,
     LeaseHeartbeatSupervisor,
@@ -175,6 +176,8 @@ FINALIZER_LANE_METRIC_FIELDS = (
     "finalizer_terminal_commit_ms",
     "finalizer_event_projection_ms",
     "finalizer_db_index_ms",
+    "finalizer_db_index_gate_wait_ms",
+    "finalizer_db_index_gate_service_ms",
     "finalizer_cleanup_ms",
     "finalizer_post_terminal_ms",
     "finalizer_lane_service_ms",
@@ -5681,6 +5684,65 @@ def _index_finalized_bundle(
     event_id: str,
     evidence_state: str,
     bundle: dict,
+    io_gate: BoundedIoGate | None = None,
+    gate_diagnostics: dict[str, int | float] | None = None,
+) -> bool:
+    timing: dict[str, int | float] = {
+        "limit": 0,
+        "wait_ms": 0.0,
+        "service_ms": 0.0,
+        "active_at_acquire": 1,
+    }
+    if io_gate is None:
+        started_at = time.monotonic()
+        result = _index_finalized_bundle_unbounded(
+            pg_conn,
+            event_id=event_id,
+            evidence_state=evidence_state,
+            bundle=bundle,
+        )
+        timing["service_ms"] = round(
+            max(0.0, (time.monotonic() - started_at) * 1000),
+            3,
+        )
+    else:
+        with io_gate.slot() as acquired_timing:
+            timing = acquired_timing
+            result = _index_finalized_bundle_unbounded(
+                pg_conn,
+                event_id=event_id,
+                evidence_state=evidence_state,
+                bundle=bundle,
+            )
+    diagnostics = {
+        "finalizer_db_index_gate_limit": int(timing["limit"]),
+        "finalizer_db_index_gate_wait_ms": float(timing["wait_ms"]),
+        "finalizer_db_index_gate_service_ms": float(timing["service_ms"]),
+        "finalizer_db_index_gate_active_at_acquire": int(
+            timing["active_at_acquire"]
+        ),
+    }
+    if gate_diagnostics is not None:
+        gate_diagnostics.update(diagnostics)
+    logger.info(
+        "evidence_db_index_io_gate event_id=%s limit=%s wait_ms=%s "
+        "service_ms=%s active_at_acquire=%s result=%s",
+        event_id,
+        diagnostics["finalizer_db_index_gate_limit"],
+        diagnostics["finalizer_db_index_gate_wait_ms"],
+        diagnostics["finalizer_db_index_gate_service_ms"],
+        diagnostics["finalizer_db_index_gate_active_at_acquire"],
+        result,
+    )
+    return result
+
+
+def _index_finalized_bundle_unbounded(
+    pg_conn: psycopg.Connection,
+    *,
+    event_id: str,
+    evidence_state: str,
+    bundle: dict,
 ) -> bool:
     evidence_dir = str(bundle.get("evidence_dir") or "")
     if not evidence_dir:
@@ -6171,7 +6233,7 @@ def _log_finalizer_lane_metrics(
     finalizer_worker_id: str,
     source_id: str,
     replay_shard_id: str,
-    stage_timings: dict[str, int],
+    stage_timings: dict[str, int | float],
 ) -> None:
     logger.info(
         "media_finalizer_lane_completed event_id=%s worker_id=%s "
@@ -6184,6 +6246,10 @@ def _log_finalizer_lane_metrics(
         "finalizer_publish_rebase_ms=%s "
         "finalizer_terminal_commit_ms=%s "
         "finalizer_event_projection_ms=%s finalizer_db_index_ms=%s "
+        "finalizer_db_index_gate_limit=%s "
+        "finalizer_db_index_gate_wait_ms=%s "
+        "finalizer_db_index_gate_service_ms=%s "
+        "finalizer_db_index_gate_active_at_acquire=%s "
         "finalizer_cleanup_ms=%s finalizer_post_terminal_ms=%s "
         "finalizer_lane_service_ms=%s",
         event_id,
@@ -6200,6 +6266,10 @@ def _log_finalizer_lane_metrics(
         stage_timings.get("finalizer_terminal_commit_ms", 0),
         stage_timings.get("finalizer_event_projection_ms", 0),
         stage_timings.get("finalizer_db_index_ms", 0),
+        stage_timings.get("finalizer_db_index_gate_limit", 0),
+        stage_timings.get("finalizer_db_index_gate_wait_ms", 0),
+        stage_timings.get("finalizer_db_index_gate_service_ms", 0),
+        stage_timings.get("finalizer_db_index_gate_active_at_acquire", 0),
         stage_timings.get("finalizer_cleanup_ms", 0),
         stage_timings.get("finalizer_post_terminal_ms", 0),
         stage_timings.get("finalizer_lane_service_ms", 0),
@@ -6527,6 +6597,7 @@ def _finalize_one(
     bundle_process_pool: _FinalizerProcessPool | None = None,
     database_url: str = "",
     handoff_lease: MaterializationLease | None = None,
+    db_index_io_gate: BoundedIoGate | None = None,
 ) -> _FinalizeOneResult:
     finalize_started = time.monotonic()
     lane_started_value = phase_diagnostics.get("finalizer_started_monotonic")
@@ -6878,15 +6949,19 @@ def _finalize_one(
         if not projection_persisted:
             logger.error("media_finalized_event_projection_missing event_id=%s", event_id)
         db_index_started = time.monotonic()
+        db_index_gate_diagnostics: dict[str, int | float] = {}
         _index_finalized_bundle(
             pg_conn,
             event_id=event_id,
             evidence_state=evidence_state,
             bundle=bundle,
+            io_gate=db_index_io_gate,
+            gate_diagnostics=db_index_gate_diagnostics,
         )
         stage_timings["finalizer_db_index_ms"] = int(
             (time.monotonic() - db_index_started) * 1000
         )
+        stage_timings.update(db_index_gate_diagnostics)
         cleanup_started = time.monotonic()
         cleanup = _attempt_terminal_sink_cleanup(
             pg_conn,
@@ -8586,6 +8661,7 @@ def _run_finalizer_admission_v2(
             lease_heartbeat_supervisor=runtime_resources.lease_heartbeats,
             shutdown_controller=runtime_resources.shutdown,
             bundle_process_pool=bundle_process_pool,
+            db_index_io_gate=runtime_resources.db_index_io_gate,
         )
         result = dict(raw_result or {})
         result.setdefault("status", "finalized")
@@ -9597,6 +9673,7 @@ def _process_sink_output_with_finalizer_pool(
                         runtime_resources.lease_heartbeats
                     ),
                     shutdown_controller=runtime_resources.shutdown,
+                    db_index_io_gate=runtime_resources.db_index_io_gate,
                 )
                 future.add_done_callback(
                     lambda _done, permit=work_permit, source=source_permit: (
@@ -9784,6 +9861,7 @@ def _process_single_finalizer_job(
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None = None,
     shutdown_controller: ShutdownController | None = None,
     bundle_process_pool: _FinalizerProcessPool | None = None,
+    db_index_io_gate: BoundedIoGate | None = None,
 ) -> dict[str, object]:
     finalizer_started_at = datetime.now(timezone.utc).isoformat()
     finalizer_started_monotonic = time.monotonic()
@@ -9840,6 +9918,7 @@ def _process_single_finalizer_job(
                 lease_heartbeat_supervisor=lease_heartbeat_supervisor,
                 shutdown_controller=shutdown_controller,
                 bundle_process_pool=bundle_process_pool,
+                db_index_io_gate=db_index_io_gate,
             )
     finally:
         if connection_provider is None and "conn" in locals() and conn is not None:
@@ -9877,6 +9956,7 @@ def _run_single_finalizer_job_with_connection(
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None,
     shutdown_controller: ShutdownController | None,
     bundle_process_pool: _FinalizerProcessPool | None,
+    db_index_io_gate: BoundedIoGate | None,
 ) -> dict[str, object]:
         permit: _HeldMaterializationPermit | None = None
         try:
@@ -10028,6 +10108,7 @@ def _run_single_finalizer_job_with_connection(
                 bundle_process_pool=bundle_process_pool,
                 database_url=database_url,
                 handoff_lease=handoff_lease,
+                db_index_io_gate=db_index_io_gate,
             )
             if outcome.throttle_decision:
                 pacer.apply_decision(outcome.throttle_decision)
@@ -14077,6 +14158,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         ),
         db_pool_enabled=getattr(cfg, "media_worker_db_pool_enabled", False),
         db_pool_timeout_s=getattr(cfg, "media_worker_db_pool_timeout_s", 5.0),
+        db_index_io_concurrency=getattr(
+            cfg,
+            "media_worker_db_index_io_concurrency",
+            0,
+        ),
         shutdown_grace_s=getattr(cfg, "media_worker_shutdown_grace_s", 45.0),
         shutdown_kill_timeout_s=getattr(
             cfg,
@@ -14204,6 +14290,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "segment_index_effective=%s segment_index_refresh_s=%s "
         "segment_index_reconcile_s=%s segment_index_row_cache_entries=%s "
         "segment_index_row_cache_max_bytes=%s segment_index_io_concurrency=%s "
+        "db_index_io_concurrency_configured=%s "
+        "db_index_io_concurrency=%s "
         "segment_read_pin_ttl_s=%s "
         "lanes_effective=%s "
         "max_active=%s image_workers=%s remux_workers=%s finalizer_workers=%s "
@@ -14224,6 +14312,9 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             256 * 1024 * 1024,
         ),
         getattr(cfg, "media_worker_segment_index_io_concurrency", 2),
+        getattr(cfg, "media_worker_db_index_io_concurrency", 0),
+        (runtime_resources.db_index_io_gate.snapshot()["limit"]
+         if runtime_resources.db_index_io_gate is not None else 0),
         getattr(cfg, "rolling_cache_read_pin_ttl_s", 600.0),
         runtime_resources.finalizer_lane is not None,
         cfg.materialization_max_active,
@@ -14747,6 +14838,15 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "db_pool_checkout_wait_ms=%s db_pool_checkout_timeouts=%s "
                 "db_pool_checkout_errors=%s db_pool_resets=%s "
                 "db_pool_connections_lost=%s "
+                "db_index_io_gate_limit=%s db_index_io_gate_active=%s "
+                "db_index_io_gate_waiting=%s "
+                "db_index_io_gate_active_peak=%s "
+                "db_index_io_gate_acquired_total=%s "
+                "db_index_io_gate_wait_ms_total=%s "
+                "db_index_io_gate_wait_ms_max=%s "
+                "db_index_io_gate_wait_events_total=%s "
+                "db_index_io_gate_service_ms_total=%s "
+                "db_index_io_gate_service_ms_max=%s "
                 "lease_heartbeat_active=%s lease_heartbeat_total=%s "
                 "lease_heartbeat_lost=%s lease_heartbeat_expired=%s "
                 "lease_heartbeat_errors=%s "
@@ -14845,6 +14945,37 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 (resource_snapshot.get("db_pool") or {}).get("reset_count", 0),
                 (resource_snapshot.get("db_pool") or {}).get(
                     "connections_lost",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get("limit", 0),
+                (resource_snapshot.get("db_index_io_gate") or {}).get("active", 0),
+                (resource_snapshot.get("db_index_io_gate") or {}).get("waiting", 0),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "active_peak",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "acquired_total",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "wait_ms_total",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "wait_ms_max",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "wait_events_total",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "service_ms_total",
+                    0,
+                ),
+                (resource_snapshot.get("db_index_io_gate") or {}).get(
+                    "service_ms_max",
                     0,
                 ),
                 (resource_snapshot.get("lease_heartbeats") or {}).get("active", 0),
