@@ -450,9 +450,38 @@ def test_bounded_publication_dispatcher_backpressures_without_reordering_or_drop
     assert dispatcher.close(timeout_s=2) is True
     assert order == ["segment-1", "segment-2", "segment-3"]
     assert callbacks == order
-    assert dispatcher.snapshot()["outstanding"] == 0
+    snapshot = dispatcher.snapshot()
+    assert snapshot["outstanding"] == 0
     assert metrics.snapshot()["publication_queue_wait_events_total"] >= 1
     assert metrics.snapshot()["publication_outstanding_peak"] == 2
+    peak = dispatcher.peak_snapshot()
+    assert peak["outstanding"] == 2
+    assert peak["queue_depth"] == 1
+    assert peak["source_id"] == "camera-01"
+    assert peak["segment_id"] == "segment-2"
+    assert int(peak["at_epoch_ms"]) > 0
+    first_diagnostics = fragments[0].publication_diagnostics
+    second_diagnostics = fragments[1].publication_diagnostics
+    third_diagnostics = fragments[2].publication_diagnostics
+    assert first_diagnostics["publication_worker_service_ms"] >= 100
+    assert second_diagnostics["publication_queue_residence_ms"] >= 100
+    assert third_diagnostics["publication_capacity_wait_ms"] >= 100
+    for diagnostics in (
+        first_diagnostics,
+        second_diagnostics,
+        third_diagnostics,
+    ):
+        assert diagnostics["publication_dispatch_total_ms"] >= (
+            diagnostics["publication_capacity_wait_ms"]
+            + diagnostics["publication_queue_residence_ms"]
+            + diagnostics["publication_worker_service_ms"]
+            - 1.0
+        )
+        assert diagnostics["publication_outstanding_at_submit"] in {1, 2}
+        assert diagnostics["publication_queue_depth_at_submit"] in {0, 1}
+    assert snapshot["queue_residence_ms_max"] >= 100
+    assert snapshot["worker_service_ms_max"] >= 100
+    assert snapshot["dispatch_total_ms_max"] >= 100
 
 
 def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(
@@ -475,11 +504,13 @@ def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(
         metrics=metrics,
         thread_name="test-publication-error",
     )
+    fragments: dict[str, SimpleNamespace] = {}
     for segment_id in ("bad", "good"):
         fragment = SimpleNamespace(
             segment_id=segment_id,
             final_dir=tmp_path / segment_id,
         )
+        fragments[segment_id] = fragment
         dispatcher.submit(
             source_id="camera-01",
             publisher=FailingPublisher(),
@@ -497,6 +528,12 @@ def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(
     assert dispatcher.snapshot()["completed_total"] == 1
     assert dispatcher.snapshot()["outstanding"] == 0
     assert metrics.snapshot()["publication_failed_total"] == 1
+    assert fragments["bad"].publication_diagnostics[
+        "publication_worker_service_ms"
+    ] >= 0
+    assert fragments["good"].publication_diagnostics[
+        "publication_dispatch_total_ms"
+    ] >= 0
 
 
 def test_async_publication_error_marks_active_source_pipeline_failed(

@@ -6832,9 +6832,15 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
                 "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
                 "publish_staging_dir_fsync_ms=1 publish_parent_prepare_ms=0 "
-                "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
-                "publish_journal_append_ms=1 publish_accounted_ms=12 "
-                "publish_unattributed_ms=0",
+                    "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
+                    "publish_journal_append_ms=1 publish_accounted_ms=12 "
+                    "publish_unattributed_ms=0 "
+                    "publication_capacity_wait_ms=0.01 "
+                    "publication_queue_residence_ms=4 "
+                    "publication_worker_service_ms=12 "
+                    "publication_dispatch_total_ms=16.01 "
+                    "publication_outstanding_at_submit=2 "
+                    "publication_queue_depth_at_submit=1",
                 "2026-07-22 02:03:12,901 INFO rolling_cache_sink.gst "
                 "segment published source=source-a epoch=epoch-a session=session-a "
                 "segment=segment-b frames=84 bytes=1000 "
@@ -6843,9 +6849,15 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
                 "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
                 "publish_staging_dir_fsync_ms=1 publish_parent_prepare_ms=0 "
-                "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
-                "publish_journal_append_ms=1 publish_accounted_ms=39 "
-                "publish_unattributed_ms=1",
+                    "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
+                    "publish_journal_append_ms=1 publish_accounted_ms=39 "
+                    "publish_unattributed_ms=1 "
+                    "publication_capacity_wait_ms=0.02 "
+                    "publication_queue_residence_ms=20 "
+                    "publication_worker_service_ms=40 "
+                    "publication_dispatch_total_ms=60.02 "
+                    "publication_outstanding_at_submit=37 "
+                    "publication_queue_depth_at_submit=36",
                 "2026-07-22 02:03:13,901 INFO rolling_cache_sink.gst "
                 "publication dispatcher stopped drained=True "
                 "publication_capacity=128 publication_worker_count=1 "
@@ -6856,6 +6868,16 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publication_queue_wait_ms_total=0.5 "
                 "publication_queue_wait_ms_max=0.1 "
                 "publication_queue_wait_events_total=0 "
+                "publication_queue_residence_ms_total=2000 "
+                "publication_queue_residence_ms_max=20 "
+                "publication_queue_residence_events_total=1 "
+                "publication_worker_service_ms_total=2050 "
+                "publication_worker_service_ms_max=40 "
+                "publication_dispatch_total_ms_total=4050 "
+                "publication_dispatch_total_ms_max=60.02 "
+                "publication_outstanding_peak_at_epoch_ms=1784695393901 "
+                "publication_outstanding_peak_source=source-a "
+                "publication_outstanding_peak_segment=segment-b "
                 "publication_shutdown_timeout_total=0",
             ]
         ),
@@ -7074,6 +7096,30 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_failed_total"
     ]["max"] == 0.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_queue_residence_ms"
+    ]["max"] == 20.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_worker_service_ms"
+    ]["max"] == 40.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_dispatch_total_ms"
+    ]["max"] == 60.02
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_outstanding_at_submit"
+    ]["max"] == 37.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_queue_residence_ms_total"
+    ]["max"] == 2000.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_outstanding_peak_at_epoch_ms"
+    ]["max"] == 1784695393901.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_outstanding_peak_sources"
+    ] == {"source-a": 1}
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_outstanding_peak_segments"
+    ] == {"segment-b": 1}
     assert (
         summary["media_worker"]["media_resource_segment_index_io_concurrency"][
             "max"
