@@ -81,6 +81,8 @@ Environment overrides:
                       Host-wide deterministic durable commit lanes (0 disables).
   ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE=<profile default>
                       Regular-file durability primitive: fsync or fdatasync.
+  ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=<profile default>
+                      Metadata/manifest layout: split or single_inode.
   MEDIA_WORKER_FINALIZER_WORKERS=<profile default>
                       Finalizer thread count.
   MEDIA_WORKER_FINALIZER_PROCESS_WORKERS=<profile default>
@@ -134,6 +136,7 @@ case "${profile}" in
     rolling_cache_publication_workers_default="1"
     rolling_cache_publication_commit_slots_default="0"
     rolling_cache_publication_file_sync_mode_default="fsync"
+    rolling_cache_publication_metadata_layout_default="split"
     media_worker_finalizer_workers_default="8"
     media_worker_finalizer_process_workers_default="4"
     media_worker_finalizer_queue_capacity_default="8"
@@ -174,6 +177,7 @@ case "${profile}" in
     rolling_cache_publication_workers_default="1"
     rolling_cache_publication_commit_slots_default="0"
     rolling_cache_publication_file_sync_mode_default="fsync"
+    rolling_cache_publication_metadata_layout_default="split"
     media_worker_finalizer_workers_default="4"
     media_worker_finalizer_process_workers_default="4"
     media_worker_finalizer_queue_capacity_default="4"
@@ -231,6 +235,7 @@ media_worker_segment_index_io_concurrency="${MEDIA_WORKER_SEGMENT_INDEX_IO_CONCU
 rolling_cache_publication_workers="${ROLLING_CACHE_PUBLICATION_WORKERS:-${rolling_cache_publication_workers_default}}"
 rolling_cache_publication_commit_slots="${ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS:-${rolling_cache_publication_commit_slots_default}}"
 rolling_cache_publication_file_sync_mode="${ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE:-${rolling_cache_publication_file_sync_mode_default}}"
+rolling_cache_publication_metadata_layout="${ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT:-${rolling_cache_publication_metadata_layout_default}}"
 media_worker_finalizer_workers="${MEDIA_WORKER_FINALIZER_WORKERS:-${media_worker_finalizer_workers_default}}"
 media_worker_finalizer_process_workers="${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-${media_worker_finalizer_process_workers_default}}"
 media_worker_finalizer_queue_capacity="${MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY:-${media_worker_finalizer_queue_capacity_default}}"
@@ -290,6 +295,7 @@ cmd=(
   --rolling-cache-publication-workers "${rolling_cache_publication_workers}"
   --rolling-cache-publication-commit-slots "${rolling_cache_publication_commit_slots}"
   --rolling-cache-publication-file-sync-mode "${rolling_cache_publication_file_sync_mode}"
+  --rolling-cache-publication-metadata-layout "${rolling_cache_publication_metadata_layout}"
   --media-worker-finalizer-workers "${media_worker_finalizer_workers}"
   --media-worker-finalizer-process-workers "${media_worker_finalizer_process_workers}"
   --media-worker-finalizer-queue-capacity "${media_worker_finalizer_queue_capacity}"
@@ -445,6 +451,7 @@ printf 'media_worker_segment_index_io_concurrency=%s\n' "${media_worker_segment_
 printf 'rolling_cache_publication_workers=%s\n' "${rolling_cache_publication_workers}"
 printf 'rolling_cache_publication_commit_slots=%s\n' "${rolling_cache_publication_commit_slots}"
 printf 'rolling_cache_publication_file_sync_mode=%s\n' "${rolling_cache_publication_file_sync_mode}"
+printf 'rolling_cache_publication_metadata_layout=%s\n' "${rolling_cache_publication_metadata_layout}"
 printf 'media_worker_finalizer_workers=%s\n' "${media_worker_finalizer_workers}"
 printf 'media_worker_finalizer_process_workers=%s\n' "${media_worker_finalizer_process_workers}"
 printf 'media_worker_finalizer_queue_capacity=%s\n' "${media_worker_finalizer_queue_capacity}"

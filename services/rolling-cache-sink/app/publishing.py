@@ -25,6 +25,7 @@ from config import (
 
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
+SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v2"
 SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
 SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
 SEGMENT_PUBLICATION_COMMIT_LOCK_FILE = ".segment-publication-commit.lock"
@@ -109,6 +110,34 @@ class _StagedPublication:
     stage_service_ms: float
 
 
+def _json_line(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
+
+
+def _single_inode_metadata_payload(
+    *,
+    manifest: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bytes]:
+    """Encode one self-sized manifest control record followed by native rows."""
+
+    row_payload = b"".join(_json_line(row) for row in rows)
+    sized_manifest = dict(manifest)
+    sized_manifest["metadata_size_bytes"] = 0
+    for _attempt in range(10):
+        payload = _json_line(sized_manifest) + row_payload
+        payload_size = len(payload)
+        if int(sized_manifest["metadata_size_bytes"]) == payload_size:
+            return sized_manifest, payload
+        sized_manifest["metadata_size_bytes"] = payload_size
+    raise RuntimeError("rolling_segment_single_inode_size_did_not_converge")
+
+
 class AtomicSegmentPublisher:
     """Publish video and native JSONL metadata as one directory rename.
 
@@ -131,6 +160,7 @@ class AtomicSegmentPublisher:
         ),
         commit_slot_count: int = 0,
         file_sync_mode: str = "fsync",
+        metadata_layout: str = "split",
     ) -> None:
         epoch = safe_component(runtime_epoch_id, field="runtime_epoch_id")
         source = safe_component(source_id, field="source_id")
@@ -173,6 +203,13 @@ class AtomicSegmentPublisher:
         ):
             raise RuntimeError("fdatasync is unavailable on this platform")
         self._file_sync_mode = requested_file_sync_mode
+        requested_metadata_layout = str(metadata_layout).strip().lower()
+        if requested_metadata_layout not in {"split", "single_inode"}:
+            raise ValueError(
+                "metadata_layout must be split or single_inode, got "
+                f"{requested_metadata_layout!r}"
+            )
+        self._metadata_layout = requested_metadata_layout
         if self._commit_slot_count == 0:
             self._commit_lock_path: Path | None = None
         elif self._commit_slot_count == 1:
@@ -232,24 +269,18 @@ class AtomicSegmentPublisher:
                 if pts is not None
             ]
 
-        metadata_path = fragment.staging_dir / "metadata.json"
-        with metadata_path.open("x", encoding="utf-8") as handle:
-            with timings.measure("metadata_write_ms"):
-                for row in fragment.rows:
-                    handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
-                    handle.write("\n")
-                handle.flush()
-        with timings.measure("metadata_stat_ms"):
-            metadata_stat = metadata_path.stat()
         video_size_bytes = video_stat.st_size
-        metadata_size_bytes = metadata_stat.st_size
         manifest = {
-            "schema_version": SEGMENT_MANIFEST_SCHEMA_VERSION,
+            "schema_version": (
+                SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
+                if self._metadata_layout == "single_inode"
+                else SEGMENT_MANIFEST_SCHEMA_VERSION
+            ),
             "segment_id": fragment.segment_id,
             "source_id": self._source_id,
             "runtime_epoch_id": self._runtime_epoch_id,
             "video_file": fragment.video_path.name,
-            "metadata_file": metadata_path.name,
+            "metadata_file": "metadata.json",
             "first_pts": min(pts_values),
             "last_pts": max(pts_values),
             "frame_count": len(pts_values),
@@ -260,16 +291,51 @@ class AtomicSegmentPublisher:
                 max(source_pts_values) if source_pts_values else None
             ),
             "video_size_bytes": video_size_bytes,
-            "metadata_size_bytes": metadata_size_bytes,
+            "metadata_size_bytes": 0,
         }
+        metadata_path = fragment.staging_dir / "metadata.json"
         manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
-        with manifest_path.open("x", encoding="utf-8") as handle:
+        if self._metadata_layout == "single_inode":
+            manifest, metadata_payload = _single_inode_metadata_payload(
+                manifest=manifest,
+                rows=fragment.rows,
+            )
+            with metadata_path.open("xb") as handle:
+                with timings.measure("metadata_write_ms"):
+                    handle.write(metadata_payload)
+                    handle.flush()
+            with timings.measure("metadata_stat_ms"):
+                metadata_stat = metadata_path.stat()
             with timings.measure("manifest_write_ms"):
-                handle.write(
-                    json.dumps(manifest, separators=(",", ":"), ensure_ascii=False)
-                )
-                handle.write("\n")
-                handle.flush()
+                os.link(metadata_path, manifest_path)
+            timings.record("manifest_fsync_ms", 0.0)
+        else:
+            with metadata_path.open("x", encoding="utf-8") as handle:
+                with timings.measure("metadata_write_ms"):
+                    for row in fragment.rows:
+                        handle.write(
+                            json.dumps(
+                                row,
+                                separators=(",", ":"),
+                                ensure_ascii=False,
+                            )
+                        )
+                        handle.write("\n")
+                    handle.flush()
+            with timings.measure("metadata_stat_ms"):
+                metadata_stat = metadata_path.stat()
+            manifest["metadata_size_bytes"] = metadata_stat.st_size
+            with manifest_path.open("x", encoding="utf-8") as handle:
+                with timings.measure("manifest_write_ms"):
+                    handle.write(
+                        json.dumps(
+                            manifest,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        )
+                    )
+                    handle.write("\n")
+                    handle.flush()
         with timings.measure("manifest_stat_ms"):
             manifest_stat = manifest_path.stat()
 
@@ -325,9 +391,10 @@ class AtomicSegmentPublisher:
                     with metadata_path.open("rb") as handle:
                         with timings.measure("metadata_fsync_ms"):
                             file_sync(handle.fileno())
-                    with manifest_path.open("rb") as handle:
-                        with timings.measure("manifest_fsync_ms"):
-                            file_sync(handle.fileno())
+                    if self._metadata_layout == "split":
+                        with manifest_path.open("rb") as handle:
+                            with timings.measure("manifest_fsync_ms"):
+                                file_sync(handle.fileno())
                     with timings.measure("staging_dir_fsync_ms"):
                         _fsync_directory(fragment.staging_dir)
 
@@ -401,6 +468,13 @@ class AtomicSegmentPublisher:
                 "publish_file_sync_mode": self._file_sync_mode,
                 "publish_file_fdatasync_enabled": int(
                     self._file_sync_mode == "fdatasync"
+                ),
+                "publish_metadata_layout": self._metadata_layout,
+                "publish_single_inode_enabled": int(
+                    self._metadata_layout == "single_inode"
+                ),
+                "publish_regular_file_sync_count": (
+                    1 if self._metadata_layout == "single_inode" else 2
                 ),
                 **{
                     (

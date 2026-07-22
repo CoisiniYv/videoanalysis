@@ -491,6 +491,7 @@ class PressureConfig:
     rolling_cache_publication_workers: int = 1
     rolling_cache_publication_commit_slots: int = 0
     rolling_cache_publication_file_sync_mode: str = "fsync"
+    rolling_cache_publication_metadata_layout: str = "split"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -695,6 +696,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "Regular-file durability primitive for rolling metadata and "
             "manifest publication. The daily default is fsync; fdatasync is "
             "an explicit diagnostic and does not change directory fences."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-publication-metadata-layout",
+        choices=("split", "single_inode"),
+        default="split",
+        help=(
+            "Rolling metadata/manifest inode layout. The daily split default "
+            "retains two files; single_inode is an explicit one-file-fence "
+            "diagnostic that keeps both historical paths."
         ),
     )
     parser.add_argument(
@@ -1481,6 +1492,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         rolling_cache_publication_file_sync_mode=str(
             args.rolling_cache_publication_file_sync_mode
+        ),
+        rolling_cache_publication_metadata_layout=str(
+            args.rolling_cache_publication_metadata_layout
         ),
         preserve_warmup_results=bool(args.preserve_warmup_results),
     )
@@ -4520,6 +4534,9 @@ def start_rolling_cache_sinks_for_pressure(
             "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": (
                 cfg.rolling_cache_publication_file_sync_mode
             ),
+            "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": (
+                cfg.rolling_cache_publication_metadata_layout
+            ),
             "ROLLING_CACHE_FPS": _format_fps_float(rolling_cache_input_fps),
             "ROLLING_CACHE_RUNTIME_EPOCH_ID": runtime_epoch_id,
             "ROLLING_CACHE_RETENTION_SECONDS": str(
@@ -4606,6 +4623,9 @@ def start_rolling_cache_sinks_for_pressure(
         "rolling_cache_publication_file_sync_mode": (
             cfg.rolling_cache_publication_file_sync_mode
         ),
+        "rolling_cache_publication_metadata_layout": (
+            cfg.rolling_cache_publication_metadata_layout
+        ),
         "observed_env": observed_env,
         "states": service_states,
         "dependency_states": dependency_states,
@@ -4660,6 +4680,17 @@ def start_rolling_cache_sinks_for_pressure(
         raise RuntimeError(
             "rolling-cache publication file sync mode was not applied "
             f"after compose recreate: {file_sync_mode_mismatches}"
+        )
+    metadata_layout_mismatches = {
+        service: values.get("ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT", "")
+        for service, values in observed_env.items()
+        if values.get("ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT", "")
+        != cfg.rolling_cache_publication_metadata_layout
+    }
+    if metadata_layout_mismatches:
+        raise RuntimeError(
+            "rolling-cache publication metadata layout was not applied "
+            f"after compose recreate: {metadata_layout_mismatches}"
         )
     return summary
 
@@ -10396,6 +10427,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_commit_slot_count",
                 "publish_commit_slot_index",
                 "publish_file_fdatasync_enabled",
+                "publish_single_inode_enabled",
+                "publish_regular_file_sync_count",
                 "publish_validate_ms",
                 "publish_metadata_write_ms",
                 "publish_metadata_fsync_ms",
@@ -10434,6 +10467,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_worker_count",
                 "publication_commit_slot_count",
                 "publication_file_fdatasync_enabled",
+                "publication_single_inode_enabled",
+                "publication_regular_file_sync_count",
                 "publication_queue_depth",
                 "publication_queue_depth_peak",
                 "publication_outstanding",

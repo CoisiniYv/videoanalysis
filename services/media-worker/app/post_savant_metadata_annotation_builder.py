@@ -94,6 +94,14 @@ def build_post_savant_annotation_sidecar(
 def load_native_metadata(path: Path) -> list[dict[str, Any]]:
     """Load video-file-sink metadata from JSONL, JSON array, or JSON object form."""
 
+    def native_records(values: list[object]) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in values
+            if isinstance(item, dict)
+            and item.get("schema_version") != "rolling-segment-manifest-v2"
+        ]
+
     text = path.read_text(encoding="utf-8")
     if not text.strip():
         return []
@@ -111,15 +119,15 @@ def load_native_metadata(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"invalid metadata JSONL at line {line_number}: {exc}") from exc
             if isinstance(value, dict):
                 frames.append(value)
-        return frames
+        return native_records(frames)
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
+        return native_records(payload)
     if isinstance(payload, dict):
         for key in ("frames", "metadata", "records"):
             value = payload.get(key)
             if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-        return [payload]
+                return native_records(value)
+        return native_records([payload])
     return []
 
 

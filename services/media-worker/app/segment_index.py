@@ -25,6 +25,7 @@ MUTATION_LOCK_FILE = ".rolling-cache-mutation.lock"
 READ_PIN_SCHEMA_VERSION = "rolling-segment-read-pin-v1"
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
+SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v2"
 MAX_SEGMENT_MANIFEST_BYTES = 64 * 1024
 SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
 SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
@@ -107,6 +108,7 @@ class _IndexedSegment:
 
 @dataclass(frozen=True)
 class _SegmentManifest:
+    schema_version: str
     segment_id: str
     source_id: str
     runtime_epoch_id: str
@@ -1092,12 +1094,22 @@ class RollingSegmentIndex:
         video_identity = identity("video")
         if (
             manifest_identity.size <= 0
-            or manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
             or metadata_identity.size != manifest.metadata_size_bytes
             or video_identity.size != manifest.video_size_bytes
             or video_identity.size < self.min_video_bytes
         ):
             raise ValueError("rolling_segment_publication_size_identity_invalid")
+        if (
+            manifest.schema_version == SEGMENT_MANIFEST_SCHEMA_VERSION
+            and manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
+        ):
+            raise ValueError("rolling_segment_publication_manifest_too_large")
+        if (
+            manifest.schema_version
+            == SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
+            and manifest_identity != metadata_identity
+        ):
+            raise ValueError("rolling_segment_publication_inode_alias_invalid")
 
         segment_dir = journal_path.parent / segment_id
         manifest_path = segment_dir / SEGMENT_MANIFEST_FILE
@@ -1370,7 +1382,6 @@ class RollingSegmentIndex:
             return
         if (
             manifest_identity.size <= 0
-            or manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
             or not self._is_stable(manifest_identity)
         ):
             catalog.pending.add(manifest_path)
@@ -1419,6 +1430,15 @@ class RollingSegmentIndex:
             self._remove_entry(catalog, manifest_path)
             return
         if (
+            manifest.schema_version == SEGMENT_MANIFEST_SCHEMA_VERSION
+            and manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
+        ):
+            self._increment_stat("parse_errors")
+            catalog.pending.add(manifest_path)
+            catalog.failed_identities[manifest_path] = manifest_identity
+            self._remove_entry(catalog, manifest_path)
+            return
+        if (
             manifest.segment_id != manifest_path.parent.name
             or manifest.source_id != catalog.source_id
             or manifest.runtime_epoch_id != catalog.runtime_epoch_id
@@ -1458,6 +1478,11 @@ class RollingSegmentIndex:
         if (
             manifest.metadata_size_bytes != metadata_identity.size
             or manifest.video_size_bytes != video_identity.size
+            or (
+                manifest.schema_version
+                == SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
+                and manifest_identity != metadata_identity
+            )
         ):
             self._increment_stat("parse_errors")
             catalog.pending.add(manifest_path)
@@ -1511,14 +1536,41 @@ class RollingSegmentIndex:
     def _parse_manifest(self, manifest_path: Path) -> _SegmentManifest:
         self._record_count("manifest_parses")
         with self._timed("manifest_parse_ms"):
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            with manifest_path.open("rb") as handle:
+                first_record = handle.readline(MAX_SEGMENT_MANIFEST_BYTES + 1)
+                if (
+                    not first_record
+                    or len(first_record) > MAX_SEGMENT_MANIFEST_BYTES
+                ):
+                    raise ValueError("rolling_segment_manifest_record_too_large")
+                payload = json.loads(first_record.decode("utf-8"))
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("schema_version")
+                    == SEGMENT_MANIFEST_SCHEMA_VERSION
+                ):
+                    remaining_budget = (
+                        MAX_SEGMENT_MANIFEST_BYTES - len(first_record) + 1
+                    )
+                    remainder = handle.read(max(1, remaining_budget))
+                    if (
+                        len(first_record) + len(remainder)
+                        > MAX_SEGMENT_MANIFEST_BYTES
+                    ):
+                        raise ValueError("rolling_segment_manifest_record_too_large")
+                    if remainder.strip():
+                        raise ValueError("rolling_segment_manifest_v1_trailing_data")
         return self._manifest_from_payload(payload)
 
     @staticmethod
     def _manifest_from_payload(payload: object) -> _SegmentManifest:
         if not isinstance(payload, dict):
             raise ValueError("rolling_segment_manifest_not_object")
-        if payload.get("schema_version") != SEGMENT_MANIFEST_SCHEMA_VERSION:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {
+            SEGMENT_MANIFEST_SCHEMA_VERSION,
+            SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION,
+        }:
             raise ValueError("rolling_segment_manifest_schema_invalid")
 
         def required_text(name: str) -> str:
@@ -1576,6 +1628,7 @@ class RollingSegmentIndex:
         ):
             raise ValueError("rolling_segment_manifest_source_bounds_invalid")
         return _SegmentManifest(
+            schema_version=str(schema_version),
             segment_id=required_text("segment_id"),
             source_id=required_text("source_id"),
             runtime_epoch_id=required_text("runtime_epoch_id"),
@@ -1597,6 +1650,8 @@ class RollingSegmentIndex:
                 row
                 for row in load_native_metadata(metadata_path)
                 if isinstance(row, dict)
+                and row.get("schema_version")
+                != SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
             ]
         self._increment_stat("metadata_parses")
         return rows

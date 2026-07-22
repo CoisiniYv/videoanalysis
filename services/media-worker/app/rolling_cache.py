@@ -787,6 +787,8 @@ def _select_rows(
             else load_native_metadata(segment.metadata_path)
         )
         for row in segment_rows:
+            if row.get("schema_version") == "rolling-segment-manifest-v2":
+                continue
             pts = _row_pts(row)
             if pts is None:
                 auxiliary_rows.append(row)
