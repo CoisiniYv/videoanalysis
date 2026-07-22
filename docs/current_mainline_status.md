@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `fa7731f`，pressure restore 修复 `da35730`，dispatcher observability
+  `f075b46`，pressure restore 修复 `da35730`，dispatcher observability
   `647dd2f`/`3c80722`，production grouping disable `555afef`，finalizer attribution
   `478bff5`；尚未合入，且 exact r300 仍未通过全部 Spec 33 容量门，不能声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
@@ -28,7 +28,7 @@ user157 在 `cb0595e` 完成后工作区干净。下表的“已实现”表示�
 | 双分支推理 | 单 GPU A/B，Replay/raw-fanout/Savant，自动或手动分片 | T4 40 路已验证；4090 60 路有早于最新双时间域改造的通过记录 |
 | ROI AdaFace | Savant 导出 ROI，独立 TensorRT worker 批量 embedding | T4 40、历史 4090 60 均有验证 |
 | 人体轨迹 | 独立 `person-observation-worker` 批量写 PostgreSQL；丢失 Redis group 后从 retained rows 自愈 | 40/60 压测报告均有覆盖；group 自愈与日志轮转已做代码/运行 smoke，仍缺 restart soak |
-| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass 与 default-off single-inode v2 publication | Rounds 27-32 的 grouping/arbitration/并发/fdatasync/single-inode 容量诊断均被拒绝；single-inode correctness 通过且 file sync 下降，但 directory sync、FIFO residence 和 visibility 退化，exact r300 与后续门仍未解锁 |
+| rolling-cache | 自有 GStreamer sink、原子 fragment/manifest、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service attribution、生产 preparation group limit=1、双时间域、分 catalog COW segment index、有界 I/O admission；工作分支另含 bounded pin、publication journal、selected-identity/metadata reuse、DB bulk-row rebase bypass、default-off single-inode v2 与 alias-free metadata-only v3 publication | Rounds 27-32 的 grouping/arbitration/并发/fdatasync/single-inode 容量诊断均被拒绝；metadata-only v3 静态和真实双镜像正确性通过，但压力容量尚未测，exact r300 与后续门仍未解锁 |
 | evidence 固化 | Scheduler V2、image/remux/finalizer lanes、进程 finalizer、DB pool | exact-lease 正确性通过；`a88472c` 后 finalizer publish 已不再是 p95 主约束，60 路严格容量门仍未闭合 |
 | 生命周期 | materialization v2、lease/fence/handoff、Replay create fencing | migrations 029–031；`2a57f20` exact-transfer 通过一小时正确性门 |
 | 热路径索引 | cleanup recovery 与 algorithm cooldown concurrent indexes | migration 032 已提交；目标 DB 是否应用仍需单独核对 |
@@ -370,14 +370,24 @@ Round 29-31 后续分别拒绝了 two-worker sharding、two-slot commit lanes �
 atomic rename、journal/reconcile 和 daily split default。`da35730` 同时确保 pressure cleanup 真正
 从 daily Compose 重建 sink 配置，不再只停掉带诊断环境的容器。
 
+`22aa940`/`f075b46` 已把上述 v3 合同先红后绿：`metadata.json` 第一行是有界
+`rolling-segment-manifest-v3`，其后为 exact native rows，且不创建
+`segment_manifest.json`。journal 中 v3 的 manifest/metadata identity 相等，但 index catalog key
+为 `metadata.json`；initial rebuild、periodic reconcile、fallback、read-pin fence 与 v1/v2
+兼容均保留。静态门为 191 + 243 + 47 passed（另 1 expected skip），focused selection 329
+passed。真实双镜像 artifact
+`rolling_publication_metadata_only_smoke_20260722T104522Z` 的 sink/index marker 均通过；它只关闭
+实现正确性，不代表 ext4/FIFO/visibility 容量改善。下一步仍是唯一变量的 360 秒 Candidate B
+width-three r300 因果诊断。
+
 ## 已知开放项
 
 ### P0/P1
 
 - 保持 production preparation limit=1、commit arbitration=False；显式 group/arbiter 只用于历史复现，
   不在生产 sink 启用；
-- 先以红测和真实容器证明 metadata-only v3 无 hard-link alias 的 crash/recovery/index 合同，再用
-  不变 360s r300 做唯一变量诊断；不组合调整 worker、queue、retention、index width、finalizer
+- metadata-only v3 的红测、静态与真实双镜像 crash/recovery/index 合同已通过；下一步只运行
+  不变 360s r300 唯一变量诊断，不组合调整 worker、queue、retention、index width、finalizer
   或 deadline；
 - 全部既有 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 Candidate B/width 3/
   retention/deadline 保持不变；

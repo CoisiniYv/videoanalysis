@@ -74,7 +74,12 @@ residence/dispatch p95 roughly doubles, capacity-wait events rise from 55 to
 200 and metadata visibility rises from 3.256 to 14.251 seconds. The hard-link
 alias therefore moved the ext4 durability cost rather than removing it. The
 next isolated contract removes only that alias while preserving the embedded
-control record, one file fsync, both directory fsyncs and atomic rename.
+control record, one file fsync, both directory fsyncs and atomic rename. Round
+33 now implements that default-off metadata-only v3 representation. Its red
+contracts, focused and broad static suites, and real dual-image publication/
+index/recovery smoke pass; the unchanged 360-second causal diagnostic remains
+pending, so no capacity claim or later-run authorization follows from the
+implementation proof.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -168,6 +173,8 @@ control record, one file fsync, both directory fsyncs and atomic rename.
 | `c4e54e6` | single-inode implementation proof | Records the static and dual-image durability/index/recovery smoke without claiming pressure capacity |
 | `2e5c173` | pressure sink restore red contracts | Requires diagnostic containers to be recreated from daily Compose while preserving their original running/stopped state |
 | `da35730` | pressure sink config restoration | Recreates only the affected sinks without dependencies, verifies state and prevents a diagnostic metadata layout from surviving cleanup |
+| `22aa940` | metadata-only v3 red contracts | Requires alias-free one-fence publication, metadata-keyed journal/reconcile/fallback discovery, exact native rows, v1/v2 compatibility, failure staging and pressure observability |
+| `f075b46` | default-off metadata-only v3 layout | Embeds the bounded v3 control record in `metadata.json`, omits the hard-link alias and preserves every directory, rename, journal, read-pin, FIFO and daily-default fence |
 
 ## Measurement rounds
 
@@ -2046,6 +2053,50 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   final-parent fsync, journal/reconcile authority, failure staging, FIFO bound
   and daily split default remain unchanged.
 
+### Round 33: metadata-only v3 implementation proof
+
+- Tests-only `22aa940` freezes the alias-free contract. `metadata.json` begins
+  with one bounded `rolling-segment-manifest-v3` record followed by the exact
+  native JSONL rows; `segment_manifest.json` must not exist. Publication still
+  performs one regular-file sync, staging-directory sync, atomic directory
+  rename and final-parent sync. Sync failure remains staged and invisible.
+- Implementation `f075b46` adds
+  `ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=metadata_only` while keeping the
+  daily/Compose/profile default `split`. The journal retains equal manifest/
+  metadata identities for v3, but Media Worker keys the catalog by
+  `metadata.json`. Initial rebuild, periodic membership reconciliation and
+  fallback discovery recognize only a bounded v3 first record when no alias
+  exists. v1 split and v2 hard-link entries retain their historical keys and
+  identity rules; both v2/v3 control records are excluded from native rows.
+- Static validation passed 191 sink/index/materialization/performance tests,
+  243 pressure/analyzer/deployment tests, and 47 additional Spec 33 lifecycle,
+  static-index, DB-index and finalizer tests with one expected skip. The focused
+  sink/index/pressure selection passed 329 tests. Compile, shell syntax,
+  Compose rendering and diff checks passed; the local Python environment has no
+  Ruff module, so no Ruff result is claimed.
+- Real dual-image artifact:
+  `/data/video-analytics/artifacts/rolling_publication_metadata_only_smoke_20260722T104522Z`.
+  Sink image
+  `sha256:237f063901d48adfd4265b519d1a40813d94df62717d506fcd197d71d8182bd0`
+  proved the exact v3 one-file/two-directory fence order, no alias, v1/v2
+  compatibility, five journaled successes, one injected metadata-sync failure
+  retained under staging, and a successful same-publisher successor. Marker:
+  `PASS_PUBLICATION_METADATA_ONLY_SINK_CONTAINER_SMOKE`.
+- Media Worker image
+  `sha256:5b451db0c4859a01471d2d05a183b3cc81f6109712e12592e42535162afa5c84`
+  consumed the mixed catalog, discovered a later v3 record journal-only while
+  retained-leaf enumeration was forbidden, recovered an unjournaled
+  post-rename crash-window v3 leaf through periodic membership reconciliation,
+  found all seven leaves through fallback, preserved metadata catalog keys and
+  exact frame rows, and rejected a changed v3 identity at read-pin publication
+  with zero marker residue. Marker:
+  `PASS_PUBLICATION_METADATA_ONLY_INDEX_CONTAINER_SMOKE`.
+- This closes only implementation correctness. It does not compare ext4
+  regular/directory service, FIFO residence/dispatch, capacity waits,
+  visibility, callback pressure, scheduler/DB phases or parsing under 60-route
+  pressure. The next sole runtime variable remains `split -> metadata_only` in
+  one unchanged 360-second Candidate B width-three r300 diagnostic.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -2152,12 +2203,10 @@ absent, all pressure artifacts are retained and about 184GB is free.
    reduced regular-file sync time, but failed residence, dispatch,
    capacity-wait, visibility and no-directory-shift gates. `single_inode` must
    remain diagnostic-only and cannot advance exact r300.
-5. Add red contracts for a default-off metadata-only v3 layout with no hard-link
-   alias. Preserve bounded first-record discovery, exact native rows,
-   journal-only discovery, filesystem crash-window reconciliation, legacy split
-   and v2 support, read-pin identity fencing, failure staging and pressure/
-   deployment audit. Keep both directory fsyncs and atomic rename unchanged.
-6. After static and real-container proof, run one unchanged 360-second
+5. Keep the committed metadata-only v3 implementation default-off. Its static
+   and dual-image correctness proof passes, but that does not establish causal
+   capacity or authorize a daily-default change.
+6. Run one unchanged 360-second
    Candidate B r300 diagnostic with that layout as the sole behavior variable.
    It must beat Round 26 regular-file/directory service, residence/dispatch,
    fewer-than-55 capacity waits and 3.256-second visibility without moving work

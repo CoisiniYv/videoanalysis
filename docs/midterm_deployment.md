@@ -188,6 +188,12 @@ bash scripts/midterm_stop.sh
 当前 env 默认 `FACE_VECTOR_BACKEND=pgvector`。启用 qdrant profile 还不等于 face-worker
 已切换；必须同时设置向量后端、检查 outbox/bootstrap/reconcile 和 fallback 指标。
 
+rolling publication 的日常布局固定为
+`ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=split`。`single_inode` 与
+`metadata_only` 只供带 artifact 的容量诊断显式选择；后者使用无 hard-link alias 的 v3
+`metadata.json` 首行 control record。二者都不是 8090 运行预设，也不能因实现/容器 smoke
+通过而改成部署默认值。
+
 ## 9. 端口
 
 | 端口 | 用途 |
