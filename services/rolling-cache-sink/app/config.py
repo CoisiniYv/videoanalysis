@@ -147,7 +147,7 @@ class SinkConfig:
             publication_metadata_layout=_choice(
                 "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
                 "split",
-                choices=("split", "single_inode"),
+                choices=("split", "single_inode", "metadata_only"),
             ),
             source_id=source_id,
             source_id_prefix=source_id_prefix,

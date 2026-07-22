@@ -26,6 +26,7 @@ from config import (
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
 SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v2"
+METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v3"
 SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
 SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
 SEGMENT_PUBLICATION_COMMIT_LOCK_FILE = ".segment-publication-commit.lock"
@@ -119,7 +120,7 @@ def _json_line(payload: dict[str, Any]) -> bytes:
     )
 
 
-def _single_inode_metadata_payload(
+def _embedded_manifest_metadata_payload(
     *,
     manifest: dict[str, Any],
     rows: list[dict[str, Any]],
@@ -135,7 +136,7 @@ def _single_inode_metadata_payload(
         if int(sized_manifest["metadata_size_bytes"]) == payload_size:
             return sized_manifest, payload
         sized_manifest["metadata_size_bytes"] = payload_size
-    raise RuntimeError("rolling_segment_single_inode_size_did_not_converge")
+    raise RuntimeError("rolling_segment_embedded_manifest_size_did_not_converge")
 
 
 class AtomicSegmentPublisher:
@@ -204,9 +205,13 @@ class AtomicSegmentPublisher:
             raise RuntimeError("fdatasync is unavailable on this platform")
         self._file_sync_mode = requested_file_sync_mode
         requested_metadata_layout = str(metadata_layout).strip().lower()
-        if requested_metadata_layout not in {"split", "single_inode"}:
+        if requested_metadata_layout not in {
+            "split",
+            "single_inode",
+            "metadata_only",
+        }:
             raise ValueError(
-                "metadata_layout must be split or single_inode, got "
+                "metadata_layout must be split, single_inode, or metadata_only, got "
                 f"{requested_metadata_layout!r}"
             )
         self._metadata_layout = requested_metadata_layout
@@ -271,11 +276,11 @@ class AtomicSegmentPublisher:
 
         video_size_bytes = video_stat.st_size
         manifest = {
-            "schema_version": (
-                SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
-                if self._metadata_layout == "single_inode"
-                else SEGMENT_MANIFEST_SCHEMA_VERSION
-            ),
+            "schema_version": {
+                "split": SEGMENT_MANIFEST_SCHEMA_VERSION,
+                "single_inode": SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION,
+                "metadata_only": METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION,
+            }[self._metadata_layout],
             "segment_id": fragment.segment_id,
             "source_id": self._source_id,
             "runtime_epoch_id": self._runtime_epoch_id,
@@ -295,8 +300,8 @@ class AtomicSegmentPublisher:
         }
         metadata_path = fragment.staging_dir / "metadata.json"
         manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
-        if self._metadata_layout == "single_inode":
-            manifest, metadata_payload = _single_inode_metadata_payload(
+        if self._metadata_layout != "split":
+            manifest, metadata_payload = _embedded_manifest_metadata_payload(
                 manifest=manifest,
                 rows=fragment.rows,
             )
@@ -306,8 +311,15 @@ class AtomicSegmentPublisher:
                     handle.flush()
             with timings.measure("metadata_stat_ms"):
                 metadata_stat = metadata_path.stat()
-            with timings.measure("manifest_write_ms"):
-                os.link(metadata_path, manifest_path)
+            if self._metadata_layout == "single_inode":
+                with timings.measure("manifest_write_ms"):
+                    os.link(metadata_path, manifest_path)
+                with timings.measure("manifest_stat_ms"):
+                    manifest_stat = manifest_path.stat()
+            else:
+                timings.record("manifest_write_ms", 0.0)
+                timings.record("manifest_stat_ms", 0.0)
+                manifest_stat = metadata_stat
             timings.record("manifest_fsync_ms", 0.0)
         else:
             with metadata_path.open("x", encoding="utf-8") as handle:
@@ -336,8 +348,8 @@ class AtomicSegmentPublisher:
                     )
                     handle.write("\n")
                     handle.flush()
-        with timings.measure("manifest_stat_ms"):
-            manifest_stat = manifest_path.stat()
+            with timings.measure("manifest_stat_ms"):
+                manifest_stat = manifest_path.stat()
 
         return _StagedPublication(
             fragment=fragment,
@@ -473,8 +485,11 @@ class AtomicSegmentPublisher:
                 "publish_single_inode_enabled": int(
                     self._metadata_layout == "single_inode"
                 ),
+                "publish_metadata_only_enabled": int(
+                    self._metadata_layout == "metadata_only"
+                ),
                 "publish_regular_file_sync_count": (
-                    1 if self._metadata_layout == "single_inode" else 2
+                    1 if self._metadata_layout != "split" else 2
                 ),
                 **{
                     (

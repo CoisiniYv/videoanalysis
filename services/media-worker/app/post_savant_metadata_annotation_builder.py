@@ -51,6 +51,10 @@ FORBIDDEN_IMAGE_FIELDS = {
     "base64_image",
     "frame_bytes",
 }
+ROLLING_SEGMENT_CONTROL_SCHEMA_VERSIONS = {
+    "rolling-segment-manifest-v2",
+    "rolling-segment-manifest-v3",
+}
 
 
 @dataclass(frozen=True)
@@ -99,7 +103,8 @@ def load_native_metadata(path: Path) -> list[dict[str, Any]]:
             item
             for item in values
             if isinstance(item, dict)
-            and item.get("schema_version") != "rolling-segment-manifest-v2"
+            and item.get("schema_version")
+            not in ROLLING_SEGMENT_CONTROL_SCHEMA_VERSIONS
         ]
 
     text = path.read_text(encoding="utf-8")

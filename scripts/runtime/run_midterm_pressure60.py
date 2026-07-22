@@ -700,12 +700,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--rolling-cache-publication-metadata-layout",
-        choices=("split", "single_inode"),
+        choices=("split", "single_inode", "metadata_only"),
         default="split",
         help=(
             "Rolling metadata/manifest inode layout. The daily split default "
             "retains two files; single_inode is an explicit one-file-fence "
-            "diagnostic that keeps both historical paths."
+            "diagnostic that keeps both historical paths; metadata_only is "
+            "an explicit v3 one-file-fence diagnostic without that alias."
         ),
     )
     parser.add_argument(
@@ -10474,6 +10475,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_commit_slot_index",
                 "publish_file_fdatasync_enabled",
                 "publish_single_inode_enabled",
+                "publish_metadata_only_enabled",
                 "publish_regular_file_sync_count",
                 "publish_validate_ms",
                 "publish_metadata_write_ms",
@@ -10514,6 +10516,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_commit_slot_count",
                 "publication_file_fdatasync_enabled",
                 "publication_single_inode_enabled",
+                "publication_metadata_only_enabled",
                 "publication_regular_file_sync_count",
                 "publication_queue_depth",
                 "publication_queue_depth_peak",

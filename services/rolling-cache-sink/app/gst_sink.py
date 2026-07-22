@@ -397,6 +397,7 @@ class SourcePipeline:
             "publish_commit_slot_count=%s publish_commit_slot_index=%s "
             "publish_file_sync_mode=%s publish_file_fdatasync_enabled=%s "
             "publish_metadata_layout=%s publish_single_inode_enabled=%s "
+            "publish_metadata_only_enabled=%s "
             "publish_regular_file_sync_count=%s "
             "publish_validate_ms=%s "
             "publish_metadata_write_ms=%s publish_metadata_fsync_ms=%s "
@@ -436,6 +437,7 @@ class SourcePipeline:
             timings.get("publish_file_fdatasync_enabled", "unavailable"),
             timings.get("publish_metadata_layout", "unavailable"),
             timings.get("publish_single_inode_enabled", "unavailable"),
+            timings.get("publish_metadata_only_enabled", "unavailable"),
             timings.get("publish_regular_file_sync_count", "unavailable"),
             timings.get("publish_validate_ms", "unavailable"),
             timings.get("publish_metadata_write_ms", "unavailable"),
@@ -544,13 +546,18 @@ class RollingCacheSink:
             int(config.publication_metadata_layout == "single_inode"),
         )
         metrics.set(
+            "publication_metadata_only_enabled",
+            int(config.publication_metadata_layout == "metadata_only"),
+        )
+        metrics.set(
             "publication_regular_file_sync_count",
-            1 if config.publication_metadata_layout == "single_inode" else 2,
+            1 if config.publication_metadata_layout != "split" else 2,
         )
         LOGGER.info(
             "publication dispatcher started workers=%d outstanding_limit=%d "
             "prepare_group_limit=%d commit_arbitration_enabled=%s "
             "commit_slot_count=%d file_sync_mode=%s metadata_layout=%s "
+            "metadata_only_enabled=%d "
             "regular_file_sync_count=%d",
             config.publication_workers,
             SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
@@ -559,7 +566,8 @@ class RollingCacheSink:
             config.publication_commit_slots,
             config.publication_file_sync_mode,
             config.publication_metadata_layout,
-            1 if config.publication_metadata_layout == "single_inode" else 2,
+            int(config.publication_metadata_layout == "metadata_only"),
+            1 if config.publication_metadata_layout != "split" else 2,
         )
 
         Gst.init(None)
@@ -687,6 +695,7 @@ class RollingCacheSink:
             "publication_commit_slot_count=%d "
             "publication_file_fdatasync_enabled=%d "
             "publication_single_inode_enabled=%d "
+            "publication_metadata_only_enabled=%d "
             "publication_regular_file_sync_count=%d "
             "publication_queue_depth=%d publication_queue_depth_peak=%d "
             "publication_outstanding=%d publication_outstanding_peak=%d "
@@ -725,7 +734,8 @@ class RollingCacheSink:
             self._config.publication_commit_slots,
             int(self._config.publication_file_sync_mode == "fdatasync"),
             int(self._config.publication_metadata_layout == "single_inode"),
-            1 if self._config.publication_metadata_layout == "single_inode" else 2,
+            int(self._config.publication_metadata_layout == "metadata_only"),
+            1 if self._config.publication_metadata_layout != "split" else 2,
             int(publication_state["queue_depth"]),
             int(publication_state["queue_depth_peak"]),
             int(publication_state["outstanding"]),

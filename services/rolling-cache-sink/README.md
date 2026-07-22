@@ -25,6 +25,10 @@ Published segments retain the consumer contract:
   segment_manifest.json
 ```
 
+The default-off `metadata_only` v3 diagnostic intentionally omits
+`segment_manifest.json`; its bounded manifest control record is the first line
+of `metadata.json`, followed by the exact native Savant JSONL rows.
+
 Finalized fragments are staged outside the source directory and become visible
 through one same-filesystem directory rename. Failed or interrupted fragments
 remain under `.rolling-cache-staging` without a visible `metadata.json` in any
@@ -41,3 +45,13 @@ final-parent fsync. Media Worker accepts both layouts, parses only the bounded
 first v2 record for discovery and excludes it from frame rows. This diagnostic
 does not use filesystem-wide sync and does not change the daily `split`
 default.
+
+`ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=metadata_only` retains the embedded
+representation with a v3 control record but creates no hard-link alias. It
+performs one regular-file sync followed by the unchanged staging-directory
+sync, atomic directory rename and final-parent sync. The publication journal
+records the metadata identity as both the catalog and metadata identity; Media
+Worker keys v3 catalog entries by `metadata.json` and keeps journal,
+filesystem reconciliation, fallback discovery, read-pin and v1/v2
+compatibility intact. This mode is also default-off; `split` remains the daily
+layout.

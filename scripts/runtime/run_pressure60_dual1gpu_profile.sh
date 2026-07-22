@@ -82,7 +82,7 @@ Environment overrides:
   ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE=<profile default>
                       Regular-file durability primitive: fsync or fdatasync.
   ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=<profile default>
-                      Metadata/manifest layout: split or single_inode.
+                      Metadata/manifest layout: split, single_inode, or metadata_only.
   MEDIA_WORKER_FINALIZER_WORKERS=<profile default>
                       Finalizer thread count.
   MEDIA_WORKER_FINALIZER_PROCESS_WORKERS=<profile default>

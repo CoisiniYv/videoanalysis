@@ -24,8 +24,10 @@ READ_PIN_DIR = ".read-pins"
 MUTATION_LOCK_FILE = ".rolling-cache-mutation.lock"
 READ_PIN_SCHEMA_VERSION = "rolling-segment-read-pin-v1"
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
+SEGMENT_METADATA_FILE = "metadata.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
 SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v2"
+METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v3"
 MAX_SEGMENT_MANIFEST_BYTES = 64 * 1024
 SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
 SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
@@ -682,19 +684,21 @@ class RollingSegmentIndex:
         if catalog is None:
             return {}
         with self._locked(catalog.lock):
-            return {
-                directory: (
+            identities: dict[
+                Path,
+                tuple[FileIdentity, FileIdentity],
+            ] = {}
+            for directory in selected_directories:
+                indexed = catalog.entries.get(directory / SEGMENT_MANIFEST_FILE)
+                if indexed is None:
+                    indexed = catalog.entries.get(directory / SEGMENT_METADATA_FILE)
+                if indexed is None:
+                    continue
+                identities[directory] = (
                     indexed.metadata_identity,
                     indexed.video_identity,
                 )
-                for directory in selected_directories
-                if (
-                    indexed := catalog.entries.get(
-                        directory / SEGMENT_MANIFEST_FILE
-                    )
-                )
-                is not None
-            }
+            return identities
 
     @staticmethod
     def _source_window_candidates(
@@ -1104,20 +1108,32 @@ class RollingSegmentIndex:
             and manifest_identity.size > MAX_SEGMENT_MANIFEST_BYTES
         ):
             raise ValueError("rolling_segment_publication_manifest_too_large")
-        if (
-            manifest.schema_version
-            == SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
-            and manifest_identity != metadata_identity
-        ):
-            raise ValueError("rolling_segment_publication_inode_alias_invalid")
+        if manifest_identity != metadata_identity:
+            if (
+                manifest.schema_version
+                == SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
+            ):
+                raise ValueError("rolling_segment_publication_inode_alias_invalid")
+            if (
+                manifest.schema_version
+                == METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION
+            ):
+                raise ValueError(
+                    "rolling_segment_publication_metadata_identity_invalid"
+                )
 
         segment_dir = journal_path.parent / segment_id
-        manifest_path = segment_dir / SEGMENT_MANIFEST_FILE
-        if self._runtime_epoch_from_path(manifest_path) != catalog.runtime_epoch_id:
+        catalog_path = segment_dir / (
+            SEGMENT_METADATA_FILE
+            if manifest.schema_version
+            == METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION
+            else SEGMENT_MANIFEST_FILE
+        )
+        if self._runtime_epoch_from_path(catalog_path) != catalog.runtime_epoch_id:
             raise ValueError("rolling_segment_publication_epoch_path_invalid")
         metadata_path = segment_dir / manifest.metadata_file
         video_path = segment_dir / manifest.video_file
-        existing = catalog.entries.get(manifest_path)
+        existing = catalog.entries.get(catalog_path)
         if existing is not None:
             if (
                 existing.manifest_identity != manifest_identity
@@ -1142,20 +1158,21 @@ class RollingSegmentIndex:
             source_first_pts=manifest.source_first_pts,
             source_last_pts=manifest.source_last_pts,
         )
-        catalog.entries[manifest_path] = _IndexedSegment(
+        catalog.entries[catalog_path] = _IndexedSegment(
             segment=segment,
             manifest_identity=manifest_identity,
             metadata_identity=metadata_identity,
             video_identity=video_identity,
         )
-        catalog.pending.discard(manifest_path)
-        catalog.failed_identities.pop(manifest_path, None)
+        catalog.pending.discard(catalog_path)
+        catalog.failed_identities.pop(catalog_path, None)
         catalog.containers.pop(segment_dir, None)
 
     def _rebuild(self, catalog: _Catalog, *, now: float, initial: bool) -> None:
         with self._timed("rebuild_ms"):
             catalog.publication_cursors = self._snapshot_publication_tails(catalog)
-            candidates: set[Path] = set()
+            manifest_candidates: set[Path] = set()
+            metadata_candidates: set[Path] = set()
             containers: dict[Path, int] = {}
             visited = 0
             for source_root in self._candidate_source_roots(
@@ -1170,11 +1187,18 @@ class RollingSegmentIndex:
                         raise RuntimeError("rolling_segment_index_scan_overflow")
                     if is_dir:
                         containers[path] = self._directory_mtime(path)
-                    elif (
-                        path.name == SEGMENT_MANIFEST_FILE
-                        and "materialized" not in path.parts
-                    ):
-                        candidates.add(path.resolve(strict=False))
+                    elif "materialized" not in path.parts:
+                        if path.name == SEGMENT_MANIFEST_FILE:
+                            manifest_candidates.add(path.resolve(strict=False))
+                        elif path.name == SEGMENT_METADATA_FILE:
+                            metadata_candidates.add(path.resolve(strict=False))
+            candidates = manifest_candidates | {
+                metadata_path
+                for metadata_path in metadata_candidates
+                if metadata_path.with_name(SEGMENT_MANIFEST_FILE)
+                not in manifest_candidates
+                and self._is_metadata_only_catalog_candidate(metadata_path)
+            }
             self._record_count("scanned_known", len(candidates))
             previous = set(catalog.entries)
             catalog.containers = containers
@@ -1319,21 +1343,40 @@ class RollingSegmentIndex:
                     child_path = Path(child.path)
                     child_directories.add(child_path)
                     manifest_path = child_path / SEGMENT_MANIFEST_FILE
+                    metadata_path = child_path / SEGMENT_METADATA_FILE
+                    known_path = next(
+                        (
+                            candidate
+                            for candidate in (manifest_path, metadata_path)
+                            if candidate in catalog.entries
+                            or candidate in catalog.pending
+                        ),
+                        None,
+                    )
                     if (
-                        manifest_path in catalog.entries
-                        and manifest_path not in catalog.pending
+                        known_path is not None
+                        and known_path in catalog.entries
+                        and known_path not in catalog.pending
                     ):
-                        current_manifests.add(manifest_path)
+                        current_manifests.add(known_path)
                         catalog.containers.pop(child_path, None)
                         continue
-                    if manifest_path.is_file():
-                        current_manifests.add(manifest_path)
+                    candidate_path = (
+                        manifest_path
+                        if manifest_path.is_file()
+                        else metadata_path
+                        if metadata_path.is_file()
+                        and self._is_metadata_only_catalog_candidate(metadata_path)
+                        else None
+                    )
+                    if candidate_path is not None:
+                        current_manifests.add(candidate_path)
                         catalog.containers.pop(child_path, None)
                         if (
-                            manifest_path not in catalog.entries
-                            or manifest_path in catalog.pending
+                            candidate_path not in catalog.entries
+                            or candidate_path in catalog.pending
                         ):
-                            self._refresh_candidate(catalog, manifest_path)
+                            self._refresh_candidate(catalog, candidate_path)
                         continue
                     previous_child_mtime = catalog.containers.get(child_path)
                     child_mtime = self._directory_mtime(child_path)
@@ -1438,8 +1481,15 @@ class RollingSegmentIndex:
             catalog.failed_identities[manifest_path] = manifest_identity
             self._remove_entry(catalog, manifest_path)
             return
+        expected_catalog_name = (
+            SEGMENT_METADATA_FILE
+            if manifest.schema_version
+            == METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION
+            else SEGMENT_MANIFEST_FILE
+        )
         if (
-            manifest.segment_id != manifest_path.parent.name
+            manifest_path.name != expected_catalog_name
+            or manifest.segment_id != manifest_path.parent.name
             or manifest.source_id != catalog.source_id
             or manifest.runtime_epoch_id != catalog.runtime_epoch_id
             or self._runtime_epoch_from_path(manifest_path)
@@ -1480,7 +1530,10 @@ class RollingSegmentIndex:
             or manifest.video_size_bytes != video_identity.size
             or (
                 manifest.schema_version
-                == SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
+                in {
+                    SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION,
+                    METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION,
+                }
                 and manifest_identity != metadata_identity
             )
         ):
@@ -1563,6 +1616,30 @@ class RollingSegmentIndex:
         return self._manifest_from_payload(payload)
 
     @staticmethod
+    def _is_metadata_only_catalog_candidate(metadata_path: Path) -> bool:
+        """Recognize v3 without treating arbitrary native JSON as a manifest.
+
+        A legacy or damaged segment may contain ``metadata.json`` without the
+        compact catalog file. Alias-free v3 discovery must not turn those
+        native rows into a full-row fallback or a pending catalog entry, so
+        membership scans perform only this bounded first-record probe.
+        """
+
+        try:
+            with metadata_path.open("rb") as handle:
+                first_record = handle.readline(MAX_SEGMENT_MANIFEST_BYTES + 1)
+            if not first_record or len(first_record) > MAX_SEGMENT_MANIFEST_BYTES:
+                return False
+            payload = json.loads(first_record.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("schema_version")
+            == METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION
+        )
+
+    @staticmethod
     def _manifest_from_payload(payload: object) -> _SegmentManifest:
         if not isinstance(payload, dict):
             raise ValueError("rolling_segment_manifest_not_object")
@@ -1570,6 +1647,7 @@ class RollingSegmentIndex:
         if schema_version not in {
             SEGMENT_MANIFEST_SCHEMA_VERSION,
             SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION,
+            METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION,
         }:
             raise ValueError("rolling_segment_manifest_schema_invalid")
 
@@ -1651,7 +1729,10 @@ class RollingSegmentIndex:
                 for row in load_native_metadata(metadata_path)
                 if isinstance(row, dict)
                 and row.get("schema_version")
-                != SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION
+                not in {
+                    SINGLE_INODE_SEGMENT_MANIFEST_SCHEMA_VERSION,
+                    METADATA_ONLY_SEGMENT_MANIFEST_SCHEMA_VERSION,
+                }
             ]
         self._increment_stat("metadata_parses")
         return rows
@@ -1737,12 +1818,25 @@ class RollingSegmentIndex:
         ):
             if not source_root.exists():
                 continue
-            for manifest_path in source_root.rglob(SEGMENT_MANIFEST_FILE):
+            manifest_paths = {
+                path.resolve(strict=False)
+                for path in source_root.rglob(SEGMENT_MANIFEST_FILE)
+                if "materialized" not in path.parts
+            }
+            metadata_paths = {
+                path.resolve(strict=False)
+                for path in source_root.rglob(SEGMENT_METADATA_FILE)
+                if "materialized" not in path.parts
+                and path.with_name(SEGMENT_MANIFEST_FILE).resolve(strict=False)
+                not in manifest_paths
+                and self._is_metadata_only_catalog_candidate(path)
+            }
+            for manifest_path in manifest_paths | metadata_paths:
                 if "materialized" in manifest_path.parts:
                     continue
                 self._refresh_candidate(
                     catalog,
-                    manifest_path.resolve(strict=False),
+                    manifest_path,
                 )
         return sorted(
             (entry.segment for entry in catalog.entries.values()),
