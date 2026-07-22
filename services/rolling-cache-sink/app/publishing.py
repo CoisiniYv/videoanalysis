@@ -23,6 +23,7 @@ SEGMENT_MANIFEST_FILE = "segment_manifest.json"
 SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
 SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
 SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
+SEGMENT_PUBLICATION_COMMIT_LOCK_FILE = ".segment-publication-commit.lock"
 SEGMENT_PUBLICATION_SCHEMA_VERSION = "rolling-segment-publication-v1"
 SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
@@ -62,6 +63,10 @@ class _PublicationPhaseTimings:
 
     def elapsed_ms(self) -> float:
         return max(0.0, (self._clock_ns() - self._started_ns) / 1_000_000.0)
+
+    def record(self, name: str, duration_ms: float) -> None:
+        duration_ms = max(0.0, float(duration_ms))
+        self._durations_ms[name] = self._durations_ms.get(name, 0.0) + duration_ms
 
     def finish(self, *, total_ms: float | None = None) -> dict[str, float]:
         if total_ms is None:
@@ -123,6 +128,7 @@ class AtomicSegmentPublisher:
         epoch_root = cache_root / namespace / "epochs" / epoch
         self._staging_root = epoch_root / ".rolling-cache-staging" / source / session
         self._segments_root = epoch_root / source / "segments"
+        self._commit_lock_path = epoch_root / SEGMENT_PUBLICATION_COMMIT_LOCK_FILE
         self._session_id = session
         self._runtime_epoch_id = epoch
         self._source_id = source
@@ -229,68 +235,100 @@ class AtomicSegmentPublisher:
         fragment = staged.fragment
         timings = staged.timings
         commit_started_ns = time.monotonic_ns()
+        commit_lock_hold_ms = 0.0
+        timings.record("commit_lock_wait_ms", 0.0)
         metadata_path = fragment.staging_dir / "metadata.json"
         manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
-        with metadata_path.open("rb") as handle:
-            with timings.measure("metadata_fsync_ms"):
-                os.fsync(handle.fileno())
-        with manifest_path.open("rb") as handle:
-            with timings.measure("manifest_fsync_ms"):
-                os.fsync(handle.fileno())
-        with timings.measure("staging_dir_fsync_ms"):
-            _fsync_directory(fragment.staging_dir)
+        try:
+            with self._commit_lock_path.open("a+b") as lock_handle:
+                lock_wait_started_ns = time.monotonic_ns()
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                finally:
+                    timings.record(
+                        "commit_lock_wait_ms",
+                        (time.monotonic_ns() - lock_wait_started_ns) / 1_000_000.0,
+                    )
 
-        with timings.measure("parent_prepare_ms"):
-            fragment.final_dir.parent.mkdir(parents=True, exist_ok=True)
-            if fragment.final_dir.exists():
-                raise FileExistsError(
-                    f"rolling_segment_final_collision:{fragment.segment_id}"
-                )
-        with timings.measure("rename_ms"):
-            os.replace(fragment.staging_dir, fragment.final_dir)
-        with timings.measure("parent_dir_fsync_ms"):
-            _fsync_directory(fragment.final_dir.parent)
-        with timings.measure("journal_append_ms"):
-            try:
-                _append_publication_record(
-                    segments_root=fragment.final_dir.parent,
-                    manifest=staged.manifest,
-                    manifest_stat=staged.manifest_stat,
-                    metadata_stat=staged.metadata_stat,
-                    video_stat=staged.video_stat,
-                )
-            except Exception as exc:
-                # The atomic segment directory is authoritative. The journal is a
-                # bounded discovery accelerator, so a crash or append failure in
-                # this post-commit window must leave the segment usable; the media
-                # worker's periodic directory reconciliation recovers it.
-                LOGGER.warning(
-                    "segment publication journal append failed source=%s epoch=%s "
-                    "segment=%s path=%s error=%s",
-                    self._source_id,
-                    self._runtime_epoch_id,
-                    fragment.segment_id,
-                    fragment.final_dir,
-                    exc,
-                )
-        commit_service_ms = max(
-            0.0,
-            (time.monotonic_ns() - commit_started_ns) / 1_000_000.0,
-        )
-        phase_diagnostics = timings.finish(
-            total_ms=staged.stage_service_ms + commit_service_ms
-        )
-        fragment.publication_diagnostics = {
-            "schema_version": "rolling-segment-publication-timing-v1",
-            "first_pts": staged.first_pts,
-            "last_pts": staged.last_pts,
-            "publish_stage_ms": round(staged.stage_service_ms, 3),
-            "publish_commit_ms": round(commit_service_ms, 3),
-            **{
-                (name if name.startswith("publish_") else f"publish_{name}"): value
-                for name, value in phase_diagnostics.items()
-            },
-        }
+                lock_hold_started_ns = time.monotonic_ns()
+                try:
+                    with metadata_path.open("rb") as handle:
+                        with timings.measure("metadata_fsync_ms"):
+                            os.fsync(handle.fileno())
+                    with manifest_path.open("rb") as handle:
+                        with timings.measure("manifest_fsync_ms"):
+                            os.fsync(handle.fileno())
+                    with timings.measure("staging_dir_fsync_ms"):
+                        _fsync_directory(fragment.staging_dir)
+
+                    with timings.measure("parent_prepare_ms"):
+                        fragment.final_dir.parent.mkdir(parents=True, exist_ok=True)
+                        if fragment.final_dir.exists():
+                            raise FileExistsError(
+                                "rolling_segment_final_collision:"
+                                f"{fragment.segment_id}"
+                            )
+                    with timings.measure("rename_ms"):
+                        os.replace(fragment.staging_dir, fragment.final_dir)
+                    with timings.measure("parent_dir_fsync_ms"):
+                        _fsync_directory(fragment.final_dir.parent)
+                    with timings.measure("journal_append_ms"):
+                        try:
+                            _append_publication_record(
+                                segments_root=fragment.final_dir.parent,
+                                manifest=staged.manifest,
+                                manifest_stat=staged.manifest_stat,
+                                metadata_stat=staged.metadata_stat,
+                                video_stat=staged.video_stat,
+                            )
+                        except Exception as exc:
+                            # The atomic segment directory is authoritative. The
+                            # journal is a bounded discovery accelerator, so a
+                            # crash or append failure in this post-commit window
+                            # leaves the segment usable; periodic reconciliation
+                            # recovers it.
+                            LOGGER.warning(
+                                "segment publication journal append failed "
+                                "source=%s epoch=%s segment=%s path=%s error=%s",
+                                self._source_id,
+                                self._runtime_epoch_id,
+                                fragment.segment_id,
+                                fragment.final_dir,
+                                exc,
+                            )
+                finally:
+                    try:
+                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                    finally:
+                        commit_lock_hold_ms = max(
+                            0.0,
+                            (
+                                time.monotonic_ns() - lock_hold_started_ns
+                            )
+                            / 1_000_000.0,
+                        )
+        finally:
+            commit_service_ms = max(
+                0.0,
+                (time.monotonic_ns() - commit_started_ns) / 1_000_000.0,
+            )
+            phase_diagnostics = timings.finish(
+                total_ms=staged.stage_service_ms + commit_service_ms
+            )
+            fragment.publication_diagnostics = {
+                "schema_version": "rolling-segment-publication-timing-v1",
+                "first_pts": staged.first_pts,
+                "last_pts": staged.last_pts,
+                "publish_stage_ms": round(staged.stage_service_ms, 3),
+                "publish_commit_ms": round(commit_service_ms, 3),
+                "publish_commit_lock_hold_ms": round(commit_lock_hold_ms, 3),
+                **{
+                    (
+                        name if name.startswith("publish_") else f"publish_{name}"
+                    ): value
+                    for name, value in phase_diagnostics.items()
+                },
+            }
         return fragment.final_dir
 
     def publish(self, fragment: Fragment) -> Path:
@@ -454,6 +492,14 @@ class _PreparedPublication:
     group_position: int
 
 
+def _diagnostic_duration_ms(fragment: Any, name: str) -> float:
+    diagnostics = getattr(fragment, "publication_diagnostics", {}) or {}
+    try:
+        return max(0.0, float(diagnostics.get(name, 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class BoundedPublicationDispatcher:
     """Prepare bounded FIFO groups, then durably commit them on one worker.
 
@@ -509,6 +555,11 @@ class BoundedPublicationDispatcher:
         self._prepare_service_ms_max = 0.0
         self._commit_wait_ms_total = 0.0
         self._commit_wait_ms_max = 0.0
+        self._commit_lock_wait_ms_total = 0.0
+        self._commit_lock_wait_ms_max = 0.0
+        self._commit_lock_wait_events_total = 0
+        self._commit_lock_hold_ms_total = 0.0
+        self._commit_lock_hold_ms_max = 0.0
         self._queue_residence_ms_total = 0.0
         self._queue_residence_ms_max = 0.0
         self._queue_residence_events_total = 0
@@ -761,6 +812,14 @@ class BoundedPublicationDispatcher:
             worker_service_ms=worker_service_ms,
             dispatch_total_ms=dispatch_total_ms,
         )
+        commit_lock_wait_ms = _diagnostic_duration_ms(
+            queued.fragment,
+            "publish_commit_lock_wait_ms",
+        )
+        commit_lock_hold_ms = _diagnostic_duration_ms(
+            queued.fragment,
+            "publish_commit_lock_hold_ms",
+        )
 
         if failed:
             assert error is not None
@@ -802,6 +861,18 @@ class BoundedPublicationDispatcher:
             self._commit_wait_ms_max = max(
                 self._commit_wait_ms_max,
                 commit_wait_ms,
+            )
+            self._commit_lock_wait_ms_total += commit_lock_wait_ms
+            self._commit_lock_wait_ms_max = max(
+                self._commit_lock_wait_ms_max,
+                commit_lock_wait_ms,
+            )
+            if commit_lock_wait_ms >= 1.0:
+                self._commit_lock_wait_events_total += 1
+            self._commit_lock_hold_ms_total += commit_lock_hold_ms
+            self._commit_lock_hold_ms_max = max(
+                self._commit_lock_hold_ms_max,
+                commit_lock_hold_ms,
             )
             self._queue_residence_ms_total += item.queue_residence_ms
             self._queue_residence_ms_max = max(
@@ -904,6 +975,25 @@ class BoundedPublicationDispatcher:
             ),
             "commit_wait_ms_total": round(self._commit_wait_ms_total, 3),
             "commit_wait_ms_max": round(self._commit_wait_ms_max, 3),
+            "commit_lock_wait_ms_total": round(
+                self._commit_lock_wait_ms_total,
+                3,
+            ),
+            "commit_lock_wait_ms_max": round(
+                self._commit_lock_wait_ms_max,
+                3,
+            ),
+            "commit_lock_wait_events_total": (
+                self._commit_lock_wait_events_total
+            ),
+            "commit_lock_hold_ms_total": round(
+                self._commit_lock_hold_ms_total,
+                3,
+            ),
+            "commit_lock_hold_ms_max": round(
+                self._commit_lock_hold_ms_max,
+                3,
+            ),
             "queue_residence_ms_total": round(
                 self._queue_residence_ms_total,
                 3,

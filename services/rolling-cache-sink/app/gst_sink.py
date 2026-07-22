@@ -385,6 +385,8 @@ class SourcePipeline:
             "segment published source=%s epoch=%s session=%s segment=%s "
             "frames=%d bytes=%d first_pts=%s last_pts=%s "
             "publish_total_ms=%s publish_stage_ms=%s publish_commit_ms=%s "
+            "publish_commit_lock_wait_ms=%s "
+            "publish_commit_lock_hold_ms=%s "
             "publish_validate_ms=%s "
             "publish_metadata_write_ms=%s publish_metadata_fsync_ms=%s "
             "publish_metadata_stat_ms=%s publish_manifest_write_ms=%s "
@@ -414,6 +416,8 @@ class SourcePipeline:
             timings.get("publish_total_ms", "unavailable"),
             timings.get("publish_stage_ms", "unavailable"),
             timings.get("publish_commit_ms", "unavailable"),
+            timings.get("publish_commit_lock_wait_ms", "unavailable"),
+            timings.get("publish_commit_lock_hold_ms", "unavailable"),
             timings.get("publish_validate_ms", "unavailable"),
             timings.get("publish_metadata_write_ms", "unavailable"),
             timings.get("publish_metadata_fsync_ms", "unavailable"),
@@ -649,6 +653,11 @@ class RollingCacheSink:
             "publication_prepare_service_ms_max=%.3f "
             "publication_commit_wait_ms_total=%.3f "
             "publication_commit_wait_ms_max=%.3f "
+            "publication_commit_lock_wait_ms_total=%.3f "
+            "publication_commit_lock_wait_ms_max=%.3f "
+            "publication_commit_lock_wait_events_total=%d "
+            "publication_commit_lock_hold_ms_total=%.3f "
+            "publication_commit_lock_hold_ms_max=%.3f "
             "publication_queue_residence_ms_total=%.3f "
             "publication_queue_residence_ms_max=%.3f "
             "publication_queue_residence_events_total=%d "
@@ -681,6 +690,11 @@ class RollingCacheSink:
             float(publication_state["prepare_service_ms_max"]),
             float(publication_state["commit_wait_ms_total"]),
             float(publication_state["commit_wait_ms_max"]),
+            float(publication_state["commit_lock_wait_ms_total"]),
+            float(publication_state["commit_lock_wait_ms_max"]),
+            int(publication_state["commit_lock_wait_events_total"]),
+            float(publication_state["commit_lock_hold_ms_total"]),
+            float(publication_state["commit_lock_hold_ms_max"]),
             float(publication_state["queue_residence_ms_total"]),
             float(publication_state["queue_residence_ms_max"]),
             int(publication_state["queue_residence_events_total"]),
