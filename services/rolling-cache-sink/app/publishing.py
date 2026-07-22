@@ -6,6 +6,7 @@ import fcntl
 import json
 import logging
 import os
+import queue
 import shutil
 import threading
 import time
@@ -25,6 +26,7 @@ SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
 SEGMENT_PUBLICATION_SCHEMA_VERSION = "rolling-segment-publication-v1"
 SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
+SEGMENT_PUBLICATION_OUTSTANDING_LIMIT = 128
 
 LOGGER = logging.getLogger("rolling_cache_sink.publisher")
 
@@ -368,6 +370,238 @@ def _append_publication_record(
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
+@dataclass(frozen=True)
+class _QueuedPublication:
+    source_id: str
+    publisher: Any
+    fragment: Fragment
+    on_published: Callable[[Fragment, Path], None] | None
+    on_publish_error: Callable[[Fragment, Exception], None] | None
+
+
+class BoundedPublicationDispatcher:
+    """Run durable segment publication on one bounded FIFO worker.
+
+    One worker intentionally preserves the sink's existing publication
+    concurrency and global/per-source order. The finite outstanding semaphore
+    absorbs rare fsync stalls; once full, the GLib callback blocks at submit as
+    explicit backpressure instead of dropping a finalized fragment or growing
+    an unbounded executor queue.
+    """
+
+    _STOP = object()
+
+    def __init__(
+        self,
+        *,
+        capacity: int = SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+        metrics: Any | None = None,
+        thread_name: str = "rolling-cache-publication",
+    ) -> None:
+        self.capacity = max(1, int(capacity))
+        self.worker_count = 1
+        self._metrics = metrics
+        self._queue: queue.Queue[_QueuedPublication | object] = queue.Queue(
+            maxsize=self.capacity
+        )
+        self._slots = threading.BoundedSemaphore(self.capacity)
+        self._state_lock = threading.Lock()
+        self._idle = threading.Event()
+        self._idle.set()
+        self._accepting = True
+        self._outstanding = 0
+        self._outstanding_peak = 0
+        self._active = 0
+        self._queue_depth_peak = 0
+        self._submitted_total = 0
+        self._completed_total = 0
+        self._failed_total = 0
+        self._queue_wait_ms_total = 0.0
+        self._queue_wait_ms_max = 0.0
+        self._queue_wait_events_total = 0
+        self._shutdown_timeout_total = 0
+        self._thread = threading.Thread(
+            target=self._run,
+            name=thread_name,
+            daemon=True,
+        )
+        self._thread.start()
+        self._sync_metrics(self.snapshot())
+
+    def submit(
+        self,
+        *,
+        source_id: str,
+        publisher: Any,
+        fragment: Fragment,
+        on_published: Callable[[Fragment, Path], None] | None = None,
+        on_publish_error: Callable[[Fragment, Exception], None] | None = None,
+    ) -> None:
+        with self._state_lock:
+            if not self._accepting:
+                raise RuntimeError("rolling_segment_publication_dispatcher_closed")
+
+        wait_started_at = time.monotonic()
+        self._slots.acquire()
+        wait_ms = max(0.0, (time.monotonic() - wait_started_at) * 1000.0)
+        with self._state_lock:
+            if not self._accepting:
+                self._slots.release()
+                raise RuntimeError("rolling_segment_publication_dispatcher_closed")
+            self._outstanding += 1
+            self._submitted_total += 1
+            self._outstanding_peak = max(
+                self._outstanding_peak,
+                self._outstanding,
+            )
+            queue_depth = max(0, self._outstanding - self._active)
+            self._queue_depth_peak = max(self._queue_depth_peak, queue_depth)
+            self._queue_wait_ms_total += wait_ms
+            self._queue_wait_ms_max = max(self._queue_wait_ms_max, wait_ms)
+            if wait_ms >= 1.0:
+                self._queue_wait_events_total += 1
+            self._idle.clear()
+            state = self._snapshot_locked()
+        task = _QueuedPublication(
+            source_id=str(source_id),
+            publisher=publisher,
+            fragment=fragment,
+            on_published=on_published,
+            on_publish_error=on_publish_error,
+        )
+        try:
+            self._queue.put_nowait(task)
+        except Exception:
+            with self._state_lock:
+                self._outstanding -= 1
+                self._submitted_total -= 1
+                if self._outstanding == 0:
+                    self._idle.set()
+                state = self._snapshot_locked()
+            self._slots.release()
+            self._sync_metrics(state)
+            raise
+        self._sync_metrics(state)
+
+    def snapshot(self) -> dict[str, int | float | bool]:
+        with self._state_lock:
+            return self._snapshot_locked()
+
+    def close(self, *, timeout_s: float) -> bool:
+        timeout_s = max(0.0, float(timeout_s))
+        started_at = time.monotonic()
+        with self._state_lock:
+            self._accepting = False
+            state = self._snapshot_locked()
+        self._sync_metrics(state)
+        if not self._idle.wait(timeout_s):
+            with self._state_lock:
+                self._shutdown_timeout_total += 1
+                state = self._snapshot_locked()
+            self._sync_metrics(state)
+            return False
+        if not self._thread.is_alive():
+            return True
+        try:
+            self._queue.put_nowait(self._STOP)
+        except queue.Full:
+            with self._state_lock:
+                self._shutdown_timeout_total += 1
+                state = self._snapshot_locked()
+            self._sync_metrics(state)
+            return False
+        remaining_s = max(0.0, timeout_s - (time.monotonic() - started_at))
+        self._thread.join(remaining_s)
+        if self._thread.is_alive():
+            with self._state_lock:
+                self._shutdown_timeout_total += 1
+                state = self._snapshot_locked()
+            self._sync_metrics(state)
+            return False
+        return True
+
+    def _run(self) -> None:
+        while True:
+            queued = self._queue.get()
+            if queued is self._STOP:
+                self._queue.task_done()
+                return
+            assert isinstance(queued, _QueuedPublication)
+            with self._state_lock:
+                self._active = 1
+                state = self._snapshot_locked()
+            self._sync_metrics(state)
+            failed = False
+            try:
+                final_dir = queued.publisher.publish(queued.fragment)
+            except Exception as exc:
+                failed = True
+                if queued.on_publish_error is not None:
+                    try:
+                        queued.on_publish_error(queued.fragment, exc)
+                    except Exception:
+                        LOGGER.exception(
+                            "segment publication error callback failed "
+                            "source=%s segment=%s",
+                            queued.source_id,
+                            queued.fragment.segment_id,
+                        )
+            else:
+                if queued.on_published is not None:
+                    try:
+                        queued.on_published(queued.fragment, final_dir)
+                    except Exception:
+                        failed = True
+                        LOGGER.exception(
+                            "segment publication success callback failed "
+                            "source=%s segment=%s",
+                            queued.source_id,
+                            queued.fragment.segment_id,
+                        )
+            finally:
+                with self._state_lock:
+                    self._active = 0
+                    self._outstanding = max(0, self._outstanding - 1)
+                    if failed:
+                        self._failed_total += 1
+                    else:
+                        self._completed_total += 1
+                    if self._outstanding == 0:
+                        self._idle.set()
+                    state = self._snapshot_locked()
+                self._slots.release()
+                self._queue.task_done()
+                self._sync_metrics(state)
+
+    def _snapshot_locked(self) -> dict[str, int | float | bool]:
+        return {
+            "accepting": self._accepting,
+            "capacity": self.capacity,
+            "worker_count": self.worker_count,
+            "queue_depth": max(0, self._outstanding - self._active),
+            "queue_depth_peak": self._queue_depth_peak,
+            "outstanding": self._outstanding,
+            "outstanding_peak": self._outstanding_peak,
+            "active": self._active,
+            "submitted_total": self._submitted_total,
+            "completed_total": self._completed_total,
+            "failed_total": self._failed_total,
+            "queue_wait_ms_total": round(self._queue_wait_ms_total, 3),
+            "queue_wait_ms_max": round(self._queue_wait_ms_max, 3),
+            "queue_wait_events_total": self._queue_wait_events_total,
+            "shutdown_timeout_total": self._shutdown_timeout_total,
+        }
+
+    def _sync_metrics(self, state: dict[str, int | float | bool]) -> None:
+        if self._metrics is None:
+            return
+        for name, value in state.items():
+            if name == "accepting":
+                self._metrics.set("publication_accepting", int(bool(value)))
+                continue
+            self._metrics.set(f"publication_{name}", float(value))
+
+
 class FragmentLedger:
     """Assign frame rows to splitmux fragments and finalize closed fragments."""
 
@@ -375,10 +609,12 @@ class FragmentLedger:
         self,
         publisher: AtomicSegmentPublisher,
         *,
+        publication_dispatcher: BoundedPublicationDispatcher | None = None,
         on_published: Callable[[Fragment, Path], None] | None = None,
         on_publish_error: Callable[[Fragment, Exception], None] | None = None,
     ) -> None:
         self._publisher = publisher
+        self._publication_dispatcher = publication_dispatcher
         self._on_published = on_published
         self._on_publish_error = on_publish_error
         self._lock = threading.RLock()
@@ -388,6 +624,7 @@ class FragmentLedger:
         self._next_row_id = 0
         self._eos_rows: list[dict[str, Any]] = []
         self._pending_close_locations: set[str] = set()
+        self._pending_publications = 0
 
     def open_fragment(self, fragment_id: int, first_gst_pts: int) -> str:
         fragment = self._publisher.prepare(fragment_id)
@@ -467,6 +704,30 @@ class FragmentLedger:
             self._pending_close_locations.discard(location)
             self._by_location.pop(location, None)
             self._ordered.remove(fragment)
+            if self._publication_dispatcher is not None:
+                self._pending_publications += 1
+        if self._publication_dispatcher is not None:
+            try:
+                self._publication_dispatcher.submit(
+                    source_id=next(
+                        (
+                            str(row.get("source_id") or "")
+                            for row in fragment.rows
+                            if row.get("source_id")
+                        ),
+                        "unknown",
+                    ),
+                    publisher=self._publisher,
+                    fragment=fragment,
+                    on_published=self._async_published,
+                    on_publish_error=self._async_publish_error,
+                )
+            except Exception as exc:
+                self._publication_finished()
+                if self._on_publish_error is not None:
+                    self._on_publish_error(fragment, exc)
+                raise
+            return fragment.final_dir
         try:
             final_dir = self._publisher.publish(fragment)
         except Exception as exc:
@@ -479,7 +740,25 @@ class FragmentLedger:
 
     def pending_count(self) -> int:
         with self._lock:
-            return len(self._by_location)
+            return len(self._by_location) + self._pending_publications
+
+    def _async_published(self, fragment: Fragment, final_dir: Path) -> None:
+        try:
+            if self._on_published is not None:
+                self._on_published(fragment, final_dir)
+        finally:
+            self._publication_finished()
+
+    def _async_publish_error(self, fragment: Fragment, error: Exception) -> None:
+        try:
+            if self._on_publish_error is not None:
+                self._on_publish_error(fragment, error)
+        finally:
+            self._publication_finished()
+
+    def _publication_finished(self) -> None:
+        with self._lock:
+            self._pending_publications = max(0, self._pending_publications - 1)
 
     def abandon_pending(self) -> dict[str, int]:
         """Remove unpublished fragment staging after a pipeline is stopped.

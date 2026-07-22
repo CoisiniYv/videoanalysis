@@ -11,7 +11,13 @@ from typing import Any
 
 from config import EpochResolver, SinkConfig, safe_component
 from observability import SinkMetrics
-from publishing import AtomicSegmentPublisher, Fragment, FragmentLedger
+from publishing import (
+    SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+    AtomicSegmentPublisher,
+    BoundedPublicationDispatcher,
+    Fragment,
+    FragmentLedger,
+)
 
 
 LOGGER = logging.getLogger("rolling_cache_sink.gst")
@@ -33,6 +39,7 @@ class SourcePipeline:
         gst: Any,
         build_caps: Any,
         convert_ts: Any,
+        publication_dispatcher: BoundedPublicationDispatcher,
     ) -> None:
         self.source_id = safe_component(source_id, field="source_id")
         self.runtime_epoch_id = safe_component(
@@ -64,6 +71,7 @@ class SourcePipeline:
         )
         self._ledger = FragmentLedger(
             publisher,
+            publication_dispatcher=publication_dispatcher,
             on_published=self._on_published,
             on_publish_error=self._on_publish_error,
         )
@@ -420,6 +428,10 @@ class SourcePipeline:
             fragment.staging_dir,
             error,
         )
+        if self._closed:
+            self._metrics.inc("pipeline_errors_total")
+        else:
+            self._mark_failed(error)
 
     def _mark_failed(self, error: BaseException | str) -> None:
         if not self._failed.is_set():
@@ -464,6 +476,15 @@ class RollingCacheSink:
         self._h264_codec = Codec.H264
         self._contexts: dict[str, SourcePipeline] = {}
         self._stopping = False
+        self._publication_dispatcher = BoundedPublicationDispatcher(
+            capacity=SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+            metrics=metrics,
+            thread_name="rolling-cache-publication",
+        )
+        LOGGER.info(
+            "publication dispatcher started workers=1 outstanding_limit=%d",
+            SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
+        )
 
         Gst.init(None)
         self._main_loop = GLib.MainLoop()
@@ -538,6 +559,7 @@ class RollingCacheSink:
                     gst=self._gst,
                     build_caps=self._build_caps,
                     convert_ts=self._convert_ts,
+                    publication_dispatcher=self._publication_dispatcher,
                 )
             except Exception:
                 self._metrics.inc("pipeline_errors_total")
@@ -577,6 +599,38 @@ class RollingCacheSink:
         self._stopping = True
         for source_id in list(self._contexts):
             self._close_source(source_id, reason="adapter_shutdown", actual_eos=False)
+        publication_drained = self._publication_dispatcher.close(
+            timeout_s=self._config.shutdown_timeout_s
+        )
+        publication_state = self._publication_dispatcher.snapshot()
+        publication_log = LOGGER.info if publication_drained else LOGGER.error
+        publication_log(
+            "publication dispatcher stopped drained=%s "
+            "publication_capacity=%d publication_worker_count=%d "
+            "publication_queue_depth=%d publication_queue_depth_peak=%d "
+            "publication_outstanding=%d publication_outstanding_peak=%d "
+            "publication_active=%d publication_submitted_total=%d "
+            "publication_completed_total=%d publication_failed_total=%d "
+            "publication_queue_wait_ms_total=%.3f "
+            "publication_queue_wait_ms_max=%.3f "
+            "publication_queue_wait_events_total=%d "
+            "publication_shutdown_timeout_total=%d",
+            publication_drained,
+            int(publication_state["capacity"]),
+            int(publication_state["worker_count"]),
+            int(publication_state["queue_depth"]),
+            int(publication_state["queue_depth_peak"]),
+            int(publication_state["outstanding"]),
+            int(publication_state["outstanding_peak"]),
+            int(publication_state["active"]),
+            int(publication_state["submitted_total"]),
+            int(publication_state["completed_total"]),
+            int(publication_state["failed_total"]),
+            float(publication_state["queue_wait_ms_total"]),
+            float(publication_state["queue_wait_ms_max"]),
+            int(publication_state["queue_wait_events_total"]),
+            int(publication_state["shutdown_timeout_total"]),
+        )
         self._main_loop.quit()
         self._main_loop_thread.join(self._config.shutdown_timeout_s)
         if self._main_loop_thread.is_alive():
