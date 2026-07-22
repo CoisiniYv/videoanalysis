@@ -74,6 +74,20 @@ DEFAULT_PRESSURE_FPS = "8/1"
 DEFAULT_PRESSURE_DURATION_S = 600
 DEFAULT_PRESSURE_DRAIN_S = 120
 ROLLING_CACHE_FULL_RATE_MIN_RATIO = 0.90
+ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS = {
+    "ROLLING_CACHE_ROOT": "/media/rolling-cache",
+    "ROLLING_CACHE_SEGMENT_SECONDS": "4",
+    "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
+    "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "0",
+    "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fsync",
+    "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "split",
+    "ROLLING_CACHE_FPS": "24",
+    "ROLLING_CACHE_RUNTIME_EPOCH_ID": "",
+    "ROLLING_CACHE_RETENTION_SECONDS": "300",
+}
+ROLLING_CACHE_SINK_COMPOSE_ENV_KEYS = tuple(
+    ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS
+)
 SOURCE_CONTROLLER = Path("scripts/runtime/camera_source_controller.py")
 SOURCE_ADAPTER_SITECUSTOMIZE = (
     REPO_ROOT / "scripts/runtime/source_adapter_overlay/sitecustomize.py"
@@ -4436,6 +4450,38 @@ def _env_bool(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def daily_rolling_cache_sink_env(cfg: PressureConfig) -> dict[str, str]:
+    values = dict(ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
+    env_path = Path(cfg.env_file)
+    if not env_path.is_absolute():
+        env_path = REPO_ROOT / env_path
+    if not env_path.exists():
+        return values
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if key not in values:
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def daily_rolling_cache_sink_restore_process_env() -> tuple[dict[str, str], list[str]]:
+    env = os.environ.copy()
+    removed = []
+    for key in ROLLING_CACHE_SINK_COMPOSE_ENV_KEYS:
+        if key in env:
+            removed.append(key)
+            env.pop(key, None)
+    return env, removed
+
+
 def configure_media_worker_rolling_cache(
     cfg: PressureConfig,
     *,
@@ -4767,6 +4813,9 @@ def restore_rolling_cache_sinks_after_pressure(
         cfg.compose_file,
         *[item for profile in profiles for item in ("--profile", profile)],
     ]
+    restore_env, sanitized_inherited_env_keys = (
+        daily_rolling_cache_sink_restore_process_env()
+    )
     if services_to_stop:
         run(
             [
@@ -4779,6 +4828,7 @@ def restore_rolling_cache_sinks_after_pressure(
                 *services_to_stop,
             ],
             cfg.artifact_dir / artifact_name,
+            env=restore_env,
             check=True,
         )
     else:
@@ -4799,6 +4849,7 @@ def restore_rolling_cache_sinks_after_pressure(
                 *services_to_start,
             ],
             cfg.artifact_dir / running_log_name,
+            env=restore_env,
             check=True,
         )
     after = rolling_cache_sink_state_snapshot()
@@ -4812,6 +4863,38 @@ def restore_rolling_cache_sinks_after_pressure(
         if bool((after.get(service) or {}).get("running"))
         != (service in services_to_start)
     }
+    daily_expected_env = daily_rolling_cache_sink_env(cfg)
+    restored_raw_env = {
+        service: docker_container_env(
+            "video-analytics-midterm-rolling-cache-sink"
+            if service == "rolling-cache-sink"
+            else f"video-analytics-midterm-{service}"
+        )
+        for service in services
+    }
+    restored_env = {
+        service: {
+            key: raw_env.get(key, "")
+            for key in ROLLING_CACHE_SINK_COMPOSE_ENV_KEYS
+        }
+        for service, raw_env in restored_raw_env.items()
+    }
+    env_mismatches = {
+        service: {
+            key: {
+                "expected": daily_expected_env[key],
+                "observed": observed.get(key, ""),
+            }
+            for key in ROLLING_CACHE_SINK_COMPOSE_ENV_KEYS
+            if observed.get(key, "") != daily_expected_env[key]
+        }
+        for service, observed in restored_env.items()
+    }
+    env_mismatches = {
+        service: mismatches
+        for service, mismatches in env_mismatches.items()
+        if mismatches
+    }
     summary = {
         "profiles": profiles,
         "services": services,
@@ -4821,12 +4904,16 @@ def restore_rolling_cache_sinks_after_pressure(
         "original": original_states,
         "after": after,
         "state_mismatches": state_mismatches,
+        "sanitized_inherited_env_keys": sanitized_inherited_env_keys,
+        "daily_expected_env": daily_expected_env,
+        "restored_env": restored_env,
+        "env_mismatches": env_mismatches,
     }
     write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
-    if state_mismatches:
+    if state_mismatches or env_mismatches:
         raise RuntimeError(
-            "rolling-cache sink restore state mismatch: "
-            f"{state_mismatches}"
+            "rolling-cache sink restore mismatch: "
+            f"state={state_mismatches} env={env_mismatches}"
         )
     return summary
 

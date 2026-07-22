@@ -6312,6 +6312,8 @@ def test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compo
             "rolling-cache-sink-b": {"running": False, "status": "created"},
         },
     )
+    daily_env = dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
+    monkeypatch.setattr(module, "docker_container_env", lambda _name: daily_env)
 
     summary = module.restore_rolling_cache_sinks_after_pressure(
         cfg,
@@ -6417,6 +6419,46 @@ def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_d
     assert summary["env_mismatches"] == {}
 
 
+def test_restore_rolling_cache_sinks_fails_on_daily_env_mismatch(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+    )
+    observed_env = dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
+    observed_env["ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"] = "metadata_only"
+
+    monkeypatch.setattr(module, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "rolling_cache_sink_state_snapshot",
+        lambda: {
+            "rolling-cache-sink-a": {"running": False, "status": "created"},
+            "rolling-cache-sink-b": {"running": False, "status": "created"},
+        },
+    )
+    monkeypatch.setattr(
+        module, "docker_container_env", lambda _name: observed_env
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
+    ):
+        module.restore_rolling_cache_sinks_after_pressure(
+            cfg,
+            original_states={
+                "rolling-cache-sink-a": {"running": False, "status": "exited"},
+                "rolling-cache-sink-b": {"running": False, "status": "exited"},
+            },
+            artifact_name="compose_restore_rolling_cache_sinks.log",
+        )
+
+
 def test_restore_rolling_cache_sinks_restarts_only_originally_running_services(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -6444,6 +6486,8 @@ def test_restore_rolling_cache_sinks_restarts_only_originally_running_services(
             "rolling-cache-sink-b": {"running": False, "status": "created"},
         },
     )
+    daily_env = dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
+    monkeypatch.setattr(module, "docker_container_env", lambda _name: daily_env)
 
     summary = module.restore_rolling_cache_sinks_after_pressure(
         cfg,
