@@ -557,6 +557,7 @@ def _write_person_bbox_db_sidecar_fallback(
     )
     return summary, {
         "written": True,
+        "annotations": annotations,
         "annotations_path": str(annotations_path),
         "summary_path": str(summary_path),
     }
