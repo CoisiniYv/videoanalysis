@@ -123,6 +123,67 @@ def _write_manifest(
     return manifest
 
 
+def _write_single_inode_segment(
+    root: Path,
+    *,
+    epoch: str,
+    source_id: str,
+    name: str,
+    pts_values: list[int],
+    row_padding_bytes: int = 0,
+) -> tuple[Path, list[dict]]:
+    directory = root / "midterm" / "epochs" / epoch / source_id / "segments" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    video = directory / "video.mov"
+    metadata = directory / "metadata.json"
+    manifest_path = directory / "segment_manifest.json"
+    video.write_bytes((name.encode("utf-8") or b"x") * 512)
+    rows = [
+        {
+            "type": "VideoFrame",
+            "source_id": source_id,
+            "pts": pts,
+            "uuid": f"{name}-{index}",
+            "padding": "x" * row_padding_bytes,
+        }
+        for index, pts in enumerate(pts_values)
+    ]
+    manifest = {
+        "schema_version": "rolling-segment-manifest-v2",
+        "segment_id": name,
+        "source_id": source_id,
+        "runtime_epoch_id": epoch,
+        "video_file": video.name,
+        "metadata_file": metadata.name,
+        "first_pts": min(pts_values),
+        "last_pts": max(pts_values),
+        "frame_count": len(pts_values),
+        "source_first_pts": min(pts_values),
+        "source_last_pts": max(pts_values),
+        "video_size_bytes": video.stat().st_size,
+        "metadata_size_bytes": 0,
+    }
+    payload = b""
+    for _attempt in range(10):
+        payload = (
+            json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+            + b"\n"
+            + b"".join(
+                json.dumps(row, separators=(",", ":")).encode("utf-8") + b"\n"
+                for row in rows
+            )
+        )
+        if manifest["metadata_size_bytes"] == len(payload):
+            break
+        manifest["metadata_size_bytes"] = len(payload)
+    else:
+        raise AssertionError("single-inode metadata size did not converge")
+    metadata.write_bytes(payload)
+    os.link(metadata, manifest_path)
+    assert metadata.stat().st_ino == manifest_path.stat().st_ino
+    return directory, rows
+
+
 def _identity_payload(path: Path) -> dict[str, int]:
     stat = path.stat()
     return {
@@ -137,7 +198,9 @@ def _append_publication_record(directory: Path) -> Path:
     manifest_path = directory / "segment_manifest.json"
     metadata_path = directory / "metadata.json"
     video_path = directory / "video.mov"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8").splitlines()[0]
+    )
     record = {
         "schema_version": "rolling-segment-publication-v1",
         "source_id": manifest["source_id"],
@@ -337,6 +400,116 @@ def test_publication_journal_discovers_new_segment_without_directory_enumeration
     assert [segment.segment_id for segment in segments] == ["0001", "0002"]
     assert int(index.snapshot()["manifest_parses"]) == manifest_parses_before
     assert diagnostics["segment_index_publication_records"] == 1
+
+
+def test_single_inode_manifest_journal_is_bounded_and_frame_rows_stay_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    first = _write_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2],
+    )
+    _append_publication_record(first)
+    index = _index(root)
+    assert [
+        segment.segment_id
+        for segment in index.find_segments(
+            source_id="camera-01",
+            runtime_epoch_id="epoch-a",
+            allow_fallback=False,
+        )
+    ] == ["0001"]
+
+    second, expected_rows = _write_single_inode_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0002",
+        pts_values=list(range(3, 131)),
+        row_padding_bytes=1024,
+    )
+    assert (second / "metadata.json").stat().st_size > 64 * 1024
+    _append_publication_record(second)
+    segments_dir = second.parent.resolve(strict=False)
+    import app.segment_index as segment_index
+
+    real_scandir = segment_index.os.scandir
+
+    def reject_retention_directory_scan(path):
+        if Path(path).resolve(strict=False) == segments_dir:
+            raise AssertionError("steady refresh enumerated retained segment leaves")
+        return real_scandir(path)
+
+    monkeypatch.setattr(segment_index.os, "scandir", reject_retention_directory_scan)
+    before = index.snapshot()
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+    )
+    after_discovery = index.snapshot()
+
+    assert [segment.segment_id for segment in segments] == ["0001", "0002"]
+    assert int(after_discovery["full_row_parses"]) == int(before["full_row_parses"])
+    second_segment = next(segment for segment in segments if segment.segment_id == "0002")
+    assert index.rows_for_segment(second_segment) == expected_rows
+    assert all(
+        row.get("schema_version") != "rolling-segment-manifest-v2"
+        for row in index.rows_for_segment(second_segment)
+    )
+    after_rows = index.snapshot()
+    assert int(after_rows["full_row_parses"]) == int(before["full_row_parses"]) + 1
+    assert int(after_rows["publication_records"]) >= 1
+
+    expected_identities = index._catalog_segment_identities(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        segments=[second_segment],
+    )
+    with (second / "metadata.json").open("ab") as handle:
+        handle.write(b"{}\n")
+    from app.segment_index import SegmentPinRetryableError
+
+    with pytest.raises(SegmentPinRetryableError):
+        with index.pin_segments(
+            [second_segment],
+            _expected_identities=expected_identities,
+        ):
+            pass
+
+
+def test_single_inode_unjournaled_segment_is_recovered_by_manifest_reconcile(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    directory, expected_rows = _write_single_inode_segment(
+        root,
+        epoch="epoch-a",
+        source_id="camera-01",
+        name="0001",
+        pts_values=[1, 2, 3],
+        row_padding_bytes=32 * 1024,
+    )
+    assert not (directory.parent / ".segment-publications.jsonl").exists()
+    index = _index(root)
+
+    segments = index.find_segments(
+        source_id="camera-01",
+        runtime_epoch_id="epoch-a",
+        allow_fallback=False,
+    )
+
+    assert [segment.segment_id for segment in segments] == ["0001"]
+    assert index.rows_for_segment(segments[0]) == expected_rows
+    snapshot = index.snapshot()
+    assert int(snapshot["manifest_parses"]) == 1
+    assert int(snapshot["full_row_parses"]) == 1
+    assert int(snapshot["publication_records"]) == 0
 
 
 def test_periodic_reconcile_recovers_unjournaled_publish_and_retention_delete(

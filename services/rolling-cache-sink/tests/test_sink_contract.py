@@ -242,12 +242,178 @@ def test_atomic_publication_stages_before_the_unchanged_durable_commit(
     assert Path(events[1][1]).name == "segment_manifest.json"
     assert Path(events[2][1]).name.endswith(".partial")
     assert Path(events[4][1]).name == "segments"
+    assert (final_dir / "metadata.json").stat().st_ino != (
+        final_dir / "segment_manifest.json"
+    ).stat().st_ino
     assert fragment.publication_diagnostics["publish_stage_ms"] >= 0
     assert fragment.publication_diagnostics["publish_commit_ms"] >= 0
     assert fragment.publication_diagnostics["publish_file_sync_mode"] == "fsync"
     assert fragment.publication_diagnostics[
         "publish_file_fdatasync_enabled"
     ] == 0
+    assert fragment.publication_diagnostics["publish_metadata_layout"] == "split"
+    assert fragment.publication_diagnostics[
+        "publish_single_inode_enabled"
+    ] == 0
+    assert fragment.publication_diagnostics[
+        "publish_regular_file_sync_count"
+    ] == 2
+
+
+def test_single_inode_metadata_layout_uses_one_file_fsync_and_keeps_dir_fences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        metadata_layout="single_inode",
+    )
+    fragment = publisher.prepare(90)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {"source_id": "camera-01", "pts": 10, "uuid": "frame-10"},
+            {"source_id": "camera-01", "pts": 20, "uuid": "frame-20"},
+        ]
+    )
+    events: list[tuple[str, str]] = []
+    real_fsync = publishing.os.fsync
+    real_replace = publishing.os.replace
+
+    def record_fsync(fd: int) -> None:
+        events.append(("fsync", str(Path(f"/proc/self/fd/{fd}").resolve())))
+        real_fsync(fd)
+
+    def record_replace(source, destination) -> None:
+        events.append(("replace", f"{source}->{destination}"))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "fsync", record_fsync)
+    monkeypatch.setattr(publishing.os, "replace", record_replace)
+
+    staged = publisher.stage_publication(fragment)
+    metadata_path = fragment.staging_dir / "metadata.json"
+    manifest_path = fragment.staging_dir / "segment_manifest.json"
+    metadata_stat = metadata_path.stat()
+    manifest_stat = manifest_path.stat()
+    lines = metadata_path.read_text(encoding="utf-8").splitlines()
+    manifest = json.loads(lines[0])
+
+    assert events == []
+    assert (metadata_stat.st_dev, metadata_stat.st_ino) == (
+        manifest_stat.st_dev,
+        manifest_stat.st_ino,
+    )
+    assert metadata_stat.st_nlink == 2
+    assert manifest["schema_version"] == "rolling-segment-manifest-v2"
+    assert manifest["metadata_size_bytes"] == metadata_stat.st_size
+    assert [json.loads(line) for line in lines[1:]] == fragment.rows
+
+    final_dir = publisher.commit_publication(staged)
+
+    assert final_dir == fragment.final_dir
+    assert [kind for kind, _value in events] == [
+        "fsync",
+        "fsync",
+        "replace",
+        "fsync",
+    ]
+    assert Path(events[0][1]).name == "metadata.json"
+    assert Path(events[1][1]).name.endswith(".partial")
+    assert Path(events[3][1]).name == "segments"
+    assert fragment.publication_diagnostics["publish_metadata_layout"] == (
+        "single_inode"
+    )
+    assert fragment.publication_diagnostics[
+        "publish_single_inode_enabled"
+    ] == 1
+    assert fragment.publication_diagnostics[
+        "publish_regular_file_sync_count"
+    ] == 1
+    assert fragment.publication_diagnostics["publish_manifest_fsync_ms"] == 0
+
+
+def test_single_inode_file_sync_failure_preserves_staging_and_never_renames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        metadata_layout="single_inode",
+    )
+    fragment = publisher.prepare(93)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 10})
+    staged = publisher.stage_publication(fragment)
+    replace_called = False
+
+    def fail_fsync(_fd: int) -> None:
+        raise OSError("injected single-inode fsync failure")
+
+    def record_replace(_source, _destination) -> None:
+        nonlocal replace_called
+        replace_called = True
+
+    monkeypatch.setattr(publishing.os, "fsync", fail_fsync)
+    monkeypatch.setattr(publishing.os, "replace", record_replace)
+
+    with pytest.raises(OSError, match="injected single-inode fsync failure"):
+        publisher.commit_publication(staged)
+
+    metadata_stat = (fragment.staging_dir / "metadata.json").stat()
+    manifest_stat = (fragment.staging_dir / "segment_manifest.json").stat()
+    assert replace_called is False
+    assert fragment.staging_dir.is_dir()
+    assert fragment.final_dir.exists() is False
+    assert metadata_stat.st_ino == manifest_stat.st_ino
+    assert fragment.publication_diagnostics["publish_metadata_layout"] == (
+        "single_inode"
+    )
+    assert fragment.publication_diagnostics[
+        "publish_regular_file_sync_count"
+    ] == 1
+
+
+def test_single_inode_publication_journal_records_one_aliased_identity(
+    tmp_path: Path,
+) -> None:
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        metadata_layout="single_inode",
+    )
+    fragment = publisher.prepare(94)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.extend(
+        [
+            {"source_id": "camera-01", "pts": 10},
+            {"source_id": "camera-01", "pts": 20},
+        ]
+    )
+
+    final_dir = publisher.publish(fragment)
+
+    record = json.loads(
+        (final_dir.parent / ".segment-publications.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert record["manifest"]["schema_version"] == "rolling-segment-manifest-v2"
+    assert record["identities"]["manifest"] == record["identities"]["metadata"]
+    assert (final_dir / "metadata.json").stat().st_ino == (
+        final_dir / "segment_manifest.json"
+    ).stat().st_ino
 
 
 def test_atomic_publication_fdatasync_mode_keeps_directory_fsync_and_order(
@@ -2078,6 +2244,7 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
         "ROLLING_CACHE_PUBLICATION_WORKERS",
         "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
         "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
+        "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
     ):
         monkeypatch.delenv(name, raising=False)
     config = SinkConfig.from_env()
@@ -2086,6 +2253,7 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert config.publication_workers == 1
     assert config.publication_commit_slots == 0
     assert config.publication_file_sync_mode == "fsync"
+    assert config.publication_metadata_layout == "split"
 
 
 def test_config_accepts_bounded_publication_workers(
@@ -2151,5 +2319,30 @@ def test_config_rejects_unknown_publication_file_sync_mode(
     with pytest.raises(
         ValueError,
         match="ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
+    ):
+        SinkConfig.from_env()
+
+
+def test_config_accepts_single_inode_publication_metadata_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv(
+        "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
+        "single_inode",
+    )
+
+    assert SinkConfig.from_env().publication_metadata_layout == "single_inode"
+
+
+def test_config_rejects_unknown_publication_metadata_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT", "syncfs")
+
+    with pytest.raises(
+        ValueError,
+        match="ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
     ):
         SinkConfig.from_env()

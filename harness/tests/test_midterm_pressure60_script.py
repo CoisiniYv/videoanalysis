@@ -639,6 +639,31 @@ def test_profile_propagates_rolling_cache_publication_file_sync_mode() -> None:
     )
 
 
+def test_profile_propagates_rolling_cache_publication_metadata_layout() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "publication-metadata-layout-dry-run",
+            "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "single_inode",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert (
+        "rolling_cache_publication_metadata_layout=single_inode"
+        in completed.stdout
+    )
+    assert (
+        "--rolling-cache-publication-metadata-layout single_inode"
+        in completed.stdout
+    )
+
+
 def test_pressure_cli_bounds_rolling_cache_publication_workers() -> None:
     module = _load_module()
 
@@ -682,6 +707,22 @@ def test_pressure_cli_bounds_rolling_cache_publication_file_sync_mode() -> None:
     with pytest.raises(SystemExit):
         module.parse_args(
             ["--rolling-cache-publication-file-sync-mode", "syncfs"]
+        )
+
+
+def test_pressure_cli_bounds_rolling_cache_publication_metadata_layout() -> None:
+    module = _load_module()
+
+    assert module.parse_args([]).rolling_cache_publication_metadata_layout == "split"
+    assert (
+        module.parse_args(
+            ["--rolling-cache-publication-metadata-layout", "single_inode"]
+        ).rolling_cache_publication_metadata_layout
+        == "single_inode"
+    )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            ["--rolling-cache-publication-metadata-layout", "syncfs"]
         )
 
 
@@ -6247,6 +6288,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         rolling_cache_publication_workers=2,
         rolling_cache_publication_commit_slots=2,
         rolling_cache_publication_file_sync_mode="fdatasync",
+        rolling_cache_publication_metadata_layout="single_inode",
         rtsp_uri="rtsp://shared.example/live/24fps",
         rtsp_republish_input_uri="/fixtures/fixed-8fps.mp4",
     )
@@ -6271,6 +6313,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
             "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
             "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
             "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
+            "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "single_inode",
         },
     )
     monkeypatch.setattr(
@@ -6297,12 +6340,16 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"] == (
         "fdatasync"
     )
+    assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"] == (
+        "single_inode"
+    )
     assert summary["runtime_epoch_id"] == "midterm-epoch-123"
     assert summary["rolling_cache_expected_raw_fps"] == 8.0
     assert summary["rolling_cache_retention_seconds"] == expected_retention
     assert summary["rolling_cache_publication_workers"] == 2
     assert summary["rolling_cache_publication_commit_slots"] == 2
     assert summary["rolling_cache_publication_file_sync_mode"] == "fdatasync"
+    assert summary["rolling_cache_publication_metadata_layout"] == "single_inode"
     assert summary["dependency_services"] == [
         "replay-raw-fanout-a",
         "replay-raw-fanout-b",
@@ -6954,6 +7001,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publish_commit_lock_hold_ms=8.5 "
                     "publish_commit_slot_count=2 publish_commit_slot_index=1 "
                     "publish_file_fdatasync_enabled=1 "
+                    "publish_single_inode_enabled=1 "
+                    "publish_regular_file_sync_count=1 "
                 "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=3 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
@@ -6981,6 +7030,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                     "publish_commit_lock_hold_ms=24 "
                     "publish_commit_slot_count=2 publish_commit_slot_index=1 "
                     "publish_file_fdatasync_enabled=1 "
+                    "publish_single_inode_enabled=1 "
+                    "publish_regular_file_sync_count=1 "
                 "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=30 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
@@ -7005,6 +7056,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publication_capacity=128 publication_worker_count=2 "
                 "publication_commit_slot_count=2 "
                 "publication_file_fdatasync_enabled=1 "
+                "publication_single_inode_enabled=1 "
+                "publication_regular_file_sync_count=1 "
                 "publication_queue_depth=0 publication_queue_depth_peak=36 "
                 "publication_outstanding=0 publication_outstanding_peak=37 "
                 "publication_active=0 publication_active_peak=2 "
@@ -7260,6 +7313,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         "rolling_cache_publish_file_fdatasync_enabled"
     ]["max"] == 1.0
     assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_single_inode_enabled"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_regular_file_sync_count"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
         "rolling_cache_publish_metadata_fsync_ms"
     ]["max"] == 30.0
     assert summary["rolling_cache_sink_b"]["rolling_cache_publish_total_ms"][
@@ -7282,6 +7341,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     ]["max"] == 2.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_file_fdatasync_enabled"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_single_inode_enabled"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_regular_file_sync_count"
     ]["max"] == 1.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_failed_total"
