@@ -43,11 +43,15 @@ wait, raised dispatcher residence p95 to 13.879 seconds, dispatch p95 to
 therefore rejected and disabled by default. Round 29 implements the next
 evidence-backed single variable: two deterministic source-sharded publication
 workers per sink are available behind an explicit bounded setting, while the
-daily/default value remains one. The tests, full static suites and real
-container durability/failure/shutdown smoke pass; no pressure result is yet
-claimed. The 360-second two-worker causal diagnostic is the next gate. Exact
-r300 remains pending; r3840 and both one-hour acceptance runs are still
-prohibited.
+daily/default value remains one. Its tests, full static suites and real
+container durability/failure/shutdown smoke pass, but the Round 29 diagnostic
+rejects the behavior: four concurrent process-wide commit workers nearly
+double mean durable service, increase >=1-second services from 25 to 90,
+raise residence/dispatch p95 to 6.12-6.19/6.43-6.63 seconds and metadata
+visibility p95 to 11.859 seconds. The next bounded hypothesis is host-wide
+durable commit concurrency two, between the rejected one-slot Round 28 arbiter
+and rejected four-worker Round 29 experiment. Exact r300 remains pending;
+r3840 and both one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -1658,16 +1662,57 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   marker was `PASS_PUBLICATION_SHARD_CONTAINER_SMOKE`: 4 submitted, 3
   completed, 1 failed, zero outstanding/active, `drained=true`, and both
   worker threads stopped.
-- This closes only the implementation/correctness gate. The next unique
-  runtime variable is two workers per sink versus the Round 26 ungrouped,
-  unarbitrated one-worker baseline. The diagnostic must keep the fixed
-  fixture/hash, 60 routes, 360-second sample, disk r300, Candidate B
-  `20/12/8`, finalizer `8/4/8`, index width three, preparation one and commit
-  arbitration false. It must report worker count and active peak two on both
-  sinks, preserve every input/correctness/residual gate, materially lower both
-  residence and dispatch p95, reduce the combined 55 Round-26 capacity-wait
-  events, and improve the 3.256-second visibility p95 before exact r300 is
-  authorized.
+- The unchanged 360-second diagnostic artifact is
+  `/data/video-analytics/artifacts/pressure60_8p1_pubshard2_ioadm3_b6m_r300_20260722T0745Z`.
+  It used the same 4,800-second fixture and
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`
+  hash, 60 routes, disk r300, Candidate B `20/12/8`, finalizer `8/4/8`,
+  index width three, preparation one, 25-second pre/postfill and 120-second
+  drain. Publication workers two was the only behavior variable against the
+  Round 26 baseline. This is a rejected causal diagnostic, not exact r300.
+- Input and correctness passed. Both forwarder and Savant observed 60/60
+  sources; steady effective FPS was 8.0791 versus the 7.92 minimum, and send
+  failure, queue-full, raw drop and raw-send failure were zero. All 924 formal
+  tasks materialized with 588 behavior videos and 336 watchlist images; all
+  998 retained 8090 details passed. The 636 retained videos passed the 5+5
+  duration, >=20 FPS, timeline, annotation, bbox and person-context checks.
+  Attempt-zero expiry, duplicate/finalizer failure, active task, lease, WIP,
+  lane and finalizer-pending residuals were zero. Person persistence covered
+  all 60 sources with 77,591 rows versus 77,580 exports and measured loss zero.
+- The intended variable was exercised exactly. Both sinks reported worker
+  count and active peak two, zero publication failure/timeout and a clean
+  drain. Each sink assigned 15 sources to each CRC32 worker and no source
+  crossed workers. Preparation limit was one, commit-lock wait/hold remained
+  zero and both queues returned to zero.
+- Capacity nevertheless regressed against Round 26. Sink A/B residence p95
+  moved `5.172/4.916s -> 6.122/6.186s`; dispatch p95 moved
+  `5.275/5.188s -> 6.430/6.627s`. Both still reached 128 outstanding.
+  Capacity-wait events rose `55 -> 162`, cumulative capacity wait rose
+  `6.215s -> 22.830s`, and maxima rose to 3.275/3.912 seconds. Ready-to-claim
+  p95 moved `6.668s -> 6.958s`; media queue remained failing at 21.933
+  seconds; metadata visibility regressed `3.256s -> 11.859s`. Media-worker
+  CPU rose `126.88% -> 144.17%`. Lifecycle improved to 17.545 seconds and
+  finalizer/DB claim remained fast, but those downstream passes do not offset
+  the publication and visibility regressions.
+- The mechanism is four-way fsync amplification, not bad sharding. Across
+  8,600 publications, mean durable service rose `21.543ms -> 39.635ms` and
+  cumulative service rose `176.954s -> 340.864s`; >=1-second services rose
+  `25 -> 90`. Commit-service concurrency reached four and remained at four
+  for 60.878 seconds; 90 slow services formed 183 overlap pairs, including 60
+  within one sink across its workers and 123 across sinks. Per-sink aggregate
+  service busy time rose from about 16.4% to 29.5-30.3%. The slowest visible
+  segments then spent about 25.1 seconds in their source-shard queue before
+  only 6-124ms of their own service.
+- Reproducible comparisons are retained as
+  `publication_shard_timing_analysis.json` and
+  `publication_shard_concurrency_analysis.json` in the artifact. Two workers
+  per sink without a host-wide commit ceiling are rejected. The next single
+  variable is a two-slot host-wide durable-commit bound while retaining the
+  same source-stable queues. One slot already failed in Round 28; four active
+  commits failed here; two preserves one peer-progress lane and matches the
+  Round 26 host overlap envelope. It must beat the Round 26 residence,
+  dispatch, capacity-wait and visibility baseline, not merely improve on this
+  rejected run, before exact r300 is authorized.
 
 ## Runtime recovery audit
 
@@ -1706,28 +1751,40 @@ rolling materialization disabled and r300. Redis `save` remains
 `3600 1 300 100 60 10000`; 197GB is free. The ephemeral container smoke was
 removed automatically and did not start or alter the live rolling sinks.
 
+The post-Round-29 diagnostic cleanup again reports `drain_complete=true`,
+0/60 enabled cameras, zero active evidence task, Replay slot,
+record-request lag/pending and pressure/source/MediaMTX container. The daily
+media-worker returned to WIP four, finalizer threads 32, process finalizers
+zero, segment-index width two, rolling materialization disabled and r300.
+Redis `save` and PostgreSQL checkpoint settings were restored; 195GB remains
+free and the worktree is clean. All failed-run artifacts were preserved.
+
 ## Next gates
 
-1. Keep production/default preparation at one, commit arbitration disabled and
-   publication workers at one. Retain explicit grouping/arbitration only for
-   historical reproduction; use worker count two only in the labeled Round 29
-   diagnostic.
-2. Run one 360-second Candidate B r300 causal diagnostic with publication
-   workers two as the only behavior variable. Do not change WIP, remux,
+1. Keep production/default preparation at one, commit arbitration/slots
+   disabled and publication workers at one. Retain explicit grouping,
+   one-slot arbitration and two-worker sharding only for historical
+   reproduction; do not enable the rejected Round 27-29 modes in a daily sink.
+2. Freeze red contracts for a two-slot host-wide durable-commit bound across
+   the four source-sharded workers. Prove maximum commit concurrency two,
+   progress on the other slot during one slow holder, stable source/slot
+   assignment, cross-process exclusion per slot, error release, global
+   outstanding backpressure and clean shutdown before implementation.
+3. After full static and real-container gates pass, run one unchanged
+   360-second Candidate B r300 diagnostic with workers two and commit slots two
+   as the only change from rejected Round 29. Do not change WIP, remux,
    max-per-poll, finalizer, index width, retention, deadlines or fixture/hash.
-3. Require both sink terminal snapshots to report worker count and active peak
-   two, plus all input, correctness, bundle and residual gates. Compare each
-   sink's residence/dispatch distribution, capacity wait and visibility
-   directly with Round 26. A result that merely moves delay to capacity wait,
-   callback backpressure or the peer shard is rejected.
-4. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
-   gate materially improves residence/dispatch, visibility and backpressure.
-   Rounds 27 and 28 are negative causal evidence and do not replace the exact
-   width-three 600-second r300 gate.
-5. Repeat the exact r300 gate with the fixed fixture/hash only after the new
+4. Require both sinks to report worker/active peak two and both commit slots,
+   plus every input, correctness, bundle and residual gate. It must beat Round
+   26 residence/dispatch p95, the combined 55 capacity-wait events and
+   3.256-second visibility p95; merely improving on Round 29 is insufficient.
+5. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
+   gate passes. Rounds 27-29 are negative 360-second causal evidence and do not
+   replace the exact width-three 600-second r300 gate.
+6. Repeat the exact r300 gate with the fixed fixture/hash only after the new
    short diagnostic passes. Only a complete input, capacity, visibility,
    watchlist, annotation and residual pass permits the 3,840-second-retention
    short gate.
-6. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+7. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.
