@@ -66,7 +66,11 @@ capacity-wait events from 55 to 233, and moves metadata visibility p95 from
 3.256 seconds to 14.787 seconds. Regular-file and directory-sync cumulative
 time both worsen, proving that `fdatasync` still induces the same ext4 device
 durability episodes on this host. Exact r300 remains pending; r3840 and both
-one-hour acceptance runs are still prohibited.
+one-hour acceptance runs are still prohibited. Round 32 implements the next
+default-off single-inode metadata/manifest diagnostic with one regular-file
+`fsync` and the unchanged two directory fences. Its test, static and dual-image
+publication/index/recovery smoke gates pass; the unchanged 360-second causal
+pressure diagnostic is the next gate.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -155,6 +159,8 @@ one-hour acceptance runs are still prohibited.
 | `8333309` | regular-file sync-mode red contracts | Requires explicit fdatasync only for metadata/manifest, unchanged directory fsync/rename order, failure staging, default fsync and full pressure/deployment audit |
 | `a618796` | bounded regular-file fdatasync diagnostic | Adds a default-off fsync/fdatasync choice while preserving every directory fence, capacity, callback, retention and scheduling behavior |
 | `0f0efb6` | fdatasync implementation proof | Records the static and real-container durability/failure/shutdown proof without claiming pressure capacity |
+| `640538c` | single-inode publication red contracts | Requires one aliased inode/file fence, legacy compatibility, bounded v2 discovery, exact frame rows, journal/reconcile recovery, failure staging, pressure/deployment audit and daily split default |
+| `fa7731f` | default-off single-inode publication layout | Adds the v2 manifest control record and hard-linked historical paths while retaining staging/rename/directory fences and rejecting cross-inode v2 identities |
 
 ## Measurement rounds
 
@@ -1919,6 +1925,67 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   measurements. Round 31 is rejected; fdatasync remains diagnostic-only and
   the daily regular-file mode remains `fsync`.
 
+### Round 32: single-inode metadata/manifest implementation
+
+- Durability assessment rejected mount-wide group-sync shortcuts before code.
+  Rolling media, PostgreSQL and Docker all live on `/dev/nvme0n1p2` ext4;
+  `os.sync()` or a ctypes `syncfs()` wrapper would flush unrelated database and
+  container writes and destroy causal isolation. A directory fsync alone does
+  not establish regular-file content durability. Neither can replace an
+  explicit file fence.
+- Tests-only `640538c` freezes a default-off single-inode contract. In
+  `single_inode` mode, `metadata.json` begins with one bounded
+  `rolling-segment-manifest-v2` control record followed by the exact native
+  frame JSONL. `segment_manifest.json` is a hard link to the same immutable
+  inode. The index must parse only the bounded first record for discovery,
+  exclude it from frame rows, require manifest/metadata identity equality,
+  retain legacy v1 split-layout behavior, consume journal records without a
+  retained-directory scan, recover the post-rename/pre-journal crash window by
+  filesystem reconcile and preserve exact read-pin identity fencing.
+- Implementation `fa7731f` adds
+  `ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=split|single_inode`. Daily env,
+  Compose and pressure defaults remain `split`; only an explicit labeled
+  diagnostic selects `single_inode`. The v2 representation performs one
+  metadata-inode `fsync`, then the unchanged staging-directory `fsync`, atomic
+  directory rename and final-parent `fsync`. It never uses mount-wide sync.
+  File-sync, staging-directory or rename failure remains invisible under
+  `.rolling-cache-staging`; journal append remains a post-commit accelerator.
+- Static validation passed 201 sink/index/materialization/performance tests and
+  241 pressure, analyzer and deployment tests. Python compile, shell syntax,
+  Compose rendering and diff checks passed. Default split publications still
+  use distinct inodes and two regular-file fences; v1 manifests and existing
+  readers remain covered.
+- Real dual-image artifact:
+  `/data/video-analytics/artifacts/rolling_publication_single_inode_smoke_20260722T094317Z`.
+  The rolling-sink image bind-mounted `fa7731f` and completed two v2
+  publications plus one legacy split publication. Each v2 publication used one
+  regular-file fsync plus the same two directory fsyncs; both historical names
+  had the same inode/link count two, exact self-sized v2 header and exact frame
+  rows. The split publication retained distinct inodes and two file fsyncs.
+- An injected v2 metadata fsync `OSError` performed no rename, retained both
+  hard-linked names in its partial staging directory and did not stop the same
+  one-worker dispatcher from publishing its successor. Final dispatcher state
+  was four submitted, three completed, one injected failure, zero outstanding,
+  active, queue or shutdown timeout. The sink marker is
+  `PASS_PUBLICATION_SINGLE_INODE_CONTAINER_SMOKE`.
+- The real media-worker image consumed both layouts, excluded both v2 control
+  records from exact two-row native metadata, published and released a
+  two-segment read pin with zero residual, consumed one newly appended v2
+  journal record without another manifest parse, and recovered the same two v2
+  leaves with zero journal records through manifest-only crash-window
+  reconciliation. Both paths reported zero parse error. Its marker is
+  `PASS_PUBLICATION_SINGLE_INODE_INDEX_CONTAINER_SMOKE`.
+- Two harness-only index attempts are preserved in the artifact. The first
+  incorrectly expected source/epoch fields outside the established read-pin
+  schema; the second used `shutil.copytree`, which correctly broke hard-link
+  identity and was rejected by the production fence. The corrected copy
+  explicitly restored the copied hard links before testing reconciliation.
+  Neither attempt touched a live service, database, Redis or daily config.
+- This closes only the implementation gate. The next sole runtime variable is
+  `split -> single_inode` with regular-file mode restored to `fsync`, one
+  publication worker and zero commit slots. It must beat Round 26 before exact
+  r300 can advance.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1986,6 +2053,16 @@ zero and regular-file mode is `fsync`. Redis `save` is
 `1GB/80MB` and compression off. The worktree was clean before this ledger
 update, the completion status file is absent and about 190GB is free.
 
+The post-Round-32 dual-image smoke audit made no live-runtime mutation and
+reconfirmed 0/60 enabled pressure cameras, zero active task/lease/
+finalizer-pending row, no live pressure/MediaMTX/ffmpeg/rolling-sink process or
+container and an absent completion status file. The daily media-worker remains
+at WIP/remux-queue/finalizer `4/4/32`, process finalizers zero, index width two,
+rolling materialization disabled, r300, publication workers one, commit slots
+zero and file mode `fsync`; the not-yet-recreated daily containers therefore
+continue the historical split layout by default. Redis `save` remains
+`3600 1 300 100 60 10000`.
+
 ## Next gates
 
 1. Keep production/default preparation at one, commit arbitration/slots
@@ -2000,25 +2077,26 @@ update, the completion status file is absent and about 190GB is free.
    the same ext4 mount, so filesystem-wide sync would flush unrelated database
    and container writes; directory fsync alone does not durably order regular
    file contents. Neither has an acceptable isolated crash contract here.
-4. Freeze the next test-first single variable as a default-off single-inode
-   metadata/manifest representation. One bounded manifest control record and
-   the native frame rows share one immutable metadata inode; the historical
-   `metadata.json` and `segment_manifest.json` paths may refer to that inode,
-   allowing one regular-file fsync while retaining the staging-directory
-   fsync, atomic directory rename and final-parent fsync. Red tests must first
-   require legacy-layout compatibility, bounded first-record parsing, exact
-   metadata/video identity fencing, control-record exclusion from frame rows,
-   crash/error staging, no rename before the one file fence, journal/reconcile
-   recovery, callback FIFO, backpressure and clean shutdown. If those semantics
-   cannot be proved without weakening an invariant, reject the representation
-   before pressure rather than substitute filesystem-wide sync.
-5. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
+4. Retain the now-green single-inode red contracts, static suites and dual-image
+   proof. Run one unchanged 360-second Candidate B r300 diagnostic with
+   regular-file mode `fsync`, publication workers one, commit slots zero and
+   `ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=single_inode` as the sole behavior
+   change from Round 26. Do not change WIP, remux, max-per-poll, finalizer,
+   index width, retention, deadlines or fixture/hash.
+5. Require both sinks to report single-inode enabled, one regular-file sync,
+   zero manifest-file sync, the unchanged two directory fences and clean drain.
+   Require every input/correctness/bundle/residual gate plus regular-file sync
+   total below 80.352 seconds, residence/dispatch p95 below the corresponding
+   Round 26 sink, fewer than 55 capacity-wait events and visibility below
+   3.256 seconds. Moving time into directory fsync, callback backpressure,
+   metadata parsing or scheduler/DB work is a rejection.
+6. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
    gate passes. Rounds 27-31 are negative 360-second causal evidence and do not
    replace the exact width-three 600-second r300 gate.
-6. Repeat the exact r300 gate with the fixed fixture/hash only after the new
+7. Repeat the exact r300 gate with the fixed fixture/hash only after the new
    short diagnostic passes. Only a complete input, capacity, visibility,
    watchlist, annotation and residual pass permits the 3,840-second-retention
    short gate.
-7. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+8. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.

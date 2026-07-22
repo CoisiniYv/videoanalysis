@@ -157,7 +157,7 @@ rolling sink 做有限收尾。不要把“停止采集”误解成立即杀死�
 | 事件 | `event-worker` | 事件、cooldown、任务、告警；不再兼任高率轨迹消费 |
 | 轨迹 | `person-observation-worker` | 独立批量持久化人体轨迹，避免事件策略阻塞 |
 | 匹配 | `face-worker` | 人脸 observation、图库匹配、watchlist event、轨迹图片 |
-| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation group limit=1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标 |
+| 缓存 | `rolling-cache-sink` | 每 source/session H.264 passthrough、单 worker/128 outstanding FIFO durable publication、stage/commit 与 queue-residence/service/total attribution、生产 preparation group limit=1、原子 fragment/compact manifest/rename、rename 后有界校验 journal、健康与 drain 指标；日常 metadata layout 仍为 split，工作分支另有 default-off single-inode v2 诊断以减少一个 regular-file fence |
 | 兼容取证 | `clip-worker` / `video-file-sink` | Replay job 协调、围栏 admission、兼容/回退输出 |
 | 固化 | `media-worker` | Scheduler V2、segment index、租约/围栏、finalizer、DB 索引、清理 |
 
