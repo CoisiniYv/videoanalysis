@@ -130,6 +130,7 @@ class AtomicSegmentPublisher:
             SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED
         ),
         commit_slot_count: int = 0,
+        file_sync_mode: str = "fsync",
     ) -> None:
         epoch = safe_component(runtime_epoch_id, field="runtime_epoch_id")
         source = safe_component(source_id, field="source_id")
@@ -161,6 +162,17 @@ class AtomicSegmentPublisher:
             if self._commit_slot_count > 0
             else -1
         )
+        requested_file_sync_mode = str(file_sync_mode).strip().lower()
+        if requested_file_sync_mode not in {"fsync", "fdatasync"}:
+            raise ValueError(
+                "file_sync_mode must be fsync or fdatasync, got "
+                f"{requested_file_sync_mode!r}"
+            )
+        if requested_file_sync_mode == "fdatasync" and not callable(
+            getattr(os, "fdatasync", None)
+        ):
+            raise RuntimeError("fdatasync is unavailable on this platform")
+        self._file_sync_mode = requested_file_sync_mode
         if self._commit_slot_count == 0:
             self._commit_lock_path: Path | None = None
         elif self._commit_slot_count == 1:
@@ -305,12 +317,17 @@ class AtomicSegmentPublisher:
                         )
                     lock_hold_started_ns = time.monotonic_ns()
                 try:
+                    file_sync = (
+                        os.fdatasync
+                        if self._file_sync_mode == "fdatasync"
+                        else os.fsync
+                    )
                     with metadata_path.open("rb") as handle:
                         with timings.measure("metadata_fsync_ms"):
-                            os.fsync(handle.fileno())
+                            file_sync(handle.fileno())
                     with manifest_path.open("rb") as handle:
                         with timings.measure("manifest_fsync_ms"):
-                            os.fsync(handle.fileno())
+                            file_sync(handle.fileno())
                     with timings.measure("staging_dir_fsync_ms"):
                         _fsync_directory(fragment.staging_dir)
 
@@ -381,6 +398,10 @@ class AtomicSegmentPublisher:
                 "publish_commit_lock_hold_ms": round(commit_lock_hold_ms, 3),
                 "publish_commit_slot_count": self._commit_slot_count,
                 "publish_commit_slot_index": self._commit_slot_index,
+                "publish_file_sync_mode": self._file_sync_mode,
+                "publish_file_fdatasync_enabled": int(
+                    self._file_sync_mode == "fdatasync"
+                ),
                 **{
                     (
                         name if name.startswith("publish_") else f"publish_{name}"
