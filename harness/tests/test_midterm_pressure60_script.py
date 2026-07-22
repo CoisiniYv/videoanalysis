@@ -6651,7 +6651,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "release_reason=sink_video_stable sink_video_to_stable_ms=31000",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=1 tick_duration_ms=1200 "
-                "tick_gap_ms=unavailable rolling_due=True general_due=True "
+                "tick_gap_ms=unavailable "
+                "tick_stage_lifecycle_recovery_ms=20 "
+                "tick_stage_remux_admission_ms=900 "
+                "tick_stage_finalizer_scan_admission_ms=100 "
+                "tick_stage_accounted_ms=1020 tick_stage_unattributed_ms=180 "
+                "rolling_due=True general_due=True "
                 "oldest_ready_age_ms=9000 image_lane_depth=3 "
                 "remux_lane_depth=2 finalizer_lane_depth=1 "
                 "finalizer_admission_rejected_total=1 "
@@ -6682,7 +6687,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_publication_reconciles=0",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=2 tick_duration_ms=200 "
-                "tick_gap_ms=1300 rolling_due=True general_due=True "
+                "tick_gap_ms=1300 "
+                "tick_stage_lifecycle_recovery_ms=10 "
+                "tick_stage_remux_admission_ms=80 "
+                "tick_stage_finalizer_scan_admission_ms=40 "
+                "tick_stage_accounted_ms=130 tick_stage_unattributed_ms=70 "
+                "rolling_due=True general_due=True "
                 "completed_cycle_sequence=1 cycle_body_ms=1200 "
                 "cycle_snapshot_ms=40 cycle_logging_ms=10 "
                 "cycle_planned_sleep_ms=100 cycle_actual_sleep_ms=105 "
@@ -6742,6 +6752,48 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "evidence_sidecars_pruned event_id=e1 duration_ms=3 result={}",
             ]
         ),
+        encoding="utf-8",
+    )
+    (tmp_path / "rolling_cache_sink_a_logs_since_start.txt").write_text(
+        "\n".join(
+            [
+                "2026-07-22 02:03:08,901 INFO rolling_cache_sink.gst "
+                "segment published source=source-a epoch=epoch-a session=session-a "
+                "segment=segment-a frames=84 bytes=1000 "
+                "publish_total_ms=12 publish_validate_ms=1 "
+                "publish_metadata_write_ms=2 publish_metadata_fsync_ms=3 "
+                "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
+                "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
+                "publish_staging_dir_fsync_ms=1 publish_parent_prepare_ms=0 "
+                "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
+                "publish_journal_append_ms=1 publish_accounted_ms=12 "
+                "publish_unattributed_ms=0",
+                "2026-07-22 02:03:12,901 INFO rolling_cache_sink.gst "
+                "segment published source=source-a epoch=epoch-a session=session-a "
+                "segment=segment-b frames=84 bytes=1000 "
+                "publish_total_ms=40 publish_validate_ms=1 "
+                "publish_metadata_write_ms=2 publish_metadata_fsync_ms=30 "
+                "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
+                "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
+                "publish_staging_dir_fsync_ms=1 publish_parent_prepare_ms=0 "
+                "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
+                "publish_journal_append_ms=1 publish_accounted_ms=39 "
+                "publish_unattributed_ms=1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "rolling_cache_sink_b_logs_since_start.txt").write_text(
+        "2026-07-22 02:03:10,901 INFO rolling_cache_sink.gst "
+        "segment published source=source-b epoch=epoch-a session=session-b "
+        "segment=segment-c frames=84 bytes=1000 publish_total_ms=8 "
+        "publish_validate_ms=1 publish_metadata_write_ms=1 "
+        "publish_metadata_fsync_ms=1 publish_metadata_stat_ms=0 "
+        "publish_manifest_write_ms=1 publish_manifest_fsync_ms=1 "
+        "publish_manifest_stat_ms=0 publish_staging_dir_fsync_ms=1 "
+        "publish_parent_prepare_ms=0 publish_rename_ms=0 "
+        "publish_parent_dir_fsync_ms=1 publish_journal_append_ms=1 "
+        "publish_accounted_ms=8 publish_unattributed_ms=0",
         encoding="utf-8",
     )
     (tmp_path / "video_file_sink_a_logs_since_start.txt").write_text(
@@ -6873,6 +6925,15 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_scheduler_cycle_work_ms"]["max"] == 1195.0
     assert summary["media_worker"]["media_scheduler_cycle_snapshot_ms"]["max"] == 40.0
     assert summary["media_worker"]["media_scheduler_cycle_actual_sleep_ms"]["max"] == 105.0
+    assert summary["media_worker"][
+        "media_scheduler_tick_stage_remux_admission_ms"
+    ]["max"] == 900.0
+    assert summary["media_worker"][
+        "media_scheduler_tick_stage_finalizer_scan_admission_ms"
+    ]["p50"] == 70.0
+    assert summary["media_worker"][
+        "media_scheduler_tick_stage_unattributed_ms"
+    ]["max"] == 180.0
     assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 2.0
     assert summary["media_worker"]["media_scheduler_image_lane_depth"]["max"] == 3.0
     assert summary["media_worker"]["media_scheduler_finalizer_lane_depth"]["max"] == 1.0
@@ -6907,6 +6968,15 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_resource_max_active"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_cpu_thread_limit"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_remux_workers"]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"]["rolling_cache_publish_total_ms"][
+        "max"
+    ] == 40.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_metadata_fsync_ms"
+    ]["max"] == 30.0
+    assert summary["rolling_cache_sink_b"]["rolling_cache_publish_total_ms"][
+        "p50"
+    ] == 8.0
     assert (
         summary["media_worker"]["media_resource_segment_index_io_concurrency"][
             "max"
