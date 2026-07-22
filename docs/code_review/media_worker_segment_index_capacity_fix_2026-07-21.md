@@ -35,9 +35,19 @@ gates passed, but ready/media/visibility p95 regressed to
 19.265/33.298/22.799 seconds, dispatcher residence p95 rose from 5.041 to
 14.004 seconds, and dispatch-total p95 rose from 5.216 to 18.385 seconds.
 Grouping is therefore rejected and the production preparation limit is one;
-explicit multi-item grouping remains only as a diagnostic/test mechanism. The
-exact r300 gate remains pending; r3840 and both one-hour acceptance runs are
-still prohibited.
+explicit multi-item grouping remains only as a diagnostic/test mechanism.
+Round 28 then serialized cross-sink durable commits behind one epoch lock. It
+removed overlap as designed but accumulated 74.592 seconds of explicit lock
+wait, raised dispatcher residence p95 to 13.879 seconds, dispatch p95 to
+14.025 seconds and metadata visibility p95 to 16.531 seconds. Arbitration is
+therefore rejected and disabled by default. Round 29 implements the next
+evidence-backed single variable: two deterministic source-sharded publication
+workers per sink are available behind an explicit bounded setting, while the
+daily/default value remains one. The tests, full static suites and real
+container durability/failure/shutdown smoke pass; no pressure result is yet
+claimed. The 360-second two-worker causal diagnostic is the next gate. Exact
+r300 remains pending; r3840 and both one-hour acceptance runs are still
+prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -113,6 +123,11 @@ still prohibited.
 | `f4bf094` | bounded FIFO preparation experiment | Stages at most 32 queued items, then commits each through every original fsync/rename/journal fence on the same single worker |
 | `db20d24` | production-disable red contract | Requires the effective/default preparation group limit to remain one while explicit grouping stays supported |
 | `555afef` | production grouping disable | Sets the production/default preparation limit to one without removing the stage/commit diagnostics or explicit multi-item test path |
+| `d874756`, `2888927` | cross-sink commit-arbitration red contracts and experiment | Serialized the unchanged durable commit region behind one epoch-root flock and measured lock wait/hold separately |
+| `a0b7f63`, `e590f9b` | arbitration production-disable contract and implementation | Restored independent commits by default after the Round 28 negative causal result |
+| `7a45389` | Round 28 rejection ledger | Records the retained diagnostic, comparison and restored daily runtime without claiming closure |
+| `d36e046` | source-sharded publication red contracts | Requires cross-source overlap, same-source FIFO/callback order, one global capacity bound, peer progress after shard failure, clean multi-worker shutdown and bounded config/deployment/pressure surfaces |
+| `e7e2478` | bounded source-sharded publication | Adds deterministic `crc32(source_id) % worker_count` queues, active-peak/worker-index observability and an explicit pressure override while leaving the daily default at one |
 
 ## Measurement rounds
 
@@ -1598,6 +1613,62 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   further capacity experiment is authorized until this artifact is reviewed
   and one new single variable is justified without combining knobs.
 
+### Round 29: bounded source-sharded publication implementation
+
+- Round 26 showed that each sink worker was busy only about 16.4% of the
+  observed span while residence p95 was about five seconds and 20 slow
+  cross-sink commits overlapped. Round 28 then proved that removing that
+  overlap is harmful. The remaining structural hypothesis is therefore the
+  global FIFO inside each sink: one rare durability stall should not make
+  unrelated sources sharing that sink wait behind the same head item.
+- Tests-only `d36e046` first required two different CRC32 source shards to
+  execute concurrently; every fragment from one source to remain serial and
+  callback-ordered; the capacity semaphore to remain global across shards;
+  one shard's failure not to stop peer progress; and multi-worker shutdown to
+  drain all accepted work. Configuration must default to one, reject values
+  outside 1-4, wire all three Compose sink services, propagate an explicit
+  pressure value and retain effective worker count, worker index and active
+  peak in pressure summaries.
+- Implementation `e7e2478` creates one bounded queue/thread per worker and
+  assigns it with `crc32(source_id) % worker_count`. The same source therefore
+  cannot cross workers, while different shards may overlap. A single existing
+  `BoundedSemaphore` still caps aggregate accepted work at 128 across all
+  queues. Production preparation remains one and cross-sink commit arbitration
+  remains false. Every metadata/manifest/staging-directory/parent-directory
+  fsync, atomic directory rename, journal append, failure callback and shutdown
+  drain remains in its original per-fragment order.
+- The daily and Compose default is
+  `ROLLING_CACHE_PUBLICATION_WORKERS=1`; both the sink config and pressure CLI
+  bound explicit values to 1-4. The pressure profile default also remains one,
+  so only a labeled diagnostic can select two. Per-fragment logs now expose
+  `publication_worker_index`; dispatcher metrics and terminal logs expose
+  `publication_worker_count` and `publication_active_peak`.
+- Static validation passed the complete rolling-sink suite (51 tests), the
+  pressure harness/analyzer selection (206 tests) and deployment suite (29
+  tests). Python compile, shell syntax, Compose rendering and diff checks also
+  passed.
+- An ephemeral real-container smoke used image
+  `sha256:237f063901d48adfd4265b519d1a40813d94df62717d506fcd197d71d8182bd0`
+  with the current app bind-mounted. Sources `camera-04` and `camera-00`
+  deterministically selected workers zero and one and reached
+  `publication_active_peak=2`. Three real atomic publications completed with
+  three manifests and three journal records. A fourth publication injected an
+  `OSError` on worker zero and waited for worker one's following same-source
+  publication, proving peer progress before failure propagation. The terminal
+  marker was `PASS_PUBLICATION_SHARD_CONTAINER_SMOKE`: 4 submitted, 3
+  completed, 1 failed, zero outstanding/active, `drained=true`, and both
+  worker threads stopped.
+- This closes only the implementation/correctness gate. The next unique
+  runtime variable is two workers per sink versus the Round 26 ungrouped,
+  unarbitrated one-worker baseline. The diagnostic must keep the fixed
+  fixture/hash, 60 routes, 360-second sample, disk r300, Candidate B
+  `20/12/8`, finalizer `8/4/8`, index width three, preparation one and commit
+  arbitration false. It must report worker count and active peak two on both
+  sinks, preserve every input/correctness/residual gate, materially lower both
+  residence and dispatch p95, reduce the combined 55 Round-26 capacity-wait
+  events, and improve the 3.256-second visibility p95 before exact r300 is
+  authorized.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1627,25 +1698,36 @@ were stopped. Rolling materialization was disabled with r300 and index width
 two; media WIP/remux/finalizer returned to `4/4/32`, process finalizers to zero,
 and Redis/PostgreSQL defaults were restored. About 197GB remained free.
 
+The post-Round-29 implementation audit still reports 0/60 enabled cameras and
+`drain_complete=true`: zero active evidence tasks, Replay slots, record-request
+pending/lag and pressure containers. The daily media-worker remains at WIP
+four, finalizer threads 32, process finalizers zero, segment-index width two,
+rolling materialization disabled and r300. Redis `save` remains
+`3600 1 300 100 60 10000`; 197GB is free. The ephemeral container smoke was
+removed automatically and did not start or alter the live rolling sinks.
+
 ## Next gates
 
-1. Keep production/default preparation at one and cross-sink commit arbitration
-   disabled. Retain the opt-in implementation and lock diagnostics only for
-   historical reproduction; do not enable it in a production sink.
-2. Review the Round 28 artifact against Round 26 before selecting any further
-   capacity behavior. A new run requires one explicit causal variable and a
-   falsifiable improvement criterion; do not combine worker, queue, retention,
-   index-width, finalizer or deadline changes.
-3. Preserve one worker per sink, the 128 outstanding bound, exact per-sink FIFO
-   order, and every metadata/manifest/directory/parent fsync, atomic rename and
-   journal fence while that review is open.
-4. Keep exact r300, r3840 and both one-hour acceptances blocked. Rounds 27 and 28
-   are negative 360-second causal evidence and do not replace the exact
+1. Keep production/default preparation at one, commit arbitration disabled and
+   publication workers at one. Retain explicit grouping/arbitration only for
+   historical reproduction; use worker count two only in the labeled Round 29
+   diagnostic.
+2. Run one 360-second Candidate B r300 causal diagnostic with publication
+   workers two as the only behavior variable. Do not change WIP, remux,
+   max-per-poll, finalizer, index width, retention, deadlines or fixture/hash.
+3. Require both sink terminal snapshots to report worker count and active peak
+   two, plus all input, correctness, bundle and residual gates. Compare each
+   sink's residence/dispatch distribution, capacity wait and visibility
+   directly with Round 26. A result that merely moves delay to capacity wait,
+   callback backpressure or the peer shard is rejected.
+4. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
+   gate materially improves residence/dispatch, visibility and backpressure.
+   Rounds 27 and 28 are negative causal evidence and do not replace the exact
    width-three 600-second r300 gate.
-5. Repeat the exact r300 gate with the fixed fixture/hash only after a newly
-   justified short diagnostic passes. Only a complete
-   input, capacity, visibility, watchlist, annotation and residual pass permits
-   the 3,840-second-retention short gate.
+5. Repeat the exact r300 gate with the fixed fixture/hash only after the new
+   short diagnostic passes. Only a complete input, capacity, visibility,
+   watchlist, annotation and residual pass permits the 3,840-second-retention
+   short gate.
 6. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.
