@@ -52,8 +52,12 @@ visibility p95 to 11.859 seconds. The next bounded hypothesis is host-wide
 durable commit concurrency two, between the rejected one-slot Round 28 arbiter
 and rejected four-worker Round 29 experiment. Round 30 implements two
 deterministic cross-process lock lanes behind a default-off setting; all static
-and real dual-container correctness gates pass. Its unchanged 360-second
-causal diagnostic is pending. Exact r300 remains pending; r3840 and both
+and real dual-container correctness gates pass, but its unchanged 360-second
+diagnostic rejects the behavior. Correctness still passes, while lock waits add
+139.866 seconds of service, residence/dispatch p95 regresses to
+11.20-11.33/11.55-11.58 seconds, capacity-wait events rise to 294 and metadata
+visibility p95 rises to 18.638 seconds. Two lanes are therefore diagnostic-only
+and remain disabled by default. Exact r300 remains pending; r3840 and both
 one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
@@ -138,6 +142,7 @@ one-hour acceptance runs are still prohibited.
 | `19a0a47` | Round 29 rejection ledger | Preserves the passed correctness result, four-way fsync amplification analysis and restored daily runtime without advancing exact r300 |
 | `1b33028` | two-lane durable-commit red contracts | Requires same-lane cross-process exclusion, peer-lane progress, stable assignment, error release, bounded shutdown and explicit config/deployment/pressure evidence |
 | `b9ea4f1` | deterministic host commit lanes | Maps each source to one of 0-4 epoch-root flock lanes, retains the default-off/legacy one-lock paths and carries slot count/index through live and retained observability |
+| `e0c1d16` | two-lane real-container proof | Records host peak two, per-slot peak one, failure release and clean dual-container shutdown without claiming pressure capacity |
 
 ## Measurement rounds
 
@@ -1766,6 +1771,62 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   two. It must preserve all correctness/residual gates and beat Round 26
   residence/dispatch p95, 55 capacity-wait events and 3.256-second visibility
   p95 before exact r300 is authorized.
+- The retained diagnostic is
+  `/data/video-analytics/artifacts/pressure60_8p1_pubslots2_ioadm3_b6m_r300_20260722T0820Z`.
+  It kept the fixed fixture/hash, 60 routes, 360-second sample, disk r300,
+  Candidate B `20/12/8`, finalizer `8/4/8`, index width three, preparation one,
+  25-second pre/postfill and 120-second drain. Publication workers two and
+  commit slots two were applied to both sinks; commit slots were the only
+  behavior change from rejected Round 29. This is negative causal evidence,
+  not the exact 600-second r300 gate.
+- Input, correctness and retained evidence passed. Forwarder and Savant both
+  observed 60/60 sources, steady effective FPS was 8.0511, and send failure,
+  queue-full, raw drop and raw-send failure were zero. All 926 formal tasks
+  materialized. All 1,001 retained 8090 details passed; all 642 retained videos
+  passed the 5+5 duration, raw-FPS, timeline, annotation, bbox and
+  person-context checks, alongside 359 watchlist images. Three accepted
+  annotation-count differences were DB overlay rows merging to one clip frame;
+  no annotation, bbox or person-context row was missing. Person persistence was
+  exactly 74,134/74,134 over 60 sources. Attempt-zero expiry, duplicate,
+  claim-busy, finalizer failure, task, lease, WIP, lane and finalizer-pending
+  residuals were zero.
+- The intended lanes were exercised. Both sinks reported worker count and
+  active peak two, slot count two, slot indexes zero and one, zero publication
+  failure/shutdown timeout and a clean drain. Each sink assigned 15 sources to
+  each worker; all 8,203 records retained one stable worker and slot per source.
+  The exact dual-container audit already measured host peak two/per-slot peak
+  one. Pressure-log projection is limited because `on_published` logs after the
+  monotonic worker-completion timestamp: it creates 576 impossible same-slot
+  overlaps totaling 242.959ms, but the maximum is only 3.266ms and none exceeds
+  a 4ms callback/log skew allowance. The two shared kernel flocks, 1,270
+  measured >=1ms waits and stable slot assignment therefore support the
+  physical two-commit bound without pretending callback timestamps are exact
+  lock timestamps.
+- Capacity failed more severely than both comparison runs. Round 26 -> Round
+  29 -> Round 30 sink A/B residence p95 was
+  `5.172/4.916 -> 6.122/6.186 -> 11.331/11.204s`; dispatch p95 was
+  `5.275/5.188 -> 6.430/6.627 -> 11.551/11.582s`; combined capacity-wait events
+  were `55 -> 162 -> 294`; and metadata visibility p95 was
+  `3.256 -> 11.859 -> 18.638s`. Ready-to-claim p95 regressed to 11.633s, media
+  queue p95 to 25.663s and lifecycle p95 to 24.884s. Exact r300 is not
+  authorized.
+- The mechanism is explicit lane convoying, not an unenforced bound. Across
+  8,203 publications, lock holds totaled 195.485s and lock waits added
+  139.866s; 46 holds and 46 waits exceeded one second. Mean/cumulative worker
+  service stayed at 41.252ms/338.388s, essentially the rejected Round 29
+  service burden, while each long holder delayed its same-lane peer. This
+  converted four-way fsync amplification into two longer per-source queues.
+  Reproducible results are retained in
+  `publication_commit_slots_timing_analysis.json` and
+  `publication_commit_slots_concurrency_analysis.json`.
+- Phase attribution returns the next single variable to the unarbitrated,
+  one-worker Round 26 path. Its metadata and manifest regular-file `fsync`
+  calls consumed 80.352s and produced 11 >=1s calls; directory fences remain a
+  separate required 47.179s. The next bounded diagnostic will preserve every
+  rename and directory `fsync`, but use `fdatasync` for the two regular files so
+  file data/size durability remains while unrelated inode metadata need not be
+  forced. It must be default-off, test-first and beat Round 26 before exact
+  r300 can advance.
 
 ## Runtime recovery audit
 
@@ -1812,31 +1873,45 @@ zero, segment-index width two, rolling materialization disabled and r300.
 Redis `save` and PostgreSQL checkpoint settings were restored; 195GB remains
 free and the worktree is clean. All failed-run artifacts were preserved.
 
+The post-Round-30 diagnostic cleanup reports 0/60 enabled cameras and zero
+active task, lease or finalizer-pending row. No pressure source, local
+MediaMTX, pressure ffmpeg, dual Savant or rolling-sink container/process
+remains. The daily media-worker is back at WIP/remux/finalizer `4/4/32`, process
+finalizers zero, segment-index width two, rolling materialization disabled,
+r300, publication workers one and commit slots zero. Redis `save` is
+`3600 1 300 100 60 10000`; PostgreSQL is back at checkpoint timeout 5min,
+WAL `1024/80MB` and compression off. The worktree is clean and about 192GB is
+free. The passed-correctness/failed-capacity artifact remains intact.
+
 ## Next gates
 
 1. Keep production/default preparation at one, commit arbitration/slots
-   disabled and publication workers at one. Retain explicit grouping,
-   one-slot arbitration and two-worker sharding only for historical
-   reproduction; do not enable the rejected Round 27-29 modes in a daily sink.
-2. Retain the now-green two-slot contracts and real-container audit: maximum
-   commit concurrency two, peer-lane progress, stable source/slot assignment,
-   cross-process exclusion, error release, global outstanding backpressure and
-   clean shutdown.
-3. Run one unchanged
-   360-second Candidate B r300 diagnostic with workers two and commit slots two
-   as the only change from rejected Round 29. Do not change WIP, remux,
-   max-per-poll, finalizer, index width, retention, deadlines or fixture/hash.
-4. Require both sinks to report worker/active peak two and both commit slots,
-   plus every input, correctness, bundle and residual gate. It must beat Round
-   26 residence/dispatch p95, the combined 55 capacity-wait events and
-   3.256-second visibility p95; merely improving on Round 29 is insufficient.
-5. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
-   gate passes. Rounds 27-29 are negative 360-second causal evidence and do not
+   disabled and publication workers at one. Retain grouping, one/two-slot
+   arbitration and two-worker sharding only for historical reproduction; none
+   of the rejected Round 27-30 modes may become a daily default.
+2. Add a red regular-file durability contract before implementation: explicit
+   diagnostic opt-in must call `fdatasync` for metadata and manifest, retain
+   `fsync` for staging/final parent directories, preserve atomic rename and
+   journal order, surface the effective mode, and default to historical
+   `fsync` in sink/Compose/pressure configuration.
+3. Implement only that regular-file sync-mode switch, then run focused
+   durability/error/shutdown tests, the complete sink/pressure/deployment
+   selections, Compose rendering and a real-container order/failure smoke.
+4. Run one unchanged 360-second Candidate B r300 diagnostic with publication
+   workers one, commit slots zero and regular-file `fdatasync` as the sole
+   behavior change from Round 26. Do not change WIP, remux, max-per-poll,
+   finalizer, index width, retention, deadlines or fixture/hash.
+5. Require every input/correctness/bundle/residual gate plus lower regular-file
+   sync tail, residence/dispatch p95 below both Round 26 sinks, fewer than 55
+   capacity-wait events and visibility below 3.256s. Moving time into directory
+   fsync, callback backpressure or scheduler/DB work is a rejection.
+6. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
+   gate passes. Rounds 27-30 are negative 360-second causal evidence and do not
    replace the exact width-three 600-second r300 gate.
-6. Repeat the exact r300 gate with the fixed fixture/hash only after the new
+7. Repeat the exact r300 gate with the fixed fixture/hash only after the new
    short diagnostic passes. Only a complete input, capacity, visibility,
    watchlist, annotation and residual pass permits the 3,840-second-retention
    short gate.
-7. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+8. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.
