@@ -50,8 +50,11 @@ double mean durable service, increase >=1-second services from 25 to 90,
 raise residence/dispatch p95 to 6.12-6.19/6.43-6.63 seconds and metadata
 visibility p95 to 11.859 seconds. The next bounded hypothesis is host-wide
 durable commit concurrency two, between the rejected one-slot Round 28 arbiter
-and rejected four-worker Round 29 experiment. Exact r300 remains pending;
-r3840 and both one-hour acceptance runs are still prohibited.
+and rejected four-worker Round 29 experiment. Round 30 implements two
+deterministic cross-process lock lanes behind a default-off setting; all static
+and real dual-container correctness gates pass. Its unchanged 360-second
+causal diagnostic is pending. Exact r300 remains pending; r3840 and both
+one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -132,6 +135,9 @@ r3840 and both one-hour acceptance runs are still prohibited.
 | `7a45389` | Round 28 rejection ledger | Records the retained diagnostic, comparison and restored daily runtime without claiming closure |
 | `d36e046` | source-sharded publication red contracts | Requires cross-source overlap, same-source FIFO/callback order, one global capacity bound, peer progress after shard failure, clean multi-worker shutdown and bounded config/deployment/pressure surfaces |
 | `e7e2478` | bounded source-sharded publication | Adds deterministic `crc32(source_id) % worker_count` queues, active-peak/worker-index observability and an explicit pressure override while leaving the daily default at one |
+| `19a0a47` | Round 29 rejection ledger | Preserves the passed correctness result, four-way fsync amplification analysis and restored daily runtime without advancing exact r300 |
+| `1b33028` | two-lane durable-commit red contracts | Requires same-lane cross-process exclusion, peer-lane progress, stable assignment, error release, bounded shutdown and explicit config/deployment/pressure evidence |
+| `b9ea4f1` | deterministic host commit lanes | Maps each source to one of 0-4 epoch-root flock lanes, retains the default-off/legacy one-lock paths and carries slot count/index through live and retained observability |
 
 ## Measurement rounds
 
@@ -1714,6 +1720,53 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   dispatch, capacity-wait and visibility baseline, not merely improve on this
   rejected run, before exact r300 is authorized.
 
+### Round 30: two-lane host commit bound implementation
+
+- Tests-only `1b33028` first required sources on the same lane to serialize
+  while a different lane progresses; the same exclusion to hold against an
+  external process; a blocked lane to make bounded shutdown return false and
+  later drain; and a commit exception to preserve staging, release its lane and
+  allow a same-lane successor. The default diagnostics must report zero slots
+  and index -1. Sink config, all three Compose services, pressure CLI/profile,
+  applied container environment and retained summaries must expose a bounded
+  0-4 slot count plus per-fragment slot index.
+- Implementation `b9ea4f1` leaves
+  `ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS=0` in the daily environment. A value
+  of one reuses the historical Round 28 epoch lock; values 2-4 select
+  `.segment-publication-commit-slot-N.lock` with
+  `crc32(source_id) % slot_count`. With workers two and slots two, each source
+  remains on one dispatcher queue and the matching commit lane across both
+  sink processes. The four worker threads may prepare independently, but at
+  most one commit per lane can execute the metadata/manifest/directory/parent
+  fsync, rename and journal sequence. No fence, capacity, retention, deadline,
+  callback or drain order was removed.
+- Full static validation passed 58 rolling-sink tests, 208 pressure/analyzer
+  tests and 29 deployment tests. Python compile, shell syntax, Compose render
+  and diff checks passed. Historical default-off and explicit one-lock tests
+  remain green.
+- Real dual-container artifact:
+  `/data/video-analytics/artifacts/rolling_publication_commit_slots_smoke_20260722T081551Z`.
+  Two service-image containers bind-mounted the current app and one shared
+  epoch, each ran two dispatcher workers and submitted both slot-zero and
+  slot-one sources. A shared audit around the real atomic rename observed
+  host commit peak two, per-slot peak one, 16 balanced start/end events and
+  zero concurrency violation. Both containers reached active-worker peak two.
+- Eight fragments were staged. Seven completed every durable fence and
+  produced seven journal records. One slot-zero rename raised the injected
+  `OSError`; its partial staging directory remained, the lock was released and
+  the same lane later published successfully. Cross-container lock waits were
+  about 245-257ms. Role A ended 3 complete/1 failed and role B 4/0; both ended
+  drained with zero outstanding/active/shutdown timeout and both worker threads
+  stopped. This closes the implementation gate only.
+- The next unique runtime variable against rejected Round 29 is commit slots
+  two. The short diagnostic must otherwise retain its exact 4,800-second
+  fixture/hash, 60 routes, 360-second sample, disk r300, Candidate B
+  `20/12/8`, finalizer `8/4/8`, index width three, preparation one and two
+  source workers per sink. Actual commit overlap must reconstruct to at most
+  two. It must preserve all correctness/residual gates and beat Round 26
+  residence/dispatch p95, 55 capacity-wait events and 3.256-second visibility
+  p95 before exact r300 is authorized.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1765,12 +1818,11 @@ free and the worktree is clean. All failed-run artifacts were preserved.
    disabled and publication workers at one. Retain explicit grouping,
    one-slot arbitration and two-worker sharding only for historical
    reproduction; do not enable the rejected Round 27-29 modes in a daily sink.
-2. Freeze red contracts for a two-slot host-wide durable-commit bound across
-   the four source-sharded workers. Prove maximum commit concurrency two,
-   progress on the other slot during one slow holder, stable source/slot
-   assignment, cross-process exclusion per slot, error release, global
-   outstanding backpressure and clean shutdown before implementation.
-3. After full static and real-container gates pass, run one unchanged
+2. Retain the now-green two-slot contracts and real-container audit: maximum
+   commit concurrency two, peer-lane progress, stable source/slot assignment,
+   cross-process exclusion, error release, global outstanding backpressure and
+   clean shutdown.
+3. Run one unchanged
    360-second Candidate B r300 diagnostic with workers two and commit slots two
    as the only change from rejected Round 29. Do not change WIP, remux,
    max-per-poll, finalizer, index width, retention, deadlines or fixture/hash.
