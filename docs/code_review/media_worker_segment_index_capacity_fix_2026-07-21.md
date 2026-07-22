@@ -57,12 +57,16 @@ diagnostic rejects the behavior. Correctness still passes, while lock waits add
 139.866 seconds of service, residence/dispatch p95 regresses to
 11.20-11.33/11.55-11.58 seconds, capacity-wait events rise to 294 and metadata
 visibility p95 rises to 18.638 seconds. Two lanes are therefore diagnostic-only
-and remain disabled by default. Round 31 now implements the selected
-default-off regular-file `fdatasync` diagnostic; test, static and real-container
-durability/error/shutdown gates pass without changing either directory `fsync`
-or the daily `fsync` default. Its unchanged causal pressure run is the next
-gate. Exact r300 remains pending; r3840 and both one-hour acceptance runs are
-still prohibited.
+and remain disabled by default. Round 31 implemented and then rejected the
+selected default-off regular-file `fdatasync` diagnostic. Test, static,
+real-container and pressure correctness gates all pass without changing either
+directory `fsync` or the daily `fsync` default, but its unchanged causal
+diagnostic roughly doubles both sinks' queue-residence and dispatch p95, raises
+capacity-wait events from 55 to 233, and moves metadata visibility p95 from
+3.256 seconds to 14.787 seconds. Regular-file and directory-sync cumulative
+time both worsen, proving that `fdatasync` still induces the same ext4 device
+durability episodes on this host. Exact r300 remains pending; r3840 and both
+one-hour acceptance runs are still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -150,6 +154,7 @@ still prohibited.
 | `cd3b327` | Round 30 rejection ledger | Preserves passed correctness, lane-convoy attribution, comparison artifacts and restored daily runtime without advancing exact r300 |
 | `8333309` | regular-file sync-mode red contracts | Requires explicit fdatasync only for metadata/manifest, unchanged directory fsync/rename order, failure staging, default fsync and full pressure/deployment audit |
 | `a618796` | bounded regular-file fdatasync diagnostic | Adds a default-off fsync/fdatasync choice while preserving every directory fence, capacity, callback, retention and scheduling behavior |
+| `0f0efb6` | fdatasync implementation proof | Records the static and real-container durability/failure/shutdown proof without claiming pressure capacity |
 
 ## Measurement rounds
 
@@ -1873,6 +1878,46 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   This closes only the implementation gate. The next unique runtime variable
   is fdatasync versus Round 26; workers must return to one and commit slots to
   zero so rejected Round 29/30 behaviors are not combined.
+- Causal diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pubfdatasync_ioadm3_b6m_r300_20260722T0857Z`.
+  It retained the Round 26 fixture/hash, 60 routes, disk-backed r300, Candidate
+  B `20/12/8`, finalizer `8/4/8`, index width three, one publication worker per
+  sink, zero commit slots, 360-second sample, 25-second postfill and 120-second
+  drain. The only intended behavior variable was regular-file `fdatasync`.
+- Harness, input and correctness passed: 60/60 sources sustained 8.0466 FPS
+  with zero send failure, queue-full, raw drop or raw-send failure. All 922
+  formal tasks and all 993 retained tasks materialized. All 638 retained videos
+  passed duration, FPS, timeline, annotation, bbox and person-context; all 993
+  retained items passed their DB-backed 8090 checks. Person persistence passed
+  at 74,116 stored rows versus 74,112 exports with measured loss zero. Expiry,
+  duplicate, claim-busy, handoff recovery, retry failure, finalizer failure and
+  all task/lease/WIP/lane/finalizer-pending residuals were zero.
+- Dispatcher correctness also held. Sink A/B submitted and completed
+  `4089/4107` publications with worker/active peak one, fdatasync enabled, zero
+  commit slots and clean terminal drain. No failure or shutdown timeout was
+  reported.
+- Capacity regressed decisively against Round 26. Sink A/B queue-residence p95
+  moved from `5.172/4.916s` to `10.697/10.547s`; dispatch p95 moved from
+  `5.275/5.188s` to `10.798/10.672s`. Capacity waits at or above one
+  millisecond rose from 55 to 233 and cumulative wait rose from 6.215 seconds
+  to 27.034 seconds. Ready-to-claim, media queue, lifecycle and metadata
+  visibility p95 were `7.260/23.655/22.138/14.787s`; only the lifecycle bound
+  passed. Media-worker CPU fell from 126.88% to 105.46%, but that does not
+  compensate for the storage and latency regression.
+- Phase attribution rejects the inode-metadata hypothesis. Total publication
+  worker service was essentially flat at `176.954s -> 177.989s`, while regular
+  file sync worsened from `80.352s -> 103.982s`, directory sync worsened from
+  `47.179s -> 61.461s`, combined service p95 rose from 31.621ms to 49.584ms and
+  services at or above one second rose from 25 to 48. On this ext4 workload
+  `fdatasync` still forces device durability barriers; it does not remove or
+  smooth the synchronized flush episodes.
+- Corrected retained analyses are
+  `publication_fdatasync_timing_analysis.json`,
+  `publication_fdatasync_phase_analysis.json` and
+  `round26_vs_round31_comparison.json` in the artifact. The copied Round 29
+  interpretation in the first file was corrected without changing its raw
+  measurements. Round 31 is rejected; fdatasync remains diagnostic-only and
+  the daily regular-file mode remains `fsync`.
 
 ## Runtime recovery audit
 
@@ -1929,27 +1974,46 @@ r300, publication workers one and commit slots zero. Redis `save` is
 WAL `1024/80MB` and compression off. The worktree is clean and about 192GB is
 free. The passed-correctness/failed-capacity artifact remains intact.
 
+The post-Round-31 diagnostic cleanup again reports 0/60 enabled pressure
+cameras and zero active task, lease or finalizer-pending row. No live pressure
+source, local MediaMTX, pressure ffmpeg, dual Savant or rolling-sink process/
+container remains; the two Compose rolling-sink containers are stopped. The
+daily media-worker is back at WIP/remux-queue/finalizer `4/4/32`, rolling remux
+worker one, process finalizers zero, segment-index width two, rolling
+materialization disabled and r300. Publication workers are one, commit slots
+zero and regular-file mode is `fsync`. Redis `save` is
+`3600 1 300 100 60 10000`; PostgreSQL is back at checkpoint timeout 5min, WAL
+`1GB/80MB` and compression off. The worktree was clean before this ledger
+update, the completion status file is absent and about 190GB is free.
+
 ## Next gates
 
 1. Keep production/default preparation at one, commit arbitration/slots
    disabled and publication workers at one. Retain grouping, one/two-slot
    arbitration and two-worker sharding only for historical reproduction; none
    of the rejected Round 27-30 modes may become a daily default.
-2. Retain the now-green regular-file sync-mode contract, complete static suites
-   and real service-image proof. Do not enable fdatasync in daily sinks before
-   the causal pressure artifact passes.
-3. Run one unchanged 360-second Candidate B r300 diagnostic with publication
-   workers one, commit slots zero and regular-file `fdatasync` as the sole
-   behavior change from Round 26. Do not change WIP, remux, max-per-poll,
-   finalizer, index width, retention, deadlines or fixture/hash.
-4. Require both sink startup/terminal/per-fragment evidence to show fdatasync
-   enabled with one worker, one preparation item, zero commit slots and a clean
-   drain. Require every input/correctness/bundle/residual gate plus lower file
-   sync tail, residence/dispatch p95 below both Round 26 sinks, fewer than 55
-   capacity-wait events and visibility below 3.256s. Moving time into directory
-   fsync, callback backpressure or scheduler/DB work is a rejection.
+2. Keep regular-file `fdatasync` diagnostic-only and daily/default mode
+   `fsync`. Round 31 passed correctness but failed every causal capacity
+   comparison; it must not advance exact r300.
+3. Do not use `os.sync()`, a ctypes `syncfs()` wrapper or a directory-only fsync
+   as an apparent group commit. Rolling media, PostgreSQL and Docker all share
+   the same ext4 mount, so filesystem-wide sync would flush unrelated database
+   and container writes; directory fsync alone does not durably order regular
+   file contents. Neither has an acceptable isolated crash contract here.
+4. Freeze the next test-first single variable as a default-off single-inode
+   metadata/manifest representation. One bounded manifest control record and
+   the native frame rows share one immutable metadata inode; the historical
+   `metadata.json` and `segment_manifest.json` paths may refer to that inode,
+   allowing one regular-file fsync while retaining the staging-directory
+   fsync, atomic directory rename and final-parent fsync. Red tests must first
+   require legacy-layout compatibility, bounded first-record parsing, exact
+   metadata/video identity fencing, control-record exclusion from frame rows,
+   crash/error staging, no rename before the one file fence, journal/reconcile
+   recovery, callback FIFO, backpressure and clean shutdown. If those semantics
+   cannot be proved without weakening an invariant, reject the representation
+   before pressure rather than substitute filesystem-wide sync.
 5. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
-   gate passes. Rounds 27-30 are negative 360-second causal evidence and do not
+   gate passes. Rounds 27-31 are negative 360-second causal evidence and do not
    replace the exact width-three 600-second r300 gate.
 6. Repeat the exact r300 gate with the fixed fixture/hash only after the new
    short diagnostic passes. Only a complete input, capacity, visibility,
