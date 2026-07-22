@@ -21,6 +21,34 @@ sys.path.insert(0, MEDIA_WORKER_ROOT)
 from app import rolling_cache  # noqa: E402
 
 
+def test_materialized_metadata_publication_is_compact_and_lossless(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "metadata.json"
+    payload = {
+        "event_id": "event-1",
+        "camera_name": "一号摄像头",
+        "frames": [
+            {
+                "type": "VideoFrame",
+                "pts": 123,
+                "objects": [{"label": "person", "confidence": 0.9}],
+            }
+        ],
+    }
+
+    rolling_cache._write_json(path, payload)
+
+    expected = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n"
+    assert path.read_text(encoding="utf-8") == expected
+    assert json.loads(path.read_text(encoding="utf-8")) == payload
+    assert list(tmp_path.glob(".metadata.json.*.tmp")) == []
+
+
 def test_wall_clock_event_window_maps_to_stable_mux_clock() -> None:
     rows = [
         {
