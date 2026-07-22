@@ -8,10 +8,12 @@ import logging
 import os
 import shutil
 import threading
+import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from config import safe_component
 
@@ -35,6 +37,44 @@ class Fragment:
     video_path: Path
     first_gst_pts: int | None = None
     rows: list[dict[str, Any]] = field(default_factory=list)
+    publication_diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+class _PublicationPhaseTimings:
+    """Account publication phases without changing their execution order."""
+
+    def __init__(self, *, clock_ns: Callable[[], int] = time.monotonic_ns) -> None:
+        self._clock_ns = clock_ns
+        self._started_ns = self._clock_ns()
+        self._durations_ms: dict[str, float] = {}
+
+    @contextmanager
+    def measure(self, name: str) -> Iterator[None]:
+        started_ns = self._clock_ns()
+        try:
+            yield
+        finally:
+            duration_ms = max(0.0, (self._clock_ns() - started_ns) / 1_000_000.0)
+            self._durations_ms[name] = self._durations_ms.get(name, 0.0) + duration_ms
+
+    def finish(self) -> dict[str, float]:
+        total_ms = max(0.0, (self._clock_ns() - self._started_ns) / 1_000_000.0)
+        accounted_ms = sum(self._durations_ms.values())
+        result = {
+            name: round(value, 3)
+            for name, value in self._durations_ms.items()
+        }
+        result.update(
+            {
+                "publish_total_ms": round(total_ms, 3),
+                "publish_accounted_ms": round(accounted_ms, 3),
+                "publish_unattributed_ms": round(
+                    max(0.0, total_ms - accounted_ms),
+                    3,
+                ),
+            }
+        )
+        return result
 
 
 class AtomicSegmentPublisher:
@@ -81,34 +121,43 @@ class AtomicSegmentPublisher:
         )
 
     def publish(self, fragment: Fragment) -> Path:
-        if not fragment.video_path.is_file():
-            raise RuntimeError(f"rolling_segment_video_missing:{fragment.segment_id}")
-        video_stat = fragment.video_path.stat()
-        if video_stat.st_size <= 0:
-            raise RuntimeError(f"rolling_segment_video_missing:{fragment.segment_id}")
-        pts_values = [
-            pts
-            for pts in (_row_pts(row) for row in fragment.rows)
-            if pts is not None
-        ]
-        if not pts_values:
-            raise RuntimeError(
-                f"rolling_segment_metadata_has_no_pts:{fragment.segment_id}"
-            )
-        source_pts_values = [
-            pts
-            for pts in (_source_row_pts(row) for row in fragment.rows)
-            if pts is not None
-        ]
+        timings = _PublicationPhaseTimings()
+        with timings.measure("validate_ms"):
+            if not fragment.video_path.is_file():
+                raise RuntimeError(
+                    f"rolling_segment_video_missing:{fragment.segment_id}"
+                )
+            video_stat = fragment.video_path.stat()
+            if video_stat.st_size <= 0:
+                raise RuntimeError(
+                    f"rolling_segment_video_missing:{fragment.segment_id}"
+                )
+            pts_values = [
+                pts
+                for pts in (_row_pts(row) for row in fragment.rows)
+                if pts is not None
+            ]
+            if not pts_values:
+                raise RuntimeError(
+                    f"rolling_segment_metadata_has_no_pts:{fragment.segment_id}"
+                )
+            source_pts_values = [
+                pts
+                for pts in (_source_row_pts(row) for row in fragment.rows)
+                if pts is not None
+            ]
 
         metadata_path = fragment.staging_dir / "metadata.json"
         with metadata_path.open("x", encoding="utf-8") as handle:
-            for row in fragment.rows:
-                handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
-                handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        metadata_stat = metadata_path.stat()
+            with timings.measure("metadata_write_ms"):
+                for row in fragment.rows:
+                    handle.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False))
+                    handle.write("\n")
+                handle.flush()
+            with timings.measure("metadata_fsync_ms"):
+                os.fsync(handle.fileno())
+        with timings.measure("metadata_stat_ms"):
+            metadata_stat = metadata_path.stat()
         video_size_bytes = video_stat.st_size
         metadata_size_bytes = metadata_stat.st_size
         manifest = {
@@ -132,44 +181,62 @@ class AtomicSegmentPublisher:
         }
         manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
         with manifest_path.open("x", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(manifest, separators=(",", ":"), ensure_ascii=False)
-            )
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        manifest_stat = manifest_path.stat()
-        _fsync_directory(fragment.staging_dir)
+            with timings.measure("manifest_write_ms"):
+                handle.write(
+                    json.dumps(manifest, separators=(",", ":"), ensure_ascii=False)
+                )
+                handle.write("\n")
+                handle.flush()
+            with timings.measure("manifest_fsync_ms"):
+                os.fsync(handle.fileno())
+        with timings.measure("manifest_stat_ms"):
+            manifest_stat = manifest_path.stat()
+        with timings.measure("staging_dir_fsync_ms"):
+            _fsync_directory(fragment.staging_dir)
 
-        fragment.final_dir.parent.mkdir(parents=True, exist_ok=True)
-        if fragment.final_dir.exists():
-            raise FileExistsError(
-                f"rolling_segment_final_collision:{fragment.segment_id}"
-            )
-        os.replace(fragment.staging_dir, fragment.final_dir)
-        _fsync_directory(fragment.final_dir.parent)
-        try:
-            _append_publication_record(
-                segments_root=fragment.final_dir.parent,
-                manifest=manifest,
-                manifest_stat=manifest_stat,
-                metadata_stat=metadata_stat,
-                video_stat=video_stat,
-            )
-        except Exception as exc:
-            # The atomic segment directory is authoritative. The journal is a
-            # bounded discovery accelerator, so a crash or append failure in
-            # this post-commit window must leave the segment usable; the media
-            # worker's periodic directory reconciliation recovers it.
-            LOGGER.warning(
-                "segment publication journal append failed source=%s epoch=%s "
-                "segment=%s path=%s error=%s",
-                self._source_id,
-                self._runtime_epoch_id,
-                fragment.segment_id,
-                fragment.final_dir,
-                exc,
-            )
+        with timings.measure("parent_prepare_ms"):
+            fragment.final_dir.parent.mkdir(parents=True, exist_ok=True)
+            if fragment.final_dir.exists():
+                raise FileExistsError(
+                    f"rolling_segment_final_collision:{fragment.segment_id}"
+                )
+        with timings.measure("rename_ms"):
+            os.replace(fragment.staging_dir, fragment.final_dir)
+        with timings.measure("parent_dir_fsync_ms"):
+            _fsync_directory(fragment.final_dir.parent)
+        with timings.measure("journal_append_ms"):
+            try:
+                _append_publication_record(
+                    segments_root=fragment.final_dir.parent,
+                    manifest=manifest,
+                    manifest_stat=manifest_stat,
+                    metadata_stat=metadata_stat,
+                    video_stat=video_stat,
+                )
+            except Exception as exc:
+                # The atomic segment directory is authoritative. The journal is a
+                # bounded discovery accelerator, so a crash or append failure in
+                # this post-commit window must leave the segment usable; the media
+                # worker's periodic directory reconciliation recovers it.
+                LOGGER.warning(
+                    "segment publication journal append failed source=%s epoch=%s "
+                    "segment=%s path=%s error=%s",
+                    self._source_id,
+                    self._runtime_epoch_id,
+                    fragment.segment_id,
+                    fragment.final_dir,
+                    exc,
+                )
+        phase_diagnostics = timings.finish()
+        fragment.publication_diagnostics = {
+            "schema_version": "rolling-segment-publication-timing-v1",
+            "first_pts": min(pts_values),
+            "last_pts": max(pts_values),
+            **{
+                (name if name.startswith("publish_") else f"publish_{name}"): value
+                for name, value in phase_diagnostics.items()
+            },
+        }
         return fragment.final_dir
 
 

@@ -368,17 +368,44 @@ class SourcePipeline:
 
     def _on_published(self, fragment: Fragment, final_dir: Path) -> None:
         size = (final_dir / "video.mov").stat().st_size
+        timings = fragment.publication_diagnostics
         self._metrics.inc("segments_published_total")
         self._metrics.inc("segment_bytes_total", size)
         self._metrics.inc("pending_fragments", -1)
         LOGGER.info(
-            "segment published source=%s epoch=%s session=%s segment=%s frames=%d bytes=%d",
+            "segment published source=%s epoch=%s session=%s segment=%s "
+            "frames=%d bytes=%d first_pts=%s last_pts=%s "
+            "publish_total_ms=%s publish_validate_ms=%s "
+            "publish_metadata_write_ms=%s publish_metadata_fsync_ms=%s "
+            "publish_metadata_stat_ms=%s publish_manifest_write_ms=%s "
+            "publish_manifest_fsync_ms=%s publish_manifest_stat_ms=%s "
+            "publish_staging_dir_fsync_ms=%s publish_parent_prepare_ms=%s "
+            "publish_rename_ms=%s publish_parent_dir_fsync_ms=%s "
+            "publish_journal_append_ms=%s publish_accounted_ms=%s "
+            "publish_unattributed_ms=%s",
             self.source_id,
             self.runtime_epoch_id,
             self.session_id,
             fragment.segment_id,
             sum(1 for row in fragment.rows if "pts" in row or "frame_pts" in row),
             size,
+            timings.get("first_pts", "unavailable"),
+            timings.get("last_pts", "unavailable"),
+            timings.get("publish_total_ms", "unavailable"),
+            timings.get("publish_validate_ms", "unavailable"),
+            timings.get("publish_metadata_write_ms", "unavailable"),
+            timings.get("publish_metadata_fsync_ms", "unavailable"),
+            timings.get("publish_metadata_stat_ms", "unavailable"),
+            timings.get("publish_manifest_write_ms", "unavailable"),
+            timings.get("publish_manifest_fsync_ms", "unavailable"),
+            timings.get("publish_manifest_stat_ms", "unavailable"),
+            timings.get("publish_staging_dir_fsync_ms", "unavailable"),
+            timings.get("publish_parent_prepare_ms", "unavailable"),
+            timings.get("publish_rename_ms", "unavailable"),
+            timings.get("publish_parent_dir_fsync_ms", "unavailable"),
+            timings.get("publish_journal_append_ms", "unavailable"),
+            timings.get("publish_accounted_ms", "unavailable"),
+            timings.get("publish_unattributed_ms", "unavailable"),
         )
 
     def _on_publish_error(self, fragment: Fragment, error: Exception) -> None:

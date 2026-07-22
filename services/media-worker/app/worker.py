@@ -25,8 +25,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, local
-from contextlib import nullcontext
-from typing import Callable
+from contextlib import contextmanager, nullcontext
+from typing import Callable, Iterator
 
 import psycopg
 from psycopg.rows import dict_row
@@ -13758,6 +13758,61 @@ def _scheduler_cycle_observability(
     }
 
 
+_SCHEDULER_STAGE_NAMES = (
+    "lifecycle_recovery",
+    "finalizer_completion_drain",
+    "image_completion_drain",
+    "finalizer_pending_snapshot",
+    "finalizer_recovery_query",
+    "finalizer_recovery_admission",
+    "finalizer_scan_admission",
+    "cleanup_recovery",
+    "alias_reconcile",
+    "remux_admission",
+    "rolling_image_admission",
+    "snapshot_admission",
+    "annotation_admission",
+    "legacy_rolling",
+    "legacy_finalizer_recovery",
+    "legacy_sink_scan",
+    "legacy_snapshot",
+    "legacy_annotation",
+)
+
+
+class _SchedulerStageTimings:
+    """Measure non-overlapping scheduler-body stages with no semantic hooks."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._durations_ms = {name: 0.0 for name in _SCHEDULER_STAGE_NAMES}
+
+    @contextmanager
+    def measure(self, name: str) -> Iterator[None]:
+        if name not in self._durations_ms:
+            raise ValueError(f"unknown scheduler stage: {name}")
+        started_at = self._clock()
+        try:
+            yield
+        finally:
+            elapsed_ms = max(0.0, (self._clock() - started_at) * 1000.0)
+            self._durations_ms[name] += elapsed_ms
+
+    def snapshot(self, *, tick_body_ms: int) -> dict[str, float]:
+        durations = {
+            f"tick_stage_{name}_ms": round(value, 3)
+            for name, value in self._durations_ms.items()
+        }
+        accounted_ms = sum(self._durations_ms.values())
+        body_ms = max(0.0, float(tick_body_ms))
+        durations["tick_stage_accounted_ms"] = round(accounted_ms, 3)
+        durations["tick_stage_unattributed_ms"] = round(
+            max(0.0, body_ms - accounted_ms),
+            3,
+        )
+        return durations
+
+
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     global _active_materialization_resources
     if (
@@ -14065,16 +14120,18 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             cleanup_recovery_due = (
                 now_monotonic >= next_cleanup_recovery_poll_at
             )
+            stage_timings = _SchedulerStageTimings()
             try:
                 recovery_updates = 0
                 if lifecycle_recovery_due:
                     next_lifecycle_recovery_poll_at = (
                         now_monotonic + rolling_cache_poll_interval_s
                     )
-                    recovery_updates = _recover_rolling_cache_lifecycle(
-                        pg_conn,
-                        cfg,
-                    )
+                    with stage_timings.measure("lifecycle_recovery"):
+                        recovery_updates = _recover_rolling_cache_lifecycle(
+                            pg_conn,
+                            cfg,
+                        )
                     if recovery_updates:
                         logger.info(
                             "media_scheduler_lifecycle_recovery updated=%s "
@@ -14088,11 +14145,13 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 if scheduler_v2_enabled:
                     completed_updates = 0
                     if finalizer_scheduler_v2 is not None:
-                        completed_updates += finalizer_scheduler_v2.drain_completed(
-                            pg_conn
-                        )
+                        with stage_timings.measure("finalizer_completion_drain"):
+                            completed_updates += finalizer_scheduler_v2.drain_completed(
+                                pg_conn
+                            )
                     if image_scheduler_v2 is not None:
-                        completed_updates += image_scheduler_v2.drain_completed(pg_conn)
+                        with stage_timings.measure("image_completion_drain"):
+                            completed_updates += image_scheduler_v2.drain_completed(pg_conn)
                     if completed_updates:
                         logger.info(
                             "media_scheduler_v2_completed updated=%s",
@@ -14110,65 +14169,73 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         )
                         if finalizer_scheduler_v2 is not None:
                             try:
-                                finalizer_pending_snapshot = finalizer_pending_metrics(
-                                    pg_conn
-                                )
+                                with stage_timings.measure(
+                                    "finalizer_pending_snapshot"
+                                ):
+                                    finalizer_pending_snapshot = finalizer_pending_metrics(
+                                        pg_conn
+                                    )
                             except Exception:
                                 logger.exception(
                                     "media_finalizer_pending_metrics_failed"
                                 )
-                            recovered_metadata = _recoverable_finalizer_metadata(
-                                pg_conn,
-                                limit=max(
-                                    1,
-                                    int(
-                                        os.getenv(
-                                            "MEDIA_WORKER_FINALIZER_RECOVERY_MAX_PER_POLL",
-                                            "100",
-                                        )
+                            with stage_timings.measure("finalizer_recovery_query"):
+                                recovered_metadata = _recoverable_finalizer_metadata(
+                                    pg_conn,
+                                    limit=max(
+                                        1,
+                                        int(
+                                            os.getenv(
+                                                "MEDIA_WORKER_FINALIZER_RECOVERY_MAX_PER_POLL",
+                                                "100",
+                                            )
+                                        ),
                                     ),
-                                ),
-                            )
+                                )
                             recovered_admitted = 0
                             if recovered_metadata:
-                                recovered_admitted = (
-                                    finalizer_scheduler_v2.admit_metadata(
-                                        pg_conn,
-                                        sink_dir=cfg.sink_output_dir,
-                                        metadata_files=recovered_metadata,
-                                        scan_stats={
-                                            "scan_duration_ms": 0,
-                                            "metadata_files_visited": len(
-                                                recovered_metadata
+                                with stage_timings.measure(
+                                    "finalizer_recovery_admission"
+                                ):
+                                    recovered_admitted = (
+                                        finalizer_scheduler_v2.admit_metadata(
+                                            pg_conn,
+                                            sink_dir=cfg.sink_output_dir,
+                                            metadata_files=recovered_metadata,
+                                            scan_stats={
+                                                "scan_duration_ms": 0,
+                                                "metadata_files_visited": len(
+                                                    recovered_metadata
+                                                ),
+                                                "metadata_files_parsed": len(
+                                                    recovered_metadata
+                                                ),
+                                                "scan_mode": (
+                                                    "finalizer_pending_recovery_v2"
+                                                ),
+                                            },
+                                            processed_dirs=set(),
+                                            processed_state_path=None,
+                                            candidate_dirs=None,
+                                            invalid_output_failures=None,
+                                            stability_checks=1,
+                                            cleanup_replay_sink_output_enabled=(
+                                                cfg.cleanup_replay_sink_output_enabled
                                             ),
-                                            "metadata_files_parsed": len(
-                                                recovered_metadata
+                                            replay_sink_output_max_bytes=(
+                                                cfg.replay_sink_output_max_bytes
                                             ),
-                                            "scan_mode": (
-                                                "finalizer_pending_recovery_v2"
-                                            ),
-                                        },
-                                        processed_dirs=set(),
-                                        processed_state_path=None,
-                                        candidate_dirs=None,
-                                        invalid_output_failures=None,
-                                        stability_checks=1,
-                                        cleanup_replay_sink_output_enabled=(
-                                            cfg.cleanup_replay_sink_output_enabled
-                                        ),
-                                        replay_sink_output_max_bytes=(
-                                            cfg.replay_sink_output_max_bytes
-                                        ),
+                                        )
                                     )
+                            with stage_timings.measure("finalizer_scan_admission"):
+                                general_admitted = finalizer_scheduler_v2.scan_and_admit(
+                                    pg_conn,
+                                    sink_dir=active_sink_output_dir,
+                                    processed_dirs=processed_dirs,
+                                    processed_state_path=processed_state_path,
+                                    candidate_dirs=candidate_dirs,
+                                    invalid_output_failures=invalid_output_failures,
                                 )
-                            general_admitted = finalizer_scheduler_v2.scan_and_admit(
-                                pg_conn,
-                                sink_dir=active_sink_output_dir,
-                                processed_dirs=processed_dirs,
-                                processed_state_path=processed_state_path,
-                                candidate_dirs=candidate_dirs,
-                                invalid_output_failures=invalid_output_failures,
-                            )
                             if recovered_admitted or general_admitted:
                                 logger.info(
                                     "media_scheduler_v2_finalizer_admitted "
@@ -14178,23 +14245,24 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                                 )
 
                         if cleanup_recovery_due:
-                            cleanup_stats = _recover_pending_sink_cleanups(
-                                pg_conn,
-                                sink_root=cfg.sink_output_dir,
-                                enabled=cfg.cleanup_replay_sink_output_enabled,
-                                allowed_statuses=(
-                                    cfg.cleanup_replay_sink_output_statuses
-                                ),
-                                limit=max(
-                                    1,
-                                    int(
-                                        os.getenv(
-                                            "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
-                                            "16",
-                                        )
+                            with stage_timings.measure("cleanup_recovery"):
+                                cleanup_stats = _recover_pending_sink_cleanups(
+                                    pg_conn,
+                                    sink_root=cfg.sink_output_dir,
+                                    enabled=cfg.cleanup_replay_sink_output_enabled,
+                                    allowed_statuses=(
+                                        cfg.cleanup_replay_sink_output_statuses
                                     ),
-                                ),
-                            )
+                                    limit=max(
+                                        1,
+                                        int(
+                                            os.getenv(
+                                                "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
+                                                "16",
+                                            )
+                                        ),
+                                    ),
+                                )
                             cleanup_rows_scanned_total += cleanup_stats.rows_scanned
                             cleanup_recovered_total += cleanup_stats.recovered
                             cleanup_retry_pending_total += cleanup_stats.retry_pending
@@ -14218,7 +14286,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                                 cleanup_stats.retry_pending,
                                 cleanup_retry_delay_s,
                             )
-                        alias_updates = _reconcile_covered_event_aliases(pg_conn)
+                        with stage_timings.measure("alias_reconcile"):
+                            alias_updates = _reconcile_covered_event_aliases(pg_conn)
                         if alias_updates:
                             logger.info(
                                 "media_worker: covered evidence aliases updated %d events",
@@ -14229,11 +14298,12 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         next_rolling_cache_poll_at = (
                             now_monotonic + rolling_cache_poll_interval_s
                         )
-                        remux_updates = (
-                            rolling_cache_runner.process(pg_conn, cfg)
-                            if rolling_cache_runner is not None
-                            else 0
-                        )
+                        with stage_timings.measure("remux_admission"):
+                            remux_updates = (
+                                rolling_cache_runner.process(pg_conn, cfg)
+                                if rolling_cache_runner is not None
+                                else 0
+                            )
                         if remux_updates:
                             logger.info(
                                 "media_scheduler_v2_rolling remux=%s",
@@ -14241,19 +14311,22 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                             )
 
                     if rolling_cache_due and image_scheduler_v2 is not None:
-                        rolling_images_admitted = (
-                            image_scheduler_v2.admit_rolling_images(pg_conn)
-                        )
+                        with stage_timings.measure("rolling_image_admission"):
+                            rolling_images_admitted = (
+                                image_scheduler_v2.admit_rolling_images(pg_conn)
+                            )
                         if rolling_images_admitted:
                             logger.info(
                                 "media_scheduler_v2_images_admitted rolling=%s",
                                 rolling_images_admitted,
                             )
                     if general_due and image_scheduler_v2 is not None:
-                        snapshots_admitted = image_scheduler_v2.admit_snapshots(pg_conn)
-                        annotations_admitted = (
-                            image_scheduler_v2.admit_annotations(pg_conn)
-                        )
+                        with stage_timings.measure("snapshot_admission"):
+                            snapshots_admitted = image_scheduler_v2.admit_snapshots(pg_conn)
+                        with stage_timings.measure("annotation_admission"):
+                            annotations_admitted = (
+                                image_scheduler_v2.admit_annotations(pg_conn)
+                            )
                         if snapshots_admitted or annotations_admitted:
                             logger.info(
                                 "media_scheduler_v2_images_admitted snapshots=%s "
@@ -14266,14 +14339,15 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                     next_rolling_cache_poll_at = (
                         now_monotonic + rolling_cache_poll_interval_s
                     )
-                    rolling_updates = _process_rolling_cache_tasks(
-                        pg_conn,
-                        cfg,
-                        runner=rolling_cache_runner,
-                        runtime_resources=runtime_resources,
-                        segment_index=segment_index,
-                        recover_lifecycle=False,
-                    )
+                    with stage_timings.measure("legacy_rolling"):
+                        rolling_updates = _process_rolling_cache_tasks(
+                            pg_conn,
+                            cfg,
+                            runner=rolling_cache_runner,
+                            runtime_resources=runtime_resources,
+                            segment_index=segment_index,
+                            recover_lifecycle=False,
+                        )
                     if rolling_updates:
                         logger.info(
                             "media_worker: rolling-cache materialized %d events",
@@ -14298,62 +14372,65 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         ),
                     )
                     if recovered_metadata:
-                        recovery_updates = _process_configured_sink_output(
-                            pg_conn,
-                            cfg,
-                            sink_dir=cfg.sink_output_dir,
-                            processed_dirs=set(),
-                            candidate_dirs=None,
-                            invalid_output_failures=None,
-                            materialization_guard=materialization_guard,
-                            materialization_pacer=materialization_pacer,
-                            processed_state_path=None,
-                            metadata_files_override=recovered_metadata,
-                            scan_stats_override={
-                                "scan_duration_ms": 0,
-                                "metadata_files_visited": len(recovered_metadata),
-                                "metadata_files_parsed": len(recovered_metadata),
-                                "scan_mode": "finalizer_pending_recovery",
-                            },
-                            runtime_resources=runtime_resources,
-                        )
+                        with stage_timings.measure("legacy_finalizer_recovery"):
+                            recovery_updates = _process_configured_sink_output(
+                                pg_conn,
+                                cfg,
+                                sink_dir=cfg.sink_output_dir,
+                                processed_dirs=set(),
+                                candidate_dirs=None,
+                                invalid_output_failures=None,
+                                materialization_guard=materialization_guard,
+                                materialization_pacer=materialization_pacer,
+                                processed_state_path=None,
+                                metadata_files_override=recovered_metadata,
+                                scan_stats_override={
+                                    "scan_duration_ms": 0,
+                                    "metadata_files_visited": len(recovered_metadata),
+                                    "metadata_files_parsed": len(recovered_metadata),
+                                    "scan_mode": "finalizer_pending_recovery",
+                                },
+                                runtime_resources=runtime_resources,
+                            )
                         if recovery_updates:
                             logger.info(
                                 "media_worker: recovered finalizer %d events",
                                 recovery_updates,
                             )
 
-                    clip_updates = _process_configured_sink_output(
-                        pg_conn,
-                        cfg,
-                        sink_dir=active_sink_output_dir,
-                        processed_dirs=processed_dirs,
-                        candidate_dirs=candidate_dirs,
-                        invalid_output_failures=invalid_output_failures,
-                        materialization_guard=materialization_guard,
-                        materialization_pacer=materialization_pacer,
-                        processed_state_path=processed_state_path,
-                        runtime_resources=runtime_resources,
-                    )
+                    with stage_timings.measure("legacy_sink_scan"):
+                        clip_updates = _process_configured_sink_output(
+                            pg_conn,
+                            cfg,
+                            sink_dir=active_sink_output_dir,
+                            processed_dirs=processed_dirs,
+                            candidate_dirs=candidate_dirs,
+                            invalid_output_failures=invalid_output_failures,
+                            materialization_guard=materialization_guard,
+                            materialization_pacer=materialization_pacer,
+                            processed_state_path=processed_state_path,
+                            runtime_resources=runtime_resources,
+                        )
                     if clip_updates:
                         logger.info("media_worker: clip updated %d events", clip_updates)
 
                     if cleanup_recovery_due:
-                        cleanup_stats = _recover_pending_sink_cleanups(
-                            pg_conn,
-                            sink_root=cfg.sink_output_dir,
-                            enabled=cfg.cleanup_replay_sink_output_enabled,
-                            allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
-                            limit=max(
-                                1,
-                                int(
-                                    os.getenv(
-                                        "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
-                                        "16",
-                                    )
+                        with stage_timings.measure("cleanup_recovery"):
+                            cleanup_stats = _recover_pending_sink_cleanups(
+                                pg_conn,
+                                sink_root=cfg.sink_output_dir,
+                                enabled=cfg.cleanup_replay_sink_output_enabled,
+                                allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
+                                limit=max(
+                                    1,
+                                    int(
+                                        os.getenv(
+                                            "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
+                                            "16",
+                                        )
+                                    ),
                                 ),
-                            ),
-                        )
+                            )
                         cleanup_rows_scanned_total += cleanup_stats.rows_scanned
                         cleanup_recovered_total += cleanup_stats.recovered
                         cleanup_retry_pending_total += cleanup_stats.retry_pending
@@ -14375,26 +14452,29 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                             cleanup_retry_delay_s,
                         )
 
-                    alias_updates = _reconcile_covered_event_aliases(pg_conn)
+                    with stage_timings.measure("alias_reconcile"):
+                        alias_updates = _reconcile_covered_event_aliases(pg_conn)
                     if alias_updates:
                         logger.info(
                             "media_worker: covered evidence aliases updated %d events",
                             alias_updates,
                         )
 
-                    snap_updates = _process_pending_snapshots(
-                        pg_conn,
-                        cfg.snapshot_output_dir,
-                        cfg.default_pre_seconds,
-                    )
+                    with stage_timings.measure("legacy_snapshot"):
+                        snap_updates = _process_pending_snapshots(
+                            pg_conn,
+                            cfg.snapshot_output_dir,
+                            cfg.default_pre_seconds,
+                        )
                     if snap_updates:
                         logger.info(
                             "media_worker: snapshot updated %d events", snap_updates
                         )
 
-                    ann_updates = _process_pending_annotations(
-                        pg_conn, cfg.annotated_output_dir,
-                    )
+                    with stage_timings.measure("legacy_annotation"):
+                        ann_updates = _process_pending_annotations(
+                            pg_conn, cfg.annotated_output_dir,
+                        )
                     if ann_updates:
                         logger.info(
                             "media_worker: annotation updated %d events", ann_updates
@@ -14403,6 +14483,10 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 logger.exception("media worker loop error")
 
             tick_duration_ms = int((time.monotonic() - tick_started_at) * 1000)
+            tick_stage_snapshot = stage_timings.snapshot(tick_body_ms=tick_duration_ms)
+            tick_stage_text = " ".join(
+                f"{name}={value:g}" for name, value in tick_stage_snapshot.items()
+            )
             snapshot_started_at = time.monotonic()
             permit_snapshot = materialization_guard.snapshot()
             resource_snapshot = runtime_resources.snapshot()
@@ -14459,7 +14543,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             logger.info(
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=%s sequence=%s tick_duration_ms=%s "
-                "tick_gap_ms=%s completed_cycle_sequence=%s "
+                "tick_gap_ms=%s %s completed_cycle_sequence=%s "
                 "cycle_body_ms=%s cycle_snapshot_ms=%s cycle_logging_ms=%s "
                 "cycle_planned_sleep_ms=%s cycle_actual_sleep_ms=%s "
                 "cycle_accounted_ms=%s cycle_work_ms=%s cycle_total_ms=%s "
@@ -14524,6 +14608,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 scheduler_tick_sequence,
                 tick_duration_ms,
                 tick_gap_ms if tick_gap_ms is not None else "unavailable",
+                tick_stage_text,
                 (
                     scheduler_tick_sequence - 1
                     if tick_gap_ms is not None

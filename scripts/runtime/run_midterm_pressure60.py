@@ -9663,6 +9663,9 @@ def collect_rolling_cache_segment_visibility(
     frame_counts: list[int] = []
     segment_frame_rates_fps: list[float] = []
     visibility_lags_s: list[float] = []
+    visibility_lags_by_source: dict[str, list[float]] = {}
+    visibility_lags_by_visible_bucket: dict[int, list[float]] = {}
+    slow_segments: list[dict[str, Any]] = []
     source_ids: set[str] = set()
     sampled_paths: list[str] = []
     skipped_clock_domain = 0
@@ -9705,7 +9708,38 @@ def collect_rolling_cache_segment_visibility(
             except FileNotFoundError:
                 metadata_files_vanished += 1
                 continue
-            visibility_lags_s.append(metadata_mtime - last_pts_epoch_s)
+            visibility_lag_s = metadata_mtime - last_pts_epoch_s
+            visibility_lags_s.append(visibility_lag_s)
+            visibility_lags_by_source.setdefault(source_id, []).append(
+                visibility_lag_s
+            )
+            visible_bucket = int(metadata_mtime // 30) * 30
+            visibility_lags_by_visible_bucket.setdefault(
+                visible_bucket,
+                [],
+            ).append(visibility_lag_s)
+            try:
+                relative_path = str(metadata_path.relative_to(root))
+            except ValueError:
+                relative_path = str(metadata_path)
+            epoch_id = ""
+            try:
+                epochs_index = metadata_path.parts.index("epochs")
+                epoch_id = metadata_path.parts[epochs_index + 1]
+            except (ValueError, IndexError):
+                pass
+            slow_segments.append(
+                {
+                    "source_id": source_id,
+                    "runtime_epoch_id": epoch_id,
+                    "segment_id": metadata_path.parent.name,
+                    "last_pts": last_pts,
+                    "last_pts_epoch_s": round(last_pts_epoch_s, 6),
+                    "visible_at_epoch_s": round(metadata_mtime, 6),
+                    "lag_s": round(visibility_lag_s, 3),
+                    "metadata_path": relative_path,
+                }
+            )
             if len(sampled_paths) < 20:
                 sampled_paths.append(str(metadata_path))
         else:
@@ -9721,6 +9755,34 @@ def collect_rolling_cache_segment_visibility(
         "segment_duration_s": _numeric_distribution(segment_durations_s),
         "segment_frame_rate_fps": _numeric_distribution(segment_frame_rates_fps),
         "metadata_visible_lag_s": _numeric_distribution(visibility_lags_s),
+        "metadata_visible_lag_s_by_source": {
+            source_id: _numeric_distribution(values)
+            for source_id, values in sorted(visibility_lags_by_source.items())
+        },
+        "metadata_visible_lag_s_by_visible_at_30s": [
+            {
+                "visible_at_bucket_start_epoch_s": bucket_start,
+                "visible_at_bucket_start": datetime.fromtimestamp(
+                    bucket_start,
+                    timezone.utc,
+                ).isoformat(),
+                "segment_count": len(values),
+                "lag_s": _numeric_distribution(values),
+            }
+            for bucket_start, values in sorted(
+                visibility_lags_by_visible_bucket.items()
+            )
+        ],
+        "metadata_visible_lag_threshold_counts": {
+            "over_2s": sum(value > 2.0 for value in visibility_lags_s),
+            "over_5s": sum(value > 5.0 for value in visibility_lags_s),
+            "over_10s": sum(value > 10.0 for value in visibility_lags_s),
+        },
+        "slowest_segments": sorted(
+            slow_segments,
+            key=lambda item: float(item["lag_s"]),
+            reverse=True,
+        )[:50],
         "skipped_clock_domain": skipped_clock_domain,
         "parse_errors": parse_errors,
         "metadata_files_vanished": metadata_files_vanished,
@@ -9981,6 +10043,9 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
         "adaface_forwarder": cfg.artifact_dir / "adaface_forwarder_logs_since_start.txt",
         "adaface_roi_worker": cfg.artifact_dir / "adaface_roi_worker_logs_since_start.txt",
         "replay_raw_fanout": cfg.artifact_dir / "replay_raw_fanout_logs_since_start.txt",
+        "rolling_cache_sink": cfg.artifact_dir / "rolling_cache_sink_logs_since_start.txt",
+        "rolling_cache_sink_a": cfg.artifact_dir / "rolling_cache_sink_a_logs_since_start.txt",
+        "rolling_cache_sink_b": cfg.artifact_dir / "rolling_cache_sink_b_logs_since_start.txt",
     }
     summary: dict[str, Any] = {}
     for key, path in paths.items():
@@ -10137,6 +10202,59 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "cycle_work_ms",
                 "cycle_total_ms",
                 "cycle_unattributed_ms",
+            )
+        }
+        media_scheduler_tick_stage_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="media_scheduler_tick",
+                field=field,
+            )
+            for field in (
+                "tick_stage_lifecycle_recovery_ms",
+                "tick_stage_finalizer_completion_drain_ms",
+                "tick_stage_image_completion_drain_ms",
+                "tick_stage_finalizer_pending_snapshot_ms",
+                "tick_stage_finalizer_recovery_query_ms",
+                "tick_stage_finalizer_recovery_admission_ms",
+                "tick_stage_finalizer_scan_admission_ms",
+                "tick_stage_cleanup_recovery_ms",
+                "tick_stage_alias_reconcile_ms",
+                "tick_stage_remux_admission_ms",
+                "tick_stage_rolling_image_admission_ms",
+                "tick_stage_snapshot_admission_ms",
+                "tick_stage_annotation_admission_ms",
+                "tick_stage_legacy_rolling_ms",
+                "tick_stage_legacy_finalizer_recovery_ms",
+                "tick_stage_legacy_sink_scan_ms",
+                "tick_stage_legacy_snapshot_ms",
+                "tick_stage_legacy_annotation_ms",
+                "tick_stage_accounted_ms",
+                "tick_stage_unattributed_ms",
+            )
+        }
+        rolling_cache_publish_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="segment published",
+                field=field,
+            )
+            for field in (
+                "publish_total_ms",
+                "publish_validate_ms",
+                "publish_metadata_write_ms",
+                "publish_metadata_fsync_ms",
+                "publish_metadata_stat_ms",
+                "publish_manifest_write_ms",
+                "publish_manifest_fsync_ms",
+                "publish_manifest_stat_ms",
+                "publish_staging_dir_fsync_ms",
+                "publish_parent_prepare_ms",
+                "publish_rename_ms",
+                "publish_parent_dir_fsync_ms",
+                "publish_journal_append_ms",
+                "publish_accounted_ms",
+                "publish_unattributed_ms",
             )
         }
         media_scheduler_remux_lane_depth = _log_metric_numbers_for_lines(
@@ -10471,6 +10589,14 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             **{
                 f"media_scheduler_{field}": _numeric_distribution(values)
                 for field, values in media_scheduler_cycle_metrics.items()
+            },
+            **{
+                f"media_scheduler_{field}": _numeric_distribution(values)
+                for field, values in media_scheduler_tick_stage_metrics.items()
+            },
+            **{
+                f"rolling_cache_{field}": _numeric_distribution(values)
+                for field, values in rolling_cache_publish_metrics.items()
             },
             "media_scheduler_remux_lane_depth": _numeric_distribution(
                 media_scheduler_remux_lane_depth
@@ -12700,64 +12826,175 @@ def postgres_observability_summary(
             f"evidence_lifecycle_query_failed:{type(exc).__name__}"
         )
     try:
-        row = conn.execute(
-            f"""
-            WITH measured AS (
-                SELECT
-                    et.materialization_ready_at,
-                    NULLIF(
-                        et.materialization_audit->'rolling_cache'->>'claimed_at',
-                        ''
-                    )::timestamptz AS claimed_at,
-                    et.last_materialization_at
-                FROM evidence_tasks et
-                WHERE et.source_id LIKE %(prefix)s
-                  AND {_formal_pressure_event_predicate("et")}
-                  AND et.materialization_ready_at IS NOT NULL
-                  AND et.materialization_audit ? 'rolling_cache'
-            ),
-            deltas AS (
-                SELECT
-                    EXTRACT(EPOCH FROM (claimed_at - materialization_ready_at)) AS ready_to_claim_s,
-                    EXTRACT(EPOCH FROM (last_materialization_at - claimed_at)) AS claim_to_materialized_s
-                FROM measured
-                WHERE claimed_at IS NOT NULL
+        summary["rolling_cache_ready_schedule_seconds"] = (
+            rolling_cache_schedule_latency_summary(
+                conn,
+                run_id,
+                sampling_start_event_ts_ms=sampling_start_event_ts_ms,
             )
-            SELECT
-                count(*) AS count,
-                count(*) FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_count,
-                percentile_cont(0.50) WITHIN GROUP (ORDER BY ready_to_claim_s)
-                    FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_p50_s,
-                percentile_cont(0.95) WITHIN GROUP (ORDER BY ready_to_claim_s)
-                    FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_p95_s,
-                percentile_cont(1.00) WITHIN GROUP (ORDER BY ready_to_claim_s)
-                    FILTER (WHERE ready_to_claim_s IS NOT NULL) AS ready_to_claim_max_s,
-                count(*) FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_count,
-                percentile_cont(0.50) WITHIN GROUP (ORDER BY claim_to_materialized_s)
-                    FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_p50_s,
-                percentile_cont(0.95) WITHIN GROUP (ORDER BY claim_to_materialized_s)
-                    FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_p95_s,
-                percentile_cont(1.00) WITHIN GROUP (ORDER BY claim_to_materialized_s)
-                    FILTER (WHERE claim_to_materialized_s IS NOT NULL) AS claim_to_materialized_max_s
-            FROM deltas
-            """,
-            {
-                "prefix": f"{run_id}_%",
-                "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
-            },
-        ).fetchone()
-        ready_metrics = _row_json(row)
-        ready_metrics["status"] = (
-            "measured"
-            if int(ready_metrics.get("ready_to_claim_count") or 0) > 0
-            else "not_enough_data"
         )
-        summary["rolling_cache_ready_schedule_seconds"] = ready_metrics
     except Exception as exc:
         summary["rolling_cache_ready_schedule_seconds"] = _not_enough_data(
             f"rolling_cache_ready_schedule_query_failed:{type(exc).__name__}"
         )
     return summary
+
+
+def rolling_cache_schedule_latency_summary(
+    conn,
+    run_id: str,
+    *,
+    sampling_start_event_ts_ms: int = 0,
+) -> dict[str, Any]:
+    """Separate fixed readiness policy from scheduler and coverage retry wait."""
+
+    row = conn.execute(
+        f"""
+        WITH measured AS (
+            SELECT
+                et.materialization_attempt_count,
+                et.materialization_ready_at,
+                et.created_at AS task_created_at,
+                et.last_materialization_at,
+                to_timestamp(et.event_ts_ms / 1000.0) AS event_at,
+                COALESCE(
+                    NULLIF(
+                        et.materialization_audit
+                            ->'lifecycle_v2_claim'->>'claimed_at',
+                        ''
+                    ),
+                    NULLIF(
+                        et.materialization_audit
+                            ->'rolling_cache'->>'claimed_at',
+                        ''
+                    )
+                )::timestamptz AS claimed_at,
+                NULLIF(
+                    et.materialization_audit
+                        ->'lifecycle_v2_retry'->>'delay_s',
+                    ''
+                )::double precision AS retry_delay_s
+            FROM evidence_tasks et
+            WHERE et.source_id LIKE %(prefix)s
+              AND {_formal_pressure_event_predicate("et")}
+              AND COALESCE(et.clip_required, false) = true
+              AND et.materialization_ready_at IS NOT NULL
+        ),
+        deltas AS (
+            SELECT
+                materialization_attempt_count,
+                retry_delay_s,
+                EXTRACT(EPOCH FROM (
+                    materialization_ready_at - event_at
+                )) AS policy_wait_s,
+                EXTRACT(EPOCH FROM (
+                    materialization_ready_at - task_created_at
+                )) AS task_created_to_ready_s,
+                EXTRACT(EPOCH FROM (
+                    claimed_at - materialization_ready_at
+                )) AS ready_to_claim_s,
+                EXTRACT(EPOCH FROM (
+                    last_materialization_at - claimed_at
+                )) AS claim_to_materialized_s
+            FROM measured
+        )
+        SELECT
+            count(*) AS count,
+            count(*) FILTER (
+                WHERE materialization_attempt_count > 1
+            ) AS retry_count,
+            count(*) FILTER (WHERE policy_wait_s IS NOT NULL)
+                AS policy_wait_count,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY policy_wait_s)
+                FILTER (WHERE policy_wait_s IS NOT NULL) AS policy_wait_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY policy_wait_s)
+                FILTER (WHERE policy_wait_s IS NOT NULL) AS policy_wait_p95_s,
+            percentile_cont(1.00) WITHIN GROUP (ORDER BY policy_wait_s)
+                FILTER (WHERE policy_wait_s IS NOT NULL) AS policy_wait_max_s,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY task_created_to_ready_s)
+                FILTER (WHERE task_created_to_ready_s IS NOT NULL)
+                AS task_created_to_ready_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY task_created_to_ready_s)
+                FILTER (WHERE task_created_to_ready_s IS NOT NULL)
+                AS task_created_to_ready_p95_s,
+            count(*) FILTER (WHERE ready_to_claim_s IS NOT NULL)
+                AS ready_to_claim_count,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (WHERE ready_to_claim_s IS NOT NULL)
+                AS ready_to_claim_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (WHERE ready_to_claim_s IS NOT NULL)
+                AS ready_to_claim_p95_s,
+            percentile_cont(1.00) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (WHERE ready_to_claim_s IS NOT NULL)
+                AS ready_to_claim_max_s,
+            count(*) FILTER (
+                WHERE ready_to_claim_s IS NOT NULL
+                  AND materialization_attempt_count = 1
+            ) AS first_claim_count,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (
+                    WHERE ready_to_claim_s IS NOT NULL
+                      AND materialization_attempt_count = 1
+                ) AS first_claim_ready_to_claim_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (
+                    WHERE ready_to_claim_s IS NOT NULL
+                      AND materialization_attempt_count = 1
+                ) AS first_claim_ready_to_claim_p95_s,
+            percentile_cont(1.00) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (
+                    WHERE ready_to_claim_s IS NOT NULL
+                      AND materialization_attempt_count = 1
+                ) AS first_claim_ready_to_claim_max_s,
+            count(*) FILTER (
+                WHERE ready_to_claim_s IS NOT NULL
+                  AND materialization_attempt_count > 1
+            ) AS retried_claim_count,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (
+                    WHERE ready_to_claim_s IS NOT NULL
+                      AND materialization_attempt_count > 1
+                ) AS retried_ready_to_claim_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (
+                    WHERE ready_to_claim_s IS NOT NULL
+                      AND materialization_attempt_count > 1
+                ) AS retried_ready_to_claim_p95_s,
+            percentile_cont(1.00) WITHIN GROUP (ORDER BY ready_to_claim_s)
+                FILTER (
+                    WHERE ready_to_claim_s IS NOT NULL
+                      AND materialization_attempt_count > 1
+                ) AS retried_ready_to_claim_max_s,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY retry_delay_s)
+                FILTER (WHERE retry_delay_s IS NOT NULL) AS retry_delay_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY retry_delay_s)
+                FILTER (WHERE retry_delay_s IS NOT NULL) AS retry_delay_p95_s,
+            count(*) FILTER (WHERE claim_to_materialized_s IS NOT NULL)
+                AS claim_to_materialized_count,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY claim_to_materialized_s)
+                FILTER (WHERE claim_to_materialized_s IS NOT NULL)
+                AS claim_to_materialized_p50_s,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY claim_to_materialized_s)
+                FILTER (WHERE claim_to_materialized_s IS NOT NULL)
+                AS claim_to_materialized_p95_s,
+            percentile_cont(1.00) WITHIN GROUP (ORDER BY claim_to_materialized_s)
+                FILTER (WHERE claim_to_materialized_s IS NOT NULL)
+                AS claim_to_materialized_max_s
+        FROM deltas
+        """,
+        {
+            "prefix": f"{run_id}_%",
+            "sampling_start_event_ts_ms": sampling_start_event_ts_ms,
+        },
+    ).fetchone()
+    metrics = _row_json(row)
+    metrics["status"] = (
+        "measured"
+        if int(metrics.get("ready_to_claim_count") or 0) > 0
+        else "not_enough_data"
+    )
+    return metrics
 
 
 def event_task_ingest_latency_summary(
