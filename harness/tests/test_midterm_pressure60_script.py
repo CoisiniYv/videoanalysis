@@ -598,6 +598,25 @@ def test_profile_propagates_rolling_cache_publication_workers() -> None:
     assert "--rolling-cache-publication-workers 2" in completed.stdout
 
 
+def test_profile_propagates_rolling_cache_publication_commit_slots() -> None:
+    completed = subprocess.run(
+        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
+        cwd=ROOT.parent,
+        env={
+            **os.environ,
+            "DRY_RUN": "1",
+            "RUN_ID": "publication-commit-slots-dry-run",
+            "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
+        },
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert "rolling_cache_publication_commit_slots=2" in completed.stdout
+    assert "--rolling-cache-publication-commit-slots 2" in completed.stdout
+
+
 def test_pressure_cli_bounds_rolling_cache_publication_workers() -> None:
     module = _load_module()
 
@@ -610,6 +629,22 @@ def test_pressure_cli_bounds_rolling_cache_publication_workers() -> None:
     )
     with pytest.raises(SystemExit):
         module.parse_args(["--rolling-cache-publication-workers", "5"])
+
+
+def test_pressure_cli_bounds_rolling_cache_publication_commit_slots() -> None:
+    module = _load_module()
+
+    assert module.parse_args([]).rolling_cache_publication_commit_slots == 0
+    assert (
+        module.parse_args(
+            ["--rolling-cache-publication-commit-slots", "2"]
+        ).rolling_cache_publication_commit_slots
+        == 2
+    )
+    with pytest.raises(SystemExit):
+        module.parse_args(["--rolling-cache-publication-commit-slots", "5"])
+    with pytest.raises(SystemExit):
+        module.parse_args(["--rolling-cache-publication-commit-slots", "-1"])
 
 
 def test_profile_defaults_to_run_scoped_rtsp_server_for_fixed_input() -> None:
@@ -6172,6 +6207,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         dual_shard_same_gpu=True,
         rolling_cache_evidence=True,
         rolling_cache_publication_workers=2,
+        rolling_cache_publication_commit_slots=2,
         rtsp_uri="rtsp://shared.example/live/24fps",
         rtsp_republish_input_uri="/fixtures/fixed-8fps.mp4",
     )
@@ -6194,6 +6230,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         lambda _name: {
             "ROLLING_CACHE_RETENTION_SECONDS": str(expected_retention),
             "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
+            "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
         },
     )
     monkeypatch.setattr(
@@ -6216,10 +6253,12 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         expected_retention
     )
     assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_WORKERS"] == "2"
+    assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS"] == "2"
     assert summary["runtime_epoch_id"] == "midterm-epoch-123"
     assert summary["rolling_cache_expected_raw_fps"] == 8.0
     assert summary["rolling_cache_retention_seconds"] == expected_retention
     assert summary["rolling_cache_publication_workers"] == 2
+    assert summary["rolling_cache_publication_commit_slots"] == 2
     assert summary["dependency_services"] == [
         "replay-raw-fanout-a",
         "replay-raw-fanout-b",
@@ -6868,7 +6907,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment=segment-a frames=84 bytes=1000 "
                 "publish_total_ms=12 publish_stage_ms=3 publish_commit_ms=9 "
                 "publish_commit_lock_wait_ms=0.5 "
-                "publish_commit_lock_hold_ms=8.5 "
+                    "publish_commit_lock_hold_ms=8.5 "
+                    "publish_commit_slot_count=2 publish_commit_slot_index=1 "
                 "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=3 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
@@ -6893,7 +6933,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment=segment-b frames=84 bytes=1000 "
                 "publish_total_ms=40 publish_stage_ms=4 publish_commit_ms=36 "
                 "publish_commit_lock_wait_ms=12 "
-                "publish_commit_lock_hold_ms=24 "
+                    "publish_commit_lock_hold_ms=24 "
+                    "publish_commit_slot_count=2 publish_commit_slot_index=1 "
                 "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=30 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
@@ -6916,6 +6957,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "2026-07-22 02:03:13,901 INFO rolling_cache_sink.gst "
                 "publication dispatcher stopped drained=True "
                 "publication_capacity=128 publication_worker_count=2 "
+                "publication_commit_slot_count=2 "
                 "publication_queue_depth=0 publication_queue_depth_peak=36 "
                 "publication_outstanding=0 publication_outstanding_peak=37 "
                 "publication_active=0 publication_active_peak=2 "
@@ -7162,6 +7204,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         "rolling_cache_publish_commit_lock_hold_ms"
     ]["max"] == 24.0
     assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_commit_slot_count"
+    ]["max"] == 2.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_commit_slot_index"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
         "rolling_cache_publish_metadata_fsync_ms"
     ]["max"] == 30.0
     assert summary["rolling_cache_sink_b"]["rolling_cache_publish_total_ms"][
@@ -7178,6 +7226,9 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     ]["max"] == 2.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_active_peak"
+    ]["max"] == 2.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_commit_slot_count"
     ]["max"] == 2.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_failed_total"

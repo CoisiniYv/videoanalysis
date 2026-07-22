@@ -285,6 +285,8 @@ def test_epoch_commit_arbitration_is_disabled_by_default(
     assert fragment.publication_diagnostics[
         "publish_commit_lock_hold_ms"
     ] == 0
+    assert fragment.publication_diagnostics["publish_commit_slot_count"] == 0
+    assert fragment.publication_diagnostics["publish_commit_slot_index"] == -1
 
 
 def test_epoch_commit_arbiter_serializes_concurrent_source_commits(
@@ -357,6 +359,84 @@ def test_epoch_commit_arbiter_serializes_concurrent_source_commits(
     )
 
 
+def test_two_commit_slots_serialize_same_lane_while_peer_lane_progresses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert zlib.crc32(b"camera-04") % 2 == 0
+    assert zlib.crc32(b"camera-05") % 2 == 0
+    assert zlib.crc32(b"camera-00") % 2 == 1
+    publishers = {
+        source_id: AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=f"s{source_id[-1] * 16}",
+            commit_slot_count=2,
+        )
+        for source_id in ("camera-04", "camera-05", "camera-00")
+    }
+    staged = {}
+    for index, (source_id, publisher) in enumerate(publishers.items(), start=31):
+        fragment = publisher.prepare(index)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append({"source_id": source_id, "pts": index})
+        staged[source_id] = publisher.stage_publication(fragment)
+
+    first_entered = threading.Event()
+    same_lane_entered = threading.Event()
+    peer_lane_entered = threading.Event()
+    release_first = threading.Event()
+    real_replace = publishing.os.replace
+    errors: list[BaseException] = []
+
+    def controlled_replace(source: Path, destination: Path) -> None:
+        destination = Path(destination)
+        if "camera-04" in destination.parts:
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+        elif "camera-05" in destination.parts:
+            same_lane_entered.set()
+        elif "camera-00" in destination.parts:
+            peer_lane_entered.set()
+        real_replace(source, destination)
+
+    def commit(source_id: str) -> None:
+        try:
+            publishers[source_id].commit_publication(staged[source_id])
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(publishing.os, "replace", controlled_replace)
+    first_thread = threading.Thread(target=commit, args=("camera-04",), daemon=True)
+    same_thread = threading.Thread(target=commit, args=("camera-05",), daemon=True)
+    peer_thread = threading.Thread(target=commit, args=("camera-00",), daemon=True)
+    first_thread.start()
+    assert first_entered.wait(timeout=1)
+    same_thread.start()
+    peer_thread.start()
+
+    assert peer_lane_entered.wait(timeout=1)
+    assert same_lane_entered.wait(timeout=0.1) is False
+    release_first.set()
+    for thread in (first_thread, same_thread, peer_thread):
+        thread.join(timeout=2)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in (first_thread, same_thread, peer_thread))
+    assert same_lane_entered.is_set()
+    for source_id, item in staged.items():
+        diagnostics = item.fragment.publication_diagnostics
+        assert diagnostics["publish_commit_slot_count"] == 2
+        assert diagnostics["publish_commit_slot_index"] == (
+            zlib.crc32(source_id.encode("utf-8")) % 2
+        )
+    assert staged["camera-05"].fragment.publication_diagnostics[
+        "publish_commit_lock_wait_ms"
+    ] >= 90
+
+
 def test_epoch_commit_arbiter_blocks_cross_process_and_shutdown_is_bounded(
     tmp_path: Path,
 ) -> None:
@@ -419,6 +499,94 @@ def test_epoch_commit_arbiter_blocks_cross_process_and_shutdown_is_bounded(
     assert published == [fragment.final_dir]
     assert fragment.publication_diagnostics["publish_commit_lock_wait_ms"] >= 40
     assert fragment.publication_diagnostics["publish_commit_lock_hold_ms"] >= 0
+    assert dispatcher.snapshot()["shutdown_timeout_total"] == 1
+
+
+def test_two_commit_slots_exclude_cross_process_per_lane_and_drain_peer(
+    tmp_path: Path,
+) -> None:
+    publishers = {
+        source_id: AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=f"s{source_id[-1] * 16}",
+            commit_slot_count=2,
+        )
+        for source_id in ("camera-04", "camera-00")
+    }
+    fragments = {}
+    for index, (source_id, publisher) in enumerate(publishers.items(), start=41):
+        fragment = publisher.prepare(index)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append({"source_id": source_id, "pts": index})
+        fragments[source_id] = fragment
+
+    slot_zero_path = (
+        tmp_path
+        / "cache"
+        / "midterm"
+        / "epochs"
+        / "epoch-a"
+        / ".segment-publication-commit-slot-0.lock"
+    )
+    context = multiprocessing.get_context("fork")
+    acquired = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_exclusive_flock,
+        args=(str(slot_zero_path), acquired, release),
+    )
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=4,
+        worker_count=2,
+        thread_name="test-cross-process-commit-slots",
+    )
+    published: list[str] = []
+    errors: list[tuple[str, str]] = []
+    holder.start()
+    try:
+        assert acquired.wait(timeout=2)
+        for source_id in ("camera-04", "camera-00"):
+            dispatcher.submit(
+                source_id=source_id,
+                publisher=publishers[source_id],
+                fragment=fragments[source_id],
+                on_published=lambda fragment, _path: published.append(
+                    fragment.segment_id
+                ),
+                on_publish_error=lambda fragment, error: errors.append(
+                    (fragment.segment_id, str(error))
+                ),
+            )
+        deadline = time.monotonic() + 1
+        while not fragments["camera-00"].final_dir.is_dir():
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        assert fragments["camera-00"].final_dir.is_dir()
+        assert fragments["camera-04"].final_dir.exists() is False
+        first_close = dispatcher.close(timeout_s=0.05)
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=2)
+
+    assert holder.exitcode == 0
+    assert first_close is False
+    assert dispatcher.close(timeout_s=2) is True
+    assert errors == []
+    assert sorted(published) == sorted(
+        fragment.segment_id for fragment in fragments.values()
+    )
+    assert fragments["camera-04"].publication_diagnostics[
+        "publish_commit_lock_wait_ms"
+    ] >= 40
+    assert fragments["camera-00"].publication_diagnostics[
+        "publish_commit_slot_index"
+    ] == 1
     assert dispatcher.snapshot()["shutdown_timeout_total"] == 1
 
 
@@ -503,6 +671,49 @@ def test_epoch_commit_arbiter_releases_after_commit_error(
     assert fragments["camera-b"].publication_diagnostics[
         "publish_commit_lock_hold_ms"
     ] >= 0
+
+
+def test_commit_slot_releases_after_commit_error_for_same_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publishers = {
+        source_id: AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=f"s{source_id[-1] * 16}",
+            commit_slot_count=2,
+        )
+        for source_id in ("camera-04", "camera-05")
+    }
+    fragments = {}
+    for index, (source_id, publisher) in enumerate(publishers.items(), start=51):
+        fragment = publisher.prepare(index)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append({"source_id": source_id, "pts": index})
+        fragments[source_id] = fragment
+
+    real_replace = publishing.os.replace
+
+    def fail_first_replace(source: Path, destination: Path) -> None:
+        if "camera-04" in Path(destination).parts:
+            raise OSError("injected-slot-commit-failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "replace", fail_first_replace)
+
+    with pytest.raises(OSError, match="injected-slot-commit-failure"):
+        publishers["camera-04"].publish(fragments["camera-04"])
+    second_final = publishers["camera-05"].publish(fragments["camera-05"])
+
+    assert fragments["camera-04"].staging_dir.is_dir()
+    assert second_final.is_dir()
+    assert {
+        fragment.publication_diagnostics["publish_commit_slot_index"]
+        for fragment in fragments.values()
+    } == {0}
 
 
 def test_missing_video_is_not_published_and_staging_is_preserved(
@@ -1753,12 +1964,14 @@ def test_config_keeps_four_second_default(monkeypatch: pytest.MonkeyPatch) -> No
         "SOURCE_ID",
         "SOURCE_ID_PREFIX",
         "ROLLING_CACHE_PUBLICATION_WORKERS",
+        "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
     ):
         monkeypatch.delenv(name, raising=False)
     config = SinkConfig.from_env()
     assert config.segment_seconds == 4.0
     assert config.http_port == 8080
     assert config.publication_workers == 1
+    assert config.publication_commit_slots == 0
 
 
 def test_config_accepts_bounded_publication_workers(
@@ -1779,4 +1992,28 @@ def test_config_rejects_unbounded_publication_workers(
     monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_WORKERS", value)
 
     with pytest.raises(ValueError, match="ROLLING_CACHE_PUBLICATION_WORKERS"):
+        SinkConfig.from_env()
+
+
+def test_config_accepts_bounded_publication_commit_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS", "2")
+
+    assert SinkConfig.from_env().publication_commit_slots == 2
+
+
+@pytest.mark.parametrize("value", ("-1", "5", "not-an-integer"))
+def test_config_rejects_unbounded_publication_commit_slots(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("ZMQ_ENDPOINT", "sub+connect:tcp://fanout:5560")
+    monkeypatch.setenv("ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS", value)
+
+    with pytest.raises(
+        ValueError,
+        match="ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+    ):
         SinkConfig.from_env()
