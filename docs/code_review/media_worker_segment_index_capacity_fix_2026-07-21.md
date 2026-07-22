@@ -57,8 +57,12 @@ diagnostic rejects the behavior. Correctness still passes, while lock waits add
 139.866 seconds of service, residence/dispatch p95 regresses to
 11.20-11.33/11.55-11.58 seconds, capacity-wait events rise to 294 and metadata
 visibility p95 rises to 18.638 seconds. Two lanes are therefore diagnostic-only
-and remain disabled by default. Exact r300 remains pending; r3840 and both
-one-hour acceptance runs are still prohibited.
+and remain disabled by default. Round 31 now implements the selected
+default-off regular-file `fdatasync` diagnostic; test, static and real-container
+durability/error/shutdown gates pass without changing either directory `fsync`
+or the daily `fsync` default. Its unchanged causal pressure run is the next
+gate. Exact r300 remains pending; r3840 and both one-hour acceptance runs are
+still prohibited.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -143,6 +147,9 @@ one-hour acceptance runs are still prohibited.
 | `1b33028` | two-lane durable-commit red contracts | Requires same-lane cross-process exclusion, peer-lane progress, stable assignment, error release, bounded shutdown and explicit config/deployment/pressure evidence |
 | `b9ea4f1` | deterministic host commit lanes | Maps each source to one of 0-4 epoch-root flock lanes, retains the default-off/legacy one-lock paths and carries slot count/index through live and retained observability |
 | `e0c1d16` | two-lane real-container proof | Records host peak two, per-slot peak one, failure release and clean dual-container shutdown without claiming pressure capacity |
+| `cd3b327` | Round 30 rejection ledger | Preserves passed correctness, lane-convoy attribution, comparison artifacts and restored daily runtime without advancing exact r300 |
+| `8333309` | regular-file sync-mode red contracts | Requires explicit fdatasync only for metadata/manifest, unchanged directory fsync/rename order, failure staging, default fsync and full pressure/deployment audit |
+| `a618796` | bounded regular-file fdatasync diagnostic | Adds a default-off fsync/fdatasync choice while preserving every directory fence, capacity, callback, retention and scheduling behavior |
 
 ## Measurement rounds
 
@@ -1828,6 +1835,45 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   forced. It must be default-off, test-first and beat Round 26 before exact
   r300 can advance.
 
+### Round 31: regular-file fdatasync implementation
+
+- Tests-only `8333309` first required the historical default to retain the
+  exact `fsync(metadata)`, `fsync(manifest)`, `fsync(staging directory)`, atomic
+  rename, `fsync(final parent)` order. Explicit `fdatasync` mode must replace
+  only the first two regular-file calls, retain both directory calls and every
+  later fence, report its effective mode, preserve staging and avoid rename on
+  sync failure, reject unknown modes and propagate through all three Compose
+  sinks and the pressure profile/artifact surface.
+- Implementation `a618796` adds
+  `ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE=fsync|fdatasync`. Daily env, Compose
+  and pressure defaults remain `fsync`; only an explicit labeled diagnostic can
+  select `fdatasync`. `AtomicSegmentPublisher` still stages invisible files,
+  synchronizes both regular files before the staging directory, performs the
+  same-filesystem atomic rename, synchronizes the final parent, appends the
+  same journal record and invokes the callback only after that sequence.
+  `fdatasync` retains data and size durability for the newly-created files;
+  directory `fsync` retains both names and rename durability.
+- Static validation passed 62 rolling-sink tests and 239 combined pressure,
+  analyzer and deployment tests. Python compile, shell syntax, diff checks and
+  Compose rendering passed. The tests include regular-file sync order,
+  injected sync failure, commit-lane concurrency/error/shutdown history,
+  bounded config, applied container env and retained log aggregation.
+- Real service-image artifact:
+  `/data/video-analytics/artifacts/rolling_publication_fdatasync_smoke_20260722T085418Z`.
+  Image `sha256:237f063901d48adfd4265b519d1a40813d94df62717d506fcd197d71d8182bd0`
+  bind-mounted the committed app. Two fdatasync fragments completed with two
+  fdatasync calls plus the unchanged two directory fsyncs and produced two
+  journal records. A historical fsync fragment completed with four fsync calls
+  and one journal record. An injected metadata fdatasync `OSError` performed no
+  rename, retained its partial staging directory and did not stop the same
+  worker from publishing its successor.
+- The smoke marker is `PASS_PUBLICATION_FDATASYNC_CONTAINER_SMOKE`.
+  Dispatcher state ended 4 submitted, 3 completed, 1 intentionally failed,
+  zero outstanding/active/queue/shutdown timeout and preparation limit one.
+  This closes only the implementation gate. The next unique runtime variable
+  is fdatasync versus Round 26; workers must return to one and commit slots to
+  zero so rejected Round 29/30 behaviors are not combined.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1889,29 +1935,26 @@ free. The passed-correctness/failed-capacity artifact remains intact.
    disabled and publication workers at one. Retain grouping, one/two-slot
    arbitration and two-worker sharding only for historical reproduction; none
    of the rejected Round 27-30 modes may become a daily default.
-2. Add a red regular-file durability contract before implementation: explicit
-   diagnostic opt-in must call `fdatasync` for metadata and manifest, retain
-   `fsync` for staging/final parent directories, preserve atomic rename and
-   journal order, surface the effective mode, and default to historical
-   `fsync` in sink/Compose/pressure configuration.
-3. Implement only that regular-file sync-mode switch, then run focused
-   durability/error/shutdown tests, the complete sink/pressure/deployment
-   selections, Compose rendering and a real-container order/failure smoke.
-4. Run one unchanged 360-second Candidate B r300 diagnostic with publication
+2. Retain the now-green regular-file sync-mode contract, complete static suites
+   and real service-image proof. Do not enable fdatasync in daily sinks before
+   the causal pressure artifact passes.
+3. Run one unchanged 360-second Candidate B r300 diagnostic with publication
    workers one, commit slots zero and regular-file `fdatasync` as the sole
    behavior change from Round 26. Do not change WIP, remux, max-per-poll,
    finalizer, index width, retention, deadlines or fixture/hash.
-5. Require every input/correctness/bundle/residual gate plus lower regular-file
+4. Require both sink startup/terminal/per-fragment evidence to show fdatasync
+   enabled with one worker, one preparation item, zero commit slots and a clean
+   drain. Require every input/correctness/bundle/residual gate plus lower file
    sync tail, residence/dispatch p95 below both Round 26 sinks, fewer than 55
    capacity-wait events and visibility below 3.256s. Moving time into directory
    fsync, callback backpressure or scheduler/DB work is a rejection.
-6. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
+5. Keep exact r300, r3840 and both one-hour acceptances blocked until that short
    gate passes. Rounds 27-30 are negative 360-second causal evidence and do not
    replace the exact width-three 600-second r300 gate.
-7. Repeat the exact r300 gate with the fixed fixture/hash only after the new
+6. Repeat the exact r300 gate with the fixed fixture/hash only after the new
    short diagnostic passes. Only a complete input, capacity, visibility,
    watchlist, annotation and residual pass permits the 3,840-second-retention
    short gate.
-8. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
+7. Only after r300 and r3840 pass, run two comparable one-hour acceptances with
    full evidence/8090 validation, restore the daily runtime, and then consider
    Phase 7 legacy removal and completion.
