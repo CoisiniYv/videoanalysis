@@ -11,7 +11,7 @@ import shutil
 import threading
 import time
 import zlib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -29,6 +29,7 @@ SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
 SEGMENT_PUBLICATION_OUTSTANDING_LIMIT = 128
 SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT = 1
+SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED = False
 
 LOGGER = logging.getLogger("rolling_cache_sink.publisher")
 
@@ -120,6 +121,9 @@ class AtomicSegmentPublisher:
         runtime_epoch_id: str,
         source_id: str,
         session_id: str,
+        commit_arbitration_enabled: bool = (
+            SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED
+        ),
     ) -> None:
         epoch = safe_component(runtime_epoch_id, field="runtime_epoch_id")
         source = safe_component(source_id, field="source_id")
@@ -129,6 +133,7 @@ class AtomicSegmentPublisher:
         self._staging_root = epoch_root / ".rolling-cache-staging" / source / session
         self._segments_root = epoch_root / source / "segments"
         self._commit_lock_path = epoch_root / SEGMENT_PUBLICATION_COMMIT_LOCK_FILE
+        self._commit_arbitration_enabled = bool(commit_arbitration_enabled)
         self._session_id = session
         self._runtime_epoch_id = epoch
         self._source_id = source
@@ -240,17 +245,26 @@ class AtomicSegmentPublisher:
         metadata_path = fragment.staging_dir / "metadata.json"
         manifest_path = fragment.staging_dir / SEGMENT_MANIFEST_FILE
         try:
-            with self._commit_lock_path.open("a+b") as lock_handle:
-                lock_wait_started_ns = time.monotonic_ns()
-                try:
-                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                finally:
-                    timings.record(
-                        "commit_lock_wait_ms",
-                        (time.monotonic_ns() - lock_wait_started_ns) / 1_000_000.0,
-                    )
-
-                lock_hold_started_ns = time.monotonic_ns()
+            lock_context = (
+                self._commit_lock_path.open("a+b")
+                if self._commit_arbitration_enabled
+                else nullcontext()
+            )
+            with lock_context as lock_handle:
+                lock_hold_started_ns: int | None = None
+                if lock_handle is not None:
+                    lock_wait_started_ns = time.monotonic_ns()
+                    try:
+                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                    finally:
+                        timings.record(
+                            "commit_lock_wait_ms",
+                            (
+                                time.monotonic_ns() - lock_wait_started_ns
+                            )
+                            / 1_000_000.0,
+                        )
+                    lock_hold_started_ns = time.monotonic_ns()
                 try:
                     with metadata_path.open("rb") as handle:
                         with timings.measure("metadata_fsync_ms"):
@@ -297,16 +311,20 @@ class AtomicSegmentPublisher:
                                 exc,
                             )
                 finally:
-                    try:
-                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-                    finally:
-                        commit_lock_hold_ms = max(
-                            0.0,
-                            (
-                                time.monotonic_ns() - lock_hold_started_ns
+                    if (
+                        lock_handle is not None
+                        and lock_hold_started_ns is not None
+                    ):
+                        try:
+                            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                        finally:
+                            commit_lock_hold_ms = max(
+                                0.0,
+                                (
+                                    time.monotonic_ns() - lock_hold_started_ns
+                                )
+                                / 1_000_000.0,
                             )
-                            / 1_000_000.0,
-                        )
         finally:
             commit_service_ms = max(
                 0.0,

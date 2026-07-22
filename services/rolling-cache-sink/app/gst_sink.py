@@ -12,6 +12,7 @@ from typing import Any
 from config import EpochResolver, SinkConfig, safe_component
 from observability import SinkMetrics
 from publishing import (
+    SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
     SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
     SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
     AtomicSegmentPublisher,
@@ -69,6 +70,9 @@ class SourcePipeline:
             runtime_epoch_id=self.runtime_epoch_id,
             source_id=self.source_id,
             session_id=self.session_id,
+            commit_arbitration_enabled=(
+                SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED
+            ),
         )
         self._ledger = FragmentLedger(
             publisher,
@@ -512,9 +516,10 @@ class RollingCacheSink:
         )
         LOGGER.info(
             "publication dispatcher started workers=1 outstanding_limit=%d "
-            "prepare_group_limit=%d",
+            "prepare_group_limit=%d commit_arbitration_enabled=%s",
             SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
             SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
+            SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
         )
 
         Gst.init(None)
