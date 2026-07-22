@@ -91,6 +91,32 @@ def _resources(worker: Any, *, max_active: int = 2):
     return runtime
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    ((0, 4), (1, 1), (99, 4)),
+)
+def test_finalizer_db_index_io_gate_is_process_lifetime_and_wip_bounded(
+    configured: int,
+    expected: int,
+) -> None:
+    worker = _worker()
+    runtime = worker.MaterializationResources(
+        database_url="postgresql://unused",
+        max_active=4,
+        image_workers=1,
+        remux_workers=1,
+        finalizer_workers=4,
+        db_pool_enabled=False,
+        db_index_io_concurrency=configured,
+    )
+    try:
+        assert runtime.db_index_io_gate is not None
+        assert runtime.db_index_io_gate.snapshot()["limit"] == expected
+        assert runtime.snapshot()["db_index_io_gate"]["limit"] == expected
+    finally:
+        runtime.close(wait=True)
+
+
 def _cfg(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "materialization_finalizer_max_per_source_per_poll": 4,

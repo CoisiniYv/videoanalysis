@@ -1238,12 +1238,15 @@ def test_pressure_runner_exposes_media_worker_capacity_candidates() -> None:
             "4",
             "--media-worker-segment-index-io-concurrency",
             "3",
+            "--media-worker-db-index-io-concurrency",
+            "1",
         ]
     )
 
     assert parsed.media_worker_materialization_max_active == 12
     assert parsed.media_worker_rolling_remux_workers == 4
     assert parsed.media_worker_segment_index_io_concurrency == 3
+    assert parsed.media_worker_db_index_io_concurrency == 1
 
 
 def test_pressure_runner_rejects_nonpositive_segment_index_io_concurrency() -> None:
@@ -1256,6 +1259,16 @@ def test_pressure_runner_rejects_nonpositive_segment_index_io_concurrency() -> N
         module.main(["--media-worker-segment-index-io-concurrency", "0"])
 
 
+def test_pressure_runner_rejects_negative_db_index_io_concurrency() -> None:
+    module = _load_module()
+
+    with pytest.raises(
+        SystemExit,
+        match="--media-worker-db-index-io-concurrency must be non-negative",
+    ):
+        module.main(["--media-worker-db-index-io-concurrency", "-1"])
+
+
 def test_4090_profile_allows_one_dimension_index_io_override() -> None:
     completed = subprocess.run(
         ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
@@ -1265,6 +1278,7 @@ def test_4090_profile_allows_one_dimension_index_io_override() -> None:
             "DRY_RUN": "1",
             "RUN_ID": "io-concurrency-dry-run",
             "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY": "3",
+            "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY": "1",
         },
         check=True,
         text=True,
@@ -1273,6 +1287,8 @@ def test_4090_profile_allows_one_dimension_index_io_override() -> None:
 
     assert "media_worker_segment_index_io_concurrency=3" in completed.stdout
     assert "--media-worker-segment-index-io-concurrency 3" in completed.stdout
+    assert "media_worker_db_index_io_concurrency=1" in completed.stdout
+    assert "--media-worker-db-index-io-concurrency 1" in completed.stdout
 
 
 def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
@@ -1321,6 +1337,21 @@ def test_rolling_cache_pressure_indexes_db_timeline_and_overlays() -> None:
 
     assert '"EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED": "true"' in source
     assert "timeline rows, overlay rows" in source
+
+
+def test_pressure_artifact_captures_finalizer_db_index_gate_wait_and_peak() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    for field in (
+        "finalizer_db_index_gate_wait_ms",
+        "finalizer_db_index_gate_service_ms",
+        "db_index_io_gate_limit",
+        "db_index_io_gate_active",
+        "db_index_io_gate_active_peak",
+        "db_index_io_gate_wait_ms_total",
+        "db_index_io_gate_wait_events_total",
+    ):
+        assert field in source
 
 
 def test_rolling_cache_pressure_sets_fast_ready_poll_interval() -> None:
@@ -1373,6 +1404,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
         media_worker_materialization_max_active=12,
         media_worker_rolling_remux_workers=8,
         media_worker_segment_index_io_concurrency=3,
+        media_worker_db_index_io_concurrency=1,
     )
     captured: dict[str, dict[str, str]] = {}
 
@@ -1406,6 +1438,7 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES"] == "2048"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES"] == "268435456"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY"] == "3"
+    assert values["MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"] == "1"
     assert values["MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED"] == "false"
     assert values["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == "4"
     event_values = captured["compose_recreate_event_worker_rolling_cache.log"]

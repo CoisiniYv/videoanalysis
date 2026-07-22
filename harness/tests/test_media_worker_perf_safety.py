@@ -6,8 +6,11 @@ import importlib
 import json
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any
 
@@ -806,6 +809,97 @@ def test_materialized_bundle_indexes_in_memory_rows_without_sidecar_files(
     assert not (bundle_dir / "annotations.frame_cache.identity.jsonl").exists()
     assert not (bundle_dir / "summary.frame_cache.identity.json").exists()
     assert (bundle_dir / "raw_clip.mov").is_file()
+
+
+def test_finalizer_db_index_io_gate_serializes_expanded_row_writes_and_reports_wait(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    worker = _activate("media-worker", "app.worker")
+    gate = worker.BoundedIoGate(name="finalizer-db-index", limit=1)
+    first_entered = Event()
+    release_first = Event()
+    state_lock = Lock()
+    active = 0
+    active_peak = 0
+
+    def fake_upsert(_conn: object, **_kwargs: Any) -> dict[str, int]:
+        nonlocal active, active_peak
+        with state_lock:
+            active += 1
+            active_peak = max(active_peak, active)
+            call_index = gate.snapshot()["acquired_total"]
+        first_entered.set()
+        if call_index == 1:
+            assert release_first.wait(timeout=2)
+        with state_lock:
+            active -= 1
+        return {
+            "sidecar_build_ms": 0,
+            "db_bundle_index_ms": 0,
+            "db_artifact_index_ms": 0,
+            "db_timeline_index_ms": 0,
+            "db_overlay_index_ms": 0,
+        }
+
+    monkeypatch.setattr(worker, "upsert_evidence_bundle_index", fake_upsert)
+    monkeypatch.setattr(worker, "_upsert_covered_event_aliases", lambda *_a, **_k: 0)
+    monkeypatch.setattr(worker, "_set_event_db_index_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        worker,
+        "_prune_success_evidence_sidecars",
+        lambda *_a, **_k: {"deleted": [], "errors": 0},
+    )
+    monkeypatch.setenv("EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED", "true")
+
+    diagnostics = [{}, {}]
+    bundles = []
+    for index in range(2):
+        bundle_dir = tmp_path / f"bundle-{index}"
+        bundle_dir.mkdir()
+        (bundle_dir / "raw_clip.mov").write_bytes(b"video")
+        bundles.append(
+            {
+                "evidence_dir": str(bundle_dir),
+                "_db_timeline_rows": [{"clip_frame_index": 0}],
+                "_db_overlay_rows": [{"clip_frame_index": 0, "objects": []}],
+            }
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                worker._index_finalized_bundle,
+                object(),
+                event_id=f"00000000-0000-4000-8000-00000000000{index}",
+                evidence_state="materialized",
+                bundle=bundles[index],
+                io_gate=gate,
+                gate_diagnostics=diagnostics[index],
+            )
+            for index in range(2)
+        ]
+        assert first_entered.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while gate.snapshot()["waiting"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert gate.snapshot()["active"] == 1
+        assert gate.snapshot()["waiting"] == 1
+        release_first.set()
+        assert [future.result(timeout=2) for future in futures] == [True, True]
+
+    snapshot = gate.snapshot()
+    assert active_peak == 1
+    assert snapshot["limit"] == 1
+    assert snapshot["active"] == 0
+    assert snapshot["waiting"] == 0
+    assert snapshot["active_peak"] == 1
+    assert snapshot["acquired_total"] == 2
+    assert snapshot["wait_events_total"] >= 1
+    assert snapshot["wait_ms_total"] > 0
+    assert diagnostics[0]["finalizer_db_index_gate_limit"] == 1
+    assert diagnostics[1]["finalizer_db_index_gate_wait_ms"] > 0
+    assert diagnostics[1]["finalizer_db_index_gate_service_ms"] >= 0
 
 
 def test_db_index_failure_persists_in_memory_annotation_diagnostics(
@@ -2365,6 +2459,21 @@ def test_segment_index_io_concurrency_is_configurable_and_bounded(
     cfg = config.load_config()
 
     assert cfg.media_worker_segment_index_io_concurrency == 1
+
+
+def test_finalizer_db_index_io_concurrency_defaults_to_no_extra_limit(
+    monkeypatch: Any,
+) -> None:
+    config = _activate("media-worker", "app.config")
+
+    monkeypatch.delenv("MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY", raising=False)
+    assert config.load_config().media_worker_db_index_io_concurrency == 0
+
+    monkeypatch.setenv("MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY", "1")
+    assert config.load_config().media_worker_db_index_io_concurrency == 1
+
+    monkeypatch.setenv("MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY", "-1")
+    assert config.load_config().media_worker_db_index_io_concurrency == 0
 
 
 def test_rolling_cache_runtime_errors_are_terminal_not_deferred() -> None:

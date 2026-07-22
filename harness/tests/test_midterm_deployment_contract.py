@@ -509,6 +509,9 @@ def test_replay_first_topology_is_preserved() -> None:
         "MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"
     ] == "${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-0}"
     assert services["media-worker"]["environment"][
+        "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"
+    ] == "${MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY:-0}"
+    assert services["media-worker"]["environment"][
         "MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"
     ] == "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
     assert services["media-worker"]["environment"][
@@ -988,6 +991,7 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
     assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
     assert env_file["MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"] == "0"
+    assert env_file["MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"] == "0"
     assert env_file["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == "4"
     assert env_file["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == "false"
     assert env_file["MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED"] == "true"
@@ -1009,6 +1013,9 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     )
     assert media_env["MEDIA_WORKER_FINALIZER_WORKERS"] == (
         "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
+    )
+    assert media_env["MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"] == (
+        "${MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY:-0}"
     )
     assert media_env["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == (
         "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
