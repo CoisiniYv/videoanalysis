@@ -6,6 +6,7 @@
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
 exact-lease 修复 `2a57f20`，当前容量观测 checkpoint `70d4e75`。
 selected-identity 结构 checkpoint 为 `72413a2`。
+metadata reuse 实验 checkpoint 为 `fcbe2bd`，尚未通过 correctness/capacity 门。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -295,6 +296,16 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   97 active/60 ready，严格门失败且 r3840 禁止。当前下一单变量是 normal success path 复用
   内存中的 exact selected metadata 构造 handoff，去掉对刚原子写入文件的 immediate reload；
   recovery 仍读 durable file，on-disk pretty JSON 与容量参数本轮不变；
+- `d73759d`/`fcbe2bd` 进一步让 normal success path 复用刚发布的 exact metadata dict，
+  recovery 仍从 durable file 重建。真实容器 `rolling_metadata_handoff_smoke_20260721T235829Z`
+  证明 normal loader 0 次、reload metric 0、pretty JSON payload/bytes 不变、recovery loader 1 次。
+  对应 r300 `pressure60_8p1_metareuse_ioadm3_b10m_r300_20260721T235925Z` 把 remux-total p95
+  从 6.897s 降到 5.876s，但 ready/media/lifecycle/DB lifecycle p95 仍为
+  50.87s/70.17s/70.69s/72.86s，metadata visibility p95=21.64s，正式尾部 82 active/41 ready；
+  因此容量门仍失败。该轮 1,008 video/timeline 全通过，但 8 个 DB person-context fallback bundle
+  缺 overlay：fallback 写出 16-27 行 JSONL 却未把 annotations list 交给 expanded-row index，后者
+  以空 list 写零行并随后 prune 文件。先修这个 correctness propagation 缺口，再测试 compact
+  metadata；r3840 继续禁止；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

@@ -56,6 +56,8 @@ two one-hour acceptance runs have passed yet.
 | `70d4e75` | instrumentation-only remux attribution | Carries the new metrics through materialization, durable handoff/recovery, finalization logs and retained pressure summaries without changing scheduling or serialization |
 | `e88a4ed` | selected-identity complexity red test | Requires six selected leaves to cause six direct lookups and zero retained-catalog value iteration |
 | `72413a2` | direct selected pin identity lookup | Resolves only the already-selected manifest keys under the short catalog lock while preserving missing-entry retry and exact identity fences |
+| `d73759d` | normal-path metadata reload red test | Forbids parsing the freshly published metadata file while retaining unchanged durable bytes and recovery authority |
+| `fcbe2bd` | in-memory metadata handoff | Carries the exact published metadata payload into the normal handoff and reports zero reload time without changing serialization or recovery |
 
 ## Measurement rounds
 
@@ -871,6 +873,51 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   durable file, and the on-disk pretty JSON format, metadata contents,
   capacities, retention and deadlines remain unchanged for attribution.
 
+### Round 18: normal-path metadata reuse
+
+- Red test `d73759d` makes any normal-path
+  `_load_scan_metadata_payload()` call fail, requires the returned handoff and
+  finalizer phase to report `remux_metadata_reload_ms=0`, and verifies that the
+  durable pretty JSON bytes do not change. `fcbe2bd` carries the exact dict
+  already serialized by `materialize_window()` into the handoff. Recovery
+  continues to load `metadata.json` from the immutable staged identity.
+- Affected index/sink/rolling tests passed 141, pressure harness/analyzer 201,
+  and broader lifecycle/scheduler/finalizer/deployment tests passed 134 with
+  eight environment skips. Critical Ruff, compile and Compose rendering
+  passed. A fresh PostgreSQL database migrated through 001-032 and passed all
+  eight real materialization/finalizer contracts.
+- Bind-mounted smoke:
+  `/data/video-analytics/artifacts/rolling_metadata_handoff_smoke_20260721T235829Z`.
+  The real index/materializer selected two leaves, performed zero normal
+  metadata loader calls, preserved the pretty JSON payload/bytes, reported
+  reload 0, then performed exactly one durable-file load during simulated
+  recovery. It left zero pin-marker residual.
+- Exact unchanged r300 artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_metareuse_ioadm3_b10m_r300_20260721T235925Z`.
+  Input passed at 60/60 and 8.0385 FPS with zero send/queue/raw loss. All 969
+  formal and 1,008 retained tasks materialized, all videos passed duration/FPS,
+  all 1,008 bundle and timeline API checks passed, person persistence passed at
+  102,834 stored versus 102,832 exported with zero measured loss, and expiry,
+  recovery, retry failure, claim-busy, duplicate, finalizer failure and final
+  task/lease/lane/finalizer-pending residuals were zero.
+- Reload removal is dynamically effective but insufficient. Reload p95 became
+  exactly 0 and remux-total p95 fell from 6.897s to 5.876s. Ready-to-remux,
+  media queue, lifecycle and DB lifecycle p95 improved only to
+  `50.869/70.168/70.691/72.855s`; oldest-ready and metadata-visibility p95 were
+  57.646s and 21.637s. The formal tail still held 82 active/41 ready and relied
+  on drain. WIP/remux/finalizer depth p95 was `20/12/12`, finalizer admission
+  gap/retry reached 46, and handoff-to-admission p95 rose to 4.910s. The strict
+  capacity/visibility gate therefore failed and r3840 remains prohibited.
+- This run also exposed a separate correctness bug in the rare DB
+  person-context fallback. Eight retained events logged 16-27 recovered
+  annotation frames and wrote valid JSONL, but
+  `_write_person_bbox_db_sidecar_fallback()` returned no `annotations` list.
+  `_db_index_payload_kwargs()` consequently supplied `overlay_rows=[]`; the DB
+  index inserted zero overlays and then pruned the valid sidecar. The outcome
+  was 1,000/1,008 annotation checks passing, with eight bbox/person-context
+  failures. A deterministic red test and narrow propagation fix are required
+  before any further capacity candidate.
+
 ## Recovery audit after Round 1
 
 The failed artifact was preserved. The harness restored the daily single
@@ -884,15 +931,17 @@ leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Add a deterministic red test requiring the normal materialization path to
-   reuse its exact in-memory selected metadata when building the immutable
-   handoff, without an immediate read/parse of the newly published file.
-2. Implement only that normal-path reload removal. Keep crash recovery reading
-   the durable metadata file and keep its pretty JSON bytes, filesystem/
-   journal/pin/identity/lease fences, capacities and PostgreSQL queue semantics
-   unchanged for attribution.
-3. Repeat focused tests, fresh PostgreSQL and a bind-mounted representative
-   smoke, then the exact width-three r300 gate. Only a full strict pass permits
+1. Add a deterministic red test requiring the DB person-context fallback to
+   return the exact annotations it writes, so expanded-row indexing cannot
+   receive an empty overlay list and prune the only copy.
+2. Implement only that annotation propagation fix and prove DB overlay/API
+   readability with focused tests and a representative smoke. Do not alter
+   WIP/remux/finalizer capacity, retention or deadlines.
+3. The next measured capacity variable may compact the approximately 238KB
+   metadata serialization, whose publish p95 remains 1.248s, but it must first
+   have its own red serialization/compatibility contract and must retain the
+   zero-reload and recovery fences.
+4. Repeat the exact width-three r300 gate. Only a full strict pass permits
    r3840; watchlist-zero is not a substitute for latency/visibility gates.
-4. Only after both short retention gates pass, run two comparable one-hour
+5. Only after both short retention gates pass, run two comparable one-hour
    acceptances with the fixed fixture/hash and full evidence/8090 validation.

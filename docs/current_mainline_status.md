@@ -8,7 +8,7 @@
 - 产品 checkpoint：`fd39fdb`；exact-lease 修复：`2a57f20`；
 - Candidate C 验证文档基线：`cb0595e`；本文是其后的 docs-only 结论增补；
 - 当前容量修复工作分支：`codex/segment-index-concurrency-fix-20260721`；最新结构提交
-  `72413a2`、最新观测提交 `70d4e75`，尚未合入或声明为 60 路默认容量；
+  `fcbe2bd`、最新观测提交 `70d4e75`，尚未合入或声明为 60 路默认容量；
 - 部署入口：`scripts/midterm_start.sh`；
 - Compose：`infra/docker-compose.midterm.yml`；
 - 用户入口：`http://<host>:8090/operator`；
@@ -204,17 +204,32 @@ p95 1.201s/0.988s，handoff-build 仅 58ms。下一单变量先以红测要求 n
 内存中的 exact selected metadata 构造 immutable handoff，禁止立即重读刚发布的文件；crash recovery
 继续读 durable file，on-disk pretty JSON、WIP/remux/finalizer、width、retention 和 deadline 不变。
 
+`d73759d`/`fcbe2bd` 已实现这条 normal-path reuse；
+`rolling_metadata_handoff_smoke_20260721T235829Z` 证明 normal loader 0 次、reload metric 0、durable
+pretty JSON payload/bytes 不变，且 recovery 单独 load 一次。exact r300
+`pressure60_8p1_metareuse_ioadm3_b10m_r300_20260721T235925Z` 输入 60/60、8.0385 FPS、零
+send/queue/raw loss，969/969 正式与 1,008 retained 全 materialized，视频/timeline/person
+persistence/fence/residual 均通过。reload p95 归零、remux-total p95 6.897s→5.876s，但
+ready/media/lifecycle/DB lifecycle p95 仍为 50.87s/70.17s/70.69s/72.86s，oldest-ready
+57.65s、metadata visibility 21.64s，正式尾部 82 active/41 ready；严格容量门失败，r3840 禁止。
+
+该轮另暴露 8 个 annotation correctness failure：DB person-context fallback 已日志确认每 event
+恢复并写出 16-27 annotation frames，但返回值缺 `annotations`，使 expanded-row DB index 显式收到
+`overlay_rows=[]`、写入 0 行，随后又 prune 唯一 JSONL。结果 1,000/1,008 annotation 通过，8 个
+bbox/person-context 均缺。下一步必须先以红测固化并修复这个 in-memory overlay propagation；之后
+才允许用独立红测测试 metadata compact serialization，且不改变任何 capacity knob。
+
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 width 3 和 Candidate B 其余参数不变；保留 sink 原子发布、journal/reconciliation、pin/
-  identity 与 recovery 合同；下一变量仅为 normal-path metadata immediate reload removal，先以红测
-  证明 handoff 使用 exact in-memory selected metadata，recovery 仍读取 durable file；
+- 保持 width 3 和 Candidate B 其余参数不变；先修 DB person-context fallback 的 annotations
+  propagation 并证明 expanded overlay rows/API 可读；随后 metadata compact serialization 必须有
+  独立红测，且保留 zero-reload、durable recovery、journal/pin/identity 合同；
 - 只有结构修复后的 r300 输入、容量、correctness、annotation、visibility、residual 全通过，
   才运行 3,840s endurance 短门；两者未通过前不再跑一小时；
-- 最新 r300 的 finalizer-pool/finalization p95 为 4.022s/5.862s；不把 finalizer 或容量扩张
-  与 metadata reload 结构变量混在同一候选；
+- 最新 r300 的 finalizer-pool/finalization/handoff-admission p95 为 4.395s/5.411s/4.910s；
+  不把 finalizer 或容量扩张与 metadata serialization 结构变量混在同一候选；
 - 完成真实混合 RTSP 的断流、重连和长 soak；
 - 完成 event/person/face/media worker restart/recovery soak；
 - 继续观察生产 T4 84–85°C、70W power cap 和 evidence 波峰排队。
