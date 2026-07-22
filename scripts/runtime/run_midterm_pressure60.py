@@ -10261,6 +10261,33 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "tick_stage_unattributed_ms",
             )
         }
+        media_remux_admission_metrics = {
+            field: _log_metric_numbers_for_lines(
+                text,
+                marker="schema_version=rolling-remux-admission-timing-v1",
+                field=field,
+            )
+            for field in (
+                "remux_admission_total_ms",
+                "remux_admission_stage_completion_scan_ms",
+                "remux_admission_stage_completion_result_ms",
+                "remux_admission_stage_handoff_persist_ms",
+                "remux_admission_stage_completion_convergence_ms",
+                "remux_admission_stage_completion_release_ms",
+                "remux_admission_stage_finalizer_admission_ms",
+                "remux_admission_stage_candidate_query_ms",
+                "remux_admission_stage_capacity_reservation_ms",
+                "remux_admission_stage_prepare_claim_ms",
+                "remux_admission_stage_heartbeat_register_ms",
+                "remux_admission_stage_executor_submit_ms",
+                "remux_admission_accounted_ms",
+                "remux_admission_unattributed_ms",
+                "remux_admission_candidate_count",
+                "remux_admission_prepared_count",
+                "remux_admission_submitted_count",
+                "remux_admission_completed_count",
+            )
+        }
         rolling_cache_publish_metrics = {
             field: _log_metric_numbers_for_lines(
                 text,
@@ -10621,6 +10648,10 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             **{
                 f"media_scheduler_{field}": _numeric_distribution(values)
                 for field, values in media_scheduler_tick_stage_metrics.items()
+            },
+            **{
+                f"media_{field}": _numeric_distribution(values)
+                for field, values in media_remux_admission_metrics.items()
             },
             **{
                 f"rolling_cache_{field}": _numeric_distribution(values)
@@ -13379,6 +13410,57 @@ def media_worker_observability_summary(diagnostics: dict[str, Any]) -> dict[str,
                     "total_ms",
                     "unattributed_ms",
                 )
+            },
+            "remux_admission": {
+                "total_ms": logs.get("media_remux_admission_total_ms")
+                or _not_enough_data("remux admission total timing unavailable"),
+                "accounted_ms": logs.get(
+                    "media_remux_admission_accounted_ms"
+                )
+                or _not_enough_data(
+                    "remux admission accounted timing unavailable"
+                ),
+                "unattributed_ms": logs.get(
+                    "media_remux_admission_unattributed_ms"
+                )
+                or _not_enough_data(
+                    "remux admission unattributed timing unavailable"
+                ),
+                "stages": {
+                    name: logs.get(f"media_remux_admission_stage_{name}")
+                    or _not_enough_data(
+                        f"remux admission stage {name} unavailable"
+                    )
+                    for name in (
+                        "completion_scan_ms",
+                        "completion_result_ms",
+                        "handoff_persist_ms",
+                        "completion_convergence_ms",
+                        "completion_release_ms",
+                        "finalizer_admission_ms",
+                        "candidate_query_ms",
+                        "capacity_reservation_ms",
+                        "prepare_claim_ms",
+                        "heartbeat_register_ms",
+                        "executor_submit_ms",
+                    )
+                },
+                "candidate_count": logs.get(
+                    "media_remux_admission_candidate_count"
+                )
+                or _not_enough_data("remux admission candidate count unavailable"),
+                "prepared_count": logs.get(
+                    "media_remux_admission_prepared_count"
+                )
+                or _not_enough_data("remux admission prepared count unavailable"),
+                "submitted_count": logs.get(
+                    "media_remux_admission_submitted_count"
+                )
+                or _not_enough_data("remux admission submitted count unavailable"),
+                "completed_count": logs.get(
+                    "media_remux_admission_completed_count"
+                )
+                or _not_enough_data("remux admission completed count unavailable"),
             },
             "oldest_ready_age_ms": logs.get(
                 "media_scheduler_oldest_ready_age_ms"

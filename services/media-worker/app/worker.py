@@ -1617,7 +1617,7 @@ class _MaterializationGuard:
             if self.active > 0:
                 self.active -= 1
 
-    def snapshot(self) -> dict[str, int]:
+    def snapshot(self) -> dict[str, float | int]:
         with self._lock:
             return {
                 "max_active": self.max_active,
@@ -11997,6 +11997,69 @@ def _image_materialization_failure_reason(exc: Exception, *, max_chars: int = 90
     return reason if len(reason) <= max_chars else reason[:max_chars]
 
 
+_REMUX_ADMISSION_STAGE_NAMES = (
+    "completion_scan",
+    "completion_result",
+    "handoff_persist",
+    "completion_convergence",
+    "completion_release",
+    "finalizer_admission",
+    "candidate_query",
+    "capacity_reservation",
+    "prepare_claim",
+    "heartbeat_register",
+    "executor_submit",
+)
+
+
+class _RemuxAdmissionStageTimings:
+    """Attribute one runner poll without changing admission semantics."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._durations_ms = {
+            name: 0.0 for name in _REMUX_ADMISSION_STAGE_NAMES
+        }
+        self.candidate_count = 0
+        self.prepared_count = 0
+        self.submitted_count = 0
+        self.completed_count = 0
+
+    @contextmanager
+    def measure(self, name: str) -> Iterator[None]:
+        if name not in self._durations_ms:
+            raise ValueError(f"unknown remux admission stage: {name}")
+        started_at = self._clock()
+        try:
+            yield
+        finally:
+            elapsed_ms = max(0.0, (self._clock() - started_at) * 1000.0)
+            self._durations_ms[name] += elapsed_ms
+
+    def snapshot(self, *, total_ms: float) -> dict[str, float | int]:
+        durations: dict[str, float | int] = {
+            f"remux_admission_stage_{name}_ms": round(value, 3)
+            for name, value in self._durations_ms.items()
+        }
+        accounted_ms = sum(self._durations_ms.values())
+        bounded_total_ms = max(0.0, float(total_ms))
+        durations.update(
+            {
+                "remux_admission_total_ms": round(bounded_total_ms, 3),
+                "remux_admission_accounted_ms": round(accounted_ms, 3),
+                "remux_admission_unattributed_ms": round(
+                    max(0.0, bounded_total_ms - accounted_ms),
+                    3,
+                ),
+                "remux_admission_candidate_count": self.candidate_count,
+                "remux_admission_prepared_count": self.prepared_count,
+                "remux_admission_submitted_count": self.submitted_count,
+                "remux_admission_completed_count": self.completed_count,
+            }
+        )
+        return durations
+
+
 class _RollingCacheMaterializationRunner:
     """Keep rolling-cache materialization workers hot without blocking polling.
 
@@ -12044,6 +12107,7 @@ class _RollingCacheMaterializationRunner:
             ],
         ] = {}
         self._oldest_ready_age_ms = 0
+        self._last_process_timings: dict[str, float | int] = {}
 
     def close(self) -> None:
         if self._executor is not None:
@@ -12054,6 +12118,7 @@ class _RollingCacheMaterializationRunner:
             "active": len(self._futures),
             "capacity": self.max_workers,
             "oldest_ready_age_ms": self._oldest_ready_age_ms,
+            **self._last_process_timings,
         }
 
     def drain_only(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
@@ -12087,157 +12152,203 @@ class _RollingCacheMaterializationRunner:
     def process(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
         # Recovery/expiry is owned by _process_rolling_cache_tasks and runs
         # exactly once before either legacy or persistent-runner admission.
-        updated = self._drain_completed(pg_conn, cfg)
+        process_started_at = time.monotonic()
+        timings = _RemuxAdmissionStageTimings()
+        try:
+            updated = self._drain_completed(pg_conn, cfg, timings=timings)
 
-        if (
-            self._runtime_resources is not None
-            and not self._runtime_resources.admission_open
-        ):
-            return updated
+            if (
+                self._runtime_resources is not None
+                and not self._runtime_resources.admission_open
+            ):
+                return updated
 
-        available = self.max_workers - len(self._futures)
-        if available > 0:
-            claim_limit = min(
-                max(1, int(getattr(cfg, "rolling_cache_materialization_max_per_poll", 1))),
-                available,
-            )
-            rows = _rolling_cache_candidate_tasks(pg_conn, cfg, limit=claim_limit)
-            self._oldest_ready_age_ms = max(
-                (
-                    int(row.get("rolling_cache_ready_lag_ms") or 0)
-                    for row in rows
-                ),
-                default=0,
-            )
-            segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
-            for row in rows:
-                if len(self._futures) >= self.max_workers:
-                    break
-                lane_reservation: LaneReservation | None = None
-                work_permit: WorkPermit | None = None
-                source_permit: SourcePermit | None = None
-                if self._runtime_resources is not None:
-                    if self._shared_lane is None:
-                        break
-                    lane_reservation = self._shared_lane.try_reserve()
-                    if lane_reservation is None:
-                        break
-                    source_id = str(
-                        row.get("source_id") or row.get("replay_source_id") or ""
-                    )
-                    source_permit = self._runtime_resources.source_slots.try_acquire(
-                        source_id
-                    )
-                    if source_permit is None:
-                        lane_reservation.cancel()
-                        continue
-                    work_permit = self._runtime_resources.work_budget.try_acquire(
-                        "remux",
-                        owner=str(row.get("event_id") or ""),
-                    )
-                    if work_permit is None:
-                        source_permit.release()
-                        lane_reservation.cancel()
-                        break
-                try:
-                    job = _prepare_rolling_cache_job(
+            available = self.max_workers - len(self._futures)
+            if available > 0:
+                claim_limit = min(
+                    max(
+                        1,
+                        int(
+                            getattr(
+                                cfg,
+                                "rolling_cache_materialization_max_per_poll",
+                                1,
+                            )
+                        ),
+                    ),
+                    available,
+                )
+                with timings.measure("candidate_query"):
+                    rows = _rolling_cache_candidate_tasks(
                         pg_conn,
                         cfg,
-                        row,
-                        segment_cache=segment_cache,
-                        segment_index=self._segment_index,
+                        limit=claim_limit,
                     )
-                except Exception:
-                    if work_permit is not None:
-                        work_permit.release()
-                    if source_permit is not None:
-                        source_permit.release()
-                    if lane_reservation is not None:
-                        lane_reservation.cancel()
-                    logger.exception(
-                        "rolling_cache_prepare_failed event_id=%s",
-                        row.get("event_id"),
-                    )
-                    continue
-                if job is None:
-                    if work_permit is not None:
-                        work_permit.release()
-                    if source_permit is not None:
-                        source_permit.release()
-                    if lane_reservation is not None:
-                        lane_reservation.cancel()
-                    continue
-                lease = (
-                    job.get("lease")
-                    if isinstance(job.get("lease"), MaterializationLease)
-                    else None
+                timings.candidate_count = len(rows)
+                self._oldest_ready_age_ms = max(
+                    (
+                        int(row.get("rolling_cache_ready_lag_ms") or 0)
+                        for row in rows
+                    ),
+                    default=0,
                 )
-                heartbeat_handle: LeaseHeartbeatHandle | None = None
-                heartbeat_supervisor = (
-                    self._runtime_resources.lease_heartbeats
-                    if self._runtime_resources is not None
-                    else None
-                )
-                if heartbeat_supervisor is not None and lease is not None:
-                    heartbeat_handle = heartbeat_supervisor.register(
-                        f"remux:{lease.event_id}:{lease.token}:{lease.generation}",
-                        payload=lease,
-                        lease_seconds=(
-                            cfg.rolling_cache_materialization_processing_deadline_seconds
-                        ),
-                    )
-                try:
-                    if lane_reservation is not None:
-                        future = lane_reservation.submit(
-                            _materialize_rolling_cache_job,
-                            root=cfg.rolling_cache_root,
-                            output_root=cfg.rolling_cache_materialized_root,
-                            job=job,
-                            segment_index=self._segment_index,
+                segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
+                for row in rows:
+                    if len(self._futures) >= self.max_workers:
+                        break
+                    lane_reservation: LaneReservation | None = None
+                    work_permit: WorkPermit | None = None
+                    source_permit: SourcePermit | None = None
+                    with timings.measure("capacity_reservation"):
+                        if self._runtime_resources is not None:
+                            if self._shared_lane is None:
+                                break
+                            lane_reservation = self._shared_lane.try_reserve()
+                            if lane_reservation is None:
+                                break
+                            source_id = str(
+                                row.get("source_id")
+                                or row.get("replay_source_id")
+                                or ""
+                            )
+                            source_permit = (
+                                self._runtime_resources.source_slots.try_acquire(
+                                    source_id
+                                )
+                            )
+                            if source_permit is None:
+                                lane_reservation.cancel()
+                                continue
+                            work_permit = (
+                                self._runtime_resources.work_budget.try_acquire(
+                                    "remux",
+                                    owner=str(row.get("event_id") or ""),
+                                )
+                            )
+                            if work_permit is None:
+                                source_permit.release()
+                                lane_reservation.cancel()
+                                break
+                    try:
+                        with timings.measure("prepare_claim"):
+                            job = _prepare_rolling_cache_job(
+                                pg_conn,
+                                cfg,
+                                row,
+                                segment_cache=segment_cache,
+                                segment_index=self._segment_index,
+                            )
+                    except Exception:
+                        if work_permit is not None:
+                            work_permit.release()
+                        if source_permit is not None:
+                            source_permit.release()
+                        if lane_reservation is not None:
+                            lane_reservation.cancel()
+                        logger.exception(
+                            "rolling_cache_prepare_failed event_id=%s",
+                            row.get("event_id"),
                         )
-                    else:
-                        assert self._executor is not None
-                        future = self._executor.submit(
-                            _materialize_rolling_cache_job,
-                            root=cfg.rolling_cache_root,
-                            output_root=cfg.rolling_cache_materialized_root,
-                            job=job,
-                            segment_index=self._segment_index,
+                        continue
+                    if job is None:
+                        if work_permit is not None:
+                            work_permit.release()
+                        if source_permit is not None:
+                            source_permit.release()
+                        if lane_reservation is not None:
+                            lane_reservation.cancel()
+                        continue
+                    timings.prepared_count += 1
+                    lease = (
+                        job.get("lease")
+                        if isinstance(job.get("lease"), MaterializationLease)
+                        else None
+                    )
+                    heartbeat_handle: LeaseHeartbeatHandle | None = None
+                    heartbeat_supervisor = (
+                        self._runtime_resources.lease_heartbeats
+                        if self._runtime_resources is not None
+                        else None
+                    )
+                    with timings.measure("heartbeat_register"):
+                        if heartbeat_supervisor is not None and lease is not None:
+                            heartbeat_handle = heartbeat_supervisor.register(
+                                "remux:"
+                                f"{lease.event_id}:{lease.token}:{lease.generation}",
+                                payload=lease,
+                                lease_seconds=(
+                                    cfg.rolling_cache_materialization_processing_deadline_seconds
+                                ),
+                            )
+                    try:
+                        with timings.measure("executor_submit"):
+                            if lane_reservation is not None:
+                                future = lane_reservation.submit(
+                                    _materialize_rolling_cache_job,
+                                    root=cfg.rolling_cache_root,
+                                    output_root=cfg.rolling_cache_materialized_root,
+                                    job=job,
+                                    segment_index=self._segment_index,
+                                )
+                            else:
+                                assert self._executor is not None
+                                future = self._executor.submit(
+                                    _materialize_rolling_cache_job,
+                                    root=cfg.rolling_cache_root,
+                                    output_root=cfg.rolling_cache_materialized_root,
+                                    job=job,
+                                    segment_index=self._segment_index,
+                                )
+                    except Exception as exc:
+                        if heartbeat_supervisor is not None:
+                            heartbeat_supervisor.unregister(heartbeat_handle)
+                        _defer_rolling_cache_task_safely(
+                            pg_conn,
+                            event_id=str(job.get("event_id") or ""),
+                            reason=(
+                                "temporary_io_error:"
+                                f"remux_lane_submit_failed:{type(exc).__name__}"
+                            ),
+                            lease=lease,
                         )
-                except Exception as exc:
-                    if heartbeat_supervisor is not None:
-                        heartbeat_supervisor.unregister(heartbeat_handle)
-                    _defer_rolling_cache_task_safely(
-                        pg_conn,
-                        event_id=str(job.get("event_id") or ""),
-                        reason=(
-                            "temporary_io_error:"
-                            f"remux_lane_submit_failed:{type(exc).__name__}"
-                        ),
-                        lease=lease,
+                        if work_permit is not None:
+                            work_permit.release()
+                        if source_permit is not None:
+                            source_permit.release()
+                        logger.exception(
+                            "rolling_cache_remux_lane_submit_failed event_id=%s",
+                            job.get("event_id"),
+                        )
+                        continue
+                    self._futures[future] = (
+                        str(job.get("event_id") or ""),
+                        job.get("lease")
+                        if isinstance(job.get("lease"), MaterializationLease)
+                        else None,
+                        work_permit,
+                        source_permit,
+                        heartbeat_handle,
                     )
-                    if work_permit is not None:
-                        work_permit.release()
-                    if source_permit is not None:
-                        source_permit.release()
-                    logger.exception(
-                        "rolling_cache_remux_lane_submit_failed event_id=%s",
-                        job.get("event_id"),
-                    )
-                    continue
-                self._futures[future] = (
-                    str(job.get("event_id") or ""),
-                    job.get("lease")
-                    if isinstance(job.get("lease"), MaterializationLease)
-                    else None,
-                    work_permit,
-                    source_permit,
-                    heartbeat_handle,
-                )
+                    timings.submitted_count += 1
 
-        return updated + self._drain_completed(pg_conn, cfg)
+            return updated + self._drain_completed(
+                pg_conn,
+                cfg,
+                timings=timings,
+            )
+        finally:
+            total_ms = (time.monotonic() - process_started_at) * 1000.0
+            self._last_process_timings = timings.snapshot(
+                total_ms=total_ms,
+            )
 
-    def _drain_completed(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
+    def _drain_completed(
+        self,
+        pg_conn: psycopg.Connection,
+        cfg: Config,
+        *,
+        timings: _RemuxAdmissionStageTimings | None = None,
+    ) -> int:
         if not self._futures:
             return 0
 
@@ -12245,31 +12356,55 @@ class _RollingCacheMaterializationRunner:
         transferred_handoffs: dict[str, _FinalizerHandoffTransfer] = {}
         transferred_work_permits: dict[str, WorkPermit] = {}
         for future, future_context in list(self._futures.items()):
-            if not future.done():
+            with (
+                timings.measure("completion_scan")
+                if timings is not None
+                else nullcontext()
+            ):
+                future_done = future.done()
+            if not future_done:
                 continue
             self._futures.pop(future, None)
+            if timings is not None:
+                timings.completed_count += 1
             event_id, lease, work_permit, source_permit, heartbeat_handle = future_context
             try:
-                metadata = future.result()
+                with (
+                    timings.measure("completion_result")
+                    if timings is not None
+                    else nullcontext()
+                ):
+                    metadata = future.result()
                 if heartbeat_handle is not None and not heartbeat_handle.healthy:
                     reason = (
                         "materialization_max_attempt_age_exceeded"
                         if heartbeat_handle.expired
                         else "materialization_lease_fence_lost"
                     )
-                    _defer_rolling_cache_task(
-                        pg_conn,
-                        event_id=event_id,
-                        reason=reason,
-                        retry_after_s=1.0,
-                        lease=lease,
-                    )
+                    with (
+                        timings.measure("completion_convergence")
+                        if timings is not None
+                        else nullcontext()
+                    ):
+                        _defer_rolling_cache_task(
+                            pg_conn,
+                            event_id=event_id,
+                            reason=reason,
+                            retry_after_s=1.0,
+                            lease=lease,
+                        )
                     continue
-                if _persist_rolling_cache_handoff_metadata(
-                    pg_conn,
-                    cfg,
-                    metadata,
+                with (
+                    timings.measure("handoff_persist")
+                    if timings is not None
+                    else nullcontext()
                 ):
+                    persisted = _persist_rolling_cache_handoff_metadata(
+                        pg_conn,
+                        cfg,
+                        metadata,
+                    )
+                if persisted:
                     metadata_overrides.append(metadata)
                     if (
                         self._finalizer_scheduler_v2 is not None
@@ -12287,66 +12422,93 @@ class _RollingCacheMaterializationRunner:
                         transferred_work_permits[event_id] = work_permit
                         work_permit = None
             except SegmentPinRetryableError as exc:
-                _defer_rolling_cache_task_safely(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=f"temporary_io_error:{exc}",
-                    retry_after_s=1.0,
-                    lease=lease,
-                )
-            except RollingCacheCoverageMiss as exc:
-                _defer_rolling_cache_task(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=str(exc) or "rolling_cache_coverage_miss",
-                    lease=lease,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "rolling_cache_materialization_failed event_id=%s",
-                    event_id,
-                )
-                _fail_rolling_cache_task(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=_rolling_cache_failure_reason(exc),
-                    lease=lease,
-                )
-            finally:
-                if (
-                    self._runtime_resources is not None
-                    and self._runtime_resources.lease_heartbeats is not None
+                with (
+                    timings.measure("completion_convergence")
+                    if timings is not None
+                    else nullcontext()
                 ):
-                    self._runtime_resources.lease_heartbeats.unregister(
-                        heartbeat_handle
+                    _defer_rolling_cache_task_safely(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=f"temporary_io_error:{exc}",
+                        retry_after_s=1.0,
+                        lease=lease,
                     )
-                if work_permit is not None:
-                    work_permit.release()
-                if source_permit is not None:
-                    source_permit.release()
+            except RollingCacheCoverageMiss as exc:
+                with (
+                    timings.measure("completion_convergence")
+                    if timings is not None
+                    else nullcontext()
+                ):
+                    _defer_rolling_cache_task(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=str(exc) or "rolling_cache_coverage_miss",
+                        lease=lease,
+                    )
+            except Exception as exc:
+                with (
+                    timings.measure("completion_convergence")
+                    if timings is not None
+                    else nullcontext()
+                ):
+                    logger.exception(
+                        "rolling_cache_materialization_failed event_id=%s",
+                        event_id,
+                    )
+                    _fail_rolling_cache_task(
+                        pg_conn,
+                        event_id=event_id,
+                        reason=_rolling_cache_failure_reason(exc),
+                        lease=lease,
+                    )
+            finally:
+                with (
+                    timings.measure("completion_release")
+                    if timings is not None
+                    else nullcontext()
+                ):
+                    if (
+                        self._runtime_resources is not None
+                        and self._runtime_resources.lease_heartbeats is not None
+                    ):
+                        self._runtime_resources.lease_heartbeats.unregister(
+                            heartbeat_handle
+                        )
+                    if work_permit is not None:
+                        work_permit.release()
+                    if source_permit is not None:
+                        source_permit.release()
 
         if not metadata_overrides:
             return 0
         if self._finalizer_scheduler_v2 is not None:
-            admitted = self._finalizer_scheduler_v2.admit_metadata(
-                pg_conn,
-                sink_dir=str(Path(cfg.rolling_cache_materialized_root) / "midterm"),
-                metadata_files=metadata_overrides,
-                scan_stats={
-                    "scan_duration_ms": 0,
-                    "metadata_files_visited": len(metadata_overrides),
-                    "metadata_files_parsed": len(metadata_overrides),
-                    "scan_mode": "rolling_cache_scheduler_v2",
-                },
-                processed_dirs=set(),
-                processed_state_path=None,
-                candidate_dirs=None,
-                invalid_output_failures=None,
-                stability_checks=1,
-                cleanup_replay_sink_output_enabled=True,
-                replay_sink_output_max_bytes=0,
-                transferred_handoffs=transferred_handoffs,
-            )
+            with (
+                timings.measure("finalizer_admission")
+                if timings is not None
+                else nullcontext()
+            ):
+                admitted = self._finalizer_scheduler_v2.admit_metadata(
+                    pg_conn,
+                    sink_dir=str(
+                        Path(cfg.rolling_cache_materialized_root) / "midterm"
+                    ),
+                    metadata_files=metadata_overrides,
+                    scan_stats={
+                        "scan_duration_ms": 0,
+                        "metadata_files_visited": len(metadata_overrides),
+                        "metadata_files_parsed": len(metadata_overrides),
+                        "scan_mode": "rolling_cache_scheduler_v2",
+                    },
+                    processed_dirs=set(),
+                    processed_state_path=None,
+                    candidate_dirs=None,
+                    invalid_output_failures=None,
+                    stability_checks=1,
+                    cleanup_replay_sink_output_enabled=True,
+                    replay_sink_output_max_bytes=0,
+                    transferred_handoffs=transferred_handoffs,
+                )
             logger.info(
                 "rolling_cache_finalizer_v2_admitted candidates=%s admitted=%s",
                 len(metadata_overrides),
@@ -12356,13 +12518,18 @@ class _RollingCacheMaterializationRunner:
                 permit.release()
             transferred_work_permits.clear()
             return 0
-        return _flush_rolling_cache_finalizer_batch_or_defer(
-            pg_conn,
-            cfg,
-            metadata_overrides,
-            runtime_resources=self._runtime_resources,
-            transferred_work_permits=transferred_work_permits,
-        )
+        with (
+            timings.measure("finalizer_admission")
+            if timings is not None
+            else nullcontext()
+        ):
+            return _flush_rolling_cache_finalizer_batch_or_defer(
+                pg_conn,
+                cfg,
+                metadata_overrides,
+                runtime_resources=self._runtime_resources,
+                transferred_work_permits=transferred_work_permits,
+            )
 
 
 def _prepare_rolling_cache_job(
@@ -14516,6 +14683,20 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 if rolling_cache_runner is not None
                 else {"active": 0, "capacity": 0}
             )
+            remux_admission_timing_text = (
+                "schema_version=rolling-remux-admission-timing-v1 "
+                + " ".join(
+                    f"{name}={value:g}"
+                    for name, value in remux_snapshot.items()
+                    if name.startswith("remux_admission_")
+                )
+                if rolling_cache_due
+                and any(
+                    name.startswith("remux_admission_")
+                    for name in remux_snapshot
+                )
+                else ""
+            )
             finalizer_scheduler_snapshot = (
                 finalizer_scheduler_v2.snapshot()
                 if finalizer_scheduler_v2 is not None
@@ -14543,7 +14724,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             logger.info(
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=%s sequence=%s tick_duration_ms=%s "
-                "tick_gap_ms=%s %s completed_cycle_sequence=%s "
+                "tick_gap_ms=%s %s %s completed_cycle_sequence=%s "
                 "cycle_body_ms=%s cycle_snapshot_ms=%s cycle_logging_ms=%s "
                 "cycle_planned_sleep_ms=%s cycle_actual_sleep_ms=%s "
                 "cycle_accounted_ms=%s cycle_work_ms=%s cycle_total_ms=%s "
@@ -14609,6 +14790,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 tick_duration_ms,
                 tick_gap_ms if tick_gap_ms is not None else "unavailable",
                 tick_stage_text,
+                remux_admission_timing_text,
                 (
                     scheduler_tick_sequence - 1
                     if tick_gap_ms is not None
