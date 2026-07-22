@@ -4752,35 +4752,81 @@ def restore_rolling_cache_sinks_after_pressure(
         for service in services
         if not bool((original_states.get(service) or {}).get("running"))
     ]
+    services_to_start = [
+        service
+        for service in services
+        if bool((original_states.get(service) or {}).get("running"))
+    ]
+    compose_prefix = [
+        "docker",
+        "compose",
+        "--env-file",
+        cfg.env_file,
+        "-f",
+        cfg.compose_file,
+        *[item for profile in profiles for item in ("--profile", profile)],
+    ]
     if services_to_stop:
         run(
             [
-                "docker",
-                "compose",
-                "--env-file",
-                cfg.env_file,
-                "-f",
-                cfg.compose_file,
-                *[item for profile in profiles for item in ("--profile", profile)],
-                "stop",
+                *compose_prefix,
+                "up",
+                "--no-start",
+                "--no-deps",
+                "--force-recreate",
+                "--no-build",
                 *services_to_stop,
             ],
             cfg.artifact_dir / artifact_name,
-            check=False,
+            check=True,
         )
     else:
         write_text(
             cfg.artifact_dir / artifact_name,
-            "No rolling-cache sink services were stopped; all pressure services were already running before the run.\n",
+            "No originally stopped rolling-cache sink services required recreation.\n",
         )
+    if services_to_start:
+        running_log_name = artifact_name.replace(".log", "_running.log")
+        run(
+            [
+                *compose_prefix,
+                "up",
+                "-d",
+                "--no-deps",
+                "--force-recreate",
+                "--no-build",
+                *services_to_start,
+            ],
+            cfg.artifact_dir / running_log_name,
+            check=True,
+        )
+    after = rolling_cache_sink_state_snapshot()
+    state_mismatches = {
+        service: {
+            "expected_running": service in services_to_start,
+            "observed_running": bool((after.get(service) or {}).get("running")),
+            "observed_status": (after.get(service) or {}).get("status"),
+        }
+        for service in services
+        if bool((after.get(service) or {}).get("running"))
+        != (service in services_to_start)
+    }
     summary = {
         "profiles": profiles,
         "services": services,
         "stopped": services_to_stop,
+        "recreated_stopped": services_to_stop,
+        "restarted_running": services_to_start,
         "original": original_states,
-        "after": rolling_cache_sink_state_snapshot(),
+        "after": after,
+        "state_mismatches": state_mismatches,
     }
     write_json(cfg.artifact_dir / artifact_name.replace(".log", ".json"), summary)
+    if state_mismatches:
+        raise RuntimeError(
+            "rolling-cache sink restore state mismatch: "
+            f"{state_mismatches}"
+        )
     return summary
 
 
