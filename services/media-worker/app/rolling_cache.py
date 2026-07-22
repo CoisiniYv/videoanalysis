@@ -1042,6 +1042,6 @@ def _compact_error_text(value: str, *, max_chars: int = 700) -> str:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
+        json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
         fh.write("\n")
     os.replace(tmp, path)
