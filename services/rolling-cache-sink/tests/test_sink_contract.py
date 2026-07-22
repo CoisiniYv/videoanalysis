@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import sys
 import threading
 import time
@@ -32,6 +33,25 @@ def _publisher(tmp_path: Path) -> AtomicSegmentPublisher:
         source_id="camera-01",
         session_id="s0123456789abcdef",
     )
+
+
+def _hold_exclusive_flock(
+    lock_path: str,
+    acquired: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    import fcntl
+
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        acquired.set()
+        try:
+            if not release.wait(timeout=5):
+                raise TimeoutError("test_flock_release_timeout")
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def test_atomic_publication_matches_media_worker_layout_and_native_jsonl(
@@ -151,6 +171,8 @@ def test_atomic_publication_exposes_complete_phase_diagnostics(
         "publish_manifest_write_ms",
         "publish_manifest_fsync_ms",
         "publish_manifest_stat_ms",
+        "publish_commit_lock_wait_ms",
+        "publish_commit_lock_hold_ms",
         "publish_staging_dir_fsync_ms",
         "publish_parent_prepare_ms",
         "publish_rename_ms",
@@ -222,6 +244,208 @@ def test_atomic_publication_stages_before_the_unchanged_durable_commit(
     assert Path(events[4][1]).name == "segments"
     assert fragment.publication_diagnostics["publish_stage_ms"] >= 0
     assert fragment.publication_diagnostics["publish_commit_ms"] >= 0
+
+
+def test_epoch_commit_arbiter_serializes_concurrent_source_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publishers = {
+        source_id: AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=f"s{source_id[-1] * 16}",
+        )
+        for source_id in ("camera-a", "camera-b")
+    }
+    staged = {}
+    for index, (source_id, publisher) in enumerate(publishers.items(), start=1):
+        fragment = publisher.prepare(index)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append({"source_id": source_id, "pts": index})
+        staged[source_id] = publisher.stage_publication(fragment)
+
+    first_replace_entered = threading.Event()
+    second_replace_entered = threading.Event()
+    release_first_replace = threading.Event()
+    real_replace = publishing.os.replace
+    errors: list[BaseException] = []
+
+    def controlled_replace(source: Path, destination: Path) -> None:
+        destination = Path(destination)
+        if "camera-a" in destination.parts:
+            first_replace_entered.set()
+            assert release_first_replace.wait(timeout=2)
+        elif "camera-b" in destination.parts:
+            second_replace_entered.set()
+        real_replace(source, destination)
+
+    def commit(source_id: str) -> None:
+        try:
+            publishers[source_id].commit_publication(staged[source_id])
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(publishing.os, "replace", controlled_replace)
+    first_thread = threading.Thread(target=commit, args=("camera-a",), daemon=True)
+    second_thread = threading.Thread(target=commit, args=("camera-b",), daemon=True)
+    first_thread.start()
+    assert first_replace_entered.wait(timeout=1)
+    second_thread.start()
+    second_entered_while_first_held = second_replace_entered.wait(timeout=0.1)
+    release_first_replace.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+
+    assert second_entered_while_first_held is False
+    assert first_thread.is_alive() is False
+    assert second_thread.is_alive() is False
+    assert errors == []
+    for item in staged.values():
+        diagnostics = item.fragment.publication_diagnostics
+        assert diagnostics["publish_commit_lock_wait_ms"] >= 0
+        assert diagnostics["publish_commit_lock_hold_ms"] >= 0
+    assert (
+        staged["camera-b"].fragment.publication_diagnostics[
+            "publish_commit_lock_wait_ms"
+        ]
+        >= 90
+    )
+
+
+def test_epoch_commit_arbiter_blocks_cross_process_and_shutdown_is_bounded(
+    tmp_path: Path,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(21)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 21})
+    lock_path = (
+        tmp_path
+        / "cache"
+        / "midterm"
+        / "epochs"
+        / "epoch-a"
+        / ".segment-publication-commit.lock"
+    )
+    context = multiprocessing.get_context("fork")
+    acquired = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_exclusive_flock,
+        args=(str(lock_path), acquired, release),
+    )
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=2,
+        thread_name="test-cross-process-commit-arbiter",
+    )
+    published: list[Path] = []
+    holder.start()
+    try:
+        assert acquired.wait(timeout=2)
+        dispatcher.submit(
+            source_id="camera-01",
+            publisher=publisher,
+            fragment=fragment,
+            on_published=lambda _fragment, path: published.append(path),
+            on_publish_error=lambda _fragment, error: pytest.fail(str(error)),
+        )
+        deadline = time.monotonic() + 1
+        while not (fragment.staging_dir / "metadata.json").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        first_close = dispatcher.close(timeout_s=0.05)
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=2)
+
+    assert holder.exitcode == 0
+    assert first_close is False
+    assert dispatcher.close(timeout_s=2) is True
+    assert published == [fragment.final_dir]
+    assert fragment.publication_diagnostics["publish_commit_lock_wait_ms"] >= 40
+    assert fragment.publication_diagnostics["publish_commit_lock_hold_ms"] >= 0
+    assert dispatcher.snapshot()["shutdown_timeout_total"] == 1
+
+
+def test_epoch_commit_arbiter_acquire_failure_preserves_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(22)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 22})
+    real_flock = publishing.fcntl.flock
+
+    def fail_commit_lock(fd: int, operation: int) -> None:
+        target = Path(f"/proc/self/fd/{fd}").resolve()
+        if (
+            target.name == ".segment-publication-commit.lock"
+            and operation & publishing.fcntl.LOCK_EX
+        ):
+            raise OSError("injected-commit-lock-failure")
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(publishing.fcntl, "flock", fail_commit_lock)
+
+    with pytest.raises(OSError, match="injected-commit-lock-failure"):
+        publisher.publish(fragment)
+
+    assert fragment.staging_dir.is_dir()
+    assert fragment.final_dir.exists() is False
+    assert fragment.publication_diagnostics["publish_commit_lock_wait_ms"] >= 0
+    assert fragment.publication_diagnostics["publish_commit_lock_hold_ms"] == 0
+
+
+def test_epoch_commit_arbiter_releases_after_commit_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publishers = {
+        source_id: AtomicSegmentPublisher(
+            cache_root=tmp_path / "cache",
+            namespace="midterm",
+            runtime_epoch_id="epoch-a",
+            source_id=source_id,
+            session_id=f"s{source_id[-1] * 16}",
+        )
+        for source_id in ("camera-a", "camera-b")
+    }
+    fragments = {}
+    for index, (source_id, publisher) in enumerate(publishers.items(), start=23):
+        fragment = publisher.prepare(index)
+        fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+        fragment.rows.append({"source_id": source_id, "pts": index})
+        fragments[source_id] = fragment
+
+    real_replace = publishing.os.replace
+
+    def fail_first_replace(source: Path, destination: Path) -> None:
+        if "camera-a" in Path(destination).parts:
+            raise OSError("injected-commit-failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(publishing.os, "replace", fail_first_replace)
+
+    with pytest.raises(OSError, match="injected-commit-failure"):
+        publishers["camera-a"].publish(fragments["camera-a"])
+    second_final = publishers["camera-b"].publish(fragments["camera-b"])
+
+    assert fragments["camera-a"].staging_dir.is_dir()
+    assert fragments["camera-a"].final_dir.exists() is False
+    assert second_final.is_dir()
+    assert fragments["camera-a"].publication_diagnostics[
+        "publish_commit_lock_hold_ms"
+    ] >= 0
+    assert fragments["camera-b"].publication_diagnostics[
+        "publish_commit_lock_hold_ms"
+    ] >= 0
 
 
 def test_missing_video_is_not_published_and_staging_is_preserved(

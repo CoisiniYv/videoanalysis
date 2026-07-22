@@ -6828,6 +6828,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment published source=source-a epoch=epoch-a session=session-a "
                 "segment=segment-a frames=84 bytes=1000 "
                 "publish_total_ms=12 publish_stage_ms=3 publish_commit_ms=9 "
+                "publish_commit_lock_wait_ms=0.5 "
+                "publish_commit_lock_hold_ms=8.5 "
                 "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=3 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
@@ -6850,6 +6852,8 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment published source=source-a epoch=epoch-a session=session-a "
                 "segment=segment-b frames=84 bytes=1000 "
                 "publish_total_ms=40 publish_stage_ms=4 publish_commit_ms=36 "
+                "publish_commit_lock_wait_ms=12 "
+                "publish_commit_lock_hold_ms=24 "
                 "publish_validate_ms=1 "
                 "publish_metadata_write_ms=2 publish_metadata_fsync_ms=30 "
                 "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
@@ -6885,6 +6889,11 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "publication_prepare_service_ms_max=4 "
                 "publication_commit_wait_ms_total=1500 "
                 "publication_commit_wait_ms_max=12 "
+                "publication_commit_lock_wait_ms_total=2500 "
+                "publication_commit_lock_wait_ms_max=12 "
+                "publication_commit_lock_wait_events_total=1 "
+                "publication_commit_lock_hold_ms_total=3200 "
+                "publication_commit_lock_hold_ms_max=24 "
                 "publication_queue_residence_ms_total=2000 "
                 "publication_queue_residence_ms_max=20 "
                 "publication_queue_residence_events_total=1 "
@@ -7105,6 +7114,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
         "max"
     ] == 36.0
     assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_commit_lock_wait_ms"
+    ]["max"] == 12.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publish_commit_lock_hold_ms"
+    ]["max"] == 24.0
+    assert summary["rolling_cache_sink_a"][
         "rolling_cache_publish_metadata_fsync_ms"
     ]["max"] == 30.0
     assert summary["rolling_cache_sink_b"]["rolling_cache_publish_total_ms"][
@@ -7158,6 +7173,15 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_commit_wait_ms_total"
     ]["max"] == 1500.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_commit_lock_wait_ms_total"
+    ]["max"] == 2500.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_commit_lock_wait_events_total"
+    ]["max"] == 1.0
+    assert summary["rolling_cache_sink_a"][
+        "rolling_cache_publication_commit_lock_hold_ms_total"
+    ]["max"] == 3200.0
     assert summary["rolling_cache_sink_a"][
         "rolling_cache_publication_outstanding_peak_at_epoch_ms"
     ]["max"] == 1784695393901.0
