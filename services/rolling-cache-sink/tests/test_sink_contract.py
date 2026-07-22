@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,7 @@ if str(APP_ROOT) not in sys.path:
 from config import EpochResolver, SinkConfig, safe_component  # noqa: E402
 from gst_sink import SourcePipeline  # noqa: E402
 from observability import HealthState, SinkMetrics  # noqa: E402
+import publishing  # noqa: E402
 from publishing import AtomicSegmentPublisher, FragmentLedger  # noqa: E402
 
 
@@ -332,6 +335,192 @@ def test_publication_journal_rotation_is_bounded_and_keeps_current_record(
     assert [record["segment_id"] for record in records] == [
         "s0123456789abcdef-00000013"
     ]
+
+
+def test_fragment_ledger_dispatches_durable_publication_off_callback_thread(
+    tmp_path: Path,
+) -> None:
+    real_publisher = _publisher(tmp_path)
+    publication_started = threading.Event()
+    release_publication = threading.Event()
+    published: list[Path] = []
+
+    class SlowPublisher:
+        prepare = real_publisher.prepare
+
+        @staticmethod
+        def publish(fragment):
+            publication_started.set()
+            assert release_publication.wait(timeout=2)
+            return real_publisher.publish(fragment)
+
+    metrics = SinkMetrics()
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=2,
+        metrics=metrics,
+        thread_name="test-publication",
+    )
+    ledger = FragmentLedger(
+        SlowPublisher(),
+        publication_dispatcher=dispatcher,
+        on_published=lambda _fragment, path: published.append(path),
+    )
+    ledger.queue_frame(1, {"source_id": "camera-01", "pts": 1})
+    location = ledger.open_fragment(0, 1)
+    Path(location).write_bytes(b"video")
+    ledger.record_eos({"source_id": "camera-01", "schema": "EndOfStream"})
+
+    started_at = time.monotonic()
+    final_dir = ledger.close_fragment(location)
+
+    assert time.monotonic() - started_at < 0.2
+    assert publication_started.wait(timeout=1)
+    assert final_dir is not None
+    assert not final_dir.exists()
+    assert ledger.pending_count() == 1
+    assert metrics.snapshot()["publication_outstanding"] == 1
+
+    release_publication.set()
+    assert dispatcher.close(timeout_s=2) is True
+    assert final_dir.is_dir()
+    assert published == [final_dir]
+    assert ledger.pending_count() == 0
+    assert metrics.snapshot()["publication_outstanding"] == 0
+
+
+def test_bounded_publication_dispatcher_backpressures_without_reordering_or_drop(
+    tmp_path: Path,
+) -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    third_submitted = threading.Event()
+    order: list[str] = []
+    callbacks: list[str] = []
+    metrics = SinkMetrics()
+
+    class OrderedPublisher:
+        @staticmethod
+        def publish(fragment):
+            order.append(fragment.segment_id)
+            if fragment.segment_id == "segment-1":
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=2,
+        metrics=metrics,
+        thread_name="test-publication-order",
+    )
+    fragments = [
+        SimpleNamespace(
+            segment_id=f"segment-{index}",
+            final_dir=tmp_path / f"segment-{index}",
+        )
+        for index in (1, 2, 3)
+    ]
+
+    def submit(fragment) -> None:
+        dispatcher.submit(
+            source_id="camera-01",
+            publisher=OrderedPublisher(),
+            fragment=fragment,
+            on_published=lambda item, _path: callbacks.append(item.segment_id),
+            on_publish_error=lambda _item, error: pytest.fail(str(error)),
+        )
+
+    submit(fragments[0])
+    assert first_started.wait(timeout=1)
+    submit(fragments[1])
+    third_thread = threading.Thread(
+        target=lambda: (submit(fragments[2]), third_submitted.set()),
+        daemon=True,
+    )
+    third_thread.start()
+
+    assert not third_submitted.wait(timeout=0.1)
+    snapshot = dispatcher.snapshot()
+    assert snapshot["outstanding"] == 2
+    assert snapshot["outstanding_peak"] == 2
+
+    release_first.set()
+    assert third_submitted.wait(timeout=1)
+    third_thread.join(timeout=1)
+    assert dispatcher.close(timeout_s=2) is True
+    assert order == ["segment-1", "segment-2", "segment-3"]
+    assert callbacks == order
+    assert dispatcher.snapshot()["outstanding"] == 0
+    assert metrics.snapshot()["publication_queue_wait_events_total"] >= 1
+    assert metrics.snapshot()["publication_outstanding_peak"] == 2
+
+
+def test_bounded_publication_dispatcher_surfaces_error_and_drains_remaining(
+    tmp_path: Path,
+) -> None:
+    errors: list[tuple[str, str]] = []
+    published: list[str] = []
+    metrics = SinkMetrics()
+
+    class FailingPublisher:
+        @staticmethod
+        def publish(fragment):
+            if fragment.segment_id == "bad":
+                raise OSError("injected-publication-failure")
+            fragment.final_dir.mkdir(parents=True)
+            return fragment.final_dir
+
+    dispatcher = publishing.BoundedPublicationDispatcher(
+        capacity=2,
+        metrics=metrics,
+        thread_name="test-publication-error",
+    )
+    for segment_id in ("bad", "good"):
+        fragment = SimpleNamespace(
+            segment_id=segment_id,
+            final_dir=tmp_path / segment_id,
+        )
+        dispatcher.submit(
+            source_id="camera-01",
+            publisher=FailingPublisher(),
+            fragment=fragment,
+            on_published=lambda item, _path: published.append(item.segment_id),
+            on_publish_error=lambda item, error: errors.append(
+                (item.segment_id, str(error))
+            ),
+        )
+
+    assert dispatcher.close(timeout_s=2) is True
+    assert errors == [("bad", "injected-publication-failure")]
+    assert published == ["good"]
+    assert dispatcher.snapshot()["failed_total"] == 1
+    assert dispatcher.snapshot()["completed_total"] == 1
+    assert dispatcher.snapshot()["outstanding"] == 0
+    assert metrics.snapshot()["publication_failed_total"] == 1
+
+
+def test_async_publication_error_marks_active_source_pipeline_failed(
+    tmp_path: Path,
+) -> None:
+    pipeline = object.__new__(SourcePipeline)
+    pipeline._metrics = SinkMetrics()
+    pipeline._failed = threading.Event()
+    pipeline._closed = False
+    pipeline.source_id = "camera-01"
+    pipeline.runtime_epoch_id = "epoch-a"
+    pipeline.session_id = "session-a"
+    fragment = SimpleNamespace(
+        segment_id="segment-a",
+        staging_dir=tmp_path / "segment-a.partial",
+    )
+
+    pipeline._on_publish_error(fragment, OSError("injected-publication-failure"))
+
+    metrics = pipeline._metrics.snapshot()
+    assert pipeline.failed is True
+    assert metrics["segment_publish_errors_total"] == 1
+    assert metrics["pipeline_errors_total"] == 1
+    assert metrics["pipeline_errors_active"] == 1
 
 
 def test_fragment_ledger_assigns_boundary_frames_to_new_fragment(
