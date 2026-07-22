@@ -10310,6 +10310,12 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_journal_append_ms",
                 "publish_accounted_ms",
                 "publish_unattributed_ms",
+                "publication_capacity_wait_ms",
+                "publication_queue_residence_ms",
+                "publication_worker_service_ms",
+                "publication_dispatch_total_ms",
+                "publication_outstanding_at_submit",
+                "publication_queue_depth_at_submit",
             )
         }
         rolling_cache_publication_dispatcher_metrics = {
@@ -10332,6 +10338,14 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publication_queue_wait_ms_total",
                 "publication_queue_wait_ms_max",
                 "publication_queue_wait_events_total",
+                "publication_queue_residence_ms_total",
+                "publication_queue_residence_ms_max",
+                "publication_queue_residence_events_total",
+                "publication_worker_service_ms_total",
+                "publication_worker_service_ms_max",
+                "publication_dispatch_total_ms_total",
+                "publication_dispatch_total_ms_max",
+                "publication_outstanding_peak_at_epoch_ms",
                 "publication_shutdown_timeout_total",
             )
         }
@@ -10691,6 +10705,20 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             ),
             "rolling_cache_publication_dispatcher_drained": text.count(
                 "publication dispatcher stopped drained=True"
+            ),
+            "rolling_cache_publication_outstanding_peak_sources": (
+                _log_field_counts(
+                    text,
+                    marker="publication dispatcher stopped",
+                    field="publication_outstanding_peak_source",
+                )
+            ),
+            "rolling_cache_publication_outstanding_peak_segments": (
+                _log_field_counts(
+                    text,
+                    marker="publication dispatcher stopped",
+                    field="publication_outstanding_peak_segment",
+                )
             ),
             "media_scheduler_remux_lane_depth": _numeric_distribution(
                 media_scheduler_remux_lane_depth

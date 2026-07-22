@@ -390,7 +390,13 @@ class SourcePipeline:
             "publish_staging_dir_fsync_ms=%s publish_parent_prepare_ms=%s "
             "publish_rename_ms=%s publish_parent_dir_fsync_ms=%s "
             "publish_journal_append_ms=%s publish_accounted_ms=%s "
-            "publish_unattributed_ms=%s",
+            "publish_unattributed_ms=%s "
+            "publication_capacity_wait_ms=%s "
+            "publication_queue_residence_ms=%s "
+            "publication_worker_service_ms=%s "
+            "publication_dispatch_total_ms=%s "
+            "publication_outstanding_at_submit=%s "
+            "publication_queue_depth_at_submit=%s",
             self.source_id,
             self.runtime_epoch_id,
             self.session_id,
@@ -414,6 +420,12 @@ class SourcePipeline:
             timings.get("publish_journal_append_ms", "unavailable"),
             timings.get("publish_accounted_ms", "unavailable"),
             timings.get("publish_unattributed_ms", "unavailable"),
+            timings.get("publication_capacity_wait_ms", "unavailable"),
+            timings.get("publication_queue_residence_ms", "unavailable"),
+            timings.get("publication_worker_service_ms", "unavailable"),
+            timings.get("publication_dispatch_total_ms", "unavailable"),
+            timings.get("publication_outstanding_at_submit", "unavailable"),
+            timings.get("publication_queue_depth_at_submit", "unavailable"),
         )
 
     def _on_publish_error(self, fragment: Fragment, error: Exception) -> None:
@@ -603,6 +615,7 @@ class RollingCacheSink:
             timeout_s=self._config.shutdown_timeout_s
         )
         publication_state = self._publication_dispatcher.snapshot()
+        publication_peak = self._publication_dispatcher.peak_snapshot()
         publication_log = LOGGER.info if publication_drained else LOGGER.error
         publication_log(
             "publication dispatcher stopped drained=%s "
@@ -614,6 +627,16 @@ class RollingCacheSink:
             "publication_queue_wait_ms_total=%.3f "
             "publication_queue_wait_ms_max=%.3f "
             "publication_queue_wait_events_total=%d "
+            "publication_queue_residence_ms_total=%.3f "
+            "publication_queue_residence_ms_max=%.3f "
+            "publication_queue_residence_events_total=%d "
+            "publication_worker_service_ms_total=%.3f "
+            "publication_worker_service_ms_max=%.3f "
+            "publication_dispatch_total_ms_total=%.3f "
+            "publication_dispatch_total_ms_max=%.3f "
+            "publication_outstanding_peak_at_epoch_ms=%d "
+            "publication_outstanding_peak_source=%s "
+            "publication_outstanding_peak_segment=%s "
             "publication_shutdown_timeout_total=%d",
             publication_drained,
             int(publication_state["capacity"]),
@@ -629,6 +652,16 @@ class RollingCacheSink:
             float(publication_state["queue_wait_ms_total"]),
             float(publication_state["queue_wait_ms_max"]),
             int(publication_state["queue_wait_events_total"]),
+            float(publication_state["queue_residence_ms_total"]),
+            float(publication_state["queue_residence_ms_max"]),
+            int(publication_state["queue_residence_events_total"]),
+            float(publication_state["worker_service_ms_total"]),
+            float(publication_state["worker_service_ms_max"]),
+            float(publication_state["dispatch_total_ms_total"]),
+            float(publication_state["dispatch_total_ms_max"]),
+            int(publication_peak["at_epoch_ms"]),
+            str(publication_peak["source_id"]),
+            str(publication_peak["segment_id"]),
             int(publication_state["shutdown_timeout_total"]),
         )
         self._main_loop.quit()

@@ -377,6 +377,11 @@ class _QueuedPublication:
     fragment: Fragment
     on_published: Callable[[Fragment, Path], None] | None
     on_publish_error: Callable[[Fragment, Exception], None] | None
+    requested_at_ns: int
+    accepted_at_ns: int
+    capacity_wait_ms: float
+    outstanding_at_submit: int
+    queue_depth_at_submit: int
 
 
 class BoundedPublicationDispatcher:
@@ -397,10 +402,14 @@ class BoundedPublicationDispatcher:
         capacity: int = SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
         metrics: Any | None = None,
         thread_name: str = "rolling-cache-publication",
+        clock_ns: Callable[[], int] = time.monotonic_ns,
+        wall_clock_ns: Callable[[], int] = time.time_ns,
     ) -> None:
         self.capacity = max(1, int(capacity))
         self.worker_count = 1
         self._metrics = metrics
+        self._clock_ns = clock_ns
+        self._wall_clock_ns = wall_clock_ns
         self._queue: queue.Queue[_QueuedPublication | object] = queue.Queue(
             maxsize=self.capacity
         )
@@ -419,7 +428,18 @@ class BoundedPublicationDispatcher:
         self._queue_wait_ms_total = 0.0
         self._queue_wait_ms_max = 0.0
         self._queue_wait_events_total = 0
+        self._queue_residence_ms_total = 0.0
+        self._queue_residence_ms_max = 0.0
+        self._queue_residence_events_total = 0
+        self._worker_service_ms_total = 0.0
+        self._worker_service_ms_max = 0.0
+        self._dispatch_total_ms_total = 0.0
+        self._dispatch_total_ms_max = 0.0
         self._shutdown_timeout_total = 0
+        self._outstanding_peak_at_epoch_ms = 0
+        self._outstanding_peak_source_id = "none"
+        self._outstanding_peak_segment_id = "none"
+        self._outstanding_peak_queue_depth = 0
         self._thread = threading.Thread(
             target=self._run,
             name=thread_name,
@@ -441,20 +461,26 @@ class BoundedPublicationDispatcher:
             if not self._accepting:
                 raise RuntimeError("rolling_segment_publication_dispatcher_closed")
 
-        wait_started_at = time.monotonic()
+        requested_at_ns = self._clock_ns()
         self._slots.acquire()
-        wait_ms = max(0.0, (time.monotonic() - wait_started_at) * 1000.0)
+        accepted_at_ns = self._clock_ns()
+        wait_ms = max(0.0, (accepted_at_ns - requested_at_ns) / 1_000_000.0)
         with self._state_lock:
             if not self._accepting:
                 self._slots.release()
                 raise RuntimeError("rolling_segment_publication_dispatcher_closed")
             self._outstanding += 1
             self._submitted_total += 1
-            self._outstanding_peak = max(
-                self._outstanding_peak,
-                self._outstanding,
-            )
             queue_depth = max(0, self._outstanding - self._active)
+            if self._outstanding > self._outstanding_peak:
+                self._outstanding_peak = self._outstanding
+                self._outstanding_peak_at_epoch_ms = max(
+                    0,
+                    int(self._wall_clock_ns() // 1_000_000),
+                )
+                self._outstanding_peak_source_id = str(source_id)
+                self._outstanding_peak_segment_id = str(fragment.segment_id)
+                self._outstanding_peak_queue_depth = queue_depth
             self._queue_depth_peak = max(self._queue_depth_peak, queue_depth)
             self._queue_wait_ms_total += wait_ms
             self._queue_wait_ms_max = max(self._queue_wait_ms_max, wait_ms)
@@ -468,6 +494,11 @@ class BoundedPublicationDispatcher:
             fragment=fragment,
             on_published=on_published,
             on_publish_error=on_publish_error,
+            requested_at_ns=requested_at_ns,
+            accepted_at_ns=accepted_at_ns,
+            capacity_wait_ms=wait_ms,
+            outstanding_at_submit=int(state["outstanding"]),
+            queue_depth_at_submit=queue_depth,
         )
         try:
             self._queue.put_nowait(task)
@@ -486,6 +517,16 @@ class BoundedPublicationDispatcher:
     def snapshot(self) -> dict[str, int | float | bool]:
         with self._state_lock:
             return self._snapshot_locked()
+
+    def peak_snapshot(self) -> dict[str, int | str]:
+        with self._state_lock:
+            return {
+                "outstanding": self._outstanding_peak,
+                "queue_depth": self._outstanding_peak_queue_depth,
+                "at_epoch_ms": self._outstanding_peak_at_epoch_ms,
+                "source_id": self._outstanding_peak_source_id,
+                "segment_id": self._outstanding_peak_segment_id,
+            }
 
     def close(self, *, timeout_s: float) -> bool:
         timeout_s = max(0.0, float(timeout_s))
@@ -527,14 +568,26 @@ class BoundedPublicationDispatcher:
                 self._queue.task_done()
                 return
             assert isinstance(queued, _QueuedPublication)
+            worker_started_at_ns = self._clock_ns()
+            queue_residence_ms = max(
+                0.0,
+                (worker_started_at_ns - queued.accepted_at_ns) / 1_000_000.0,
+            )
             with self._state_lock:
                 self._active = 1
                 state = self._snapshot_locked()
             self._sync_metrics(state)
             failed = False
+            worker_completed_at_ns = worker_started_at_ns
             try:
                 final_dir = queued.publisher.publish(queued.fragment)
             except Exception as exc:
+                worker_completed_at_ns = self._clock_ns()
+                self._attach_dispatch_diagnostics(
+                    queued,
+                    queue_residence_ms=queue_residence_ms,
+                    worker_completed_at_ns=worker_completed_at_ns,
+                )
                 failed = True
                 if queued.on_publish_error is not None:
                     try:
@@ -547,6 +600,12 @@ class BoundedPublicationDispatcher:
                             queued.fragment.segment_id,
                         )
             else:
+                worker_completed_at_ns = self._clock_ns()
+                self._attach_dispatch_diagnostics(
+                    queued,
+                    queue_residence_ms=queue_residence_ms,
+                    worker_completed_at_ns=worker_completed_at_ns,
+                )
                 if queued.on_published is not None:
                     try:
                         queued.on_published(queued.fragment, final_dir)
@@ -559,6 +618,14 @@ class BoundedPublicationDispatcher:
                             queued.fragment.segment_id,
                         )
             finally:
+                worker_service_ms = max(
+                    0.0,
+                    (worker_completed_at_ns - worker_started_at_ns) / 1_000_000.0,
+                )
+                dispatch_total_ms = max(
+                    0.0,
+                    (worker_completed_at_ns - queued.requested_at_ns) / 1_000_000.0,
+                )
                 with self._state_lock:
                     self._active = 0
                     self._outstanding = max(0, self._outstanding - 1)
@@ -566,12 +633,74 @@ class BoundedPublicationDispatcher:
                         self._failed_total += 1
                     else:
                         self._completed_total += 1
+                    self._queue_residence_ms_total += queue_residence_ms
+                    self._queue_residence_ms_max = max(
+                        self._queue_residence_ms_max,
+                        queue_residence_ms,
+                    )
+                    if queue_residence_ms >= 1.0:
+                        self._queue_residence_events_total += 1
+                    self._worker_service_ms_total += worker_service_ms
+                    self._worker_service_ms_max = max(
+                        self._worker_service_ms_max,
+                        worker_service_ms,
+                    )
+                    self._dispatch_total_ms_total += dispatch_total_ms
+                    self._dispatch_total_ms_max = max(
+                        self._dispatch_total_ms_max,
+                        dispatch_total_ms,
+                    )
                     if self._outstanding == 0:
                         self._idle.set()
                     state = self._snapshot_locked()
                 self._slots.release()
                 self._queue.task_done()
                 self._sync_metrics(state)
+
+    def _attach_dispatch_diagnostics(
+        self,
+        queued: _QueuedPublication,
+        *,
+        queue_residence_ms: float,
+        worker_completed_at_ns: int,
+    ) -> None:
+        worker_service_ms = max(
+            0.0,
+            (worker_completed_at_ns - queued.accepted_at_ns) / 1_000_000.0
+            - queue_residence_ms,
+        )
+        dispatch_total_ms = max(
+            0.0,
+            (worker_completed_at_ns - queued.requested_at_ns) / 1_000_000.0,
+        )
+        diagnostics = dict(
+            getattr(queued.fragment, "publication_diagnostics", {}) or {}
+        )
+        diagnostics.update(
+            {
+                "publication_capacity_wait_ms": round(
+                    queued.capacity_wait_ms,
+                    3,
+                ),
+                "publication_queue_residence_ms": round(
+                    queue_residence_ms,
+                    3,
+                ),
+                "publication_worker_service_ms": round(
+                    worker_service_ms,
+                    3,
+                ),
+                "publication_dispatch_total_ms": round(
+                    dispatch_total_ms,
+                    3,
+                ),
+                "publication_outstanding_at_submit": (
+                    queued.outstanding_at_submit
+                ),
+                "publication_queue_depth_at_submit": queued.queue_depth_at_submit,
+            }
+        )
+        queued.fragment.publication_diagnostics = diagnostics
 
     def _snapshot_locked(self) -> dict[str, int | float | bool]:
         return {
@@ -589,6 +718,17 @@ class BoundedPublicationDispatcher:
             "queue_wait_ms_total": round(self._queue_wait_ms_total, 3),
             "queue_wait_ms_max": round(self._queue_wait_ms_max, 3),
             "queue_wait_events_total": self._queue_wait_events_total,
+            "queue_residence_ms_total": round(
+                self._queue_residence_ms_total,
+                3,
+            ),
+            "queue_residence_ms_max": round(self._queue_residence_ms_max, 3),
+            "queue_residence_events_total": self._queue_residence_events_total,
+            "worker_service_ms_total": round(self._worker_service_ms_total, 3),
+            "worker_service_ms_max": round(self._worker_service_ms_max, 3),
+            "dispatch_total_ms_total": round(self._dispatch_total_ms_total, 3),
+            "dispatch_total_ms_max": round(self._dispatch_total_ms_max, 3),
+            "outstanding_peak_at_epoch_ms": self._outstanding_peak_at_epoch_ms,
             "shutdown_timeout_total": self._shutdown_timeout_total,
         }
 
