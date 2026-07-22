@@ -6278,6 +6278,113 @@ def test_stop_rolling_cache_sinks_before_pressure_reconfigure_stops_dual_sinks(
     assert summary["services"] == ["rolling-cache-sink-a", "rolling-cache-sink-b"]
 
 
+def test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compose(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+        rolling_cache_publication_metadata_layout="single_inode",
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, log_path, **kwargs: calls.append(
+            {"command": command, "log_path": log_path, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "rolling_cache_sink_state_snapshot",
+        lambda: {
+            "rolling-cache-sink-a": {"running": False, "status": "created"},
+            "rolling-cache-sink-b": {"running": False, "status": "created"},
+        },
+    )
+
+    summary = module.restore_rolling_cache_sinks_after_pressure(
+        cfg,
+        original_states={
+            "rolling-cache-sink-a": {"running": False, "status": "exited"},
+            "rolling-cache-sink-b": {"running": False, "status": "exited"},
+        },
+        artifact_name="compose_restore_rolling_cache_sinks.log",
+    )
+
+    assert len(calls) == 1
+    command = calls[0]["command"]
+    assert command[-2:] == ["rolling-cache-sink-a", "rolling-cache-sink-b"]
+    assert "up" in command
+    assert "--no-start" in command
+    assert "--no-deps" in command
+    assert "--force-recreate" in command
+    assert "--no-build" in command
+    assert "stop" not in command
+    assert calls[0]["kwargs"]["check"] is True
+    assert summary["recreated_stopped"] == [
+        "rolling-cache-sink-a",
+        "rolling-cache-sink-b",
+    ]
+
+
+def test_restore_rolling_cache_sinks_restarts_only_originally_running_services(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, log_path, **kwargs: calls.append(
+            {"command": command, "log_path": log_path, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "rolling_cache_sink_state_snapshot",
+        lambda: {
+            "rolling-cache-sink-a": {"running": True, "status": "running"},
+            "rolling-cache-sink-b": {"running": False, "status": "created"},
+        },
+    )
+
+    summary = module.restore_rolling_cache_sinks_after_pressure(
+        cfg,
+        original_states={
+            "rolling-cache-sink-a": {"running": True, "status": "running"},
+            "rolling-cache-sink-b": {"running": False, "status": "exited"},
+        },
+        artifact_name="compose_restore_rolling_cache_sinks.log",
+    )
+
+    assert len(calls) == 2
+    running_command = next(
+        item["command"] for item in calls if "rolling-cache-sink-a" in item["command"]
+    )
+    stopped_command = next(
+        item["command"] for item in calls if "rolling-cache-sink-b" in item["command"]
+    )
+    assert "up" in running_command
+    assert "-d" in running_command
+    assert "--no-start" not in running_command
+    assert "up" in stopped_command
+    assert "--no-start" in stopped_command
+    assert summary["restarted_running"] == ["rolling-cache-sink-a"]
+    assert summary["recreated_stopped"] == ["rolling-cache-sink-b"]
+
+
 def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path: Path) -> None:
     module = _load_module()
     cfg = _config(
