@@ -489,6 +489,7 @@ class PressureConfig:
     pressure_sampling_start_event_ts_ms: int = 0
     pressure_sampling_end_event_ts_ms: int = 0
     rolling_cache_publication_workers: int = 1
+    rolling_cache_publication_commit_slots: int = 0
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -673,6 +674,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Per-sink source-sharded rolling segment publication workers. "
             "The daily default is one; bounded diagnostics may use up to four."
+        ),
+    )
+    parser.add_argument(
+        "--rolling-cache-publication-commit-slots",
+        type=int,
+        choices=range(0, 5),
+        default=0,
+        help=(
+            "Host-wide deterministic rolling publication commit lanes. Zero "
+            "keeps the daily unarbitrated default; diagnostics may use 1-4."
         ),
     )
     parser.add_argument(
@@ -1453,6 +1464,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         rolling_cache_publication_workers=int(
             args.rolling_cache_publication_workers
+        ),
+        rolling_cache_publication_commit_slots=int(
+            args.rolling_cache_publication_commit_slots
         ),
         preserve_warmup_results=bool(args.preserve_warmup_results),
     )
@@ -4486,6 +4500,9 @@ def start_rolling_cache_sinks_for_pressure(
             "ROLLING_CACHE_PUBLICATION_WORKERS": str(
                 cfg.rolling_cache_publication_workers
             ),
+            "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": str(
+                cfg.rolling_cache_publication_commit_slots
+            ),
             "ROLLING_CACHE_FPS": _format_fps_float(rolling_cache_input_fps),
             "ROLLING_CACHE_RUNTIME_EPOCH_ID": runtime_epoch_id,
             "ROLLING_CACHE_RETENTION_SECONDS": str(
@@ -4566,6 +4583,9 @@ def start_rolling_cache_sinks_for_pressure(
         "rolling_cache_publication_workers": (
             cfg.rolling_cache_publication_workers
         ),
+        "rolling_cache_publication_commit_slots": (
+            cfg.rolling_cache_publication_commit_slots
+        ),
         "observed_env": observed_env,
         "states": service_states,
         "dependency_states": dependency_states,
@@ -4598,6 +4618,17 @@ def start_rolling_cache_sinks_for_pressure(
         raise RuntimeError(
             "rolling-cache publication worker count was not applied after "
             f"compose recreate: {publication_worker_mismatches}"
+        )
+    commit_slot_mismatches = {
+        service: values.get("ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS", "")
+        for service, values in observed_env.items()
+        if values.get("ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS", "")
+        != str(cfg.rolling_cache_publication_commit_slots)
+    }
+    if commit_slot_mismatches:
+        raise RuntimeError(
+            "rolling-cache publication commit slot count was not applied "
+            f"after compose recreate: {commit_slot_mismatches}"
         )
     return summary
 
@@ -10331,6 +10362,8 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
                 "publish_commit_ms",
                 "publish_commit_lock_wait_ms",
                 "publish_commit_lock_hold_ms",
+                "publish_commit_slot_count",
+                "publish_commit_slot_index",
                 "publish_validate_ms",
                 "publish_metadata_write_ms",
                 "publish_metadata_fsync_ms",
@@ -10367,6 +10400,7 @@ def summarize_logs(cfg: PressureConfig) -> dict[str, Any]:
             for field in (
                 "publication_capacity",
                 "publication_worker_count",
+                "publication_commit_slot_count",
                 "publication_queue_depth",
                 "publication_queue_depth_peak",
                 "publication_outstanding",

@@ -38,6 +38,7 @@ class SinkMetrics:
             "publication_accepting": 0,
             "publication_capacity": 0,
             "publication_worker_count": 0,
+            "publication_commit_slot_count": 0,
             "publication_queue_depth": 0,
             "publication_queue_depth_peak": 0,
             "publication_outstanding": 0,

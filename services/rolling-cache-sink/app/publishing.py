@@ -16,7 +16,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from config import MAX_ROLLING_CACHE_PUBLICATION_WORKERS, safe_component
+from config import (
+    MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS,
+    MAX_ROLLING_CACHE_PUBLICATION_WORKERS,
+    safe_component,
+)
 
 
 SEGMENT_MANIFEST_FILE = "segment_manifest.json"
@@ -24,6 +28,7 @@ SEGMENT_MANIFEST_SCHEMA_VERSION = "rolling-segment-manifest-v1"
 SEGMENT_PUBLICATION_JOURNAL_FILE = ".segment-publications.jsonl"
 SEGMENT_PUBLICATION_JOURNAL_LOCK_FILE = ".segment-publications.lock"
 SEGMENT_PUBLICATION_COMMIT_LOCK_FILE = ".segment-publication-commit.lock"
+SEGMENT_PUBLICATION_COMMIT_SLOT_FILE = ".segment-publication-commit-slot-{slot}.lock"
 SEGMENT_PUBLICATION_SCHEMA_VERSION = "rolling-segment-publication-v1"
 SEGMENT_PUBLICATION_JOURNAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_SEGMENT_PUBLICATION_RECORD_BYTES = 128 * 1024
@@ -124,6 +129,7 @@ class AtomicSegmentPublisher:
         commit_arbitration_enabled: bool = (
             SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED
         ),
+        commit_slot_count: int = 0,
     ) -> None:
         epoch = safe_component(runtime_epoch_id, field="runtime_epoch_id")
         source = safe_component(source_id, field="source_id")
@@ -132,8 +138,41 @@ class AtomicSegmentPublisher:
         epoch_root = cache_root / namespace / "epochs" / epoch
         self._staging_root = epoch_root / ".rolling-cache-staging" / source / session
         self._segments_root = epoch_root / source / "segments"
-        self._commit_lock_path = epoch_root / SEGMENT_PUBLICATION_COMMIT_LOCK_FILE
         self._commit_arbitration_enabled = bool(commit_arbitration_enabled)
+        requested_commit_slot_count = int(commit_slot_count)
+        if not 0 <= requested_commit_slot_count <= (
+            MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS
+        ):
+            raise ValueError(
+                "commit_slot_count must be between 0 and "
+                f"{MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS}, got "
+                f"{requested_commit_slot_count}"
+            )
+        if self._commit_arbitration_enabled and requested_commit_slot_count > 1:
+            raise ValueError(
+                "commit_arbitration_enabled cannot be combined with "
+                "commit_slot_count > 1"
+            )
+        self._commit_slot_count = (
+            1 if self._commit_arbitration_enabled else requested_commit_slot_count
+        )
+        self._commit_slot_index = (
+            zlib.crc32(source.encode("utf-8")) % self._commit_slot_count
+            if self._commit_slot_count > 0
+            else -1
+        )
+        if self._commit_slot_count == 0:
+            self._commit_lock_path: Path | None = None
+        elif self._commit_slot_count == 1:
+            self._commit_lock_path = (
+                epoch_root / SEGMENT_PUBLICATION_COMMIT_LOCK_FILE
+            )
+        else:
+            self._commit_lock_path = epoch_root / (
+                SEGMENT_PUBLICATION_COMMIT_SLOT_FILE.format(
+                    slot=self._commit_slot_index
+                )
+            )
         self._session_id = session
         self._runtime_epoch_id = epoch
         self._source_id = source
@@ -247,7 +286,7 @@ class AtomicSegmentPublisher:
         try:
             lock_context = (
                 self._commit_lock_path.open("a+b")
-                if self._commit_arbitration_enabled
+                if self._commit_lock_path is not None
                 else nullcontext()
             )
             with lock_context as lock_handle:
@@ -340,6 +379,8 @@ class AtomicSegmentPublisher:
                 "publish_stage_ms": round(staged.stage_service_ms, 3),
                 "publish_commit_ms": round(commit_service_ms, 3),
                 "publish_commit_lock_hold_ms": round(commit_lock_hold_ms, 3),
+                "publish_commit_slot_count": self._commit_slot_count,
+                "publish_commit_slot_index": self._commit_slot_index,
                 **{
                     (
                         name if name.startswith("publish_") else f"publish_{name}"

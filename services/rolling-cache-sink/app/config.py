@@ -14,6 +14,7 @@ from pathlib import Path
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
 MAX_ROLLING_CACHE_PUBLICATION_WORKERS = 4
+MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS = 4
 
 
 def safe_component(value: str, *, field: str) -> str:
@@ -59,6 +60,17 @@ def _bounded_positive_int(name: str, default: int, *, maximum: int) -> int:
     return value
 
 
+def _bounded_nonnegative_int(name: str, default: int, *, maximum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if not 0 <= value <= maximum:
+        raise ValueError(f"{name} must be between 0 and {maximum}, got {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class SinkConfig:
     zmq_endpoint: str
@@ -70,6 +82,7 @@ class SinkConfig:
     http_host: str
     http_port: int
     publication_workers: int
+    publication_commit_slots: int
     source_id: str | None
     source_id_prefix: str | None
     explicit_epoch_id: str
@@ -110,6 +123,11 @@ class SinkConfig:
                 "ROLLING_CACHE_PUBLICATION_WORKERS",
                 1,
                 maximum=MAX_ROLLING_CACHE_PUBLICATION_WORKERS,
+            ),
+            publication_commit_slots=_bounded_nonnegative_int(
+                "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
+                0,
+                maximum=MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS,
             ),
             source_id=source_id,
             source_id_prefix=source_id_prefix,

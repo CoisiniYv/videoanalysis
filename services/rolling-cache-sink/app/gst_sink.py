@@ -73,6 +73,7 @@ class SourcePipeline:
             commit_arbitration_enabled=(
                 SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED
             ),
+            commit_slot_count=config.publication_commit_slots,
         )
         self._ledger = FragmentLedger(
             publisher,
@@ -391,6 +392,7 @@ class SourcePipeline:
             "publish_total_ms=%s publish_stage_ms=%s publish_commit_ms=%s "
             "publish_commit_lock_wait_ms=%s "
             "publish_commit_lock_hold_ms=%s "
+            "publish_commit_slot_count=%s publish_commit_slot_index=%s "
             "publish_validate_ms=%s "
             "publish_metadata_write_ms=%s publish_metadata_fsync_ms=%s "
             "publish_metadata_stat_ms=%s publish_manifest_write_ms=%s "
@@ -423,6 +425,8 @@ class SourcePipeline:
             timings.get("publish_commit_ms", "unavailable"),
             timings.get("publish_commit_lock_wait_ms", "unavailable"),
             timings.get("publish_commit_lock_hold_ms", "unavailable"),
+            timings.get("publish_commit_slot_count", "unavailable"),
+            timings.get("publish_commit_slot_index", "unavailable"),
             timings.get("publish_validate_ms", "unavailable"),
             timings.get("publish_metadata_write_ms", "unavailable"),
             timings.get("publish_metadata_fsync_ms", "unavailable"),
@@ -517,13 +521,19 @@ class RollingCacheSink:
             metrics=metrics,
             thread_name="rolling-cache-publication",
         )
+        metrics.set(
+            "publication_commit_slot_count",
+            config.publication_commit_slots,
+        )
         LOGGER.info(
             "publication dispatcher started workers=%d outstanding_limit=%d "
-            "prepare_group_limit=%d commit_arbitration_enabled=%s",
+            "prepare_group_limit=%d commit_arbitration_enabled=%s "
+            "commit_slot_count=%d",
             config.publication_workers,
             SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
             SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
             SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
+            config.publication_commit_slots,
         )
 
         Gst.init(None)
@@ -648,6 +658,7 @@ class RollingCacheSink:
         publication_log(
             "publication dispatcher stopped drained=%s "
             "publication_capacity=%d publication_worker_count=%d "
+            "publication_commit_slot_count=%d "
             "publication_queue_depth=%d publication_queue_depth_peak=%d "
             "publication_outstanding=%d publication_outstanding_peak=%d "
             "publication_active=%d publication_active_peak=%d "
@@ -682,6 +693,7 @@ class RollingCacheSink:
             publication_drained,
             int(publication_state["capacity"]),
             int(publication_state["worker_count"]),
+            self._config.publication_commit_slots,
             int(publication_state["queue_depth"]),
             int(publication_state["queue_depth_peak"]),
             int(publication_state["outstanding"]),
