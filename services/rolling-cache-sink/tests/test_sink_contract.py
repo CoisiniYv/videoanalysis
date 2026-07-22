@@ -246,6 +246,47 @@ def test_atomic_publication_stages_before_the_unchanged_durable_commit(
     assert fragment.publication_diagnostics["publish_commit_ms"] >= 0
 
 
+def test_epoch_commit_arbitration_is_disabled_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert publishing.SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED is False
+    publisher = _publisher(tmp_path)
+    fragment = publisher.prepare(10)
+    fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
+    fragment.rows.append({"source_id": "camera-01", "pts": 10})
+    commit_lock_operations: list[int] = []
+    real_flock = publishing.fcntl.flock
+
+    def record_flock(fd: int, operation: int) -> None:
+        target = Path(f"/proc/self/fd/{fd}").resolve()
+        if target.name == publishing.SEGMENT_PUBLICATION_COMMIT_LOCK_FILE:
+            commit_lock_operations.append(operation)
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(publishing.fcntl, "flock", record_flock)
+
+    final_dir = publisher.publish(fragment)
+
+    commit_lock_path = (
+        tmp_path
+        / "cache"
+        / "midterm"
+        / "epochs"
+        / "epoch-a"
+        / publishing.SEGMENT_PUBLICATION_COMMIT_LOCK_FILE
+    )
+    assert final_dir.is_dir()
+    assert commit_lock_operations == []
+    assert commit_lock_path.exists() is False
+    assert fragment.publication_diagnostics[
+        "publish_commit_lock_wait_ms"
+    ] == 0
+    assert fragment.publication_diagnostics[
+        "publish_commit_lock_hold_ms"
+    ] == 0
+
+
 def test_epoch_commit_arbiter_serializes_concurrent_source_commits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -257,6 +298,7 @@ def test_epoch_commit_arbiter_serializes_concurrent_source_commits(
             runtime_epoch_id="epoch-a",
             source_id=source_id,
             session_id=f"s{source_id[-1] * 16}",
+            commit_arbitration_enabled=True,
         )
         for source_id in ("camera-a", "camera-b")
     }
@@ -318,7 +360,14 @@ def test_epoch_commit_arbiter_serializes_concurrent_source_commits(
 def test_epoch_commit_arbiter_blocks_cross_process_and_shutdown_is_bounded(
     tmp_path: Path,
 ) -> None:
-    publisher = _publisher(tmp_path)
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        commit_arbitration_enabled=True,
+    )
     fragment = publisher.prepare(21)
     fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
     fragment.rows.append({"source_id": "camera-01", "pts": 21})
@@ -377,7 +426,14 @@ def test_epoch_commit_arbiter_acquire_failure_preserves_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    publisher = _publisher(tmp_path)
+    publisher = AtomicSegmentPublisher(
+        cache_root=tmp_path / "cache",
+        namespace="midterm",
+        runtime_epoch_id="epoch-a",
+        source_id="camera-01",
+        session_id="s0123456789abcdef",
+        commit_arbitration_enabled=True,
+    )
     fragment = publisher.prepare(22)
     fragment.video_path.write_bytes(b"encoded-h264-in-mov" * 128)
     fragment.rows.append({"source_id": "camera-01", "pts": 22})
@@ -414,6 +470,7 @@ def test_epoch_commit_arbiter_releases_after_commit_error(
             runtime_epoch_id="epoch-a",
             source_id=source_id,
             session_id=f"s{source_id[-1] * 16}",
+            commit_arbitration_enabled=True,
         )
         for source_id in ("camera-a", "camera-b")
     }
