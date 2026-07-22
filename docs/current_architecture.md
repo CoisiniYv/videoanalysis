@@ -4,9 +4,10 @@
 
 适用范围：产品分支 `feat/roi-adaface-redis-20260711` 及容量修复分支
 `codex/segment-index-concurrency-fix-20260721`；产品 checkpoint `fd39fdb`，
-exact-lease 修复 `2a57f20`，当前容量观测 checkpoint `70d4e75`。
-selected-identity 结构 checkpoint 为 `72413a2`。
-metadata reuse 实验 checkpoint 为 `fcbe2bd`，尚未通过 correctness/capacity 门。
+exact-lease 修复 `2a57f20`，当前容量 checkpoint `f11f561`。
+selected-identity 结构 checkpoint 为 `72413a2`，metadata reuse 为 `fcbe2bd`，
+fallback-overlay 修复为 `7e01432`，compact metadata publication 为 `f11f561`。
+最新 exact r300 的 retained correctness 已通过，但 capacity/watchlist 门仍失败。
 本文描述“这个 revision 实际写成什么样”，不等同于任意机器都已部署同一份代码。
 
 ## 1. 文档与事实源
@@ -306,6 +307,37 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   缺 overlay：fallback 写出 16-27 行 JSONL 却未把 annotations list 交给 expanded-row index，后者
   以空 list 写零行并随后 prune 文件。先修这个 correctness propagation 缺口，再测试 compact
   metadata；r3840 继续禁止；
+- `7736ec5`/`7e01432` 已先红后绿修复上述 fallback：返回值现在携带它实际写出的 normalized
+  annotations，expanded-row index 不再收到空 overlay。一次 disposable PostgreSQL smoke
+  `fallback_overlay_index_smoke_20260722T002952Z` 证明 2 个返回行、2 个 JSONL、2 个 durable
+  overlay、2 个 timeline，API repository 可读全部 person-context；
+- `faee207`/`f11f561` 随后只把 durable selected-frame metadata 改为 compact JSON，不改变
+  payload、normal zero-reload、recovery、journal/pin/identity 或任何 capacity/deadline。真实容器
+  `compact_metadata_handoff_smoke_20260722T003409Z` 的 240-frame payload 从 122,972 缩到
+  70,886 bytes（42.36%），decoded payload 完全一致，normal loader 0、recovery loader 1、pin
+  residual 0；
+- 对应 exact r300
+  `pressure60_8p1_metacompact_ioadm3_b10m_r300_20260722T003536Z` 保持 width 3、Candidate B
+  `20/12/8` 与 `8/4/8`、600s/120s、300s disk retention 和固定 fixture/hash。输入通过
+  60/60、8.0525 FPS 与零 send/queue/raw loss；972 formal 和 1,011 retained 最终全部
+  materialized，1,011/1,011 video/detail/timeline/annotation/bbox/person-context 全通过，DB 有
+  241,629 timeline rows、63,718 overlay rows、144,238 bbox objects、66,403 person-context
+  objects。person persistence 101,918/101,917、measured loss 0，末态 task/lease/finalizer/pin
+  residual 均为 0；
+- compact publication 动态有效：job metadata median 237,431→156,786 bytes，metadata publish
+  p95 1.248s→0.962s，remux-total p95 5.876s→3.996s；ready/media/lifecycle/DB lifecycle p95
+  也从 50.87s/70.17s/70.69s/72.86s 改善到 26.23s/48.30s/48.61s/50.53s。但 formal 尾部
+  仍有 72 active（31 ready、13 finalizer-pending），依赖 quiescence/drain；严格容量门失败，
+  r3840 禁止；
+- 当前压力已经移到 finalizer：WIP/remux/finalizer depth p95=20/8/12，finalizer lane 最大 16；
+  pool wait/finalization/handoff-admission p95=4.658s/4.908s/6.340s，129 个 handoff 需 durable
+  retry。per-event log 显示 fenced canonical publish p50/p95=1.890s/3.789s，bundle build 仅
+  0.351s/1.409s，terminal 后直到 lane return 另占 0.230s/3.092s。下一步先以红测拆分 publish
+  heartbeat/rename/rebase 和完整 lane service，不先增加 process workers 或组合 capacity；
+- 同轮 declared `adaface_roi_watchlist_events_zero` 是独立 business gate：ROI worker 实际发布
+  34,111 embeddings、DB 覆盖 60 source/30,696 observations、pending 0，但 face-worker 因 DB
+  没有 active Reese/Finch targets 而 gallery query=0。下一 exact gate 前必须显式恢复图库前置条件，
+  不降低 watchlist gate；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量

@@ -3,11 +3,14 @@
 ## Status
 
 Ongoing. This document is a resumable measurement and change ledger, not a
-completion claim. Direct selected-leaf identity lookup passed deterministic
-and real-container correctness proofs and reduced segment-index lock-hold p95
-from 3.067s to 63ms, but its unchanged width-three r300 still failed the strict
-capacity and visibility gates. Neither the two retention short gates nor the
-two one-hour acceptance runs have passed yet.
+completion claim. Direct selected-leaf identity lookup, normal-path metadata
+reuse, fallback-overlay propagation and compact metadata publication all passed
+deterministic and real-container correctness proofs. Compact publication then
+improved the unchanged width-three r300 ready/media/lifecycle p95 materially,
+but the formal tail still relied on drain, finalizer admission saturated and
+the run also lacked active Reese/Finch gallery targets. The strict r300 gate
+therefore remains failed. Neither the 3,840-second-retention short gate nor the
+two one-hour acceptance runs are permitted yet.
 
 - Branch: `codex/segment-index-concurrency-fix-20260721`
 - Clean baseline: `01b62acbc72aab9de57263425f3d9dea64d8827f`
@@ -58,6 +61,10 @@ two one-hour acceptance runs have passed yet.
 | `72413a2` | direct selected pin identity lookup | Resolves only the already-selected manifest keys under the short catalog lock while preserving missing-entry retry and exact identity fences |
 | `d73759d` | normal-path metadata reload red test | Forbids parsing the freshly published metadata file while retaining unchanged durable bytes and recovery authority |
 | `fcbe2bd` | in-memory metadata handoff | Carries the exact published metadata payload into the normal handoff and reports zero reload time without changing serialization or recovery |
+| `7736ec5` | fallback-overlay propagation red test | Requires the DB person-context fallback to return the exact annotation rows it writes so expanded-row indexing cannot receive an empty overlay list |
+| `7e01432` | fallback-overlay propagation fix | Retains recovered person-context rows in memory through finalizer DB indexing while preserving the diagnostic JSONL contract |
+| `faee207` | compact metadata serialization red test | Requires compact durable JSON with exact payload/recovery equivalence, zero normal reload and a material byte reduction |
+| `f11f561` | compact rolling metadata publication | Publishes compact JSON without changing payload semantics, handoff/recovery authority, capacity, retention, deadlines or index fences |
 
 ## Measurement rounds
 
@@ -918,30 +925,120 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   failures. A deterministic red test and narrow propagation fix are required
   before any further capacity candidate.
 
-## Recovery audit after Round 1
+### Round 19: DB person-context fallback overlay propagation
 
-The failed artifact was preserved. The harness restored the daily single
-branch, stopped all 60 pressure sources, ffmpeg publishers, and the local
-MediaMTX container, disabled all pressure cameras, and restored rolling-cache
-materialization to its default disabled state and retention to 300s. Redis
-`save` returned to `3600 1 300 100 60 10000`; PostgreSQL returned to
+- Red-test commit `7736ec5` reproduces the exact failure from Round 18: the
+  fallback writes valid person-context JSONL rows, but the returned bundle has
+  no `annotations`, so expanded DB indexing receives `overlay_rows=[]` and can
+  prune the only copy. `7e01432` returns the same normalized rows it writes and
+  carries them through the finalizer without changing fallback selection,
+  frame matching or database index semantics.
+- The disposable-PostgreSQL smoke is retained at
+  `/data/video-analytics/artifacts/fallback_overlay_index_smoke_20260722T002952Z`.
+  It produced two returned annotations, two JSONL rows, two durable overlay
+  rows and two timeline rows; the API repository read both person-context
+  records after sidecar pruning.
+- Affected index/sink/rolling tests passed as part of the 143-test set described
+  below. The wider pressure/lifecycle/finalizer/deployment selection passed 335
+  with eight environment skips, and a fresh PostgreSQL database migrated
+  001-032 and passed all eight real contracts. This is a correctness fix only;
+  it does not claim capacity.
+
+### Round 20: compact rolling metadata publication and exact r300
+
+- Red-test commit `faee207` first required compact durable JSON, exact decoded
+  payload equality, zero normal-path reload, recovery from the durable file and
+  a material byte reduction. `f11f561` changes only JSON formatting; selected
+  rows, handoff data, recovery authority, journal/pin/identity fences, WIP,
+  remux/finalizer capacity, retention and deadlines are unchanged.
+- Bind-mounted smoke:
+  `/data/video-analytics/artifacts/compact_metadata_handoff_smoke_20260722T003409Z`.
+  Its 240-frame payload shrank from 122,972 to 70,886 bytes (42.36%) with exact
+  decoded payload equality, zero normal reload, one recovery load and zero pin
+  residue.
+- Exact unchanged r300 artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_metacompact_ioadm3_b10m_r300_20260722T003536Z`.
+  It retained WIP/remux/max-per-poll `20/12/8`, finalizer
+  threads/processes/queue `8/4/8`, index width three, 600s sample, 120s fixed
+  drain, disk-backed 300s retention and fixture SHA256
+  `42d477ae2bc4eadf4dcd6192ef9a963926e1d88b1755c59e935270230d047490`.
+- Input passed at 60/60 and 8.0525 FPS against the 7.92 minimum. Savant send
+  failure delta, queue-full samples, forwarder queue depth and raw-forwarder
+  drop/send failures were zero. The formal window created 972 tasks. At the
+  formal tail only 899 were playable and 72 remained active, including 31
+  ready and 13 finalizer-pending; source quiescence plus postfill/drain later
+  converged all 972 formal and all 1,011 retained tasks to materialized with
+  zero expiry, active lease or finalizer-pending residue.
+- Retained correctness passed. All 1,011 videos met the 5+5 duration and raw-FPS
+  gates; 1,011/1,011 8090 details, timelines and annotations passed with zero
+  missing bbox or person context. PostgreSQL retained 241,629 timeline rows and
+  63,718 overlay rows containing 144,238 bbox objects and 66,403
+  person-context objects. Five API annotation counts were one lower than the
+  source-row count because DB overlay rows legitimately merge a clip frame
+  index; none was a failure. Person persistence passed at 101,918 stored versus
+  101,917 exported, with measured loss zero and final consumer lag/pending 0/0.
+- Compaction was dynamically effective but insufficient. Median job metadata
+  fell from 237,431 to 156,786 bytes (33.97%); publish p50/p95 improved from
+  332ms/1.248s to 265ms/0.962s, reload remained exactly zero and remux-total
+  p95 fell from 5.876s to 3.996s. Ready-to-remux/media queue/lifecycle/DB
+  lifecycle p95 improved from `50.869/70.168/70.691/72.855s` to
+  `26.231/48.305/48.606/50.535s`, but remained above the strict targets and the
+  non-empty formal tail still required drain. Oldest-ready and poll-gap p95
+  were 34.264s and 3.234s.
+- The index is no longer the p95 limiter: per-job I/O-slot/refresh/pin-publish/
+  catalog-lock-hold p95 was `80/288/106/0.474ms`; selected pin cardinality was
+  six, all 1,011 pins were released, and publication errors/reconciles,
+  fallback scans and active-pin residue were zero.
+- The pressure has moved to finalizer service. WIP/remux/finalizer-depth p95
+  was `20/8/12`, with finalizer depth reaching its 16 running-plus-queued
+  bound. Finalizer pool wait/finalization/handoff-to-admission p95 was
+  `4.658/4.908/6.340s`; 129/1,011 handoffs missed immediate admission and were
+  durably retried, with zero retry failure or recovery. Preserved per-event
+  logs further show the current blind spot: the fenced canonical-attempt
+  publish stage was 1.890s p50/3.789s p95, while bundle construction was only
+  351ms/1.409s. Work after the terminal transition occupied another
+  230ms/3.092s before the finalizer lane returned, including DB index p95
+  1.716s. Increasing process workers is not justified until the publish fence
+  and full lane occupancy are split into attributable phases.
+- The harness declared `adaface_roi_watchlist_events_zero`. This is a real
+  business-gate failure but not an AdaFace transport loss: the ROI worker
+  published 34,111 embeddings, PostgreSQL stored 30,696 observations across
+  all 60 sources, and pending was zero. Face-worker performed zero gallery
+  queries because the database had no active Reese/Finch targets and repeatedly
+  logged `watchlist rule has no active targets`. The gallery precondition must
+  be restored explicitly before the next exact gate; it does not waive the
+  independent capacity failure.
+- Validation at `f11f561`: affected index/sink/rolling 143 passed; combined
+  pressure/lifecycle/finalizer/deployment 335 passed with eight skips; fresh
+  PostgreSQL 001-032 plus real contracts eight passed. Critical Ruff, compile,
+  Compose rendering and diff checks passed.
+
+## Recovery audit after Round 20
+
+The failed artifact was preserved. A fresh live audit after harness completion
+confirmed the daily single branch, zero enabled cameras, no pressure source,
+ffmpeg publisher or local MediaMTX process/container, and zero active
+materialization task, lease or finalizer-pending row. Media-worker was running
+with restart count zero, `ROLLING_CACHE_MATERIALIZATION_ENABLED=false`, 300s
+retention and daily segment-index width two. Redis `save` returned to
+`3600 1 300 100 60 10000`; PostgreSQL returned to
 `checkpoint_timeout=5min`, `max_wal_size=1GB`, and `min_wal_size=80MB`.
-Post-cleanup PostgreSQL contained only materialized tasks and zero active
-leases/finalizer-pending rows.
 
 ## Next gates
 
-1. Add a deterministic red test requiring the DB person-context fallback to
-   return the exact annotations it writes, so expanded-row indexing cannot
-   receive an empty overlay list and prune the only copy.
-2. Implement only that annotation propagation fix and prove DB overlay/API
-   readability with focused tests and a representative smoke. Do not alter
-   WIP/remux/finalizer capacity, retention or deadlines.
-3. The next measured capacity variable may compact the approximately 238KB
-   metadata serialization, whose publish p95 remains 1.248s, but it must first
-   have its own red serialization/compatibility contract and must retain the
-   zero-reload and recovery fences.
-4. Repeat the exact width-three r300 gate. Only a full strict pass permits
-   r3840; watchlist-zero is not a substitute for latency/visibility gates.
+1. Restore or freshly register active Reese/Finch gallery targets through the
+   operational registration path and prove the pressure preflight sees them;
+   do not weaken the watchlist gate.
+2. Add a deterministic red attribution contract for the dominant finalizer
+   interval: split fenced attempt publication into lease-heartbeat, canonical
+   prepare/rename and rebase time, and measure complete finalizer-lane service
+   through event projection, DB index, sidecar prune and cleanup. This first
+   change is instrumentation-only.
+3. Use that attribution to select one structural finalizer variable. Do not
+   raise process workers, queue, WIP or remux together, and do not widen the
+   deadline.
+4. Repeat the exact width-three r300 gate with the fixed fixture/hash. Only a
+   full input, capacity, visibility, watchlist, annotation and residual pass
+   permits the 3,840-second-retention short gate.
 5. Only after both short retention gates pass, run two comparable one-hour
-   acceptances with the fixed fixture/hash and full evidence/8090 validation.
+   acceptances with full evidence/8090 validation.
