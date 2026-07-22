@@ -2163,6 +2163,86 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   split/fsync/one-worker/zero-slot/r300 with empty pressure epoch and zero
   mismatch.
 
+### Round 34: final-parent cohort commit is causally rejected
+
+- Tests-only `008fe10` freezes a different durability shape from rejected
+  Round 27. Every item must finish both regular-file fences and its
+  staging-directory fence before the next item is touched. Implementation
+  `09e9cc8` then renames the natural cohort in exact FIFO order, explicitly
+  fences every distinct final parent, appends journals, and releases callbacks
+  in FIFO only after the complete cohort fence. The default remains one;
+  values above one reject preparation grouping, multiple publication workers
+  and commit slots. The selected diagnostic limit was eight.
+- Focused rolling-sink plus pressure/deployment validation passed 326 tests,
+  the analyzer selection passed eight, and the broader segment-index,
+  materialization, finalizer and lifecycle selection passed 204 with eight
+  expected skips. Python compilation, shell syntax and profiled Compose
+  rendering passed.
+- Real-image artifact:
+  `/data/video-analytics/artifacts/rolling_publication_final_parent_group_smoke_20260722T121401Z`.
+  Marker `PASS_PUBLICATION_FINAL_PARENT_GROUP_CONTAINER_SMOKE` proves
+  multi-parent fencing, FIFO callback release, retained staging after a middle
+  rename failure, successor progress, parent-fsync failure isolation and
+  shutdown drain.
+- Causal diagnostic artifact:
+  `/data/video-analytics/artifacts/pressure60_8p1_pubparentgrp8_ioadm3_b6m_r300_20260722T1222Z`.
+  It retained the fixed 4,800-second fixture/hash, 60 routes, disk r300,
+  Candidate B `20/12/8`, finalizer `8/4/8`, index width three, split metadata,
+  regular-file `fsync`, one publisher, preparation limit one, zero commit slots,
+  a 360-second sample, 25-second pre/postfill and 120-second drain. The sole
+  intended behavior variable against Round 26 was final-parent group limit
+  `1 -> 8`; this is not the exact 600-second r300 acceptance.
+- Harness, input and correctness passed. All 60 inputs reached both branches
+  without restart, send failure, queue-full sample or raw loss. All 921 formal
+  tasks and all 994 retained tasks materialized. The retained set contains 641
+  videos and 353 images; every video passed 5+5 duration/raw-FPS, timeline,
+  annotation, bbox and person-context checks, and all retained items passed the
+  8090 gates. Task, lease, Replay, WIP, lane and finalizer-pending residuals
+  were zero. The only warning was the expected `validate_seq_iq` sampling gap.
+- The mechanism was exercised but was normally idle. Sink A/B completed
+  `4,255/4,260` publications in 7,522 natural cohorts: 7,366 singletons, 135
+  full groups of eight, and 21 partial groups. FIFO position validation passed.
+  The 8,515 renames required 8,511 distinct-parent fences; four repeated-parent
+  fences were legitimately coalesced, and every distinct parent was explicitly
+  fenced. No durability fence was omitted.
+- Required file service regressed. Round 26 -> Round 34 regular-file fsync was
+  `80.352s -> 104.693s`, or `9.782ms -> 12.295ms` per publication. The two
+  directory fences were `47.179s -> 51.175s`, or
+  `5.744ms -> 6.010ms` per publication. Own commit-service p95 improved
+  `31.621ms -> 15.974ms`, but services at or above one second rose `25 -> 42`.
+  After shared cohort wait is counted once rather than once per callback, the
+  cohort busy estimate is `210.611s`, 1.148 times Round 26 per publication;
+  16 cohorts exceeded one second and five exceeded ten seconds.
+- Capacity therefore fails the frozen Round 26 comparison. Sink A/B residence
+  p95 changes `5.172/4.916s -> 9.140/9.502s`; dispatch p95 changes
+  `5.275/5.188s -> 10.292/9.929s`. Both queues still reach 128 outstanding.
+  Capacity waits at or above one millisecond fall `55 -> 42`, but cumulative
+  capacity wait rises `6.215s -> 35.691s`; the few largest waits are
+  `12.319/11.535s`. Callback cohort-wait p95 is 28.749ms and its member-weighted
+  total is 330.624s. Metadata visibility improves `3.256s -> 2.096s`, which is
+  still above the absolute 2-second closure gate.
+- Downstream work did not absorb the missing time. Ready-to-claim,
+  media-queue and lifecycle p95 are `7.817/25.369/22.591s`; the first two miss
+  closure. Segment-index full-row/manifest parse p95 improves
+  `19.451/3.384ms -> 14.003/2.305ms`; scheduler poll p95/max improves
+  `63ms/14.327s -> 53.25ms/12.251s`; DB claim p95 improves
+  `84.1ms -> 68ms`, with zero checkout timeout.
+- The decisive event is a synchronized storage-wide convoy at
+  `2026-07-22 12:31:28Z`. Sink A/B each spent about 16.53/16.59 seconds on an
+  eight-item cohort while the members' own regular-file and staging fences had
+  already accumulated most of that service. Final-parent grouping begins only
+  after backlog exists and does not remove those fences; it packages the
+  resulting queue and adds callback fence wait rather than preventing the
+  convoy. Reducing or enlarging the cohort limit would tune this failed
+  mechanism, not address the causal service tail.
+- Reproducible analyses are retained as
+  `publication_final_parent_group_timing_analysis.json`,
+  `publication_final_parent_group_phase_analysis.json`,
+  `round26_vs_round34_comparison.json` and
+  `analyze_final_parent_group_comparison.py` in the artifact. Round 34 is
+  rejected; group mode remains default-off with daily limit one. Exact r300,
+  r3840 and both one-hour runs remain blocked.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -2266,6 +2346,19 @@ doctor still reports `ok=false` for its pre-existing expectation drift
 (`MAX_FPS_CONTROL`, pose threshold, replay-config surface and absent optional
 source-adapter), not for pressure cleanup or durability restoration.
 
+The fresh post-Round-34 audit at 2026-07-22T12:50:39Z reports 0/60 enabled
+cameras, zero active evidence task, lease, Replay slot or finalizer-pending row,
+and zero Redis record-request pending/lag. No pressure harness, fixture ffmpeg,
+local MediaMTX or pressure source process remains. The daily single branch is
+running; dual Savant/fanout branches and both rolling sinks are stopped. Both
+stopped sinks were freshly restored to split/fsync/one-worker/zero-slot/r300
+with final-parent group limit one. Daily Media Worker is at WIP/remux/finalizer
+`4/4/32`, process finalizers zero, index width two, rolling materialization
+disabled and restart count zero. Redis `save` is
+`3600 1 300 100 60 10000`; PostgreSQL is `5min/1GB/80MB/off`. The completion
+status file is absent, the worktree was clean before this ledger update, and
+about 183GB remains free.
+
 ## Next gates
 
 1. Keep production/default preparation at one, commit arbitration/slots
@@ -2288,21 +2381,26 @@ source-adapter), not for pressure cleanup or durability restoration.
    dual-image and pressure correctness and lowers file-sync/total service, but
    fails directory-shift, residence, dispatch, capacity-wait and visibility
    gates. It remains default-off and cannot become a daily layout.
-6. Keep the `af29c21`/`3e35f16` restore fence: diagnostic launcher environment
+6. Retain Round 34 as negative causal evidence. Final-parent grouping preserves
+   every durability boundary and improves visibility plus capacity-wait event
+   count, but worsens file/directory service, residence, dispatch and cumulative
+   capacity wait. Keep its daily limit at one; do not tune group size as a new
+   capacity claim.
+7. Keep the `af29c21`/`3e35f16` restore fence: diagnostic launcher environment
    must not outrank daily Compose during cleanup, and recreation must fail on
    any of the nine sink env mismatches. Stopped state alone is not restoration
    proof.
-7. Do not select another behavior variable merely because Round 33 is negative.
+8. Do not select another behavior variable merely because Round 34 is negative.
    First explain the remaining rare directory/writeback convoy and freeze one
    falsifiable, test-first mechanism. Do not remove either directory fence or
    combine worker, queue, retention, index, finalizer or deadline changes.
-8. Keep exact r300, r3840 and both one-hour acceptances blocked. Rounds 27-33
+9. Keep exact r300, r3840 and both one-hour acceptances blocked. Rounds 27-34
    are negative 360-second causal evidence and do not replace the exact
    width-three 600-second r300 gate.
-9. Repeat exact r300 with the fixed fixture/hash only after a future unchanged
+10. Repeat exact r300 with the fixed fixture/hash only after a future unchanged
    short diagnostic beats Round 26 on file/directory service, both residence/
    dispatch p95 values, fewer-than-55 capacity waits and 3.256-second
    visibility without shifting work into callback, parsing or scheduler/DB.
-10. Only a complete exact-r300 input/capacity/visibility/watchlist/annotation/
+11. Only a complete exact-r300 input/capacity/visibility/watchlist/annotation/
     residual pass permits r3840. Only after both short gates pass may two
     comparable one-hour acceptances and Phase 7 legacy removal be considered.
