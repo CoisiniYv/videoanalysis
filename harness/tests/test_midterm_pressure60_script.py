@@ -6338,6 +6338,85 @@ def test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compo
     ]
 
 
+def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_daily_config(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_module()
+    cfg = _config(
+        module,
+        artifact_dir=tmp_path,
+        dual_shard_same_gpu=True,
+        rolling_cache_evidence=True,
+        rolling_cache_publication_workers=2,
+        rolling_cache_publication_commit_slots=2,
+        rolling_cache_publication_file_sync_mode="fdatasync",
+        rolling_cache_publication_metadata_layout="metadata_only",
+        pressure_rolling_cache_retention_s=3840,
+    )
+    pressure_env = {
+        "ROLLING_CACHE_ROOT": "/media/rolling-cache-pressure",
+        "ROLLING_CACHE_SEGMENT_SECONDS": "8",
+        "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
+        "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
+        "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
+        "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "metadata_only",
+        "ROLLING_CACHE_FPS": "23.976024",
+        "ROLLING_CACHE_RUNTIME_EPOCH_ID": "pressure-epoch",
+        "ROLLING_CACHE_RETENTION_SECONDS": "3840",
+    }
+    daily_env = {
+        "ROLLING_CACHE_ROOT": "/media/rolling-cache",
+        "ROLLING_CACHE_SEGMENT_SECONDS": "4",
+        "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
+        "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "0",
+        "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fsync",
+        "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "split",
+        "ROLLING_CACHE_FPS": "24",
+        "ROLLING_CACHE_RUNTIME_EPOCH_ID": "",
+        "ROLLING_CACHE_RETENTION_SECONDS": "300",
+    }
+    calls = []
+    for key, value in pressure_env.items():
+        monkeypatch.setenv(key, value)
+
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, log_path, **kwargs: calls.append(
+            {"command": command, "log_path": log_path, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "rolling_cache_sink_state_snapshot",
+        lambda: {
+            "rolling-cache-sink-a": {"running": False, "status": "created"},
+            "rolling-cache-sink-b": {"running": False, "status": "created"},
+        },
+    )
+    monkeypatch.setattr(module, "docker_container_env", lambda _name: daily_env)
+
+    summary = module.restore_rolling_cache_sinks_after_pressure(
+        cfg,
+        original_states={
+            "rolling-cache-sink-a": {"running": False, "status": "exited"},
+            "rolling-cache-sink-b": {"running": False, "status": "exited"},
+        },
+        artifact_name="compose_restore_rolling_cache_sinks.log",
+    )
+
+    assert len(calls) == 1
+    restore_env = calls[0]["kwargs"]["env"]
+    for key in pressure_env:
+        assert key not in restore_env
+    assert summary["daily_expected_env"] == daily_env
+    assert summary["restored_env"] == {
+        "rolling-cache-sink-a": daily_env,
+        "rolling-cache-sink-b": daily_env,
+    }
+    assert summary["env_mismatches"] == {}
+
+
 def test_restore_rolling_cache_sinks_restarts_only_originally_running_services(
     monkeypatch, tmp_path: Path
 ) -> None:
