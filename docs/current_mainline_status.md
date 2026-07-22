@@ -339,16 +339,38 @@ A/B `28/27` 增到 `339/341`。size-32 prewrite 在第一次 retained per-item f
 metadata，并放大跨 sink flush convoy，因此该假设已拒绝。`db20d24`/`555afef` 已把生产/default
 preparation limit 固化为 1，同时保留显式 multi-item 诊断和全部 stage/commit metrics。
 
+`d874756`/`2888927` 随后以红绿测试加入共享 epoch-root commit `flock`，并保留 staging 在锁外、
+全部 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 exact per-sink FIFO；lock
+wait/hold 同时进入 per-segment 日志、sink 聚合和 pressure artifact。真实跨容器
+`rolling_publication_commit_arbiter_smoke_20260722T064452Z` 证明两个容器使用相同 lock inode，
+一个在另一个约 254ms hold 后等待 253.952ms，且注入 rename failure 后 peer 等待 247.203ms
+仍成功 commit。
+
+不变的 Round 28 360s diagnostic
+`pressure60_8p1_pubarb_ioadm3_b6m_r300_20260722T064800Z` 的 correctness 完整通过：60/60、
+8.0591 FPS、零 send/queue/raw loss、925/925 formal、993/993 retained，635 video 的 window/FPS/
+timeline/annotation/bbox/person-context 与 358 image、8090/fence/residual 全通过；唯一 warning 是预期
+`validate_seq_iq` sampling gap。但 capacity 相对 Round 26 明显退化：ready/media/lifecycle/visibility
+p95 从 6.668s/23.426s/19.923s/3.256s 变为 10.714s/26.607s/27.131s/16.531s，dispatcher
+residence/total p95 从 5.041s/5.216s 变为 13.879s/14.025s，capacity-wait event 从 55 增到 373。
+
+arbiter 正确消除了跨 sink 慢 lock-hold overlap，但产生 74.592s peer lock wait；两个 FIFO queue
+堆在同一全局慢 holder 后，扩大 residence、dispatch、visibility 与 callback backpressure。该假设已
+拒绝。`a0b7f63`/`e590f9b` 将生产/default arbitration 固化为 `False`：普通 publisher 不打开
+epoch commit-lock 且 wait/hold 精确为 0，显式 opt-in 与全部诊断仅保留历史复现；完整 sink suite
+42 passed、pressure harness 201 passed、rendered deployment smoke 29 passed。exact r300、r3840
+与一小时验收继续禁止，Round 28 未完成因果评审并确定一个新的单变量前，不授权下一容量实验。
+
 ## 已知开放项
 
 ### P0/P1
 
-- 保持 production preparation limit=1。下一单变量是在 sink A/B durable commit 外使用一个共享
-  epoch-root filesystem `flock`；先固化 concurrent thread、真实 cross-process、lock/commit error、
-  shutdown 和 lock wait/hold metrics，再做真实容器 smoke 与一个不变 360s r300 causal run；
+- 保持 production preparation limit=1、commit arbitration=False；显式 group/arbiter 只用于历史复现，
+  不在生产 sink 启用；
+- 先完成 Round 28 与 Round 26 的因果对照，再固化一个新的单变量和可证伪改善标准；评审完成前不运行
+  下一容量实验，不组合调整 worker、queue、retention、index width、finalizer 或 deadline；
 - 全部既有 fsync/rename/journal fence、每 sink 单 worker/128 outstanding 与 Candidate B/width 3/
-  retention/deadline 保持不变；只有 service burst area、dispatch total、visibility 和 capacity wait
-  均实质改善才允许 exact r300；
+  retention/deadline 保持不变；
 - r3840 和一小时验收继续禁止；只有后续 exact r300 的 input、Spec 33 capacity/visibility、
   watchlist、correctness、annotation 与 residual 全通过，才允许进入 3,840s retention 短门；
 - 不同时增加 process workers、WIP、remux、finalizer queue 或 index width，也不放宽 deadline；

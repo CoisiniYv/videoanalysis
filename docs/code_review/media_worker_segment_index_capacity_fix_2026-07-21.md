@@ -1546,6 +1546,58 @@ daily `rolling_cache_materialization_enabled=false` / 300s retention restored.
   diagnostic. It advances only if service burst area, total dispatch latency,
   visibility and capacity backpressure all improve materially.
 
+### Round 28: cross-sink durable-commit arbitration is rejected
+
+- Tests-only `d874756` first required one epoch-root filesystem lock across
+  concurrent sources and processes, bounded shutdown while waiting, preserved
+  staging on lock failure, release after commit failure, and separate lock-wait
+  and lock-hold diagnostics. `2888927` added that arbitration around each sink
+  A/B durable commit. Staging stayed outside the lock; every metadata/manifest/
+  directory/parent fsync, atomic rename, journal append, one worker per sink,
+  exact per-sink FIFO order and the 128 outstanding bound remained unchanged.
+- The focused rolling-sink suite passed 41 tests and the pressure harness passed
+  201. Compile and diff checks passed. Real cross-container smoke:
+  `/data/video-analytics/artifacts/rolling_publication_commit_arbiter_smoke_20260722T064452Z`.
+  Both containers observed the same lock inode; one waited 253.952ms behind the
+  other's approximately 254ms hold. An injected rename failure retained its
+  staging directory and released the lock, allowing the peer to wait 247.203ms
+  and commit successfully. Production preparation remained one.
+- The unchanged 360-second diagnostic is
+  `/data/video-analytics/artifacts/pressure60_8p1_pubarb_ioadm3_b6m_r300_20260722T064800Z`.
+  It kept the fixed fixture/hash, 60 routes, disk r300, Candidate B `20/12/8`,
+  finalizer `8/4/8`, index width three, 25-second postfill and 120-second drain.
+  This is negative causal evidence, not the exact 600-second r300 acceptance.
+- Input and correctness passed: 60/60 sources at 8.0591 effective FPS with zero
+  send failure, queue-full or raw loss; 925/925 formal tasks materialized; all
+  993 retained details passed. All 635 retained videos passed the 5+5 window,
+  raw FPS, timeline, annotation, bbox and person-context checks; 358 retained
+  items were watchlist images. Expiry-without-attempt, active task, lease and
+  finalizer-pending residuals were zero. The only harness warning was the
+  expected `validate_seq_iq` sampling gap.
+- Capacity regressed against the ungrouped Round 26 baseline. Ready-to-claim p95
+  moved `6.668s -> 10.714s`, media queue `23.426s -> 26.607s`, lifecycle
+  `19.923s -> 27.131s`, and metadata visibility `3.256s -> 16.531s`.
+  Dispatcher residence p95 moved `5.041s -> 13.879s`, dispatch-total p95
+  `5.216s -> 14.025s`, and capacity-wait events `55 -> 373`. Worker-service p95
+  fell `31.621ms -> 22.105ms`, but cumulative service rose
+  `176.954s -> 197.333s`; the lower per-item percentile did not produce useful
+  end-to-end capacity.
+- Arbitration itself functioned: 8,147 commits had zero reconstructed overlap
+  between cross-sink lock holds over 50ms. It instead converted peer stalls into
+  74.592s of explicit lock wait across 817 >=1ms waits. Lock holds totaled
+  119.851s, with 78 over 100ms and 31 over one second. Two independent FIFO
+  queues therefore accumulated behind one global slow holder, increasing
+  residence, dispatch latency, visibility and callback backpressure. The
+  hypothesis is rejected; exact r300, r3840 and one-hour runs remain blocked.
+- Red production contract `a0b7f63` and implementation `e590f9b` now keep
+  `SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED=False`. A normal publisher
+  never opens the epoch commit-lock file and reports exactly zero lock wait/hold.
+  Explicit constructor opt-in, arbitration behavior and all diagnostics remain
+  available for historical reproduction. The complete sink suite passes 42
+  tests, the pressure harness 201, and the rendered deployment smoke 29. No
+  further capacity experiment is authorized until this artifact is reviewed
+  and one new single variable is justified without combining knobs.
+
 ## Runtime recovery audit
 
 Both the failed attribution artifact and the two valid post-fix artifacts were
@@ -1568,23 +1620,30 @@ r300, index width two, media WIP/remux/finalizer `4/4/32`, process finalizers
 zero, Redis/PostgreSQL defaults restored, no pressure/source/MediaMTX/ffmpeg
 processes, and about 199GB free.
 
+The post-Round-28 audit again confirmed zero enabled cameras, active tasks,
+leases and finalizer-pending rows; only the daily single branch was running.
+Dual branches, rolling sinks, pressure sources, MediaMTX and pressure ffmpeg
+were stopped. Rolling materialization was disabled with r300 and index width
+two; media WIP/remux/finalizer returned to `4/4/32`, process finalizers to zero,
+and Redis/PostgreSQL defaults were restored. About 197GB remained free.
+
 ## Next gates
 
-1. Keep r3840 and both one-hour acceptances blocked. Round 27 is negative
-   360-second causal evidence and does not replace the exact width-three
-   600-second r300 gate. Keep production/default preparation at one.
-2. Add red contracts for one shared epoch-root filesystem `flock` around the
-   existing durable commit sections of sink A/B. Cover concurrent threads,
-   cross-process exclusion, lock-open/acquire failure, commit error release and
-   bounded shutdown. Measure lock wait and hold explicitly.
+1. Keep production/default preparation at one and cross-sink commit arbitration
+   disabled. Retain the opt-in implementation and lock diagnostics only for
+   historical reproduction; do not enable it in a production sink.
+2. Review the Round 28 artifact against Round 26 before selecting any further
+   capacity behavior. A new run requires one explicit causal variable and a
+   falsifiable improvement criterion; do not combine worker, queue, retention,
+   index-width, finalizer or deadline changes.
 3. Preserve one worker per sink, the 128 outstanding bound, exact per-sink FIFO
    order, and every metadata/manifest/directory/parent fsync, atomic rename and
-   journal fence. Do not widen media/publisher capacity, retention or deadline.
-4. Run a real-container arbitration smoke, then one unchanged 360-second r300
-   diagnostic. Require materially lower service burst area, dispatch total,
-   metadata visibility and capacity wait without correctness or residual loss.
-5. Repeat the exact r300 gate with the fixed fixture/hash only after that short
-   gate passes. Only a complete
+   journal fence while that review is open.
+4. Keep exact r300, r3840 and both one-hour acceptances blocked. Rounds 27 and 28
+   are negative 360-second causal evidence and do not replace the exact
+   width-three 600-second r300 gate.
+5. Repeat the exact r300 gate with the fixed fixture/hash only after a newly
+   justified short diagnostic passes. Only a complete
    input, capacity, visibility, watchlist, annotation and residual pass permits
    the 3,840-second-retention short gate.
 6. Only after r300 and r3840 pass, run two comparable one-hour acceptances with

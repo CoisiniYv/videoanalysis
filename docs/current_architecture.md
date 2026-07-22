@@ -409,10 +409,24 @@ profile/环境后，才能把运行态描述为 Qdrant authoritative。
   size-32 group、commit-wait p99=15.771s、68 组跨 sink 慢 service overlap 和明显增加的 capacity
   wait 证明 prewrite 放大了 writeback/flush convoy。该假设已拒绝；`db20d24`/`555afef` 将生产/
   默认 preparation limit 固化为 1，同时保留显式 multi-item 诊断能力；
-- 下一单变量仅允许在 sink A/B durable commit 外增加一个共享 epoch-root filesystem `flock`，
-  明确记录 lock wait/hold；不增加 worker、不删 fsync/rename/journal fence。必须先通过并发、跨进程、
-  error/shutdown 红绿测试与真实容器 smoke，再运行一个不变 360s r300 causal diagnostic；只有 service
-  burst area、dispatch total、visibility 与 capacity wait 均实质改善，才可解锁 exact r300；
+- `d874756`/`2888927` 已先红后绿实现共享 epoch-root filesystem `flock`：staging 在锁外，
+  每个 metadata/manifest/directory/parent fsync、atomic rename、journal append、每 sink 单 worker、
+  exact FIFO 和 128 outstanding 均未改变，并新增 lock wait/hold 明细与聚合指标。真实跨容器
+  `rolling_publication_commit_arbiter_smoke_20260722T064452Z` 证明相同 lock inode、约 254ms 跨进程
+  等待，以及 commit error 后 peer 可继续；
+- 对应不变 360s Round 28 diagnostic
+  `pressure60_8p1_pubarb_ioadm3_b6m_r300_20260722T064800Z` 的 60/60、8.0591 FPS、925 formal、
+  993 retained（635 video/358 image）、8090/annotation/person/fence/residual 全通过；但相对 Round 26，
+  ready/media/lifecycle/visibility p95 从 6.668s/23.426s/19.923s/3.256s 退化到
+  10.714s/26.607s/27.131s/16.531s，dispatcher residence/total p95 从 5.041s/5.216s 退化到
+  13.879s/14.025s，capacity-wait event 从 55 增到 373；
+- arbiter 确实消除了跨 sink 慢 lock-hold overlap，却把 peer stall 变成 74.592s 显式 lock wait；
+  两个独立 FIFO queue 堆在同一个全局慢 holder 后，visibility、dispatch 和 backpressure 同时恶化。
+  该假设已拒绝；`a0b7f63`/`e590f9b` 将生产/默认 arbitration 固化为关闭，普通 publisher 不创建
+  commit-lock 文件且 wait/hold 精确为 0；显式 opt-in 与诊断仅保留作历史复现；
+- exact r300、r3840 和一小时验收继续禁止。Round 28 artifact 未完成进一步因果评审并固化一个新的
+  单变量与可证伪改善标准前，不授权下一次容量实验；不得组合修改 worker、queue、retention、width、
+  finalizer 或 deadline；
 - Candidate C 使用 3,840s endurance retention、2,048-row cache；日常恢复配置是
   300s retention、256-row cache。两种 working set 必须分别验收，不能互相替代；
 - 当前生产 T4 基线仍是 40 路，GPU 温度/功耗和同步事件波峰下的 evidence 排队余量
