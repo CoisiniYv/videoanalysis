@@ -19,6 +19,7 @@ silently dropping evidence.
 from __future__ import annotations
 
 import importlib
+import inspect
 from pathlib import Path
 import sys
 from threading import Event
@@ -700,3 +701,126 @@ def test_real_postgres_uncapped_window_keeps_every_sources_backlog(
     assert len(rows) == 21
     assert sources.count("camera-A") == 20
     assert sources.count("camera-B") == 1
+
+
+# --------------------------------------------------------------------------
+# Boundary cases for the fairness claim.
+#
+# Per-source ranking makes a SINGLE candidate window fair. It does not by
+# itself bound how long a camera waits across many polls: ROW_NUMBER has no
+# memory of which sources were served last time. These tests pin where the
+# guarantee holds and where it does not.
+# --------------------------------------------------------------------------
+
+
+def test_high_priority_source_at_its_cap_does_not_hide_a_normal_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rank cap, not luck, is what leaves room for the second camera.
+
+    camera-A holds all four of its slots and has twenty high-priority tasks
+    queued behind them. Ranking caps A's contribution at `per_source_limit`
+    rows, so the fifth row of a five-row window belongs to camera-B and the one
+    free worker can be used. Without the cap, A's priority would fill the
+    window and the slot would idle.
+    """
+
+    worker = _activate("media-worker", "app.worker")
+    rows = _ready_rows({"camera-A": 20, "camera-B": 1})
+    for row in rows:
+        if row["source_id"] == "camera-A":
+            row["priority"] = 100
+    table = _FairCandidateTable(rows)
+    runner, runtime = _runner_with_blocking_remux(
+        worker,
+        monkeypatch,
+        table,
+        remux_workers=5,
+        source_limit=4,
+    )
+    try:
+        runner.process(_RecordingConn(), _cfg())
+        submitted = _submitted_sources(runner)
+
+        assert submitted.count("camera-A") == 4
+        assert "camera-B" in submitted
+    finally:
+        runner.force_stop(_RecordingConn())
+        runtime.close(wait=False)
+
+
+def test_rows_rejected_after_fetch_are_deferred_not_retried_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `max_workers` window bound covers source-cap rejections only.
+
+    A row can also be rejected after the fetch because its footage is not
+    covered yet. That consumes window slots the bound does not account for, so
+    a poll can admit less than its free capacity. It is self-correcting rather
+    than a permanent block only because the prepare path defers the task,
+    pushing `materialization_next_attempt_at` forward so the row leaves the
+    candidate set on the next poll. If that defer is ever removed, the same
+    rows return every poll and the window is blocked for good.
+    """
+
+    worker = _activate("media-worker", "app.worker")
+    source = inspect.getsource(worker._prepare_rolling_cache_job)
+
+    assert "RollingCacheCoverageMiss" in source
+    assert "_defer_rolling_cache_task" in source
+    # The coverage-miss handler must defer before giving the row up.
+    miss_handler = source.split("except RollingCacheCoverageMiss")[1]
+    assert "_defer_rolling_cache_task" in miss_handler.split("return None")[0]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN DEFECT: per-source ranking is fair within one candidate window "
+        "but carries no state between polls. When there are more sources than "
+        "window slots, a camera with a deep backlog keeps producing the oldest "
+        "rank-1 row every poll and quiet cameras are never selected. Fixing "
+        "this needs cross-poll rotation state, which is deliberately out of "
+        "this change's scope."
+    ),
+)
+def test_real_postgres_cross_poll_fairness_with_more_sources_than_slots(
+    fairness_db,
+) -> None:
+    """Every camera must be served within a bounded number of polls.
+
+    Five cameras carry a 100-task backlog; thirty-five carry one newer task
+    each. The window is five. Each poll completes exactly what it selected, so
+    nothing is blocked by execution capacity -- only by selection order.
+    """
+
+    worker = _activate("media-worker", "app.worker")
+    conn, add = fairness_db
+
+    for index in range(1, 6):
+        add(f"camera-{index:02d}", 100, age_s=600)
+    for index in range(6, 41):
+        add(f"camera-{index:02d}", 1, age_s=60)
+
+    served: set[str] = set()
+    for _ in range(60):
+        rows = worker._rolling_cache_candidate_tasks(
+            conn,
+            _cfg(),
+            limit=5,
+            per_source_limit=4,
+        )
+        if not rows:
+            break
+        served.update(str(row["source_id"]) for row in rows)
+        conn.execute(
+            "UPDATE evidence_tasks SET materialization_status = 'materialized'"
+            " WHERE event_id = ANY(%s)",
+            ([row["event_id"] for row in rows],),
+        )
+
+    quiet = {f"camera-{index:02d}" for index in range(6, 41)}
+    assert quiet <= served, (
+        f"{len(quiet - served)} of {len(quiet)} quiet cameras were never "
+        "scheduled in 60 polls"
+    )

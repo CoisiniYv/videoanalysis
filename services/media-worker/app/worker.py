@@ -11239,6 +11239,10 @@ class _ImageSchedulerV2:
 # backlog fill the whole window; the per-source cap rejected the overflow rows
 # only after the fetch, so idle workers never saw another camera's ready task.
 # The round-robin across sources therefore has to happen inside the query.
+#
+# Scope: this makes a single window fair across the sources it can hold. It is
+# not a bounded-wait guarantee -- ROW_NUMBER is recomputed per poll and does
+# not remember which sources were served before.
 _UNBOUNDED_SOURCE_RANK = 1_000_000
 
 _FAIR_SOURCE_KEY_SQL = """COALESCE(
@@ -12349,7 +12353,22 @@ class _RollingCacheMaterializationRunner:
                 # waits out the poll. Each blocked source contributes at most
                 # `per_source_limit` ranked rows and the blocked sources
                 # together hold `max_workers - available` slots, so a window of
-                # `max_workers` always leaves room for `available` usable rows.
+                # `max_workers` leaves room for `available` usable rows.
+                #
+                # That bound holds only for SOURCE-CAP rejections. A row can
+                # also be dropped after the fetch because its footage is not
+                # covered yet; those rows are deferred (their next attempt is
+                # pushed forward) so they leave the candidate set rather than
+                # blocking it, but they can still cost this poll some capacity.
+                #
+                # It is also a per-poll bound, NOT a bound on how long a camera
+                # waits. Ranking is recomputed from scratch every poll and
+                # carries no memory of who was served last, so when there are
+                # more sources than window slots a camera with a deep backlog
+                # keeps supplying the oldest rank-1 row and quiet cameras are
+                # never selected. See the xfail in
+                # harness/tests/test_evidence_source_fairness.py -- closing it
+                # needs cross-poll rotation state.
                 fetch_limit = max(claim_limit, self.max_workers)
                 with timings.measure("candidate_query"):
                     rows = _rolling_cache_candidate_tasks(
