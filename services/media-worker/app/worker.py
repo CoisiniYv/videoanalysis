@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, local
 from contextlib import contextmanager, nullcontext
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
@@ -43,6 +43,13 @@ from libs.evidence_lifecycle import (
 )
 
 from app.annotated_snapshot import generate_annotated_snapshot
+from app.source_rotation import (
+    IMAGE_LANE,
+    REMUX_LANE,
+    mark_served,
+    next_source_turns,
+    rotation_supported,
+)
 from app.config import Config, load_config
 from app.evidence_db_index import upsert_evidence_bundle_index
 from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
@@ -10459,6 +10466,72 @@ def _process_rolling_cache_tasks(
     return updated
 
 
+_IMAGE_ROTATION_ENABLED: bool | None = None
+
+
+def _image_turn_sources(
+    pg_conn: psycopg.Connection,
+    cfg: Config,
+    runtime_resources: MaterializationResources | None,
+) -> tuple[str, ...]:
+    """Turn order for the image lane.
+
+    The image lane rotates independently of remux: a camera whose clip is being
+    remuxed has not had its snapshot produced, so the two lanes must not share
+    one cursor.
+    """
+
+    global _IMAGE_ROTATION_ENABLED
+    if _IMAGE_ROTATION_ENABLED is None:
+        try:
+            _IMAGE_ROTATION_ENABLED = rotation_supported(pg_conn)
+        except Exception:
+            logger.exception("rolling_cache_image_rotation_probe_failed")
+            _IMAGE_ROTATION_ENABLED = False
+    if not _IMAGE_ROTATION_ENABLED:
+        return ()
+    limit = max(
+        1,
+        int(getattr(cfg, "rolling_cache_materialization_max_per_poll", 1) or 1),
+    )
+    excluded = (
+        runtime_resources.source_slots.saturated_sources()
+        if runtime_resources is not None
+        else ()
+    )
+    try:
+        turns = next_source_turns(
+            pg_conn,
+            lane=IMAGE_LANE,
+            statuses=ROLLING_CACHE_TASK_STATUSES,
+            limit=limit,
+            configured_sources=tuple(cfg.rolling_cache_sources or ()),
+            excluded_sources=excluded,
+            task_predicate=(
+                "COALESCE(et.task_type, '') = 'image_only'"
+                " AND COALESCE(et.clip_required, false) = false"
+            ),
+        )
+    except Exception:
+        logger.exception("rolling_cache_image_source_turn_query_failed")
+        return ()
+    return tuple(turn.source_id for turn in turns)
+
+
+def _mark_image_source_served(
+    pg_conn: psycopg.Connection,
+    source_id: str,
+) -> None:
+    if not _IMAGE_ROTATION_ENABLED or not source_id:
+        return
+    try:
+        mark_served(pg_conn, lane=IMAGE_LANE, source_id=source_id)
+    except Exception:
+        logger.exception(
+            "rolling_cache_image_rotation_mark_failed source_id=%s", source_id
+        )
+
+
 def _process_rolling_cache_image_tasks(
     pg_conn: psycopg.Connection,
     cfg: Config,
@@ -10468,6 +10541,7 @@ def _process_rolling_cache_image_tasks(
 ) -> int:
     if runtime_resources is not None and not runtime_resources.admission_open:
         return 0
+    image_turn_sources = _image_turn_sources(pg_conn, cfg, runtime_resources)
     rows = _rolling_cache_image_candidate_tasks(
         pg_conn,
         cfg,
@@ -10476,6 +10550,7 @@ def _process_rolling_cache_image_tasks(
             if runtime_resources is not None
             else None
         ),
+        turn_sources=image_turn_sources,
     )
     updated = 0
     segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
@@ -10525,6 +10600,10 @@ def _process_rolling_cache_image_tasks(
             if source_permit is not None:
                 source_permit.release()
             continue
+        # The claim succeeded, so this camera has genuinely been served and its
+        # turn advances. A permit rejection or a failed claim above reaches
+        # `continue` without touching the cursor.
+        _mark_image_source_served(pg_conn, source_id)
         try:
             event_context = _load_event_context(pg_conn, event_id)
             runtime_epoch_id = (
@@ -11315,6 +11394,7 @@ def _rolling_cache_image_candidate_tasks(
     *,
     limit: int | None = None,
     per_source_limit: int | None = None,
+    turn_sources: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     with pg_conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -11343,6 +11423,11 @@ def _rolling_cache_image_candidate_tasks(
                       %(sources_empty)s
                       OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
                   )
+                  AND (
+                      %(turn_sources_empty)s
+                      OR COALESCE(et.source_id, et.replay_source_id, '')
+                         = ANY(%(turn_sources)s)
+                  )
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_ready_at <= now()
                   AND COALESCE(
@@ -11369,6 +11454,8 @@ def _rolling_cache_image_candidate_tasks(
                 "statuses": list(ROLLING_CACHE_TASK_STATUSES),
                 "sources": list(cfg.rolling_cache_sources),
                 "sources_empty": not bool(cfg.rolling_cache_sources),
+                "turn_sources": list(turn_sources or ()),
+                "turn_sources_empty": not bool(turn_sources),
                 **_fair_source_rank_params(
                     cfg,
                     limit=limit,
@@ -12271,6 +12358,7 @@ class _RollingCacheMaterializationRunner:
             ],
         ] = {}
         self._oldest_ready_age_ms = 0
+        self._rotation_enabled: bool | None = None
         self._last_process_timings: dict[str, float | int] = {}
 
     def close(self) -> None:
@@ -12284,6 +12372,74 @@ class _RollingCacheMaterializationRunner:
             "oldest_ready_age_ms": self._oldest_ready_age_ms,
             **self._last_process_timings,
         }
+
+    def _turn_sources(
+        self,
+        pg_conn: psycopg.Connection,
+        cfg: Config,
+        available: int,
+    ) -> tuple[str, ...]:
+        """Sources to draw candidates from this poll, least recently served first.
+
+        Returns an empty tuple to mean "no restriction", which is what happens
+        when the rotation table is absent (migration 033 not applied). The
+        scheduler then behaves exactly as it did before: fair within a window,
+        unfair across polls.
+        """
+
+        if self._rotation_enabled is None:
+            try:
+                self._rotation_enabled = rotation_supported(pg_conn)
+            except Exception:
+                logger.exception("rolling_cache_rotation_probe_failed")
+                self._rotation_enabled = False
+            if not self._rotation_enabled:
+                logger.warning(
+                    "rolling_cache_source_rotation_unavailable lane=%s "
+                    "reason=migration_033_not_applied", REMUX_LANE,
+                )
+        if not self._rotation_enabled:
+            return ()
+        # Sources already holding every execution slot cannot run anything, so
+        # giving them a turn would spend the window on certain rejections.
+        excluded = (
+            self._runtime_resources.source_slots.saturated_sources()
+            if self._runtime_resources is not None
+            else ()
+        )
+        try:
+            turns = next_source_turns(
+                pg_conn,
+                lane=REMUX_LANE,
+                statuses=ROLLING_CACHE_TASK_STATUSES,
+                limit=max(1, int(available)),
+                configured_sources=tuple(cfg.rolling_cache_sources or ()),
+                excluded_sources=excluded,
+                task_predicate=(
+                    "COALESCE(et.task_type, '') <> 'image_only'"
+                    " AND COALESCE(et.clip_required, false) = true"
+                ),
+            )
+        except Exception:
+            logger.exception("rolling_cache_source_turn_query_failed")
+            return ()
+        return tuple(turn.source_id for turn in turns)
+
+    def _mark_source_served(
+        self,
+        pg_conn: psycopg.Connection,
+        source_id: str,
+    ) -> None:
+        if not self._rotation_enabled or not source_id:
+            return
+        try:
+            mark_served(pg_conn, lane=REMUX_LANE, source_id=source_id)
+        except Exception:
+            # A lost cursor update costs fairness on the next poll, never
+            # correctness of the task itself, so it must not fail the claim.
+            logger.exception(
+                "rolling_cache_rotation_mark_failed source_id=%s", source_id
+            )
 
     def drain_only(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
         return self._drain_completed(pg_conn, cfg)
@@ -12347,6 +12503,10 @@ class _RollingCacheMaterializationRunner:
                     if self._runtime_resources is not None
                     else None
                 )
+                # Which cameras get a turn this poll. Ranking alone is fair
+                # only inside one window; the rotation is what bounds how long
+                # a camera waits when there are more cameras than slots.
+                turn_sources = self._turn_sources(pg_conn, cfg, available)
                 # Rows from a source that already holds all of its slots are
                 # rejected below, so a window sized by free capacity alone can
                 # be spent entirely on them while another camera's ready task
@@ -12376,6 +12536,7 @@ class _RollingCacheMaterializationRunner:
                         cfg,
                         limit=fetch_limit,
                         per_source_limit=source_limit,
+                        turn_sources=turn_sources,
                     )
                 timings.candidate_count = len(rows)
                 self._oldest_ready_age_ms = max(
@@ -12525,6 +12686,19 @@ class _RollingCacheMaterializationRunner:
                     )
                     claimed += 1
                     timings.submitted_count += 1
+                    # Service is a successful claim, never a selection. A row
+                    # rejected by the source cap, or deferred because its
+                    # footage is not covered yet, must not spend the camera's
+                    # turn -- otherwise a camera that can never run would keep
+                    # rotating to the back without producing anything.
+                    self._mark_source_served(
+                        pg_conn,
+                        str(
+                            row.get("source_id")
+                            or row.get("replay_source_id")
+                            or ""
+                        ),
+                    )
 
             return updated + self._drain_completed(
                 pg_conn,
@@ -13210,6 +13384,7 @@ def _rolling_cache_candidate_tasks(
     *,
     limit: int | None = None,
     per_source_limit: int | None = None,
+    turn_sources: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     with pg_conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -13239,6 +13414,11 @@ def _rolling_cache_candidate_tasks(
                       %(sources_empty)s
                       OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
                   )
+                  AND (
+                      %(turn_sources_empty)s
+                      OR COALESCE(et.source_id, et.replay_source_id, '')
+                         = ANY(%(turn_sources)s)
+                  )
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_ready_at <= now()
                   AND COALESCE(
@@ -13260,6 +13440,8 @@ def _rolling_cache_candidate_tasks(
                 "statuses": list(ROLLING_CACHE_TASK_STATUSES),
                 "sources": list(cfg.rolling_cache_sources),
                 "sources_empty": not bool(cfg.rolling_cache_sources),
+                "turn_sources": list(turn_sources or ()),
+                "turn_sources_empty": not bool(turn_sources),
                 **_fair_source_rank_params(
                     cfg,
                     limit=limit,

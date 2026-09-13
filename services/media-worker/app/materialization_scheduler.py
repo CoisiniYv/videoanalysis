@@ -584,6 +584,21 @@ class SourceSlotRegistry:
             self._active[key] = active + 1
         return SourcePermit(self, key, generation)
 
+    def saturated_sources(self) -> tuple[str, ...]:
+        """Sources holding every slot they are allowed.
+
+        The scheduler skips these when handing out turns: a row belonging to
+        one of them is certain to be rejected, so letting it into the candidate
+        window only spends capacity another camera could have used.
+        """
+
+        with self._lock:
+            return tuple(
+                source_id
+                for source_id, active in self._active.items()
+                if active >= self.per_source_limit
+            )
+
     def _release(self, source_id: str) -> None:
         with self._lock:
             active = self._active.get(source_id, 0)

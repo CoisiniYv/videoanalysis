@@ -168,9 +168,19 @@ class _FairCandidateTable:
         *,
         limit: int | None = None,
         per_source_limit: int | None = None,
+        turn_sources: Any = None,
     ) -> list[dict[str, Any]]:
-        self.calls.append({"limit": limit, "per_source_limit": per_source_limit})
+        self.calls.append(
+            {
+                "limit": limit,
+                "per_source_limit": per_source_limit,
+                "turn_sources": tuple(turn_sources or ()),
+            }
+        )
         pending = [row for row in self.rows if not row["_submitted"]]
+        if turn_sources:
+            allowed = set(turn_sources)
+            pending = [row for row in pending if row["source_id"] in allowed]
 
         def within_source(row: dict[str, Any]) -> tuple[Any, ...]:
             return (-row["priority"], row["due"], row["task_created_at"])
@@ -577,6 +587,12 @@ CREATE TABLE {_FIXTURE_SCHEMA}.evidence_tasks (
 );
 """
 
+# The rotation ledger is applied from the real migration so the fixture cannot
+# drift from what production runs.
+_ROTATION_MIGRATION = (
+    REPO_ROOT / "db" / "migrations" / "033_evidence_source_rotation.sql"
+)
+
 
 @pytest.fixture()
 def fairness_db():
@@ -591,6 +607,7 @@ def fairness_db():
     conn = psycopg.connect(database_url, autocommit=True)
     conn.execute(_FIXTURE_DDL)
     conn.execute(f"SET search_path TO {_FIXTURE_SCHEMA}")
+    conn.execute(_ROTATION_MIGRATION.read_text(encoding="utf-8"))
 
     def add(source_id: str, count: int, *, priority: int = 50, age_s: int = 0) -> None:
         for _ in range(count):
@@ -773,25 +790,66 @@ def test_rows_rejected_after_fetch_are_deferred_not_retried_in_place(
     assert "_defer_rolling_cache_task" in miss_handler.split("return None")[0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN DEFECT: per-source ranking is fair within one candidate window "
-        "but carries no state between polls. When there are more sources than "
-        "window slots, a camera with a deep backlog keeps producing the oldest "
-        "rank-1 row every poll and quiet cameras are never selected. Fixing "
-        "this needs cross-poll rotation state, which is deliberately out of "
-        "this change's scope."
-    ),
-)
-def test_real_postgres_cross_poll_fairness_with_more_sources_than_slots(
+# Controlled-condition bound: 40 sources, 5 slots per round, same priority,
+# every source continuously runnable and every claim completing immediately.
+# Eight rounds is ceil(40 / 5) -- a true rotation cannot need more, and any
+# regression that reintroduces backlog-driven selection blows straight past it.
+# This counts SCHEDULING ROUNDS, not seconds, and says nothing about how long a
+# clip takes to produce.
+_FAIR_ROUNDS_BOUND = 8
+
+
+def _rotate_once(worker: Any, conn: Any, *, slots: int, source_cap: int) -> list[str]:
+    """One scheduler round: pick turns, fetch from them, claim, mark served."""
+
+    from app import source_rotation
+
+    turns = source_rotation.next_source_turns(
+        conn,
+        lane=source_rotation.REMUX_LANE,
+        statuses=worker.ROLLING_CACHE_TASK_STATUSES,
+        limit=slots,
+        task_predicate=(
+            "COALESCE(et.task_type, '') <> 'image_only'"
+            " AND COALESCE(et.clip_required, false) = true"
+        ),
+    )
+    turn_sources = tuple(turn.source_id for turn in turns)
+    if not turn_sources:
+        return []
+    rows = worker._rolling_cache_candidate_tasks(
+        conn,
+        _cfg(),
+        limit=slots,
+        per_source_limit=source_cap,
+        turn_sources=turn_sources,
+    )
+    served: list[str] = []
+    for row in rows:
+        source_id = str(row["source_id"])
+        conn.execute(
+            "UPDATE evidence_tasks SET materialization_status = 'materialized'"
+            " WHERE event_id = %s",
+            (row["event_id"],),
+        )
+        source_rotation.mark_served(
+            conn,
+            lane=source_rotation.REMUX_LANE,
+            source_id=source_id,
+        )
+        served.append(source_id)
+    return served
+
+
+def test_real_postgres_every_camera_is_served_within_the_rotation_bound(
     fairness_db,
 ) -> None:
-    """Every camera must be served within a bounded number of polls.
+    """Bounded wait when there are far more cameras than scheduler slots.
 
-    Five cameras carry a 100-task backlog; thirty-five carry one newer task
-    each. The window is five. Each poll completes exactly what it selected, so
-    nothing is blocked by execution capacity -- only by selection order.
+    Five cameras carry a 100-task backlog and would, under pure age ordering,
+    supply the oldest candidate forever; thirty-five carry one newer task each.
+    Nothing here is blocked by execution capacity -- each round completes
+    exactly what it selected -- so only selection order decides the outcome.
     """
 
     worker = _activate("media-worker", "app.worker")
@@ -802,25 +860,211 @@ def test_real_postgres_cross_poll_fairness_with_more_sources_than_slots(
     for index in range(6, 41):
         add(f"camera-{index:02d}", 1, age_s=60)
 
+    all_cameras = {f"camera-{index:02d}" for index in range(1, 41)}
     served: set[str] = set()
-    for _ in range(60):
-        rows = worker._rolling_cache_candidate_tasks(
-            conn,
-            _cfg(),
-            limit=5,
-            per_source_limit=4,
-        )
-        if not rows:
+    rounds_used = 0
+    for round_index in range(1, _FAIR_ROUNDS_BOUND + 1):
+        picked = _rotate_once(worker, conn, slots=5, source_cap=4)
+        if not picked:
             break
-        served.update(str(row["source_id"]) for row in rows)
-        conn.execute(
-            "UPDATE evidence_tasks SET materialization_status = 'materialized'"
-            " WHERE event_id = ANY(%s)",
-            ([row["event_id"] for row in rows],),
+        rounds_used = round_index
+        served.update(picked)
+        if all_cameras <= served:
+            break
+
+    missing = sorted(all_cameras - served)
+    assert not missing, (
+        f"{len(missing)} of 40 cameras were not served within "
+        f"{_FAIR_ROUNDS_BOUND} rounds: {missing[:5]}..."
+    )
+    assert rounds_used <= _FAIR_ROUNDS_BOUND
+
+
+def test_real_postgres_rotation_does_not_advance_on_a_refused_claim(
+    fairness_db,
+) -> None:
+    """Selection is not service.
+
+    A camera whose row is rejected by the execution cap, or deferred because
+    its footage is not covered yet, must keep its place in the rotation. If
+    selection advanced the cursor, such a camera would rotate to the back
+    forever while never producing anything.
+    """
+
+    _activate("media-worker", "app.worker")
+    from app import source_rotation
+
+    conn, add = fairness_db
+    add("camera-A", 3, age_s=60)
+    add("camera-B", 3, age_s=60)
+
+    def turn_order() -> list[str]:
+        return [
+            turn.source_id
+            for turn in source_rotation.next_source_turns(
+                conn,
+                lane=source_rotation.REMUX_LANE,
+                statuses=("manifest_ready", "materialization_pending"),
+                limit=10,
+                task_predicate="true",
+            )
+        ]
+
+    before = turn_order()
+    assert before == ["camera-A", "camera-B"]
+
+    # A poll that selects camera-A but never claims anything for it.
+    assert turn_order()[0] == "camera-A"
+    assert turn_order() == before
+
+    # Only a real claim moves it.
+    source_rotation.mark_served(
+        conn,
+        lane=source_rotation.REMUX_LANE,
+        source_id="camera-A",
+    )
+    assert turn_order() == ["camera-B", "camera-A"]
+
+
+def test_real_postgres_image_and_remux_lanes_rotate_independently(
+    fairness_db,
+) -> None:
+    """A clip being remuxed for a camera is not a snapshot for that camera."""
+
+    _activate("media-worker", "app.worker")
+    from app import source_rotation
+
+    conn, add = fairness_db
+    add("camera-A", 1, age_s=60)
+    add("camera-B", 1, age_s=60)
+
+    source_rotation.mark_served(
+        conn,
+        lane=source_rotation.REMUX_LANE,
+        source_id="camera-A",
+    )
+
+    def order(lane: str) -> list[str]:
+        return [
+            turn.source_id
+            for turn in source_rotation.next_source_turns(
+                conn,
+                lane=lane,
+                statuses=("manifest_ready", "materialization_pending"),
+                limit=10,
+                task_predicate="true",
+            )
+        ]
+
+    assert order(source_rotation.REMUX_LANE) == ["camera-B", "camera-A"]
+    # The image lane has served nobody, so its order is untouched.
+    assert order(source_rotation.IMAGE_LANE) == ["camera-A", "camera-B"]
+
+
+def test_real_postgres_high_priority_source_skips_the_rotation_queue(
+    fairness_db,
+) -> None:
+    """Urgency outranks the round-robin; a watchlist hit does not wait a turn."""
+
+    _activate("media-worker", "app.worker")
+    from app import source_rotation
+
+    conn, add = fairness_db
+    add("camera-A", 1, age_s=600)
+    add("camera-B", 1, age_s=300)
+    add("camera-Z", 1, priority=100, age_s=1)
+
+    # camera-Z was served most recently, so pure rotation would put it last.
+    for source_id in ("camera-A", "camera-B", "camera-Z"):
+        source_rotation.mark_served(
+            conn,
+            lane=source_rotation.REMUX_LANE,
+            source_id=source_id,
         )
 
+    turns = source_rotation.next_source_turns(
+        conn,
+        lane=source_rotation.REMUX_LANE,
+        statuses=("manifest_ready", "materialization_pending"),
+        limit=3,
+        task_predicate="true",
+    )
+    assert [turn.source_id for turn in turns][0] == "camera-Z"
+
+
+def test_real_postgres_starved_cameras_actually_reach_their_business_deadline(
+    fairness_db,
+) -> None:
+    """Connect starvation to the symptom, with time actually advancing.
+
+    "Not served for sixty rounds" is not the same claim as "expired". This test
+    advances each task's `materialization_deadline_at` past `now()` and then
+    applies the same predicate the recovery pass uses, so the outcome is an
+    expiry count per camera rather than an inference from round numbers.
+
+    Without rotation the busy cameras hold the window and every quiet camera
+    expires unserved. With rotation every camera is served before the deadline
+    is reached.
+    """
+
+    worker = _activate("media-worker", "app.worker")
+    conn, add = fairness_db
+    conn.execute(
+        "ALTER TABLE evidence_tasks"
+        " ADD COLUMN IF NOT EXISTS materialization_deadline_at timestamptz"
+    )
+
+    for index in range(1, 6):
+        add(f"camera-{index:02d}", 100, age_s=600)
+    for index in range(6, 41):
+        add(f"camera-{index:02d}", 1, age_s=60)
+    # Every task is 60s from its 300s business deadline at the start.
+    conn.execute(
+        "UPDATE evidence_tasks"
+        " SET materialization_deadline_at = now() + interval '60 seconds'"
+    )
+
+    def expired_per_camera() -> dict[str, int]:
+        # The predicate the rolling recovery pass uses for ready-but-unclaimed
+        # tasks that have run out of business time.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source_id, COUNT(*)
+                FROM evidence_tasks
+                WHERE materialization_status IN (
+                          'manifest_ready', 'materialization_pending'
+                      )
+                  AND materialization_deadline_at IS NOT NULL
+                  AND materialization_deadline_at <= now()
+                GROUP BY source_id
+                """
+            )
+            return {str(row[0]): int(row[1]) for row in cur.fetchall()}
+
+    served: set[str] = set()
+    for _ in range(_FAIR_ROUNDS_BOUND):
+        picked = _rotate_once(worker, conn, slots=5, source_cap=4)
+        if not picked:
+            break
+        served.update(picked)
+
+    # Time passes: everything still queued is now past its deadline.
+    conn.execute(
+        "UPDATE evidence_tasks"
+        " SET materialization_deadline_at = now() - interval '1 second'"
+        " WHERE materialization_status IN"
+        " ('manifest_ready', 'materialization_pending')"
+    )
+    expired = expired_per_camera()
+
     quiet = {f"camera-{index:02d}" for index in range(6, 41)}
-    assert quiet <= served, (
-        f"{len(quiet - served)} of {len(quiet)} quiet cameras were never "
-        "scheduled in 60 polls"
+    # A quiet camera had exactly one task; being served means it has none left
+    # to expire. That is the difference between producing evidence and
+    # producing `business_deadline_expired`.
+    assert quiet <= served
+    quiet_expired = {camera for camera in quiet if expired.get(camera, 0) > 0}
+    assert not quiet_expired, (
+        f"{len(quiet_expired)} quiet cameras expired without ever being "
+        f"scheduled: {sorted(quiet_expired)[:5]}..."
     )
