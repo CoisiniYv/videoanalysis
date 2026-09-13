@@ -448,6 +448,14 @@ def _content_type_for_path(path: str) -> str:
 ACTIVE_ADMISSION_STATUSES = (
     *sorted(ACTIVE_COMPATIBILITY_TASK_STATUSES),
 )
+# Rolling evidence V2 records outstanding work in `materialization_status`, and
+# a queued task sits in `materialization_pending` -- a value the legacy
+# compatibility set does not contain. Counting only the legacy column made
+# every queued task invisible to admission, so a cap fired only during the
+# brief window in which a task happened to be claimed.
+ACTIVE_ADMISSION_MATERIALIZATION_STATUSES = (
+    *sorted(ACTIVE_MATERIALIZATION_STATUSES),
+)
 
 
 def _coverage_merge_enabled() -> bool:
@@ -471,14 +479,39 @@ def _coverage_parent_max_duration_seconds() -> int:
     return max(0, _int_env("EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS", 60))
 
 
+def _source_limit_mode() -> str:
+    """How `EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE` is enforced.
+
+    `execution_concurrency` (default) keeps the task in the durable queue and
+    leaves the cap to the media-worker source slots. `skip` is the legacy
+    behaviour that writes `materialization_skipped` instead.
+    """
+
+    mode = os.getenv(
+        "EVIDENCE_ADMISSION_SOURCE_LIMIT_MODE",
+        "execution_concurrency",
+    ).strip().lower()
+    return "skip" if mode == "skip" else "execution_concurrency"
+
+
 def _active_admission_count(
     conn: psycopg.Connection,
     *,
     source_id: str = "",
     event_type: str = "",
 ) -> int:
-    clauses = ["status = ANY(%(statuses)s)"]
-    params: dict[str, Any] = {"statuses": list(ACTIVE_ADMISSION_STATUSES)}
+    clauses = [
+        "("
+        "status = ANY(%(statuses)s)"
+        " OR materialization_status = ANY(%(materialization_statuses)s)"
+        ")"
+    ]
+    params: dict[str, Any] = {
+        "statuses": list(ACTIVE_ADMISSION_STATUSES),
+        "materialization_statuses": list(
+            ACTIVE_ADMISSION_MATERIALIZATION_STATUSES
+        ),
+    }
     if source_id:
         clauses.append("source_id = %(source_id)s")
         params["source_id"] = source_id
@@ -758,7 +791,13 @@ def _evidence_admission_decision(
     source_limit = _int_env("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", 0)
     event_type_limits = _int_map_env("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE")
     high_priority = _is_high_priority_event(event)
+    # The per-source knob bounds how many of a camera's tasks run at once, not
+    # how many may exist. Execution concurrency is enforced by the media-worker
+    # SourceSlotRegistry, so a second event on a busy camera queues instead of
+    # being dropped; "skip" restores the old drop-on-cap behaviour.
+    source_limit_mode = _source_limit_mode()
     source_limit_observed: int | None = None
+    source_limit_bypassed_for_priority = False
     try:
         if global_limit > 0:
             observed = _active_admission_count(conn)
@@ -773,15 +812,20 @@ def _evidence_admission_decision(
         if source_limit > 0 and source_id:
             observed = _active_admission_count(conn, source_id=source_id)
             source_limit_observed = observed
-            if observed >= source_limit:
-                return {
-                    "allowed": False,
-                    "reason": "admission_source_active_limit_reached",
-                    "scope": "source",
-                    "source_id": source_id,
-                    "limit": source_limit,
-                    "observed": observed,
-                }
+            if observed >= source_limit and source_limit_mode == "skip":
+                # Legacy behaviour: refuse the task outright. It is written as
+                # `materialization_skipped`, so the evidence is never produced.
+                if high_priority:
+                    source_limit_bypassed_for_priority = True
+                else:
+                    return {
+                        "allowed": False,
+                        "reason": "admission_source_active_limit_reached",
+                        "scope": "source",
+                        "source_id": source_id,
+                        "limit": source_limit,
+                        "observed": observed,
+                    }
         event_type_limit = event_type_limits.get(event_type, 0)
         if event_type_limit > 0 and event_type:
             observed = _active_admission_count(conn, event_type=event_type)
@@ -804,8 +848,9 @@ def _evidence_admission_decision(
         "allowed": True,
         "reason": "admitted",
         "high_priority": high_priority,
-        "source_limit_bypassed_for_priority": False,
+        "source_limit_bypassed_for_priority": source_limit_bypassed_for_priority,
         "source_limit": source_limit,
+        "source_limit_mode": source_limit_mode,
         "source_observed": source_limit_observed,
     }
 

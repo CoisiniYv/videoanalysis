@@ -220,7 +220,7 @@ def test_manifest_first_initial_status_and_ttl_metadata(monkeypatch) -> None:
     ).isoformat() == "2026-05-28T20:26:50+00:00"
 
 
-def test_event_worker_evidence_admission_limits_active_pending_by_source(
+def test_event_worker_evidence_admission_skip_mode_limits_pending_by_source(
     monkeypatch,
 ) -> None:
     _activate(EVENT_WORKER_DIR)
@@ -254,6 +254,7 @@ def test_event_worker_evidence_admission_limits_active_pending_by_source(
     monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "10")
     monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "2")
     monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_SOURCE_LIMIT_MODE", "skip")
 
     decision = repository._evidence_admission_decision(
         FakeConn(),
@@ -500,7 +501,7 @@ def test_media_worker_watchlist_image_rejects_distant_cache_frame(
         raise AssertionError("distant frame must not be accepted for face evidence")
 
 
-def test_event_worker_evidence_admission_source_limit_blocks_watchlist_priority(
+def test_event_worker_evidence_admission_source_limit_admits_watchlist_priority(
     monkeypatch,
 ) -> None:
     _activate(EVENT_WORKER_DIR)
@@ -534,6 +535,7 @@ def test_event_worker_evidence_admission_source_limit_blocks_watchlist_priority(
     monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "10")
     monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "2")
     monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_SOURCE_LIMIT_MODE", "skip")
 
     decision = repository._evidence_admission_decision(
         FakeConn(),
@@ -543,10 +545,10 @@ def test_event_worker_evidence_admission_source_limit_blocks_watchlist_priority(
         event_type="watchlist_hit",
     )
 
-    assert decision["allowed"] is False
-    assert decision["reason"] == "admission_source_active_limit_reached"
-    assert decision["scope"] == "source"
-    assert decision["observed"] == 2
+    # Even in the legacy drop-on-cap mode, a watchlist hit is never discarded
+    # because a routine clip on the same camera is still outstanding.
+    assert decision["allowed"] is True
+    assert decision["source_limit_bypassed_for_priority"] is True
 
 
 def test_event_worker_evidence_admission_event_type_budget_prioritizes_watchlist(

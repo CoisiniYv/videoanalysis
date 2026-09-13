@@ -10242,7 +10242,15 @@ def _process_rolling_cache_tasks(
     if runner is not None:
         return updated + runner.process(pg_conn, cfg)
 
-    rows = _rolling_cache_candidate_tasks(pg_conn, cfg)
+    rows = _rolling_cache_candidate_tasks(
+        pg_conn,
+        cfg,
+        per_source_limit=(
+            runtime_resources.source_slots.per_source_limit
+            if runtime_resources is not None
+            else None
+        ),
+    )
     metadata_overrides: list[dict] = []
     finalizer_chunk_size = max(1, int(cfg.materialization_finalizer_workers or 1) * 2)
     jobs: list[dict[str, object]] = []
@@ -10460,7 +10468,15 @@ def _process_rolling_cache_image_tasks(
 ) -> int:
     if runtime_resources is not None and not runtime_resources.admission_open:
         return 0
-    rows = _rolling_cache_image_candidate_tasks(pg_conn, cfg)
+    rows = _rolling_cache_image_candidate_tasks(
+        pg_conn,
+        cfg,
+        per_source_limit=(
+            runtime_resources.source_slots.per_source_limit
+            if runtime_resources is not None
+            else None
+        ),
+    )
     updated = 0
     segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
     for row in rows:
@@ -11219,11 +11235,82 @@ class _ImageSchedulerV2:
         }
 
 
+# Ordering candidates globally and then applying LIMIT let one busy camera's
+# backlog fill the whole window; the per-source cap rejected the overflow rows
+# only after the fetch, so idle workers never saw another camera's ready task.
+# The round-robin across sources therefore has to happen inside the query.
+_UNBOUNDED_SOURCE_RANK = 1_000_000
+
+_FAIR_SOURCE_KEY_SQL = """COALESCE(
+                        NULLIF(et.source_id, ''),
+                        NULLIF(et.replay_source_id, ''),
+                        ''
+                    ) AS fair_source_key"""
+
+_FAIR_SOURCE_RANK_SQL = """,
+            ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY fair_source_key
+                        ORDER BY
+                            priority DESC,
+                            materialization_due_at ASC,
+                            rolling_cache_ready_at ASC,
+                            task_created_at ASC
+                    ) AS source_rank
+                FROM candidates
+                WHERE rolling_cache_ready_at <= now()
+            )
+            SELECT
+                *,
+                GREATEST(
+                    0,
+                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
+                )::bigint AS rolling_cache_ready_lag_ms
+            FROM ranked
+            WHERE source_rank <= %(per_source_limit)s
+            ORDER BY
+                priority DESC,
+                source_rank ASC,
+                materialization_due_at ASC,
+                rolling_cache_ready_at ASC,
+                task_created_at ASC
+            LIMIT %(limit)s"""
+
+
+def _fair_source_rank_params(
+    cfg: Config,
+    *,
+    limit: int | None,
+    per_source_limit: int | None,
+) -> dict[str, int]:
+    """Size the candidate window and the per-source slice of it.
+
+    ``per_source_limit`` is the execution-side cap, so ranking beyond it only
+    collects rows that would be rejected anyway. Callers with no execution cap
+    pass ``None`` and keep the interleave without losing any source's backlog.
+    """
+
+    effective_limit = int(
+        max(1, int(limit))
+        if limit is not None
+        else cfg.rolling_cache_materialization_max_per_poll
+    )
+    rank_cap = (
+        max(1, int(per_source_limit))
+        if per_source_limit is not None
+        else max(_UNBOUNDED_SOURCE_RANK, effective_limit)
+    )
+    return {"limit": effective_limit, "per_source_limit": rank_cap}
+
+
 def _rolling_cache_image_candidate_tasks(
     pg_conn: psycopg.Connection,
     cfg: Config,
     *,
     limit: int | None = None,
+    per_source_limit: int | None = None,
 ) -> list[dict[str, object]]:
     with pg_conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -11239,7 +11326,10 @@ def _rolling_cache_image_candidate_tasks(
                         et.materialization_next_attempt_at,
                         et.materialization_ready_at
                     ) AS materialization_due_at,
-                    et.materialization_ready_at AS rolling_cache_ready_at
+                    et.materialization_ready_at AS rolling_cache_ready_at,
+                    """
+                    + _FAIR_SOURCE_KEY_SQL
+                    + """
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
                 WHERE et.materialization_status = ANY(%(statuses)s)
@@ -11267,29 +11357,18 @@ def _rolling_cache_image_candidate_tasks(
                         AND COALESCE(ea.uri, '') <> ''
                   )
             )
-            SELECT
-                *,
-                GREATEST(
-                    0,
-                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
-                )::bigint AS rolling_cache_ready_lag_ms
-            FROM candidates
-            WHERE rolling_cache_ready_at <= now()
-            ORDER BY
-                priority DESC,
-                materialization_due_at ASC,
-                rolling_cache_ready_at ASC,
-                task_created_at ASC
-            LIMIT %(limit)s
+            """
+            + _FAIR_SOURCE_RANK_SQL
+            + """
             """,
             {
                 "statuses": list(ROLLING_CACHE_TASK_STATUSES),
                 "sources": list(cfg.rolling_cache_sources),
                 "sources_empty": not bool(cfg.rolling_cache_sources),
-                "limit": (
-                    max(1, int(limit))
-                    if limit is not None
-                    else cfg.rolling_cache_materialization_max_per_poll
+                **_fair_source_rank_params(
+                    cfg,
+                    limit=limit,
+                    per_source_limit=per_source_limit,
                 ),
             },
         )
@@ -12259,11 +12338,25 @@ class _RollingCacheMaterializationRunner:
                     ),
                     available,
                 )
+                source_limit = (
+                    self._runtime_resources.source_slots.per_source_limit
+                    if self._runtime_resources is not None
+                    else None
+                )
+                # Rows from a source that already holds all of its slots are
+                # rejected below, so a window sized by free capacity alone can
+                # be spent entirely on them while another camera's ready task
+                # waits out the poll. Each blocked source contributes at most
+                # `per_source_limit` ranked rows and the blocked sources
+                # together hold `max_workers - available` slots, so a window of
+                # `max_workers` always leaves room for `available` usable rows.
+                fetch_limit = max(claim_limit, self.max_workers)
                 with timings.measure("candidate_query"):
                     rows = _rolling_cache_candidate_tasks(
                         pg_conn,
                         cfg,
-                        limit=claim_limit,
+                        limit=fetch_limit,
+                        per_source_limit=source_limit,
                     )
                 timings.candidate_count = len(rows)
                 self._oldest_ready_age_ms = max(
@@ -12274,8 +12367,9 @@ class _RollingCacheMaterializationRunner:
                     default=0,
                 )
                 segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
+                claimed = 0
                 for row in rows:
-                    if len(self._futures) >= self.max_workers:
+                    if len(self._futures) >= self.max_workers or claimed >= claim_limit:
                         break
                     lane_reservation: LaneReservation | None = None
                     work_permit: WorkPermit | None = None
@@ -12410,6 +12504,7 @@ class _RollingCacheMaterializationRunner:
                         source_permit,
                         heartbeat_handle,
                     )
+                    claimed += 1
                     timings.submitted_count += 1
 
             return updated + self._drain_completed(
@@ -13095,6 +13190,7 @@ def _rolling_cache_candidate_tasks(
     cfg: Config,
     *,
     limit: int | None = None,
+    per_source_limit: int | None = None,
 ) -> list[dict[str, object]]:
     with pg_conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -13110,7 +13206,10 @@ def _rolling_cache_candidate_tasks(
                         et.materialization_next_attempt_at,
                         et.materialization_ready_at
                     ) AS materialization_due_at,
-                    et.materialization_ready_at AS rolling_cache_ready_at
+                    et.materialization_ready_at AS rolling_cache_ready_at,
+                    """
+                    + _FAIR_SOURCE_KEY_SQL
+                    + """
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
                 LEFT JOIN evidence_bundles eb ON eb.event_id = et.event_id
@@ -13134,29 +13233,18 @@ def _rolling_cache_candidate_tasks(
                   AND COALESCE(et.replay_slot_status, '') <> 'active'
                   AND eb.event_id IS NULL
             )
-            SELECT
-                *,
-                GREATEST(
-                    0,
-                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
-                )::bigint AS rolling_cache_ready_lag_ms
-            FROM candidates
-            WHERE rolling_cache_ready_at <= now()
-            ORDER BY
-                priority DESC,
-                materialization_due_at ASC,
-                rolling_cache_ready_at ASC,
-                task_created_at ASC
-            LIMIT %(limit)s
+            """
+            + _FAIR_SOURCE_RANK_SQL
+            + """
             """,
             {
                 "statuses": list(ROLLING_CACHE_TASK_STATUSES),
                 "sources": list(cfg.rolling_cache_sources),
                 "sources_empty": not bool(cfg.rolling_cache_sources),
-                "limit": (
-                    max(1, int(limit))
-                    if limit is not None
-                    else cfg.rolling_cache_materialization_max_per_poll
+                **_fair_source_rank_params(
+                    cfg,
+                    limit=limit,
+                    per_source_limit=per_source_limit,
                 ),
             },
         )
