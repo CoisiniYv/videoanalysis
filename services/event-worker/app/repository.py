@@ -479,6 +479,67 @@ def _coverage_parent_max_duration_seconds() -> int:
     return max(0, _int_env("EVIDENCE_COVERAGE_PARENT_MAX_DURATION_SECONDS", 60))
 
 
+def _admission_reserved_per_source() -> int:
+    """Outstanding tasks every enabled source may always have.
+
+    Without a floor, the global backlog guard is first-come-first-served: a
+    chatty camera fills it with its own backlog and quiet cameras are refused
+    at admission, where no amount of scheduler fairness can recover them --
+    the task was never enqueued.
+    """
+
+    return max(0, _int_env("EVIDENCE_ADMISSION_RESERVED_PER_SOURCE", 1))
+
+
+def _admission_enabled_sources() -> tuple[str, ...]:
+    """Sources that get a reservation.
+
+    Deliberately the configured roster, not "sources with tasks right now": a
+    camera that is quiet at this instant is exactly the one the reservation
+    exists for, and deriving the list from current backlog would skip it.
+    """
+
+    return _csv_env("EVIDENCE_ADMISSION_RESERVED_SOURCES")
+
+
+def _shared_admission_used(
+    conn: psycopg.Connection,
+    *,
+    reserved_per_source: int,
+) -> int:
+    """Active tasks drawn from the shared pool rather than a reservation.
+
+    Each source's first `reserved_per_source` tasks are its own and are not
+    charged to the shared pool, so a busy source can exhaust the shared pool
+    but can never consume another source's floor.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT COALESCE(SUM(GREATEST(0, per_source.active - %(reserved)s)), 0)
+            FROM (
+                SELECT source_id, COUNT(*) AS active
+                FROM evidence_tasks
+                WHERE (
+                    status = ANY(%(statuses)s)
+                    OR materialization_status = ANY(%(materialization_statuses)s)
+                )
+                GROUP BY source_id
+            ) AS per_source
+            """,
+            {
+                "reserved": max(0, int(reserved_per_source)),
+                "statuses": list(ACTIVE_ADMISSION_STATUSES),
+                "materialization_statuses": list(
+                    ACTIVE_ADMISSION_MATERIALIZATION_STATUSES
+                ),
+            },
+        )
+        row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
 def _source_limit_mode() -> str:
     """How `EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE` is enforced.
 
@@ -791,6 +852,8 @@ def _evidence_admission_decision(
     source_limit = _int_env("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", 0)
     event_type_limits = _int_map_env("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE")
     high_priority = _is_high_priority_event(event)
+    reserved_per_source = _admission_reserved_per_source()
+    reserved_sources = _admission_enabled_sources()
     # The per-source knob bounds how many of a camera's tasks run at once, not
     # how many may exist. Execution concurrency is enforced by the media-worker
     # SourceSlotRegistry, so a second event on a busy camera queues instead of
@@ -799,16 +862,57 @@ def _evidence_admission_decision(
     source_limit_observed: int | None = None
     source_limit_bypassed_for_priority = False
     try:
-        if global_limit > 0:
-            observed = _active_admission_count(conn)
-            if observed >= global_limit:
+        # A source inside its own reservation is admitted ahead of every cap,
+        # including the event-type budget: otherwise the global floor would be
+        # granted and then taken back one check later, and the camera's only
+        # request would still be dropped.
+        # The roster is required: without it there is no way to size the
+        # shared remainder, and charging only overshoot against the full global
+        # cap would quietly inflate that cap by one slot per source.
+        reservation_active = reserved_per_source > 0 and bool(reserved_sources)
+        if reservation_active and source_id and source_id in reserved_sources:
+            reserved_observed = _active_admission_count(conn, source_id=source_id)
+            if reserved_observed < reserved_per_source:
                 return {
-                    "allowed": False,
-                    "reason": "admission_global_active_limit_reached",
-                    "scope": "global",
-                    "limit": global_limit,
-                    "observed": observed,
+                    "allowed": True,
+                    "reason": "admitted_source_reservation",
+                    "high_priority": high_priority,
+                    "source_limit_bypassed_for_priority": False,
+                    "source_limit": source_limit,
+                    "source_limit_mode": source_limit_mode,
+                    "source_observed": reserved_observed,
+                    "source_reserved": reserved_per_source,
                 }
+        if global_limit > 0:
+            shared_limit = global_limit - reserved_per_source * len(reserved_sources)
+            if reservation_active and shared_limit > 0:
+                # Past its reservation a source competes only for the shared
+                # remainder, so its backlog cannot reach another source's floor.
+                observed = _shared_admission_used(
+                    conn,
+                    reserved_per_source=reserved_per_source,
+                )
+                if observed >= shared_limit:
+                    return {
+                        "allowed": False,
+                        "reason": "admission_shared_pool_exhausted",
+                        "scope": "global_shared",
+                        "limit": shared_limit,
+                        "global_limit": global_limit,
+                        "reserved_per_source": reserved_per_source,
+                        "reserved_sources": len(reserved_sources),
+                        "observed": observed,
+                    }
+            else:
+                observed = _active_admission_count(conn)
+                if observed >= global_limit:
+                    return {
+                        "allowed": False,
+                        "reason": "admission_global_active_limit_reached",
+                        "scope": "global",
+                        "limit": global_limit,
+                        "observed": observed,
+                    }
         if source_limit > 0 and source_id:
             observed = _active_admission_count(conn, source_id=source_id)
             source_limit_observed = observed
@@ -852,6 +956,7 @@ def _evidence_admission_decision(
         "source_limit": source_limit,
         "source_limit_mode": source_limit_mode,
         "source_observed": source_limit_observed,
+        "source_reserved": reserved_per_source,
     }
 
 

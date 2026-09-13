@@ -1068,3 +1068,169 @@ def test_real_postgres_starved_cameras_actually_reach_their_business_deadline(
         f"{len(quiet_expired)} quiet cameras expired without ever being "
         f"scheduled: {sorted(quiet_expired)[:5]}..."
     )
+
+
+# --------------------------------------------------------------------------
+# Admission floor.
+#
+# Scheduler fairness cannot recover a task that was never enqueued, so the
+# global backlog guard needs a per-source floor of its own. One evidence task
+# is one event's evidence request -- evidence_tasks is keyed by event_id and a
+# task is either image_only or video, never both -- so a reservation counted in
+# tasks is a reservation counted in events.
+# --------------------------------------------------------------------------
+
+
+class _PoolCursor:
+    """Serves both the per-source count and the shared-pool aggregate."""
+
+    def __init__(self, per_source: dict[str, int], reserved: int) -> None:
+        self.per_source = per_source
+        self.reserved = reserved
+        self.sql = ""
+        self.params: dict[str, Any] = {}
+
+    def __enter__(self) -> "_PoolCursor":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: dict[str, Any]) -> None:
+        self.sql = sql
+        self.params = params
+
+    def fetchone(self) -> tuple[int]:
+        if "GREATEST" in self.sql:
+            reserved = int(self.params.get("reserved", 0))
+            return (
+                sum(max(0, active - reserved) for active in self.per_source.values()),
+            )
+        source_id = self.params.get("source_id")
+        if source_id:
+            return (self.per_source.get(str(source_id), 0),)
+        return (sum(self.per_source.values()),)
+
+
+class _PoolConn:
+    def __init__(self, per_source: dict[str, int], reserved: int = 1) -> None:
+        self.cursor_obj = _PoolCursor(per_source, reserved)
+
+    def cursor(self, *_args: Any, **_kwargs: Any) -> _PoolCursor:
+        return self.cursor_obj
+
+
+def _decide(repository: Any, conn: Any, source_id: str, event_type: str = "intrusion"):
+    return repository._evidence_admission_decision(
+        conn,
+        {"event_type": event_type},
+        initial_status="materialization_pending",
+        source_id=source_id,
+        event_type=event_type,
+    )
+
+
+@pytest.fixture()
+def reservation_env(monkeypatch: pytest.MonkeyPatch):
+    sources = [f"camera-{index:02d}" for index in range(1, 41)]
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "240")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "0")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_RESERVED_PER_SOURCE", "1")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_RESERVED_SOURCES", ",".join(sources))
+    _activate("event-worker", "app.repository")
+    from app import repository
+
+    return repository, sources
+
+
+def test_a_quiet_camera_keeps_its_slot_when_a_busy_camera_floods_the_backlog(
+    reservation_env,
+) -> None:
+    """The floor is what the symptom needs: a busy camera must not spend it."""
+
+    repository, sources = reservation_env
+    # 240 global - (40 sources x 1 reserved) = 200 shared. Six cameras holding
+    # 40 each charge 6 x 39 = 234 to the shared pool, exhausting it.
+    flooded = {f"camera-{index:02d}": 40 for index in range(1, 7)}
+    conn = _PoolConn(flooded, reserved=1)
+
+    busy = _decide(repository, conn, "camera-01")
+    assert busy["allowed"] is False
+    assert busy["reason"] == "admission_shared_pool_exhausted"
+
+    quiet = _decide(repository, conn, "camera-30")
+    assert quiet["allowed"] is True
+    assert quiet["reason"] == "admitted_source_reservation"
+    assert quiet["source_reserved"] == 1
+
+
+def test_a_camera_past_its_reservation_competes_only_for_the_shared_pool(
+    reservation_env,
+) -> None:
+    repository, _sources = reservation_env
+    # 240 global - (40 sources x 1 reserved) = 200 shared. One camera holding
+    # 150 has charged 149 to the shared pool and is still under it.
+    conn = _PoolConn({"camera-01": 150}, reserved=1)
+
+    decision = _decide(repository, conn, "camera-01")
+    assert decision["allowed"] is True
+
+    # Two cameras together exceeding the shared remainder are refused, while
+    # every untouched camera keeps its floor.
+    conn = _PoolConn({"camera-01": 150, "camera-02": 60}, reserved=1)
+    assert _decide(repository, conn, "camera-01")["allowed"] is False
+    assert _decide(repository, conn, "camera-40")["allowed"] is True
+
+
+def test_event_type_budget_cannot_take_back_the_reserved_slot(
+    reservation_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A floor granted and then revoked one check later is not a floor."""
+
+    repository, _sources = reservation_env
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "intrusion:1")
+    conn = _PoolConn({"camera-01": 40}, reserved=1)
+
+    decision = _decide(repository, conn, "camera-30")
+    assert decision["allowed"] is True
+    assert decision["reason"] == "admitted_source_reservation"
+
+
+def test_reservation_is_a_floor_not_a_ceiling(reservation_env) -> None:
+    """Concurrency can only over-admit, never revoke someone else's floor.
+
+    Admission checks and inserts are not one transaction, so two concurrent
+    requests for the same camera can both observe an empty reservation and both
+    be admitted. That overshoots the shared pool by one -- acceptable for an
+    overload guard -- but it cannot consume another camera's reservation,
+    because the shared-pool total subtracts every source's floor before summing.
+    """
+
+    repository, _sources = reservation_env
+    # camera-01 raced itself to 2 outstanding with a reservation of 1.
+    conn = _PoolConn({"camera-01": 2}, reserved=1)
+
+    # It is charged for exactly the overshoot, not for its reserved task.
+    assert repository._shared_admission_used(conn, reserved_per_source=1) == 1
+    # Every other camera's floor is untouched.
+    assert _decide(repository, conn, "camera-07")["reason"] == (
+        "admitted_source_reservation"
+    )
+
+
+def test_reservation_off_restores_the_plain_global_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_GLOBAL", "10")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_PER_SOURCE", "0")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_MAX_ACTIVE_BY_EVENT_TYPE", "")
+    monkeypatch.setenv("EVIDENCE_ADMISSION_RESERVED_PER_SOURCE", "0")
+    monkeypatch.delenv("EVIDENCE_ADMISSION_RESERVED_SOURCES", raising=False)
+    _activate("event-worker", "app.repository")
+    from app import repository
+
+    decision = _decide(repository, _PoolConn({"camera-01": 10}, reserved=0), "camera-01")
+    assert decision["allowed"] is False
+    assert decision["reason"] == "admission_global_active_limit_reached"
