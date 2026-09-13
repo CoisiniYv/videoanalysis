@@ -1049,7 +1049,11 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
 
     assert env_file["ROLLING_CACHE_ENABLED"] == "false"
     assert env_file["ROLLING_CACHE_MATERIALIZATION_ENABLED"] == "false"
-    assert env_file["ROLLING_CACHE_RETENTION_SECONDS"] == "300"
+    # 600, not 300: an accepted task can be claimed just before its 300s
+    # business deadline and then read source segments for the full 120s
+    # processing deadline, reaching pre_seconds back before the event. See
+    # harness/tests/test_evidence_runtime_config_safety.py for the derivation.
+    assert env_file["ROLLING_CACHE_RETENTION_SECONDS"] == "600"
     assert env_file["ROLLING_CACHE_SEGMENT_SECONDS"] == "4"
     assert env_file["ROLLING_CACHE_FPS"] == "24"
     assert env_file["ROLLING_CACHE_SEGMENT_FRAMES"] == ""

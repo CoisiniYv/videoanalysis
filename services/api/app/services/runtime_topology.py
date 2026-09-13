@@ -834,7 +834,7 @@ def build_topology_plan(
         "roi_batch_timeout_ms": int(preset.get("roi_batch_timeout_ms") or 40),
         "rolling_prefill_seconds": int(preset.get("rolling_prefill_seconds") or 25),
         "rolling_retention_seconds": int(
-            preset.get("rolling_retention_seconds") or 300
+            preset.get("rolling_retention_seconds") or 600
         ),
         "requested_mode": requested_mode,
         "effective_mode": effective_mode,
@@ -1002,7 +1002,7 @@ def _apply_dual_topology(
                             "ROLLING_CACHE_ROOT": "/media/rolling-cache",
                             "ROLLING_CACHE_SEGMENT_SECONDS": "4",
                             "ROLLING_CACHE_RETENTION_SECONDS": str(
-                                int(plan.get("rolling_retention_seconds") or 300)
+                                int(plan.get("rolling_retention_seconds") or 600)
                             ),
                         },
                         force_start=True,
@@ -1847,7 +1847,7 @@ def _prepare_full_pipeline(
         "ROLLING_CACHE_ROOT": "/media/rolling-cache",
         "ROLLING_CACHE_MATERIALIZED_ROOT": "/media/rolling-cache-materialized",
         "ROLLING_CACHE_RETENTION_SECONDS": str(
-            int(plan.get("rolling_retention_seconds") or 300)
+            int(plan.get("rolling_retention_seconds") or 600)
         ),
         "ROLLING_CACHE_SEGMENT_SECONDS": "4",
         "ROLLING_CACHE_FALLBACK_TO_REPLAY": "false",
