@@ -10,6 +10,7 @@ STORAGE_OVERRIDE="$REPO_ROOT/infra/midterm-storage.override.yml"
 ENV_FILE="$REPO_ROOT/infra/env/midterm.env"
 DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 API_BASE="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
+AUTH_FILE="${OPERATOR_AUTH_FILE_HOST:-$DATA_ROOT/media/evidence/.operator-auth}"
 COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 [[ -f "$STORAGE_OVERRIDE" ]] && COMPOSE_ARGS+=(-f "$STORAGE_OVERRIDE")
 
@@ -45,6 +46,14 @@ compose() {
     docker compose "${COMPOSE_ARGS[@]}" "$@"
 }
 
+operator_check() {
+    python3 "$SCRIPT_DIR/runtime/check_operator_access.py" "$1" "$AUTH_FILE" --timeout 10 >/dev/null
+}
+
+operator_get() {
+    python3 "$SCRIPT_DIR/runtime/check_operator_access.py" "$1" "$AUTH_FILE" --timeout 10 --print-body
+}
+
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $*"
 }
@@ -74,7 +83,7 @@ log_section() {
 check_prerequisites() {
     log_section "Health Tool Prerequisites"
 
-    local commands=(docker curl jq ss)
+    local commands=(docker curl jq ss python3)
     local command_name
     for command_name in "${commands[@]}"; do
         if command -v "$command_name" >/dev/null 2>&1; then
@@ -88,6 +97,12 @@ check_prerequisites() {
         log_pass "docker compose: available"
     else
         log_fail "docker compose: unavailable"
+    fi
+
+    if bash "$SCRIPT_DIR/runtime/set_operator_credentials.sh" --check >/dev/null 2>&1; then
+        log_pass "8090 operator credentials: configured"
+    else
+        log_fail "8090 operator credentials: missing or invalid"
     fi
 }
 
@@ -157,7 +172,7 @@ check_api_endpoints() {
     if curl --noproxy '*' -fsS "$API_BASE/health" >/dev/null 2>&1; then
         log_pass "8090 /health: OK"
     else
-        log_fail "8090 /health: unreachable"
+        log_fail "8090 /health: unreachable or authentication is not configured"
         return
     fi
 
@@ -172,7 +187,7 @@ check_api_endpoints() {
     local item path label
     for item in "${endpoints[@]}"; do
         IFS=':' read -r path label <<< "$item"
-        if curl --noproxy '*' -fsS "$API_BASE$path" >/dev/null 2>&1; then
+        if operator_check "$API_BASE$path" 2>/dev/null; then
             log_pass "$label: OK"
         else
             log_fail "$label: failed"
@@ -189,7 +204,7 @@ check_camera_config() {
     log_section "Camera Configuration"
 
     local response camera_count
-    response="$(curl --noproxy '*' -fsS "$API_BASE/api/v1/cameras" 2>/dev/null || echo '{"data":null}')"
+    response="$(operator_get "$API_BASE/api/v1/cameras" 2>/dev/null || echo '{"data":null}')"
     camera_count="$(json_count "$response")"
 
     if [[ "$camera_count" =~ ^[0-9]+$ && "$camera_count" -gt 0 ]]; then
@@ -207,7 +222,7 @@ check_face_gallery() {
     log_section "Face Gallery Status"
 
     local response people_count
-    response="$(curl --noproxy '*' -fsS "$API_BASE/api/v1/people" 2>/dev/null || echo '{"data":null}')"
+    response="$(operator_get "$API_BASE/api/v1/people" 2>/dev/null || echo '{"data":null}')"
     people_count="$(json_count "$response")"
 
     if [[ "$people_count" =~ ^[0-9]+$ && "$people_count" -gt 0 ]]; then
@@ -225,7 +240,7 @@ check_runtime_metrics() {
     log_section "Runtime Metrics"
 
     local response
-    response="$(curl --noproxy '*' -fsS "$API_BASE/api/v1/runtime/overview" 2>/dev/null || echo '{"data":null}')"
+    response="$(operator_get "$API_BASE/api/v1/runtime/overview" 2>/dev/null || echo '{"data":null}')"
 
     if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
         log_pass "Runtime overview: available"
@@ -273,7 +288,7 @@ check_redis() {
 check_database() {
     log_section "Database Connectivity"
 
-    if curl --noproxy '*' -fsS "$API_BASE/api/v1/cameras" >/dev/null 2>&1; then
+    if operator_check "$API_BASE/api/v1/cameras" 2>/dev/null; then
         log_pass "Database: API can query camera table"
     else
         log_warn "Database: could not verify through API"
@@ -362,7 +377,7 @@ main() {
 
     echo ""
     log_info "Operator portal: $API_BASE/operator"
-    log_info "API documentation: $API_BASE/docs"
+    log_info "Deployment baseline: $API_BASE/system/deployment-baseline"
     echo ""
 }
 

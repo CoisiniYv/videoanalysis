@@ -52,11 +52,29 @@ flowchart LR
 
 目标运行环境为 Linux + Docker Compose + NVIDIA GPU Runtime。模型、存储目录和具体 GPU 配置请参考 [部署文档](docs/midterm_deployment.md)。
 
-### 2. 启动服务
+### 2. 配置 8090 操作员账号
+
+学校部署默认对 8090 启用 fail-closed Basic Auth。首次启动前执行：
 
 ```bash
-bash scripts/midterm_start.sh
+bash scripts/runtime/set_operator_credentials.sh
 ```
+
+凭据保存在数据目录的 `media/evidence/.operator-auth`，不写入 Git 仓库。若凭据缺失或格式无效，8090 的业务、API、媒体和证据路由会拒绝访问，`/health` 返回 degraded。
+
+### 3. 启动学校部署
+
+```bash
+bash scripts/school_deploy.sh
+```
+
+该入口会：
+
+1. 拒绝带有未提交源码修改的部署，同时允许 8090 正常生成的 camera/runtime 配置变化；
+2. 检查 8090 操作员凭据；
+3. 调用现有 `midterm_start.sh` 启动服务；
+4. 对 8090 和内部 API 代理执行认证后的 readiness 检查；
+5. 记录 Git commit、Compose 配置摘要、镜像声明、模型哈希和迁移集合哈希。
 
 启动完成后打开：
 
@@ -64,9 +82,23 @@ bash scripts/midterm_start.sh
 http://127.0.0.1:8090/operator
 ```
 
-日常使用无需直接访问内部 FastAPI 容器端口。
+浏览器会要求输入操作员账号。日常使用无需直接访问内部 FastAPI 容器端口。
 
-### 3. 配置并启动视频分析
+当前部署基线保存在：
+
+```text
+/data/video-analytics/media/evidence/.deployment-baseline.txt
+```
+
+也可在登录后访问：
+
+```text
+http://127.0.0.1:8090/system/deployment-baseline
+```
+
+`scripts/midterm_start.sh` 保留为底层部署脚本；学校正式部署优先使用 `scripts/school_deploy.sh`。
+
+### 4. 配置并启动视频分析
 
 1. 在 **配置 → 摄像头** 中登记 RTSP 地址；
 2. 为摄像头配置 ROI、算法和事件规则；
@@ -75,7 +107,7 @@ http://127.0.0.1:8090/operator
 5. 启动完整链路并在运行页观察 source、FPS、队列和延迟；
 6. 在 **证据** 与 **人员轨迹** 页面查看分析结果。
 
-### 4. 健康检查与停止
+### 5. 健康检查与停止
 
 ```bash
 bash scripts/midterm_health.sh
@@ -134,6 +166,7 @@ Event / Watchlist Match
 
 | 用途 | 文件 |
 | --- | --- |
+| 学校部署入口 | `scripts/school_deploy.sh` |
 | 主 Compose | `infra/docker-compose.midterm.yml` |
 | 默认环境变量 | `infra/env/midterm.env` |
 | 存储挂载 | `infra/midterm-storage.override.yml` |
@@ -160,4 +193,4 @@ PostgreSQL 是摄像头、规则、人员、图库、事件和 evidence metadata
 
 ## 部署提示
 
-8090 是面向操作员的统一入口。若部署到非受信任网络，请在网络边界或反向代理层配置访问控制、TLS 和必要的安全策略，不要直接将内部服务端口暴露到公网。
+8090 是面向操作员的统一入口，学校部署默认要求身份认证。内部 FastAPI、Redis、PostgreSQL、Replay 与各类 metrics 端口仍应通过主机防火墙或网络 ACL 限制在运维需要的范围内；Basic Auth 解决的是最低访问边界，不替代 TLS、网络隔离或后续更细粒度的角色权限。若跨越不受信任网络访问 8090，应在反向代理层启用 TLS。
