@@ -50,6 +50,16 @@ def _unauthorized_response() -> JSONResponse:
     )
 
 
+def _strip_authorization_header(request: Request) -> None:
+    """Do not forward the portal password to the internal API network."""
+
+    request.scope["headers"] = [
+        (name, value)
+        for name, value in request.scope.get("headers", [])
+        if name.lower() != b"authorization"
+    ]
+
+
 class OperatorAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         required = auth_required()
@@ -77,6 +87,11 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             return _auth_unavailable_response()
         if not authorization_valid(request.headers.get("authorization"), credentials):
             return _unauthorized_response()
+
+        # Authentication terminates at the 8090 boundary. The internal API is
+        # not an authentication authority and must not receive the reusable
+        # Basic credential in proxied request headers.
+        _strip_authorization_header(request)
         return await call_next(request)
 
 
