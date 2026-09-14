@@ -12,4 +12,4 @@ COPY app/ ./app/
 
 EXPOSE 8090
 
-CMD ["sh", "-c", "uvicorn app.main:app --host ${EVIDENCE_VIEWER_HOST:-0.0.0.0} --port ${EVIDENCE_VIEWER_PORT:-8090}"]
+CMD ["sh", "-c", "uvicorn app.secured:app --host ${EVIDENCE_VIEWER_HOST:-0.0.0.0} --port ${EVIDENCE_VIEWER_PORT:-8090}"]
