@@ -8,7 +8,6 @@ every request so they can be rotated without restarting the container.
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -25,7 +24,7 @@ from app.operator_auth import (
 )
 
 
-DEFAULT_BASELINE_FILE = "/evidence/.deployment-baseline.json"
+DEFAULT_BASELINE_FILE = "/evidence/.deployment-baseline.txt"
 REALM = os.getenv("OPERATOR_AUTH_REALM", "Video Analytics Operator")
 
 
@@ -85,18 +84,26 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
 def deployment_baseline() -> JSONResponse:
     path = _baseline_path()
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return JSONResponse(
             status_code=404,
             content={"detail": "deployment baseline has not been captured"},
         )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError) as exc:
         return JSONResponse(
             status_code=503,
             content={"detail": f"deployment baseline is unreadable: {exc}"},
         )
-    if not isinstance(payload, dict):
+
+    payload: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key:
+            payload[key] = value
+    if not payload.get("git_commit"):
         return JSONResponse(
             status_code=503,
             content={"detail": "deployment baseline has an invalid format"},
