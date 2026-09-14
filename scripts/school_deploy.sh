@@ -9,10 +9,65 @@ DATA_ROOT="${VIDEO_ANALYTICS_DATA_ROOT:-/data/video-analytics}"
 AUTH_FILE="${OPERATOR_AUTH_FILE_HOST:-$DATA_ROOT/media/evidence/.operator-auth}"
 OPERATOR_URL="${MIDTERM_OPERATOR_URL:-http://127.0.0.1:8090}"
 WAIT_SECONDS="${MIDTERM_DEPLOY_WAIT_SECONDS:-240}"
+ACTIVE_PROFILES=()
 
 fail() {
     echo "[ERROR] $*" >&2
     exit 1
+}
+
+add_profile() {
+    local candidate="$1"
+    [[ -n "$candidate" ]] || return 0
+    local existing
+    for existing in "${ACTIVE_PROFILES[@]-}"; do
+        [[ "$existing" != "$candidate" ]] || return 0
+    done
+    ACTIVE_PROFILES+=("$candidate")
+}
+
+collect_profiles() {
+    local raw profile index
+    if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
+        IFS=',' read -r -a raw <<< "$MIDTERM_COMPOSE_PROFILES"
+        for profile in "${raw[@]}"; do
+            profile="${profile//[[:space:]]/}"
+            add_profile "$profile"
+        done
+    fi
+
+    index=1
+    while [[ "$index" -le "$#" ]]; do
+        if [[ "${!index}" == "--local-postgres" ]]; then
+            fail "--local-postgres uses development credentials and is not allowed by scripts/school_deploy.sh"
+        fi
+        if [[ "${!index}" == "--profile" ]]; then
+            next_index=$((index + 1))
+            [[ "$next_index" -le "$#" ]] || fail "--profile requires a value"
+            add_profile "${!next_index}"
+            index=$((index + 2))
+            continue
+        fi
+        index=$((index + 1))
+    done
+
+    if [[ ${#ACTIVE_PROFILES[@]} -gt 0 ]]; then
+        MIDTERM_COMPOSE_PROFILES="$(IFS=,; echo "${ACTIVE_PROFILES[*]}")"
+        export MIDTERM_COMPOSE_PROFILES
+    else
+        unset MIDTERM_COMPOSE_PROFILES || true
+    fi
+}
+
+check_database_credentials() {
+    [[ -n "${VIDEO_ANALYTICS_DATABASE_URL:-}" ]] || fail \
+        "VIDEO_ANALYTICS_DATABASE_URL must be set explicitly for a school deployment"
+
+    case "$VIDEO_ANALYTICS_DATABASE_URL" in
+        *://video:video@*)
+            fail "VIDEO_ANALYTICS_DATABASE_URL still uses the example video/video credentials"
+            ;;
+    esac
 }
 
 check_source_state() {
@@ -59,6 +114,8 @@ main() {
     command -v python3 >/dev/null 2>&1 || fail "python3 is required"
     command -v curl >/dev/null 2>&1 || fail "curl is required"
 
+    collect_profiles "$@"
+    check_database_credentials
     check_source_state
 
     if ! bash "$SCRIPT_DIR/runtime/set_operator_credentials.sh" --check; then
@@ -68,6 +125,9 @@ main() {
     fi
 
     echo "[INFO] Starting the school deployment from commit $(git -C "$REPO_ROOT" rev-parse HEAD)"
+    if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
+        echo "[INFO] Compose profiles: $MIDTERM_COMPOSE_PROFILES"
+    fi
     bash "$SCRIPT_DIR/midterm_start.sh" --skip-health "$@"
 
     wait_for_operator || fail "8090 did not pass authenticated readiness checks within ${WAIT_SECONDS}s"
