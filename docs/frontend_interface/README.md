@@ -1,78 +1,98 @@
-# 前端接口与交接文档
+# 前端与 API 集成
 
-更新时间：2026-07-20
+本目录描述 Video Analytics Platform 的 Web 操作台、浏览器侧 API 使用方式以及主要数据契约。面向需要修改 8090 操作界面、接入业务 API 或理解前后端边界的开发者。
 
-代码基线：当前分支 `feat/roi-adaface-redis-20260711`、HEAD `1eb4174` 及当前未提交
-工作区。若 HEAD/工作区变化，先核对代码再沿用本文。
+项目总体架构请先阅读 [`../current_architecture.md`](../current_architecture.md)。
 
-## 文档导航
-
-| 文件 | 内容 |
-| --- | --- |
-| [01_architecture.md](01_architecture.md) | 8090 proxy、页面模块和完整链路控制 |
-| [02_api_inventory.md](02_api_inventory.md) | 浏览器可访问的 API 清单 |
-| [03_data_contracts.md](03_data_contracts.md) | 摄像头、人员、轨迹、evidence 与维护合同 |
-| [04_views_and_modules.md](04_views_and_modules.md) | 页面/DOM/跨模块交互 |
-| [05_development_and_validation.md](05_development_and_validation.md) | 开发与验证 |
-
-仓库级架构先读 `docs/current_architecture.md`。
-
-## 当前前端形态
+## 前端架构
 
 ```text
 Browser :8090
-  -> evidence-viewer
-       -> /static/*       vanilla HTML/CSS/JS
-       -> /api/v1/*       api:8000 proxy
-       -> /media/*        API media proxy
-       -> /api/bundles/*  legacy evidence compatibility
+  |
+  v
+Evidence Viewer / Operator
+  +-- /static/*       HTML / CSS / JavaScript
+  +-- /api/v1/*       -> FastAPI service
+  +-- /media/*        -> evidence media proxy
+  +-- /api/bundles/*  legacy compatibility path
 ```
 
-脚本固定顺序：
+浏览器通过 8090 使用 same-origin API 和媒体路径。FastAPI 服务本身运行在内部 Compose 网络中，不要求浏览器直接访问其容器端口。
+
+## 前端技术栈
+
+当前操作台采用轻量的原生前端实现：
+
+- HTML；
+- CSS；
+- Vanilla JavaScript；
+- 无 React / Vue / TypeScript；
+- 无独立前端 bundler。
+
+主要脚本按以下顺序加载：
 
 ```text
 operator.js -> trajectory.js -> evidence.js -> maintenance.js
 ```
 
-无 React/Vue/TypeScript/bundler。`index.html` 是 DOM 合同，`style.css` 为全局作用域，
-资源 query version 需要随改动刷新。
+`index.html` 定义页面 DOM 结构，`style.css` 使用全局样式。修改静态资源时应同步检查页面引用和资源版本参数。
 
-## 页面结构
+## 文档导航
 
-一级导航：
+| 文档 | 内容 |
+| --- | --- |
+| [01_architecture.md](01_architecture.md) | 8090 proxy、页面模块与运行控制架构 |
+| [02_api_inventory.md](02_api_inventory.md) | 浏览器侧 API 清单 |
+| [03_data_contracts.md](03_data_contracts.md) | 摄像头、人员、轨迹与 evidence 数据契约 |
+| [04_views_and_modules.md](04_views_and_modules.md) | 页面、DOM 和模块交互 |
+| [05_development_and_validation.md](05_development_and_validation.md) | 开发与验证方式 |
 
-- 配置：摄像头、人员与人脸库；
-- 证据：告警证据、人员轨迹；
-- 运维控制：启动与状态、高级维护。
+## 页面模块
 
-内部 hash 仍为 `#cameras/#people/#trajectory/#evidence/#runtime/#maintenance`。
+操作台主要包含以下业务区域：
 
-Runtime 页面当前包含：
+- **配置**：摄像头、ROI、算法和规则；
+- **人员与人脸**：人员资料与人脸图库；
+- **证据**：事件证据、视频、快照和标注；
+- **人员轨迹**：按人员查看跨时间观测记录；
+- **启动与运行**：运行预设、摄像头选择、source/FPS/延迟与任务状态；
+- **高级维护**：拓扑、性能配置、存储和诊断。
 
-- 实时延迟；
-- 完整链路快速启动、摄像头选择和后台进度；
-- 建议下一步；
-- 高级 performance/topology；
-- 摄像头性能、forwarder、evidence 和 container 状态。
+页面内部使用 hash 进行模块切换，包括：
 
-## 重要边界
+```text
+#cameras
+#people
+#trajectory
+#evidence
+#runtime
+#maintenance
+```
 
-1. 浏览器只使用 8090 same-origin；
-2. 8090 不代理 FastAPI `/docs`；
-3. 新 evidence 使用 `/api/v1/evidence`，不依赖 `/api/bundles`；
-4. 媒体 URL 使用 API 返回的 `/media/...`；
-5. topology apply-async 刷新页面可继续显示，但 API 重启会中断执行；
-6. 运行预设由服务端返回，前端不能复制另一套常量；
-7. 完整启动时按 source_ids 批量启用，不能逐路触发当前单分支；
-8. 当前没有统一鉴权/RBAC；
-9. `/api/v1/ws/alerts` 后端存在，但 8090 未做 WebSocket upgrade proxy。
+## API 集成约定
 
-## 事实优先级
+1. 浏览器业务请求优先使用 `/api/v1/*`；
+2. Evidence 媒体地址使用 API 返回的 `/media/...` 路径；
+3. 新 evidence 功能使用 `/api/v1/evidence`，`/api/bundles` 仅用于兼容旧数据；
+4. 运行预设和运行时参数由服务端 API 提供，前端不维护第二套硬编码预设；
+5. 批量启动完整链路时按 `source_ids` 提交选中的摄像头集合；
+6. FastAPI 的 OpenAPI `/docs` 属于内部 API 服务，不由 8090 作为主要用户入口提供；
+7. `/api/v1/ws/alerts` 如需在浏览器中使用，部署层必须同时具备 WebSocket upgrade 代理能力。
 
-1. router/service/repository；
-2. `index.html` 与 JavaScript 消费方式；
-3. harness 合同测试；
-4. 本目录文档。
+## 代码位置
 
-接口或页面变化必须在同一提交更新本目录和
-`docs/midterm_web_operator_guide.md`。
+前端静态页面和代理服务位于 `services/evidence-viewer/`，业务 API 位于 `services/api/`。涉及接口字段、运行时控制或 evidence 数据结构的修改，应同时检查：
+
+```text
+services/evidence-viewer/
+services/api/
+services/event-worker/
+services/media-worker/
+harness/tests/
+```
+
+API 契约和页面行为应由代码与自动化测试共同约束，本文档用于解释稳定的集成方式，而不是记录某个临时开发分支或工作区状态。
+
+## 部署安全
+
+8090 适合作为统一操作入口，但在非受信任网络中仍应置于受控网络或反向代理之后，并配置 TLS、访问控制和必要的审计策略。不要将内部 Redis、PostgreSQL、推理服务或调试端口直接暴露到公网。

@@ -1,116 +1,163 @@
 # Video Analytics Platform
 
-多路实时视频分析与证据固化系统，基于 Savant、NVIDIA DeepStream、TensorRT、
-Redis 和 PostgreSQL。
+面向多路 RTSP 摄像头的实时视频智能分析与事件证据平台。系统将视频采集、GPU 推理、行为事件、人脸识别、人员轨迹、滚动缓存与证据生成整合为一套可运行、可观测、可管理的服务化架构。
 
-文档基线：2026-07-20。当前工作区架构见
-[`docs/current_architecture.md`](docs/current_architecture.md)。
+核心技术栈包括 **Savant / NVIDIA DeepStream / TensorRT、GStreamer、FastAPI、Redis 与 PostgreSQL**。
 
-## 启动与用户入口
+## 核心能力
+
+- 多路 RTSP 摄像头接入、运行时分片与 A/B 双分析分支；
+- 基于 GPU 的目标检测、姿态/行为规则与实时事件处理；
+- Face ROI、AdaFace 特征提取、人员图库与 watchlist 匹配；
+- 人员观测、跨时间轨迹查询与事件关联；
+- 全帧率 rolling cache 与事件前后窗口证据生成；
+- 原始视频片段、快照、时间线、检测框/姿态等证据元数据；
+- 8090 Web 操作台，覆盖摄像头配置、运行控制、证据查看、人员管理与运行状态；
+- 面向多摄像头场景的任务调度、source fairness、租约恢复与证据生命周期管理。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    CAM[RTSP Cameras] --> RP[Replay A/B]
+    RP --> FAN[Raw Fan-out A/B]
+
+    FAN -->|sampled frames| SAV[Savant / DeepStream / TensorRT]
+    FAN -->|full-rate stream| RC[Rolling Cache Sink]
+
+    SAV --> EVT[Event Worker]
+    SAV --> OBS[Person Observation Worker]
+    SAV --> ROI[Face ROI]
+    ROI --> ADA[AdaFace ROI Worker]
+    ADA --> FACE[Face Worker]
+    FACE --> EVT
+
+    EVT --> TASK[(Evidence Tasks)]
+    RC --> MEDIA[Media Worker]
+    TASK --> MEDIA
+
+    OBS --> PG[(PostgreSQL)]
+    FACE --> PG
+    EVT --> PG
+    MEDIA --> PG
+
+    PG --> UI[8090 Operator / Evidence Viewer]
+```
+
+完整运行预设采用 **rolling-cache-first** 的证据链：实时分析链路按配置帧率执行推理，同时保留全帧率编码流用于事件发生后的证据裁剪。事件、人员、规则和证据元数据由 PostgreSQL 持久化，Redis 主要承担异步消息与流式任务传递。
+
+## 快速开始
+
+### 1. 环境准备
+
+目标运行环境为 Linux + Docker Compose + NVIDIA GPU Runtime。模型、存储目录和具体 GPU 配置请参考 [部署文档](docs/midterm_deployment.md)。
+
+### 2. 启动服务
 
 ```bash
 bash scripts/midterm_start.sh
 ```
 
-启动脚本会检查 Docker/GPU、准备 `/data/video-analytics` 和快速盘目录、验证模型、
-构建基础镜像、启动管理与普通单分支服务，并预创建但不启动由 8090 管理的双分支
-容器。日常操作统一进入：
+启动完成后打开：
 
 ```text
 http://127.0.0.1:8090/operator
 ```
 
-内部 FastAPI 只监听 Compose 网络的 `api:8000`，不作为宿主机客户入口。
+日常使用无需直接访问内部 FastAPI 容器端口。
 
-普通操作员建议：
+### 3. 配置并启动视频分析
 
-1. 在 8090 登记摄像头并配置 ROI/算法；
-2. 点击“选择摄像头并启动”；
-3. 选择 T4 40 路或 4090 60 路完整预设；
-4. 勾选精确路数并自动均分或手动指定 A/B；
-5. 等待后台任务完成 source 收敛、rolling-cache 预热和 evidence 开放。
+1. 在 **配置 → 摄像头** 中登记 RTSP 地址；
+2. 为摄像头配置 ROI、算法和事件规则；
+3. 在 **启动与运行** 中选择摄像头；
+4. 选择与硬件匹配的运行预设；
+5. 启动完整链路并在运行页观察 source、FPS、队列和延迟；
+6. 在 **证据** 与 **人员轨迹** 页面查看分析结果。
 
-不要为了准备批量运行而逐路点击“加入当前运行”。
+### 4. 健康检查与停止
 
-## 当前完整链路
-
-```text
-RTSP cameras
-  -> Replay A/B
-  -> replay-raw-fanout A/B
-       |-> sampled frames -> Savant A/B -> events/person/face ROI/annotations
-       `-> full-rate frames -> rolling-cache-sink A/B
-
-person observations -> person-observation-worker -> PostgreSQL
-face ROI -> adaface-roi-worker -> face-worker -> watchlist events
-events -> event-worker -> evidence tasks
-rolling segments + tasks -> media-worker Scheduler V2/finalizers
-  -> raw_clip/image + DB-backed timeline/overlay
-  -> 8090 evidence and trajectory views
+```bash
+bash scripts/midterm_health.sh
+bash scripts/runtime/doctor_midterm.sh
+bash scripts/midterm_stop.sh
 ```
-
-完整预设是 rolling-cache-first：`clip-worker -> Replay job -> video-file-sink` 仍作为
-普通单分支和兼容路径存在，但不是两个完整双分支预设的主 evidence 路径。原始证据
-约 24 FPS，Savant 分析 cadence 为 4/8 FPS。
 
 ## 运行预设
 
-| 预设 | 目标 | 关键参数 |
-| --- | --- | --- |
-| `production_t4_40` | 单 T4 40 路，A/B 20/20 | 4 FPS，batch 4/4，ROI AdaFace 16，CUDA MPS 45/45/10，rolling 600s |
-| `local_4090_60` | 单 4090 60 路，A/B 30/30 | 8 FPS，batch 4/4，ROI AdaFace 16，不用 MPS，rolling 600s |
+仓库提供两套主要的单 GPU 参考预设：
 
-精确值以
-`services/api/app/services/runtime_topology.py::RUNTIME_PROFILE_PRESETS` 为准。
+| 预设 | 目标规模 | 分析帧率 | 分支 | Rolling Cache |
+| --- | ---: | ---: | --- | ---: |
+| `production_t4_40` | 40 路 | 4 FPS | A/B 20/20 | 600 s |
+| `local_4090_60` | 60 路 | 8 FPS | A/B 30/30 | 600 s |
 
-## 当前部署文件
+精确参数由 `services/api/app/services/runtime_topology.py` 中的 `RUNTIME_PROFILE_PRESETS` 定义。上述规模是仓库提供的硬件配置模板，不代表任意码率、分辨率、事件密度和摄像头环境下都具有相同吞吐能力。
+
+## 证据生成链路
+
+```text
+Event / Watchlist Match
+        |
+        v
+  evidence_tasks (PostgreSQL)
+        |
+        v
+ Media Worker Scheduler
+        |
+        +--> Rolling Cache segments
+        +--> frame annotations / timeline
+        |
+        v
+ raw clip / snapshot / metadata
+        |
+        v
+ PostgreSQL index + 8090 viewer
+```
+
+证据任务具有明确的等待、执行、完成、失败和过期状态。Media Worker 使用 source-aware 调度与持久化任务状态，避免单个摄像头持续占用全部工作槽；`scripts/runtime/report_evidence_camera_ledger.py` 可用于按摄像头核对证据任务的阶段分布与结果。
+
+## 主要目录
+
+| 目录 | 说明 |
+| --- | --- |
+| `services/` | API、event/media/face worker、rolling-cache、Web viewer 等服务 |
+| `modules/` | Savant / Replay 运行模块与配置 |
+| `libs/` | 跨服务共享的生命周期、证据与运行时组件 |
+| `infra/` | Docker Compose、环境变量和部署覆盖配置 |
+| `db/migrations/` | PostgreSQL schema 与迁移 |
+| `scripts/` | 启停、诊断、维护和运行时工具 |
+| `harness/tests/` | 集成、合同、调度与回归测试 |
+| `docs/` | 架构、部署、操作、接口和技术参考文档 |
+
+## 关键部署文件
 
 | 用途 | 文件 |
 | --- | --- |
-| Compose | `infra/docker-compose.midterm.yml` |
-| Env 默认值 | `infra/env/midterm.env` |
+| 主 Compose | `infra/docker-compose.midterm.yml` |
+| 默认环境变量 | `infra/env/midterm.env` |
 | 存储挂载 | `infra/midterm-storage.override.yml` |
-| 8090 双分支预创建 override | `infra/operator-dual-runtime.override.yml` |
-| Replay 配置 | `modules/savant_replay/config.midterm*.json` |
-| Camera 快照 | `modules/savant_security/config/cameras.midterm.yml` |
+| 双分支运行覆盖 | `infra/operator-dual-runtime.override.yml` |
 | Savant module | `modules/savant_security/module.yml` |
+| Camera runtime snapshot | `modules/savant_security/config/cameras.midterm.yml` |
 
-PostgreSQL 是摄像头、规则、人员、图库、事件和 evidence metadata 的事实源；YAML
-和 topology JSON 是运行快照。当前 env 默认人脸向量后端是 `pgvector`；Qdrant 是
-可选 profile，而不是未加配置时的默认运行态。
+PostgreSQL 是摄像头、规则、人员、图库、事件和 evidence metadata 的持久化事实源；运行时 YAML/JSON 主要用于生成或表达当前运行配置。人脸向量后端默认使用 pgvector，Qdrant 可通过对应 profile 启用。
 
-## 默认端口
+## 文档
 
-- 8090：操作台、API/media 代理；
-- 6396：Redis；
-- 8098：基础 Replay API；
-- 18080：基础 Savant metrics；
-- 18081：基础 analysis-forwarder metrics；
-- 18184：基础 raw-fanout metrics；
-- 18180/18181、18185/18186：A/B Savant/raw-fanout 诊断端口；
-- 18187：ROI AdaFace metrics；
-- 5439：仅 `local-postgres` profile。
+从 [docs/README.md](docs/README.md) 开始阅读项目文档。
 
-## 当前验证边界
+常用入口：
 
-- T4 40 路、4 FPS、完整 evidence 链已通过当前代码正式门禁，并有约 4 小时运行审计；
-- 4090 60 路、8 FPS 曾在 2026-07-14 通过；随后 rolling-cache 双时间域改造只对
-  40 路重新正式验证，当前工作区仍需同 revision 的 60 路复跑；
-- 生产 T4 基线保持 40 路，GPU 热/功耗和 evidence 波峰余量有限；
-- 真实混合 RTSP 断流恢复、worker restart soak、鉴权/RBAC 和跨 API 重启的后台任务
-  恢复仍未闭环。
+- [系统架构](docs/current_architecture.md)
+- [部署说明](docs/midterm_deployment.md)
+- [Web 操作指南](docs/midterm_web_operator_guide.md)
+- [快速运维参考](docs/midterm_quick_reference.md)
+- [前端与 API 集成](docs/frontend_interface/README.md)
+- [技术参考手册](docs/midterm_knowledge_base/README.md)
 
-## 文档入口
+带日期的压测、诊断、迁移和设计记录用于保留工程演进过程，不应当作当前部署接口或运行合同。对外使用时优先以上述稳定文档、当前配置和源码为准。
 
-- 当前架构：`docs/current_architecture.md`
-- 当前状态：`docs/current_mainline_status.md`
-- 部署说明：`docs/midterm_deployment.md`
-- 8090 操作指南：`docs/midterm_web_operator_guide.md`
-- 单卡双分支专项流程：
-  `docs/midterm_8090_single_gpu_dual_branch_operator_runbook_2026-07-14.md`
-- 知识库：`docs/midterm_knowledge_base/00_Index.md`
-- 前端/API：`docs/frontend_interface/README.md`
-- 本次文档同步审计：`docs/documentation_sync_audit_2026-07-20.md`
-- 历史阶段材料：各目录的 `archive/phase-only/`
+## 部署提示
 
-带日期的测试/审计报告只证明其记录的 revision 和参数，不应替代当前架构文档。
+8090 是面向操作员的统一入口。若部署到非受信任网络，请在网络边界或反向代理层配置访问控制、TLS 和必要的安全策略，不要直接将内部服务端口暴露到公网。

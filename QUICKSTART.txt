@@ -1,84 +1,83 @@
-Midterm 视频分析系统 - 快速启动
-更新时间：2026-07-20
+Video Analytics Platform - Quick Start
+======================================
 
-1. 启动基础服务
+1. Start the platform
 
     bash scripts/midterm_start.sh
 
-   首次启动会检查 GPU/Docker、准备数据目录和模型、构建镜像，并预创建但不启动
-   8090 管理的双分支容器。
+   The startup script checks the runtime environment, prepares data directories,
+   builds or starts the required services, and prepares the components managed by
+   the operator console.
 
-2. 打开操作台
+2. Open the operator console
 
     http://127.0.0.1:8090/operator
 
-   浏览器只连接 8090。内部 API 的 8000 端口不应直接暴露。
+   Port 8090 is the normal browser entry point. Internal API and service ports are
+   intended for service-to-service communication and diagnostics.
 
-3. 登记摄像头和算法
+3. Register cameras
 
-   - 进入“配置 -> 摄像头”；
-   - 填写名称、RTSP 地址、ROI 和算法规则；
-   - 批量双分支运行时，登记阶段可以不选择“加入当前运行”。
+   - Open Configuration -> Cameras.
+   - Add a camera name and RTSP URL.
+   - Configure ROI, algorithms and event rules.
+   - For a multi-camera run, configure cameras first and select the desired set
+     when starting the runtime.
 
-4. 选择并启动完整链路
+4. Select a runtime profile
 
-   - 点击首屏“选择摄像头并启动”；
-   - 生产 T4 选择 40 路，系统分成 20/20，分析 4 FPS；
-   - 本机 4090 选择 60 路，系统分成 30/30，分析 8 FPS；
-   - 也可以手动指定 A/B；
-   - 点击“启动完整双分支”。
+   Reference profiles included in the repository:
 
-   页面会显示：启动前预检 -> 双分支/TensorRT -> 摄像头收敛 ->
-   rolling-cache 预热 -> 开放 evidence。任务在 API 后台执行，刷新页面后可继续查看
-   状态；API 进程重启会中断该任务。
+   - production_t4_40: 40 streams, A/B 20/20, 4 FPS analysis.
+   - local_4090_60:    60 streams, A/B 30/30, 8 FPS analysis.
 
-5. 验收
+   Actual capacity depends on GPU, resolution, bitrate, codec settings, event
+   density and storage performance.
 
-   在“启动与运行”检查：
+5. Start the complete pipeline
 
-   - A/B source 数量正确；
-   - 每路最近帧持续更新；
-   - forwarder queue 和 send failure 不增长；
-   - 端到端延迟没有持续升高；
-   - evidence task 能收敛；
-   - 视频约 24 FPS、5+5 秒，bbox/timeline 可见；
-   - 人员轨迹页能显示命中图片。
+   In Start & Runtime, select the cameras and launch the complete dual-branch
+   runtime. Wait for source convergence and rolling-cache readiness, then verify:
 
-6. 注册人脸（可选）
+   - expected A/B source counts;
+   - continuously updating frames;
+   - stable analysis FPS;
+   - queues and failures are not continuously increasing;
+   - evidence tasks reach completed or explicit terminal states;
+   - event evidence and person trajectories are queryable.
 
-   在“人员与人脸”选择单张或多张清晰照片，填写唯一人员编号和姓名。完整双分支
-   预设使用 ROI AdaFace worker；4090 预设不使用 CUDA MPS，但仍启用该人脸链路。
+6. Register people and faces (optional)
 
-7. 停止
+   Use People & Faces in the operator console to create a person and enroll one
+   or more clear face images. The complete runtime uses the ROI AdaFace pipeline
+   for face embeddings and gallery matching.
 
-   - 只停止完整采集/推理：在 8090 点击“停止完整链路”；
-   - 停止整套服务：bash scripts/midterm_stop.sh
-
-   8090 停止操作会让部分 worker 继续收尾，不等同于整栈停止。
-
-常用检查
+7. Health checks
 
     bash scripts/midterm_health.sh
     bash scripts/runtime/doctor_midterm.sh
 
-注意：midterm_health.sh 的固定服务清单仍偏向旧单分支；双分支、rolling-cache 和
-person-observation-worker 应同时从 8090 运行总览判断。
+   For per-camera evidence reconciliation, see:
 
-关键端口
+    scripts/runtime/report_evidence_camera_ledger.py
 
-    8090   操作台、API/media 代理
-    6396   Redis
-    8098   基础 Replay API
-    18080  基础 Savant metrics
-    18081  基础 analysis-forwarder metrics
-    18184  基础 raw-fanout metrics
-    18187  ROI AdaFace metrics
+8. Stop
 
-更多帮助
+   - Stop only the active analysis runtime from the 8090 operator console.
+   - Stop the complete stack with:
 
-    当前架构：docs/current_architecture.md
-    操作指南：docs/midterm_web_operator_guide.md
-    部署说明：docs/midterm_deployment.md
-    API 清单：docs/frontend_interface/02_api_inventory.md
+       bash scripts/midterm_stop.sh
 
-8090 当前不代理 FastAPI /docs；不要把 http://127.0.0.1:8090/docs 当成可用入口。
+Documentation
+-------------
+
+    Project overview:       README.md
+    Documentation index:    docs/README.md
+    Architecture:           docs/current_architecture.md
+    Deployment:             docs/midterm_deployment.md
+    Operator guide:         docs/midterm_web_operator_guide.md
+    Operations reference:   docs/midterm_quick_reference.md
+    Frontend/API reference: docs/frontend_interface/README.md
+
+FastAPI /docs belongs to the internal API service and is not the primary 8090
+operator endpoint.
