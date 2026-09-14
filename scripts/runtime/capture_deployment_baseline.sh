@@ -31,6 +31,18 @@ done < <(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal || true
 
 compose_args=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 [[ ! -f "$STORAGE_OVERRIDE" ]] || compose_args+=(-f "$STORAGE_OVERRIDE")
+active_profiles=()
+if [[ -n "${MIDTERM_COMPOSE_PROFILES:-}" ]]; then
+    IFS=',' read -r -a raw_profiles <<< "$MIDTERM_COMPOSE_PROFILES"
+    for profile in "${raw_profiles[@]}"; do
+        profile="${profile//[[:space:]]/}"
+        [[ -n "$profile" ]] || continue
+        active_profiles+=("$profile")
+        compose_args+=(--profile "$profile")
+    done
+fi
+active_profiles_csv="$(IFS=,; echo "${active_profiles[*]-}")"
+
 compose_sha256="$(docker compose "${compose_args[@]}" config | sha256sum | awk '{print $1}')"
 compose_images="$(docker compose "${compose_args[@]}" config --images | sort -u | paste -sd ',' -)"
 
@@ -109,7 +121,7 @@ model_digest() {
 pose_model="${POSE_MODEL_FILE:-$(env_file_value POSE_MODEL_FILE)}"
 face_model="${FACE_DETECTOR_MODEL_FILE:-$(env_file_value FACE_DETECTOR_MODEL_FILE)}"
 adaface_model="${ADAFACE_ENGINE_PATH:-$(env_file_value ADAFACE_ENGINE_PATH)}"
-[[ -n "$adaface_model" ]] || adaface_model="/models/adaface/adaface_ir50_webface4m.onnx"
+[[ -n "$adaface_model" ]] || adaface_model="/models/adaface/adaface_ir50_webface4m.onnx_b16_gpu0_fp16.engine"
 
 pose_model_host="$(model_host_path "$pose_model")"
 face_model_host="$(model_host_path "$face_model")"
@@ -132,6 +144,7 @@ trap 'rm -f "$tmp"' EXIT
     printf 'git_branch=%s\n' "$git_branch"
     printf 'git_source_dirty=%s\n' "$git_source_dirty"
     printf 'git_runtime_config_dirty=%s\n' "$git_runtime_config_dirty"
+    printf 'compose_profiles=%s\n' "$active_profiles_csv"
     printf 'compose_config_sha256=%s\n' "$compose_sha256"
     printf 'compose_images=%s\n' "$compose_images"
     printf 'running_image_ids=%s\n' "$running_image_ids"
