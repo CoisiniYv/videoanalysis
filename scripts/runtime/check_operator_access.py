@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check an authenticated 8090 endpoint without exposing the password in argv."""
+"""Call an authenticated 8090 endpoint without exposing the password in argv."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ def main() -> int:
     parser.add_argument("url")
     parser.add_argument("auth_file")
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--print-body", action="store_true")
     args = parser.parse_args()
 
     path = Path(args.auth_file)
@@ -32,11 +33,13 @@ def main() -> int:
     request = Request(args.url, headers={"Authorization": f"Basic {token}"})
     try:
         with urlopen(request, timeout=max(0.1, args.timeout)) as response:
-            response.read(1)
-            if 200 <= int(response.status) < 300:
-                return 0
-            print(f"operator endpoint returned HTTP {response.status}", file=sys.stderr)
-            return 1
+            body = response.read() if args.print_body else response.read(1)
+            if not (200 <= int(response.status) < 300):
+                print(f"operator endpoint returned HTTP {response.status}", file=sys.stderr)
+                return 1
+            if args.print_body:
+                sys.stdout.buffer.write(body)
+            return 0
     except HTTPError as exc:
         print(f"operator endpoint returned HTTP {exc.code}", file=sys.stderr)
         return 1
