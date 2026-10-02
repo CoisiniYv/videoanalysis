@@ -1,63 +1,63 @@
-# Midterm 部署与操作指南
+# Midterm Deployment and Operator Guide
 
-本文面向部署人员和日常操作员，介绍 Video Analytics Platform 的启动、摄像头配置、运行预设、状态检查与停止流程。项目总体介绍与架构请先阅读根目录 [`README.md`](README.md)。
+This guide covers startup, camera configuration, runtime presets, status checks, and shutdown for deployment staff and daily operators of the Video Analytics Platform. Start with the root [`README.md`](README.md) for the project overview and architecture.
 
-## 启动系统
+## Start the System
 
 ```bash
 bash scripts/midterm_start.sh
 ```
 
-启动脚本会完成运行环境检查、数据目录准备、基础镜像/服务启动，并准备由 8090 操作台管理的运行时组件。
+The startup script checks the runtime environment, prepares data directories, starts base images/services, and prepares runtime components managed by the operator console on port 8090.
 
-启动后访问：
+After startup, open:
 
 ```text
 http://127.0.0.1:8090/operator
 ```
 
-8090 是浏览器侧统一入口；内部 API、Redis、推理服务和 metrics 端口主要用于服务间通信或诊断。
+Port 8090 is the unified browser entry point. Internal API, Redis, inference, and metrics ports are primarily used for service communication or diagnostics.
 
-## 推荐操作流程
+## Recommended Workflow
 
-### 1. 登记摄像头
+### 1. Register Cameras
 
-进入 **配置 → 摄像头**，为每路视频填写：
+Under **Configuration → Cameras**, configure each stream with:
 
-- 摄像头名称与 RTSP 地址；
+- Camera name and RTSP address;
 - ROI；
-- 需要启用的算法；
-- 事件规则及相关参数。
+- Algorithms to enable;
+- Event rules and related parameters.
 
-批量启动完整双分支时，可以先完成配置，再统一选择需要运行的摄像头。
+For a batch startup of the full dual-branch pipeline, configure cameras first, then select all cameras to run.
 
-### 2. 选择运行预设
+### 2. Select a Runtime Preset
 
-在 **启动与运行** 页面选择摄像头和硬件预设：
+Select cameras and a hardware preset on the **Startup and Runtime** page:
 
-| 预设 | 参考规模 | 分析帧率 | 分支分配 |
+| Preset | Reference Streams | Analysis Frame Rate | Branch Allocation |
 | --- | ---: | ---: | --- |
-| `production_t4_40` | 40 路 | 4 FPS | A/B 20/20 |
-| `local_4090_60` | 60 路 | 8 FPS | A/B 30/30 |
+| `production_t4_40` | 40 | 4 FPS | A/B 20/20 |
+| `local_4090_60` | 60 | 8 FPS | A/B 30/30 |
 
-页面支持自动均分，也支持手动指定 A/B source。实际可承载规模会受到视频分辨率、码率、编码参数、事件密度、GPU 型号和存储性能影响。
+The page supports automatic balancing and manual A/B source assignment. Actual capacity depends on resolution, bitrate, encoding settings, event density, GPU model, and storage performance.
 
-### 3. 启动完整链路
+### 3. Start the Full Pipeline
 
-点击完整链路启动后，系统会依次完成运行时准备、source 收敛、rolling cache 建立和 evidence 链路开放。运行状态应以 8090 页面返回的实际 source、FPS、队列、延迟和任务状态为准。
+Starting the full pipeline prepares the runtime, brings sources into the expected state, establishes the rolling cache, and enables the evidence pipeline. Use actual sources, FPS, queues, latency, and task status reported by the 8090 page to assess runtime health.
 
-### 4. 查看分析结果
+### 4. View Analysis Results
 
-操作台主要包含以下功能：
+The operator console provides:
 
-- **摄像头**：RTSP、ROI、算法和规则管理；
-- **人员与人脸**：人员资料、人脸注册与图库管理；
-- **证据**：事件视频、快照、检测框/姿态和时间线；
-- **人员轨迹**：人员命中记录与轨迹图片；
-- **启动与运行**：运行预设、source、吞吐与延迟；
-- **高级维护**：存储、拓扑和运行时诊断。
+- **Cameras**: RTSP, ROI, algorithm, and rule management;
+- **People and Faces**: person profiles, face registration, and gallery management;
+- **Evidence**: event videos, snapshots, bounding boxes/poses, and timelines;
+- **Person Trajectories**: person match records and trajectory images;
+- **Startup and Runtime**: presets, sources, throughput, and latency;
+- **Advanced Maintenance**: storage, topology, and runtime diagnostics.
 
-## 运行架构
+## Runtime Architecture
 
 ```text
 RTSP Cameras
@@ -81,59 +81,59 @@ Events + Rolling Cache
  Evidence + PostgreSQL index -> 8090 Viewer
 ```
 
-完整预设使用 rolling cache 保存全帧率编码流，同时按配置帧率进行 AI 分析，从而将推理吞吐和证据视频质量解耦。
+Full presets retain full-frame-rate encoded streams in the rolling cache while AI analysis runs at the configured frame rate, decoupling inference throughput from evidence video quality.
 
-## 运行检查
+## Runtime Checks
 
-常用命令：
+Common commands:
 
 ```bash
 bash scripts/midterm_health.sh
 bash scripts/runtime/doctor_midterm.sh
 ```
 
-建议在 8090 同时确认：
+Also confirm on the 8090 console that:
 
-- 目标摄像头均已进入预期分支；
-- 每路 source 持续产生新帧；
-- 分析 FPS 与预设相符且无持续下降；
-- queue / retry / failure 指标没有持续增长；
-- evidence task 能从排队状态进入完成或明确的终态；
-- 事件证据、快照和人员轨迹可正常查询。
+- All target cameras are assigned to the expected branches;
+- Every source continues to produce new frames;
+- Analysis FPS matches the preset without a sustained decline;
+- Queue / retry / failure metrics are not continuously increasing;
+- Evidence tasks progress from queued to completed or another explicit terminal state;
+- Event evidence, snapshots, and person trajectories can be queried successfully.
 
-如需按摄像头核对证据生命周期，可使用 `scripts/runtime/report_evidence_camera_ledger.py`。
+Use `scripts/runtime/report_evidence_camera_ledger.py` to inspect the evidence lifecycle by camera.
 
-## 停止系统
+## Stop the System
 
-只停止当前完整采集/分析运行时，可在 8090 使用 **停止完整链路**。这会停止对应采集和推理组件，并允许必要的后台任务完成收尾。
+To stop only the current acquisition/analysis runtime, use **Stop Full Pipeline** on port 8090. This stops the corresponding acquisition and inference components while allowing necessary background tasks to finish.
 
-停止整套服务：
+To stop all services:
 
 ```bash
 bash scripts/midterm_stop.sh
 ```
 
-## 主要配置文件
+## Main Configuration Files
 
-| 文件 | 用途 |
+| File | Purpose |
 | --- | --- |
-| `infra/docker-compose.midterm.yml` | 主服务编排 |
-| `infra/env/midterm.env` | 默认环境变量 |
-| `infra/midterm-storage.override.yml` | 数据与媒体存储挂载 |
-| `infra/operator-dual-runtime.override.yml` | A/B 双分支运行时 |
-| `modules/savant_replay/config.midterm*.json` | Replay 配置 |
-| `modules/savant_security/config/cameras.midterm.yml` | 摄像头运行快照 |
-| `modules/savant_security/module.yml` | Savant 推理模块 |
+| `infra/docker-compose.midterm.yml` | Main service orchestration |
+| `infra/env/midterm.env` | Default environment variables |
+| `infra/midterm-storage.override.yml` | Data and media storage mounts |
+| `infra/operator-dual-runtime.override.yml` | A/B dual-branch runtime |
+| `modules/savant_replay/config.midterm*.json` | Replay configuration |
+| `modules/savant_security/config/cameras.midterm.yml` | Camera runtime snapshot |
+| `modules/savant_security/module.yml` | Savant inference module |
 
-运行预设的精确参数由 `services/api/app/services/runtime_topology.py` 中的 `RUNTIME_PROFILE_PRESETS` 维护。
+Exact preset parameters are maintained by `RUNTIME_PROFILE_PRESETS` in `services/api/app/services/runtime_topology.py`.
 
-## 进一步阅读
+## Further Reading
 
-- [`docs/README.md`](docs/README.md)：文档总入口
-- [`docs/current_architecture.md`](docs/current_architecture.md)：完整系统架构
-- [`docs/midterm_deployment.md`](docs/midterm_deployment.md)：部署和存储说明
-- [`docs/midterm_web_operator_guide.md`](docs/midterm_web_operator_guide.md)：8090 页面操作
-- [`docs/midterm_quick_reference.md`](docs/midterm_quick_reference.md)：常用命令与排障
-- [`docs/frontend_interface/README.md`](docs/frontend_interface/README.md)：前端与 API 集成
+- [`docs/README.md`](docs/README.md): documentation entry point
+- [`docs/current_architecture.md`](docs/current_architecture.md): complete system architecture
+- [`docs/midterm_deployment.md`](docs/midterm_deployment.md): deployment and storage
+- [`docs/midterm_web_operator_guide.md`](docs/midterm_web_operator_guide.md): operating the 8090 console
+- [`docs/midterm_quick_reference.md`](docs/midterm_quick_reference.md): common commands and troubleshooting
+- [`docs/frontend_interface/README.md`](docs/frontend_interface/README.md): frontend and API integration
 
-内部 FastAPI 文档位于 API 服务自身的 `/docs`。8090 主要提供操作界面和业务 API/media 代理，不应把 `http://127.0.0.1:8090/docs` 作为接口文档入口。
+Internal FastAPI documentation is available at the API service's own `/docs` endpoint. Port 8090 primarily serves the operator interface and business API/media proxy. Do not use `http://127.0.0.1:8090/docs` as the API documentation entry point.
