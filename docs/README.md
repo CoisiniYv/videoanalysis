@@ -1,56 +1,56 @@
 # Documentation
 
-这里是 Video Analytics Platform 的文档入口。仓库包含稳定使用文档，也保留了大量设计、压测、诊断和迁移记录；如果你的目标是部署、使用或理解当前系统，请优先从本页列出的稳定文档开始。
+This is the documentation entry point for the Video Analytics Platform. The repository contains stable usage guides alongside design, load-test, diagnostic, and migration records. To deploy, use, or understand the current system, start with the stable documents listed here.
 
-## 使用者入口
+## User Entry Points
 
-| 文档 | 适合谁 | 内容 |
+| Document | Audience | Contents |
 | --- | --- | --- |
-| [`../README.md`](../README.md) | 所有人 | 项目介绍、架构与快速开始 |
-| [`../README_MIDTERM.md`](../README_MIDTERM.md) | 部署/操作人员 | 启动、摄像头配置、运行预设与停止 |
-| [`midterm_web_operator_guide.md`](midterm_web_operator_guide.md) | 操作人员 | 8090 Web 操作台详细使用方式 |
-| [`midterm_quick_reference.md`](midterm_quick_reference.md) | 运维人员 | 常用命令与排障速查 |
-| [`midterm_deployment.md`](midterm_deployment.md) | 部署人员 | Compose、存储、profile 与环境配置 |
+| [`../README.md`](../README.md) | Everyone | Project overview, architecture, and quick start |
+| [`../README_MIDTERM.md`](../README_MIDTERM.md) | Deployment staff / operators | Startup, camera configuration, runtime presets, and shutdown |
+| [`midterm_web_operator_guide.md`](midterm_web_operator_guide.md) | Operators | Detailed guide to the 8090 Web console |
+| [`midterm_quick_reference.md`](midterm_quick_reference.md) | Operations staff | Common commands and troubleshooting |
+| [`midterm_deployment.md`](midterm_deployment.md) | Deployment staff | Compose, storage, profiles, and environment configuration |
 
-## 架构与开发
+## Architecture and Development
 
-| 文档 | 内容 |
+| Document | Contents |
 | --- | --- |
-| [`current_architecture.md`](current_architecture.md) | 当前系统组件、数据流和运行形态 |
-| [`frontend_interface/README.md`](frontend_interface/README.md) | Web 前端、8090 proxy 与 API 集成 |
-| [`midterm_knowledge_base/README.md`](midterm_knowledge_base/README.md) | 服务、证据链、数据契约和排障的技术参考 |
-| [`compose_inventory.md`](compose_inventory.md) | Compose 文件和运行形态索引 |
+| [`current_architecture.md`](current_architecture.md) | Current components, data flows, and runtime modes |
+| [`frontend_interface/README.md`](frontend_interface/README.md) | Web frontend, 8090 proxy, and API integration |
+| [`midterm_knowledge_base/README.md`](midterm_knowledge_base/README.md) | Technical reference for services, evidence pipelines, data contracts, and troubleshooting |
+| [`compose_inventory.md`](compose_inventory.md) | Compose files and runtime mode index |
 
-## 文档分类
+## Documentation Categories
 
-### 稳定文档
+### Stable Documentation
 
-稳定文档描述当前项目的使用方式、架构和接口，应随着代码和配置变化持续维护。根 README、本页、部署文档、操作指南和接口文档属于这一类。
+Stable documents describe current usage, architecture, and interfaces, and should be maintained as code and configuration change. This includes the root README, this page, deployment guides, operator guides, and interface documentation.
 
-### 工程记录
+### Engineering Records
 
-仓库中还保留以下类型的资料：
+The repository also retains:
 
-- 文件名中带日期的压测、验证、迁移与诊断报告；
-- `code_review/` 下的专项审查记录；
-- `repair_goal/`、`runtime_stability_fix/`、`replay_evidence_fix/` 等历史修复过程资料；
-- `archive/` 与各目录中的 `archive/phase-only/` 历史配置和阶段性产物。
+- Dated load-test, validation, migration, and diagnostic reports;
+- Focused review records under `code_review/`;
+- Historical repair materials under `repair_goal/`, `runtime_stability_fix/`, `replay_evidence_fix/`, and similar directories;
+- Historical configuration and phase artifacts under `archive/` and nested `archive/phase-only/` directories.
 
-这些文件保留了工程决策的上下文，适合追溯问题或研究历史实现，但**不应作为当前部署说明、API 合同或容量承诺**。
+These records preserve the context of engineering decisions and help investigate past issues or implementations. They **do not define current deployment instructions, API contracts, or capacity guarantees**.
 
-## 如何判断当前行为
+## Determining Current Behavior
 
-当文档之间出现差异时，建议按以下顺序核对：
+When documents disagree, check the following in order:
 
-1. 当前 `main` 分支源码与数据库迁移；
-2. 当前 Compose、环境变量和 runtime profile；
-3. 自动化合同/回归测试；
-4. `current_architecture.md`、部署与操作稳定文档；
-5. 带日期的历史报告和设计记录。
+1. Current source code and database migrations on `main`;
+2. Current Compose configuration, environment variables, and runtime profiles;
+3. Automated contract and regression tests;
+4. `current_architecture.md` and stable deployment/operator documentation;
+5. Dated historical reports and design records.
 
-对于性能数据，必须同时确认 GPU、视频分辨率、码率、分析 FPS、摄像头数量、事件负载和对应代码版本，不能直接把历史压测数字视为其他环境的性能保证。
+When interpreting performance figures, verify the GPU, video resolution, bitrate, analysis FPS, camera count, event load, and code version. Historical load-test figures are not performance guarantees for other environments.
 
-## 常用运行入口
+## Common Runtime Commands
 
 ```bash
 # Start
@@ -64,10 +64,10 @@ bash scripts/runtime/doctor_midterm.sh
 bash scripts/midterm_stop.sh
 ```
 
-Web 操作台：
+Web operator console:
 
 ```text
 http://127.0.0.1:8090/operator
 ```
 
-生产或非受信任网络部署时，请通过受控网络或反向代理保护 8090，并避免直接暴露内部数据库、Redis、推理与调试端口。
+For production or untrusted-network deployments, protect port 8090 through a controlled network or reverse proxy. Avoid directly exposing internal database, Redis, inference, or debugging ports.
