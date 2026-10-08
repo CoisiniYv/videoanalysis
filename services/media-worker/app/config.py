@@ -61,15 +61,12 @@ class Config:
     materialization_reserved_non_image: int = 1
     media_worker_db_pool_enabled: bool = False
     media_worker_db_pool_timeout_s: float = 5.0
-    media_worker_db_index_io_concurrency: int = 0
     media_worker_scheduler_v2_enabled: bool = False
     media_worker_segment_index_enabled: bool = False
     media_worker_segment_index_refresh_interval_s: float = 0.5
     media_worker_segment_index_reconcile_interval_s: float = 30.0
     media_worker_segment_index_stability_age_s: float = 0.25
     media_worker_segment_index_row_cache_entries: int = 256
-    media_worker_segment_index_row_cache_max_bytes: int = 256 * 1024 * 1024
-    media_worker_segment_index_io_concurrency: int = 2
     media_worker_segment_index_max_catalogs: int = 256
     rolling_cache_read_pin_ttl_s: float = 600.0
     media_worker_shutdown_grace_s: float = 45.0
@@ -310,10 +307,6 @@ def load_config() -> Config:
             0.05,
             float(os.getenv("MEDIA_WORKER_DB_POOL_TIMEOUT_S", "5")),
         ),
-        media_worker_db_index_io_concurrency=max(
-            0,
-            int(os.getenv("MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY", "0")),
-        ),
         media_worker_scheduler_v2_enabled=os.getenv(
             "MEDIA_WORKER_SCHEDULER_V2_ENABLED", "false"
         )
@@ -359,24 +352,6 @@ def load_config() -> Config:
                 os.getenv(
                     "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES",
                     "256",
-                )
-            ),
-        ),
-        media_worker_segment_index_row_cache_max_bytes=max(
-            1,
-            int(
-                os.getenv(
-                    "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES",
-                    str(256 * 1024 * 1024),
-                )
-            ),
-        ),
-        media_worker_segment_index_io_concurrency=max(
-            1,
-            int(
-                os.getenv(
-                    "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY",
-                    "2",
                 )
             ),
         ),

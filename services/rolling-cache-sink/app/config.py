@@ -13,9 +13,6 @@ from pathlib import Path
 
 
 _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.:@+-]+$")
-MAX_ROLLING_CACHE_PUBLICATION_WORKERS = 4
-MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS = 4
-MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT = 32
 
 
 def safe_component(value: str, *, field: str) -> str:
@@ -54,32 +51,6 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
-def _bounded_positive_int(name: str, default: int, *, maximum: int) -> int:
-    value = _positive_int(name, default)
-    if value > maximum:
-        raise ValueError(f"{name} must be <= {maximum}, got {value}")
-    return value
-
-
-def _bounded_nonnegative_int(name: str, default: int, *, maximum: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
-    if not 0 <= value <= maximum:
-        raise ValueError(f"{name} must be between 0 and {maximum}, got {value}")
-    return value
-
-
-def _choice(name: str, default: str, *, choices: tuple[str, ...]) -> str:
-    value = os.getenv(name, default).strip().lower()
-    if value not in choices:
-        rendered = ", ".join(choices)
-        raise ValueError(f"{name} must be one of {rendered}, got {value!r}")
-    return value
-
-
 @dataclass(frozen=True)
 class SinkConfig:
     zmq_endpoint: str
@@ -90,11 +61,6 @@ class SinkConfig:
     pts_regression_tolerance_s: float
     http_host: str
     http_port: int
-    publication_workers: int
-    publication_commit_slots: int
-    publication_final_parent_group_limit: int
-    publication_file_sync_mode: str
-    publication_metadata_layout: str
     source_id: str | None
     source_id_prefix: str | None
     explicit_epoch_id: str
@@ -131,31 +97,6 @@ class SinkConfig:
             http_host=os.getenv("ROLLING_CACHE_SINK_HTTP_HOST", "0.0.0.0").strip()
             or "0.0.0.0",
             http_port=_positive_int("ROLLING_CACHE_SINK_HTTP_PORT", 8080),
-            publication_workers=_bounded_positive_int(
-                "ROLLING_CACHE_PUBLICATION_WORKERS",
-                1,
-                maximum=MAX_ROLLING_CACHE_PUBLICATION_WORKERS,
-            ),
-            publication_commit_slots=_bounded_nonnegative_int(
-                "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS",
-                0,
-                maximum=MAX_ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS,
-            ),
-            publication_final_parent_group_limit=_bounded_positive_int(
-                "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT",
-                1,
-                maximum=MAX_ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT,
-            ),
-            publication_file_sync_mode=_choice(
-                "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE",
-                "fsync",
-                choices=("fsync", "fdatasync"),
-            ),
-            publication_metadata_layout=_choice(
-                "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
-                "split",
-                choices=("split", "single_inode", "metadata_only"),
-            ),
             source_id=source_id,
             source_id_prefix=source_id_prefix,
             explicit_epoch_id=explicit_epoch,

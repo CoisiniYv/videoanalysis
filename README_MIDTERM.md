@@ -1,139 +1,159 @@
-# Midterm Deployment and Operator Guide
+# Midterm 视频分析系统 - 使用入口
 
-This guide covers startup, camera configuration, runtime presets, status checks, and shutdown for deployment staff and daily operators of the Video Analytics Platform. Start with the root [`README.md`](README.md) for the project overview and architecture.
+> **快速开始：** 看 `QUICKSTART.txt` 一页纸指南
 
-## Start the System
+## 一键启动
 
 ```bash
+# 迁移机/项目机统一启动入口
 bash scripts/midterm_start.sh
-```
 
-The startup script checks the runtime environment, prepares data directories, starts base images/services, and prepares runtime components managed by the operator console on port 8090.
-
-After startup, open:
-
-```text
+# 打开浏览器访问
 http://127.0.0.1:8090/operator
 ```
 
-Port 8090 is the unified browser entry point. Internal API, Redis, inference, and metrics ports are primarily used for service communication or diagnostics.
+启动脚本负责机器层准备：检查 Docker/GPU、创建运行目录、验证模型资产、构建镜像并
+启动所有容器。启动完成后，摄像头、人员/人脸、告警证据、存储维护和运行时重启都
+从 8090 页面管理。
 
-## Recommended Workflow
+## Web 操作台
 
-### 1. Register Cameras
+启动后通过浏览器操作，无需命令行：
 
-Under **Configuration → Cameras**, configure each stream with:
+- **摄像头管理**：添加/编辑 RTSP 视频源
+- **人员与人脸**：上传人脸照片建立人员库
+- **告警证据**：查看告警录像和识别结果
 
-- Camera name and RTSP address;
-- ROI；
-- Algorithms to enable;
-- Event rules and related parameters.
+详细使用指南：[docs/midterm_web_operator_guide.md](docs/midterm_web_operator_guide.md)
 
-For a batch startup of the full dual-branch pipeline, configure cameras first, then select all cameras to run.
+## 一键管理脚本
 
-### 2. Select a Runtime Preset
+| 脚本 | 功能 |
+|------|------|
+| `scripts/midterm_start.sh` | 迁移机/项目机整体启动入口 |
+| `scripts/midterm_stop.sh` | 停止服务，默认保留 `/data/video-analytics` 数据 |
+| `scripts/midterm_health.sh` | 全面健康检查 |
 
-Select cameras and a hardware preset on the **Startup and Runtime** page:
-
-| Preset | Reference Streams | Analysis Frame Rate | Branch Allocation |
-| --- | ---: | ---: | --- |
-| `production_t4_40` | 40 | 4 FPS | A/B 20/20 |
-| `local_4090_60` | 60 | 8 FPS | A/B 30/30 |
-
-The page supports automatic balancing and manual A/B source assignment. Actual capacity depends on resolution, bitrate, encoding settings, event density, GPU model, and storage performance.
-
-### 3. Start the Full Pipeline
-
-Starting the full pipeline prepares the runtime, brings sources into the expected state, establishes the rolling cache, and enables the evidence pipeline. Use actual sources, FPS, queues, latency, and task status reported by the 8090 page to assess runtime health.
-
-### 4. View Analysis Results
-
-The operator console provides:
-
-- **Cameras**: RTSP, ROI, algorithm, and rule management;
-- **People and Faces**: person profiles, face registration, and gallery management;
-- **Evidence**: event videos, snapshots, bounding boxes/poses, and timelines;
-- **Person Trajectories**: person match records and trajectory images;
-- **Startup and Runtime**: presets, sources, throughput, and latency;
-- **Advanced Maintenance**: storage, topology, and runtime diagnostics.
-
-## Runtime Architecture
-
-```text
-RTSP Cameras
-    |
-    v
-Replay A/B -> Raw Fan-out A/B
-    |                 |
-    |                 +--> full-rate stream -> Rolling Cache
-    |
-    +--> sampled stream -> Savant / GPU inference
-                              |
-                              +--> events / person observations
-                              +--> face ROI -> AdaFace -> Face Worker
-
-Events + Rolling Cache
-          |
-          v
-     Media Worker
-          |
-          v
- Evidence + PostgreSQL index -> 8090 Viewer
-```
-
-Full presets retain full-frame-rate encoded streams in the rolling cache while AI analysis runs at the configured frame rate, decoupling inference throughput from evidence video quality.
-
-## Runtime Checks
-
-Common commands:
+## 健康检查
 
 ```bash
 bash scripts/midterm_health.sh
-bash scripts/runtime/doctor_midterm.sh
 ```
 
-Also confirm on the 8090 console that:
+会检查：
+- ✓ 容器状态（12个默认服务）
+- ✓ API 端点可用性
+- ✓ 摄像头配置状态
+- ✓ 人脸库注册状态
+- ✓ GPU 可用性
+- ✓ 磁盘空间
 
-- All target cameras are assigned to the expected branches;
-- Every source continues to produce new frames;
-- Analysis FPS matches the preset without a sustained decline;
-- Queue / retry / failure metrics are not continuously increasing;
-- Evidence tasks progress from queued to completed or another explicit terminal state;
-- Event evidence, snapshots, and person trajectories can be queried successfully.
+## 文档导航
 
-Use `scripts/runtime/report_evidence_camera_ledger.py` to inspect the evidence lifecycle by camera.
+| 文档 | 用途 |
+|------|------|
+| `QUICKSTART.txt` | 一页纸快速入门（推荐第一次看这个） |
+| `docs/midterm_web_operator_guide.md` | Web 操作台详细使用指南 |
+| `docs/midterm_quick_reference.md` | API/命令/故障排查参考 |
+| `docs/midterm_clean_machine_migration_2026-06-25.md` | 新机器干净迁移说明和打包/部署脚本 |
+| `docs/midterm_uos_clean_machine_migration_steps_2026-06-29.md` | 统信 UOS 新机器全 Docker / 离线迁移步骤 |
+| `docs/midterm_migration_runbook_2026-06-23.md` | 系统迁移打包流程 |
+| `CLAUDE.md` | 开发规则和部署入口说明 |
 
-## Stop the System
+## 系统架构
 
-To stop only the current acquisition/analysis runtime, use **Stop Full Pipeline** on port 8090. This stops the corresponding acquisition and inference components while allowing necessary background tasks to finish.
+```
+RTSP 源
+  → Replay 存储
+  → analysis-forwarder 采样分析
+  → Savant 推理（YOLO26-pose + YOLOv8-Face + AdaFace）
+  → Redis 事件流
+  → event-worker / face-worker
+  → clip-worker Replay 作业
+  → video-file-sink 原始录像
+  → media-worker 证据包生成
+  → 8090 Web 操作台复核
+```
 
-To stop all services:
+## 当前部署
+
+- **启动入口**: `scripts/midterm_start.sh`
+- **Compose 文件**: `infra/docker-compose.midterm.yml`
+- **环境配置**: `infra/env/midterm.env`
+- **compose 项目名**: `video-analytics-midterm`
+- **默认 SOURCE_ID**: `primary_rtsp`
+
+## 典型工作流
 
 ```bash
+# 1. 启动系统
+bash scripts/midterm_start.sh
+
+# 2. 检查健康状态
+bash scripts/midterm_health.sh
+
+# 3. 打开浏览器配置和管理运行时
+open http://127.0.0.1:8090/operator
+
+# 4. 在 Web 界面添加摄像头和人员
+
+# 5. 查看告警证据
+
+# 6. 停止系统（保留数据）
 bash scripts/midterm_stop.sh
 ```
 
-## Main Configuration Files
+## 故障排查
 
-| File | Purpose |
-| --- | --- |
-| `infra/docker-compose.midterm.yml` | Main service orchestration |
-| `infra/env/midterm.env` | Default environment variables |
-| `infra/midterm-storage.override.yml` | Data and media storage mounts |
-| `infra/operator-dual-runtime.override.yml` | A/B dual-branch runtime |
-| `modules/savant_replay/config.midterm*.json` | Replay configuration |
-| `modules/savant_security/config/cameras.midterm.yml` | Camera runtime snapshot |
-| `modules/savant_security/module.yml` | Savant inference module |
+### 端口冲突
 
-Exact preset parameters are maintained by `RUNTIME_PROFILE_PRESETS` in `services/api/app/services/runtime_topology.py`.
+```bash
+# 检查占用
+ss -ltn | grep -E ':(6396|8090|8098|18080|18081)'
 
-## Further Reading
+# 停止旧部署
+bash scripts/midterm_stop.sh
+```
 
-- [`docs/README.md`](docs/README.md): documentation entry point
-- [`docs/current_architecture.md`](docs/current_architecture.md): complete system architecture
-- [`docs/midterm_deployment.md`](docs/midterm_deployment.md): deployment and storage
-- [`docs/midterm_web_operator_guide.md`](docs/midterm_web_operator_guide.md): operating the 8090 console
-- [`docs/midterm_quick_reference.md`](docs/midterm_quick_reference.md): common commands and troubleshooting
-- [`docs/frontend_interface/README.md`](docs/frontend_interface/README.md): frontend and API integration
+### 服务日志
 
-Internal FastAPI documentation is available at the API service's own `/docs` endpoint. Port 8090 primarily serves the operator interface and business API/media proxy. Do not use `http://127.0.0.1:8090/docs` as the API documentation entry point.
+```bash
+# 所有服务
+docker compose -f infra/docker-compose.midterm.yml logs -f
+
+# 特定服务
+docker compose -f infra/docker-compose.midterm.yml logs -f api
+docker compose -f infra/docker-compose.midterm.yml logs -f savant-security
+```
+
+### 重启单个服务
+
+```bash
+docker compose -f infra/docker-compose.midterm.yml restart <service>
+```
+
+## 开发规则
+
+详见 `CLAUDE.md`，关键原则：
+
+1. 当前部署只使用 `midterm` 文件
+2. 修改前先添加/更新测试
+3. 功能代码变更后只重启受影响服务
+4. 运行态修改必须同步更新文档
+
+## 性能验证
+
+长期产能验证按 `specs/16_dual_path_30x2_t4_production_optimization.md` 执行。
+
+## 迁移打包
+
+准备迁移到其他机器：
+
+1. 运行健康检查确认当前状态正常
+2. 提交所有代码修改
+3. 按 `docs/midterm_migration_runbook_2026-06-23.md` 打包
+
+## 联系
+
+- 问题反馈：查看日志 + 健康检查输出
+- API 文档：http://127.0.0.1:8090/docs

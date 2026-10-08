@@ -1,9 +1,2729 @@
 cameras:
-  00000000-0000-4000-8000-781078565686:
+  01e398c9-cc1c-4401-a2ed-777616d05594:
     enabled: true
-    source_id: source_00000000-0000-4000-8000-781078565686
-    name: lab
-    rtsp_url: rtsp://10.37.57.157:8554/camera
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_33
+    name: 压力摄像头 34
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-33
+    site_id: pressure
+    zones:
+      pressure-33_full_frame:
+        zone_id: pressure-33_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-33_watchlist:
+        rule_id: pressure-33_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-33_intrusion:
+        rule_id: pressure-33_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-33_full_frame
+          zone_id: pressure-33_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-33_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  062c197b-73fd-4582-a47f-15eaa9b8581e:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_06
+    name: 压力摄像头 07
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-06
+    site_id: pressure
+    zones:
+      pressure-06_full_frame:
+        zone_id: pressure-06_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-06_watchlist:
+        rule_id: pressure-06_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-06_intrusion:
+        rule_id: pressure-06_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-06_full_frame
+          zone_id: pressure-06_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-06_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  0c80ff65-7eb3-464a-a22b-3ee1c38e0146:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_25
+    name: 压力摄像头 26
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-25
+    site_id: pressure
+    zones:
+      pressure-25_full_frame:
+        zone_id: pressure-25_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-25_watchlist:
+        rule_id: pressure-25_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-25_intrusion:
+        rule_id: pressure-25_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-25_full_frame
+          zone_id: pressure-25_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-25_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  0e650430-baed-462f-8cd4-c9faf1a53964:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_04
+    name: 压力摄像头 05
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-04
+    site_id: pressure
+    zones:
+      pressure-04_full_frame:
+        zone_id: pressure-04_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-04_watchlist:
+        rule_id: pressure-04_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-04_intrusion:
+        rule_id: pressure-04_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-04_full_frame
+          zone_id: pressure-04_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-04_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  1367e392-5b8f-41fb-bde4-7623d1074584:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_23
+    name: 压力摄像头 24
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-23
+    site_id: pressure
+    zones:
+      pressure-23_full_frame:
+        zone_id: pressure-23_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-23_watchlist:
+        rule_id: pressure-23_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-23_intrusion:
+        rule_id: pressure-23_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-23_full_frame
+          zone_id: pressure-23_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-23_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  15b9c50b-3082-434f-967e-06c9bd040f34:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_20
+    name: 压力摄像头 21
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-20
+    site_id: pressure
+    zones:
+      pressure-20_full_frame:
+        zone_id: pressure-20_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-20_watchlist:
+        rule_id: pressure-20_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-20_intrusion:
+        rule_id: pressure-20_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-20_full_frame
+          zone_id: pressure-20_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-20_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  1a0a2f6b-f65f-48ae-a98a-972c17fa4407:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_28
+    name: 压力摄像头 29
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-28
+    site_id: pressure
+    zones:
+      pressure-28_full_frame:
+        zone_id: pressure-28_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-28_watchlist:
+        rule_id: pressure-28_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-28_intrusion:
+        rule_id: pressure-28_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-28_full_frame
+          zone_id: pressure-28_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-28_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  1cf2cdc3-5e90-434a-af51-a5957ad57694:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_00
+    name: 压力摄像头 01
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-00
+    site_id: pressure
+    zones:
+      pressure-00_full_frame:
+        zone_id: pressure-00_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-00_watchlist:
+        rule_id: pressure-00_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-00_intrusion:
+        rule_id: pressure-00_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-00_full_frame
+          zone_id: pressure-00_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-00_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  244bbeed-597a-4fc9-b8a8-3e0b0d1c8216:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_35
+    name: 压力摄像头 36
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-35
+    site_id: pressure
+    zones:
+      pressure-35_full_frame:
+        zone_id: pressure-35_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-35_watchlist:
+        rule_id: pressure-35_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-35_intrusion:
+        rule_id: pressure-35_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-35_full_frame
+          zone_id: pressure-35_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-35_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  24ed764e-531b-4d01-b303-6d1e103c14b8:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_05
+    name: 压力摄像头 06
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-05
+    site_id: pressure
+    zones:
+      pressure-05_full_frame:
+        zone_id: pressure-05_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-05_watchlist:
+        rule_id: pressure-05_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-05_intrusion:
+        rule_id: pressure-05_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-05_full_frame
+          zone_id: pressure-05_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-05_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  286dd5d4-b4f1-4207-92bb-a0ca8ded33ba:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_39
+    name: 压力摄像头 40
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-39
+    site_id: pressure
+    zones:
+      pressure-39_full_frame:
+        zone_id: pressure-39_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-39_watchlist:
+        rule_id: pressure-39_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-39_intrusion:
+        rule_id: pressure-39_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-39_full_frame
+          zone_id: pressure-39_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-39_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  36b5d9bb-3ce1-435e-a555-e46ec0c72af8:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_07
+    name: 压力摄像头 08
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-07
+    site_id: pressure
+    zones:
+      pressure-07_full_frame:
+        zone_id: pressure-07_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-07_watchlist:
+        rule_id: pressure-07_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-07_intrusion:
+        rule_id: pressure-07_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-07_full_frame
+          zone_id: pressure-07_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-07_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  477ed3de-7390-452c-9c6e-5b149ff31913:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_29
+    name: 压力摄像头 30
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-29
+    site_id: pressure
+    zones:
+      pressure-29_full_frame:
+        zone_id: pressure-29_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-29_watchlist:
+        rule_id: pressure-29_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-29_intrusion:
+        rule_id: pressure-29_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-29_full_frame
+          zone_id: pressure-29_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-29_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  4f72adb6-e31b-47e4-b176-d0ee36bd36cf:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_38
+    name: 压力摄像头 39
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-38
+    site_id: pressure
+    zones:
+      pressure-38_full_frame:
+        zone_id: pressure-38_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-38_watchlist:
+        rule_id: pressure-38_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-38_intrusion:
+        rule_id: pressure-38_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-38_full_frame
+          zone_id: pressure-38_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-38_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  529e5356-b238-43f0-9ebb-6ea0eff01cba:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_03
+    name: 压力摄像头 04
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-03
+    site_id: pressure
+    zones:
+      pressure-03_full_frame:
+        zone_id: pressure-03_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-03_watchlist:
+        rule_id: pressure-03_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-03_intrusion:
+        rule_id: pressure-03_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-03_full_frame
+          zone_id: pressure-03_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-03_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  5347ad9b-123f-41a6-aeda-b55214f2996f:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_21
+    name: 压力摄像头 22
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-21
+    site_id: pressure
+    zones:
+      pressure-21_full_frame:
+        zone_id: pressure-21_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-21_watchlist:
+        rule_id: pressure-21_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-21_intrusion:
+        rule_id: pressure-21_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-21_full_frame
+          zone_id: pressure-21_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-21_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  604e9ee3-f10a-4e74-8d04-1ec3dbaa7512:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_19
+    name: 压力摄像头 20
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-19
+    site_id: pressure
+    zones:
+      pressure-19_full_frame:
+        zone_id: pressure-19_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-19_watchlist:
+        rule_id: pressure-19_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-19_intrusion:
+        rule_id: pressure-19_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-19_full_frame
+          zone_id: pressure-19_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-19_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  616debec-f6b0-475c-b858-bf2ed58cad04:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_16
+    name: 压力摄像头 17
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-16
+    site_id: pressure
+    zones:
+      pressure-16_full_frame:
+        zone_id: pressure-16_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-16_watchlist:
+        rule_id: pressure-16_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-16_intrusion:
+        rule_id: pressure-16_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-16_full_frame
+          zone_id: pressure-16_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-16_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  64249b14-235e-47bb-8c70-6d0a53f92d8b:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_31
+    name: 压力摄像头 32
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-31
+    site_id: pressure
+    zones:
+      pressure-31_full_frame:
+        zone_id: pressure-31_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-31_watchlist:
+        rule_id: pressure-31_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-31_intrusion:
+        rule_id: pressure-31_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-31_full_frame
+          zone_id: pressure-31_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-31_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  6452103f-b65d-45e0-bc4e-472e6e2edef2:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_11
+    name: 压力摄像头 12
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-11
+    site_id: pressure
+    zones:
+      pressure-11_full_frame:
+        zone_id: pressure-11_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-11_watchlist:
+        rule_id: pressure-11_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-11_intrusion:
+        rule_id: pressure-11_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-11_full_frame
+          zone_id: pressure-11_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-11_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  72edb215-7137-4fd3-977f-e539beae2423:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_13
+    name: 压力摄像头 14
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-13
+    site_id: pressure
+    zones:
+      pressure-13_full_frame:
+        zone_id: pressure-13_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-13_watchlist:
+        rule_id: pressure-13_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-13_intrusion:
+        rule_id: pressure-13_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-13_full_frame
+          zone_id: pressure-13_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-13_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  749ffa4d-2a67-44af-9cfa-68293757d050:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_09
+    name: 压力摄像头 10
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-09
+    site_id: pressure
+    zones:
+      pressure-09_full_frame:
+        zone_id: pressure-09_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-09_watchlist:
+        rule_id: pressure-09_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-09_intrusion:
+        rule_id: pressure-09_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-09_full_frame
+          zone_id: pressure-09_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-09_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  85a7f92f-86dc-4ad1-8e20-3c94549335c1:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_30
+    name: 压力摄像头 31
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-30
+    site_id: pressure
+    zones:
+      pressure-30_full_frame:
+        zone_id: pressure-30_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-30_watchlist:
+        rule_id: pressure-30_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-30_intrusion:
+        rule_id: pressure-30_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-30_full_frame
+          zone_id: pressure-30_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-30_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  8c478627-ed59-40b1-935d-a3c48ba0e8bd:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_08
+    name: 压力摄像头 09
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-08
+    site_id: pressure
+    zones:
+      pressure-08_full_frame:
+        zone_id: pressure-08_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-08_watchlist:
+        rule_id: pressure-08_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-08_intrusion:
+        rule_id: pressure-08_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-08_full_frame
+          zone_id: pressure-08_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-08_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  9082f8d7-1438-4a8c-b433-596ee5883724:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_02
+    name: 压力摄像头 03
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-02
+    site_id: pressure
+    zones:
+      pressure-02_full_frame:
+        zone_id: pressure-02_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-02_watchlist:
+        rule_id: pressure-02_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-02_intrusion:
+        rule_id: pressure-02_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-02_full_frame
+          zone_id: pressure-02_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-02_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  91ecab13-329f-4a31-a19d-e30d82223063:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_32
+    name: 压力摄像头 33
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-32
+    site_id: pressure
+    zones:
+      pressure-32_full_frame:
+        zone_id: pressure-32_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-32_watchlist:
+        rule_id: pressure-32_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-32_intrusion:
+        rule_id: pressure-32_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-32_full_frame
+          zone_id: pressure-32_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-32_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  9d375b34-18ac-493d-854e-77589f8ee89f:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_37
+    name: 压力摄像头 38
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-37
+    site_id: pressure
+    zones:
+      pressure-37_full_frame:
+        zone_id: pressure-37_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-37_watchlist:
+        rule_id: pressure-37_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-37_intrusion:
+        rule_id: pressure-37_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-37_full_frame
+          zone_id: pressure-37_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-37_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  acbdd36a-69fb-40d1-8a78-df0ec433f024:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_34
+    name: 压力摄像头 35
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-34
+    site_id: pressure
+    zones:
+      pressure-34_full_frame:
+        zone_id: pressure-34_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-34_watchlist:
+        rule_id: pressure-34_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-34_intrusion:
+        rule_id: pressure-34_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-34_full_frame
+          zone_id: pressure-34_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-34_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  b3ce844d-35dd-4750-b69a-2312d89439b3:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_18
+    name: 压力摄像头 19
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-18
+    site_id: pressure
+    zones:
+      pressure-18_full_frame:
+        zone_id: pressure-18_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-18_watchlist:
+        rule_id: pressure-18_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-18_intrusion:
+        rule_id: pressure-18_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-18_full_frame
+          zone_id: pressure-18_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-18_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  bde30986-ab1e-4016-928c-0f267e1eeb09:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_10
+    name: 压力摄像头 11
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-10
+    site_id: pressure
+    zones:
+      pressure-10_full_frame:
+        zone_id: pressure-10_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-10_watchlist:
+        rule_id: pressure-10_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-10_intrusion:
+        rule_id: pressure-10_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-10_full_frame
+          zone_id: pressure-10_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-10_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  c238dc1b-e09d-424c-8c77-6f54346feb67:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_24
+    name: 压力摄像头 25
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-24
+    site_id: pressure
+    zones:
+      pressure-24_full_frame:
+        zone_id: pressure-24_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-24_watchlist:
+        rule_id: pressure-24_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-24_intrusion:
+        rule_id: pressure-24_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-24_full_frame
+          zone_id: pressure-24_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-24_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  c97160ae-a0a2-45a7-92b4-db6c44c55d9b:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_15
+    name: 压力摄像头 16
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-15
+    site_id: pressure
+    zones:
+      pressure-15_full_frame:
+        zone_id: pressure-15_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-15_watchlist:
+        rule_id: pressure-15_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-15_intrusion:
+        rule_id: pressure-15_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-15_full_frame
+          zone_id: pressure-15_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-15_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  cam_1080movie:
+    enabled: false
+    source_id: source_cam_1080movie
+    name: 1080movie测试
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
     gpu_id: 0
     input_type: rtsp
     rtsp_transport: tcp
@@ -15,149 +2735,76 @@ cameras:
       global_alert_cooldown_s: 30
       store_suppressed_events: true
       suppress_record_request: true
-    location: ccc
+    location: pressure-test
     site_id: lab
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  cbe64543-48d9-4e26-9592-949ed34e53bb:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_12
+    name: 压力摄像头 13
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-12
+    site_id: pressure
     zones:
-      lab_full_frame:
-        zone_id: lab_full_frame
-        zone_type: line
-        type: line
+      pressure-12_full_frame:
+        zone_id: pressure-12_full_frame
+        zone_type: polygon
+        type: polygon
         coordinate_space: pixel
         points:
-        - - 640.0
-          - 360.0
-        - - 992.0
-          - 324.0
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
         enabled: true
     rules:
-      rule_chasing:
-        rule_id: rule_chasing
-        algorithm_id: behavior.chasing
-        rule_type: chasing
-        enabled: true
-        config:
-          zone: lab_full_frame
-          zone_id: lab_full_frame
-          severity: medium
-          cooldown_s: 60
-          behind_cos_min: 0.5
-          min_speed_px_s: 120
-          max_distance_px: 220
-          min_duration_ms: 1200
-          min_cos_alignment: 0.8
-          velocity_window_ms: 700
-          min_pair_duration_s: 1.5
-          min_chase_speed_px_s: 140
-          speed_ratio_tolerance: 0.6
-        zone_id: lab_full_frame
-        evidence_policy:
-          snapshot_required: true
-          clip_required: true
-          pre_seconds: 5
-          post_seconds: 5
-      rule_crowd_gathering:
-        rule_id: rule_crowd_gathering
-        algorithm_id: behavior.crowd_gathering
-        rule_type: crowd_gathering
-        enabled: true
-        config:
-          zone: lab_full_frame
-          eps_px: 180
-          zone_id: lab_full_frame
-          severity: medium
-          cooldown_s: 60
-          min_duration_s: 10
-          require_in_zone: true
-          min_person_count: 5
-          exit_person_count: 3
-        zone_id: lab_full_frame
-        evidence_policy:
-          snapshot_required: true
-          clip_required: true
-          pre_seconds: 5
-          post_seconds: 5
-      rule_face_observation:
-        rule_id: rule_face_observation
-        algorithm_id: face.observation
-        rule_type: face.observation
-        enabled: false
-        config:
-          severity: medium
-          cooldown_s: 60
-          min_quality: 0.6
-          min_face_size: 40
-          min_similarity: 0.75
-          retention_days: 30
-          watchlist_enabled: true
-          live_search_enabled: true
-          min_face_confidence: 0.6
-          reid_min_interval_ms: 1000
-        evidence_policy:
-          snapshot_required: true
-          clip_required: true
-          pre_seconds: 5
-          post_seconds: 5
-      rule_watchlist:
-        rule_id: rule_watchlist
+      pressure-12_watchlist:
+        rule_id: pressure-12_watchlist
         algorithm_id: face.watchlist
         rule_type: face.watchlist
         enabled: true
         config:
           severity: medium
-          threshold: 0.5
-          cooldown_s: 17
+          threshold: 0.6
+          cooldown_s: 60
           target_names:
-          - zr
-          min_similarity: 0.75
-          target_person_ids:
-          - 8
+          - Reese
+          - Finch
+          min_similarity: 0.6
           watchlist_enabled: true
           live_search_enabled: true
           target_external_person_ids:
-          - '3'
+          - demo:midterm:reese
+          - demo:midterm:finch
         evidence_policy:
           snapshot_required: true
-          clip_required: true
+          clip_required: false
           pre_seconds: 5
           post_seconds: 5
-      rule_fall:
-        rule_id: rule_fall
-        algorithm_id: behavior.fall
-        rule_type: fall
-        enabled: true
-        config:
-          zone: lab_full_frame
-          zone_id: lab_full_frame
-          severity: medium
-          cooldown_s: 60
-          min_down_ms: 1500
-          min_static_s: 3
-          keypoint_threshold: 0.25
-          lying_aspect_ratio: 0.85
-          require_transition: true
-          torso_horizontal_deg: 45
-          upright_aspect_ratio: 0.55
-          horizontal_pose_ratio: 1.4
-          min_height_drop_ratio: 0.35
-          min_visible_keypoints: 0
-          head_hip_collapse_ratio: 0.22
-          min_keypoint_confidence: 0.3
-        zone_id: lab_full_frame
-        evidence_policy:
-          snapshot_required: true
-          clip_required: true
-          pre_seconds: 5
-          post_seconds: 5
-      lab_intrusion_rule:
-        rule_id: lab_intrusion_rule
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-12_intrusion:
+        rule_id: pressure-12_intrusion
         algorithm_id: behavior.intrusion
         rule_type: intrusion
         enabled: true
         config:
-          zone: lab_full_frame
-          zone_id: lab_full_frame
+          zone: pressure-12_full_frame
+          zone_id: pressure-12_full_frame
           severity: medium
-          cooldown_s: 30
+          cooldown_s: 60
           clip_required: true
           min_inside_ms: 1000
           min_person_width: 20
@@ -166,49 +2813,609 @@ cameras:
           max_bbox_area_ratio: 0.9
           min_person_confidence: 0.25
           min_visible_keypoints: 0
-        zone_id: lab_full_frame
+        zone_id: pressure-12_full_frame
         evidence_policy:
-          snapshot_required: true
+          snapshot_required: false
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-      rule_loitering:
-        rule_id: rule_loitering
-        algorithm_id: behavior.loitering
-        rule_type: loitering
-        enabled: false
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  ccd16f7c-11e5-4f88-ab44-b0e4199bbc16:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_36
+    name: 压力摄像头 37
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-36
+    site_id: pressure
+    zones:
+      pressure-36_full_frame:
+        zone_id: pressure-36_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-36_watchlist:
+        rule_id: pressure-36_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
         config:
-          zone: lab_full_frame
-          zone_id: lab_full_frame
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-36_intrusion:
+        rule_id: pressure-36_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-36_full_frame
+          zone_id: pressure-36_full_frame
           severity: medium
           cooldown_s: 60
-          min_duration_s: 30
-          max_avg_speed_px_s: 25
-          max_displacement_px: 0
-          max_motion_range_px: 120
-        zone_id: lab_full_frame
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-36_full_frame
         evidence_policy:
-          snapshot_required: true
+          snapshot_required: false
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-      rule_running:
-        rule_id: rule_running
-        algorithm_id: behavior.running
-        rule_type: running
-        enabled: false
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  cdb26059-d2db-4d27-becb-7f97a02a5e5f:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_17
+    name: 压力摄像头 18
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-17
+    site_id: pressure
+    zones:
+      pressure-17_full_frame:
+        zone_id: pressure-17_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-17_watchlist:
+        rule_id: pressure-17_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
         config:
-          zone: lab_full_frame
-          zone_id: lab_full_frame
           severity: medium
-          cooldown_s: 30
-          min_speed_px_s: 180
-          min_duration_ms: 800
-        zone_id: lab_full_frame
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
         evidence_policy:
           snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-17_intrusion:
+        rule_id: pressure-17_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-17_full_frame
+          zone_id: pressure-17_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-17_full_frame
+        evidence_policy:
+          snapshot_required: false
           clip_required: true
           pre_seconds: 5
           post_seconds: 5
-    runtime_epoch_id: midterm-20260710T055816Z-c86fe65b
-runtime_epoch_id: midterm-20260710T055816Z-c86fe65b
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  d5fcd6ec-7376-48fa-922f-9e338c1c2901:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_22
+    name: 压力摄像头 23
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-22
+    site_id: pressure
+    zones:
+      pressure-22_full_frame:
+        zone_id: pressure-22_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-22_watchlist:
+        rule_id: pressure-22_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-22_intrusion:
+        rule_id: pressure-22_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-22_full_frame
+          zone_id: pressure-22_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-22_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  dec87f54-f7f7-43b9-84b2-03a007b62d6b:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_26
+    name: 压力摄像头 27
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-26
+    site_id: pressure
+    zones:
+      pressure-26_full_frame:
+        zone_id: pressure-26_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-26_watchlist:
+        rule_id: pressure-26_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-26_intrusion:
+        rule_id: pressure-26_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-26_full_frame
+          zone_id: pressure-26_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-26_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  e811075e-ea97-4ce2-9528-115c641b0ce2:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_14
+    name: 压力摄像头 15
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-14
+    site_id: pressure
+    zones:
+      pressure-14_full_frame:
+        zone_id: pressure-14_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-14_watchlist:
+        rule_id: pressure-14_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-14_intrusion:
+        rule_id: pressure-14_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-14_full_frame
+          zone_id: pressure-14_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-14_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  f5e03ce4-efdd-4f8d-a370-c32c13a699fc:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_01
+    name: 压力摄像头 02
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-01
+    site_id: pressure
+    zones:
+      pressure-01_full_frame:
+        zone_id: pressure-01_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-01_watchlist:
+        rule_id: pressure-01_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-01_intrusion:
+        rule_id: pressure-01_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-01_full_frame
+          zone_id: pressure-01_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-01_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+  f6c33c55-3585-4647-b47d-a2fa706526fe:
+    enabled: true
+    source_id: prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_27
+    name: 压力摄像头 28
+    rtsp_url: rtsp://192.168.1.105:8554/live/1080movie
+    gpu_id: 0
+    input_type: rtsp
+    rtsp_transport: tcp
+    alert_policy:
+      cooldown_scope: algorithm
+      critical_bypass: false
+      global_alert_cooldown_s: 60
+      store_suppressed_events: true
+    location: pressure-27
+    site_id: pressure
+    zones:
+      pressure-27_full_frame:
+        zone_id: pressure-27_full_frame
+        zone_type: polygon
+        type: polygon
+        coordinate_space: pixel
+        points:
+        - - 0.0
+          - 0.0
+        - - 1920.0
+          - 0.0
+        - - 1920.0
+          - 1080.0
+        - - 0.0
+          - 1080.0
+        enabled: true
+    rules:
+      pressure-27_watchlist:
+        rule_id: pressure-27_watchlist
+        algorithm_id: face.watchlist
+        rule_type: face.watchlist
+        enabled: true
+        config:
+          severity: medium
+          threshold: 0.6
+          cooldown_s: 60
+          target_names:
+          - Reese
+          - Finch
+          min_similarity: 0.6
+          watchlist_enabled: true
+          live_search_enabled: true
+          target_external_person_ids:
+          - demo:midterm:reese
+          - demo:midterm:finch
+        evidence_policy:
+          snapshot_required: true
+          clip_required: false
+          pre_seconds: 5
+          post_seconds: 5
+          evidence_mode: image_only
+          playback_kind: image
+      pressure-27_intrusion:
+        rule_id: pressure-27_intrusion
+        algorithm_id: behavior.intrusion
+        rule_type: intrusion
+        enabled: true
+        config:
+          zone: pressure-27_full_frame
+          zone_id: pressure-27_full_frame
+          severity: medium
+          cooldown_s: 60
+          clip_required: true
+          min_inside_ms: 1000
+          min_person_width: 20
+          min_person_height: 40
+          snapshot_required: false
+          max_bbox_area_ratio: 0.9
+          min_person_confidence: 0.25
+          min_visible_keypoints: 0
+        zone_id: pressure-27_full_frame
+        evidence_policy:
+          snapshot_required: false
+          clip_required: true
+          pre_seconds: 5
+          post_seconds: 5
+          pressure_group_size: 40
+          pressure_group_index: 0
+          pressure_total_seconds: 10
+    runtime_epoch_id: midterm-20260715T105446Z-b7d27c83
+runtime_epoch_id: midterm-20260715T105446Z-b7d27c83

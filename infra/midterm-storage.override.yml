@@ -1,23 +1,92 @@
 services:
+  qdrant:
+    volumes:
+      - /home/user/video-analytics-fast/qdrant-midterm:/qdrant/storage
+
+  postgres:
+    volumes:
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+      - /home/user/video-analytics-fast/postgres-midterm:/var/lib/postgresql/data
+
+  replay-service:
+    volumes:
+      - ../modules/savant_replay/config.midterm.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm:/opt/rocksdb:rw
+
+  replay-a:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-a.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-a:/opt/rocksdb:rw
+
+  replay-b:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-b.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-b:/opt/rocksdb:rw
+
+  replay-c:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-c.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-c:/opt/rocksdb:rw
+
+  replay-d:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-d.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-d:/opt/rocksdb:rw
+
+  replay-e:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-e.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-e:/opt/rocksdb:rw
+
+  replay-f:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-f.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-f:/opt/rocksdb:rw
+
+  replay-g:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-g.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-g:/opt/rocksdb:rw
+
+  replay-h:
+    volumes:
+      - ../modules/savant_replay/config.midterm.replay-h.json:/opt/etc/config.json:ro
+      - /home/user/video-analytics-fast/replay-midterm-h:/opt/rocksdb:rw
+
+  rolling-cache-sink:
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - /home/user/video-analytics-fast/rolling-cache:/media/rolling-cache:rw
+      - /home/user/video-analytics-fast/rolling-cache-materialized:/media/rolling-cache-materialized:rw
+
+  rolling-cache-sink-a:
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - /home/user/video-analytics-fast/rolling-cache:/media/rolling-cache:rw
+      - /home/user/video-analytics-fast/rolling-cache-materialized:/media/rolling-cache-materialized:rw
+
+  rolling-cache-sink-b:
+    volumes:
+      - /data/video-analytics/media:/media:rw
+      - /home/user/video-analytics-fast/rolling-cache:/media/rolling-cache:rw
+      - /home/user/video-analytics-fast/rolling-cache-materialized:/media/rolling-cache-materialized:rw
+
+  media-worker:
+    volumes:
+      - ../services/media-worker:/app:rw
+      - ../libs:/app/libs:ro
+      - ../modules/savant_security/config:/opt/savant/src/module/config:ro
+      - /data/video-analytics/media:/media:rw
+      - /home/user/video-analytics-fast/rolling-cache:/media/rolling-cache:rw
+      - /home/user/video-analytics-fast/rolling-cache-materialized:/media/rolling-cache-materialized:rw
+
   face-worker:
     volumes:
-      - ${FACE_TRAJECTORY_HOST_ROOT:-/data/video-analytics/media/face_trajectories}:/data/video-analytics/media/face_trajectories:rw
+      - /data/video-analytics/media/face_trajectories:/data/video-analytics/media/face_trajectories:rw
+
   api:
     environment:
       FACE_TRAJECTORY_CACHE_ROOT: /data/video-analytics/media/face_trajectory_cache
       FACE_TRAJECTORY_CACHE_LIMIT_PER_PERSON: "100"
     volumes:
-      - ${FACE_TRAJECTORY_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/face_trajectory_cache}:/data/video-analytics/media/face_trajectory_cache:rw
-  rolling-cache-sink:
-    volumes:
-      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
-  rolling-cache-sink-a:
-    volumes:
-      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
-  rolling-cache-sink-b:
-    volumes:
-      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
-  media-worker:
-    volumes:
-      - ${ROLLING_CACHE_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache}:/media/rolling-cache:rw
-      - ${ROLLING_CACHE_MATERIALIZED_HOST_ROOT:-/home/user/video-analytics-fast/rolling-cache-materialized}:/media/rolling-cache-materialized:rw
+      - /home/user/video-analytics-fast/face_trajectory_cache:/data/video-analytics/media/face_trajectory_cache:rw

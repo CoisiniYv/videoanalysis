@@ -293,8 +293,6 @@ def test_t4_profile_defaults_to_validated_roi_evidence_runtime() -> None:
     assert "--media-worker-materialization-max-active 4" in output
     assert "media_worker_rolling_remux_workers=1" in output
     assert "--media-worker-rolling-remux-workers 1" in output
-    assert "media_worker_segment_index_io_concurrency=2" in output
-    assert "--media-worker-segment-index-io-concurrency 2" in output
     assert "preserve_warmup_results=1" in output
     assert "--preserve-warmup-results" in output
 
@@ -331,20 +329,12 @@ def test_4090_stress_profile_defaults_to_validated_local_pipeline() -> None:
 
     output = completed.stdout
     assert "duration_s=600" in output
-    assert "pressure_rolling_cache_retention_s=0" in output
-    assert "--pressure-rolling-cache-retention-s 0" in output
     assert "pressure_algorithm_cooldown_s=30" in output
     assert "pressure_source_start_stagger_s=0.53" in output
     assert "evidence_policy_groups=5:5" in output
     assert "adaface_roi_redis=1" in output
-    assert "media_worker_materialization_max_active=20" in output
-    assert "media_worker_rolling_remux_workers=12" in output
-    assert "media_worker_finalizer_workers=8" in output
-    assert "media_worker_finalizer_process_workers=4" in output
-    assert "media_worker_finalizer_queue_capacity=8" in output
-    assert "media_worker_rolling_max_per_poll=8" in output
-    assert "media_worker_segment_index_io_concurrency=2" in output
-    assert "--media-worker-segment-index-io-concurrency 2" in output
+    assert "media_worker_materialization_max_active=12" in output
+    assert "media_worker_rolling_remux_workers=8" in output
     assert "pressure_pause_redis_rdb=1" in output
     assert "--pressure-pause-redis-rdb" in output
     assert "pressure_tune_postgres_checkpoints=1" in output
@@ -558,226 +548,6 @@ def test_profile_propagates_pressure_algorithm_cooldown() -> None:
     output = completed.stdout
     assert "pressure_algorithm_cooldown_s=30" in output
     assert "--pressure-algorithm-cooldown-s 30" in output
-
-
-def test_profile_propagates_pressure_rolling_cache_retention() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "retention-dry-run",
-            "PRESSURE_ROLLING_CACHE_RETENTION_S": "3840",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert "pressure_rolling_cache_retention_s=3840" in completed.stdout
-    assert "--pressure-rolling-cache-retention-s 3840" in completed.stdout
-
-
-def test_profile_propagates_rolling_cache_publication_workers() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "publication-workers-dry-run",
-            "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert "rolling_cache_publication_workers=2" in completed.stdout
-    assert "--rolling-cache-publication-workers 2" in completed.stdout
-
-
-def test_profile_propagates_rolling_cache_publication_commit_slots() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "publication-commit-slots-dry-run",
-            "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert "rolling_cache_publication_commit_slots=2" in completed.stdout
-    assert "--rolling-cache-publication-commit-slots 2" in completed.stdout
-
-
-def test_profile_propagates_rolling_cache_publication_final_parent_group_limit() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "publication-final-parent-group-dry-run",
-            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "16",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert (
-        "rolling_cache_publication_final_parent_group_limit=16"
-        in completed.stdout
-    )
-    assert (
-        "--rolling-cache-publication-final-parent-group-limit 16"
-        in completed.stdout
-    )
-
-
-def test_profile_propagates_rolling_cache_publication_file_sync_mode() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "publication-file-sync-dry-run",
-            "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert "rolling_cache_publication_file_sync_mode=fdatasync" in completed.stdout
-    assert (
-        "--rolling-cache-publication-file-sync-mode fdatasync"
-        in completed.stdout
-    )
-
-
-def test_profile_propagates_rolling_cache_publication_metadata_layout() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "publication-metadata-layout-dry-run",
-            "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "metadata_only",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert (
-        "rolling_cache_publication_metadata_layout=metadata_only"
-        in completed.stdout
-    )
-    assert (
-        "--rolling-cache-publication-metadata-layout metadata_only"
-        in completed.stdout
-    )
-
-
-def test_pressure_cli_bounds_rolling_cache_publication_workers() -> None:
-    module = _load_module()
-
-    assert module.parse_args([]).rolling_cache_publication_workers == 1
-    assert (
-        module.parse_args(
-            ["--rolling-cache-publication-workers", "2"]
-        ).rolling_cache_publication_workers
-        == 2
-    )
-    with pytest.raises(SystemExit):
-        module.parse_args(["--rolling-cache-publication-workers", "5"])
-
-
-def test_pressure_cli_bounds_rolling_cache_publication_commit_slots() -> None:
-    module = _load_module()
-
-    assert module.parse_args([]).rolling_cache_publication_commit_slots == 0
-    assert (
-        module.parse_args(
-            ["--rolling-cache-publication-commit-slots", "2"]
-        ).rolling_cache_publication_commit_slots
-        == 2
-    )
-    with pytest.raises(SystemExit):
-        module.parse_args(["--rolling-cache-publication-commit-slots", "5"])
-    with pytest.raises(SystemExit):
-        module.parse_args(["--rolling-cache-publication-commit-slots", "-1"])
-
-
-def test_pressure_cli_bounds_rolling_cache_publication_final_parent_group_limit() -> None:
-    module = _load_module()
-
-    assert (
-        module.parse_args([]).rolling_cache_publication_final_parent_group_limit
-        == 1
-    )
-    assert (
-        module.parse_args(
-            ["--rolling-cache-publication-final-parent-group-limit", "16"]
-        ).rolling_cache_publication_final_parent_group_limit
-        == 16
-    )
-    with pytest.raises(SystemExit):
-        module.parse_args(
-            ["--rolling-cache-publication-final-parent-group-limit", "0"]
-        )
-    with pytest.raises(SystemExit):
-        module.parse_args(
-            ["--rolling-cache-publication-final-parent-group-limit", "33"]
-        )
-
-
-def test_pressure_cli_bounds_rolling_cache_publication_file_sync_mode() -> None:
-    module = _load_module()
-
-    assert module.parse_args([]).rolling_cache_publication_file_sync_mode == "fsync"
-    assert (
-        module.parse_args(
-            ["--rolling-cache-publication-file-sync-mode", "fdatasync"]
-        ).rolling_cache_publication_file_sync_mode
-        == "fdatasync"
-    )
-    with pytest.raises(SystemExit):
-        module.parse_args(
-            ["--rolling-cache-publication-file-sync-mode", "syncfs"]
-        )
-
-
-def test_pressure_cli_bounds_rolling_cache_publication_metadata_layout() -> None:
-    module = _load_module()
-
-    assert module.parse_args([]).rolling_cache_publication_metadata_layout == "split"
-    assert (
-        module.parse_args(
-            ["--rolling-cache-publication-metadata-layout", "single_inode"]
-        ).rolling_cache_publication_metadata_layout
-        == "single_inode"
-    )
-    assert (
-        module.parse_args(
-            ["--rolling-cache-publication-metadata-layout", "metadata_only"]
-        ).rolling_cache_publication_metadata_layout
-        == "metadata_only"
-    )
-    with pytest.raises(SystemExit):
-        module.parse_args(
-            ["--rolling-cache-publication-metadata-layout", "syncfs"]
-        )
 
 
 def test_profile_defaults_to_run_scoped_rtsp_server_for_fixed_input() -> None:
@@ -1236,59 +1006,11 @@ def test_pressure_runner_exposes_media_worker_capacity_candidates() -> None:
             "12",
             "--media-worker-rolling-remux-workers",
             "4",
-            "--media-worker-segment-index-io-concurrency",
-            "3",
-            "--media-worker-db-index-io-concurrency",
-            "1",
         ]
     )
 
     assert parsed.media_worker_materialization_max_active == 12
     assert parsed.media_worker_rolling_remux_workers == 4
-    assert parsed.media_worker_segment_index_io_concurrency == 3
-    assert parsed.media_worker_db_index_io_concurrency == 1
-
-
-def test_pressure_runner_rejects_nonpositive_segment_index_io_concurrency() -> None:
-    module = _load_module()
-
-    with pytest.raises(
-        SystemExit,
-        match="--media-worker-segment-index-io-concurrency must be positive",
-    ):
-        module.main(["--media-worker-segment-index-io-concurrency", "0"])
-
-
-def test_pressure_runner_rejects_negative_db_index_io_concurrency() -> None:
-    module = _load_module()
-
-    with pytest.raises(
-        SystemExit,
-        match="--media-worker-db-index-io-concurrency must be non-negative",
-    ):
-        module.main(["--media-worker-db-index-io-concurrency", "-1"])
-
-
-def test_4090_profile_allows_one_dimension_index_io_override() -> None:
-    completed = subprocess.run(
-        ["bash", str(PROFILE_SCRIPT), "8fps-stress"],
-        cwd=ROOT.parent,
-        env={
-            **os.environ,
-            "DRY_RUN": "1",
-            "RUN_ID": "io-concurrency-dry-run",
-            "MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY": "3",
-            "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY": "1",
-        },
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-
-    assert "media_worker_segment_index_io_concurrency=3" in completed.stdout
-    assert "--media-worker-segment-index-io-concurrency 3" in completed.stdout
-    assert "media_worker_db_index_io_concurrency=1" in completed.stdout
-    assert "--media-worker-db-index-io-concurrency 1" in completed.stdout
 
 
 def test_pressure_runner_defaults_to_high_density_acceptance_window() -> None:
@@ -1337,21 +1059,6 @@ def test_rolling_cache_pressure_indexes_db_timeline_and_overlays() -> None:
 
     assert '"EVIDENCE_DB_INDEX_EXPANDED_ROWS_ENABLED": "true"' in source
     assert "timeline rows, overlay rows" in source
-
-
-def test_pressure_artifact_captures_finalizer_db_index_gate_wait_and_peak() -> None:
-    source = SCRIPT.read_text(encoding="utf-8")
-
-    for field in (
-        "finalizer_db_index_gate_wait_ms",
-        "finalizer_db_index_gate_service_ms",
-        "db_index_io_gate_limit",
-        "db_index_io_gate_active",
-        "db_index_io_gate_active_peak",
-        "db_index_io_gate_wait_ms_total",
-        "db_index_io_gate_wait_events_total",
-    ):
-        assert field in source
 
 
 def test_rolling_cache_pressure_sets_fast_ready_poll_interval() -> None:
@@ -1403,8 +1110,6 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
         rolling_cache_prefill_s=25,
         media_worker_materialization_max_active=12,
         media_worker_rolling_remux_workers=8,
-        media_worker_segment_index_io_concurrency=3,
-        media_worker_db_index_io_concurrency=1,
     )
     captured: dict[str, dict[str, str]] = {}
 
@@ -1436,9 +1141,6 @@ def test_rolling_cache_pressure_fixes_lane_capacity_around_wip_candidate(
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ENABLED"] == "true"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S"] == "60"
     assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES"] == "2048"
-    assert values["MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES"] == "268435456"
-    assert values["MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY"] == "3"
-    assert values["MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"] == "1"
     assert values["MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED"] == "false"
     assert values["ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL"] == "4"
     event_values = captured["compose_recreate_event_worker_rolling_cache.log"]
@@ -2227,118 +1929,6 @@ def test_rolling_cache_segment_visibility_accepts_jsonl_metadata(
     assert summary["metadata_visible_lag_s"]["p50"] == 0.5
 
 
-def test_rolling_cache_segment_visibility_attributes_tail_by_source_and_time_bucket(
-    tmp_path: Path,
-) -> None:
-    module = _load_module()
-    cfg = _config(module, run_id="rolling_canary")
-    base_pts = 1_783_329_600_000_000_000
-
-    def write_segment(source_id: str, segment_id: str, last_pts: int, lag_s: float) -> None:
-        metadata_path = (
-            tmp_path
-            / "midterm"
-            / "epochs"
-            / "epoch-a"
-            / source_id
-            / "segments"
-            / segment_id
-            / "metadata.json"
-        )
-        metadata_path.parent.mkdir(parents=True)
-        metadata_path.write_text(
-            json.dumps(
-                {
-                    "frames": [
-                        {"type": "VideoFrame", "pts": last_pts - 1_000_000_000},
-                        {"type": "VideoFrame", "pts": last_pts},
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        visible_at_s = last_pts / 1_000_000_000 + lag_s
-        os.utime(metadata_path, (visible_at_s, visible_at_s))
-
-    write_segment("rolling_canary_00", "0001", base_pts, 0.5)
-    write_segment(
-        "rolling_canary_00",
-        "0002",
-        base_pts + 31_000_000_000,
-        3.0,
-    )
-    write_segment(
-        "rolling_canary_01",
-        "0003",
-        base_pts + 32_000_000_000,
-        12.0,
-    )
-
-    summary = module.collect_rolling_cache_segment_visibility(cfg, root=tmp_path)
-
-    assert summary["metadata_visible_lag_s_by_source"]["rolling_canary_00"][
-        "count"
-    ] == 2
-    assert summary["metadata_visible_lag_s_by_source"]["rolling_canary_01"][
-        "p95"
-    ] == 12.0
-    assert summary["metadata_visible_lag_threshold_counts"] == {
-        "over_2s": 2,
-        "over_5s": 1,
-        "over_10s": 1,
-    }
-    buckets = summary["metadata_visible_lag_s_by_visible_at_30s"]
-    assert sum(item["segment_count"] for item in buckets) == 3
-    assert summary["slowest_segments"][0]["source_id"] == "rolling_canary_01"
-    assert summary["slowest_segments"][0]["segment_id"] == "0003"
-    assert summary["slowest_segments"][0]["lag_s"] == 12.0
-
-
-def test_rolling_schedule_latency_summary_separates_policy_first_claim_and_retry() -> None:
-    module = _load_module()
-
-    class Result:
-        def fetchone(self):
-            return {
-                "count": 1007,
-                "retry_count": 54,
-                "policy_wait_p50_s": 14.0,
-                "policy_wait_p95_s": 14.0,
-                "ready_to_claim_count": 1007,
-                "ready_to_claim_p50_s": 0.6,
-                "ready_to_claim_p95_s": 12.0,
-                "first_claim_count": 953,
-                "first_claim_ready_to_claim_p95_s": 4.0,
-                "retried_claim_count": 54,
-                "retried_ready_to_claim_p95_s": 19.0,
-                "retry_delay_p95_s": 2.2,
-            }
-
-    class Conn:
-        def __init__(self) -> None:
-            self.query = ""
-
-        def execute(self, query, _params):
-            self.query = " ".join(query.split())
-            return Result()
-
-    conn = Conn()
-    summary = module.rolling_cache_schedule_latency_summary(
-        conn,
-        "rolling_canary",
-        sampling_start_event_ts_ms=123,
-    )
-
-    assert summary["status"] == "measured"
-    assert summary["policy_wait_p95_s"] == 14.0
-    assert summary["first_claim_ready_to_claim_p95_s"] == 4.0
-    assert summary["retried_ready_to_claim_p95_s"] == 19.0
-    assert "lifecycle_v2_claim" in conn.query
-    assert "lifecycle_v2_retry" in conn.query
-    assert "materialization_attempt_count = 1" in conn.query
-    assert "materialization_attempt_count > 1" in conn.query
-
-
 def test_rolling_cache_segment_visibility_tolerates_retention_race(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2379,53 +1969,6 @@ def test_rolling_cache_segment_visibility_tolerates_retention_race(
 
     assert summary["metadata_files_vanished"] == 1
     assert summary["metadata_visible_lag_s"]["status"] == "not_enough_data"
-
-
-def test_rolling_cache_segment_visibility_tolerates_discovery_directory_race(
-    tmp_path: Path, monkeypatch
-) -> None:
-    module = _load_module()
-    cfg = _config(module, run_id="rolling_canary")
-    metadata_path = (
-        tmp_path
-        / "midterm"
-        / "epochs"
-        / "epoch-a"
-        / "rolling_canary_00"
-        / "segments"
-        / "0001"
-        / "metadata.json"
-    )
-    metadata_path.parent.mkdir(parents=True)
-    first_pts = 1_783_329_600_000_000_000
-    last_pts = first_pts + 1_000_000_000
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "frames": [
-                    {"type": "VideoFrame", "pts": first_pts},
-                    {"type": "VideoFrame", "pts": last_pts},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    visible_at_s = last_pts / 1_000_000_000 + 0.5
-    os.utime(metadata_path, (visible_at_s, visible_at_s))
-    walk_calls: list[Path] = []
-
-    def retention_racing_walk(root, *, topdown, onerror):
-        walk_calls.append(Path(root))
-        onerror(FileNotFoundError(2, "retention removed directory", "gone"))
-        yield str(metadata_path.parent), [], [metadata_path.name]
-
-    monkeypatch.setattr(module.os, "walk", retention_racing_walk)
-
-    summary = module.collect_rolling_cache_segment_visibility(cfg, root=tmp_path)
-
-    assert walk_calls == [tmp_path]
-    assert summary["metadata_files_vanished"] == 1
-    assert summary["metadata_visible_lag_s"]["p50"] == 0.5
 
 
 def test_rolling_cache_full_rate_gate_requires_all_sources_and_fps() -> None:
@@ -2525,68 +2068,6 @@ def test_rolling_cache_pressure_requires_all_evidence_retained() -> None:
     reasons = module.pressure_failure_reasons(cfg, [], diagnostics)
 
     assert "rolling_cache_acceptance_must_keep_all_evidence" in reasons
-
-
-def test_rolling_cache_pressure_gates_fenced_handoff_and_residual_state() -> None:
-    module = _load_module()
-    cfg = _config(module, rolling_cache_evidence=True, keep_evidence=-1)
-    diagnostics = {
-        "sample_summary": {
-            "max_forwarder_sources": 2,
-            "max_savant_sources": 2,
-            "max_savant_send_failures_delta": 0,
-            "max_raw_forwarder_frames_dropped_total": 0,
-            "max_raw_forwarder_send_failures_total": 0,
-            "queue_full_samples": 0,
-            "steady_effective_fps_sample_count": 1,
-            "steady_effective_fps_meets_minimum": True,
-        },
-        "source_containers": {
-            "exited": 0,
-            "restart_count_total": 0,
-            "negative_pts_error_total": 0,
-        },
-        "log_summary": {
-            "savant": {"validate_seq_iq": 0},
-            "replay_raw_fanout": {},
-            "media_worker": {
-                "media_handoff_recovered_total": 1,
-                "media_finalizer_immediate_admission_gap": 2,
-                "media_scheduler_finalizer_handoff_retry_total": {"max": 1},
-                "media_scheduler_finalizer_handoff_retry_failed": {"max": 1},
-                "media_scheduler_permit_active_last": 1.0,
-                "media_scheduler_finalizer_lane_depth_last": 1.0,
-                "media_scheduler_finalizer_pending_leased_last": 1.0,
-            },
-        },
-    }
-    db_before_cleanup = {
-        "events": 1,
-        "distinct_events_with_playable_evidence": 1,
-        "distinct_events_with_terminal_nonplayable_outcome": 0,
-        "blocking_materialization_tasks": 0,
-        "expired_without_attempt_tasks": 1,
-        "active_materialization_leases": 1,
-        "finalizer_pending_tasks": 1,
-        "task_statuses": [],
-    }
-
-    reasons = module.pressure_failure_reasons(
-        cfg,
-        [],
-        diagnostics,
-        db_before_cleanup=db_before_cleanup,
-    )
-
-    assert "finalizer_handoff_lease_expiry_recovery_present" in reasons
-    assert "finalizer_handoff_fenced_retry_failed" in reasons
-    assert "finalizer_admission_gap_unaccounted" in reasons
-    assert "materialization_expired_without_remux_attempt" in reasons
-    assert "materialization_residual_lease_present" in reasons
-    assert "finalizer_pending_residual_present" in reasons
-    assert "materialization_wip_residual_present" in reasons
-    assert "finalizer_lane_residual_present" in reasons
-    assert "finalizer_pending_leased_residual_present" in reasons
 
 
 def test_rolling_cache_8090_annotation_gate_rejects_unchecked_annotations() -> None:
@@ -6365,239 +5846,6 @@ def test_stop_rolling_cache_sinks_before_pressure_reconfigure_stops_dual_sinks(
     assert summary["services"] == ["rolling-cache-sink-a", "rolling-cache-sink-b"]
 
 
-def test_restore_rolling_cache_sinks_recreates_stopped_services_from_daily_compose(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module = _load_module()
-    cfg = _config(
-        module,
-        artifact_dir=tmp_path,
-        dual_shard_same_gpu=True,
-        rolling_cache_evidence=True,
-        rolling_cache_publication_metadata_layout="single_inode",
-    )
-    calls = []
-
-    monkeypatch.setattr(
-        module,
-        "run",
-        lambda command, log_path, **kwargs: calls.append(
-            {"command": command, "log_path": log_path, "kwargs": kwargs}
-        ),
-    )
-    monkeypatch.setattr(
-        module,
-        "rolling_cache_sink_state_snapshot",
-        lambda: {
-            "rolling-cache-sink-a": {"running": False, "status": "created"},
-            "rolling-cache-sink-b": {"running": False, "status": "created"},
-        },
-    )
-    daily_env = dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
-    monkeypatch.setattr(module, "docker_container_env", lambda _name: daily_env)
-
-    summary = module.restore_rolling_cache_sinks_after_pressure(
-        cfg,
-        original_states={
-            "rolling-cache-sink-a": {"running": False, "status": "exited"},
-            "rolling-cache-sink-b": {"running": False, "status": "exited"},
-        },
-        artifact_name="compose_restore_rolling_cache_sinks.log",
-    )
-
-    assert len(calls) == 1
-    command = calls[0]["command"]
-    assert command[-2:] == ["rolling-cache-sink-a", "rolling-cache-sink-b"]
-    assert "up" in command
-    assert "--no-start" in command
-    assert "--no-deps" in command
-    assert "--force-recreate" in command
-    assert "--no-build" in command
-    assert "stop" not in command
-    assert calls[0]["kwargs"]["check"] is True
-    assert summary["recreated_stopped"] == [
-        "rolling-cache-sink-a",
-        "rolling-cache-sink-b",
-    ]
-
-
-def test_restore_rolling_cache_sinks_sanitizes_pressure_shell_env_and_verifies_daily_config(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module = _load_module()
-    cfg = _config(
-        module,
-        artifact_dir=tmp_path,
-        dual_shard_same_gpu=True,
-        rolling_cache_evidence=True,
-        rolling_cache_publication_workers=2,
-        rolling_cache_publication_commit_slots=2,
-        rolling_cache_publication_final_parent_group_limit=16,
-        rolling_cache_publication_file_sync_mode="fdatasync",
-        rolling_cache_publication_metadata_layout="metadata_only",
-        pressure_rolling_cache_retention_s=3840,
-    )
-    pressure_env = {
-        "ROLLING_CACHE_ROOT": "/media/rolling-cache-pressure",
-        "ROLLING_CACHE_SEGMENT_SECONDS": "8",
-        "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
-        "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
-        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "16",
-        "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
-        "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "metadata_only",
-        "ROLLING_CACHE_FPS": "23.976024",
-        "ROLLING_CACHE_RUNTIME_EPOCH_ID": "pressure-epoch",
-        "ROLLING_CACHE_RETENTION_SECONDS": "3840",
-    }
-    daily_env = {
-        "ROLLING_CACHE_ROOT": "/media/rolling-cache",
-        "ROLLING_CACHE_SEGMENT_SECONDS": "4",
-        "ROLLING_CACHE_PUBLICATION_WORKERS": "1",
-        "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "0",
-        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "1",
-        "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fsync",
-        "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "split",
-        "ROLLING_CACHE_FPS": "24",
-        "ROLLING_CACHE_RUNTIME_EPOCH_ID": "",
-        "ROLLING_CACHE_RETENTION_SECONDS": "300",
-    }
-    calls = []
-    for key, value in pressure_env.items():
-        monkeypatch.setenv(key, value)
-
-    monkeypatch.setattr(
-        module,
-        "run",
-        lambda command, log_path, **kwargs: calls.append(
-            {"command": command, "log_path": log_path, "kwargs": kwargs}
-        ),
-    )
-    monkeypatch.setattr(
-        module,
-        "rolling_cache_sink_state_snapshot",
-        lambda: {
-            "rolling-cache-sink-a": {"running": False, "status": "created"},
-            "rolling-cache-sink-b": {"running": False, "status": "created"},
-        },
-    )
-    monkeypatch.setattr(module, "docker_container_env", lambda _name: daily_env)
-
-    summary = module.restore_rolling_cache_sinks_after_pressure(
-        cfg,
-        original_states={
-            "rolling-cache-sink-a": {"running": False, "status": "exited"},
-            "rolling-cache-sink-b": {"running": False, "status": "exited"},
-        },
-        artifact_name="compose_restore_rolling_cache_sinks.log",
-    )
-
-    assert len(calls) == 1
-    restore_env = calls[0]["kwargs"]["env"]
-    for key in pressure_env:
-        assert key not in restore_env
-    assert summary["daily_expected_env"] == daily_env
-    assert summary["restored_env"] == {
-        "rolling-cache-sink-a": daily_env,
-        "rolling-cache-sink-b": daily_env,
-    }
-    assert summary["env_mismatches"] == {}
-
-
-def test_restore_rolling_cache_sinks_fails_on_daily_env_mismatch(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module = _load_module()
-    cfg = _config(
-        module,
-        artifact_dir=tmp_path,
-        dual_shard_same_gpu=True,
-        rolling_cache_evidence=True,
-    )
-    observed_env = dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
-    observed_env["ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"] = "metadata_only"
-
-    monkeypatch.setattr(module, "run", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        module,
-        "rolling_cache_sink_state_snapshot",
-        lambda: {
-            "rolling-cache-sink-a": {"running": False, "status": "created"},
-            "rolling-cache-sink-b": {"running": False, "status": "created"},
-        },
-    )
-    monkeypatch.setattr(
-        module, "docker_container_env", lambda _name: observed_env
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT",
-    ):
-        module.restore_rolling_cache_sinks_after_pressure(
-            cfg,
-            original_states={
-                "rolling-cache-sink-a": {"running": False, "status": "exited"},
-                "rolling-cache-sink-b": {"running": False, "status": "exited"},
-            },
-            artifact_name="compose_restore_rolling_cache_sinks.log",
-        )
-
-
-def test_restore_rolling_cache_sinks_restarts_only_originally_running_services(
-    monkeypatch, tmp_path: Path
-) -> None:
-    module = _load_module()
-    cfg = _config(
-        module,
-        artifact_dir=tmp_path,
-        dual_shard_same_gpu=True,
-        rolling_cache_evidence=True,
-    )
-    calls = []
-
-    monkeypatch.setattr(
-        module,
-        "run",
-        lambda command, log_path, **kwargs: calls.append(
-            {"command": command, "log_path": log_path, "kwargs": kwargs}
-        ),
-    )
-    monkeypatch.setattr(
-        module,
-        "rolling_cache_sink_state_snapshot",
-        lambda: {
-            "rolling-cache-sink-a": {"running": True, "status": "running"},
-            "rolling-cache-sink-b": {"running": False, "status": "created"},
-        },
-    )
-    daily_env = dict(module.ROLLING_CACHE_SINK_COMPOSE_ENV_DEFAULTS)
-    monkeypatch.setattr(module, "docker_container_env", lambda _name: daily_env)
-
-    summary = module.restore_rolling_cache_sinks_after_pressure(
-        cfg,
-        original_states={
-            "rolling-cache-sink-a": {"running": True, "status": "running"},
-            "rolling-cache-sink-b": {"running": False, "status": "exited"},
-        },
-        artifact_name="compose_restore_rolling_cache_sinks.log",
-    )
-
-    assert len(calls) == 2
-    running_command = next(
-        item["command"] for item in calls if "rolling-cache-sink-a" in item["command"]
-    )
-    stopped_command = next(
-        item["command"] for item in calls if "rolling-cache-sink-b" in item["command"]
-    )
-    assert "up" in running_command
-    assert "-d" in running_command
-    assert "--no-start" not in running_command
-    assert "up" in stopped_command
-    assert "--no-start" in stopped_command
-    assert summary["restarted_running"] == ["rolling-cache-sink-a"]
-    assert summary["recreated_stopped"] == ["rolling-cache-sink-b"]
-
-
 def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path: Path) -> None:
     module = _load_module()
     cfg = _config(
@@ -6605,11 +5853,6 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
         artifact_dir=tmp_path,
         dual_shard_same_gpu=True,
         rolling_cache_evidence=True,
-        rolling_cache_publication_workers=2,
-        rolling_cache_publication_commit_slots=2,
-        rolling_cache_publication_final_parent_group_limit=16,
-        rolling_cache_publication_file_sync_mode="fdatasync",
-        rolling_cache_publication_metadata_layout="metadata_only",
         rtsp_uri="rtsp://shared.example/live/24fps",
         rtsp_republish_input_uri="/fixtures/fixed-8fps.mp4",
     )
@@ -6629,14 +5872,7 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     monkeypatch.setattr(
         module,
         "docker_container_env",
-        lambda _name: {
-            "ROLLING_CACHE_RETENTION_SECONDS": str(expected_retention),
-            "ROLLING_CACHE_PUBLICATION_WORKERS": "2",
-            "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS": "2",
-            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT": "16",
-            "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE": "fdatasync",
-            "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT": "metadata_only",
-        },
+        lambda _name: {"ROLLING_CACHE_RETENTION_SECONDS": str(expected_retention)},
     )
     monkeypatch.setattr(
         module,
@@ -6657,50 +5893,14 @@ def test_start_rolling_cache_sinks_passes_runtime_epoch_id(monkeypatch, tmp_path
     assert calls[0]["env"]["ROLLING_CACHE_RETENTION_SECONDS"] == str(
         expected_retention
     )
-    assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_WORKERS"] == "2"
-    assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS"] == "2"
-    assert calls[0]["env"][
-        "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT"
-    ] == "16"
-    assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"] == (
-        "fdatasync"
-    )
-    assert calls[0]["env"]["ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"] == (
-        "metadata_only"
-    )
     assert summary["runtime_epoch_id"] == "midterm-epoch-123"
     assert summary["rolling_cache_expected_raw_fps"] == 8.0
     assert summary["rolling_cache_retention_seconds"] == expected_retention
-    assert summary["rolling_cache_publication_workers"] == 2
-    assert summary["rolling_cache_publication_commit_slots"] == 2
-    assert summary["rolling_cache_publication_final_parent_group_limit"] == 16
-    assert summary["rolling_cache_publication_file_sync_mode"] == "fdatasync"
-    assert summary["rolling_cache_publication_metadata_layout"] == "metadata_only"
     assert summary["dependency_services"] == [
         "replay-raw-fanout-a",
         "replay-raw-fanout-b",
     ]
     assert summary["missing_dependencies"] == []
-
-
-def test_pressure_rolling_cache_retention_supports_controlled_override() -> None:
-    module = _load_module()
-
-    daily = _config(
-        module,
-        duration_s=600,
-        drain_s=120,
-        pressure_rolling_cache_retention_s=300,
-    )
-    endurance = _config(
-        module,
-        duration_s=600,
-        drain_s=120,
-        pressure_rolling_cache_retention_s=3840,
-    )
-
-    assert module.pressure_rolling_cache_retention_seconds(daily) == 300
-    assert module.pressure_rolling_cache_retention_seconds(endurance) == 3840
 
 
 def test_start_rolling_cache_sinks_fails_when_dual_raw_fanout_missing(
@@ -6755,25 +5955,15 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
     monkeypatch.setattr(
         module,
         "write_combined_docker_logs",
-        lambda containers, path, since=None, **kwargs: combined.append(
-            {
-                "containers": containers,
-                "path": path,
-                "since": since,
-                **kwargs,
-            }
+        lambda containers, path, since=None: combined.append(
+            {"containers": containers, "path": path, "since": since}
         ),
     )
     monkeypatch.setattr(
         module,
         "run",
         lambda command, path, check=False, **kwargs: runs.append(
-            {
-                "command": command,
-                "path": path,
-                "check": check,
-                **kwargs,
-            }
+            {"command": command, "path": path, "check": check}
         ),
     )
 
@@ -6785,16 +5975,6 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
     commands = [" ".join(item["command"]) for item in runs]
     assert any("video-analytics-midterm-rolling-cache-sink-a" in item for item in commands)
     assert any("video-analytics-midterm-rolling-cache-sink-b" in item for item in commands)
-    assert all("--until" in item["command"] for item in runs)
-    assert all(
-        item["timeout_s"] == module.DOCKER_RUNTIME_LOG_TIMEOUT_S
-        for item in runs
-    )
-    until_values = {
-        item["command"][item["command"].index("--until") + 1]
-        for item in runs
-    }
-    assert len(until_values) == 1
     assert any(
         item["containers"]
         == [
@@ -6802,101 +5982,8 @@ def test_capture_runtime_logs_includes_rolling_cache_sinks(monkeypatch, tmp_path
             "video-analytics-midterm-replay-raw-fanout-b",
         ]
         and item["path"].name == "replay_raw_fanout_logs_since_start.txt"
-        and item["until"] in until_values
-        and item["timeout_s"] == module.DOCKER_RUNTIME_LOG_TIMEOUT_S
         for item in combined
     )
-
-
-def test_sample_runtime_closes_window_without_synchronous_log_capture() -> None:
-    source = SCRIPT.read_text(encoding="utf-8")
-    function_start = source.index("def sample_runtime(")
-    function_end = source.index("def _forwarder_queue_metrics_urls(", function_start)
-    function_source = source[function_start:function_end]
-
-    assert "capture_runtime_logs_since_start" not in function_source
-    assert '"ended_at": datetime.now(timezone.utc).isoformat()' in function_source
-
-
-def test_run_preserves_partial_output_when_nonfatal_command_times_out(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    module = _load_module()
-    command = ["docker", "logs", "worker"]
-
-    def timed_out(actual_command, **kwargs):
-        assert actual_command == command
-        assert kwargs["timeout"] == 1.25
-        raise subprocess.TimeoutExpired(
-            actual_command,
-            kwargs["timeout"],
-            output=b"partial runtime log\n",
-        )
-
-    monkeypatch.setattr(module.subprocess, "run", timed_out)
-    log_path = tmp_path / "runtime.log"
-
-    completed = module.run(
-        command,
-        log_path,
-        check=False,
-        timeout_s=1.25,
-    )
-
-    assert completed.returncode == 124
-    assert "partial runtime log" in completed.stdout
-    assert "timed out after 1.25s" in completed.stdout
-    assert log_path.read_text(encoding="utf-8") == completed.stdout
-
-
-def test_combined_docker_logs_use_fixed_end_and_bound_each_container(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    module = _load_module()
-    calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
-        assert kwargs["timeout"] == 2.5
-        if command[-1] == "worker-a":
-            raise subprocess.TimeoutExpired(
-                command,
-                kwargs["timeout"],
-                output=b"partial-a\n",
-            )
-        return subprocess.CompletedProcess(command, 0, stdout="complete-b\n")
-
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    log_path = tmp_path / "combined.log"
-
-    module.write_combined_docker_logs(
-        ["worker-a", "worker-b"],
-        log_path,
-        since="2026-07-21T14:00:00Z",
-        until="2026-07-21T14:10:00Z",
-        timeout_s=2.5,
-    )
-
-    assert len(calls) == 2
-    assert all(
-        call[0][1:5]
-        == [
-            "logs",
-            "--since",
-            "2026-07-21T14:00:00Z",
-            "--until",
-        ]
-        and call[0][5] == "2026-07-21T14:10:00Z"
-        for call in calls
-    )
-    output = log_path.read_text(encoding="utf-8")
-    assert "worker-a rc=124" in output
-    assert "partial-a" in output
-    assert "timed out after 2.5s" in output
-    assert "worker-b rc=0" in output
-    assert "complete-b" in output
 
 
 def test_compose_exposes_runtime_epoch_override_for_rolling_cache_sinks() -> None:
@@ -6945,15 +6032,6 @@ def test_downstream_observability_schema_accepts_explicit_not_enough_data() -> N
             "sink_stable_to_ffprobe_ready_ms": module._not_enough_data("synthetic"),
             "sink_ffprobe_ready_to_finalizer_start_ms": module._not_enough_data("synthetic"),
             "finalizer_pool_wait_ms": module._not_enough_data("synthetic"),
-            "finalizer_lane": module._not_enough_data("synthetic"),
-            "ready_to_remux_claim_ms": module._not_enough_data("synthetic"),
-            "remux_ms": module._not_enough_data("synthetic"),
-            "remux_exec_ms": module._not_enough_data("synthetic"),
-            "remux_total_ms": module._not_enough_data("synthetic"),
-            "segment_index_job": module._not_enough_data("synthetic"),
-            "handoff_to_finalizer_admission_ms": module._not_enough_data(
-                "synthetic"
-            ),
             "queue_wait_ms_by_source": {},
             "queue_wait_ms_by_shard": {},
             "duplicate_materialization_count": 0,
@@ -7108,25 +6186,6 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_stable_to_ffprobe_ready_ms=40 "
                 "sink_ffprobe_ready_to_finalizer_start_ms=3 "
                 "finalizer_pool_wait_ms=4 "
-                "ready_to_remux_claim_ms=12 remux_ms=800 remux_exec_ms=800 "
-                "remux_total_ms=1800 remux_metadata_publish_ms=200 "
-                "remux_metadata_bytes=10000 remux_metadata_reload_ms=100 "
-                "remux_handoff_build_ms=50 remux_unattributed_ms=25 "
-                "segment_index_io_slot_wait_ms=100.5 "
-                "segment_index_lock_wait_ms=400.5 "
-                "segment_index_lock_hold_ms=700.5 segment_index_refresh_ms=650 "
-                "segment_index_rebuild_ms=0 segment_index_stat_ms=200 "
-                "segment_index_full_row_parse_ms=300 "
-                "segment_index_manifest_parse_ms=0 segment_index_sort_ms=10 "
-                "segment_index_mutation_lock_wait_ms=2 "
-                "segment_index_pin_publish_ms=4 segment_index_pin_release_ms=1 "
-                "segment_index_publication_read_ms=6 "
-                "segment_index_pinned_segments=4 "
-                "segment_index_publication_records=2 "
-                "segment_index_publication_bytes=1000 "
-                "segment_index_publication_errors=0 "
-                "segment_index_publication_reconciles=0 "
-                "handoff_to_finalizer_admission_ms=3 "
                 "throttle_sleep_s=2.0 throttle_reason=paced deadline_slack_s=210.5 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=20 ffmpeg_invocations=1 ffmpeg_duration_ms=80 "
@@ -7142,91 +6201,19 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "sink_stable_to_ffprobe_ready_ms=60 "
                 "sink_ffprobe_ready_to_finalizer_start_ms=4 "
                 "finalizer_pool_wait_ms=6 "
-                "ready_to_remux_claim_ms=22 remux_ms=900 remux_exec_ms=900 "
-                "remux_total_ms=2100 remux_metadata_publish_ms=300 "
-                "remux_metadata_bytes=15000 remux_metadata_reload_ms=150 "
-                "remux_handoff_build_ms=60 remux_unattributed_ms=35 "
-                "segment_index_io_slot_wait_ms=300.5 "
-                "segment_index_lock_wait_ms=600.5 "
-                "segment_index_lock_hold_ms=800.5 segment_index_refresh_ms=750 "
-                "segment_index_rebuild_ms=0 segment_index_stat_ms=250 "
-                "segment_index_full_row_parse_ms=350 "
-                "segment_index_manifest_parse_ms=0 segment_index_sort_ms=12 "
-                "segment_index_mutation_lock_wait_ms=3 "
-                "segment_index_pin_publish_ms=5 segment_index_pin_release_ms=2 "
-                "segment_index_publication_read_ms=8 "
-                "segment_index_pinned_segments=6 "
-                "segment_index_publication_records=3 "
-                "segment_index_publication_bytes=1500 "
-                "segment_index_publication_errors=0 "
-                "segment_index_publication_reconciles=0 "
-                "handoff_to_finalizer_admission_ms=5 "
                 "throttle_sleep_s=0.0 throttle_reason=deadline_guard deadline_slack_s=45.0 "
                 "metadata_files_visited=1 ffprobe_invocations=1 "
                 "ffprobe_duration_ms=40 ffmpeg_invocations=1 ffmpeg_duration_ms=160 "
                 "imageio_ffmpeg_fallback_count=2 imageio_ffmpeg_fallback_duration_ms=0",
-                "media_finalizer_lane_completed event_id=e1 "
-                "finalizer_pre_bundle_ms=10 finalizer_bundle_ms=40 "
-                "finalizer_publish_total_ms=50 "
-                "finalizer_publish_heartbeat_ms=20 "
-                "finalizer_publish_prepare_ms=5 "
-                "finalizer_publish_rename_ms=10 "
-                "finalizer_publish_rebase_ms=15 "
-                "finalizer_terminal_commit_ms=5 "
-                "finalizer_event_projection_ms=6 finalizer_db_index_ms=40 "
-                "finalizer_cleanup_ms=4 finalizer_post_terminal_ms=50 "
-                "finalizer_lane_service_ms=105",
-                "media_finalizer_lane_completed event_id=e2 "
-                "finalizer_pre_bundle_ms=20 finalizer_bundle_ms=80 "
-                "finalizer_publish_total_ms=100 "
-                "finalizer_publish_heartbeat_ms=70 "
-                "finalizer_publish_prepare_ms=10 "
-                "finalizer_publish_rename_ms=10 "
-                "finalizer_publish_rebase_ms=10 "
-                "finalizer_terminal_commit_ms=10 "
-                "finalizer_event_projection_ms=12 finalizer_db_index_ms=60 "
-                "finalizer_cleanup_ms=8 finalizer_post_terminal_ms=80 "
-                "finalizer_lane_service_ms=210",
                 "media_materialization_paced event_id=e3 reason=max_per_poll_reached",
                 "media_finalization_claim_busy event_id=e4",
                 "replay_slot_released event_id=e2 "
                 "release_reason=sink_video_stable sink_video_to_stable_ms=31000",
-                "rolling_cache_remux_admission_tick "
-                "schema_version=rolling-remux-admission-timing-v1 "
-                "remux_admission_total_ms=13000 "
-                "remux_admission_stage_completion_scan_ms=50 "
-                "remux_admission_stage_completion_result_ms=25 "
-                "remux_admission_stage_handoff_persist_ms=10500 "
-                "remux_admission_stage_completion_convergence_ms=0 "
-                "remux_admission_stage_completion_release_ms=5 "
-                "remux_admission_stage_finalizer_admission_ms=400 "
-                "remux_admission_stage_candidate_query_ms=1200 "
-                "remux_admission_stage_capacity_reservation_ms=10 "
-                "remux_admission_stage_prepare_claim_ms=600 "
-                "remux_admission_stage_heartbeat_register_ms=5 "
-                "remux_admission_stage_executor_submit_ms=5 "
-                "remux_admission_accounted_ms=12800 "
-                "remux_admission_unattributed_ms=200 "
-                "remux_admission_candidate_count=8 "
-                "remux_admission_prepared_count=8 "
-                "remux_admission_submitted_count=8 "
-                "remux_admission_completed_count=8",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=1 tick_duration_ms=1200 "
-                "tick_gap_ms=unavailable "
-                "tick_stage_lifecycle_recovery_ms=20 "
-                "tick_stage_remux_admission_ms=900 "
-                "tick_stage_finalizer_scan_admission_ms=100 "
-                "tick_stage_accounted_ms=1020 tick_stage_unattributed_ms=180 "
-                "rolling_due=True general_due=True "
+                "tick_gap_ms=unavailable rolling_due=True general_due=True "
                 "oldest_ready_age_ms=9000 image_lane_depth=3 "
                 "remux_lane_depth=2 finalizer_lane_depth=1 "
-                "finalizer_admission_rejected_total=1 "
-                "finalizer_handoff_retry_total=1 "
-                "finalizer_handoff_retry_failed=0 "
-                "finalizer_queued_lease_heartbeat_total=2 "
-                "finalizer_pending_total=1 finalizer_pending_unleased=1 "
-                "finalizer_pending_leased=0 finalizer_pending_oldest_age_ms=30 "
                 "permit_active=4 permit_limit=4 db_pool_in_use=3 "
                 "db_pool_limit=4 db_pool_peak_in_use=4 db_pool_checkout_count=20 "
                 "db_pool_checkout_wait_ms=15 db_pool_checkout_timeouts=0 "
@@ -7240,34 +6227,12 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_fallback_scans=0 segment_index_row_cache_entries=7 "
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=2 segment_index_read_pins_created=4 "
-                "segment_index_read_pins_released=2 segment_index_generation=3 "
-                "segment_index_io_slot_wait_ms_total=1200.5 "
-                "segment_index_publication_read_ms_total=20 "
-                "segment_index_publication_records=10 "
-                "segment_index_publication_bytes=5000 "
-                "segment_index_publication_errors=0 "
-                "segment_index_publication_reconciles=0",
+                "segment_index_read_pins_released=2 segment_index_generation=3",
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=v2 sequence=2 tick_duration_ms=200 "
-                "tick_gap_ms=1300 "
-                "tick_stage_lifecycle_recovery_ms=10 "
-                "tick_stage_remux_admission_ms=80 "
-                "tick_stage_finalizer_scan_admission_ms=40 "
-                "tick_stage_accounted_ms=130 tick_stage_unattributed_ms=70 "
-                "rolling_due=True general_due=True "
-                "completed_cycle_sequence=1 cycle_body_ms=1200 "
-                "cycle_snapshot_ms=40 cycle_logging_ms=10 "
-                "cycle_planned_sleep_ms=100 cycle_actual_sleep_ms=105 "
-                "cycle_accounted_ms=1355 cycle_work_ms=1195 "
-                "cycle_total_ms=1300 cycle_unattributed_ms=0 "
+                "tick_gap_ms=1300 rolling_due=True general_due=True "
                 "oldest_ready_age_ms=5000 image_lane_depth=1 "
                 "remux_lane_depth=1 finalizer_lane_depth=0 "
-                "finalizer_admission_rejected_total=1 "
-                "finalizer_handoff_retry_total=1 "
-                "finalizer_handoff_retry_failed=0 "
-                "finalizer_queued_lease_heartbeat_total=4 "
-                "finalizer_pending_total=0 finalizer_pending_unleased=0 "
-                "finalizer_pending_leased=0 finalizer_pending_oldest_age_ms=0 "
                 "permit_active=1 permit_limit=4 db_pool_in_use=1 "
                 "db_pool_limit=4 db_pool_peak_in_use=4 db_pool_checkout_count=25 "
                 "db_pool_checkout_wait_ms=18 db_pool_checkout_timeouts=0 "
@@ -7281,19 +6246,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_fallback_scans=0 segment_index_row_cache_entries=8 "
                 "segment_index_row_cache_evictions=1 "
                 "segment_index_active_read_pins=0 segment_index_read_pins_created=4 "
-                "segment_index_read_pins_released=4 segment_index_generation=3 "
-                "segment_index_io_slot_wait_ms_total=1800.5 "
-                "segment_index_publication_read_ms_total=30 "
-                "segment_index_publication_records=15 "
-                "segment_index_publication_bytes=7500 "
-                "segment_index_publication_errors=0 "
-                "segment_index_publication_reconciles=0",
-                "rolling_cache_finalizer_v2_admitted candidates=3 admitted=2",
-                "rolling_cache_finalizer_v2_admitted candidates=2 admitted=2",
-                "rolling_lifecycle_recovery ready_deadline_expired=0 "
-                "running_sla_missed=0 handoff_recovered=0 "
-                "lease_retry_scheduled=0 lease_deadline_expired=0",
-                "media_finalizer_admission_rejected reason=lane_full total=1",
+                "segment_index_read_pins_released=4 segment_index_generation=3",
                 "media-worker started materialization_max_active=4 "
                 "materialization_finalizer_workers=32 "
                 "materialization_cpu_thread_limit=4 cpu_thread_limit_result=applied",
@@ -7303,8 +6256,7 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "segment_index_effective=True lanes_effective=True "
                 "max_active=4 image_workers=4 remux_workers=1 finalizer_workers=4 "
                 "image_queue_capacity=4 remux_queue_capacity=4 "
-                "finalizer_queue_capacity=4 source_limit=4 "
-                "segment_index_io_concurrency=2 shutdown_grace_s=45",
+                "finalizer_queue_capacity=4 source_limit=4 shutdown_grace_s=45",
                 "evidence_db_index_upserted event_id=e1 "
                 "expanded_rows_enabled=True duration_ms=40 sidecar_ms=8 "
                 "bundle_ms=2 artifact_ms=3 timeline_ms=17 overlay_ms=10 result={}",
@@ -7314,142 +6266,6 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
                 "evidence_sidecars_pruned event_id=e1 duration_ms=3 result={}",
             ]
         ),
-        encoding="utf-8",
-    )
-    (tmp_path / "rolling_cache_sink_a_logs_since_start.txt").write_text(
-        "\n".join(
-            [
-                "2026-07-22 02:03:08,901 INFO rolling_cache_sink.gst "
-                "segment published source=source-a epoch=epoch-a session=session-a "
-                "segment=segment-a frames=84 bytes=1000 "
-                "publish_total_ms=12 publish_stage_ms=3 publish_commit_ms=9 "
-                "publish_commit_lock_wait_ms=0.5 "
-                    "publish_commit_lock_hold_ms=8.5 "
-                    "publish_commit_slot_count=2 publish_commit_slot_index=1 "
-                    "publish_file_fdatasync_enabled=1 "
-                    "publish_single_inode_enabled=0 "
-                    "publish_metadata_only_enabled=1 "
-                    "publish_regular_file_sync_count=1 "
-                "publish_validate_ms=1 "
-                "publish_metadata_write_ms=2 publish_metadata_fsync_ms=3 "
-                "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
-                "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
-                "publish_staging_dir_fsync_ms=1 publish_parent_prepare_ms=0 "
-                    "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
-                    "publish_journal_append_ms=1 publish_accounted_ms=12 "
-                    "publish_unattributed_ms=0 "
-                    "publication_capacity_wait_ms=0.01 "
-                    "publication_queue_residence_ms=4 "
-                    "publication_prepare_service_ms=3 "
-                    "publication_commit_wait_ms=0.5 "
-                    "publication_worker_service_ms=12 "
-                    "publication_dispatch_total_ms=16.01 "
-                    "publication_outstanding_at_submit=2 "
-                    "publication_queue_depth_at_submit=1 "
-                    "publication_worker_index=1 "
-                    "publication_prepare_group_size=1 "
-                    "publication_prepare_group_position=1 "
-                    "publication_final_parent_group_size=1 "
-                    "publication_final_parent_group_position=1 "
-                    "publication_final_parent_group_unique_parents=1 "
-                    "publication_final_parent_group_fsync_count=1 "
-                    "publication_final_parent_group_fsync_saved=0 "
-                    "publication_final_parent_fence_wait_ms=1",
-                "2026-07-22 02:03:12,901 INFO rolling_cache_sink.gst "
-                "segment published source=source-a epoch=epoch-a session=session-a "
-                "segment=segment-b frames=84 bytes=1000 "
-                "publish_total_ms=40 publish_stage_ms=4 publish_commit_ms=36 "
-                "publish_commit_lock_wait_ms=12 "
-                    "publish_commit_lock_hold_ms=24 "
-                    "publish_commit_slot_count=2 publish_commit_slot_index=1 "
-                    "publish_file_fdatasync_enabled=1 "
-                    "publish_single_inode_enabled=0 "
-                    "publish_metadata_only_enabled=1 "
-                    "publish_regular_file_sync_count=1 "
-                "publish_validate_ms=1 "
-                "publish_metadata_write_ms=2 publish_metadata_fsync_ms=30 "
-                "publish_metadata_stat_ms=0 publish_manifest_write_ms=1 "
-                "publish_manifest_fsync_ms=2 publish_manifest_stat_ms=0 "
-                "publish_staging_dir_fsync_ms=1 publish_parent_prepare_ms=0 "
-                    "publish_rename_ms=0 publish_parent_dir_fsync_ms=1 "
-                    "publish_journal_append_ms=1 publish_accounted_ms=39 "
-                    "publish_unattributed_ms=1 "
-                    "publication_capacity_wait_ms=0.02 "
-                    "publication_queue_residence_ms=20 "
-                    "publication_prepare_service_ms=4 "
-                    "publication_commit_wait_ms=12 "
-                    "publication_worker_service_ms=40 "
-                    "publication_dispatch_total_ms=60.02 "
-                    "publication_outstanding_at_submit=37 "
-                    "publication_queue_depth_at_submit=36 "
-                    "publication_worker_index=1 "
-                    "publication_prepare_group_size=16 "
-                    "publication_prepare_group_position=12 "
-                    "publication_final_parent_group_size=16 "
-                    "publication_final_parent_group_position=12 "
-                    "publication_final_parent_group_unique_parents=15 "
-                    "publication_final_parent_group_fsync_count=15 "
-                    "publication_final_parent_group_fsync_saved=1 "
-                    "publication_final_parent_fence_wait_ms=18",
-                "2026-07-22 02:03:13,901 INFO rolling_cache_sink.gst "
-                "publication dispatcher stopped drained=True "
-                "publication_capacity=128 publication_worker_count=2 "
-                "publication_commit_slot_count=2 "
-                "publication_file_fdatasync_enabled=1 "
-                "publication_single_inode_enabled=0 "
-                "publication_metadata_only_enabled=1 "
-                "publication_regular_file_sync_count=1 "
-                "publication_queue_depth=0 publication_queue_depth_peak=36 "
-                "publication_outstanding=0 publication_outstanding_peak=37 "
-                "publication_active=0 publication_active_peak=2 "
-                "publication_submitted_total=200 "
-                "publication_completed_total=200 publication_failed_total=0 "
-                "publication_queue_wait_ms_total=0.5 "
-                "publication_queue_wait_ms_max=0.1 "
-                "publication_queue_wait_events_total=0 "
-                "publication_prepare_group_limit=32 "
-                "publication_prepare_group_total=20 "
-                "publication_prepare_group_size_max=16 "
-                "publication_final_parent_group_limit=16 "
-                "publication_final_parent_group_total=20 "
-                "publication_final_parent_group_size_max=16 "
-                "publication_final_parent_fsync_total=180 "
-                "publication_final_parent_fsync_saved_total=20 "
-                "publication_prepare_service_ms_total=700 "
-                "publication_prepare_service_ms_max=4 "
-                "publication_commit_wait_ms_total=1500 "
-                "publication_commit_wait_ms_max=12 "
-                "publication_commit_lock_wait_ms_total=2500 "
-                "publication_commit_lock_wait_ms_max=12 "
-                "publication_commit_lock_wait_events_total=1 "
-                "publication_commit_lock_hold_ms_total=3200 "
-                "publication_commit_lock_hold_ms_max=24 "
-                "publication_queue_residence_ms_total=2000 "
-                "publication_queue_residence_ms_max=20 "
-                "publication_queue_residence_events_total=1 "
-                "publication_worker_service_ms_total=2050 "
-                "publication_worker_service_ms_max=40 "
-                "publication_dispatch_total_ms_total=4050 "
-                "publication_dispatch_total_ms_max=60.02 "
-                "publication_outstanding_peak_at_epoch_ms=1784695393901 "
-                "publication_outstanding_peak_source=source-a "
-                "publication_outstanding_peak_segment=segment-b "
-                "publication_shutdown_timeout_total=0",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (tmp_path / "rolling_cache_sink_b_logs_since_start.txt").write_text(
-        "2026-07-22 02:03:10,901 INFO rolling_cache_sink.gst "
-        "segment published source=source-b epoch=epoch-a session=session-b "
-        "segment=segment-c frames=84 bytes=1000 publish_total_ms=8 "
-        "publish_validate_ms=1 publish_metadata_write_ms=1 "
-        "publish_metadata_fsync_ms=1 publish_metadata_stat_ms=0 "
-        "publish_manifest_write_ms=1 publish_manifest_fsync_ms=1 "
-        "publish_manifest_stat_ms=0 publish_staging_dir_fsync_ms=1 "
-        "publish_parent_prepare_ms=0 publish_rename_ms=0 "
-        "publish_parent_dir_fsync_ms=1 publish_journal_append_ms=1 "
-        "publish_accounted_ms=8 publish_unattributed_ms=0",
         encoding="utf-8",
     )
     (tmp_path / "video_file_sink_a_logs_since_start.txt").write_text(
@@ -7515,49 +6331,6 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["clip_worker"]["clip_replay_job_create_ms"]["max"] == 9.0
     assert summary["media_worker"]["media_replay_to_sink_metadata_ms"]["p50"] == 60.0
     assert summary["media_worker"]["media_finalizer_pool_wait_ms"]["max"] == 6.0
-    assert summary["media_worker"]["media_finalizer_lane_service_ms"]["p50"] == 157.5
-    assert summary["media_worker"]["media_finalizer_publish_total_ms"]["max"] == 100.0
-    assert summary["media_worker"]["media_finalizer_publish_heartbeat_ms"]["p50"] == 45.0
-    assert summary["media_worker"]["media_finalizer_publish_rename_ms"]["max"] == 10.0
-    assert summary["media_worker"]["media_finalizer_post_terminal_ms"]["p50"] == 65.0
-    assert summary["media_worker"]["media_finalizer_db_index_ms"]["max"] == 60.0
-    assert summary["media_worker"]["media_ready_to_remux_claim_ms"]["p50"] == 17.0
-    assert summary["media_worker"]["media_remux_ms"]["max"] == 900.0
-    assert summary["media_worker"]["media_remux_exec_ms"]["max"] == 900.0
-    assert summary["media_worker"]["media_remux_total_ms"]["max"] == 2100.0
-    assert summary["media_worker"]["media_remux_metadata_publish_ms"]["p50"] == 250.0
-    assert summary["media_worker"]["media_remux_metadata_bytes"]["max"] == 15000.0
-    assert summary["media_worker"]["media_remux_metadata_reload_ms"]["p50"] == 125.0
-    assert summary["media_worker"]["media_remux_handoff_build_ms"]["max"] == 60.0
-    assert summary["media_worker"]["media_remux_unattributed_ms"]["max"] == 35.0
-    assert (
-        summary["media_worker"]["media_segment_index_io_slot_wait_ms"]["p50"]
-        == 200.5
-    )
-    assert (
-        summary["media_worker"]["media_segment_index_lock_wait_ms"]["p50"]
-        == 500.5
-    )
-    assert (
-        summary["media_worker"]["media_segment_index_full_row_parse_ms"]["max"]
-        == 350.0
-    )
-    assert (
-        summary["media_worker"]["media_segment_index_publication_read_ms"]["p50"]
-        == 7.0
-    )
-    assert (
-        summary["media_worker"]["media_segment_index_publication_records"]["max"]
-        == 3.0
-    )
-    assert (
-        summary["media_worker"]["media_handoff_to_finalizer_admission_ms"]["max"]
-        == 5.0
-    )
-    assert summary["media_worker"]["media_handoff_recovered_total"] == 0
-    assert summary["media_worker"]["media_finalizer_candidate_total"] == 5
-    assert summary["media_worker"]["media_finalizer_admitted_total"] == 4
-    assert summary["media_worker"]["media_finalizer_immediate_admission_gap"] == 1
     assert summary["clip_worker"]["replay_slot_acquired"] == 1
     assert summary["clip_worker"]["replay_slot_timeout_budget_s"]["max"] == 120.0
     assert summary["media_worker"]["replay_slot_released"] == 1
@@ -7578,230 +6351,20 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     assert summary["media_worker"]["media_deadline_slack_s"]["min"] == 45.0
     assert summary["media_worker"]["media_scheduler_tick_duration_ms"]["p50"] == 700.0
     assert summary["media_worker"]["media_scheduler_tick_gap_ms"]["max"] == 1300.0
-    assert summary["media_worker"]["media_scheduler_cycle_work_ms"]["max"] == 1195.0
-    assert summary["media_worker"]["media_scheduler_cycle_snapshot_ms"]["max"] == 40.0
-    assert summary["media_worker"]["media_scheduler_cycle_actual_sleep_ms"]["max"] == 105.0
-    assert summary["media_worker"][
-        "media_scheduler_tick_stage_remux_admission_ms"
-    ]["max"] == 900.0
-    assert summary["media_worker"][
-        "media_scheduler_tick_stage_finalizer_scan_admission_ms"
-    ]["p50"] == 70.0
-    assert summary["media_worker"][
-        "media_scheduler_tick_stage_unattributed_ms"
-    ]["max"] == 180.0
-    assert summary["media_worker"]["media_remux_admission_total_ms"]["max"] == 13000.0
-    assert summary["media_worker"][
-        "media_remux_admission_stage_handoff_persist_ms"
-    ]["max"] == 10500.0
-    assert summary["media_worker"][
-        "media_remux_admission_stage_candidate_query_ms"
-    ]["max"] == 1200.0
-    assert summary["media_worker"]["media_remux_admission_candidate_count"][
-        "max"
-    ] == 8.0
     assert summary["media_worker"]["media_scheduler_remux_lane_depth"]["max"] == 2.0
     assert summary["media_worker"]["media_scheduler_image_lane_depth"]["max"] == 3.0
     assert summary["media_worker"]["media_scheduler_finalizer_lane_depth"]["max"] == 1.0
     assert summary["media_worker"]["media_scheduler_oldest_ready_age_ms"]["max"] == 9000.0
     assert summary["media_worker"]["media_scheduler_permit_active"]["max"] == 4.0
-    assert summary["media_worker"]["media_scheduler_permit_active_last"] == 1.0
-    assert (
-        summary["media_worker"]["media_scheduler_finalizer_pending_total_last"]
-        == 0.0
-    )
-    assert summary["media_worker"]["media_finalizer_admission_rejection_reasons"] == {
-        "lane_full": 1
-    }
     assert summary["media_worker"]["media_scheduler_db_pool_peak_in_use"]["max"] == 4.0
     assert summary["media_worker"]["media_scheduler_db_pool_checkout_wait_ms"]["max"] == 18.0
     assert summary["media_worker"]["media_scheduler_segment_index_hits"]["max"] == 14.0
     assert summary["media_worker"]["media_scheduler_segment_index_parses"]["max"] == 9.0
     assert summary["media_worker"]["media_scheduler_segment_index_fallback_scans"]["max"] == 0.0
     assert summary["media_worker"]["media_scheduler_segment_index_active_read_pins"]["max"] == 2.0
-    assert (
-        summary["media_worker"][
-            "media_scheduler_segment_index_io_slot_wait_ms_total"
-        ]["max"]
-        == 1800.5
-    )
-    assert (
-        summary["media_worker"][
-            "media_scheduler_segment_index_publication_records"
-        ]["max"]
-        == 15.0
-    )
     assert summary["media_worker"]["media_resource_max_active"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_cpu_thread_limit"]["max"] == 4.0
     assert summary["media_worker"]["media_resource_remux_workers"]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"]["rolling_cache_publish_total_ms"][
-        "max"
-    ] == 40.0
-    assert summary["rolling_cache_sink_a"]["rolling_cache_publish_stage_ms"][
-        "max"
-    ] == 4.0
-    assert summary["rolling_cache_sink_a"]["rolling_cache_publish_commit_ms"][
-        "max"
-    ] == 36.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_commit_lock_wait_ms"
-    ]["max"] == 12.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_commit_lock_hold_ms"
-    ]["max"] == 24.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_commit_slot_count"
-    ]["max"] == 2.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_commit_slot_index"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_file_fdatasync_enabled"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_single_inode_enabled"
-    ]["max"] == 0.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_metadata_only_enabled"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_regular_file_sync_count"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publish_metadata_fsync_ms"
-    ]["max"] == 30.0
-    assert summary["rolling_cache_sink_b"]["rolling_cache_publish_total_ms"][
-        "p50"
-    ] == 8.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_outstanding_peak"
-    ]["max"] == 37.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_queue_depth_peak"
-    ]["max"] == 36.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_worker_count"
-    ]["max"] == 2.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_active_peak"
-    ]["max"] == 2.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_commit_slot_count"
-    ]["max"] == 2.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_file_fdatasync_enabled"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_single_inode_enabled"
-    ]["max"] == 0.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_metadata_only_enabled"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_regular_file_sync_count"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_failed_total"
-    ]["max"] == 0.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_queue_residence_ms"
-    ]["max"] == 20.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_prepare_service_ms"
-    ]["max"] == 4.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_commit_wait_ms"
-    ]["max"] == 12.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_prepare_group_size"
-    ]["max"] == 16.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_prepare_group_position"
-    ]["max"] == 12.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_size"
-    ]["max"] == 16.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_position"
-    ]["max"] == 12.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_unique_parents"
-    ]["max"] == 15.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_fsync_count"
-    ]["max"] == 15.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_fsync_saved"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_fence_wait_ms"
-    ]["max"] == 18.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_worker_index"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_worker_service_ms"
-    ]["max"] == 40.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_dispatch_total_ms"
-    ]["max"] == 60.02
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_outstanding_at_submit"
-    ]["max"] == 37.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_queue_residence_ms_total"
-    ]["max"] == 2000.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_prepare_group_limit"
-    ]["max"] == 32.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_prepare_group_size_max"
-    ]["max"] == 16.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_limit"
-    ]["max"] == 16.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_total"
-    ]["max"] == 20.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_group_size_max"
-    ]["max"] == 16.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_fsync_total"
-    ]["max"] == 180.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_final_parent_fsync_saved_total"
-    ]["max"] == 20.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_prepare_service_ms_total"
-    ]["max"] == 700.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_commit_wait_ms_total"
-    ]["max"] == 1500.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_commit_lock_wait_ms_total"
-    ]["max"] == 2500.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_commit_lock_wait_events_total"
-    ]["max"] == 1.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_commit_lock_hold_ms_total"
-    ]["max"] == 3200.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_outstanding_peak_at_epoch_ms"
-    ]["max"] == 1784695393901.0
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_outstanding_peak_sources"
-    ] == {"source-a": 1}
-    assert summary["rolling_cache_sink_a"][
-        "rolling_cache_publication_outstanding_peak_segments"
-    ] == {"segment-b": 1}
-    assert (
-        summary["media_worker"]["media_resource_segment_index_io_concurrency"][
-            "max"
-        ]
-        == 2.0
-    )
     assert summary["media_worker"]["media_db_index_duration_ms"]["p50"] == 50.0
     assert summary["media_worker"]["media_db_index_sidecar_ms"]["max"] == 10.0
     assert summary["media_worker"]["media_db_index_timeline_ms"]["max"] == 25.0
@@ -7813,61 +6376,10 @@ def test_summarize_logs_extracts_downstream_worker_metrics(tmp_path: Path) -> No
     observable = module.media_worker_observability_summary(
         {"log_summary": summary}
     )
-    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v4"
-    assert observable["scheduler"]["cycle"]["work_ms"]["max"] == 1195.0
-    assert observable["scheduler"]["remux_admission"]["total_ms"]["max"] == 13000.0
-    assert observable["scheduler"]["remux_admission"]["stages"][
-        "handoff_persist_ms"
-    ]["max"] == 10500.0
-    assert observable["scheduler"]["remux_admission"]["candidate_count"][
-        "max"
-    ] == 8.0
-    assert observable["finalizer_lane"]["service_ms"]["p50"] == 157.5
-    assert observable["finalizer_lane"]["publish"]["total_ms"]["max"] == 100.0
-    assert observable["finalizer_lane"]["publish"]["heartbeat_ms"]["p50"] == 45.0
-    assert observable["finalizer_lane"]["post_terminal_ms"]["p50"] == 65.0
-    assert observable["finalizer_lane"]["db_index_ms"]["max"] == 60.0
-    assert observable["remux_total_ms"]["max"] == 2100.0
-    assert observable["remux_metadata_publish_ms"]["p50"] == 250.0
-    assert observable["remux_metadata_bytes"]["max"] == 15000.0
-    assert observable["remux_metadata_reload_ms"]["p50"] == 125.0
-    assert observable["remux_handoff_build_ms"]["max"] == 60.0
-    assert observable["remux_unattributed_ms"]["max"] == 35.0
-    assert observable["segment_index_job"]["io_slot_wait_ms"]["p50"] == 200.5
-    assert observable["segment_index_job"]["lock_wait_ms"]["p50"] == 500.5
-    assert observable["segment_index_job"]["pinned_segments"]["p50"] == 5.0
-    assert observable["segment_index_job"]["publication_records"]["max"] == 3.0
-    assert observable["scheduler"]["finalizer_admission"]["candidate_total"] == 5
-    assert (
-        observable["scheduler"]["finalizer_admission"]["immediate_admission_gap"]
-        == 1
-    )
-    assert observable["scheduler"]["durable_finalizer_queue"]["total_last"] == 0.0
+    assert observable["scheduler"]["schema_version"] == "phase6-capacity-v1"
     assert observable["scheduler"]["db_pool"]["limit"]["max"] == 4.0
     assert observable["scheduler"]["segment_index"]["parses"]["max"] == 9.0
-    assert (
-        observable["scheduler"]["segment_index"]["io_slot_wait_ms_total"]["max"]
-        == 1800.5
-    )
-    assert (
-        observable["scheduler"]["segment_index"]["publication_records"]["max"]
-        == 15.0
-    )
     assert observable["scheduler"]["capacity"]["remux_workers"]["max"] == 1.0
-    assert (
-        observable["scheduler"]["capacity"]["segment_index_io_concurrency"][
-            "max"
-        ]
-        == 2.0
-    )
-    phase = module.evidence_phase_latency_summary({"log_summary": summary})
-    assert phase["media_worker"]["finalizer_lane"]["service_ms"]["max"] == 210.0
-    assert (
-        phase["media_worker"]["finalizer_lane"]["publish"]["heartbeat_ms"][
-            "max"
-        ]
-        == 70.0
-    )
     assert observable["db_index"]["overlay_ms"]["max"] == 16.0
     sink_summary = summary["video_file_sink"]
     assert sink_summary["instances"]["video-file-sink-a"]["new_writer_count"] == 1

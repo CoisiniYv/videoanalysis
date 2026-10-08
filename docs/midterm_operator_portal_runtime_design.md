@@ -2,12 +2,8 @@
 
 Date: 2026-06-11
 
-Status: historical design snapshot. It records the 2026-06-11 portal shape and
-must not be used as the current architecture/API authority. The current portal
-has DB-backed evidence, batch face registration, a three-area navigation model,
-runtime latency, camera-first full-runtime presets, and asynchronous topology
-apply. Use `docs/frontend_interface/README.md`,
-`docs/midterm_web_operator_guide.md`, and `docs/current_architecture.md` first.
+This document records the current midterm operator portal design and the changes
+landed for the 8090 single-entry operator workflow.
 
 ## Runtime Entry
 

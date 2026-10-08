@@ -1,83 +1,138 @@
-Video Analytics Platform - Quick Start
-======================================
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                    Midterm 视频分析系统 - 快速启动指南                         ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-1. Start the platform
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 第一步：启动系统                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 
     bash scripts/midterm_start.sh
 
-   The startup script checks the runtime environment, prepares data directories,
-   builds or starts the required services, and prepares the components managed by
-   the operator console.
+    等待服务启动（约 1-3 分钟），看到 "Startup Complete" 后继续。
+    新机器首次启动会先检查模型文件和 /data/video-analytics 运行目录。
 
-2. Open the operator console
 
-    http://127.0.0.1:8090/operator
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 第二步：打开 Web 操作台                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-   Port 8090 is the normal browser entry point. Internal API and service ports are
-   intended for service-to-service communication and diagnostics.
+    浏览器访问：http://127.0.0.1:8090/operator
 
-3. Register cameras
+    你会看到一个中文界面，包含三个标签：
 
-   - Open Configuration -> Cameras.
-   - Add a camera name and RTSP URL.
-   - Configure ROI, algorithms and event rules.
-   - For a multi-camera run, configure cameras first and select the desired set
-     when starting the runtime.
+    ┌─────────────┬─────────────┬─────────────┐
+    │ 摄像头管理   │ 人员与人脸   │ 告警证据     │
+    └─────────────┴─────────────┴─────────────┘
 
-4. Select a runtime profile
 
-   Reference profiles included in the repository:
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 第三步：配置摄像头（必需）                                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-   - production_t4_40: 40 streams, A/B 20/20, 4 FPS analysis.
-   - local_4090_60:    60 streams, A/B 30/30, 8 FPS analysis.
+    1. 点击 "摄像头管理" 标签（默认已选中）
+    2. 点击右上角 "新增" 按钮
+    3. 填写表单：
+       • 摄像头名称：例如 "前门摄像头"
+       • 视频地址：例如 rtsp://192.168.1.100:554/stream1
+       • 勾选 "启用" 复选框
+    4. 点击 "保存" 按钮
 
-   Actual capacity depends on GPU, resolution, bitrate, codec settings, event
-   density and storage performance.
+    ✓ 系统会自动开始处理该摄像头的视频流
 
-5. Start the complete pipeline
 
-   In Start & Runtime, select the cameras and launch the complete dual-branch
-   runtime. Wait for source convergence and rolling-cache readiness, then verify:
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 第四步：注册人脸（可选）                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-   - expected A/B source counts;
-   - continuously updating frames;
-   - stable analysis FPS;
-   - queues and failures are not continuously increasing;
-   - evidence tasks reach completed or explicit terminal states;
-   - event evidence and person trajectories are queryable.
+    1. 点击 "人员与人脸" 标签
+    2. 在中间面板选择人脸照片
+    3. 填写表单：
+       • 人员编号：例如 "EMP001"（唯一标识）
+       • 姓名：例如 "张三"
+    4. 点击 "开始注册" 按钮
 
-6. Register people and faces (optional)
+    ✓ 注册后系统会自动识别该人员出现在摄像头中
 
-   Use People & Faces in the operator console to create a person and enroll one
-   or more clear face images. The complete runtime uses the ROI AdaFace pipeline
-   for face embeddings and gallery matching.
 
-7. Health checks
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 第五步：查看告警证据                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-    bash scripts/midterm_health.sh
-    bash scripts/runtime/doctor_midterm.sh
+    1. 点击 "告警证据" 标签
+    2. 等待系统生成告警（可能需要几分钟）
+    3. 点击列表中的告警查看录像
+    4. 视频会自动叠加人脸框和识别结果
 
-   For per-camera evidence reconciliation, see:
+    提示：如果列表为空，说明系统还没检测到异常事件
 
-    scripts/runtime/report_evidence_camera_ledger.py
 
-8. Stop
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              常用命令                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
-   - Stop only the active analysis runtime from the 8090 operator console.
-   - Stop the complete stack with:
+    启动系统：     bash scripts/midterm_start.sh
 
-       bash scripts/midterm_stop.sh
+    检查健康状态：  bash scripts/midterm_health.sh
 
-Documentation
--------------
+    停止系统：     bash scripts/midterm_stop.sh
 
-    Project overview:       README.md
-    Documentation index:    docs/README.md
-    Architecture:           docs/current_architecture.md
-    Deployment:             docs/midterm_deployment.md
-    Operator guide:         docs/midterm_web_operator_guide.md
-    Operations reference:   docs/midterm_quick_reference.md
-    Frontend/API reference: docs/frontend_interface/README.md
+    查看日志：     docker compose -f infra/docker-compose.midterm.yml logs -f
 
-FastAPI /docs belongs to the internal API service and is not the primary 8090
-operator endpoint.
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              关键端口                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+    8090  →  Web 操作台 & API 服务
+    6396  →  Redis 缓存
+    8098  →  Replay API（内部/诊断）
+    18080 →  Savant metrics（诊断）
+    18081 →  analysis-forwarder metrics（诊断）
+
+    日常管理只需要打开 8090 页面；其他端口用于内部链路或诊断。
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              故障排查                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+    问题：无法访问 Web 界面
+    解决：
+        1. 运行 bash scripts/midterm_health.sh
+        2. 检查 API 服务是否在运行
+        3. 确认没有端口冲突
+
+    问题：添加摄像头后无画面
+    解决：
+        1. 检查 RTSP 地址是否正确
+        2. 确认摄像头已启用
+        3. 查看日志：docker compose -f infra/docker-compose.midterm.yml logs savant-security
+
+    问题：人脸注册失败
+    解决：
+        1. 确保照片清晰，只有一张人脸
+        2. 检查人员编号是否重复
+        3. 查看注册回执中的错误提示
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                              更多帮助                                         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+    Web 操作台详细指南：docs/midterm_web_operator_guide.md
+
+    快速参考文档：     docs/midterm_quick_reference.md
+
+    API 交互文档：     http://127.0.0.1:8090/docs
+
+
+────────────────────────────────────────────────────────────────────────────────
+
+系统架构：RTSP 源 → Replay 存储 → Savant 推理 → Redis/PostgreSQL
+         → 事件检测 → 录像截取 → 证据生成 → Web 操作台复核
+
+证据生成策略：raw_clip.mov（原始视频）+ annotations.jsonl（标注数据）
+
+────────────────────────────────────────────────────────────────────────────────

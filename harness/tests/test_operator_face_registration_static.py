@@ -194,13 +194,13 @@ def test_operator_exposes_algorithm_rules_and_recording_window_controls() -> Non
     assert "配置并启用算法规则" in js
     assert "cameras/runtime/config/sync" in js
     assert "syncRuntimeConfig" in js
-    assert "运行设置已同步" in js
+    assert "运行配置已同步" in js
     assert "cameras/runtime/apply" in js
-    assert "运行设置已应用" in js
+    assert "运行时已应用" in js
     assert "restart-runtime" in html
-    assert "安全重启分析服务" in html
+    assert "受控重启运行时" in html
     assert "cameras/runtime/restart" in js
-    assert "分析服务已安全重启" in js
+    assert "运行时已受控重启" in js
 
 
 def test_operator_rule_and_roi_saves_use_config_sync_not_runtime_restart() -> None:
@@ -259,8 +259,8 @@ def test_operator_primary_algorithm_controls_include_rule_based_event_paths() ->
     assert "sourceApplyPayloadStatus" in js
     assert "showCameraSourceApplyResult" in js
     assert "runtime_source_apply" in js
-    assert "operator.js?v=runtime-nav-latency-20260715-operator-copy" in html
-    assert "trajectory.js?v=trajectory-page-20260712-operator-copy" in html
+    assert "operator.js?v=runtime-nav-latency-20260715" in html
+    assert "trajectory.js?v=trajectory-page-20260712" in html
     assert "watchlist-target-list" in css
     assert "匹配阈值" in js
     assert "停留毫秒" in js

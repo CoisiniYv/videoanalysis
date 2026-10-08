@@ -61,7 +61,6 @@ class RollingMaterializationResult:
     sink_dir: Path
     video_path: Path
     metadata_path: Path
-    metadata_payload: dict[str, Any]
     segment_ids: tuple[str, ...]
     requested_start_pts: int
     requested_end_pts: int
@@ -69,8 +68,6 @@ class RollingMaterializationResult:
     actual_end_pts: int
     selected_frame_count: int
     materialization_ms: int
-    metadata_publish_ms: int
-    metadata_bytes: int
     ffmpeg_command: tuple[str, ...]
     immutable_probe: dict[str, Any]
 
@@ -379,7 +376,6 @@ def materialize_window(
         "identity": output_identity,
         "observed_at_epoch_ns": time.time_ns(),
     }
-    metadata_publish_started = time.monotonic()
     label_doc = {
         **{str(k): str(v) for k, v in (labels or {}).items() if v is not None},
         "event_id": event_id,
@@ -457,15 +453,10 @@ def materialize_window(
         "frames": selected_rows,
     }
     _write_json(metadata_path, metadata)
-    metadata_publish_ms = int(
-        round((time.monotonic() - metadata_publish_started) * 1000)
-    )
-    metadata_bytes = int(metadata_path.stat().st_size)
     return RollingMaterializationResult(
         sink_dir=sink_dir,
         video_path=video_path,
         metadata_path=metadata_path,
-        metadata_payload=metadata,
         segment_ids=tuple(segment.segment_id for segment in selected),
         requested_start_pts=original_requested_start_pts,
         requested_end_pts=original_requested_end_pts,
@@ -473,8 +464,6 @@ def materialize_window(
         actual_end_pts=original_requested_end_pts,
         selected_frame_count=len(selected_rows),
         materialization_ms=materialization_ms,
-        metadata_publish_ms=metadata_publish_ms,
-        metadata_bytes=metadata_bytes,
         ffmpeg_command=tuple(executed_command),
         immutable_probe=immutable_probe,
     )
@@ -787,11 +776,6 @@ def _select_rows(
             else load_native_metadata(segment.metadata_path)
         )
         for row in segment_rows:
-            if row.get("schema_version") in {
-                "rolling-segment-manifest-v2",
-                "rolling-segment-manifest-v3",
-            }:
-                continue
             pts = _row_pts(row)
             if pts is None:
                 auxiliary_rows.append(row)
@@ -1047,6 +1031,6 @@ def _compact_error_text(value: str, *, max_chars: int = 700) -> str:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
+        json.dump(data, fh, ensure_ascii=False, indent=2)
         fh.write("\n")
     os.replace(tmp, path)

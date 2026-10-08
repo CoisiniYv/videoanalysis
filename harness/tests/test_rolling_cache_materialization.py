@@ -21,34 +21,6 @@ sys.path.insert(0, MEDIA_WORKER_ROOT)
 from app import rolling_cache  # noqa: E402
 
 
-def test_materialized_metadata_publication_is_compact_and_lossless(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "metadata.json"
-    payload = {
-        "event_id": "event-1",
-        "camera_name": "一号摄像头",
-        "frames": [
-            {
-                "type": "VideoFrame",
-                "pts": 123,
-                "objects": [{"label": "person", "confidence": 0.9}],
-            }
-        ],
-    }
-
-    rolling_cache._write_json(path, payload)
-
-    expected = json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ) + "\n"
-    assert path.read_text(encoding="utf-8") == expected
-    assert json.loads(path.read_text(encoding="utf-8")) == payload
-    assert list(tmp_path.glob(".metadata.json.*.tmp")) == []
-
-
 def test_wall_clock_event_window_maps_to_stable_mux_clock() -> None:
     rows = [
         {
@@ -299,8 +271,6 @@ def test_materialize_window_writes_sink_like_metadata_and_concat_command(tmp_pat
     metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
     assert result.video_path.read_bytes() == b"joined-video"
     assert result.segment_ids == ("0001", "0002")
-    assert result.metadata_publish_ms >= 0
-    assert result.metadata_bytes == result.metadata_path.stat().st_size
     assert metadata["labels"]["materialization_mode"] == "rolling_cache_copy"
     assert metadata["labels"]["canonical_clip"] == "true"
     assert metadata["labels"]["time_domain_crop_applied"] == "true"

@@ -91,32 +91,6 @@ def _resources(worker: Any, *, max_active: int = 2):
     return runtime
 
 
-@pytest.mark.parametrize(
-    ("configured", "expected"),
-    ((0, 4), (1, 1), (99, 4)),
-)
-def test_finalizer_db_index_io_gate_is_process_lifetime_and_wip_bounded(
-    configured: int,
-    expected: int,
-) -> None:
-    worker = _worker()
-    runtime = worker.MaterializationResources(
-        database_url="postgresql://unused",
-        max_active=4,
-        image_workers=1,
-        remux_workers=1,
-        finalizer_workers=4,
-        db_pool_enabled=False,
-        db_index_io_concurrency=configured,
-    )
-    try:
-        assert runtime.db_index_io_gate is not None
-        assert runtime.db_index_io_gate.snapshot()["limit"] == expected
-        assert runtime.snapshot()["db_index_io_gate"]["limit"] == expected
-    finally:
-        runtime.close(wait=True)
-
-
 def _cfg(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "materialization_finalizer_max_per_source_per_poll": 4,
@@ -197,71 +171,6 @@ def test_scheduler_v2_finalizer_admission_returns_without_waiting(
     assert scheduler.snapshot()["active"] == 0
     assert scheduler.snapshot()["updated_total"] == 1
     assert "/tmp/sink/event" in processed
-    assert runtime.work_budget.snapshot()["active"] == 0
-    runtime.close(wait=True)
-
-
-def test_transferred_handoff_passes_exact_lease_into_finalizer_job(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worker = _worker()
-    runtime = _resources(worker)
-    scheduler = worker._FinalizerSchedulerV2(
-        cfg=_cfg(),
-        runtime_resources=runtime,
-    )
-    _patch_finalizer_discovery(monkeypatch, worker)
-    lease = worker.MaterializationLease(
-        event_id=EVENT_ID,
-        owner="remux-v2",
-        token="exact-token",
-        generation=7,
-        phase=worker.MaterializationPhase.FINALIZER_PENDING.value,
-    )
-    permit = runtime.work_budget.try_acquire("remux", owner=EVENT_ID)
-    assert permit is not None
-    observed: list[object] = []
-
-    def finalize(admission: object, **_kwargs: object) -> dict[str, object]:
-        observed.append(getattr(admission, "handoff_lease", None))
-        return {"updated": 1, "processed": True, "status": "finalized"}
-
-    monkeypatch.setattr(worker, "_run_finalizer_admission_v2", finalize)
-    transfers = {
-        EVENT_ID: worker._FinalizerHandoffTransfer(
-            lease=lease,
-            work_permit=permit,
-        )
-    }
-    assert scheduler.admit_metadata(
-        object(),
-        sink_dir="/tmp/sink",
-        metadata_files=[
-            {
-                "event_id": EVENT_ID,
-                "_meta_dir": "/tmp/sink/event",
-                "_finalizer_phase": {
-                    "handoff_persisted_at": "2026-07-20T00:00:00+00:00"
-                },
-            }
-        ],
-        scan_stats={},
-        processed_dirs=set(),
-        processed_state_path=None,
-        candidate_dirs=None,
-        invalid_output_failures=None,
-        stability_checks=1,
-        cleanup_replay_sink_output_enabled=True,
-        replay_sink_output_max_bytes=0,
-        transferred_handoffs=transfers,
-    ) == 1
-
-    deadline = time.monotonic() + 2
-    while scheduler.snapshot()["active"] and time.monotonic() < deadline:
-        scheduler.drain_completed(object())
-        time.sleep(0.01)
-    assert observed == [lease]
-    assert transfers == {}
     assert runtime.work_budget.snapshot()["active"] == 0
     runtime.close(wait=True)
 
@@ -365,9 +274,7 @@ def test_finalizer_submit_failure_releases_every_reservation_and_retries(
     monkeypatch.setattr(
         scheduler,
         "_schedule_submit_retry",
-        lambda _conn, *, event_id, reason, **_kwargs: retries.append(
-            (event_id, reason)
-        ),
+        lambda _conn, *, event_id, reason: retries.append((event_id, reason)),
     )
     monkeypatch.setattr(
         runtime.finalizer_lane,
@@ -376,16 +283,6 @@ def test_finalizer_submit_failure_releases_every_reservation_and_retries(
     )
     transferred = runtime.work_budget.try_acquire("remux", owner=EVENT_ID)
     assert transferred is not None
-    transfer = worker._FinalizerHandoffTransfer(
-        lease=worker.MaterializationLease(
-            event_id=EVENT_ID,
-            owner="remux-v2",
-            token="token-1",
-            generation=1,
-            phase=worker.MaterializationPhase.FINALIZER_PENDING.value,
-        ),
-        work_permit=transferred,
-    )
 
     admitted = scheduler.admit_metadata(
         object(),
@@ -399,7 +296,7 @@ def test_finalizer_submit_failure_releases_every_reservation_and_retries(
         stability_checks=1,
         cleanup_replay_sink_output_enabled=True,
         replay_sink_output_max_bytes=0,
-        transferred_handoffs={EVENT_ID: transfer},
+        transferred_work_permits={EVENT_ID: transferred},
     )
 
     assert admitted == 0
@@ -421,27 +318,7 @@ def test_finalizer_discovery_exception_releases_transferred_remux_permit(
     )
     transferred = runtime.work_budget.try_acquire("remux", owner=EVENT_ID)
     assert transferred is not None
-    transfers = {
-        EVENT_ID: worker._FinalizerHandoffTransfer(
-            lease=worker.MaterializationLease(
-                event_id=EVENT_ID,
-                owner="remux-v2",
-                token="token-1",
-                generation=1,
-                phase=worker.MaterializationPhase.FINALIZER_PENDING.value,
-            ),
-            work_permit=transferred,
-        )
-    }
-    retries: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        scheduler,
-        "_schedule_submit_retry",
-        lambda _conn, *, event_id, reason, **_kwargs: retries.append(
-            (event_id, reason)
-        )
-        or True,
-    )
+    transfers = {EVENT_ID: transferred}
     monkeypatch.setattr(
         worker,
         "_materialization_schedule_rows",
@@ -463,223 +340,12 @@ def test_finalizer_discovery_exception_releases_transferred_remux_permit(
             stability_checks=1,
             cleanup_replay_sink_output_enabled=True,
             replay_sink_output_max_bytes=0,
-            transferred_handoffs=transfers,
+            transferred_work_permits=transfers,
         )
 
     assert transfers == {}
-    assert retries == [
-        (EVENT_ID, "temporary_io_error:finalizer_admission_exception")
-    ]
     assert transferred.released is True
     assert runtime.work_budget.snapshot()["active"] == 0
-    runtime.close(wait=True)
-
-
-def test_finalizer_lane_full_fenced_retries_every_transferred_handoff(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worker = _worker()
-    runtime = _resources(worker, max_active=4)
-    scheduler = worker._FinalizerSchedulerV2(
-        cfg=_cfg(),
-        runtime_resources=runtime,
-    )
-    _patch_finalizer_discovery(monkeypatch, worker)
-    held_lane_slots = [
-        runtime.finalizer_lane.try_reserve(),
-        runtime.finalizer_lane.try_reserve(),
-    ]
-    assert all(slot is not None for slot in held_lane_slots)
-    event_ids = [
-        "11111111-1111-4111-8111-111111111111",
-        "22222222-2222-4222-8222-222222222222",
-        "33333333-3333-4333-8333-333333333333",
-    ]
-    transfers: dict[str, Any] = {}
-    for index, event_id in enumerate(event_ids, start=1):
-        permit = runtime.work_budget.try_acquire("remux", owner=event_id)
-        assert permit is not None
-        transfers[event_id] = worker._FinalizerHandoffTransfer(
-            lease=worker.MaterializationLease(
-                event_id=event_id,
-                owner="remux-v2",
-                token=f"token-{index}",
-                generation=index,
-                phase=worker.MaterializationPhase.FINALIZER_PENDING.value,
-            ),
-            work_permit=permit,
-        )
-    retries: list[tuple[str, str, str, bool]] = []
-
-    def retry(
-        _conn: object,
-        *,
-        event_id: str,
-        reason: str,
-        exact_lease: object = None,
-        durable_handoff: bool = False,
-    ) -> bool:
-        retries.append(
-            (
-                event_id,
-                reason,
-                str(getattr(exact_lease, "token", "")),
-                durable_handoff,
-            )
-        )
-        return True
-
-    monkeypatch.setattr(scheduler, "_schedule_submit_retry", retry)
-    metadata = [
-        {
-            "event_id": event_id,
-            "_meta_dir": f"/tmp/sink/{event_id}",
-            "_finalizer_phase": {"handoff_persisted_at": "2026-07-20T00:00:00+00:00"},
-        }
-        for event_id in event_ids
-    ]
-
-    assert scheduler.admit_metadata(
-        object(),
-        sink_dir="/tmp/sink",
-        metadata_files=metadata,
-        scan_stats={},
-        processed_dirs=set(),
-        processed_state_path=None,
-        candidate_dirs=None,
-        invalid_output_failures=None,
-        stability_checks=1,
-        cleanup_replay_sink_output_enabled=True,
-        replay_sink_output_max_bytes=0,
-        transferred_handoffs=transfers,
-    ) == 0
-
-    assert transfers == {}
-    assert [item[0] for item in retries] == event_ids
-    assert all(item[1].startswith("capacity_unavailable:") for item in retries)
-    assert [item[2] for item in retries] == ["token-1", "token-2", "token-3"]
-    assert all(item[3] for item in retries)
-    assert runtime.work_budget.snapshot()["active"] == 0
-    assert scheduler.snapshot()["admission_rejected_total"] == 1
-    for slot in held_lane_slots:
-        assert slot is not None
-        slot.cancel()
-    runtime.close(wait=True)
-
-
-@pytest.mark.parametrize("skip_reason", ("processed", "invalid", "already_ready"))
-def test_finalizer_skip_paths_fenced_retry_transferred_handoff_before_wip_release(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    skip_reason: str,
-) -> None:
-    worker = _worker()
-    runtime = _resources(worker)
-    scheduler = worker._FinalizerSchedulerV2(
-        cfg=_cfg(),
-        runtime_resources=runtime,
-    )
-    _patch_finalizer_discovery(monkeypatch, worker)
-    meta_dir = tmp_path / "sink" / EVENT_ID
-    processed_dirs = {str(meta_dir)} if skip_reason == "processed" else set()
-    if skip_reason == "invalid":
-        monkeypatch.setattr(
-            worker,
-            "_invalid_sink_output_marker_path",
-            lambda _path: tmp_path,
-        )
-    if skip_reason == "already_ready":
-        monkeypatch.setattr(worker, "_is_already_ready", lambda *_a, **_k: True)
-        monkeypatch.setattr(worker, "_clear_sink_phase", lambda *_a, **_k: None)
-
-    permit = runtime.work_budget.try_acquire("remux", owner=EVENT_ID)
-    assert permit is not None
-    lease = worker.MaterializationLease(
-        event_id=EVENT_ID,
-        owner="remux-v2",
-        token="token-1",
-        generation=1,
-        phase=worker.MaterializationPhase.FINALIZER_PENDING.value,
-    )
-    transfers = {
-        EVENT_ID: worker._FinalizerHandoffTransfer(
-            lease=lease,
-            work_permit=permit,
-        )
-    }
-    observed: list[tuple[object, bool]] = []
-
-    def retry(
-        _conn: object,
-        *,
-        exact_lease: object = None,
-        durable_handoff: bool = False,
-        **_kwargs: object,
-    ) -> bool:
-        # The permit must remain held until the exact fenced CAS is attempted.
-        observed.append((exact_lease, permit.released))
-        return True
-
-    monkeypatch.setattr(scheduler, "_schedule_submit_retry", retry)
-
-    assert scheduler.admit_metadata(
-        object(),
-        sink_dir=str(tmp_path / "sink"),
-        metadata_files=[{"event_id": EVENT_ID, "_meta_dir": str(meta_dir)}],
-        scan_stats={},
-        processed_dirs=processed_dirs,
-        processed_state_path=None,
-        candidate_dirs=None,
-        invalid_output_failures=None,
-        stability_checks=1,
-        cleanup_replay_sink_output_enabled=True,
-        replay_sink_output_max_bytes=0,
-        transferred_handoffs=transfers,
-    ) == 0
-
-    assert transfers == {}
-    assert observed == [(lease, False)]
-    assert permit.released is True
-    assert runtime.work_budget.snapshot()["active"] == 0
-    runtime.close(wait=True)
-
-
-def test_finalizer_submit_retry_preserves_unleased_handoff_phase(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    worker = _worker()
-    runtime = _resources(worker)
-    scheduler = worker._FinalizerSchedulerV2(
-        cfg=_cfg(),
-        runtime_resources=runtime,
-    )
-    observed: list[tuple[str, str]] = []
-    monkeypatch.setattr(worker, "current_lease", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        worker,
-        "retry_unclaimed_finalizer_handoff",
-        lambda _conn, *, event_id, reason, **_kwargs: observed.append(
-            (event_id, reason)
-        )
-        or True,
-    )
-    monkeypatch.setattr(
-        worker,
-        "schedule_unclaimed_retry",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("durable handoff was demoted to waiting_ready")
-        ),
-    )
-
-    assert scheduler._schedule_submit_retry(
-        object(),
-        event_id=EVENT_ID,
-        reason="capacity_unavailable:finalizer_lane_full",
-        durable_handoff=True,
-    ) is True
-    assert observed == [
-        (EVENT_ID, "capacity_unavailable:finalizer_lane_full")
-    ]
     runtime.close(wait=True)
 
 
@@ -697,10 +363,7 @@ def test_finalizer_lane_exception_schedules_retry_and_releases_resources(
     monkeypatch.setattr(
         scheduler,
         "_schedule_submit_retry",
-        lambda _conn, *, event_id, reason, **_kwargs: retries.append(
-            (event_id, reason)
-        )
-        or True,
+        lambda _conn, *, event_id, reason: retries.append((event_id, reason)) or True,
     )
     monkeypatch.setattr(
         worker,
@@ -795,8 +458,7 @@ def test_finalizer_force_stop_fences_running_and_queued_work(
     monkeypatch.setattr(
         scheduler,
         "_schedule_submit_retry",
-        lambda _conn, *, event_id, reason, **_kwargs: retries.append(event_id)
-        or True,
+        lambda _conn, *, event_id, reason: retries.append(event_id) or True,
     )
     second_event = "22222222-2222-4222-8222-222222222222"
     metadata = [

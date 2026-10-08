@@ -72,25 +72,7 @@ Environment overrides:
   MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE=<profile default>
                       Shared media-worker WIP candidate for Phase 6 A/B.
   MEDIA_WORKER_ROLLING_REMUX_WORKERS=<profile default>
-                      Rolling remux lane width.
-  MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY=<profile default>
-                      Rolling segment-index discovery-through-pin I/O width.
-  ROLLING_CACHE_PUBLICATION_WORKERS=<profile default>
-                      Per-sink source-sharded durable publication workers.
-  ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS=<profile default>
-                      Host-wide deterministic durable commit lanes (0 disables).
-  ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE=<profile default>
-                      Regular-file durability primitive: fsync or fdatasync.
-  ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT=<profile default>
-                      Metadata/manifest layout: split, single_inode, or metadata_only.
-  MEDIA_WORKER_FINALIZER_WORKERS=<profile default>
-                      Finalizer thread count.
-  MEDIA_WORKER_FINALIZER_PROCESS_WORKERS=<profile default>
-                      Finalizer bundle process count.
-  MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY=<profile default>
-                      Bounded in-process finalizer queue capacity.
-  MEDIA_WORKER_ROLLING_MAX_PER_POLL=<profile default>
-                      New rolling remux admissions per scheduler poll.
+                      Rolling remux lane width; finalizer width remains capped at 4.
   PRESERVE_WARMUP_RESULTS=1
                       Retain prefill event/evidence and fence formal gates by time.
   PRESSURE_PAUSE_REDIS_RDB=<profile default>
@@ -102,9 +84,6 @@ Environment overrides:
   PRESSURE_CACHE_TMPFS=<profile default>
                       Bind pressure rolling-cache/intermediate materialization
                       to shared host tmpfs; final evidence remains on disk.
-  PRESSURE_ROLLING_CACHE_RETENTION_S=0
-                      Explicit pressure-only retention. Use 300 for the daily
-                      retention gate or 3840 for the endurance gate.
   ROLLING_CACHE_MIN_RAW_FPS=<profile default>
                       Minimum pre-resampler evidence cadence. The 4090 profile
                       requires 20 FPS while Savant still analyzes at 8 FPS.
@@ -117,7 +96,7 @@ case "${profile}" in
   8fps-stress)
     fps="8/1"
     min_fps="198/25"
-    run_prefix="pressure60_8p1_dual1gpu_w20_r12_f8_cd30"
+    run_prefix="pressure60_8p1_dual1gpu_cd30"
     duration_default_s="600"
     pressure_algorithm_cooldown_default_s="30"
     pressure_source_start_stagger_default_s="0.53"
@@ -130,19 +109,8 @@ case "${profile}" in
     mps_savant_percent_default="0"
     mps_adaface_percent_default="0"
     adaface_roi_redis_default="1"
-    media_worker_materialization_max_active_default="20"
-    media_worker_rolling_remux_workers_default="12"
-    media_worker_segment_index_io_concurrency_default="2"
-    media_worker_db_index_io_concurrency_default="0"
-    rolling_cache_publication_workers_default="1"
-    rolling_cache_publication_commit_slots_default="0"
-    rolling_cache_publication_final_parent_group_limit_default="1"
-    rolling_cache_publication_file_sync_mode_default="fsync"
-    rolling_cache_publication_metadata_layout_default="split"
-    media_worker_finalizer_workers_default="8"
-    media_worker_finalizer_process_workers_default="4"
-    media_worker_finalizer_queue_capacity_default="8"
-    media_worker_rolling_max_per_poll_default="8"
+    media_worker_materialization_max_active_default="12"
+    media_worker_rolling_remux_workers_default="8"
     pressure_pause_redis_rdb_default="1"
     pressure_tune_postgres_checkpoints_default="1"
     pressure_cache_tmpfs_default="1"
@@ -175,17 +143,6 @@ case "${profile}" in
     adaface_roi_redis_default="1"
     media_worker_materialization_max_active_default="4"
     media_worker_rolling_remux_workers_default="1"
-    media_worker_segment_index_io_concurrency_default="2"
-    media_worker_db_index_io_concurrency_default="0"
-    rolling_cache_publication_workers_default="1"
-    rolling_cache_publication_commit_slots_default="0"
-    rolling_cache_publication_final_parent_group_limit_default="1"
-    rolling_cache_publication_file_sync_mode_default="fsync"
-    rolling_cache_publication_metadata_layout_default="split"
-    media_worker_finalizer_workers_default="4"
-    media_worker_finalizer_process_workers_default="4"
-    media_worker_finalizer_queue_capacity_default="4"
-    media_worker_rolling_max_per_poll_default="4"
     pressure_pause_redis_rdb_default="0"
     pressure_tune_postgres_checkpoints_default="0"
     pressure_cache_tmpfs_default="0"
@@ -235,21 +192,9 @@ adaface_roi_redis="${ADAFACE_ROI_REDIS:-${adaface_roi_redis_default}}"
 roi_batch_timeout_ms="${ROI_BATCH_TIMEOUT_MS:-${roi_batch_timeout_default_ms}}"
 media_worker_materialization_max_active="${MEDIA_WORKER_MATERIALIZATION_MAX_ACTIVE:-${media_worker_materialization_max_active_default}}"
 media_worker_rolling_remux_workers="${MEDIA_WORKER_ROLLING_REMUX_WORKERS:-${media_worker_rolling_remux_workers_default}}"
-media_worker_segment_index_io_concurrency="${MEDIA_WORKER_SEGMENT_INDEX_IO_CONCURRENCY:-${media_worker_segment_index_io_concurrency_default}}"
-media_worker_db_index_io_concurrency="${MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY:-${media_worker_db_index_io_concurrency_default}}"
-rolling_cache_publication_workers="${ROLLING_CACHE_PUBLICATION_WORKERS:-${rolling_cache_publication_workers_default}}"
-rolling_cache_publication_commit_slots="${ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS:-${rolling_cache_publication_commit_slots_default}}"
-rolling_cache_publication_final_parent_group_limit="${ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT:-${rolling_cache_publication_final_parent_group_limit_default}}"
-rolling_cache_publication_file_sync_mode="${ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE:-${rolling_cache_publication_file_sync_mode_default}}"
-rolling_cache_publication_metadata_layout="${ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT:-${rolling_cache_publication_metadata_layout_default}}"
-media_worker_finalizer_workers="${MEDIA_WORKER_FINALIZER_WORKERS:-${media_worker_finalizer_workers_default}}"
-media_worker_finalizer_process_workers="${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-${media_worker_finalizer_process_workers_default}}"
-media_worker_finalizer_queue_capacity="${MEDIA_WORKER_FINALIZER_QUEUE_CAPACITY:-${media_worker_finalizer_queue_capacity_default}}"
-media_worker_rolling_max_per_poll="${MEDIA_WORKER_ROLLING_MAX_PER_POLL:-${media_worker_rolling_max_per_poll_default}}"
 pressure_pause_redis_rdb="${PRESSURE_PAUSE_REDIS_RDB:-${pressure_pause_redis_rdb_default}}"
 pressure_tune_postgres_checkpoints="${PRESSURE_TUNE_POSTGRES_CHECKPOINTS:-${pressure_tune_postgres_checkpoints_default}}"
 pressure_cache_tmpfs="${PRESSURE_CACHE_TMPFS:-${pressure_cache_tmpfs_default}}"
-pressure_rolling_cache_retention_s="${PRESSURE_ROLLING_CACHE_RETENTION_S:-0}"
 rolling_cache_min_raw_fps="${ROLLING_CACHE_MIN_RAW_FPS:-${rolling_cache_min_raw_fps_default}}"
 preserve_warmup_results="${PRESERVE_WARMUP_RESULTS:-1}"
 rtsp_republish_output_base="${RTSP_REPUBLISH_OUTPUT_BASE:-}"
@@ -297,18 +242,6 @@ cmd=(
   --batched-push-timeout "${batch_timeout_us}"
   --media-worker-materialization-max-active "${media_worker_materialization_max_active}"
   --media-worker-rolling-remux-workers "${media_worker_rolling_remux_workers}"
-  --media-worker-segment-index-io-concurrency "${media_worker_segment_index_io_concurrency}"
-  --media-worker-db-index-io-concurrency "${media_worker_db_index_io_concurrency}"
-  --rolling-cache-publication-workers "${rolling_cache_publication_workers}"
-  --rolling-cache-publication-commit-slots "${rolling_cache_publication_commit_slots}"
-  --rolling-cache-publication-final-parent-group-limit "${rolling_cache_publication_final_parent_group_limit}"
-  --rolling-cache-publication-file-sync-mode "${rolling_cache_publication_file_sync_mode}"
-  --rolling-cache-publication-metadata-layout "${rolling_cache_publication_metadata_layout}"
-  --media-worker-finalizer-workers "${media_worker_finalizer_workers}"
-  --media-worker-finalizer-process-workers "${media_worker_finalizer_process_workers}"
-  --media-worker-finalizer-queue-capacity "${media_worker_finalizer_queue_capacity}"
-  --media-worker-rolling-max-per-poll "${media_worker_rolling_max_per_poll}"
-  --pressure-rolling-cache-retention-s "${pressure_rolling_cache_retention_s}"
   --savant-ablation-stage "${ablation_stage}"
   --savant-output-mode "${output_mode}"
   --cpu-isolation-profile "${cpu_profile}"
@@ -455,21 +388,9 @@ printf 'adaface_pre_gate=%s\n' "${adaface_pre_gate}"
 printf 'adaface_decoupled=%s\n' "${adaface_decoupled}"
 printf 'media_worker_materialization_max_active=%s\n' "${media_worker_materialization_max_active}"
 printf 'media_worker_rolling_remux_workers=%s\n' "${media_worker_rolling_remux_workers}"
-printf 'media_worker_segment_index_io_concurrency=%s\n' "${media_worker_segment_index_io_concurrency}"
-printf 'media_worker_db_index_io_concurrency=%s\n' "${media_worker_db_index_io_concurrency}"
-printf 'rolling_cache_publication_workers=%s\n' "${rolling_cache_publication_workers}"
-printf 'rolling_cache_publication_commit_slots=%s\n' "${rolling_cache_publication_commit_slots}"
-printf 'rolling_cache_publication_final_parent_group_limit=%s\n' "${rolling_cache_publication_final_parent_group_limit}"
-printf 'rolling_cache_publication_file_sync_mode=%s\n' "${rolling_cache_publication_file_sync_mode}"
-printf 'rolling_cache_publication_metadata_layout=%s\n' "${rolling_cache_publication_metadata_layout}"
-printf 'media_worker_finalizer_workers=%s\n' "${media_worker_finalizer_workers}"
-printf 'media_worker_finalizer_process_workers=%s\n' "${media_worker_finalizer_process_workers}"
-printf 'media_worker_finalizer_queue_capacity=%s\n' "${media_worker_finalizer_queue_capacity}"
-printf 'media_worker_rolling_max_per_poll=%s\n' "${media_worker_rolling_max_per_poll}"
 printf 'pressure_pause_redis_rdb=%s\n' "${pressure_pause_redis_rdb}"
 printf 'pressure_tune_postgres_checkpoints=%s\n' "${pressure_tune_postgres_checkpoints}"
 printf 'pressure_cache_tmpfs=%s\n' "${pressure_cache_tmpfs}"
-printf 'pressure_rolling_cache_retention_s=%s\n' "${pressure_rolling_cache_retention_s}"
 printf 'rolling_cache_min_raw_fps=%s\n' "${rolling_cache_min_raw_fps}"
 printf 'preserve_warmup_results=%s\n' "${preserve_warmup_results}"
 printf 'rtsp_republish_output_base=%s\n' "${rtsp_republish_output_base}"

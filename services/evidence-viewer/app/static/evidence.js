@@ -351,7 +351,7 @@ function evidenceStateLabel(bundle = {}) {
     "materialization_deadline_expired",
     "generated_corrupt"
   ]);
-  return failureStates.has(stateValue) && reason ? `${label}，请查看提示` : label;
+  return failureStates.has(stateValue) && reason ? `${label}: ${reason}` : label;
 }
 
 function warningLabel(value) {
@@ -672,7 +672,10 @@ function renderBundleList() {
       evidenceStatusLabel(bundle.visual_evidence_status),
       `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
     ].filter(Boolean).join(" | ");
-    if (textOrNull(bundle.evidence_reason)) button.title = "该证据生成异常，请查看提示";
+    const reason = textOrNull(bundle.evidence_reason);
+    if (reason) {
+      button.title = reason;
+    }
     button.append(main, sub);
     if (isIdentity) {
       const action = document.createElement("span");

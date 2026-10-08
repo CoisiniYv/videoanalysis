@@ -173,7 +173,7 @@ def test_8090_form_exposes_named_full_runtime_profiles() -> None:
     assert 'value="production_t4_40"' in html
     assert 'value="local_4090_60"' in html
     assert 'name="pipeline_mode"' in html
-    assert "识别、人员轨迹和证据录像服务" in js
+    assert "MPS、ROI AdaFace、rolling-cache" in js
     assert 'id="quick-runtime-start"' in html
     assert 'id="quick-runtime-shard-strategy"' in html
     assert "管理摄像头与算法" in html
@@ -186,7 +186,7 @@ def test_8090_form_exposes_named_full_runtime_profiles() -> None:
     assert "source_ids: selected.map" in js
     assert "disable_unselected: true" in js
     assert "JSON.stringify({ source_ids: sourceIds, disable_unselected: disableUnselected })" in js
-    assert "点击“启动全部分析”后才会统一启用" in html
+    assert "点击“启动完整双分支”时才会批量启用" in html
     assert 'id="open-full-runtime-from-cameras"' not in html
     assert "openFullRuntimeFromCamerasBtn" not in js
     assert "enabled: false" in js
@@ -197,7 +197,7 @@ def test_8090_form_exposes_named_full_runtime_profiles() -> None:
     assert "运维控制" in html
     assert 'id="quick-runtime-progress"' in html
     assert 'id="quick-runtime-progress-bar"' in html
-    assert "录像缓存准备" in html
+    assert "rolling-cache 预热" in html
     assert "runtime/topology-config/apply-async" in js
     assert "runtime/topology-config/apply-status" in js
     assert "renderRuntimeTopologyApplyProgress" in js
@@ -205,8 +205,8 @@ def test_8090_form_exposes_named_full_runtime_profiles() -> None:
     assert "await asyncio.to_thread(" in viewer_main
     assert viewer_main.count("await asyncio.to_thread(") >= 2
     assert "dualReady" in js
-    assert "分析服务就绪" in js
-    assert "处理组 A / 处理组 B" in js
+    assert "双分支就绪" in js
+    assert "savant-a / savant-b" in js
     assert 'id="quick-runtime-stop"' in html
     assert "停止采集与推理" in html
     assert "runtime/control/dual/stop" in js

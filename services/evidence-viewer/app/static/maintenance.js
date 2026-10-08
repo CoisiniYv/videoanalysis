@@ -134,7 +134,7 @@ function skipReasonLabel(reason = "") {
   const key = String(reason || "skipped");
   if (SKIP_REASON_LABELS[key]) return SKIP_REASON_LABELS[key];
   if (key.startsWith("path_unsafe:")) return "证据路径不安全，已被保护性跳过。";
-  return "该对象当前无法删除，请稍后刷新后重试。";
+  return `后端跳过原因：${key}`;
 }
 
 function previewSkipReasons(preview = {}) {
@@ -179,7 +179,7 @@ function renderTargetSummary(request = {}) {
   const title = target.title || `删除${deleteKindLabel(request)}`;
   const fields = Array.isArray(target.fields) ? target.fields : [];
   const fallbackFields = [];
-  if (request.event_ids?.length) fallbackFields.push({ label: "证据编号", value: csvValues(request.event_ids).join(", ") });
+  if (request.event_ids?.length) fallbackFields.push({ label: "事件 ID", value: csvValues(request.event_ids).join(", ") });
   if (request.person_ids?.length) fallbackFields.push({ label: "人员 ID", value: csvValues(request.person_ids).join(", ") });
   if (request.external_person_ids?.length) fallbackFields.push({ label: "人员编号", value: csvValues(request.external_person_ids).join(", ") });
   if (request.gallery_embedding_ids?.length) fallbackFields.push({ label: "图库 ID", value: csvValues(request.gallery_embedding_ids).join(", ") });
@@ -223,7 +223,7 @@ function previewDisabledReason(preview = {}) {
   const expired = expiresAt && expiresAt.getTime() <= Date.now();
   const deletableCount = Number(preview.deletable_count || 0);
   if (expired) return "预览已过期，请重新生成";
-  if (!preview.preview_id) return "预览信息不完整";
+  if (!preview.preview_id) return "预览缺少 ID";
   if (deletableCount <= 0) {
     const reason = primarySkipReason(preview);
     return reason ? skipReasonLabel(reason) : "本次预览没有可删除对象";
@@ -263,7 +263,7 @@ function requireDeleteTargets(values, label) {
 function activePreviewBody(deleteRequest = {}) {
   if (deleteRequest.kind === "evidence") {
     return {
-      event_ids: requireDeleteTargets(csvValues(deleteRequest.event_ids || []), "证据编号"),
+      event_ids: requireDeleteTargets(csvValues(deleteRequest.event_ids || []), "事件 ID"),
       delete_mode: deleteRequest.delete_mode || "trash",
       allow_stale_pending_tasks: Boolean(deleteRequest.allow_stale_pending_tasks),
       max_items: Number(deleteRequest.max_items || 1000),
@@ -376,6 +376,7 @@ function renderPreview(preview, target = maintenanceDom.previewResult) {
     `<div>预计释放空间：${formatBytes(preview.estimated_bytes)}</div>`,
     `<div>过期时间：${expiresAt ? expiresAt.toLocaleString() : "-"}</div>`,
     `<div>${NO_AUTO_REGENERATE}</div>`,
+    `<div>预览 ID：${escapeHtml(preview.preview_id || "-")}</div>`,
     skippedLines.length ? `<ul>${skippedLines.join("")}</ul>` : ""
   ];
   target.innerHTML = lines.join("");
@@ -478,7 +479,7 @@ async function previewEvidenceDelete(options = {}) {
 async function executeEvidenceDelete(options = {}) {
   const preview = maintenanceState.preview;
   if (!preview?.preview_id) {
-    throw new Error("删除前必须先生成并核对预览");
+    throw new Error("删除必须先 preview");
   }
   const disabledReason = deleteActionDisabledReason(preview);
   if (disabledReason) {
@@ -510,8 +511,9 @@ async function executeEvidenceDelete(options = {}) {
     });
     const resultPayload = result.result || {};
     resultTarget.innerHTML = [
-      `<strong>${result.status === "completed" || result.status === "success" ? "删除完成" : "删除操作已提交"}</strong>`,
+      `<strong>执行结果：${escapeHtml(result.status || "-")}</strong>`,
       `<div>已处理 ${resultPayload.completed_count ?? "-"}，跳过 ${resultPayload.skipped_count ?? "-"}，失败 ${resultPayload.failed_count ?? "-"}</div>`,
+      `<div>Job ID：${escapeHtml(result.job_id || preview.preview_id || "-")}</div>`,
       `<div>${NO_AUTO_REGENERATE}</div>`
     ].join("");
     setDeleteButtonDisabled(executeButton, true);
@@ -529,7 +531,7 @@ async function executeEvidenceDelete(options = {}) {
 async function executeFaceDelete(options = {}) {
   const preview = maintenanceState.facePreview;
   if (!preview?.preview_id || !maintenanceState.facePreviewKind) {
-    throw new Error("删除前必须先生成并核对预览");
+    throw new Error("删除必须先 preview");
   }
   const disabledReason = deleteActionDisabledReason(preview);
   if (disabledReason) {
@@ -565,7 +567,7 @@ async function executeFaceDelete(options = {}) {
       body: JSON.stringify(commonBody)
     });
     resultTarget.innerHTML =
-      `<strong>${result.status === "completed" || result.status === "success" ? "删除完成" : "删除操作已提交"}</strong><div>${NO_AUTO_REGENERATE}</div>`;
+      `<strong>执行结果：${escapeHtml(result.status)}</strong><div>${NO_AUTO_REGENERATE}</div>`;
     setDeleteButtonDisabled(executeButton, true);
     maintenanceState.facePreview = null;
     await loadMaintenanceSummary();

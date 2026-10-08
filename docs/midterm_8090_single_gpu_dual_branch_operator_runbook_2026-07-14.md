@@ -1,7 +1,5 @@
 # 8090 单卡双分支启动流程说明（操作员视角）
 
-更新说明：2026-07-20 已按当前工作区复核。文件名保留首次成文日期。
-
 ## 1. 这份说明解决什么问题
 
 本文说明操作员如何从 8090 实际页面进入“单张 GPU、双 Savant 分支”运行模式，
@@ -13,7 +11,7 @@
 - `生产 T4 40 路完整链路`：20+20、4 FPS、YOLO batch 4、AdaFace batch 16、
   MPS 45%/45%/10%、ROI AdaFace、rolling-cache、5+5 证据链。
 - `本机 4090 60 路完整链路`：30+30、8 FPS、YOLO batch 4、AdaFace batch 16、
-  不启用 MPS，但仍启用 ROI AdaFace、rolling-cache 和 5+5 证据链。
+  不启用 MPS、ROI AdaFace 和 rolling-cache。
 
 首次部署或代码更新后，管理员先执行 `scripts/midterm_start.sh`。该脚本会预创建
 这些容器但保持停止；之后双分支完整链路由 8090 页面负责启动和切换。压测清理不
@@ -71,19 +69,20 @@ topology JSON。选择完整运行预设后，页面动作还会管理：
 evidence 开放；生产 T4 预设的 rolling-cache 固定预热时间为 25 秒，并显示倒计时。
 如果 B 分支独立模型缓存缺少 ONNX，预检会直接阻止启动，不再进入容器重启循环。
 
-### 2.1 生产现场结论的时效性
+### 2.1 当前生产机现场状态
 
-本文最初记录的 2026-07-14“日常单分支、enabled camera=0、预检不通过”只是当时
-快照，已经失效，不能作为当前页面状态。2026-07-15 的后续审计记录生产 T4 已运行
-`production_t4_40`：40 路启用、A/B 20/20、完整 evidence 链就绪，并连续运行约
-4 小时。
+2026-07-14 核对生产机时：
 
-每次操作仍必须以当前页面的 profile、所选摄像头、topology plan、pipeline ready 和
-apply-status 为准。`/runtime/control` 的兼容 mode 字段可能仍显示 single，不能单独用它
-否定实际双分支；应联合看 A/B 容器、source 数、topology plan 和完整链 ready 状态。
+- 实际链路为日常单分支；
+- 已保存目标为 `dual_same_gpu`；
+- 已保存“每分支目标路数”为 30，不是最新 40 路基线的 20；
+- 已保存 branch push timeout 为 40000 us，不是最新基线的 10000 us；
+- enabled camera 为 0；
+- A/B 所需的核心容器已经 `Created` 但保持停止，等待 8090 快速入口按需启动；
+- 页面“结构预检”当前为不通过。
 
-后续生产审计见：
-`docs/code_review/production_runtime_evidence_audit_2026-07-15.md`。
+所以**按当前现场状态，不能直接点击“应用已保存拓扑”**。点击“保存草稿”是安全
+的，但“确认并应用”会在服务端 preflight 阶段返回冲突，不会形成可工作的双分支。
 
 ## 3. 谁负责哪一步
 

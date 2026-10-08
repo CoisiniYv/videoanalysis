@@ -25,8 +25,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, local
-from contextlib import contextmanager, nullcontext
-from typing import Callable, Iterator, Sequence
+from contextlib import nullcontext
+from typing import Callable
 
 import psycopg
 from psycopg.rows import dict_row
@@ -43,13 +43,6 @@ from libs.evidence_lifecycle import (
 )
 
 from app.annotated_snapshot import generate_annotated_snapshot
-from app.source_rotation import (
-    IMAGE_LANE,
-    REMUX_LANE,
-    mark_served,
-    next_source_turns,
-    rotation_supported,
-)
 from app.config import Config, load_config
 from app.evidence_db_index import upsert_evidence_bundle_index
 from app.frame_cache_sidecar_writer import write_frame_cache_identity_sidecar
@@ -58,7 +51,6 @@ from app.legacy_observability import (
     materialization_correlation,
 )
 from app.materialization_scheduler import (
-    BoundedIoGate,
     LaneReservation,
     LeaseHeartbeatHandle,
     LeaseHeartbeatSupervisor,
@@ -70,7 +62,6 @@ from app.materialization_scheduler import (
     WorkPermit,
 )
 from app.materialization_repository import (
-    FinalizerPendingMetrics,
     MaterializationLease,
     claim_finalizer_task,
     claim_rolling_task,
@@ -79,7 +70,6 @@ from app.materialization_repository import (
     defer_terminal_task,
     fail_unclaimed_task,
     fail_rolling_task,
-    finalizer_pending_metrics,
     heartbeat_lease,
     persist_finalizer_handoff,
     pending_cleanup_tasks,
@@ -87,7 +77,6 @@ from app.materialization_repository import (
     recoverable_finalizer_handoffs,
     recover_and_expire_rolling_tasks,
     retry_finalizer_handoff,
-    retry_unclaimed_finalizer_handoff,
     retry_rolling_task,
     schedule_unclaimed_retry,
     supports_lifecycle_v2,
@@ -133,61 +122,6 @@ DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
 )
 DEFAULT_MEDIA_WORKER_STATE_PATH = (
     "/media/replay-sink-output/midterm/.media-worker.processed.json"
-)
-SEGMENT_INDEX_JOB_METRIC_FIELDS = (
-    "segment_index_io_slot_wait_ms",
-    "segment_index_lock_wait_ms",
-    "segment_index_lock_hold_ms",
-    "segment_index_refresh_ms",
-    "segment_index_rebuild_ms",
-    "segment_index_stat_ms",
-    "segment_index_full_row_parse_ms",
-    "segment_index_manifest_parse_ms",
-    "segment_index_sort_ms",
-    "segment_index_mutation_lock_wait_ms",
-    "segment_index_pin_publish_ms",
-    "segment_index_pin_release_ms",
-    "segment_index_publication_read_ms",
-    "segment_index_stat_calls",
-    "segment_index_full_row_parses",
-    "segment_index_manifest_parses",
-    "segment_index_scanned_known",
-    "segment_index_new_or_changed",
-    "segment_index_pinned_segments",
-    "segment_index_row_cache_hits",
-    "segment_index_row_cache_misses",
-    "segment_index_row_cache_evictions",
-    "segment_index_publication_records",
-    "segment_index_publication_bytes",
-    "segment_index_publication_errors",
-    "segment_index_publication_reconciles",
-)
-REMUX_JOB_METRIC_FIELDS = (
-    "remux_metadata_publish_ms",
-    "remux_metadata_bytes",
-    "remux_metadata_reload_ms",
-    "remux_handoff_build_ms",
-    "remux_unattributed_ms",
-)
-FINALIZER_PUBLISH_METRIC_FIELDS = (
-    "finalizer_publish_heartbeat_ms",
-    "finalizer_publish_prepare_ms",
-    "finalizer_publish_rename_ms",
-    "finalizer_publish_rebase_ms",
-    "finalizer_publish_total_ms",
-)
-FINALIZER_LANE_METRIC_FIELDS = (
-    "finalizer_pre_bundle_ms",
-    "finalizer_bundle_ms",
-    *FINALIZER_PUBLISH_METRIC_FIELDS,
-    "finalizer_terminal_commit_ms",
-    "finalizer_event_projection_ms",
-    "finalizer_db_index_ms",
-    "finalizer_db_index_gate_wait_ms",
-    "finalizer_db_index_gate_service_ms",
-    "finalizer_cleanup_ms",
-    "finalizer_post_terminal_ms",
-    "finalizer_lane_service_ms",
 )
 
 
@@ -585,7 +519,6 @@ def _write_person_bbox_db_sidecar_fallback(
     )
     return summary, {
         "written": True,
-        "annotations": annotations,
         "annotations_path": str(annotations_path),
         "summary_path": str(summary_path),
     }
@@ -1627,7 +1560,7 @@ class _MaterializationGuard:
             if self.active > 0:
                 self.active -= 1
 
-    def snapshot(self) -> dict[str, float | int]:
+    def snapshot(self) -> dict[str, int]:
         with self._lock:
             return {
                 "max_active": self.max_active,
@@ -2366,7 +2299,6 @@ def _claim_media_finalization(
     event_id: str,
     sink_path: str,
     worker_id: str,
-    expected_lease: MaterializationLease | None = None,
 ) -> dict[str, object]:
     try:
         return claim_finalizer_task(
@@ -2379,7 +2311,6 @@ def _claim_media_finalization(
                 _materialization_timeout_s()
                 or float(os.getenv("ROLLING_CACHE_MATERIALIZATION_PROCESSING_DEADLINE_SECONDS", "120")),
             ),
-            expected_lease=expected_lease,
         )
     except Exception as exc:
         logger.exception("media_finalization_claim_failed event_id=%s", event_id)
@@ -3378,21 +3309,6 @@ def _post_savant_phase_latency_metrics(
         "sink_ffprobe_ready_at": sink_ffprobe_ready_at,
         "finalizer_submitted_at": finalizer_submitted_at,
         "finalizer_started_at": finalizer_started_at,
-        "ready_to_remux_claim_ms": phase.get("ready_to_remux_claim_ms"),
-        "remux_ms": phase.get("remux_ms"),
-        "remux_exec_ms": phase.get("remux_exec_ms"),
-        "remux_total_ms": phase.get("remux_total_ms"),
-        **{
-            name: phase.get(name)
-            for name in REMUX_JOB_METRIC_FIELDS
-        },
-        **{
-            name: phase.get(name)
-            for name in SEGMENT_INDEX_JOB_METRIC_FIELDS
-        },
-        "handoff_to_finalizer_admission_ms": phase.get(
-            "handoff_to_finalizer_admission_ms"
-        ),
         "replay_to_sink_metadata_ms": _elapsed_ms_between_iso(
             replay_job_created_at,
             sink_metadata_first_seen_at,
@@ -3466,12 +3382,7 @@ def _post_savant_materialization_metrics(
         **{
             key: value
             for key, value in phase_latency_ms.items()
-            if (
-                key.endswith("_ms")
-                or key.startswith("replay_active_")
-                or key in REMUX_JOB_METRIC_FIELDS
-                or key in SEGMENT_INDEX_JOB_METRIC_FIELDS
-            )
+            if key.endswith("_ms") or key.startswith("replay_active_")
         },
         "input_bytes": video_crop.get("input_bytes"),
         "input_duration_seconds": video_crop.get("input_duration_seconds"),
@@ -5691,65 +5602,6 @@ def _index_finalized_bundle(
     event_id: str,
     evidence_state: str,
     bundle: dict,
-    io_gate: BoundedIoGate | None = None,
-    gate_diagnostics: dict[str, int | float] | None = None,
-) -> bool:
-    timing: dict[str, int | float] = {
-        "limit": 0,
-        "wait_ms": 0.0,
-        "service_ms": 0.0,
-        "active_at_acquire": 1,
-    }
-    if io_gate is None:
-        started_at = time.monotonic()
-        result = _index_finalized_bundle_unbounded(
-            pg_conn,
-            event_id=event_id,
-            evidence_state=evidence_state,
-            bundle=bundle,
-        )
-        timing["service_ms"] = round(
-            max(0.0, (time.monotonic() - started_at) * 1000),
-            3,
-        )
-    else:
-        with io_gate.slot() as acquired_timing:
-            timing = acquired_timing
-            result = _index_finalized_bundle_unbounded(
-                pg_conn,
-                event_id=event_id,
-                evidence_state=evidence_state,
-                bundle=bundle,
-            )
-    diagnostics = {
-        "finalizer_db_index_gate_limit": int(timing["limit"]),
-        "finalizer_db_index_gate_wait_ms": float(timing["wait_ms"]),
-        "finalizer_db_index_gate_service_ms": float(timing["service_ms"]),
-        "finalizer_db_index_gate_active_at_acquire": int(
-            timing["active_at_acquire"]
-        ),
-    }
-    if gate_diagnostics is not None:
-        gate_diagnostics.update(diagnostics)
-    logger.info(
-        "evidence_db_index_io_gate event_id=%s limit=%s wait_ms=%s "
-        "service_ms=%s active_at_acquire=%s result=%s",
-        event_id,
-        diagnostics["finalizer_db_index_gate_limit"],
-        diagnostics["finalizer_db_index_gate_wait_ms"],
-        diagnostics["finalizer_db_index_gate_service_ms"],
-        diagnostics["finalizer_db_index_gate_active_at_acquire"],
-        result,
-    )
-    return result
-
-
-def _index_finalized_bundle_unbounded(
-    pg_conn: psycopg.Connection,
-    *,
-    event_id: str,
-    evidence_state: str,
-    bundle: dict,
 ) -> bool:
     evidence_dir = str(bundle.get("evidence_dir") or "")
     if not evidence_dir:
@@ -6078,27 +5930,11 @@ def _recoverable_finalizer_metadata(
         metadata["_meta_dir"] = sink_output_path
         metadata["_finalizer_phase"] = {
             "handoff_recovered_at": datetime.now(timezone.utc).isoformat(),
-            "handoff_persisted_at": row.get("handoff_persisted_at"),
             "lease_generation": int(
                 row.get("materialization_lease_generation") or 0
             ),
             "attempt_token": handoff.get("attempt_token"),
             "runtime_epoch_id": row.get("runtime_epoch_id"),
-            "ready_to_remux_claim_ms": handoff.get(
-                "ready_to_remux_claim_ms"
-            ),
-            "remux_claimed_at": handoff.get("remux_claimed_at"),
-            "remux_ms": handoff.get("remux_ms"),
-            "remux_exec_ms": handoff.get("remux_exec_ms"),
-            "remux_total_ms": handoff.get("remux_total_ms"),
-            **{
-                name: handoff.get(name)
-                for name in REMUX_JOB_METRIC_FIELDS
-            },
-            **{
-                name: handoff.get(name)
-                for name in SEGMENT_INDEX_JOB_METRIC_FIELDS
-            },
         }
         labels = metadata.get("labels")
         if isinstance(labels, dict):
@@ -6138,25 +5974,6 @@ def _log_finalize_one_metrics(
         "sink_metadata_to_video_ms=%s sink_video_to_stable_ms=%s "
         "sink_stable_to_ffprobe_ready_ms=%s "
         "sink_ffprobe_ready_to_finalizer_start_ms=%s finalizer_pool_wait_ms=%s "
-        "ready_to_remux_claim_ms=%s remux_ms=%s remux_exec_ms=%s "
-        "remux_total_ms=%s "
-        "remux_metadata_publish_ms=%s remux_metadata_bytes=%s "
-        "remux_metadata_reload_ms=%s remux_handoff_build_ms=%s "
-        "remux_unattributed_ms=%s "
-        "segment_index_io_slot_wait_ms=%s "
-        "segment_index_lock_wait_ms=%s segment_index_lock_hold_ms=%s "
-        "segment_index_refresh_ms=%s segment_index_rebuild_ms=%s "
-        "segment_index_stat_ms=%s segment_index_full_row_parse_ms=%s "
-        "segment_index_manifest_parse_ms=%s segment_index_sort_ms=%s "
-        "segment_index_mutation_lock_wait_ms=%s "
-        "segment_index_pin_publish_ms=%s segment_index_pin_release_ms=%s "
-        "segment_index_publication_read_ms=%s "
-        "segment_index_pinned_segments=%s "
-        "segment_index_publication_records=%s "
-        "segment_index_publication_bytes=%s "
-        "segment_index_publication_errors=%s "
-        "segment_index_publication_reconciles=%s "
-        "handoff_to_finalizer_admission_ms=%s "
         "throttle_sleep_s=%s throttle_reason=%s deadline_slack_s=%s "
         "metadata_files_visited=%s ffprobe_invocations=%s "
         "ffprobe_duration_ms=%s ffmpeg_invocations=%s ffmpeg_duration_ms=%s "
@@ -6188,34 +6005,6 @@ def _log_finalize_one_metrics(
         materialization_metrics.get("sink_stable_to_ffprobe_ready_ms"),
         materialization_metrics.get("sink_ffprobe_ready_to_finalizer_start_ms"),
         materialization_metrics.get("finalizer_pool_wait_ms"),
-        materialization_metrics.get("ready_to_remux_claim_ms"),
-        materialization_metrics.get("remux_ms"),
-        materialization_metrics.get("remux_exec_ms"),
-        materialization_metrics.get("remux_total_ms"),
-        materialization_metrics.get("remux_metadata_publish_ms"),
-        materialization_metrics.get("remux_metadata_bytes"),
-        materialization_metrics.get("remux_metadata_reload_ms"),
-        materialization_metrics.get("remux_handoff_build_ms"),
-        materialization_metrics.get("remux_unattributed_ms"),
-        materialization_metrics.get("segment_index_io_slot_wait_ms"),
-        materialization_metrics.get("segment_index_lock_wait_ms"),
-        materialization_metrics.get("segment_index_lock_hold_ms"),
-        materialization_metrics.get("segment_index_refresh_ms"),
-        materialization_metrics.get("segment_index_rebuild_ms"),
-        materialization_metrics.get("segment_index_stat_ms"),
-        materialization_metrics.get("segment_index_full_row_parse_ms"),
-        materialization_metrics.get("segment_index_manifest_parse_ms"),
-        materialization_metrics.get("segment_index_sort_ms"),
-        materialization_metrics.get("segment_index_mutation_lock_wait_ms"),
-        materialization_metrics.get("segment_index_pin_publish_ms"),
-        materialization_metrics.get("segment_index_pin_release_ms"),
-        materialization_metrics.get("segment_index_publication_read_ms"),
-        materialization_metrics.get("segment_index_pinned_segments"),
-        materialization_metrics.get("segment_index_publication_records"),
-        materialization_metrics.get("segment_index_publication_bytes"),
-        materialization_metrics.get("segment_index_publication_errors"),
-        materialization_metrics.get("segment_index_publication_reconciles"),
-        materialization_metrics.get("handoff_to_finalizer_admission_ms"),
         (throttle_decision or {}).get("sleep_s"),
         (throttle_decision or {}).get("reason"),
         (throttle_decision or {}).get("deadline_slack_s"),
@@ -6231,55 +6020,6 @@ def _log_finalize_one_metrics(
         stage_timings.get("publish_ms", 0),
         stage_timings.get("terminal_commit_ms", 0),
         stage_timings.get("bundle_process_pid", 0),
-    )
-
-
-def _log_finalizer_lane_metrics(
-    *,
-    event_id: str,
-    finalizer_worker_id: str,
-    source_id: str,
-    replay_shard_id: str,
-    stage_timings: dict[str, int | float],
-) -> None:
-    logger.info(
-        "media_finalizer_lane_completed event_id=%s worker_id=%s "
-        "source_id=%s replay_shard_id=%s "
-        "finalizer_pre_bundle_ms=%s finalizer_bundle_ms=%s "
-        "finalizer_publish_total_ms=%s "
-        "finalizer_publish_heartbeat_ms=%s "
-        "finalizer_publish_prepare_ms=%s "
-        "finalizer_publish_rename_ms=%s "
-        "finalizer_publish_rebase_ms=%s "
-        "finalizer_terminal_commit_ms=%s "
-        "finalizer_event_projection_ms=%s finalizer_db_index_ms=%s "
-        "finalizer_db_index_gate_limit=%s "
-        "finalizer_db_index_gate_wait_ms=%s "
-        "finalizer_db_index_gate_service_ms=%s "
-        "finalizer_db_index_gate_active_at_acquire=%s "
-        "finalizer_cleanup_ms=%s finalizer_post_terminal_ms=%s "
-        "finalizer_lane_service_ms=%s",
-        event_id,
-        finalizer_worker_id,
-        source_id,
-        replay_shard_id,
-        stage_timings.get("finalizer_pre_bundle_ms", 0),
-        stage_timings.get("finalizer_bundle_ms", 0),
-        stage_timings.get("finalizer_publish_total_ms", 0),
-        stage_timings.get("finalizer_publish_heartbeat_ms", 0),
-        stage_timings.get("finalizer_publish_prepare_ms", 0),
-        stage_timings.get("finalizer_publish_rename_ms", 0),
-        stage_timings.get("finalizer_publish_rebase_ms", 0),
-        stage_timings.get("finalizer_terminal_commit_ms", 0),
-        stage_timings.get("finalizer_event_projection_ms", 0),
-        stage_timings.get("finalizer_db_index_ms", 0),
-        stage_timings.get("finalizer_db_index_gate_limit", 0),
-        stage_timings.get("finalizer_db_index_gate_wait_ms", 0),
-        stage_timings.get("finalizer_db_index_gate_service_ms", 0),
-        stage_timings.get("finalizer_db_index_gate_active_at_acquire", 0),
-        stage_timings.get("finalizer_cleanup_ms", 0),
-        stage_timings.get("finalizer_post_terminal_ms", 0),
-        stage_timings.get("finalizer_lane_service_ms", 0),
     )
 
 
@@ -6344,31 +6084,6 @@ def _rebase_path_value(value: object, old_root: Path, new_root: Path) -> object:
     return value
 
 
-_DB_BACKED_BULK_ROW_KEYS = frozenset(
-    {
-        "_db_timeline_rows",
-        "_db_overlay_rows",
-    }
-)
-
-
-def _rebase_finalizer_bundle_paths(
-    bundle: dict,
-    *,
-    old_root: Path,
-    new_root: Path,
-) -> dict:
-    """Rebase published paths without rebuilding frame/object row payloads."""
-    return {
-        key: (
-            value
-            if key in _DB_BACKED_BULK_ROW_KEYS
-            else _rebase_path_value(value, old_root, new_root)
-        )
-        for key, value in bundle.items()
-    }
-
-
 def _rewrite_published_json_paths(
     canonical_dir: Path,
     *,
@@ -6428,20 +6143,12 @@ def _publish_finalizer_attempt(
     attempt_dir: Path,
     bundle: dict,
     lease_seconds: float,
-    stage_timings: dict[str, int] | None = None,
 ) -> dict | None:
-    timings = stage_timings if stage_timings is not None else {}
-    publish_started = time.monotonic()
-    heartbeat_started = time.monotonic()
-    heartbeat_ok = heartbeat_lease(
+    if not heartbeat_lease(
         pg_conn,
         lease,
         lease_seconds=max(1.0, float(lease_seconds or 0.0)),
-    )
-    timings["finalizer_publish_heartbeat_ms"] = int(
-        (time.monotonic() - heartbeat_started) * 1000
-    )
-    if not heartbeat_ok:
+    ):
         logger.warning(
             "finalizer_publish_fence_lost event_id=%s token=%s generation=%s",
             event_id,
@@ -6452,65 +6159,40 @@ def _publish_finalizer_attempt(
             attempt_dir,
             evidence_output_dir=evidence_output_dir,
         )
-        timings["finalizer_publish_total_ms"] = int(
-            (time.monotonic() - publish_started) * 1000
-        )
         return None
-
-    prepare_started = time.monotonic()
     if not attempt_dir.is_dir():
         logger.error(
             "finalizer_attempt_missing event_id=%s path=%s",
             event_id,
             attempt_dir,
         )
-        timings["finalizer_publish_prepare_ms"] = int(
-            (time.monotonic() - prepare_started) * 1000
-        )
-        timings["finalizer_publish_total_ms"] = int(
-            (time.monotonic() - publish_started) * 1000
-        )
         return None
 
     canonical_dir = Path(evidence_output_dir) / event_id
     canonical_dir.parent.mkdir(parents=True, exist_ok=True)
-    canonical_exists = canonical_dir.exists()
-    canonical_complete = canonical_exists and _canonical_attempt_is_complete(
+    if canonical_dir.exists() and _canonical_attempt_is_complete(
         canonical_dir,
         bundle,
         attempt_dir=attempt_dir,
-    )
-    quarantine_path: Path | None = None
-    if canonical_exists and not canonical_complete:
-        quarantine_root = Path(evidence_output_dir) / ".quarantine" / event_id
-        quarantine_root.mkdir(parents=True, exist_ok=True)
-        quarantine_path = quarantine_root / (
-            f"replaced-{lease.generation}-{int(time.time() * 1000)}"
-        )
-    timings["finalizer_publish_prepare_ms"] = int(
-        (time.monotonic() - prepare_started) * 1000
-    )
-
-    rename_started = time.monotonic()
-    if canonical_complete:
+    ):
         _discard_finalizer_attempt(
             attempt_dir,
             evidence_output_dir=evidence_output_dir,
         )
     else:
-        if quarantine_path is not None:
+        if canonical_dir.exists():
+            quarantine_root = Path(evidence_output_dir) / ".quarantine" / event_id
+            quarantine_root.mkdir(parents=True, exist_ok=True)
+            quarantine_path = quarantine_root / (
+                f"replaced-{lease.generation}-{int(time.time() * 1000)}"
+            )
             os.replace(canonical_dir, quarantine_path)
         os.replace(attempt_dir, canonical_dir)
-    timings["finalizer_publish_rename_ms"] = int(
-        (time.monotonic() - rename_started) * 1000
-    )
 
-    rebase_started = time.monotonic()
-    rebased = _rebase_finalizer_bundle_paths(
-        bundle,
-        old_root=attempt_dir,
-        new_root=canonical_dir,
-    )
+    rebased = {
+        key: _rebase_path_value(value, attempt_dir, canonical_dir)
+        for key, value in bundle.items()
+    }
     rebased["evidence_dir"] = str(canonical_dir)
     if _evidence_db_index_expanded_rows_enabled():
         # DB-first bundles index timeline/overlay rows from the in-memory
@@ -6523,12 +6205,6 @@ def _publish_finalizer_attempt(
         )
     else:
         _rewrite_published_json_paths(canonical_dir, old_root=attempt_dir)
-    timings["finalizer_publish_rebase_ms"] = int(
-        (time.monotonic() - rebase_started) * 1000
-    )
-    timings["finalizer_publish_total_ms"] = int(
-        (time.monotonic() - publish_started) * 1000
-    )
     return rebased
 
 
@@ -6603,16 +6279,8 @@ def _finalize_one(
     shutdown_controller: ShutdownController | None = None,
     bundle_process_pool: _FinalizerProcessPool | None = None,
     database_url: str = "",
-    handoff_lease: MaterializationLease | None = None,
-    db_index_io_gate: BoundedIoGate | None = None,
 ) -> _FinalizeOneResult:
     finalize_started = time.monotonic()
-    lane_started_value = phase_diagnostics.get("finalizer_started_monotonic")
-    lane_started = (
-        float(lane_started_value)
-        if isinstance(lane_started_value, (int, float))
-        else finalize_started
-    )
     probe_before = _probe_metrics_snapshot()
     claim_result: dict[str, object] = {"status": "claim_error", "claimed": False}
     claim_wait_ms = 0
@@ -6629,7 +6297,6 @@ def _finalize_one(
             event_id=event_id,
             sink_path=meta_dir,
             worker_id=finalizer_worker_id,
-            expected_lease=handoff_lease,
         )
         claim_wait_ms = int((time.monotonic() - claim_started) * 1000)
         claim_status = str(claim_result.get("status") or "")
@@ -6724,7 +6391,6 @@ def _finalize_one(
         stage_timings["pre_bundle_ms"] = int(
             (time.monotonic() - finalize_started) * 1000
         )
-        stage_timings["finalizer_pre_bundle_ms"] = stage_timings["pre_bundle_ms"]
         bundle_started = time.monotonic()
         finalize_kwargs: dict[str, object] = {
             "event_id": event_id,
@@ -6761,7 +6427,6 @@ def _finalize_one(
             stage_timings["bundle_ms"] = int(
                 (time.monotonic() - bundle_started) * 1000
             )
-            stage_timings["finalizer_bundle_ms"] = stage_timings["bundle_ms"]
         except Exception as exc:
             error_message = f"{type(exc).__name__}:{exc}"
             logger.exception(
@@ -6841,7 +6506,6 @@ def _finalize_one(
             attempt_dir=attempt_dir,
             bundle=bundle,
             lease_seconds=materialization_timeout_s,
-            stage_timings=stage_timings,
         )
         if published_bundle is None:
             return _FinalizeOneResult(claim_status=claim_status)
@@ -6879,9 +6543,6 @@ def _finalize_one(
         stage_timings["terminal_commit_ms"] = int(
             (time.monotonic() - terminal_commit_started) * 1000
         )
-        stage_timings["finalizer_terminal_commit_ms"] = stage_timings[
-            "terminal_commit_ms"
-        ]
         if not terminal_committed:
             logger.warning(
                 "media_terminal_transition_fence_lost "
@@ -6892,7 +6553,6 @@ def _finalize_one(
             )
             return _FinalizeOneResult(claim_status=claim_status)
 
-        post_terminal_started = time.monotonic()
         finalize_duration_ms = int((time.monotonic() - finalize_started) * 1000)
         _record_replay_slot_finalization_duration(
             pg_conn,
@@ -6911,19 +6571,6 @@ def _finalize_one(
             if isinstance(materialization_metrics, dict)
             else {}
         )
-        materialization_metrics.update(
-            {
-                name: stage_timings.get(name)
-                for name in (
-                    "finalizer_pre_bundle_ms",
-                    "finalizer_bundle_ms",
-                    *FINALIZER_PUBLISH_METRIC_FIELDS,
-                    "finalizer_terminal_commit_ms",
-                )
-                if stage_timings.get(name) is not None
-            }
-        )
-        bundle["materialization_metrics"] = materialization_metrics
         _log_finalize_one_metrics(
             event_id=event_id,
             meta_dir=meta_dir,
@@ -6940,8 +6587,7 @@ def _finalize_one(
             stage_timings=stage_timings,
         )
         replay_job_id = str(meta.get("job_id") or meta.get("new_job") or "")
-        event_projection_started = time.monotonic()
-        projection_persisted = _persist_finalized_event_details(
+        if not _persist_finalized_event_details(
             pg_conn,
             event_id=event_id,
             clip_path=clip_path,
@@ -6949,27 +6595,14 @@ def _finalize_one(
             replay_job_id=replay_job_id,
             sink_path=meta_dir,
             bundle=bundle,
-        )
-        stage_timings["finalizer_event_projection_ms"] = int(
-            (time.monotonic() - event_projection_started) * 1000
-        )
-        if not projection_persisted:
+        ):
             logger.error("media_finalized_event_projection_missing event_id=%s", event_id)
-        db_index_started = time.monotonic()
-        db_index_gate_diagnostics: dict[str, int | float] = {}
         _index_finalized_bundle(
             pg_conn,
             event_id=event_id,
             evidence_state=evidence_state,
             bundle=bundle,
-            io_gate=db_index_io_gate,
-            gate_diagnostics=db_index_gate_diagnostics,
         )
-        stage_timings["finalizer_db_index_ms"] = int(
-            (time.monotonic() - db_index_started) * 1000
-        )
-        stage_timings.update(db_index_gate_diagnostics)
-        cleanup_started = time.monotonic()
         cleanup = _attempt_terminal_sink_cleanup(
             pg_conn,
             event_id=event_id,
@@ -6978,22 +6611,6 @@ def _finalize_one(
             clip_status=clip_status,
             enabled=cleanup_replay_sink_output_enabled,
             allowed_statuses=cleanup_replay_sink_output_statuses,
-        )
-        stage_timings["finalizer_cleanup_ms"] = int(
-            (time.monotonic() - cleanup_started) * 1000
-        )
-        stage_timings["finalizer_post_terminal_ms"] = int(
-            (time.monotonic() - post_terminal_started) * 1000
-        )
-        stage_timings["finalizer_lane_service_ms"] = int(
-            (time.monotonic() - lane_started) * 1000
-        )
-        _log_finalizer_lane_metrics(
-            event_id=event_id,
-            finalizer_worker_id=finalizer_worker_id,
-            source_id=source_id,
-            replay_shard_id=replay_shard_id,
-            stage_timings=stage_timings,
         )
         logger.info(
             "media_event_updated event_id=%s clip_path=%s sink_path=%s "
@@ -8403,7 +8020,6 @@ class _FinalizerJob:
     worker_id: str
     phase_diagnostics: dict[str, object]
     schedule_row: dict
-    handoff_lease: MaterializationLease | None = None
 
 
 class _FinalizerProcessPool:
@@ -8479,18 +8095,6 @@ class _FinalizerAdmissionV2:
     worker_id: str
     schedule_row: dict
     phase_diagnostics: dict[str, object] | None
-    finalizer_submitted_at: str
-    finalizer_submitted_monotonic: float
-    handoff_lease: MaterializationLease | None = None
-
-
-@dataclass
-class _FinalizerHandoffTransfer:
-    """Move-only remux ownership crossing the durable finalizer boundary."""
-
-    lease: MaterializationLease
-    work_permit: WorkPermit
-    lease_heartbeat: LeaseHeartbeatHandle | None = None
 
 
 @dataclass
@@ -8503,7 +8107,6 @@ class _FinalizerFlightV2:
     candidate_dirs: dict[str, tuple[int, int]] | None
     invalid_output_failures: dict[str, int] | None
     stability_checks: int
-    durable_handoff: bool
     work_permit: WorkPermit
     source_permit: SourcePermit
 
@@ -8519,34 +8122,13 @@ def _run_finalizer_admission_v2(
     replay_sink_output_max_bytes: int,
     work_permit: WorkPermit,
     source_permit: SourcePermit,
-    queued_lease_heartbeat: LeaseHeartbeatHandle | None = None,
     bundle_process_pool: _FinalizerProcessPool | None = None,
 ) -> dict[str, object]:
     """Run readiness/probe/finalization wholly inside the finalizer lane."""
-    executor_started_at = datetime.now(timezone.utc).isoformat()
-    executor_started_monotonic = time.monotonic()
-    if runtime_resources.lease_heartbeats is not None:
-        # The remux lease is heartbeated from enqueue until this executor slot
-        # starts.  Finalization claims/transfers the fence below and registers
-        # its own heartbeat for the running phase.
-        runtime_resources.lease_heartbeats.unregister(queued_lease_heartbeat)
     connection_provider = runtime_resources.db_pool
     if connection_provider is None:
         raise RuntimeError("Scheduler V2 finalizer requires a PostgreSQL pool")
     phase_diagnostics = dict(admission.phase_diagnostics or {})
-    phase_diagnostics.setdefault(
-        "finalizer_submitted_at",
-        admission.finalizer_submitted_at,
-    )
-    phase_diagnostics.setdefault(
-        "finalizer_submitted_monotonic",
-        admission.finalizer_submitted_monotonic,
-    )
-    phase_diagnostics.setdefault("finalizer_started_at", executor_started_at)
-    phase_diagnostics.setdefault(
-        "finalizer_started_monotonic",
-        executor_started_monotonic,
-    )
     phase_override = admission.phase_diagnostics is not None
     try:
         conn = connection_provider.scoped_connection()
@@ -8621,6 +8203,8 @@ def _run_finalizer_admission_v2(
                 "sink_ffprobe_ready",
             )
 
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        submitted_monotonic = time.monotonic()
         job = _FinalizerJob(
             meta=admission.meta,
             meta_dir=admission.meta_dir,
@@ -8629,9 +8213,12 @@ def _run_finalizer_admission_v2(
             source_id=admission.source_id,
             replay_shard_id=admission.replay_shard_id,
             worker_id=admission.worker_id,
-            phase_diagnostics=phase_diagnostics,
+            phase_diagnostics={
+                **phase_diagnostics,
+                "finalizer_submitted_at": submitted_at,
+                "finalizer_submitted_monotonic": submitted_monotonic,
+            },
             schedule_row=admission.schedule_row,
-            handoff_lease=admission.handoff_lease,
         )
         raw_result = _process_single_finalizer_job(
             job,
@@ -8668,7 +8255,6 @@ def _run_finalizer_admission_v2(
             lease_heartbeat_supervisor=runtime_resources.lease_heartbeats,
             shutdown_controller=runtime_resources.shutdown,
             bundle_process_pool=bundle_process_pool,
-            db_index_io_gate=runtime_resources.db_index_io_gate,
         )
         result = dict(raw_result or {})
         result.setdefault("status", "finalized")
@@ -8697,11 +8283,6 @@ class _FinalizerSchedulerV2:
         self._updated_total = 0
         self._submit_failures = 0
         self._not_ready_total = 0
-        self._admission_rejected_total = 0
-        self._admission_rejected_by_reason: dict[str, int] = {}
-        self._handoff_retry_total = 0
-        self._handoff_retry_failed = 0
-        self._queued_lease_heartbeat_total = 0
         self._oldest_ready_age_ms: int | None = None
         process_workers = int(
             getattr(cfg, "materialization_finalizer_process_workers", 0) or 0
@@ -8725,57 +8306,36 @@ class _FinalizerSchedulerV2:
         *,
         event_id: str,
         reason: str,
-        exact_lease: MaterializationLease | None = None,
-        durable_handoff: bool = False,
     ) -> bool:
         retry_reason = _retryable_finalizer_reason(reason)
-        retry_hint_s = (
-            0.25
-            if classify_reason(retry_reason).code == "capacity_unavailable"
-            else 1.0
-        )
         try:
-            lease = exact_lease or current_lease(
+            lease = current_lease(
                 pg_conn,
                 event_id=event_id,
                 fallback_owner="media-finalizer",
                 fallback_phase=MaterializationPhase.FINALIZER_PENDING.value,
             )
             if lease is not None:
-                changed = _retry_claimed_finalizer(
+                return _retry_claimed_finalizer(
                     pg_conn,
                     lease,
                     reason=retry_reason,
-                    retry_hint_s=retry_hint_s,
+                    retry_hint_s=1.0,
                 )
-            elif durable_handoff:
-                changed = retry_unclaimed_finalizer_handoff(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=retry_reason,
-                    retry_hint_s=retry_hint_s,
-                )
-            else:
-                changed = schedule_unclaimed_retry(
-                    pg_conn,
-                    event_id=event_id,
-                    reason=retry_reason,
-                    retry_hint_s=retry_hint_s,
-                )
+            changed = schedule_unclaimed_retry(
+                pg_conn,
+                event_id=event_id,
+                reason=retry_reason,
+                retry_hint_s=1.0,
+            )
         except Exception:
-            if durable_handoff:
-                self._handoff_retry_failed += 1
             logger.exception(
                 "media_scheduler_v2_finalizer_retry_failed event_id=%s reason=%s",
                 event_id,
                 retry_reason,
             )
             return False
-        if durable_handoff and changed:
-            self._handoff_retry_total += 1
         if not changed:
-            if durable_handoff:
-                self._handoff_retry_failed += 1
             logger.warning(
                 "media_scheduler_v2_finalizer_retry_not_changed event_id=%s "
                 "reason=%s",
@@ -8783,41 +8343,6 @@ class _FinalizerSchedulerV2:
                 retry_reason,
             )
         return changed
-
-    def _record_admission_rejection(self, reason: str) -> None:
-        reason_code = str(reason or "unknown")
-        self._admission_rejected_total += 1
-        self._admission_rejected_by_reason[reason_code] = (
-            self._admission_rejected_by_reason.get(reason_code, 0) + 1
-        )
-        logger.info(
-            "media_finalizer_admission_rejected reason=%s total=%s",
-            reason_code,
-            self._admission_rejected_total,
-        )
-
-    def _converge_transferred_handoff(
-        self,
-        pg_conn: psycopg.Connection,
-        transfer: _FinalizerHandoffTransfer,
-        *,
-        reason: str,
-    ) -> bool:
-        """Persist fenced retry before releasing the transferred WIP permit."""
-        if self.runtime_resources.lease_heartbeats is not None:
-            self.runtime_resources.lease_heartbeats.unregister(
-                transfer.lease_heartbeat
-            )
-        try:
-            return self._schedule_submit_retry(
-                pg_conn,
-                event_id=transfer.lease.event_id,
-                reason=reason,
-                exact_lease=transfer.lease,
-                durable_handoff=True,
-            )
-        finally:
-            transfer.work_permit.release()
 
     def admit_metadata(
         self,
@@ -8833,14 +8358,13 @@ class _FinalizerSchedulerV2:
         stability_checks: int,
         cleanup_replay_sink_output_enabled: bool,
         replay_sink_output_max_bytes: int,
-        transferred_handoffs: dict[str, _FinalizerHandoffTransfer] | None = None,
+        transferred_work_permits: dict[str, WorkPermit] | None = None,
     ) -> int:
         transferred = (
-            transferred_handoffs
-            if transferred_handoffs is not None
+            transferred_work_permits
+            if transferred_work_permits is not None
             else {}
         )
-        unsubmitted_reason = "capacity_unavailable:finalizer_admission_not_submitted"
         try:
             return self._admit_metadata_impl(
                 pg_conn,
@@ -8856,21 +8380,13 @@ class _FinalizerSchedulerV2:
                     cleanup_replay_sink_output_enabled
                 ),
                 replay_sink_output_max_bytes=replay_sink_output_max_bytes,
-                transferred_handoffs=transferred,
+                transferred_work_permits=transferred,
             )
-        except Exception:
-            unsubmitted_reason = "temporary_io_error:finalizer_admission_exception"
-            raise
         finally:
-            # Every remux completion already owns a durable fenced handoff.  No
-            # discovery, fairness, capacity or shutdown branch may return while
-            # retaining that lease without an executor owner.
-            for transfer in transferred.values():
-                self._converge_transferred_handoff(
-                    pg_conn,
-                    transfer,
-                    reason=unsubmitted_reason,
-                )
+            # A remux permit is transferred into this call.  Discovery, sort,
+            # identity and DB failures must not strand it before submission.
+            for permit in transferred.values():
+                permit.release()
             transferred.clear()
 
     def _admit_metadata_impl(
@@ -8887,10 +8403,13 @@ class _FinalizerSchedulerV2:
         stability_checks: int,
         cleanup_replay_sink_output_enabled: bool,
         replay_sink_output_max_bytes: int,
-        transferred_handoffs: dict[str, _FinalizerHandoffTransfer] | None = None,
+        transferred_work_permits: dict[str, WorkPermit] | None = None,
     ) -> int:
         if not self.runtime_resources.admission_open:
-            self._record_admission_rejection("admission_closed")
+            for permit in (transferred_work_permits or {}).values():
+                permit.release()
+            if transferred_work_permits is not None:
+                transferred_work_permits.clear()
             return 0
 
         processed_dirs_before = set(processed_dirs)
@@ -8922,7 +8441,7 @@ class _FinalizerSchedulerV2:
             if age is not None
         )
         self._oldest_ready_age_ms = max(ready_ages, default=0)
-        transferred = transferred_handoffs or {}
+        transferred = transferred_work_permits or {}
         admitted = 0
         source_counts: dict[str, int] = {}
         workers = max(1, self.runtime_resources.finalizer_lane.max_workers)
@@ -8938,47 +8457,37 @@ class _FinalizerSchedulerV2:
                 )
                 continue
             if event_id in self._active_event_ids:
-                self._record_admission_rejection("event_already_active")
+                permit = transferred.pop(event_id, None)
+                if permit is not None:
+                    permit.release()
                 continue
             if meta_dir and meta_dir in processed_dirs:
-                # A remux transfer is still a live fenced lease even if the
-                # filesystem scan state says the directory was processed.
-                # Leave it in ``transferred`` so the public finally block
-                # durably returns the handoff before releasing WIP.
+                permit = transferred.pop(event_id, None)
+                if permit is not None:
+                    permit.release()
                 continue
             if meta_dir and _invalid_sink_output_marker_path(meta_dir).exists():
                 processed_dirs.add(meta_dir)
+                permit = transferred.pop(event_id, None)
+                if permit is not None:
+                    permit.release()
                 continue
             if _is_already_ready(pg_conn, event_id):
                 if meta_dir:
                     processed_dirs.add(meta_dir)
                     _clear_sink_phase(meta_dir)
+                permit = transferred.pop(event_id, None)
+                if permit is not None:
+                    permit.release()
                 continue
 
             schedule_row = schedule_rows.get(event_id, {})
             source_id = _metadata_source_id(meta, schedule_row)
-            phase_override = meta.get("_finalizer_phase")
-            phase_diagnostics = (
-                dict(phase_override) if isinstance(phase_override, dict) else None
-            )
-            durable_handoff = phase_diagnostics is not None
-            if phase_diagnostics is not None:
-                admission_attempted_at = datetime.now(timezone.utc).isoformat()
-                phase_diagnostics["finalizer_admission_attempted_at"] = (
-                    admission_attempted_at
-                )
-                phase_diagnostics["handoff_to_finalizer_admission_ms"] = (
-                    _elapsed_ms_between_iso(
-                        phase_diagnostics.get("handoff_persisted_at"),
-                        admission_attempted_at,
-                    )
-                )
             source_count = source_counts.get(source_id, 0)
             max_per_source = int(
                 self.cfg.materialization_finalizer_max_per_source_per_poll or 0
             )
             if max_per_source > 0 and source_count >= max_per_source:
-                self._record_admission_rejection("source_poll_limit")
                 continue
             if (
                 self.cfg.materialization_finalizer_source_serial
@@ -8987,26 +8496,22 @@ class _FinalizerSchedulerV2:
                     for flight in self._futures.values()
                 )
             ):
-                self._record_admission_rejection("source_serial_limit")
                 continue
 
             lane_reservation = self.runtime_resources.finalizer_lane.try_reserve()
             if lane_reservation is None:
-                self._record_admission_rejection("lane_full")
                 break
             source_permit: SourcePermit | None = None
             work_permit: WorkPermit | None = None
-            transfer = transferred.get(event_id)
             try:
                 source_permit = self.runtime_resources.source_slots.try_acquire(
                     source_id
                 )
                 if source_permit is None:
                     lane_reservation.cancel()
-                    self._record_admission_rejection("source_slot_full")
                     continue
-                work_permit = transfer.work_permit if transfer is not None else None
-                if transfer is None:
+                work_permit = transferred.pop(event_id, None)
+                if work_permit is None:
                     work_permit = self.runtime_resources.work_budget.try_acquire(
                         "finalizer",
                         owner=event_id,
@@ -9016,20 +8521,17 @@ class _FinalizerSchedulerV2:
                 if work_permit is None:
                     source_permit.release()
                     lane_reservation.cancel()
-                    self._record_admission_rejection("work_budget_full")
                     break
             except Exception:
-                if transfer is None and work_permit is not None:
+                if work_permit is not None:
                     work_permit.release()
                 if source_permit is not None:
                     source_permit.release()
                 lane_reservation.cancel()
                 raise
 
-            queued_lease_heartbeat: LeaseHeartbeatHandle | None = None
             try:
-                submitted_at = datetime.now(timezone.utc).isoformat()
-                submitted_monotonic = time.monotonic()
+                phase_override = meta.get("_finalizer_phase")
                 admission = _FinalizerAdmissionV2(
                     meta=meta,
                     meta_dir=meta_dir,
@@ -9041,30 +8543,12 @@ class _FinalizerSchedulerV2:
                         f"finalizer-v2-{(self._submitted_total % workers) + 1}"
                     ),
                     schedule_row=schedule_row,
-                    phase_diagnostics=phase_diagnostics,
-                    finalizer_submitted_at=submitted_at,
-                    finalizer_submitted_monotonic=submitted_monotonic,
-                    handoff_lease=(transfer.lease if transfer is not None else None),
+                    phase_diagnostics=(
+                        dict(phase_override)
+                        if isinstance(phase_override, dict)
+                        else None
+                    ),
                 )
-                if (
-                    transfer is not None
-                    and self.runtime_resources.lease_heartbeats is not None
-                ):
-                    queued_lease_heartbeat = transfer.lease_heartbeat
-                    if queued_lease_heartbeat is None:
-                        queued_lease_heartbeat = (
-                            self.runtime_resources.lease_heartbeats.register(
-                                "finalizer-queued:"
-                                f"{transfer.lease.event_id}:"
-                                f"{transfer.lease.token}:"
-                                f"{transfer.lease.generation}",
-                                payload=transfer.lease,
-                                lease_seconds=(
-                                    self.cfg.rolling_cache_materialization_processing_deadline_seconds
-                                ),
-                            )
-                        )
-                    self._queued_lease_heartbeat_total += 1
                 future = lane_reservation.submit(
                     _run_finalizer_admission_v2,
                     admission,
@@ -9078,33 +8562,19 @@ class _FinalizerSchedulerV2:
                     replay_sink_output_max_bytes=replay_sink_output_max_bytes,
                     work_permit=work_permit,
                     source_permit=source_permit,
-                    queued_lease_heartbeat=queued_lease_heartbeat,
                     bundle_process_pool=self._bundle_process_pool,
                 )
             except Exception as exc:
-                if self.runtime_resources.lease_heartbeats is not None:
-                    self.runtime_resources.lease_heartbeats.unregister(
-                        queued_lease_heartbeat
-                    )
+                work_permit.release()
+                source_permit.release()
                 lane_reservation.cancel()
                 self._submit_failures += 1
                 reason = f"finalizer_lane_submit_failed:{type(exc).__name__}"
-                if transfer is not None:
-                    transferred.pop(event_id, None)
-                    self._converge_transferred_handoff(
-                        pg_conn,
-                        transfer,
-                        reason=reason,
-                    )
-                else:
-                    self._schedule_submit_retry(
-                        pg_conn,
-                        event_id=event_id,
-                        reason=reason,
-                        durable_handoff=durable_handoff,
-                    )
-                    work_permit.release()
-                source_permit.release()
+                self._schedule_submit_retry(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=reason,
+                )
                 logger.exception(
                     "media_scheduler_v2_finalizer_submit_failed event_id=%s",
                     event_id,
@@ -9112,17 +8582,11 @@ class _FinalizerSchedulerV2:
                 continue
 
             future.add_done_callback(
-                lambda _done, permit=work_permit, source=source_permit,
-                heartbeat=queued_lease_heartbeat: (
-                    self.runtime_resources.lease_heartbeats.unregister(heartbeat)
-                    if self.runtime_resources.lease_heartbeats is not None
-                    else None,
+                lambda _done, permit=work_permit, source=source_permit: (
                     permit.release(),
                     source.release(),
                 )
             )
-            if transfer is not None:
-                transferred.pop(event_id, None)
             self._futures[future] = _FinalizerFlightV2(
                 admission=admission,
                 sink_dir=sink_dir,
@@ -9132,7 +8596,6 @@ class _FinalizerSchedulerV2:
                 candidate_dirs=candidate_dirs,
                 invalid_output_failures=invalid_output_failures,
                 stability_checks=max(1, int(stability_checks or 1)),
-                durable_handoff=durable_handoff,
                 work_permit=work_permit,
                 source_permit=source_permit,
             )
@@ -9141,6 +8604,9 @@ class _FinalizerSchedulerV2:
             source_counts[source_id] = source_count + 1
             admitted += 1
 
+        for permit in transferred.values():
+            permit.release()
+        transferred.clear()
         if (
             processed_state_path is not None
             and processed_dirs != processed_dirs_before
@@ -9251,7 +8717,6 @@ class _FinalizerSchedulerV2:
                     pg_conn,
                     event_id=flight.admission.event_id,
                     reason=f"finalizer_lane_job_failed:{type(exc).__name__}",
-                    durable_handoff=flight.durable_handoff,
                 )
                 result = {}
             state_changed = False
@@ -9286,7 +8751,6 @@ class _FinalizerSchedulerV2:
                 pg_conn,
                 event_id=flight.admission.event_id,
                 reason="media_worker_shutdown_forced",
-                durable_handoff=flight.durable_handoff,
             )
             self._futures.pop(future, None)
             self._active_event_ids.discard(flight.admission.event_id)
@@ -9302,10 +8766,6 @@ class _FinalizerSchedulerV2:
             "updated_total": self._updated_total,
             "submit_failures": self._submit_failures,
             "not_ready_total": self._not_ready_total,
-            "admission_rejected_total": self._admission_rejected_total,
-            "handoff_retry_total": self._handoff_retry_total,
-            "handoff_retry_failed": self._handoff_retry_failed,
-            "queued_lease_heartbeat_total": self._queued_lease_heartbeat_total,
             "oldest_ready_age_ms": self._oldest_ready_age_ms or 0,
         }
         if self._bundle_process_pool is not None:
@@ -9680,7 +9140,6 @@ def _process_sink_output_with_finalizer_pool(
                         runtime_resources.lease_heartbeats
                     ),
                     shutdown_controller=runtime_resources.shutdown,
-                    db_index_io_gate=runtime_resources.db_index_io_gate,
                 )
                 future.add_done_callback(
                     lambda _done, permit=work_permit, source=source_permit: (
@@ -9868,16 +9327,14 @@ def _process_single_finalizer_job(
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None = None,
     shutdown_controller: ShutdownController | None = None,
     bundle_process_pool: _FinalizerProcessPool | None = None,
-    db_index_io_gate: BoundedIoGate | None = None,
 ) -> dict[str, object]:
     finalizer_started_at = datetime.now(timezone.utc).isoformat()
     finalizer_started_monotonic = time.monotonic()
-    phase_diagnostics = dict(job.phase_diagnostics or {})
-    phase_diagnostics.setdefault("finalizer_started_at", finalizer_started_at)
-    phase_diagnostics.setdefault(
-        "finalizer_started_monotonic",
-        finalizer_started_monotonic,
-    )
+    phase_diagnostics = {
+        **(job.phase_diagnostics or {}),
+        "finalizer_started_at": finalizer_started_at,
+        "finalizer_started_monotonic": finalizer_started_monotonic,
+    }
     del sink_scan_max_metadata_files
     lock_context = source_lock if source_permit is None else nullcontext()
     try:
@@ -9920,12 +9377,10 @@ def _process_single_finalizer_job(
                     cleanup_replay_sink_output_statuses
                 ),
                 phase_diagnostics=phase_diagnostics,
-                handoff_lease=job.handoff_lease,
                 preacquired_work_permit=preacquired_work_permit,
                 lease_heartbeat_supervisor=lease_heartbeat_supervisor,
                 shutdown_controller=shutdown_controller,
                 bundle_process_pool=bundle_process_pool,
-                db_index_io_gate=db_index_io_gate,
             )
     finally:
         if connection_provider is None and "conn" in locals() and conn is not None:
@@ -9958,12 +9413,10 @@ def _run_single_finalizer_job_with_connection(
     cleanup_replay_sink_output_enabled: bool,
     cleanup_replay_sink_output_statuses: tuple[str, ...],
     phase_diagnostics: dict[str, object],
-    handoff_lease: MaterializationLease | None,
     preacquired_work_permit: WorkPermit | None,
     lease_heartbeat_supervisor: LeaseHeartbeatSupervisor | None,
     shutdown_controller: ShutdownController | None,
     bundle_process_pool: _FinalizerProcessPool | None,
-    db_index_io_gate: BoundedIoGate | None,
 ) -> dict[str, object]:
         permit: _HeldMaterializationPermit | None = None
         try:
@@ -10114,8 +9567,6 @@ def _run_single_finalizer_job_with_connection(
                 shutdown_controller=shutdown_controller,
                 bundle_process_pool=bundle_process_pool,
                 database_url=database_url,
-                handoff_lease=handoff_lease,
-                db_index_io_gate=db_index_io_gate,
             )
             if outcome.throttle_decision:
                 pacer.apply_decision(outcome.throttle_decision)
@@ -10249,15 +9700,7 @@ def _process_rolling_cache_tasks(
     if runner is not None:
         return updated + runner.process(pg_conn, cfg)
 
-    rows = _rolling_cache_candidate_tasks(
-        pg_conn,
-        cfg,
-        per_source_limit=(
-            runtime_resources.source_slots.per_source_limit
-            if runtime_resources is not None
-            else None
-        ),
-    )
+    rows = _rolling_cache_candidate_tasks(pg_conn, cfg)
     metadata_overrides: list[dict] = []
     finalizer_chunk_size = max(1, int(cfg.materialization_finalizer_workers or 1) * 2)
     jobs: list[dict[str, object]] = []
@@ -10466,72 +9909,6 @@ def _process_rolling_cache_tasks(
     return updated
 
 
-_IMAGE_ROTATION_ENABLED: bool | None = None
-
-
-def _image_turn_sources(
-    pg_conn: psycopg.Connection,
-    cfg: Config,
-    runtime_resources: MaterializationResources | None,
-) -> tuple[str, ...]:
-    """Turn order for the image lane.
-
-    The image lane rotates independently of remux: a camera whose clip is being
-    remuxed has not had its snapshot produced, so the two lanes must not share
-    one cursor.
-    """
-
-    global _IMAGE_ROTATION_ENABLED
-    if _IMAGE_ROTATION_ENABLED is None:
-        try:
-            _IMAGE_ROTATION_ENABLED = rotation_supported(pg_conn)
-        except Exception:
-            logger.exception("rolling_cache_image_rotation_probe_failed")
-            _IMAGE_ROTATION_ENABLED = False
-    if not _IMAGE_ROTATION_ENABLED:
-        return ()
-    limit = max(
-        1,
-        int(getattr(cfg, "rolling_cache_materialization_max_per_poll", 1) or 1),
-    )
-    excluded = (
-        runtime_resources.source_slots.saturated_sources()
-        if runtime_resources is not None
-        else ()
-    )
-    try:
-        turns = next_source_turns(
-            pg_conn,
-            lane=IMAGE_LANE,
-            statuses=ROLLING_CACHE_TASK_STATUSES,
-            limit=limit,
-            configured_sources=tuple(cfg.rolling_cache_sources or ()),
-            excluded_sources=excluded,
-            task_predicate=(
-                "COALESCE(et.task_type, '') = 'image_only'"
-                " AND COALESCE(et.clip_required, false) = false"
-            ),
-        )
-    except Exception:
-        logger.exception("rolling_cache_image_source_turn_query_failed")
-        return ()
-    return tuple(turn.source_id for turn in turns)
-
-
-def _mark_image_source_served(
-    pg_conn: psycopg.Connection,
-    source_id: str,
-) -> None:
-    if not _IMAGE_ROTATION_ENABLED or not source_id:
-        return
-    try:
-        mark_served(pg_conn, lane=IMAGE_LANE, source_id=source_id)
-    except Exception:
-        logger.exception(
-            "rolling_cache_image_rotation_mark_failed source_id=%s", source_id
-        )
-
-
 def _process_rolling_cache_image_tasks(
     pg_conn: psycopg.Connection,
     cfg: Config,
@@ -10541,17 +9918,7 @@ def _process_rolling_cache_image_tasks(
 ) -> int:
     if runtime_resources is not None and not runtime_resources.admission_open:
         return 0
-    image_turn_sources = _image_turn_sources(pg_conn, cfg, runtime_resources)
-    rows = _rolling_cache_image_candidate_tasks(
-        pg_conn,
-        cfg,
-        per_source_limit=(
-            runtime_resources.source_slots.per_source_limit
-            if runtime_resources is not None
-            else None
-        ),
-        turn_sources=image_turn_sources,
-    )
+    rows = _rolling_cache_image_candidate_tasks(pg_conn, cfg)
     updated = 0
     segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
     for row in rows:
@@ -10600,10 +9967,6 @@ def _process_rolling_cache_image_tasks(
             if source_permit is not None:
                 source_permit.release()
             continue
-        # The claim succeeded, so this camera has genuinely been served and its
-        # turn advances. A permit rejection or a failed claim above reaches
-        # `continue` without touching the cursor.
-        _mark_image_source_served(pg_conn, source_id)
         try:
             event_context = _load_event_context(pg_conn, event_id)
             runtime_epoch_id = (
@@ -11314,87 +10677,11 @@ class _ImageSchedulerV2:
         }
 
 
-# Ordering candidates globally and then applying LIMIT let one busy camera's
-# backlog fill the whole window; the per-source cap rejected the overflow rows
-# only after the fetch, so idle workers never saw another camera's ready task.
-# The round-robin across sources therefore has to happen inside the query.
-#
-# Scope: this makes a single window fair across the sources it can hold. It is
-# not a bounded-wait guarantee -- ROW_NUMBER is recomputed per poll and does
-# not remember which sources were served before.
-_UNBOUNDED_SOURCE_RANK = 1_000_000
-
-_FAIR_SOURCE_KEY_SQL = """COALESCE(
-                        NULLIF(et.source_id, ''),
-                        NULLIF(et.replay_source_id, ''),
-                        ''
-                    ) AS fair_source_key"""
-
-_FAIR_SOURCE_RANK_SQL = """,
-            ranked AS (
-                SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY fair_source_key
-                        ORDER BY
-                            priority DESC,
-                            materialization_due_at ASC,
-                            rolling_cache_ready_at ASC,
-                            task_created_at ASC
-                    ) AS source_rank
-                FROM candidates
-                WHERE rolling_cache_ready_at <= now()
-            )
-            SELECT
-                *,
-                GREATEST(
-                    0,
-                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
-                )::bigint AS rolling_cache_ready_lag_ms
-            FROM ranked
-            WHERE source_rank <= %(per_source_limit)s
-            ORDER BY
-                priority DESC,
-                source_rank ASC,
-                materialization_due_at ASC,
-                rolling_cache_ready_at ASC,
-                task_created_at ASC
-            LIMIT %(limit)s"""
-
-
-def _fair_source_rank_params(
-    cfg: Config,
-    *,
-    limit: int | None,
-    per_source_limit: int | None,
-) -> dict[str, int]:
-    """Size the candidate window and the per-source slice of it.
-
-    ``per_source_limit`` is the execution-side cap, so ranking beyond it only
-    collects rows that would be rejected anyway. Callers with no execution cap
-    pass ``None`` and keep the interleave without losing any source's backlog.
-    """
-
-    effective_limit = int(
-        max(1, int(limit))
-        if limit is not None
-        else cfg.rolling_cache_materialization_max_per_poll
-    )
-    rank_cap = (
-        max(1, int(per_source_limit))
-        if per_source_limit is not None
-        else max(_UNBOUNDED_SOURCE_RANK, effective_limit)
-    )
-    return {"limit": effective_limit, "per_source_limit": rank_cap}
-
-
 def _rolling_cache_image_candidate_tasks(
     pg_conn: psycopg.Connection,
     cfg: Config,
     *,
     limit: int | None = None,
-    per_source_limit: int | None = None,
-    turn_sources: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     with pg_conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -11410,10 +10697,7 @@ def _rolling_cache_image_candidate_tasks(
                         et.materialization_next_attempt_at,
                         et.materialization_ready_at
                     ) AS materialization_due_at,
-                    et.materialization_ready_at AS rolling_cache_ready_at,
-                    """
-                    + _FAIR_SOURCE_KEY_SQL
-                    + """
+                    et.materialization_ready_at AS rolling_cache_ready_at
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
                 WHERE et.materialization_status = ANY(%(statuses)s)
@@ -11422,11 +10706,6 @@ def _rolling_cache_image_candidate_tasks(
                   AND (
                       %(sources_empty)s
                       OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
-                  )
-                  AND (
-                      %(turn_sources_empty)s
-                      OR COALESCE(et.source_id, et.replay_source_id, '')
-                         = ANY(%(turn_sources)s)
                   )
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_ready_at <= now()
@@ -11446,20 +10725,29 @@ def _rolling_cache_image_candidate_tasks(
                         AND COALESCE(ea.uri, '') <> ''
                   )
             )
-            """
-            + _FAIR_SOURCE_RANK_SQL
-            + """
+            SELECT
+                *,
+                GREATEST(
+                    0,
+                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
+                )::bigint AS rolling_cache_ready_lag_ms
+            FROM candidates
+            WHERE rolling_cache_ready_at <= now()
+            ORDER BY
+                priority DESC,
+                materialization_due_at ASC,
+                rolling_cache_ready_at ASC,
+                task_created_at ASC
+            LIMIT %(limit)s
             """,
             {
                 "statuses": list(ROLLING_CACHE_TASK_STATUSES),
                 "sources": list(cfg.rolling_cache_sources),
                 "sources_empty": not bool(cfg.rolling_cache_sources),
-                "turn_sources": list(turn_sources or ()),
-                "turn_sources_empty": not bool(turn_sources),
-                **_fair_source_rank_params(
-                    cfg,
-                    limit=limit,
-                    per_source_limit=per_source_limit,
+                "limit": (
+                    max(1, int(limit))
+                    if limit is not None
+                    else cfg.rolling_cache_materialization_max_per_poll
                 ),
             },
         )
@@ -12248,69 +11536,6 @@ def _image_materialization_failure_reason(exc: Exception, *, max_chars: int = 90
     return reason if len(reason) <= max_chars else reason[:max_chars]
 
 
-_REMUX_ADMISSION_STAGE_NAMES = (
-    "completion_scan",
-    "completion_result",
-    "handoff_persist",
-    "completion_convergence",
-    "completion_release",
-    "finalizer_admission",
-    "candidate_query",
-    "capacity_reservation",
-    "prepare_claim",
-    "heartbeat_register",
-    "executor_submit",
-)
-
-
-class _RemuxAdmissionStageTimings:
-    """Attribute one runner poll without changing admission semantics."""
-
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
-        self._clock = clock
-        self._durations_ms = {
-            name: 0.0 for name in _REMUX_ADMISSION_STAGE_NAMES
-        }
-        self.candidate_count = 0
-        self.prepared_count = 0
-        self.submitted_count = 0
-        self.completed_count = 0
-
-    @contextmanager
-    def measure(self, name: str) -> Iterator[None]:
-        if name not in self._durations_ms:
-            raise ValueError(f"unknown remux admission stage: {name}")
-        started_at = self._clock()
-        try:
-            yield
-        finally:
-            elapsed_ms = max(0.0, (self._clock() - started_at) * 1000.0)
-            self._durations_ms[name] += elapsed_ms
-
-    def snapshot(self, *, total_ms: float) -> dict[str, float | int]:
-        durations: dict[str, float | int] = {
-            f"remux_admission_stage_{name}_ms": round(value, 3)
-            for name, value in self._durations_ms.items()
-        }
-        accounted_ms = sum(self._durations_ms.values())
-        bounded_total_ms = max(0.0, float(total_ms))
-        durations.update(
-            {
-                "remux_admission_total_ms": round(bounded_total_ms, 3),
-                "remux_admission_accounted_ms": round(accounted_ms, 3),
-                "remux_admission_unattributed_ms": round(
-                    max(0.0, bounded_total_ms - accounted_ms),
-                    3,
-                ),
-                "remux_admission_candidate_count": self.candidate_count,
-                "remux_admission_prepared_count": self.prepared_count,
-                "remux_admission_submitted_count": self.submitted_count,
-                "remux_admission_completed_count": self.completed_count,
-            }
-        )
-        return durations
-
-
 class _RollingCacheMaterializationRunner:
     """Keep rolling-cache materialization workers hot without blocking polling.
 
@@ -12358,8 +11583,6 @@ class _RollingCacheMaterializationRunner:
             ],
         ] = {}
         self._oldest_ready_age_ms = 0
-        self._rotation_enabled: bool | None = None
-        self._last_process_timings: dict[str, float | int] = {}
 
     def close(self) -> None:
         if self._executor is not None:
@@ -12370,76 +11593,7 @@ class _RollingCacheMaterializationRunner:
             "active": len(self._futures),
             "capacity": self.max_workers,
             "oldest_ready_age_ms": self._oldest_ready_age_ms,
-            **self._last_process_timings,
         }
-
-    def _turn_sources(
-        self,
-        pg_conn: psycopg.Connection,
-        cfg: Config,
-        available: int,
-    ) -> tuple[str, ...]:
-        """Sources to draw candidates from this poll, least recently served first.
-
-        Returns an empty tuple to mean "no restriction", which is what happens
-        when the rotation table is absent (migration 033 not applied). The
-        scheduler then behaves exactly as it did before: fair within a window,
-        unfair across polls.
-        """
-
-        if self._rotation_enabled is None:
-            try:
-                self._rotation_enabled = rotation_supported(pg_conn)
-            except Exception:
-                logger.exception("rolling_cache_rotation_probe_failed")
-                self._rotation_enabled = False
-            if not self._rotation_enabled:
-                logger.warning(
-                    "rolling_cache_source_rotation_unavailable lane=%s "
-                    "reason=migration_033_not_applied", REMUX_LANE,
-                )
-        if not self._rotation_enabled:
-            return ()
-        # Sources already holding every execution slot cannot run anything, so
-        # giving them a turn would spend the window on certain rejections.
-        excluded = (
-            self._runtime_resources.source_slots.saturated_sources()
-            if self._runtime_resources is not None
-            else ()
-        )
-        try:
-            turns = next_source_turns(
-                pg_conn,
-                lane=REMUX_LANE,
-                statuses=ROLLING_CACHE_TASK_STATUSES,
-                limit=max(1, int(available)),
-                configured_sources=tuple(cfg.rolling_cache_sources or ()),
-                excluded_sources=excluded,
-                task_predicate=(
-                    "COALESCE(et.task_type, '') <> 'image_only'"
-                    " AND COALESCE(et.clip_required, false) = true"
-                ),
-            )
-        except Exception:
-            logger.exception("rolling_cache_source_turn_query_failed")
-            return ()
-        return tuple(turn.source_id for turn in turns)
-
-    def _mark_source_served(
-        self,
-        pg_conn: psycopg.Connection,
-        source_id: str,
-    ) -> None:
-        if not self._rotation_enabled or not source_id:
-            return
-        try:
-            mark_served(pg_conn, lane=REMUX_LANE, source_id=source_id)
-        except Exception:
-            # A lost cursor update costs fairness on the next poll, never
-            # correctness of the task itself, so it must not fail the claim.
-            logger.exception(
-                "rolling_cache_rotation_mark_failed source_id=%s", source_id
-            )
 
     def drain_only(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
         return self._drain_completed(pg_conn, cfg)
@@ -12472,433 +11626,266 @@ class _RollingCacheMaterializationRunner:
     def process(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
         # Recovery/expiry is owned by _process_rolling_cache_tasks and runs
         # exactly once before either legacy or persistent-runner admission.
-        process_started_at = time.monotonic()
-        timings = _RemuxAdmissionStageTimings()
-        try:
-            updated = self._drain_completed(pg_conn, cfg, timings=timings)
+        updated = self._drain_completed(pg_conn, cfg)
 
-            if (
-                self._runtime_resources is not None
-                and not self._runtime_resources.admission_open
-            ):
-                return updated
+        if (
+            self._runtime_resources is not None
+            and not self._runtime_resources.admission_open
+        ):
+            return updated
 
-            available = self.max_workers - len(self._futures)
-            if available > 0:
-                claim_limit = min(
-                    max(
-                        1,
-                        int(
-                            getattr(
-                                cfg,
-                                "rolling_cache_materialization_max_per_poll",
-                                1,
-                            )
-                        ),
-                    ),
-                    available,
+        available = self.max_workers - len(self._futures)
+        if available > 0:
+            claim_limit = min(
+                max(1, int(getattr(cfg, "rolling_cache_materialization_max_per_poll", 1))),
+                available,
+            )
+            rows = _rolling_cache_candidate_tasks(pg_conn, cfg, limit=claim_limit)
+            self._oldest_ready_age_ms = max(
+                (
+                    int(row.get("rolling_cache_ready_lag_ms") or 0)
+                    for row in rows
+                ),
+                default=0,
+            )
+            segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
+            for row in rows:
+                if len(self._futures) >= self.max_workers:
+                    break
+                lane_reservation: LaneReservation | None = None
+                work_permit: WorkPermit | None = None
+                source_permit: SourcePermit | None = None
+                if self._runtime_resources is not None:
+                    if self._shared_lane is None:
+                        break
+                    lane_reservation = self._shared_lane.try_reserve()
+                    if lane_reservation is None:
+                        break
+                    source_id = str(
+                        row.get("source_id") or row.get("replay_source_id") or ""
+                    )
+                    source_permit = self._runtime_resources.source_slots.try_acquire(
+                        source_id
+                    )
+                    if source_permit is None:
+                        lane_reservation.cancel()
+                        continue
+                    work_permit = self._runtime_resources.work_budget.try_acquire(
+                        "remux",
+                        owner=str(row.get("event_id") or ""),
+                    )
+                    if work_permit is None:
+                        source_permit.release()
+                        lane_reservation.cancel()
+                        break
+                try:
+                    job = _prepare_rolling_cache_job(
+                        pg_conn,
+                        cfg,
+                        row,
+                        segment_cache=segment_cache,
+                        segment_index=self._segment_index,
+                    )
+                except Exception:
+                    if work_permit is not None:
+                        work_permit.release()
+                    if source_permit is not None:
+                        source_permit.release()
+                    if lane_reservation is not None:
+                        lane_reservation.cancel()
+                    logger.exception(
+                        "rolling_cache_prepare_failed event_id=%s",
+                        row.get("event_id"),
+                    )
+                    continue
+                if job is None:
+                    if work_permit is not None:
+                        work_permit.release()
+                    if source_permit is not None:
+                        source_permit.release()
+                    if lane_reservation is not None:
+                        lane_reservation.cancel()
+                    continue
+                lease = (
+                    job.get("lease")
+                    if isinstance(job.get("lease"), MaterializationLease)
+                    else None
                 )
-                source_limit = (
-                    self._runtime_resources.source_slots.per_source_limit
+                heartbeat_handle: LeaseHeartbeatHandle | None = None
+                heartbeat_supervisor = (
+                    self._runtime_resources.lease_heartbeats
                     if self._runtime_resources is not None
                     else None
                 )
-                # Which cameras get a turn this poll. Ranking alone is fair
-                # only inside one window; the rotation is what bounds how long
-                # a camera waits when there are more cameras than slots.
-                turn_sources = self._turn_sources(pg_conn, cfg, available)
-                # Rows from a source that already holds all of its slots are
-                # rejected below, so a window sized by free capacity alone can
-                # be spent entirely on them while another camera's ready task
-                # waits out the poll. Each blocked source contributes at most
-                # `per_source_limit` ranked rows and the blocked sources
-                # together hold `max_workers - available` slots, so a window of
-                # `max_workers` leaves room for `available` usable rows.
-                #
-                # That bound holds only for SOURCE-CAP rejections. A row can
-                # also be dropped after the fetch because its footage is not
-                # covered yet; those rows are deferred (their next attempt is
-                # pushed forward) so they leave the candidate set rather than
-                # blocking it, but they can still cost this poll some capacity.
-                #
-                # It is also a per-poll bound, NOT a bound on how long a camera
-                # waits. Ranking is recomputed from scratch every poll and
-                # carries no memory of who was served last, so when there are
-                # more sources than window slots a camera with a deep backlog
-                # keeps supplying the oldest rank-1 row and quiet cameras are
-                # never selected. See the xfail in
-                # harness/tests/test_evidence_source_fairness.py -- closing it
-                # needs cross-poll rotation state.
-                fetch_limit = max(claim_limit, self.max_workers)
-                with timings.measure("candidate_query"):
-                    rows = _rolling_cache_candidate_tasks(
-                        pg_conn,
-                        cfg,
-                        limit=fetch_limit,
-                        per_source_limit=source_limit,
-                        turn_sources=turn_sources,
-                    )
-                timings.candidate_count = len(rows)
-                self._oldest_ready_age_ms = max(
-                    (
-                        int(row.get("rolling_cache_ready_lag_ms") or 0)
-                        for row in rows
-                    ),
-                    default=0,
-                )
-                segment_cache: dict[tuple[str, str], list[RollingSegment]] = {}
-                claimed = 0
-                for row in rows:
-                    if len(self._futures) >= self.max_workers or claimed >= claim_limit:
-                        break
-                    lane_reservation: LaneReservation | None = None
-                    work_permit: WorkPermit | None = None
-                    source_permit: SourcePermit | None = None
-                    with timings.measure("capacity_reservation"):
-                        if self._runtime_resources is not None:
-                            if self._shared_lane is None:
-                                break
-                            lane_reservation = self._shared_lane.try_reserve()
-                            if lane_reservation is None:
-                                break
-                            source_id = str(
-                                row.get("source_id")
-                                or row.get("replay_source_id")
-                                or ""
-                            )
-                            source_permit = (
-                                self._runtime_resources.source_slots.try_acquire(
-                                    source_id
-                                )
-                            )
-                            if source_permit is None:
-                                lane_reservation.cancel()
-                                continue
-                            work_permit = (
-                                self._runtime_resources.work_budget.try_acquire(
-                                    "remux",
-                                    owner=str(row.get("event_id") or ""),
-                                )
-                            )
-                            if work_permit is None:
-                                source_permit.release()
-                                lane_reservation.cancel()
-                                break
-                    try:
-                        with timings.measure("prepare_claim"):
-                            job = _prepare_rolling_cache_job(
-                                pg_conn,
-                                cfg,
-                                row,
-                                segment_cache=segment_cache,
-                                segment_index=self._segment_index,
-                            )
-                    except Exception:
-                        if work_permit is not None:
-                            work_permit.release()
-                        if source_permit is not None:
-                            source_permit.release()
-                        if lane_reservation is not None:
-                            lane_reservation.cancel()
-                        logger.exception(
-                            "rolling_cache_prepare_failed event_id=%s",
-                            row.get("event_id"),
-                        )
-                        continue
-                    if job is None:
-                        if work_permit is not None:
-                            work_permit.release()
-                        if source_permit is not None:
-                            source_permit.release()
-                        if lane_reservation is not None:
-                            lane_reservation.cancel()
-                        continue
-                    timings.prepared_count += 1
-                    lease = (
-                        job.get("lease")
-                        if isinstance(job.get("lease"), MaterializationLease)
-                        else None
-                    )
-                    heartbeat_handle: LeaseHeartbeatHandle | None = None
-                    heartbeat_supervisor = (
-                        self._runtime_resources.lease_heartbeats
-                        if self._runtime_resources is not None
-                        else None
-                    )
-                    with timings.measure("heartbeat_register"):
-                        if heartbeat_supervisor is not None and lease is not None:
-                            heartbeat_handle = heartbeat_supervisor.register(
-                                "remux:"
-                                f"{lease.event_id}:{lease.token}:{lease.generation}",
-                                payload=lease,
-                                lease_seconds=(
-                                    cfg.rolling_cache_materialization_processing_deadline_seconds
-                                ),
-                            )
-                    try:
-                        with timings.measure("executor_submit"):
-                            if lane_reservation is not None:
-                                future = lane_reservation.submit(
-                                    _materialize_rolling_cache_job,
-                                    root=cfg.rolling_cache_root,
-                                    output_root=cfg.rolling_cache_materialized_root,
-                                    job=job,
-                                    segment_index=self._segment_index,
-                                )
-                            else:
-                                assert self._executor is not None
-                                future = self._executor.submit(
-                                    _materialize_rolling_cache_job,
-                                    root=cfg.rolling_cache_root,
-                                    output_root=cfg.rolling_cache_materialized_root,
-                                    job=job,
-                                    segment_index=self._segment_index,
-                                )
-                    except Exception as exc:
-                        if heartbeat_supervisor is not None:
-                            heartbeat_supervisor.unregister(heartbeat_handle)
-                        _defer_rolling_cache_task_safely(
-                            pg_conn,
-                            event_id=str(job.get("event_id") or ""),
-                            reason=(
-                                "temporary_io_error:"
-                                f"remux_lane_submit_failed:{type(exc).__name__}"
-                            ),
-                            lease=lease,
-                        )
-                        if work_permit is not None:
-                            work_permit.release()
-                        if source_permit is not None:
-                            source_permit.release()
-                        logger.exception(
-                            "rolling_cache_remux_lane_submit_failed event_id=%s",
-                            job.get("event_id"),
-                        )
-                        continue
-                    self._futures[future] = (
-                        str(job.get("event_id") or ""),
-                        job.get("lease")
-                        if isinstance(job.get("lease"), MaterializationLease)
-                        else None,
-                        work_permit,
-                        source_permit,
-                        heartbeat_handle,
-                    )
-                    claimed += 1
-                    timings.submitted_count += 1
-                    # Service is a successful claim, never a selection. A row
-                    # rejected by the source cap, or deferred because its
-                    # footage is not covered yet, must not spend the camera's
-                    # turn -- otherwise a camera that can never run would keep
-                    # rotating to the back without producing anything.
-                    self._mark_source_served(
-                        pg_conn,
-                        str(
-                            row.get("source_id")
-                            or row.get("replay_source_id")
-                            or ""
+                if heartbeat_supervisor is not None and lease is not None:
+                    heartbeat_handle = heartbeat_supervisor.register(
+                        f"remux:{lease.event_id}:{lease.token}:{lease.generation}",
+                        payload=lease,
+                        lease_seconds=(
+                            cfg.rolling_cache_materialization_processing_deadline_seconds
                         ),
                     )
+                try:
+                    if lane_reservation is not None:
+                        future = lane_reservation.submit(
+                            _materialize_rolling_cache_job,
+                            root=cfg.rolling_cache_root,
+                            output_root=cfg.rolling_cache_materialized_root,
+                            job=job,
+                            segment_index=self._segment_index,
+                        )
+                    else:
+                        assert self._executor is not None
+                        future = self._executor.submit(
+                            _materialize_rolling_cache_job,
+                            root=cfg.rolling_cache_root,
+                            output_root=cfg.rolling_cache_materialized_root,
+                            job=job,
+                            segment_index=self._segment_index,
+                        )
+                except Exception as exc:
+                    if heartbeat_supervisor is not None:
+                        heartbeat_supervisor.unregister(heartbeat_handle)
+                    _defer_rolling_cache_task_safely(
+                        pg_conn,
+                        event_id=str(job.get("event_id") or ""),
+                        reason=(
+                            "temporary_io_error:"
+                            f"remux_lane_submit_failed:{type(exc).__name__}"
+                        ),
+                        lease=lease,
+                    )
+                    if work_permit is not None:
+                        work_permit.release()
+                    if source_permit is not None:
+                        source_permit.release()
+                    logger.exception(
+                        "rolling_cache_remux_lane_submit_failed event_id=%s",
+                        job.get("event_id"),
+                    )
+                    continue
+                self._futures[future] = (
+                    str(job.get("event_id") or ""),
+                    job.get("lease")
+                    if isinstance(job.get("lease"), MaterializationLease)
+                    else None,
+                    work_permit,
+                    source_permit,
+                    heartbeat_handle,
+                )
 
-            return updated + self._drain_completed(
-                pg_conn,
-                cfg,
-                timings=timings,
-            )
-        finally:
-            total_ms = (time.monotonic() - process_started_at) * 1000.0
-            self._last_process_timings = timings.snapshot(
-                total_ms=total_ms,
-            )
+        return updated + self._drain_completed(pg_conn, cfg)
 
-    def _drain_completed(
-        self,
-        pg_conn: psycopg.Connection,
-        cfg: Config,
-        *,
-        timings: _RemuxAdmissionStageTimings | None = None,
-    ) -> int:
+    def _drain_completed(self, pg_conn: psycopg.Connection, cfg: Config) -> int:
         if not self._futures:
             return 0
 
         metadata_overrides: list[dict] = []
-        transferred_handoffs: dict[str, _FinalizerHandoffTransfer] = {}
         transferred_work_permits: dict[str, WorkPermit] = {}
         for future, future_context in list(self._futures.items()):
-            with (
-                timings.measure("completion_scan")
-                if timings is not None
-                else nullcontext()
-            ):
-                future_done = future.done()
-            if not future_done:
+            if not future.done():
                 continue
             self._futures.pop(future, None)
-            if timings is not None:
-                timings.completed_count += 1
             event_id, lease, work_permit, source_permit, heartbeat_handle = future_context
             try:
-                with (
-                    timings.measure("completion_result")
-                    if timings is not None
-                    else nullcontext()
-                ):
-                    metadata = future.result()
+                metadata = future.result()
                 if heartbeat_handle is not None and not heartbeat_handle.healthy:
                     reason = (
                         "materialization_max_attempt_age_exceeded"
                         if heartbeat_handle.expired
                         else "materialization_lease_fence_lost"
                     )
-                    with (
-                        timings.measure("completion_convergence")
-                        if timings is not None
-                        else nullcontext()
-                    ):
-                        _defer_rolling_cache_task(
-                            pg_conn,
-                            event_id=event_id,
-                            reason=reason,
-                            retry_after_s=1.0,
-                            lease=lease,
-                        )
-                    continue
-                with (
-                    timings.measure("handoff_persist")
-                    if timings is not None
-                    else nullcontext()
-                ):
-                    persisted = _persist_rolling_cache_handoff_metadata(
-                        pg_conn,
-                        cfg,
-                        metadata,
-                    )
-                if persisted:
-                    metadata_overrides.append(metadata)
-                    if (
-                        self._finalizer_scheduler_v2 is not None
-                        and work_permit is not None
-                        and lease is not None
-                    ):
-                        transferred_handoffs[event_id] = _FinalizerHandoffTransfer(
-                            lease=lease,
-                            work_permit=work_permit,
-                            lease_heartbeat=heartbeat_handle,
-                        )
-                        work_permit = None
-                        heartbeat_handle = None
-                    elif work_permit is not None:
-                        transferred_work_permits[event_id] = work_permit
-                        work_permit = None
-            except SegmentPinRetryableError as exc:
-                with (
-                    timings.measure("completion_convergence")
-                    if timings is not None
-                    else nullcontext()
-                ):
-                    _defer_rolling_cache_task_safely(
-                        pg_conn,
-                        event_id=event_id,
-                        reason=f"temporary_io_error:{exc}",
-                        retry_after_s=1.0,
-                        lease=lease,
-                    )
-            except RollingCacheCoverageMiss as exc:
-                with (
-                    timings.measure("completion_convergence")
-                    if timings is not None
-                    else nullcontext()
-                ):
                     _defer_rolling_cache_task(
                         pg_conn,
                         event_id=event_id,
-                        reason=str(exc) or "rolling_cache_coverage_miss",
+                        reason=reason,
+                        retry_after_s=1.0,
                         lease=lease,
                     )
-            except Exception as exc:
-                with (
-                    timings.measure("completion_convergence")
-                    if timings is not None
-                    else nullcontext()
+                    continue
+                if _persist_rolling_cache_handoff_metadata(
+                    pg_conn,
+                    cfg,
+                    metadata,
                 ):
-                    logger.exception(
-                        "rolling_cache_materialization_failed event_id=%s",
-                        event_id,
-                    )
-                    _fail_rolling_cache_task(
-                        pg_conn,
-                        event_id=event_id,
-                        reason=_rolling_cache_failure_reason(exc),
-                        lease=lease,
-                    )
-            finally:
-                with (
-                    timings.measure("completion_release")
-                    if timings is not None
-                    else nullcontext()
-                ):
-                    if (
-                        self._runtime_resources is not None
-                        and self._runtime_resources.lease_heartbeats is not None
-                    ):
-                        self._runtime_resources.lease_heartbeats.unregister(
-                            heartbeat_handle
-                        )
+                    metadata_overrides.append(metadata)
                     if work_permit is not None:
-                        work_permit.release()
-                    if source_permit is not None:
-                        source_permit.release()
+                        transferred_work_permits[event_id] = work_permit
+                        work_permit = None
+            except SegmentPinRetryableError as exc:
+                _defer_rolling_cache_task_safely(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=f"temporary_io_error:{exc}",
+                    retry_after_s=1.0,
+                    lease=lease,
+                )
+            except RollingCacheCoverageMiss as exc:
+                _defer_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=str(exc) or "rolling_cache_coverage_miss",
+                    lease=lease,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "rolling_cache_materialization_failed event_id=%s",
+                    event_id,
+                )
+                _fail_rolling_cache_task(
+                    pg_conn,
+                    event_id=event_id,
+                    reason=_rolling_cache_failure_reason(exc),
+                    lease=lease,
+                )
+            finally:
+                if (
+                    self._runtime_resources is not None
+                    and self._runtime_resources.lease_heartbeats is not None
+                ):
+                    self._runtime_resources.lease_heartbeats.unregister(
+                        heartbeat_handle
+                    )
+                if work_permit is not None:
+                    work_permit.release()
+                if source_permit is not None:
+                    source_permit.release()
 
         if not metadata_overrides:
             return 0
         if self._finalizer_scheduler_v2 is not None:
-            with (
-                timings.measure("finalizer_admission")
-                if timings is not None
-                else nullcontext()
-            ):
-                admitted = self._finalizer_scheduler_v2.admit_metadata(
-                    pg_conn,
-                    sink_dir=str(
-                        Path(cfg.rolling_cache_materialized_root) / "midterm"
-                    ),
-                    metadata_files=metadata_overrides,
-                    scan_stats={
-                        "scan_duration_ms": 0,
-                        "metadata_files_visited": len(metadata_overrides),
-                        "metadata_files_parsed": len(metadata_overrides),
-                        "scan_mode": "rolling_cache_scheduler_v2",
-                    },
-                    processed_dirs=set(),
-                    processed_state_path=None,
-                    candidate_dirs=None,
-                    invalid_output_failures=None,
-                    stability_checks=1,
-                    cleanup_replay_sink_output_enabled=True,
-                    replay_sink_output_max_bytes=0,
-                    transferred_handoffs=transferred_handoffs,
-                )
+            admitted = self._finalizer_scheduler_v2.admit_metadata(
+                pg_conn,
+                sink_dir=str(Path(cfg.rolling_cache_materialized_root) / "midterm"),
+                metadata_files=metadata_overrides,
+                scan_stats={
+                    "scan_duration_ms": 0,
+                    "metadata_files_visited": len(metadata_overrides),
+                    "metadata_files_parsed": len(metadata_overrides),
+                    "scan_mode": "rolling_cache_scheduler_v2",
+                },
+                processed_dirs=set(),
+                processed_state_path=None,
+                candidate_dirs=None,
+                invalid_output_failures=None,
+                stability_checks=1,
+                cleanup_replay_sink_output_enabled=True,
+                replay_sink_output_max_bytes=0,
+                transferred_work_permits=transferred_work_permits,
+            )
             logger.info(
                 "rolling_cache_finalizer_v2_admitted candidates=%s admitted=%s",
                 len(metadata_overrides),
                 admitted,
             )
-            for permit in transferred_work_permits.values():
-                permit.release()
-            transferred_work_permits.clear()
             return 0
-        with (
-            timings.measure("finalizer_admission")
-            if timings is not None
-            else nullcontext()
-        ):
-            return _flush_rolling_cache_finalizer_batch_or_defer(
-                pg_conn,
-                cfg,
-                metadata_overrides,
-                runtime_resources=self._runtime_resources,
-                transferred_work_permits=transferred_work_permits,
-            )
+        return _flush_rolling_cache_finalizer_batch_or_defer(
+            pg_conn,
+            cfg,
+            metadata_overrides,
+            runtime_resources=self._runtime_resources,
+            transferred_work_permits=transferred_work_permits,
+        )
 
 
 def _prepare_rolling_cache_job(
@@ -12928,11 +11915,6 @@ def _prepare_rolling_cache_job(
     )
     if lease is None:
         return None
-    remux_claimed_at = datetime.now(timezone.utc)
-    ready_to_remux_claim_ms = _elapsed_ms_between(
-        _datetime_or_none(row.get("rolling_cache_ready_at")),
-        remux_claimed_at,
-    )
     try:
         event_context = _load_event_context(pg_conn, event_id)
         window = _rolling_cache_window(row, event_context)
@@ -12983,8 +11965,6 @@ def _prepare_rolling_cache_job(
             "labels": labels,
             "segments": segments,
             "lease": lease,
-            "remux_claimed_at": remux_claimed_at.isoformat(),
-            "ready_to_remux_claim_ms": ready_to_remux_claim_ms,
         }
     except RollingCacheCoverageMiss as exc:
         _defer_rolling_cache_task(
@@ -13011,7 +11991,6 @@ def _materialize_rolling_cache_job(
     job: dict[str, object],
     segment_index: RollingSegmentIndex | None = None,
 ) -> dict:
-    remux_total_started_at = time.monotonic()
     event_id = str(job.get("event_id") or "")
     requested_start_pts = int(job.get("requested_start_pts") or 0)
     requested_end_pts = int(job.get("requested_end_pts") or 0)
@@ -13020,18 +11999,10 @@ def _materialize_rolling_cache_job(
         if isinstance(job.get("segments"), list)
         else None
     )
-    index_diagnostics = (
-        segment_index.new_operation_diagnostics()
-        if segment_index is not None
-        else {}
-    )
     segment_context = (
         segment_index.pin_source_segments(
             source_id=str(job.get("source_id") or ""),
             runtime_epoch_id=str(job.get("runtime_epoch_id") or ""),
-            requested_source_start_pts=requested_start_pts,
-            requested_source_end_pts=requested_end_pts,
-            diagnostics=index_diagnostics,
         )
         if segment_index is not None
         else nullcontext(segments or [])
@@ -13053,17 +12024,12 @@ def _materialize_rolling_cache_job(
                 else None
             ),
         )
-    # materialize_window() just atomically published this exact JSON document.
-    # Keep the durable file as the recovery authority, but do not synchronously
-    # parse it again on the normal success path merely to build the handoff.
-    metadata = materialized.metadata_payload
-    if not isinstance(metadata, dict):
+    metadata = _load_scan_metadata_payload(materialized.metadata_path)
+    if metadata is None:
         raise RuntimeError("rolling_cache_materialized_metadata_unreadable")
-    metadata_reload_ms = 0
     lease = job.get("lease")
     if not isinstance(lease, MaterializationLease):
         raise RuntimeError("rolling_cache_materialization_missing_lease")
-    handoff_build_started_at = time.monotonic()
     try:
         identity = materialized.video_path.stat()
     except OSError as exc:
@@ -13088,61 +12054,7 @@ def _materialize_rolling_cache_job(
         "size": int(identity.st_size),
         "mtime_ns": int(identity.st_mtime_ns),
         "immutable_probe": materialized.immutable_probe,
-        # Preserve phase diagnostics inside the immutable handoff so a
-        # PostgreSQL-queue retry reports the same remux timing as the immediate
-        # in-memory path.
-        "ready_to_remux_claim_ms": job.get("ready_to_remux_claim_ms"),
-        "remux_claimed_at": job.get("remux_claimed_at"),
-        "remux_ms": materialized.materialization_ms,
-        "remux_exec_ms": materialized.materialization_ms,
-        "remux_metadata_publish_ms": materialized.metadata_publish_ms,
-        "remux_metadata_bytes": materialized.metadata_bytes,
-        "remux_metadata_reload_ms": metadata_reload_ms,
-        **index_diagnostics,
     }
-    handoff_build_ms = int(
-        round((time.monotonic() - handoff_build_started_at) * 1000)
-    )
-    handoff["remux_handoff_build_ms"] = handoff_build_ms
-    handoff["remux_total_ms"] = int(
-        round((time.monotonic() - remux_total_started_at) * 1000)
-    )
-    refresh_or_rebuild_ms = max(
-        _to_float(index_diagnostics.get("segment_index_refresh_ms")) or 0.0,
-        _to_float(index_diagnostics.get("segment_index_rebuild_ms")) or 0.0,
-    )
-    accounted_ms = sum(
-        (
-            float(materialized.materialization_ms),
-            float(materialized.metadata_publish_ms),
-            float(metadata_reload_ms),
-            float(handoff_build_ms),
-            _to_float(
-                index_diagnostics.get("segment_index_io_slot_wait_ms")
-            )
-            or 0.0,
-            _to_float(index_diagnostics.get("segment_index_lock_wait_ms"))
-            or 0.0,
-            refresh_or_rebuild_ms,
-            _to_float(index_diagnostics.get("segment_index_sort_ms")) or 0.0,
-            _to_float(
-                index_diagnostics.get("segment_index_mutation_lock_wait_ms")
-            )
-            or 0.0,
-            _to_float(
-                index_diagnostics.get("segment_index_pin_publish_ms")
-            )
-            or 0.0,
-            _to_float(
-                index_diagnostics.get("segment_index_pin_release_ms")
-            )
-            or 0.0,
-        )
-    )
-    handoff["remux_unattributed_ms"] = round(
-        max(0.0, float(handoff["remux_total_ms"]) - accounted_ms),
-        3,
-    )
     observed_at = datetime.now(timezone.utc).isoformat()
     return {
         **metadata,
@@ -13162,16 +12074,6 @@ def _materialize_rolling_cache_job(
             "sink_video_stable_at": observed_at,
             "sink_ffprobe_ready_at": observed_at,
             "rolling_cache_materialization_ms": materialized.materialization_ms,
-            "ready_to_remux_claim_ms": job.get("ready_to_remux_claim_ms"),
-            "remux_claimed_at": job.get("remux_claimed_at"),
-            "remux_ms": materialized.materialization_ms,
-            "remux_exec_ms": materialized.materialization_ms,
-            "remux_total_ms": handoff["remux_total_ms"],
-            **{
-                name: handoff.get(name)
-                for name in REMUX_JOB_METRIC_FIELDS
-            },
-            **index_diagnostics,
             "rolling_cache_segment_ids": list(materialized.segment_ids),
         },
     }
@@ -13383,8 +12285,6 @@ def _rolling_cache_candidate_tasks(
     cfg: Config,
     *,
     limit: int | None = None,
-    per_source_limit: int | None = None,
-    turn_sources: Sequence[str] | None = None,
 ) -> list[dict[str, object]]:
     with pg_conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -13400,10 +12300,7 @@ def _rolling_cache_candidate_tasks(
                         et.materialization_next_attempt_at,
                         et.materialization_ready_at
                     ) AS materialization_due_at,
-                    et.materialization_ready_at AS rolling_cache_ready_at,
-                    """
-                    + _FAIR_SOURCE_KEY_SQL
-                    + """
+                    et.materialization_ready_at AS rolling_cache_ready_at
                 FROM evidence_tasks et
                 JOIN events e ON e.id = et.event_id
                 LEFT JOIN evidence_bundles eb ON eb.event_id = et.event_id
@@ -13413,11 +12310,6 @@ def _rolling_cache_candidate_tasks(
                   AND (
                       %(sources_empty)s
                       OR COALESCE(et.source_id, et.replay_source_id, '') = ANY(%(sources)s)
-                  )
-                  AND (
-                      %(turn_sources_empty)s
-                      OR COALESCE(et.source_id, et.replay_source_id, '')
-                         = ANY(%(turn_sources)s)
                   )
                   AND et.materialization_ready_at IS NOT NULL
                   AND et.materialization_ready_at <= now()
@@ -13432,20 +12324,29 @@ def _rolling_cache_candidate_tasks(
                   AND COALESCE(et.replay_slot_status, '') <> 'active'
                   AND eb.event_id IS NULL
             )
-            """
-            + _FAIR_SOURCE_RANK_SQL
-            + """
+            SELECT
+                *,
+                GREATEST(
+                    0,
+                    floor(extract(epoch FROM (now() - rolling_cache_ready_at)) * 1000)
+                )::bigint AS rolling_cache_ready_lag_ms
+            FROM candidates
+            WHERE rolling_cache_ready_at <= now()
+            ORDER BY
+                priority DESC,
+                materialization_due_at ASC,
+                rolling_cache_ready_at ASC,
+                task_created_at ASC
+            LIMIT %(limit)s
             """,
             {
                 "statuses": list(ROLLING_CACHE_TASK_STATUSES),
                 "sources": list(cfg.rolling_cache_sources),
                 "sources_empty": not bool(cfg.rolling_cache_sources),
-                "turn_sources": list(turn_sources or ()),
-                "turn_sources_empty": not bool(turn_sources),
-                **_fair_source_rank_params(
-                    cfg,
-                    limit=limit,
-                    per_source_limit=per_source_limit,
+                "limit": (
+                    max(1, int(limit))
+                    if limit is not None
+                    else cfg.rolling_cache_materialization_max_per_poll
                 ),
             },
         )
@@ -14249,107 +13150,6 @@ def _process_configured_sink_output(
     )
 
 
-def _scheduler_cycle_observability(
-    *,
-    tick_gap_ms: int | None,
-    tick_body_ms: int,
-    snapshot_ms: int,
-    logging_ms: int,
-    planned_sleep_ms: int,
-    actual_sleep_ms: int,
-) -> dict[str, int | str]:
-    """Reconcile the previous scheduler cycle against its start-to-start gap."""
-
-    if tick_gap_ms is None:
-        return {
-            name: "unavailable"
-            for name in (
-                "cycle_body_ms",
-                "cycle_snapshot_ms",
-                "cycle_logging_ms",
-                "cycle_planned_sleep_ms",
-                "cycle_actual_sleep_ms",
-                "cycle_accounted_ms",
-                "cycle_work_ms",
-                "cycle_total_ms",
-                "cycle_unattributed_ms",
-            )
-        }
-    body_ms = max(0, int(tick_body_ms))
-    snapshot_ms = max(0, int(snapshot_ms))
-    logging_ms = max(0, int(logging_ms))
-    planned_sleep_ms = max(0, int(planned_sleep_ms))
-    actual_sleep_ms = max(0, int(actual_sleep_ms))
-    total_ms = max(0, int(tick_gap_ms))
-    accounted_ms = body_ms + snapshot_ms + logging_ms + actual_sleep_ms
-    return {
-        "cycle_body_ms": body_ms,
-        "cycle_snapshot_ms": snapshot_ms,
-        "cycle_logging_ms": logging_ms,
-        "cycle_planned_sleep_ms": planned_sleep_ms,
-        "cycle_actual_sleep_ms": actual_sleep_ms,
-        "cycle_accounted_ms": accounted_ms,
-        "cycle_work_ms": max(0, total_ms - actual_sleep_ms),
-        "cycle_total_ms": total_ms,
-        "cycle_unattributed_ms": max(0, total_ms - accounted_ms),
-    }
-
-
-_SCHEDULER_STAGE_NAMES = (
-    "lifecycle_recovery",
-    "finalizer_completion_drain",
-    "image_completion_drain",
-    "finalizer_pending_snapshot",
-    "finalizer_recovery_query",
-    "finalizer_recovery_admission",
-    "finalizer_scan_admission",
-    "cleanup_recovery",
-    "alias_reconcile",
-    "remux_admission",
-    "rolling_image_admission",
-    "snapshot_admission",
-    "annotation_admission",
-    "legacy_rolling",
-    "legacy_finalizer_recovery",
-    "legacy_sink_scan",
-    "legacy_snapshot",
-    "legacy_annotation",
-)
-
-
-class _SchedulerStageTimings:
-    """Measure non-overlapping scheduler-body stages with no semantic hooks."""
-
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
-        self._clock = clock
-        self._durations_ms = {name: 0.0 for name in _SCHEDULER_STAGE_NAMES}
-
-    @contextmanager
-    def measure(self, name: str) -> Iterator[None]:
-        if name not in self._durations_ms:
-            raise ValueError(f"unknown scheduler stage: {name}")
-        started_at = self._clock()
-        try:
-            yield
-        finally:
-            elapsed_ms = max(0.0, (self._clock() - started_at) * 1000.0)
-            self._durations_ms[name] += elapsed_ms
-
-    def snapshot(self, *, tick_body_ms: int) -> dict[str, float]:
-        durations = {
-            f"tick_stage_{name}_ms": round(value, 3)
-            for name, value in self._durations_ms.items()
-        }
-        accounted_ms = sum(self._durations_ms.values())
-        body_ms = max(0.0, float(tick_body_ms))
-        durations["tick_stage_accounted_ms"] = round(accounted_ms, 3)
-        durations["tick_stage_unattributed_ms"] = round(
-            max(0.0, body_ms - accounted_ms),
-            3,
-        )
-        return durations
-
-
 def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     global _active_materialization_resources
     if (
@@ -14447,11 +13247,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         ),
         db_pool_enabled=getattr(cfg, "media_worker_db_pool_enabled", False),
         db_pool_timeout_s=getattr(cfg, "media_worker_db_pool_timeout_s", 5.0),
-        db_index_io_concurrency=getattr(
-            cfg,
-            "media_worker_db_index_io_concurrency",
-            0,
-        ),
         shutdown_grace_s=getattr(cfg, "media_worker_shutdown_grace_s", 45.0),
         shutdown_kill_timeout_s=getattr(
             cfg,
@@ -14517,16 +13312,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "media_worker_segment_index_row_cache_entries",
                 256,
             ),
-            row_cache_max_bytes=getattr(
-                cfg,
-                "media_worker_segment_index_row_cache_max_bytes",
-                256 * 1024 * 1024,
-            ),
-            io_concurrency=getattr(
-                cfg,
-                "media_worker_segment_index_io_concurrency",
-                2,
-            ),
             max_catalogs=getattr(
                 cfg,
                 "media_worker_segment_index_max_catalogs",
@@ -14578,9 +13363,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         "db_pool_effective=%s segment_index_requested=%s "
         "segment_index_effective=%s segment_index_refresh_s=%s "
         "segment_index_reconcile_s=%s segment_index_row_cache_entries=%s "
-        "segment_index_row_cache_max_bytes=%s segment_index_io_concurrency=%s "
-        "db_index_io_concurrency_configured=%s "
-        "db_index_io_concurrency=%s "
         "segment_read_pin_ttl_s=%s "
         "lanes_effective=%s "
         "max_active=%s image_workers=%s remux_workers=%s finalizer_workers=%s "
@@ -14595,15 +13377,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
         getattr(cfg, "media_worker_segment_index_refresh_interval_s", 0.5),
         getattr(cfg, "media_worker_segment_index_reconcile_interval_s", 30.0),
         getattr(cfg, "media_worker_segment_index_row_cache_entries", 256),
-        getattr(
-            cfg,
-            "media_worker_segment_index_row_cache_max_bytes",
-            256 * 1024 * 1024,
-        ),
-        getattr(cfg, "media_worker_segment_index_io_concurrency", 2),
-        getattr(cfg, "media_worker_db_index_io_concurrency", 0),
-        (runtime_resources.db_index_io_gate.snapshot()["limit"]
-         if runtime_resources.db_index_io_gate is not None else 0),
         getattr(cfg, "rolling_cache_read_pin_ttl_s", 600.0),
         runtime_resources.finalizer_lane is not None,
         cfg.materialization_max_active,
@@ -14628,14 +13401,8 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     cleanup_rows_scanned_total = 0
     cleanup_recovered_total = 0
     cleanup_retry_pending_total = 0
-    finalizer_pending_snapshot = FinalizerPendingMetrics()
     last_scheduler_tick_started_at: float | None = None
     scheduler_tick_sequence = 0
-    previous_tick_body_ms = 0
-    previous_snapshot_ms = 0
-    previous_logging_ms = 0
-    previous_planned_sleep_ms = 0
-    previous_actual_sleep_ms = 0
     try:
         while not shutdown_requested:
             tick_started_at = time.monotonic()
@@ -14646,14 +13413,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             )
             last_scheduler_tick_started_at = tick_started_at
             scheduler_tick_sequence += 1
-            completed_cycle = _scheduler_cycle_observability(
-                tick_gap_ms=tick_gap_ms,
-                tick_body_ms=previous_tick_body_ms,
-                snapshot_ms=previous_snapshot_ms,
-                logging_ms=previous_logging_ms,
-                planned_sleep_ms=previous_planned_sleep_ms,
-                actual_sleep_ms=previous_actual_sleep_ms,
-            )
             now_monotonic = tick_started_at
             rolling_cache_due = (
                 cfg.rolling_cache_enabled
@@ -14667,18 +13426,16 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             cleanup_recovery_due = (
                 now_monotonic >= next_cleanup_recovery_poll_at
             )
-            stage_timings = _SchedulerStageTimings()
             try:
                 recovery_updates = 0
                 if lifecycle_recovery_due:
                     next_lifecycle_recovery_poll_at = (
                         now_monotonic + rolling_cache_poll_interval_s
                     )
-                    with stage_timings.measure("lifecycle_recovery"):
-                        recovery_updates = _recover_rolling_cache_lifecycle(
-                            pg_conn,
-                            cfg,
-                        )
+                    recovery_updates = _recover_rolling_cache_lifecycle(
+                        pg_conn,
+                        cfg,
+                    )
                     if recovery_updates:
                         logger.info(
                             "media_scheduler_lifecycle_recovery updated=%s "
@@ -14692,13 +13449,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 if scheduler_v2_enabled:
                     completed_updates = 0
                     if finalizer_scheduler_v2 is not None:
-                        with stage_timings.measure("finalizer_completion_drain"):
-                            completed_updates += finalizer_scheduler_v2.drain_completed(
-                                pg_conn
-                            )
+                        completed_updates += finalizer_scheduler_v2.drain_completed(
+                            pg_conn
+                        )
                     if image_scheduler_v2 is not None:
-                        with stage_timings.measure("image_completion_drain"):
-                            completed_updates += image_scheduler_v2.drain_completed(pg_conn)
+                        completed_updates += image_scheduler_v2.drain_completed(pg_conn)
                     if completed_updates:
                         logger.info(
                             "media_scheduler_v2_completed updated=%s",
@@ -14715,74 +13470,58 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                             cfg.sink_output_dir
                         )
                         if finalizer_scheduler_v2 is not None:
-                            try:
-                                with stage_timings.measure(
-                                    "finalizer_pending_snapshot"
-                                ):
-                                    finalizer_pending_snapshot = finalizer_pending_metrics(
-                                        pg_conn
-                                    )
-                            except Exception:
-                                logger.exception(
-                                    "media_finalizer_pending_metrics_failed"
-                                )
-                            with stage_timings.measure("finalizer_recovery_query"):
-                                recovered_metadata = _recoverable_finalizer_metadata(
-                                    pg_conn,
-                                    limit=max(
-                                        1,
-                                        int(
-                                            os.getenv(
-                                                "MEDIA_WORKER_FINALIZER_RECOVERY_MAX_PER_POLL",
-                                                "100",
-                                            )
-                                        ),
+                            recovered_metadata = _recoverable_finalizer_metadata(
+                                pg_conn,
+                                limit=max(
+                                    1,
+                                    int(
+                                        os.getenv(
+                                            "MEDIA_WORKER_FINALIZER_RECOVERY_MAX_PER_POLL",
+                                            "100",
+                                        )
                                     ),
-                                )
+                                ),
+                            )
                             recovered_admitted = 0
                             if recovered_metadata:
-                                with stage_timings.measure(
-                                    "finalizer_recovery_admission"
-                                ):
-                                    recovered_admitted = (
-                                        finalizer_scheduler_v2.admit_metadata(
-                                            pg_conn,
-                                            sink_dir=cfg.sink_output_dir,
-                                            metadata_files=recovered_metadata,
-                                            scan_stats={
-                                                "scan_duration_ms": 0,
-                                                "metadata_files_visited": len(
-                                                    recovered_metadata
-                                                ),
-                                                "metadata_files_parsed": len(
-                                                    recovered_metadata
-                                                ),
-                                                "scan_mode": (
-                                                    "finalizer_pending_recovery_v2"
-                                                ),
-                                            },
-                                            processed_dirs=set(),
-                                            processed_state_path=None,
-                                            candidate_dirs=None,
-                                            invalid_output_failures=None,
-                                            stability_checks=1,
-                                            cleanup_replay_sink_output_enabled=(
-                                                cfg.cleanup_replay_sink_output_enabled
+                                recovered_admitted = (
+                                    finalizer_scheduler_v2.admit_metadata(
+                                        pg_conn,
+                                        sink_dir=cfg.sink_output_dir,
+                                        metadata_files=recovered_metadata,
+                                        scan_stats={
+                                            "scan_duration_ms": 0,
+                                            "metadata_files_visited": len(
+                                                recovered_metadata
                                             ),
-                                            replay_sink_output_max_bytes=(
-                                                cfg.replay_sink_output_max_bytes
+                                            "metadata_files_parsed": len(
+                                                recovered_metadata
                                             ),
-                                        )
+                                            "scan_mode": (
+                                                "finalizer_pending_recovery_v2"
+                                            ),
+                                        },
+                                        processed_dirs=set(),
+                                        processed_state_path=None,
+                                        candidate_dirs=None,
+                                        invalid_output_failures=None,
+                                        stability_checks=1,
+                                        cleanup_replay_sink_output_enabled=(
+                                            cfg.cleanup_replay_sink_output_enabled
+                                        ),
+                                        replay_sink_output_max_bytes=(
+                                            cfg.replay_sink_output_max_bytes
+                                        ),
                                     )
-                            with stage_timings.measure("finalizer_scan_admission"):
-                                general_admitted = finalizer_scheduler_v2.scan_and_admit(
-                                    pg_conn,
-                                    sink_dir=active_sink_output_dir,
-                                    processed_dirs=processed_dirs,
-                                    processed_state_path=processed_state_path,
-                                    candidate_dirs=candidate_dirs,
-                                    invalid_output_failures=invalid_output_failures,
                                 )
+                            general_admitted = finalizer_scheduler_v2.scan_and_admit(
+                                pg_conn,
+                                sink_dir=active_sink_output_dir,
+                                processed_dirs=processed_dirs,
+                                processed_state_path=processed_state_path,
+                                candidate_dirs=candidate_dirs,
+                                invalid_output_failures=invalid_output_failures,
+                            )
                             if recovered_admitted or general_admitted:
                                 logger.info(
                                     "media_scheduler_v2_finalizer_admitted "
@@ -14792,24 +13531,23 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                                 )
 
                         if cleanup_recovery_due:
-                            with stage_timings.measure("cleanup_recovery"):
-                                cleanup_stats = _recover_pending_sink_cleanups(
-                                    pg_conn,
-                                    sink_root=cfg.sink_output_dir,
-                                    enabled=cfg.cleanup_replay_sink_output_enabled,
-                                    allowed_statuses=(
-                                        cfg.cleanup_replay_sink_output_statuses
+                            cleanup_stats = _recover_pending_sink_cleanups(
+                                pg_conn,
+                                sink_root=cfg.sink_output_dir,
+                                enabled=cfg.cleanup_replay_sink_output_enabled,
+                                allowed_statuses=(
+                                    cfg.cleanup_replay_sink_output_statuses
+                                ),
+                                limit=max(
+                                    1,
+                                    int(
+                                        os.getenv(
+                                            "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
+                                            "16",
+                                        )
                                     ),
-                                    limit=max(
-                                        1,
-                                        int(
-                                            os.getenv(
-                                                "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
-                                                "16",
-                                            )
-                                        ),
-                                    ),
-                                )
+                                ),
+                            )
                             cleanup_rows_scanned_total += cleanup_stats.rows_scanned
                             cleanup_recovered_total += cleanup_stats.recovered
                             cleanup_retry_pending_total += cleanup_stats.retry_pending
@@ -14833,8 +13571,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                                 cleanup_stats.retry_pending,
                                 cleanup_retry_delay_s,
                             )
-                        with stage_timings.measure("alias_reconcile"):
-                            alias_updates = _reconcile_covered_event_aliases(pg_conn)
+                        alias_updates = _reconcile_covered_event_aliases(pg_conn)
                         if alias_updates:
                             logger.info(
                                 "media_worker: covered evidence aliases updated %d events",
@@ -14845,12 +13582,11 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         next_rolling_cache_poll_at = (
                             now_monotonic + rolling_cache_poll_interval_s
                         )
-                        with stage_timings.measure("remux_admission"):
-                            remux_updates = (
-                                rolling_cache_runner.process(pg_conn, cfg)
-                                if rolling_cache_runner is not None
-                                else 0
-                            )
+                        remux_updates = (
+                            rolling_cache_runner.process(pg_conn, cfg)
+                            if rolling_cache_runner is not None
+                            else 0
+                        )
                         if remux_updates:
                             logger.info(
                                 "media_scheduler_v2_rolling remux=%s",
@@ -14858,22 +13594,19 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                             )
 
                     if rolling_cache_due and image_scheduler_v2 is not None:
-                        with stage_timings.measure("rolling_image_admission"):
-                            rolling_images_admitted = (
-                                image_scheduler_v2.admit_rolling_images(pg_conn)
-                            )
+                        rolling_images_admitted = (
+                            image_scheduler_v2.admit_rolling_images(pg_conn)
+                        )
                         if rolling_images_admitted:
                             logger.info(
                                 "media_scheduler_v2_images_admitted rolling=%s",
                                 rolling_images_admitted,
                             )
                     if general_due and image_scheduler_v2 is not None:
-                        with stage_timings.measure("snapshot_admission"):
-                            snapshots_admitted = image_scheduler_v2.admit_snapshots(pg_conn)
-                        with stage_timings.measure("annotation_admission"):
-                            annotations_admitted = (
-                                image_scheduler_v2.admit_annotations(pg_conn)
-                            )
+                        snapshots_admitted = image_scheduler_v2.admit_snapshots(pg_conn)
+                        annotations_admitted = (
+                            image_scheduler_v2.admit_annotations(pg_conn)
+                        )
                         if snapshots_admitted or annotations_admitted:
                             logger.info(
                                 "media_scheduler_v2_images_admitted snapshots=%s "
@@ -14886,15 +13619,14 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                     next_rolling_cache_poll_at = (
                         now_monotonic + rolling_cache_poll_interval_s
                     )
-                    with stage_timings.measure("legacy_rolling"):
-                        rolling_updates = _process_rolling_cache_tasks(
-                            pg_conn,
-                            cfg,
-                            runner=rolling_cache_runner,
-                            runtime_resources=runtime_resources,
-                            segment_index=segment_index,
-                            recover_lifecycle=False,
-                        )
+                    rolling_updates = _process_rolling_cache_tasks(
+                        pg_conn,
+                        cfg,
+                        runner=rolling_cache_runner,
+                        runtime_resources=runtime_resources,
+                        segment_index=segment_index,
+                        recover_lifecycle=False,
+                    )
                     if rolling_updates:
                         logger.info(
                             "media_worker: rolling-cache materialized %d events",
@@ -14919,65 +13651,62 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         ),
                     )
                     if recovered_metadata:
-                        with stage_timings.measure("legacy_finalizer_recovery"):
-                            recovery_updates = _process_configured_sink_output(
-                                pg_conn,
-                                cfg,
-                                sink_dir=cfg.sink_output_dir,
-                                processed_dirs=set(),
-                                candidate_dirs=None,
-                                invalid_output_failures=None,
-                                materialization_guard=materialization_guard,
-                                materialization_pacer=materialization_pacer,
-                                processed_state_path=None,
-                                metadata_files_override=recovered_metadata,
-                                scan_stats_override={
-                                    "scan_duration_ms": 0,
-                                    "metadata_files_visited": len(recovered_metadata),
-                                    "metadata_files_parsed": len(recovered_metadata),
-                                    "scan_mode": "finalizer_pending_recovery",
-                                },
-                                runtime_resources=runtime_resources,
-                            )
+                        recovery_updates = _process_configured_sink_output(
+                            pg_conn,
+                            cfg,
+                            sink_dir=cfg.sink_output_dir,
+                            processed_dirs=set(),
+                            candidate_dirs=None,
+                            invalid_output_failures=None,
+                            materialization_guard=materialization_guard,
+                            materialization_pacer=materialization_pacer,
+                            processed_state_path=None,
+                            metadata_files_override=recovered_metadata,
+                            scan_stats_override={
+                                "scan_duration_ms": 0,
+                                "metadata_files_visited": len(recovered_metadata),
+                                "metadata_files_parsed": len(recovered_metadata),
+                                "scan_mode": "finalizer_pending_recovery",
+                            },
+                            runtime_resources=runtime_resources,
+                        )
                         if recovery_updates:
                             logger.info(
                                 "media_worker: recovered finalizer %d events",
                                 recovery_updates,
                             )
 
-                    with stage_timings.measure("legacy_sink_scan"):
-                        clip_updates = _process_configured_sink_output(
-                            pg_conn,
-                            cfg,
-                            sink_dir=active_sink_output_dir,
-                            processed_dirs=processed_dirs,
-                            candidate_dirs=candidate_dirs,
-                            invalid_output_failures=invalid_output_failures,
-                            materialization_guard=materialization_guard,
-                            materialization_pacer=materialization_pacer,
-                            processed_state_path=processed_state_path,
-                            runtime_resources=runtime_resources,
-                        )
+                    clip_updates = _process_configured_sink_output(
+                        pg_conn,
+                        cfg,
+                        sink_dir=active_sink_output_dir,
+                        processed_dirs=processed_dirs,
+                        candidate_dirs=candidate_dirs,
+                        invalid_output_failures=invalid_output_failures,
+                        materialization_guard=materialization_guard,
+                        materialization_pacer=materialization_pacer,
+                        processed_state_path=processed_state_path,
+                        runtime_resources=runtime_resources,
+                    )
                     if clip_updates:
                         logger.info("media_worker: clip updated %d events", clip_updates)
 
                     if cleanup_recovery_due:
-                        with stage_timings.measure("cleanup_recovery"):
-                            cleanup_stats = _recover_pending_sink_cleanups(
-                                pg_conn,
-                                sink_root=cfg.sink_output_dir,
-                                enabled=cfg.cleanup_replay_sink_output_enabled,
-                                allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
-                                limit=max(
-                                    1,
-                                    int(
-                                        os.getenv(
-                                            "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
-                                            "16",
-                                        )
-                                    ),
+                        cleanup_stats = _recover_pending_sink_cleanups(
+                            pg_conn,
+                            sink_root=cfg.sink_output_dir,
+                            enabled=cfg.cleanup_replay_sink_output_enabled,
+                            allowed_statuses=cfg.cleanup_replay_sink_output_statuses,
+                            limit=max(
+                                1,
+                                int(
+                                    os.getenv(
+                                        "MEDIA_WORKER_CLEANUP_RECOVERY_MAX_PER_POLL",
+                                        "16",
+                                    )
                                 ),
-                            )
+                            ),
+                        )
                         cleanup_rows_scanned_total += cleanup_stats.rows_scanned
                         cleanup_recovered_total += cleanup_stats.recovered
                         cleanup_retry_pending_total += cleanup_stats.retry_pending
@@ -14999,29 +13728,26 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                             cleanup_retry_delay_s,
                         )
 
-                    with stage_timings.measure("alias_reconcile"):
-                        alias_updates = _reconcile_covered_event_aliases(pg_conn)
+                    alias_updates = _reconcile_covered_event_aliases(pg_conn)
                     if alias_updates:
                         logger.info(
                             "media_worker: covered evidence aliases updated %d events",
                             alias_updates,
                         )
 
-                    with stage_timings.measure("legacy_snapshot"):
-                        snap_updates = _process_pending_snapshots(
-                            pg_conn,
-                            cfg.snapshot_output_dir,
-                            cfg.default_pre_seconds,
-                        )
+                    snap_updates = _process_pending_snapshots(
+                        pg_conn,
+                        cfg.snapshot_output_dir,
+                        cfg.default_pre_seconds,
+                    )
                     if snap_updates:
                         logger.info(
                             "media_worker: snapshot updated %d events", snap_updates
                         )
 
-                    with stage_timings.measure("legacy_annotation"):
-                        ann_updates = _process_pending_annotations(
-                            pg_conn, cfg.annotated_output_dir,
-                        )
+                    ann_updates = _process_pending_annotations(
+                        pg_conn, cfg.annotated_output_dir,
+                    )
                     if ann_updates:
                         logger.info(
                             "media_worker: annotation updated %d events", ann_updates
@@ -15030,11 +13756,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 logger.exception("media worker loop error")
 
             tick_duration_ms = int((time.monotonic() - tick_started_at) * 1000)
-            tick_stage_snapshot = stage_timings.snapshot(tick_body_ms=tick_duration_ms)
-            tick_stage_text = " ".join(
-                f"{name}={value:g}" for name, value in tick_stage_snapshot.items()
-            )
-            snapshot_started_at = time.monotonic()
             permit_snapshot = materialization_guard.snapshot()
             resource_snapshot = runtime_resources.snapshot()
             segment_index_snapshot = (
@@ -15050,8 +13771,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                     "fallback_scans": "unavailable",
                     "row_cache_entries": "unavailable",
                     "row_cache_evictions": "unavailable",
-                    "row_cache_bytes": "unavailable",
-                    "row_cache_byte_evictions": "unavailable",
                     "active_read_pins": "unavailable",
                     "read_pins_created": "unavailable",
                     "read_pins_released": "unavailable",
@@ -15063,31 +13782,12 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 if rolling_cache_runner is not None
                 else {"active": 0, "capacity": 0}
             )
-            remux_admission_timing_text = (
-                "schema_version=rolling-remux-admission-timing-v1 "
-                + " ".join(
-                    f"{name}={value:g}"
-                    for name, value in remux_snapshot.items()
-                    if name.startswith("remux_admission_")
-                )
-                if rolling_cache_due
-                and any(
-                    name.startswith("remux_admission_")
-                    for name in remux_snapshot
-                )
-                else ""
-            )
-            finalizer_scheduler_snapshot = (
-                finalizer_scheduler_v2.snapshot()
-                if finalizer_scheduler_v2 is not None
-                else {}
-            )
             oldest_ready_age_ms: int | str = "unavailable"
             if scheduler_v2_enabled:
                 oldest_ready_age_ms = max(
                     int(remux_snapshot.get("oldest_ready_age_ms") or 0),
                     int(
-                        finalizer_scheduler_snapshot.get(
+                        (finalizer_scheduler_v2.snapshot() if finalizer_scheduler_v2 else {}).get(
                             "oldest_ready_age_ms",
                             0,
                         )
@@ -15099,43 +13799,21 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                         )
                     ),
                 )
-            snapshot_ms = int((time.monotonic() - snapshot_started_at) * 1000)
-            logging_started_at = time.monotonic()
             logger.info(
                 "media_scheduler_tick schema_version=phase0-scheduler-v1 "
                 "scheduler_mode=%s sequence=%s tick_duration_ms=%s "
-                "tick_gap_ms=%s %s %s completed_cycle_sequence=%s "
-                "cycle_body_ms=%s cycle_snapshot_ms=%s cycle_logging_ms=%s "
-                "cycle_planned_sleep_ms=%s cycle_actual_sleep_ms=%s "
-                "cycle_accounted_ms=%s cycle_work_ms=%s cycle_total_ms=%s "
-                "cycle_unattributed_ms=%s "
-                "recovery_due=%s rolling_due=%s general_due=%s "
+                "tick_gap_ms=%s recovery_due=%s rolling_due=%s general_due=%s "
                 "cleanup_recovery_due=%s cleanup_rows_scanned=%s "
                 "cleanup_recovered=%s cleanup_retry_pending=%s "
                 "oldest_ready_age_ms=%s "
                 "image_lane_depth=%s remux_lane_depth=%s "
                 "finalizer_lane_depth=%s "
-                "finalizer_admission_rejected_total=%s "
-                "finalizer_handoff_retry_total=%s "
-                "finalizer_handoff_retry_failed=%s "
-                "finalizer_queued_lease_heartbeat_total=%s "
-                "finalizer_pending_total=%s finalizer_pending_unleased=%s "
-                "finalizer_pending_leased=%s finalizer_pending_oldest_age_ms=%s "
                 "permit_active=%s permit_limit=%s "
                 "db_pool_in_use=%s db_pool_limit=%s "
                 "db_pool_peak_in_use=%s db_pool_checkout_count=%s "
                 "db_pool_checkout_wait_ms=%s db_pool_checkout_timeouts=%s "
                 "db_pool_checkout_errors=%s db_pool_resets=%s "
                 "db_pool_connections_lost=%s "
-                "db_index_io_gate_limit=%s db_index_io_gate_active=%s "
-                "db_index_io_gate_waiting=%s "
-                "db_index_io_gate_active_peak=%s "
-                "db_index_io_gate_acquired_total=%s "
-                "db_index_io_gate_wait_ms_total=%s "
-                "db_index_io_gate_wait_ms_max=%s "
-                "db_index_io_gate_wait_events_total=%s "
-                "db_index_io_gate_service_ms_total=%s "
-                "db_index_io_gate_service_ms_max=%s "
                 "lease_heartbeat_active=%s lease_heartbeat_total=%s "
                 "lease_heartbeat_lost=%s lease_heartbeat_expired=%s "
                 "lease_heartbeat_errors=%s "
@@ -15146,54 +13824,14 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "segment_index_fallback_scans=%s "
                 "segment_index_row_cache_entries=%s "
                 "segment_index_row_cache_evictions=%s "
-                "segment_index_row_cache_bytes=%s "
-                "segment_index_row_cache_byte_evictions=%s "
                 "segment_index_active_read_pins=%s "
                 "segment_index_read_pins_created=%s "
                 "segment_index_read_pins_released=%s "
-                "segment_index_generation=%s "
-                "segment_index_io_slot_wait_ms_total=%s "
-                "segment_index_lock_wait_ms_total=%s "
-                "segment_index_lock_hold_ms_total=%s "
-                "segment_index_refresh_ms_total=%s "
-                "segment_index_rebuild_ms_total=%s "
-                "segment_index_stat_ms_total=%s "
-                "segment_index_full_row_parse_ms_total=%s "
-                "segment_index_manifest_parse_ms_total=%s "
-                "segment_index_sort_ms_total=%s "
-                "segment_index_mutation_lock_wait_ms_total=%s "
-                "segment_index_pin_publish_ms_total=%s "
-                "segment_index_pin_release_ms_total=%s "
-                "segment_index_publication_read_ms_total=%s "
-                "segment_index_stat_calls=%s "
-                "segment_index_full_row_parses=%s "
-                "segment_index_manifest_parses=%s "
-                "segment_index_scanned_known=%s "
-                "segment_index_new_or_changed=%s "
-                "segment_index_publication_records=%s "
-                "segment_index_publication_bytes=%s "
-                "segment_index_publication_errors=%s "
-                "segment_index_publication_reconciles=%s",
+                "segment_index_generation=%s",
                 "v2" if scheduler_v2_enabled else "legacy",
                 scheduler_tick_sequence,
                 tick_duration_ms,
                 tick_gap_ms if tick_gap_ms is not None else "unavailable",
-                tick_stage_text,
-                remux_admission_timing_text,
-                (
-                    scheduler_tick_sequence - 1
-                    if tick_gap_ms is not None
-                    else "unavailable"
-                ),
-                completed_cycle["cycle_body_ms"],
-                completed_cycle["cycle_snapshot_ms"],
-                completed_cycle["cycle_logging_ms"],
-                completed_cycle["cycle_planned_sleep_ms"],
-                completed_cycle["cycle_actual_sleep_ms"],
-                completed_cycle["cycle_accounted_ms"],
-                completed_cycle["cycle_work_ms"],
-                completed_cycle["cycle_total_ms"],
-                completed_cycle["cycle_unattributed_ms"],
                 lifecycle_recovery_due,
                 rolling_cache_due,
                 general_due,
@@ -15205,17 +13843,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 (resource_snapshot.get("image_lane") or {}).get("reserved", 0),
                 remux_snapshot["active"],
                 (resource_snapshot.get("finalizer_lane") or {}).get("reserved", 0),
-                finalizer_scheduler_snapshot.get("admission_rejected_total", 0),
-                finalizer_scheduler_snapshot.get("handoff_retry_total", 0),
-                finalizer_scheduler_snapshot.get("handoff_retry_failed", 0),
-                finalizer_scheduler_snapshot.get(
-                    "queued_lease_heartbeat_total",
-                    0,
-                ),
-                finalizer_pending_snapshot.total,
-                finalizer_pending_snapshot.unleased,
-                finalizer_pending_snapshot.leased,
-                finalizer_pending_snapshot.oldest_age_ms,
                 permit_snapshot["active"],
                 permit_snapshot["max_active"],
                 (resource_snapshot.get("db_pool") or {}).get("in_use", 0),
@@ -15234,37 +13861,6 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 (resource_snapshot.get("db_pool") or {}).get("reset_count", 0),
                 (resource_snapshot.get("db_pool") or {}).get(
                     "connections_lost",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get("limit", 0),
-                (resource_snapshot.get("db_index_io_gate") or {}).get("active", 0),
-                (resource_snapshot.get("db_index_io_gate") or {}).get("waiting", 0),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "active_peak",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "acquired_total",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "wait_ms_total",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "wait_ms_max",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "wait_events_total",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "service_ms_total",
-                    0,
-                ),
-                (resource_snapshot.get("db_index_io_gate") or {}).get(
-                    "service_ms_max",
                     0,
                 ),
                 (resource_snapshot.get("lease_heartbeats") or {}).get("active", 0),
@@ -15293,72 +13889,18 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 segment_index_snapshot.get("fallback_scans", "unavailable"),
                 segment_index_snapshot.get("row_cache_entries", "unavailable"),
                 segment_index_snapshot.get("row_cache_evictions", "unavailable"),
-                segment_index_snapshot.get("row_cache_bytes", "unavailable"),
-                segment_index_snapshot.get(
-                    "row_cache_byte_evictions",
-                    "unavailable",
-                ),
                 segment_index_snapshot.get("active_read_pins", "unavailable"),
                 segment_index_snapshot.get("read_pins_created", "unavailable"),
                 segment_index_snapshot.get("read_pins_released", "unavailable"),
                 segment_index_snapshot.get("generation", "unavailable"),
-                segment_index_snapshot.get(
-                    "io_slot_wait_ms_total",
-                    "unavailable",
-                ),
-                segment_index_snapshot.get("lock_wait_ms_total", "unavailable"),
-                segment_index_snapshot.get("lock_hold_ms_total", "unavailable"),
-                segment_index_snapshot.get("refresh_ms_total", "unavailable"),
-                segment_index_snapshot.get("rebuild_ms_total", "unavailable"),
-                segment_index_snapshot.get("stat_ms_total", "unavailable"),
-                segment_index_snapshot.get(
-                    "full_row_parse_ms_total",
-                    "unavailable",
-                ),
-                segment_index_snapshot.get(
-                    "manifest_parse_ms_total",
-                    "unavailable",
-                ),
-                segment_index_snapshot.get("sort_ms_total", "unavailable"),
-                segment_index_snapshot.get(
-                    "mutation_lock_wait_ms_total",
-                    "unavailable",
-                ),
-                segment_index_snapshot.get("pin_publish_ms_total", "unavailable"),
-                segment_index_snapshot.get("pin_release_ms_total", "unavailable"),
-                segment_index_snapshot.get(
-                    "publication_read_ms_total",
-                    "unavailable",
-                ),
-                segment_index_snapshot.get("stat_calls", "unavailable"),
-                segment_index_snapshot.get("full_row_parses", "unavailable"),
-                segment_index_snapshot.get("manifest_parses", "unavailable"),
-                segment_index_snapshot.get("scanned_known", "unavailable"),
-                segment_index_snapshot.get("new_or_changed", "unavailable"),
-                segment_index_snapshot.get("publication_records", "unavailable"),
-                segment_index_snapshot.get("publication_bytes", "unavailable"),
-                segment_index_snapshot.get("publication_errors", "unavailable"),
-                segment_index_snapshot.get(
-                    "publication_reconciles",
-                    "unavailable",
-                ),
             )
-            logging_ms = int((time.monotonic() - logging_started_at) * 1000)
 
             now_monotonic = time.monotonic()
             next_due_at = next_general_poll_at
             if cfg.rolling_cache_enabled and cfg.rolling_cache_materialization_enabled:
                 next_due_at = min(next_due_at, next_rolling_cache_poll_at)
             sleep_s = max(0.1, min(1.0, next_due_at - now_monotonic))
-            planned_sleep_ms = int(sleep_s * 1000)
-            sleep_started_at = time.monotonic()
             time.sleep(sleep_s)
-            actual_sleep_ms = int((time.monotonic() - sleep_started_at) * 1000)
-            previous_tick_body_ms = tick_duration_ms
-            previous_snapshot_ms = snapshot_ms
-            previous_logging_ms = logging_ms
-            previous_planned_sleep_ms = planned_sleep_ms
-            previous_actual_sleep_ms = actual_sleep_ms
     finally:
         runtime_resources.shutdown.begin_draining()
         while True:

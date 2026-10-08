@@ -2,22 +2,7 @@
 
 Date: 2026-07-10
 
-Status: 执行中；Phase 4 正确性门于 2026-07-21 重新打开，Phase 6 容量校准进行中，Phase 7 尚未执行
-
-Corrective checkpoint (2026-07-21): the 2026-07-20 one-hour local
-60-source/8fps run invalidated the earlier assumption that every durable remux
-handoff either entered the finalizer lane or was immediately returned to
-PostgreSQL. Of 5,144 handoff candidates, 5,072 were immediately admitted; the
-72-item gap exactly matched `handoff_recovered=72`. The Phase 4 correctness
-gate is therefore reopened until admission rejection performs an exact
-owner/token/generation CAS that preserves `finalizer_pending` and the immutable
-handoff, clears the lease, applies short jitter, and releases WIP only after
-the fenced transition attempt. This does not weaken the recovery query's
-`lease_token IS NULL` fence. The same run had 733 expired tasks with
-`materialization_attempt_count=0`, so Phase 6 must separately increase and
-calibrate remux/shared-WIP throughput; adding finalizer workers alone is not an
-accepted remediation. Design and validation evidence is recorded in
-`docs/code_review/media_worker_finalizer_admission_fenced_retry_2026-07-21.md`.
+Status: 执行中；Phase 0-5 已完成，Phase 6-7 尚未执行
 
 Implementation checkpoint (2026-07-12):
 
@@ -882,20 +867,6 @@ expiry to one generation-2 terminal bundle with DB-backed timeline/bbox and
 zero runtime residual. Evidence is retained under
 `/data/video-analytics/artifacts/clip_media_phase4b_flag_independent_recovery_20260712T171945Z`.
 
-Corrective gate reopening (2026-07-21): the earlier checkpoint covered crash
-recovery but missed ordinary capacity rejection after remux had already
-persisted a handoff. The 2026-07-20 one-hour run proved a 72-item exact gap
-between remux handoff candidates and immediate finalizer admission, followed by
-72 lease-expiry recoveries. Phase 4 is reopened until every unsubmitted
-transfer in a batch, including items after a lane-full `break`, performs an
-exact fenced retry before WIP release; accepted in-memory queue items must keep
-the transferred lease heartbeat active until executor start. PostgreSQL
-`finalizer_pending` remains the durable queue, and recovered unleased handoffs
-remain in that phase when capacity is still unavailable. The new correctness
-gate requires zero normal-pressure lease-expiry handoff recovery, zero fenced
-retry failure, fully accounted candidate/admission gaps, no duplicate bundle,
-and zero lease/WIP/lane/pending residual.
-
 ### Phase 5 - Add Segment Index And Reduce Finalizer Work
 
 1. Replace per-poll recursive lookup with `RollingSegmentIndex`.
@@ -1065,17 +1036,6 @@ This does not issue `PASS_MEDIA_WORKER_CAPACITY_AND_READY_POLICY_CALIBRATED`.
 The run was only a 60-second canary and still failed the separate local 8fps
 throughput gate at 5.247fps versus 7.92fps. Production T4 4fps validation and
 two comparable 400-second plus 120-second-drain passes remain mandatory.
-
-2026-07-21 local one-hour checkpoint: a later fixed-input single-GPU,
-dual-branch 60-source run sustained 8.0246 fps but materialized 5,057/5,790
-formal tasks. Successful finalization itself stayed fast (p50 1.46s, p95
-2.68s); remux was full in about 41.1% of samples, shared WIP in 23.4%, and the
-finalizer lane in only 5.4%. All 733 expired rows had attempt count zero. After
-the reopened Phase 4 gate is repaired, the first separately labeled capacity
-candidate is WIP=20, remux=12, finalizer threads=8, finalizer queue=8, rolling
-max-per-poll=8, while finalizer process workers remain 4 pending a corrected
-process-pool wait measurement. A large in-memory queue is explicitly rejected:
-PostgreSQL owns durable waiting and deadline/fairness ordering.
 
 ### Phase 7 - Remove Legacy And Misleading Contracts
 
@@ -1439,12 +1399,10 @@ main thread too. The main scheduler tick must never execute ffmpeg/sidecar work
 or wait for a future. Add flag-independent durable finalizer_pending recovery
 and bounded TERM/KILL shutdown before pressure testing.
 
-The source/epoch RollingSegmentIndex correctness contract exists, but Candidate
-C reopens its scalability and timing-observability gate: one global lock still
-covers catalog I/O, refresh, full metadata parsing, and snapshots, while current
-remux/tick metrics omit part of that wait. Do not tune max_active again until
-the index gate in Section 15.2 passes. Only after the structural gate passes
-twice may fixed grace be reduced from measured segment coverage visibility.
+The source/epoch RollingSegmentIndex and job-local metrics are complete. Next,
+tune max_active with comparable 4/8/12 candidates; do not assume 4 or 32 is
+correct. Only after the structural gate passes twice may fixed grace be reduced
+from measured segment coverage visibility.
 
 At each phase run the specified state, migration, concurrency, pool, index, and
 existing targeted tests. Rebuild media-worker when the psycopg pool dependency
@@ -1455,156 +1413,3 @@ currently unused flag.
 Finish only after all Definition Of Done tokens and two comparable 60-source
 closure artifacts pass.
 ```
-
-## 15. 2026-07-21 Phase 4 Reopen And Phase 6 Checkpoint
-
-Candidate B 的 10 分钟短测通过，但同配置 1 小时正式测失败，不能关闭
-Phase 6。正式 artifact 为：
-
-```text
-/data/video-analytics/artifacts/pressure60_8p1_admissionfix_1h_20260721T092938Z
-```
-
-正式窗口 5,778 个任务中 4,921 materialized、857 attempt=0 expired；
-oldest-ready p95=299.06s。输入 60/60、8.0246 fps、零 send/queue/raw loss，
-因此失败归于 media-worker 持续服务率。实测 tick-gap p95=7.08s、remux
-p95=12/12、WIP p95=20/20、真实 process-pool wait p95=3.65s。
-
-Phase 4 同时保持 reopened：一次正常 lane-full 已正确执行 0.523s fenced
-retry，但另一个已 admitted 的 remux handoff 在 handoff 事务提交前被新连接
-用 `SKIP LOCKED` claim，误判 busy，约 120s 后发生 lease-expiry recovery。
-修复必须把 remux 的原始 MaterializationLease 继续传到 finalizer job，并使用
-exact owner/token/generation 的阻塞式行锁转移；普通 recovered/unleased handoff
-仍保留 `lease_token IS NULL` 与 `SKIP LOCKED` 语义。
-
-下一容量候选为 WIP=32、remux=16、rolling max-per-poll=16、finalizer
-threads=8、queue=8、process workers=8。先通过 10–15 分钟 A/B，且满足
-handoff lease-expiry recovery=0、attempt=0 expiry=0、oldest-ready 不累积，
-再重跑 1 小时。Candidate B 不得成为默认容量结论。
-
-### 15.1 Candidate C closure result
-
-exact-lease 修复提交 `2a57f20` 后，Candidate C 的 15 分钟短测通过
-scheduler/media 正确性与吞吐子门：正式任务 1,427/1,427 materialized，
-candidates=1,474、gap=122、fenced retry=122、retry failed/recovery/
-claim-busy/duplicate=0。短测 artifact：
-
-```text
-/data/video-analytics/artifacts/pressure60_8p1_exactlease_c15m_20260721T110655Z
-```
-
-同配置 1 小时正式 artifact：
-
-```text
-/data/video-analytics/artifacts/pressure60_8p1_exactlease_c_1h_20260721T114530Z
-```
-
-正式窗口 5,781 个任务中 4,742 materialized（82.03%）、1,039 attempt=0
-expired（17.97%）。输入 60/60、8.0245 fps，send/queue/raw loss=0；含
-warmup/postfill 的 4,826 个 bundle 全部通过 ffprobe 与 8090 detail/
-timeline/annotation/bbox/person-context。drain 后 active task/lease/WIP/lane/
-finalizer_pending 全为 0。
-
-本次 exact-lease 子门通过：candidates=4,826、immediate admitted=4,807、
-gap=19、fenced retry=19、retry failed=0、handoff recovered=0、claim-busy=0、
-duplicate=0。一次 heartbeat CAS false 没有伴随 expiry、recovery、candidate
-缺口或残留状态；需要补 event key/phase 观测，但不等同于 lease-expiry
-handoff recovery。Phase 4 的 admission/exact-transfer reopen 子门可关闭。
-
-Phase 6 仍失败，而且 Candidate C 不得默认化。ready-to-remux p50/p95 为
-249.69s/285.49s，实际 remux p95 仅 1.186s，handoff-to-admission p95 仅
-0.167s；oldest-ready p95=301.22s。remux/finalizer lane p95 均为 16，WIP
-p95=32，poll-gap p95=13.21s，finalizer process-pool wait p95=5.576s。
-Candidate C 相比 B 的 85.17% 成功率反而降到 82.03%，确认这一组组合参数
-发生退化并与更大批次/资源争用相关；现有指标不能把某一个旋钮或“阶段振荡”
-定为唯一因果根因。
-
-下一步不再盲目扩容。先补全 scheduler loop total/poll-gap 分解（现有
-`tick_duration_ms` 不覆盖 snapshot/logging/sleep 后段），再正交比较
-process workers 4/8、max-per-poll 8/12/16 与 WIP/remux 配对；finalizer
-queue 保持 8，PostgreSQL 继续作为唯一 durable queue。只有短测证明持续
-service rate 高于到达率、oldest-ready 可回落且 attempt=0 expiry=0，才允许
-再次进入 1 小时 Phase 6 验收。
-
-### 15.2 Candidate C static capacity postmortem
-
-Phase 4 admission/exact-transfer correctness remains closed. This subsection
-reopens only the Phase 6 segment-index/cycle-observability gate.
-
-Evidence status:
-
-- **Confirmed:** B and C both fail the one-hour capacity gate with stable
-  60-source input; C is worse despite fast post-pin remux and admission.
-- **High-confidence Probable:** a process-wide `RollingSegmentIndex` lock and
-  retained-history revalidation/full-JSONL cache churn are a common B/C hot
-  path; C's higher remux concurrency amplifies it into an unmeasured lock
-  convoy.
-- **Secondary Probable:** eight finalizer process workers add contention and
-  increase finalization/pool wait.
-- **Not yet Confirmed:** the primary causal attribution requires segmented
-  lock/refresh/pin timing and a controlled index-fix A/B.
-
-The comparable raw artifacts show:
-
-| Metric | Candidate B | Candidate C |
-| --- | ---: | ---: |
-| retained-history segments measured | 63,131 | 63,075 |
-| metadata parses / row-cache evictions | 76,014 / 73,966 | 76,357 / 74,309 |
-| active read pins p95 | 7 | 15 |
-| measured tick duration p95 | 1.517s | 1.375s |
-| poll gap p95 | 7.077s | 13.211s |
-| post-pin remux p95 | 1.262s | 1.186s |
-| finalization / process-pool wait p95 | 4.602s / 3.653s | 5.244s / 5.576s |
-
-The nearly identical segment/parse volume means cache churn alone does not
-explain C's regression. The distinguishing signature is doubled active pins
-and poll gap while measured tick work and post-pin remux stay flat.
-
-Static code alignment:
-
-1. `RollingSegmentIndex.find_segments()` holds one process-wide `RLock`
-   across catalog refresh/rebuild, file identities, full JSONL parse/cache
-   mutation, and sorting for all 60 source/epoch catalogs.
-2. `_refresh()` revalidates every known metadata path for that source/epoch;
-   the 3,840-second endurance retention keeps about one thousand segments per
-   source. The row cache is 2,048 entries and C ends with 74,309 evictions.
-3. `_materialize_rolling_cache_job()` enters `pin_source_segments()` before
-   `materialize_window()` starts `materialization_ms`; reported `remux_ms`
-   therefore excludes index-lock/refresh/sort/pin wait.
-4. the main loop computes `tick_duration_ms` before `segment_index.snapshot()`;
-   snapshot waits on the same global lock. Snapshot/logging/sleep appear in the
-   next `tick_gap_ms`, not in current tick duration.
-5. fenced admission/exact-lease changes start after the durable handoff and do
-   not reduce ready-to-index/pin work, so their correctness success does not
-   imply a capacity improvement.
-
-Required implementation order:
-
-1. **Instrumentation-only:** add total pre-pin-to-handoff time plus lock wait/
-   hold, refresh/rebuild, stat, manifest/full-row parse, sort and pin timing;
-   measure scheduler cycle work through snapshots/logging while reporting
-   planned sleep separately.
-2. **Index isolation:** use a short global catalog-map lock, per
-   `(source_id, runtime_epoch_id)` catalog locks/versions, and a separate
-   byte-bounded selected-row cache lock. Perform filesystem I/O and parsing
-   outside locks, then publish a copy-on-write catalog after a version check;
-   make metrics snapshots non-blocking/cached.
-3. **Compact discovery contract:** rolling-cache-sink atomically publishes a
-   per-segment compact manifest with identities, source/mux PTS bounds, frame
-   count, and video size. Catalog refresh parses the manifest; full native
-   JSONL is read only for selected segments.
-4. **Preserve correctness:** keep the filesystem mutation `flock`, read pins,
-   metadata/video identity fence, atomic directory rename and exact-lease
-   transfer.
-5. **Orthogonal validation:** start from B's 20 WIP/12 remux/8 max-per-poll/4
-   process-worker diagnostic baseline, then change only one dimension. Run
-   separate 300-second production-retention and 3,840-second endurance-
-   retention 10–15 minute gates before another one-hour run. B remains a
-   failed diagnostic baseline, not a default.
-
-Do not close Phase 6 by extending the roughly 300-second deadline, enlarging
-all concurrency knobs again, or caching all 63k full metadata documents. The
-short gate must first show poll-gap p95 within two poll intervals, service rate
-above arrival, oldest-ready recovery, attempt=0 expiry=0, and all exact-lease
-correctness residuals at zero. Tune the secondary finalizer bottleneck only
-after the index gate passes.

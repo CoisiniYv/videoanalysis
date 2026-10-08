@@ -11,15 +11,7 @@ from typing import Any
 
 from config import EpochResolver, SinkConfig, safe_component
 from observability import SinkMetrics
-from publishing import (
-    SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
-    SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
-    SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
-    AtomicSegmentPublisher,
-    BoundedPublicationDispatcher,
-    Fragment,
-    FragmentLedger,
-)
+from publishing import AtomicSegmentPublisher, Fragment, FragmentLedger
 
 
 LOGGER = logging.getLogger("rolling_cache_sink.gst")
@@ -41,7 +33,6 @@ class SourcePipeline:
         gst: Any,
         build_caps: Any,
         convert_ts: Any,
-        publication_dispatcher: BoundedPublicationDispatcher,
     ) -> None:
         self.source_id = safe_component(source_id, field="source_id")
         self.runtime_epoch_id = safe_component(
@@ -70,16 +61,9 @@ class SourcePipeline:
             runtime_epoch_id=self.runtime_epoch_id,
             source_id=self.source_id,
             session_id=self.session_id,
-            commit_arbitration_enabled=(
-                SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED
-            ),
-            commit_slot_count=config.publication_commit_slots,
-            file_sync_mode=config.publication_file_sync_mode,
-            metadata_layout=config.publication_metadata_layout,
         )
         self._ledger = FragmentLedger(
             publisher,
-            publication_dispatcher=publication_dispatcher,
             on_published=self._on_published,
             on_publish_error=self._on_publish_error,
         )
@@ -384,115 +368,17 @@ class SourcePipeline:
 
     def _on_published(self, fragment: Fragment, final_dir: Path) -> None:
         size = (final_dir / "video.mov").stat().st_size
-        timings = fragment.publication_diagnostics
         self._metrics.inc("segments_published_total")
         self._metrics.inc("segment_bytes_total", size)
         self._metrics.inc("pending_fragments", -1)
         LOGGER.info(
-            "segment published source=%s epoch=%s session=%s segment=%s "
-            "frames=%d bytes=%d first_pts=%s last_pts=%s "
-            "publish_total_ms=%s publish_stage_ms=%s publish_commit_ms=%s "
-            "publish_commit_wall_ms=%s "
-            "publish_commit_lock_wait_ms=%s "
-            "publish_commit_lock_hold_ms=%s "
-            "publish_commit_slot_count=%s publish_commit_slot_index=%s "
-            "publish_file_sync_mode=%s publish_file_fdatasync_enabled=%s "
-            "publish_metadata_layout=%s publish_single_inode_enabled=%s "
-            "publish_metadata_only_enabled=%s "
-            "publish_regular_file_sync_count=%s "
-            "publish_validate_ms=%s "
-            "publish_metadata_write_ms=%s publish_metadata_fsync_ms=%s "
-            "publish_metadata_stat_ms=%s publish_manifest_write_ms=%s "
-            "publish_manifest_fsync_ms=%s publish_manifest_stat_ms=%s "
-            "publish_staging_dir_fsync_ms=%s publish_parent_prepare_ms=%s "
-            "publish_rename_ms=%s publish_parent_dir_fsync_ms=%s "
-            "publish_journal_append_ms=%s publish_accounted_ms=%s "
-            "publish_unattributed_ms=%s "
-            "publication_capacity_wait_ms=%s "
-            "publication_queue_residence_ms=%s "
-            "publication_prepare_service_ms=%s "
-            "publication_commit_wait_ms=%s "
-            "publication_worker_service_ms=%s "
-            "publication_dispatch_total_ms=%s "
-            "publication_outstanding_at_submit=%s "
-            "publication_queue_depth_at_submit=%s "
-            "publication_worker_index=%s "
-            "publication_prepare_group_size=%s "
-            "publication_prepare_group_position=%s "
-            "publication_final_parent_group_size=%s "
-            "publication_final_parent_group_position=%s "
-            "publication_final_parent_group_unique_parents=%s "
-            "publication_final_parent_group_fsync_count=%s "
-            "publication_final_parent_group_fsync_saved=%s "
-            "publication_final_parent_fence_wait_ms=%s",
+            "segment published source=%s epoch=%s session=%s segment=%s frames=%d bytes=%d",
             self.source_id,
             self.runtime_epoch_id,
             self.session_id,
             fragment.segment_id,
             sum(1 for row in fragment.rows if "pts" in row or "frame_pts" in row),
             size,
-            timings.get("first_pts", "unavailable"),
-            timings.get("last_pts", "unavailable"),
-            timings.get("publish_total_ms", "unavailable"),
-            timings.get("publish_stage_ms", "unavailable"),
-            timings.get("publish_commit_ms", "unavailable"),
-            timings.get("publish_commit_wall_ms", "unavailable"),
-            timings.get("publish_commit_lock_wait_ms", "unavailable"),
-            timings.get("publish_commit_lock_hold_ms", "unavailable"),
-            timings.get("publish_commit_slot_count", "unavailable"),
-            timings.get("publish_commit_slot_index", "unavailable"),
-            timings.get("publish_file_sync_mode", "unavailable"),
-            timings.get("publish_file_fdatasync_enabled", "unavailable"),
-            timings.get("publish_metadata_layout", "unavailable"),
-            timings.get("publish_single_inode_enabled", "unavailable"),
-            timings.get("publish_metadata_only_enabled", "unavailable"),
-            timings.get("publish_regular_file_sync_count", "unavailable"),
-            timings.get("publish_validate_ms", "unavailable"),
-            timings.get("publish_metadata_write_ms", "unavailable"),
-            timings.get("publish_metadata_fsync_ms", "unavailable"),
-            timings.get("publish_metadata_stat_ms", "unavailable"),
-            timings.get("publish_manifest_write_ms", "unavailable"),
-            timings.get("publish_manifest_fsync_ms", "unavailable"),
-            timings.get("publish_manifest_stat_ms", "unavailable"),
-            timings.get("publish_staging_dir_fsync_ms", "unavailable"),
-            timings.get("publish_parent_prepare_ms", "unavailable"),
-            timings.get("publish_rename_ms", "unavailable"),
-            timings.get("publish_parent_dir_fsync_ms", "unavailable"),
-            timings.get("publish_journal_append_ms", "unavailable"),
-            timings.get("publish_accounted_ms", "unavailable"),
-            timings.get("publish_unattributed_ms", "unavailable"),
-            timings.get("publication_capacity_wait_ms", "unavailable"),
-            timings.get("publication_queue_residence_ms", "unavailable"),
-            timings.get("publication_prepare_service_ms", "unavailable"),
-            timings.get("publication_commit_wait_ms", "unavailable"),
-            timings.get("publication_worker_service_ms", "unavailable"),
-            timings.get("publication_dispatch_total_ms", "unavailable"),
-            timings.get("publication_outstanding_at_submit", "unavailable"),
-            timings.get("publication_queue_depth_at_submit", "unavailable"),
-            timings.get("publication_worker_index", "unavailable"),
-            timings.get("publication_prepare_group_size", "unavailable"),
-            timings.get("publication_prepare_group_position", "unavailable"),
-            timings.get("publication_final_parent_group_size", "unavailable"),
-            timings.get(
-                "publication_final_parent_group_position",
-                "unavailable",
-            ),
-            timings.get(
-                "publication_final_parent_group_unique_parents",
-                "unavailable",
-            ),
-            timings.get(
-                "publication_final_parent_group_fsync_count",
-                "unavailable",
-            ),
-            timings.get(
-                "publication_final_parent_group_fsync_saved",
-                "unavailable",
-            ),
-            timings.get(
-                "publication_final_parent_fence_wait_ms",
-                "unavailable",
-            ),
         )
 
     def _on_publish_error(self, fragment: Fragment, error: Exception) -> None:
@@ -507,10 +393,6 @@ class SourcePipeline:
             fragment.staging_dir,
             error,
         )
-        if self._closed:
-            self._metrics.inc("pipeline_errors_total")
-        else:
-            self._mark_failed(error)
 
     def _mark_failed(self, error: BaseException | str) -> None:
         if not self._failed.is_set():
@@ -555,62 +437,6 @@ class RollingCacheSink:
         self._h264_codec = Codec.H264
         self._contexts: dict[str, SourcePipeline] = {}
         self._stopping = False
-        if (
-            config.publication_final_parent_group_limit > 1
-            and config.publication_commit_slots > 0
-        ):
-            raise ValueError(
-                "publication_final_parent_group_limit cannot be combined with "
-                "publication_commit_slots > 0"
-            )
-        self._publication_dispatcher = BoundedPublicationDispatcher(
-            capacity=SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
-            prepare_group_limit=SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
-            final_parent_group_limit=(
-                config.publication_final_parent_group_limit
-            ),
-            worker_count=config.publication_workers,
-            metrics=metrics,
-            thread_name="rolling-cache-publication",
-        )
-        metrics.set(
-            "publication_commit_slot_count",
-            config.publication_commit_slots,
-        )
-        metrics.set(
-            "publication_file_fdatasync_enabled",
-            int(config.publication_file_sync_mode == "fdatasync"),
-        )
-        metrics.set(
-            "publication_single_inode_enabled",
-            int(config.publication_metadata_layout == "single_inode"),
-        )
-        metrics.set(
-            "publication_metadata_only_enabled",
-            int(config.publication_metadata_layout == "metadata_only"),
-        )
-        metrics.set(
-            "publication_regular_file_sync_count",
-            1 if config.publication_metadata_layout != "split" else 2,
-        )
-        LOGGER.info(
-            "publication dispatcher started workers=%d outstanding_limit=%d "
-            "prepare_group_limit=%d final_parent_group_limit=%d "
-            "commit_arbitration_enabled=%s "
-            "commit_slot_count=%d file_sync_mode=%s metadata_layout=%s "
-            "metadata_only_enabled=%d "
-            "regular_file_sync_count=%d",
-            config.publication_workers,
-            SEGMENT_PUBLICATION_OUTSTANDING_LIMIT,
-            SEGMENT_PUBLICATION_PREPARE_GROUP_LIMIT,
-            config.publication_final_parent_group_limit,
-            SEGMENT_PUBLICATION_COMMIT_ARBITRATION_ENABLED,
-            config.publication_commit_slots,
-            config.publication_file_sync_mode,
-            config.publication_metadata_layout,
-            int(config.publication_metadata_layout == "metadata_only"),
-            1 if config.publication_metadata_layout != "split" else 2,
-        )
 
         Gst.init(None)
         self._main_loop = GLib.MainLoop()
@@ -685,7 +511,6 @@ class RollingCacheSink:
                     gst=self._gst,
                     build_caps=self._build_caps,
                     convert_ts=self._convert_ts,
-                    publication_dispatcher=self._publication_dispatcher,
                 )
             except Exception:
                 self._metrics.inc("pipeline_errors_total")
@@ -725,105 +550,6 @@ class RollingCacheSink:
         self._stopping = True
         for source_id in list(self._contexts):
             self._close_source(source_id, reason="adapter_shutdown", actual_eos=False)
-        publication_drained = self._publication_dispatcher.close(
-            timeout_s=self._config.shutdown_timeout_s
-        )
-        publication_state = self._publication_dispatcher.snapshot()
-        publication_peak = self._publication_dispatcher.peak_snapshot()
-        publication_log = LOGGER.info if publication_drained else LOGGER.error
-        publication_log(
-            "publication dispatcher stopped drained=%s "
-            "publication_capacity=%d publication_worker_count=%d "
-            "publication_commit_slot_count=%d "
-            "publication_file_fdatasync_enabled=%d "
-            "publication_single_inode_enabled=%d "
-            "publication_metadata_only_enabled=%d "
-            "publication_regular_file_sync_count=%d "
-            "publication_queue_depth=%d publication_queue_depth_peak=%d "
-            "publication_outstanding=%d publication_outstanding_peak=%d "
-            "publication_active=%d publication_active_peak=%d "
-            "publication_submitted_total=%d "
-            "publication_completed_total=%d publication_failed_total=%d "
-            "publication_queue_wait_ms_total=%.3f "
-            "publication_queue_wait_ms_max=%.3f "
-            "publication_queue_wait_events_total=%d "
-            "publication_prepare_group_limit=%d "
-            "publication_prepare_group_total=%d "
-            "publication_prepare_group_size_max=%d "
-            "publication_final_parent_group_limit=%d "
-            "publication_final_parent_group_total=%d "
-            "publication_final_parent_group_size_max=%d "
-            "publication_final_parent_fsync_total=%d "
-            "publication_final_parent_fsync_saved_total=%d "
-            "publication_prepare_service_ms_total=%.3f "
-            "publication_prepare_service_ms_max=%.3f "
-            "publication_commit_wait_ms_total=%.3f "
-            "publication_commit_wait_ms_max=%.3f "
-            "publication_commit_lock_wait_ms_total=%.3f "
-            "publication_commit_lock_wait_ms_max=%.3f "
-            "publication_commit_lock_wait_events_total=%d "
-            "publication_commit_lock_hold_ms_total=%.3f "
-            "publication_commit_lock_hold_ms_max=%.3f "
-            "publication_queue_residence_ms_total=%.3f "
-            "publication_queue_residence_ms_max=%.3f "
-            "publication_queue_residence_events_total=%d "
-            "publication_worker_service_ms_total=%.3f "
-            "publication_worker_service_ms_max=%.3f "
-            "publication_dispatch_total_ms_total=%.3f "
-            "publication_dispatch_total_ms_max=%.3f "
-            "publication_outstanding_peak_at_epoch_ms=%d "
-            "publication_outstanding_peak_source=%s "
-            "publication_outstanding_peak_segment=%s "
-            "publication_shutdown_timeout_total=%d",
-            publication_drained,
-            int(publication_state["capacity"]),
-            int(publication_state["worker_count"]),
-            self._config.publication_commit_slots,
-            int(self._config.publication_file_sync_mode == "fdatasync"),
-            int(self._config.publication_metadata_layout == "single_inode"),
-            int(self._config.publication_metadata_layout == "metadata_only"),
-            1 if self._config.publication_metadata_layout != "split" else 2,
-            int(publication_state["queue_depth"]),
-            int(publication_state["queue_depth_peak"]),
-            int(publication_state["outstanding"]),
-            int(publication_state["outstanding_peak"]),
-            int(publication_state["active"]),
-            int(publication_state["active_peak"]),
-            int(publication_state["submitted_total"]),
-            int(publication_state["completed_total"]),
-            int(publication_state["failed_total"]),
-            float(publication_state["queue_wait_ms_total"]),
-            float(publication_state["queue_wait_ms_max"]),
-            int(publication_state["queue_wait_events_total"]),
-            int(publication_state["prepare_group_limit"]),
-            int(publication_state["prepare_group_total"]),
-            int(publication_state["prepare_group_size_max"]),
-            int(publication_state["final_parent_group_limit"]),
-            int(publication_state["final_parent_group_total"]),
-            int(publication_state["final_parent_group_size_max"]),
-            int(publication_state["final_parent_fsync_total"]),
-            int(publication_state["final_parent_fsync_saved_total"]),
-            float(publication_state["prepare_service_ms_total"]),
-            float(publication_state["prepare_service_ms_max"]),
-            float(publication_state["commit_wait_ms_total"]),
-            float(publication_state["commit_wait_ms_max"]),
-            float(publication_state["commit_lock_wait_ms_total"]),
-            float(publication_state["commit_lock_wait_ms_max"]),
-            int(publication_state["commit_lock_wait_events_total"]),
-            float(publication_state["commit_lock_hold_ms_total"]),
-            float(publication_state["commit_lock_hold_ms_max"]),
-            float(publication_state["queue_residence_ms_total"]),
-            float(publication_state["queue_residence_ms_max"]),
-            int(publication_state["queue_residence_events_total"]),
-            float(publication_state["worker_service_ms_total"]),
-            float(publication_state["worker_service_ms_max"]),
-            float(publication_state["dispatch_total_ms_total"]),
-            float(publication_state["dispatch_total_ms_max"]),
-            int(publication_peak["at_epoch_ms"]),
-            str(publication_peak["source_id"]),
-            str(publication_peak["segment_id"]),
-            int(publication_state["shutdown_timeout_total"]),
-        )
         self._main_loop.quit()
         self._main_loop_thread.join(self._config.shutdown_timeout_s)
         if self._main_loop_thread.is_alive():

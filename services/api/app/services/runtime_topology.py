@@ -834,7 +834,7 @@ def build_topology_plan(
         "roi_batch_timeout_ms": int(preset.get("roi_batch_timeout_ms") or 40),
         "rolling_prefill_seconds": int(preset.get("rolling_prefill_seconds") or 25),
         "rolling_retention_seconds": int(
-            preset.get("rolling_retention_seconds") or 600
+            preset.get("rolling_retention_seconds") or 300
         ),
         "requested_mode": requested_mode,
         "effective_mode": effective_mode,
@@ -1002,7 +1002,7 @@ def _apply_dual_topology(
                             "ROLLING_CACHE_ROOT": "/media/rolling-cache",
                             "ROLLING_CACHE_SEGMENT_SECONDS": "4",
                             "ROLLING_CACHE_RETENTION_SECONDS": str(
-                                int(plan.get("rolling_retention_seconds") or 600)
+                                int(plan.get("rolling_retention_seconds") or 300)
                             ),
                         },
                         force_start=True,
@@ -1838,7 +1838,6 @@ def _prepare_full_pipeline(
         "MEDIA_WORKER_SEGMENT_INDEX_ENABLED": "true",
         "MEDIA_WORKER_SEGMENT_INDEX_RECONCILE_INTERVAL_S": "60",
         "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_ENTRIES": "2048",
-        "MEDIA_WORKER_SEGMENT_INDEX_ROW_CACHE_MAX_BYTES": "268435456",
         "MEDIA_WORKER_LEGACY_DERIVATIVES_ENABLED": "false",
         "EVIDENCE_DENSITY_PROFILE": "high_density",
         "ROLLING_CACHE_ENABLED": "true",
@@ -1847,7 +1846,7 @@ def _prepare_full_pipeline(
         "ROLLING_CACHE_ROOT": "/media/rolling-cache",
         "ROLLING_CACHE_MATERIALIZED_ROOT": "/media/rolling-cache-materialized",
         "ROLLING_CACHE_RETENTION_SECONDS": str(
-            int(plan.get("rolling_retention_seconds") or 600)
+            int(plan.get("rolling_retention_seconds") or 300)
         ),
         "ROLLING_CACHE_SEGMENT_SECONDS": "4",
         "ROLLING_CACHE_FALLBACK_TO_REPLAY": "false",

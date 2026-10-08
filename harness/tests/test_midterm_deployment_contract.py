@@ -509,9 +509,6 @@ def test_replay_first_topology_is_preserved() -> None:
         "MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"
     ] == "${MEDIA_WORKER_FINALIZER_PROCESS_WORKERS:-0}"
     assert services["media-worker"]["environment"][
-        "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"
-    ] == "${MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY:-0}"
-    assert services["media-worker"]["environment"][
         "MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"
     ] == "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
     assert services["media-worker"]["environment"][
@@ -991,7 +988,6 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     assert env_file["MEDIA_WORKER_MATERIALIZATION_MAX_PER_POLL"] == "0"
     assert env_file["MEDIA_WORKER_FINALIZER_WORKERS"] == "32"
     assert env_file["MEDIA_WORKER_FINALIZER_PROCESS_WORKERS"] == "0"
-    assert env_file["MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"] == "0"
     assert env_file["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == "4"
     assert env_file["MEDIA_WORKER_FINALIZER_SOURCE_SERIAL"] == "false"
     assert env_file["MEDIA_WORKER_SINGLE_FINALIZER_V2_ENABLED"] == "true"
@@ -1013,9 +1009,6 @@ def test_midterm_media_worker_materialization_defaults_are_bounded() -> None:
     )
     assert media_env["MEDIA_WORKER_FINALIZER_WORKERS"] == (
         "${MEDIA_WORKER_FINALIZER_WORKERS:-16}"
-    )
-    assert media_env["MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY"] == (
-        "${MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY:-0}"
     )
     assert media_env["MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL"] == (
         "${MEDIA_WORKER_FINALIZER_MAX_PER_SOURCE_PER_POLL:-4}"
@@ -1049,11 +1042,7 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
 
     assert env_file["ROLLING_CACHE_ENABLED"] == "false"
     assert env_file["ROLLING_CACHE_MATERIALIZATION_ENABLED"] == "false"
-    # 600, not 300: an accepted task can be claimed just before its 300s
-    # business deadline and then read source segments for the full 120s
-    # processing deadline, reaching pre_seconds back before the event. See
-    # harness/tests/test_evidence_runtime_config_safety.py for the derivation.
-    assert env_file["ROLLING_CACHE_RETENTION_SECONDS"] == "600"
+    assert env_file["ROLLING_CACHE_RETENTION_SECONDS"] == "300"
     assert env_file["ROLLING_CACHE_SEGMENT_SECONDS"] == "4"
     assert env_file["ROLLING_CACHE_FPS"] == "24"
     assert env_file["ROLLING_CACHE_SEGMENT_FRAMES"] == ""
@@ -1123,21 +1112,6 @@ def test_midterm_rolling_cache_controls_are_disabled_and_wired_by_default() -> N
         "rolling-cache-sink-b",
     ):
         service = services[service_name]
-        assert service["environment"]["ROLLING_CACHE_PUBLICATION_WORKERS"] == (
-            "${ROLLING_CACHE_PUBLICATION_WORKERS:-1}"
-        )
-        assert service["environment"][
-            "ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS"
-        ] == "${ROLLING_CACHE_PUBLICATION_COMMIT_SLOTS:-0}"
-        assert service["environment"][
-            "ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT"
-        ] == "${ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT:-1}"
-        assert service["environment"][
-            "ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"
-        ] == "${ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE:-fsync}"
-        assert service["environment"][
-            "ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"
-        ] == "${ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT:-split}"
         assert service["image"] == "video-analytics-midterm-rolling-cache-sink:latest"
         assert service["build"]["context"] == ".."
         assert service["build"]["dockerfile"] == (
@@ -1158,11 +1132,6 @@ def test_midterm_evidence_version_is_project_named() -> None:
     media_env = compose["services"]["media-worker"]["environment"]
 
     assert env_file["EVIDENCE_VERSION"] == "midterm"
-    assert (
-        env_file["ROLLING_CACHE_PUBLICATION_FINAL_PARENT_GROUP_LIMIT"] == "1"
-    )
-    assert env_file["ROLLING_CACHE_PUBLICATION_FILE_SYNC_MODE"] == "fsync"
-    assert env_file["ROLLING_CACHE_PUBLICATION_METADATA_LAYOUT"] == "split"
     assert env_file["EVIDENCE_SCHEMA_VERSION"] == "2.0-midterm"
     assert env_file["EVIDENCE_INCLUDE_LEGACY_METADATA_FIELDS"] == "false"
     assert media_env["EVIDENCE_VERSION"] == "midterm"

@@ -578,12 +578,7 @@ function apiErrorMessage(error) {
   if (details.guard_unavailable) {
     return "无法确认是否存在生成中的证据任务，已阻止重启";
   }
-  const raw = error?.message || String(error || "未知错误");
-  if (/failed to fetch|networkerror|load failed/i.test(raw)) return "无法连接服务，请检查网络后重试";
-  if (/timeout|timed out/i.test(raw)) return "操作等待超时，请稍后刷新状态";
-  if (/HTTP\s*5\d\d/i.test(raw)) return "服务暂时不可用，请稍后重试";
-  if (/HTTP\s*4\d\d/i.test(raw)) return "请求未被接受，请检查填写内容";
-  return raw;
+  return error?.message || String(error || "未知错误");
 }
 
 function parseJsonTextarea(textarea, label) {
@@ -1906,7 +1901,7 @@ function isPressureSourceId(sourceId) {
 
 function runtimeIssueLabel(issue) {
   const labels = {
-    compose_source_not_running: "固定视频源未运行；如果该摄像头已停用，可忽略",
+    compose_source_not_running: "固定源容器未运行；如果该摄像头已停用，可忽略",
     savant_metrics_unavailable: "推理指标不可用",
     analysis_forwarder_metrics_unavailable: "分析限流指标不可用",
     forwarder_metrics_unavailable: "分析限流指标不可用",
@@ -1914,12 +1909,12 @@ function runtimeIssueLabel(issue) {
     no_active_sources: "当前没有活跃视频源",
     source_count_mismatch: "活跃视频源数量与配置不一致",
     evidence_metrics_unavailable: "证据生成指标不可用",
-    container_restart_warning: "有后台服务近期频繁重启",
+    container_restart_warning: "有容器近期频繁重启",
     profile_enabled_source_count: "启用摄像头数量符合所选运行预设",
-    full_pipeline_roi_worker_container_present: "人脸识别服务已准备",
-    full_pipeline_event_worker_container_present: "告警处理服务已准备",
-    full_pipeline_media_worker_container_present: "证据生成服务已准备",
-    full_pipeline_cuda_mps_container_present: "图形计算服务已准备",
+    full_pipeline_roi_worker_container_present: "ROI AdaFace 容器已预置",
+    full_pipeline_event_worker_container_present: "事件 worker 容器已预置",
+    full_pipeline_media_worker_container_present: "证据 worker 容器已预置",
+    full_pipeline_cuda_mps_container_present: "CUDA MPS 容器已预置",
   };
   if (!issue) return "--";
   return labels[issue] || String(issue).replace(/_/g, " ");
@@ -1955,10 +1950,10 @@ function healthText(value) {
 
 function containerRoleLabel(role) {
   const labels = {
-    api: "管理接口",
-    postgres: "数据存储",
-    redis: "高速数据服务",
-    savant: "视频识别",
+    api: "后端 API",
+    postgres: "PostgreSQL",
+    redis: "Redis",
+    savant: "Savant 推理",
     source_adapter: "固定视频源",
     compose_source: "固定视频源（固定源模式）",
     dynamic_source: "动态视频源",
@@ -1967,9 +1962,9 @@ function containerRoleLabel(role) {
     clip_worker: "证据调度",
     media_worker: "证据视频生成",
     evidence_viewer: "8090 管理端",
-    replay: "录像取证",
-    runtime_supervisor: "运行监测",
-    watchdog: "故障监测",
+    replay: "Replay 取证",
+    runtime_supervisor: "运行监督",
+    watchdog: "Watchdog",
   };
   return labels[role] || String(role || "--").replace(/_/g, " ");
 }
@@ -2014,7 +2009,7 @@ function runtimeEvidenceStateLabel(state) {
     generated_unverified: "待复核",
     materialization_failed: "生成失败",
     materialization_deadline_expired: "生成超时",
-    replaying: "录像生成中",
+    replaying: "Replay 中",
     finalizing: "生成中",
     ready: "完成",
     failed: "失败",
@@ -2031,17 +2026,6 @@ function runtimeEvidenceStateIsFailure(state) {
     "generated_corrupt",
     "expired",
   ].includes(String(state || ""));
-}
-
-function runtimeEvidenceReasonLabel(reason) {
-  const value = String(reason || "").toLowerCase();
-  if (!value) return "--";
-  if (value.includes("deadline") || value.includes("expired") || value.includes("timeout")) return "生成超时";
-  if (value.includes("missing") || value.includes("not_found")) return "所需录像或标注数据缺失";
-  if (value.includes("duration")) return "录像时长需复核";
-  if (value.includes("annotation") || value.includes("bbox")) return "画面标注需复核";
-  if (value.includes("queue") || value.includes("busy")) return "当前任务较多，仍在排队";
-  return "生成过程异常，请查看系统日志";
 }
 
 function containerGroupCounts(group = []) {
@@ -2175,9 +2159,9 @@ function renderRuntimeDecision() {
   if (runtimeActionInFlight) {
     copy = `正在${runtimeActionLabel(runtimeActionInFlight)}；请等待状态刷新后确认是否已收敛。`;
   } else if (sourceIssue) {
-    copy = `${sourceNames.length ? sourceNames.join("、") : "启用摄像头"} 尚未全部连接；请先恢复视频源，再判断是否需要切换运行方式。`;
+    copy = `${sourceNames.length ? sourceNames.join("、") : "启用摄像头"} 的视频源未收敛；先恢复视频源，再判断是否需要切换拓扑。`;
   } else if (drift.present) {
-    copy = `已保存设置为${desired.label}，当前实际为${actual.label}。如需保留当前状态，请更新保存设置；否则应用已保存设置。`;
+    copy = `保存目标是${desired.label}，实际为${actual.label}。如需保留当前链路，请在下方将目标拓扑保存为对应模式；否则应用已保存的目标拓扑。`;
   } else if (health.ok === false) {
     copy = "运行态仍有异常；请先查看下方故障摘要，不要直接执行整链路重启。";
   }
@@ -2190,10 +2174,10 @@ function renderRuntimeDecision() {
     ? `${sources.running.length}/${sources.enabled.length} 路运行`
     : "未获取";
   const sourceDetail = sourceIssue
-    ? (sourceNames.length ? `待恢复：${sourceNames.join("、")}` : "部分摄像头连接状态异常")
-    : "启用的摄像头均已连接";
+    ? (sourceNames.length ? `待恢复：${sourceNames.join("、")}` : "存在未收敛或陈旧源适配器")
+    : "启用的视频源适配器已收敛";
   const driftState = !desired.mode
-    ? "未获取保存设置"
+    ? "未获取目标拓扑"
     : (drift.present ? "配置与实际不一致" : "配置与实际一致");
   runtimeDriftSummaryEl.innerHTML =
     `<div class="runtime-drift-item ${["stopped", "mixed", "dual_partial"].includes(actual.key) ? "warn" : "ok"}">` +
@@ -2203,7 +2187,7 @@ function renderRuntimeDecision() {
       `<span>视频源</span><strong>${escapeHtml(sourceState)}</strong><small>${escapeHtml(sourceDetail)}</small>` +
     `</div>` +
     `<div class="runtime-drift-item ${drift.present ? "warn" : "ok"}">` +
-      `<span>保存设置</span><strong>${escapeHtml(desired.label || "未获取")}</strong><small>${escapeHtml(driftState)}</small>` +
+      `<span>目标拓扑</span><strong>${escapeHtml(desired.label || "未获取")}</strong><small>${escapeHtml(driftState)}</small>` +
     `</div>`;
 
   if (recoverRuntimeSourcesBtn) {
@@ -2225,7 +2209,7 @@ function runtimeLoadErrorLabel(key) {
     overview: "运行总览",
     control: "控制状态",
     performance: "性能配置",
-    topology: "处理能力设置",
+    topology: "拓扑配置",
   };
   return labels[key] || key;
 }
@@ -2271,8 +2255,8 @@ function renderRuntimePerformanceConfig() {
     `<div class="runtime-kv-grid">` +
       `<div><span>保存来源</span><strong>${escapeHtml(performanceSourceLabel(data.source))}</strong></div>` +
       `<div><span>待应用</span><strong>${formatInteger(pending.length)}</strong></div>` +
-      `<div><span>帧率控制</span><strong>${escapeHtml(containerStateLabel(forwarder))}</strong></div>` +
-      `<div><span>识别服务</span><strong>${escapeHtml(containerStateLabel(savant))}</strong></div>` +
+      `<div><span>Forwarder</span><strong>${escapeHtml(containerStateLabel(forwarder))}</strong></div>` +
+      `<div><span>Savant</span><strong>${escapeHtml(containerStateLabel(savant))}</strong></div>` +
     `</div>`;
   renderRuntimePerformanceDiff(diff);
 }
@@ -2308,7 +2292,7 @@ function renderRuntimePerformanceDiff(diff) {
   ).join("");
   runtimePerformanceDiffEl.innerHTML =
     `<table class="runtime-table runtime-performance-table">` +
-      `<thead><tr><th>参数</th><th>作用范围</th><th>配置来源</th><th>保存值</th><th>运行值</th><th>状态</th></tr></thead>` +
+      `<thead><tr><th>参数</th><th>目标</th><th>env</th><th>保存值</th><th>运行值</th><th>状态</th></tr></thead>` +
       `<tbody>${rows}</tbody>` +
     `</table>`;
 }
@@ -2343,15 +2327,15 @@ function renderRuntimeTopologyConfig() {
   const actual = runtimeActualTopology();
   runtimeTopologyStatusEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>运行方案</span><strong>${escapeHtml(QUICK_RUNTIME_PROFILE_META[config.runtime_profile]?.label || (config.runtime_profile === "custom" ? "自定义" : "未选择"))}</strong></div>` +
+      `<div><span>运行预设</span><strong>${escapeHtml(config.runtime_profile || "custom")}</strong></div>` +
       `<div><span>链路范围</span><strong>${config.pipeline_mode === "full_evidence" ? "完整证据链" : "仅推理"}</strong></div>` +
-      `<div><span>计划方式</span><strong>${escapeHtml(topologyModeLabel(plan.effective_mode || config.topology_mode))}</strong></div>` +
+      `<div><span>计划模式</span><strong>${escapeHtml(topologyModeLabel(plan.effective_mode || config.topology_mode))}</strong></div>` +
       `<div><span>实际链路</span><strong>${escapeHtml(actual.label)}</strong></div>` +
       `<div><span>启用摄像头</span><strong>${formatInteger(plan.enabled_source_count || 0)}</strong></div>` +
-      `<div><span>启动检查</span><strong>${escapeHtml(runtimePreflightLabel(preflight))}</strong></div>` +
+      `<div><span>结构预检</span><strong>${escapeHtml(runtimePreflightLabel(preflight))}</strong></div>` +
       `<div><span>完整链路</span><strong>${pipeline.ready === true ? "已就绪" : (pipeline.ready === false ? "未就绪" : "不适用")}</strong></div>` +
     `</div>` +
-    `<div class="runtime-note">完整分析要求识别、人员轨迹、录像缓存和证据生成服务同时正常运行。</div>`;
+    `<div class="runtime-note">完整链路就绪要求 MPS（生产 T4）、ROI AdaFace、raw fanout、rolling-cache、event/media worker 与双分支同时运行。</div>`;
   updateRuntimeTopologyFormVisibility({ plan });
   renderRuntimeTopologyAssignments(config, plan);
   renderRuntimeTopologyPlan(plan, data.runtime || {}, preflight);
@@ -2515,12 +2499,12 @@ function renderRuntimeLatency() {
     : "--";
   const maxQueue = branches.reduce((max, branch) => Math.max(max, Number(branch.queue_depth || 0)), 0);
   runtimeLatencySummaryEl.innerHTML =
-    `<div class="runtime-latency-card ${latencyClass(mediaLag)}"><span>分析画面延迟</span><strong>${latencyText(mediaLag)}</strong><small>${escapeHtml(sourceDisplayName(annotation.source_id) || "最新分析画面")}</small></div>` +
-    `<div class="runtime-latency-card ${latencyClass(eventLag)}"><span>告警延迟</span><strong>${latencyText(eventLag)}</strong><small>最近写入 ${latencyText(database.event_write_age_s)} 前</small></div>` +
-    `<div class="runtime-latency-card ${latencyClass(bundleLag)}"><span>证据生成延迟</span><strong>${latencyText(bundleLag)}</strong><small>最近更新 ${latencyText(indexAge)} 前</small></div>` +
-    `<div class="runtime-latency-card ${maxQueue >= 7000 ? "critical" : (maxQueue >= 2000 ? "warn" : "ok")}"><span>待分析画面</span><strong>${escapeHtml(queueText)}</strong><small>待生成 ${formatInteger(database.materialization_pending)} / 生成中 ${formatInteger(database.materializing)}</small></div>`;
+    `<div class="runtime-latency-card ${latencyClass(mediaLag)}"><span>分析画面 / PTS 延迟</span><strong>${latencyText(mediaLag)}</strong><small>${escapeHtml(annotation.source_id || "最新标注帧")}</small></div>` +
+    `<div class="runtime-latency-card ${latencyClass(eventLag)}"><span>事件画面时间延迟</span><strong>${latencyText(eventLag)}</strong><small>事件写入年龄 ${latencyText(database.event_write_age_s)}</small></div>` +
+    `<div class="runtime-latency-card ${latencyClass(bundleLag)}"><span>Evidence 画面时间延迟</span><strong>${latencyText(bundleLag)}</strong><small>索引更新年龄 ${latencyText(indexAge)}</small></div>` +
+    `<div class="runtime-latency-card ${maxQueue >= 7000 ? "critical" : (maxQueue >= 2000 ? "warn" : "ok")}"><span>Forwarder 队列</span><strong>${escapeHtml(queueText)}</strong><small>待固化 ${formatInteger(database.materialization_pending)} / 固化中 ${formatInteger(database.materializing)}</small></div>`;
   runtimeLatencyDetailEl.textContent =
-    `最后刷新 ${formatDate(data.generated_at)}；画面延迟按最新分析画面的拍摄时间计算，不包含网页刷新耗时。`;
+    `最后刷新 ${formatDate(data.generated_at)}；画面延迟以 Redis 最新 frame_annotation 的媒体时间计算，网页刷新延迟不计入。`;
 }
 
 async function loadRuntimeLatency({ silent = false } = {}) {
@@ -2539,14 +2523,14 @@ const RUNTIME_APPLY_PHASE_LABELS = {
   validation: "读取配置",
   preflight: "启动前预检",
   camera_selection: "锁定摄像头",
-  pipeline_workers: "启动基础服务",
+  pipeline_workers: "启动基础 worker",
   branch_a: "初始化分支 A",
   branch_b: "初始化分支 B",
   sources: "启动摄像头",
   source_convergence: "等待摄像头收敛",
-  rolling_cache_ready: "检查录像缓存",
-  rolling_cache_prefill: "准备录像缓存",
-  evidence_activation: "启用证据生成",
+  rolling_cache_ready: "检查 rolling-cache",
+  rolling_cache_prefill: "rolling-cache 预热",
+  evidence_activation: "开放 evidence",
   complete: "启动完成",
   failed: "启动失败",
   stopped: "已停止",
@@ -2585,11 +2569,7 @@ function renderRuntimeTopologyApplyProgress() {
   if (quickRuntimeProgressElapsedEl) quickRuntimeProgressElapsedEl.textContent = `已用时 ${runtimeApplyElapsedSeconds(status)} 秒`;
   if (quickRuntimeProgressTrackEl) quickRuntimeProgressTrackEl.setAttribute("aria-valuenow", String(Math.round(percent)));
   if (quickRuntimeProgressBarEl) quickRuntimeProgressBarEl.style.width = `${percent}%`;
-  if (quickRuntimeProgressMessageEl) {
-    quickRuntimeProgressMessageEl.textContent = state === "failed"
-      ? "启动未完成，请检查摄像头连接和运行状态"
-      : `${RUNTIME_APPLY_PHASE_LABELS[phase] || "正在启动分析服务"}，请稍候`;
-  }
+  if (quickRuntimeProgressMessageEl) quickRuntimeProgressMessageEl.textContent = status.message || "正在启动完整链路";
 
   const rolling = status.rolling_cache || null;
   if (quickRuntimeRollingProgressEl) quickRuntimeRollingProgressEl.hidden = !rolling;
@@ -2638,10 +2618,10 @@ async function pollRuntimeTopologyApplyStatus() {
   renderRuntimeTopologyApplyProgress();
   const current = runtimeTopologyApplyStatus?.status;
   if (previous === "running" && current === "succeeded") {
-    showSuccess("识别、轨迹和证据生成均已就绪");
+    showSuccess("完整双分支、rolling-cache 和 evidence 链已就绪");
     await loadRuntimeOverview({ silent: true });
   } else if (previous === "running" && current === "failed") {
-    showError("完整分析启动失败，请检查摄像头连接和运行状态");
+    showError(`完整链路启动失败：${runtimeTopologyApplyStatus.message || "请查看进度详情"}`);
     await loadRuntimeOverview({ silent: true });
   }
   return runtimeTopologyApplyStatus;
@@ -2682,7 +2662,7 @@ async function quickStartFullRuntime() {
   const counts = quickRuntimeBranchCounts(selected, body.shard_strategy);
   const profileLabel = QUICK_RUNTIME_PROFILE_META[body.runtime_profile]?.label || body.runtime_profile;
   if (!window.confirm(
-    `确认启动${profileLabel}？\n本次选择 ${selected.length} 路，两个处理组分别为 ${counts.a}/${counts.b} 路。\n确认后将统一启用所选摄像头，并启动识别、人员轨迹和证据录像。`
+    `确认启动${profileLabel}完整链路？\n本次选择 ${selected.length} 路，分支 A/B 为 ${counts.a}/${counts.b}。\n点击确认后才会批量启用所选摄像头，并启动推理、人脸轨迹和 rolling evidence。`
   )) {
     return null;
   }
@@ -2691,7 +2671,7 @@ async function quickStartFullRuntime() {
   renderQuickRuntimeStart();
   if (quickRuntimeResultEl) {
     quickRuntimeResultEl.className = "runtime-quick-result";
-    quickRuntimeResultEl.textContent = "正在保存分配并启动分析服务，首次启动可能需要数分钟，请勿重复点击。";
+    quickRuntimeResultEl.textContent = "正在保存分配并启动完整链路。TensorRT 初始化可能需要数分钟，请勿重复点击。";
   }
   try {
     const { source_ids: sourceIds, disable_unselected: disableUnselected, ...topologyBody } = body;
@@ -2908,7 +2888,7 @@ function renderRuntimeOverview() {
   ), 0);
   const effectiveHealthOk = dualReady ? true : health.ok;
   const issueText = dualReady
-    ? `两个处理组均已就绪，共 ${dualActiveSources}/${Number(topologyPlan.enabled_source_count || 0)} 路，录像缓存正常`
+    ? `完整双分支已就绪，A/B 共 ${dualActiveSources}/${Number(topologyPlan.enabled_source_count || 0)} 路，rolling-cache 正常`
     : (issues.length ? issues.map(runtimeIssueLabel).join("；") : "无已知异常");
   const effectiveForwarder = dualReady
     ? {
@@ -2921,33 +2901,33 @@ function renderRuntimeOverview() {
   runtimeHealthSummaryEl.innerHTML =
     `<div class="summary-card runtime-health-card ${effectiveHealthOk === true ? "ok" : (effectiveHealthOk === false ? "warn" : "")}">` +
       `<span>整体状态</span>` +
-      `<strong>${dualReady ? "分析服务就绪" : statusText(health.ok)}</strong>` +
+      `<strong>${dualReady ? "双分支就绪" : statusText(health.ok)}</strong>` +
       `<small>${escapeHtml(issueText)}</small>` +
     `</div>` +
     `<div class="summary-card">` +
       `<span>推理指标</span>` +
-      `<strong>${dualReady ? "两个处理组可用" : (metrics.available ? "可用" : "不可用")}</strong>` +
-      `<small>${dualReady ? "处理组 A / 处理组 B" : "识别服务状态"}</small>` +
+      `<strong>${dualReady ? "A/B 可用" : (metrics.available ? "可用" : "不可用")}</strong>` +
+      `<small>${dualReady ? "savant-a / savant-b" : escapeHtml(overview.metrics_url || "")}</small>` +
     `</div>` +
     `<div class="summary-card">` +
       `<span>当前活跃视频源</span>` +
       `<strong>${formatInteger(dualReady ? dualActiveSources : (metrics.sources_active ?? health.source_count))}</strong>` +
-      `<small>${dualReady ? `计划 ${formatInteger(topologyPlan.enabled_source_count)} 路，两个处理组均已连接` : `状态中包含 ${formatInteger((metrics.sources || []).length)} 路记录`}</small>` +
+      `<small>${dualReady ? `计划 ${formatInteger(topologyPlan.enabled_source_count)} 路，A/B 均已收敛` : `指标中保留 ${formatInteger((metrics.sources || []).length)} 路历史标签`}</small>` +
     `</div>` +
     `<div class="summary-card">` +
       `<span>标注延迟</span>` +
       `<strong>${annotationAge == null ? "--" : `${formatInteger(annotationAge)}s`}</strong>` +
-      `<small>${supervisorEnabled ? "自动监测已启用" : "自动监测未启用"}</small>` +
+      `<small>${supervisorEnabled ? "supervisor 已启用" : "supervisor 未启用"}</small>` +
     `</div>`;
 
   runtimeSupervisorSummaryEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>识别处理组</span><strong>${dualReady ? "处理组 A / 处理组 B" : (supervisor.savant_container ? "基础处理组" : "--")}</strong></div>` +
+      `<div><span>Savant 容器</span><strong>${dualReady ? "savant-a / savant-b" : escapeHtml(supervisor.savant_container || "--")}</strong></div>` +
       `<div><span>模块状态</span><strong>${dualReady ? "双分支运行中" : escapeHtml(supervisor.savant_module_status || "--")}</strong></div>` +
       `<div><span>冷却中</span><strong>${supervisor.in_cooldown ? "是" : "否"}</strong></div>` +
       `<div><span>视频源收敛</span><strong>${dualReady ? "已收敛" : (!sourceConvergence.known ? "未获取" : (sourceConvergence.healthy ? "已收敛" : "待恢复"))}</strong></div>` +
     `</div>` +
-    `<div class="runtime-note">状态表可能保留历史摄像头记录；请以当前启用摄像头的连接状态为准。</div>`;
+    `<div class="runtime-note">指标表可能保留历史视频源标签；“视频源收敛”以启用摄像头对应的动态源适配器为准。</div>`;
 
   renderRuntimeSourceTable(dualReady ? dualSavantSources : (metrics.sources || []));
   renderRuntimeForwarderTable(effectiveForwarder);
@@ -2995,7 +2975,7 @@ function renderRuntimeSourceTable(sources) {
   runtimeSourceTableEl.innerHTML =
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>摄像头</th><th>运行判断</th><th>有效帧率</th><th>人体识别帧率</th><th>人脸检测帧率</th><th>人脸特征/秒</th><th>画面延迟</th><th>已处理帧</th>` +
+        `<th>摄像头</th><th>运行判断</th><th>有效 FPS</th><th>Pose FPS</th><th>Face FPS</th><th>AdaFace/s</th><th>最近帧延迟</th><th>已处理帧</th>` +
         `<th>标注帧</th><th>人体</th><th>人脸</th><th>人脸特征</th>` +
       `</tr></thead>` +
       `<tbody>${rows}</tbody>` +
@@ -3027,10 +3007,10 @@ function renderRuntimeForwarderTable(forwarder) {
   }).join("");
   runtimeForwarderTableEl.innerHTML =
     `<div class="runtime-kv-grid">` +
-      `<div><span>待分析画面</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
+      `<div><span>队列深度</span><strong>${formatInteger(global.queue_depth)}</strong></div>` +
       `<div><span>运行状态</span><strong>${global.running === 1 ? "运行中" : "未运行"}</strong></div>` +
     `</div>` +
-    `<div class="runtime-note">发送失败为本次运行的累计值，不单独代表当前故障；请结合待分析画面数量和刷新后的变化判断。</div>` +
+    `<div class="runtime-note">发送失败为容器生命周期累计值，不单独代表当前故障；请结合队列深度、运行状态和刷新后的变化判断。</div>` +
     `<table class="runtime-table">` +
       `<thead><tr>` +
         `<th>摄像头</th><th>收到帧</th><th>转发帧</th><th>丢弃帧</th><th>丢弃比例</th><th>累计发送失败</th>` +
@@ -3043,7 +3023,7 @@ function renderRuntimeEvidenceTable(evidence) {
   if (!runtimeEvidenceTableEl) return;
   if (!evidence.available) {
     runtimeEvidenceTableEl.innerHTML =
-      `<div class="empty-state">暂时无法获取证据生成状态，请稍后刷新。</div>`;
+      `<div class="empty-state">暂无证据状态指标。${escapeHtml(evidence.error || "")}</div>`;
     return;
   }
   const counts = evidence.state_counts || [];
@@ -3064,19 +3044,19 @@ function renderRuntimeEvidenceTable(evidence) {
       `<td>${escapeHtml(runtimeEvidenceStateLabel(row.evidence_state))}</td>` +
       `<td>${escapeHtml(runtimeEvidenceStateLabel(row.task_status))}</td>` +
       `<td>${formatAge(row.age_seconds)}</td>` +
-      `<td>${escapeHtml(runtimeEvidenceReasonLabel(row.evidence_reason))}</td>` +
+      `<td>${escapeHtml(row.evidence_reason || "--")}</td>` +
     `</tr>`;
   }).join("");
   const failureRows = failures.slice(0, 5).map((row) =>
     `<li><strong>${escapeHtml(sourceDisplayName(row.source_id))}</strong> ` +
-    `${escapeHtml(eventTypeLabel(row.event_type))} / ${escapeHtml(runtimeEvidenceReasonLabel(row.evidence_reason))}</li>`
+    `${escapeHtml(eventTypeLabel(row.event_type))} / ${escapeHtml(row.evidence_reason || "failed")}</li>`
   ).join("");
   runtimeEvidenceTableEl.innerHTML =
     `<div class="runtime-kv-grid evidence-state-grid">${countHtml}</div>` +
     (failureRows ? `<ul class="runtime-failure-list">${failureRows}</ul>` : "") +
     `<table class="runtime-table">` +
       `<thead><tr>` +
-        `<th>告警类型</th><th>摄像头</th><th>证据状态</th><th>处理状态</th><th>耗时</th><th>说明</th>` +
+        `<th>事件类型</th><th>摄像头</th><th>证据状态</th><th>任务状态</th><th>耗时</th><th>原因</th>` +
       `</tr></thead>` +
       `<tbody>${rows || `<tr><td colspan="6">暂无最近证据事件。</td></tr>`}</tbody>` +
     `</table>`;
@@ -3118,7 +3098,7 @@ function renderRuntimeContainerTable(containers) {
   }
   runtimeContainerTableEl.innerHTML =
     `<table class="runtime-table">` +
-      `<thead><tr><th>服务</th><th>实例</th><th>状态</th><th>健康</th><th>重启次数</th><th>每分钟重启</th></tr></thead>` +
+      `<thead><tr><th>角色</th><th>容器</th><th>状态</th><th>健康</th><th>重启次数</th><th>每分钟重启</th></tr></thead>` +
       `<tbody>${rows.join("")}</tbody>` +
     `</table>`;
 }
@@ -3126,17 +3106,18 @@ function renderRuntimeContainerTable(containers) {
 function renderRuntimeApplyResult() {
   if (!runtimeApplyResultEl) return;
   if (!lastRuntimeApplyResult) {
-    runtimeApplyResultEl.innerHTML = `<div class="muted">配置尚未应用。</div>`;
+    runtimeApplyResultEl.innerHTML = `<div class="muted">尚未应用运行时。</div>`;
     return;
   }
   if (isRuntimeConfigSyncResult(lastRuntimeApplyResult)) {
     runtimeApplyResultEl.innerHTML =
       `<div class="runtime-kv-grid">` +
         `<div><span>配置同步</span><strong>已保存</strong></div>` +
-        `<div><span>分析服务重启</span><strong>0</strong></div>` +
+        `<div><span>runtime epoch</span><strong>${escapeHtml(lastRuntimeApplyResult.runtime_epoch_id_preserved || "--")}</strong></div>` +
+        `<div><span>容器重启</span><strong>0</strong></div>` +
         `<div><span>视频源变更</span><strong>0</strong></div>` +
       `</div>` +
-      `<div class="runtime-note">算法和区域配置已保存，分析服务无需重启。</div>`;
+      `<div class="runtime-note">算法/区域配置已写入运行配置快照；未自动重启推理链路。需要立即加载到 Savant 时，请手动执行受控重启。</div>`;
     return;
   }
   const selectedRows = latestApplyRows().filter((row) => (
@@ -3145,18 +3126,22 @@ function renderRuntimeApplyResult() {
   const applied = selectedRows.filter((row) => row.runtime_apply_state === "applied");
   const skipped = selectedRows.filter((row) => row.runtime_apply_state === "skipped");
   const unsupported = selectedRows.filter((row) => row.runtime_apply_state === "unsupported");
+  const epoch = lastRuntimeApplyResult.runtime_epoch_id ||
+    lastRuntimeApplyResult.runtime_epoch?.runtime_epoch_id || "--";
   const sourceIds = (lastRuntimeApplyResult.source_ids || []).filter(Boolean);
   const warningRows = [...unsupported, ...skipped].slice(0, 8);
   const warningHtml = warningRows.length
     ? `<ul class="runtime-warning-list">` + warningRows.map((row) =>
         `<li><strong>${escapeHtml(row.rule_id || row.algorithm_id || "--")}</strong> ` +
-        `未能应用，请检查区域和算法设置</li>`
+        `${escapeHtml(row.runtime_skip_reason || row.support_status || "skipped")} ` +
+        `<span>${escapeHtml(row.support_status_reason || "")}</span></li>`
       ).join("") + `</ul>`
-    : `<div class="muted">当前摄像头的配置没有异常提示。</div>`;
+    : `<div class="muted">当前选中摄像头没有运行时应用警告。</div>`;
   runtimeApplyResultEl.innerHTML =
     `<div class="runtime-kv-grid">` +
+      `<div><span>runtime epoch</span><strong>${escapeHtml(epoch)}</strong></div>` +
       `<div><span>摄像头</span><strong>${formatInteger((lastRuntimeApplyResult.camera_ids || []).length)}</strong></div>` +
-      `<div><span>视频源</span><strong>${formatInteger(sourceIds.length)}</strong></div>` +
+      `<div><span>source</span><strong>${formatInteger(sourceIds.length)}</strong></div>` +
       `<div><span>已应用规则</span><strong>${formatInteger(applied.length)}</strong></div>` +
       `<div><span>已跳过</span><strong>${formatInteger(skipped.length)}</strong></div>` +
       `<div><span>未支持</span><strong>${formatInteger(unsupported.length)}</strong></div>` +
@@ -3698,7 +3683,7 @@ function setRuntimeDestructiveBusy(action, busy) {
 function runtimeActionLabel(action) {
   const labels = {
     source_recovery: "恢复视频源",
-    topology_apply: "应用处理设置",
+    topology_apply: "应用拓扑",
     performance_apply: "应用性能配置",
     single_start: "启动基础单路链路",
     single_stop: "停止基础单路链路",
@@ -3731,7 +3716,7 @@ async function saveRuntimePerformanceConfig({ apply = false } = {}) {
   clearMessages();
   const body = runtimePerformanceFormBody();
   if (apply && !window.confirm(
-    "确认保存并应用性能配置？相关分析服务会短暂重启；如果仍有证据正在生成，系统会自动阻止本次操作。"
+    "确认保存并应用推理性能配置？这会重建 analysis-forwarder 和/或 Savant；证据生成中时服务端会阻止操作。"
   )) {
     setStatus("性能配置未保存");
     return null;
@@ -3774,7 +3759,8 @@ function runtimePerformanceApplyMessage(data) {
   if (!data?.changed) return "性能配置已保存，运行中配置无需变更";
   const actions = Array.isArray(data.actions) ? data.actions : [];
   const recreated = actions.filter((item) => item.action === "recreated").map((item) => item.container);
-  return `性能配置已应用，${recreated.length} 个相关服务已更新`;
+  const targets = Array.isArray(data.pending_targets) ? data.pending_targets.join(", ") : "";
+  return `性能配置已应用：${recreated.length} 个容器已重建${targets ? `（${targets}）` : ""}`;
 }
 
 function runtimeTopologyFormBody() {
@@ -3834,9 +3820,9 @@ async function saveRuntimeTopologyConfig({ apply = false } = {}) {
   clearMessages();
   const body = runtimeTopologyFormBody();
   if (apply && !window.confirm(
-    "确认保存并应用处理能力设置？识别、人员轨迹和证据录像服务将按新设置切换；如果仍有证据正在生成，系统会自动阻止本次操作。"
+    "确认保存并应用目标拓扑？完整链路预设会同时切换 MPS、ROI AdaFace、rolling-cache、source 和 Savant；证据生成中时服务端会阻止操作。"
   )) {
-    setStatus("处理能力设置未保存");
+    setStatus("拓扑配置未保存");
     return null;
   }
   if (apply) {
@@ -3853,8 +3839,8 @@ async function saveRuntimeTopologyConfig({ apply = false } = {}) {
     runtimeTopology = saved || {};
     renderRuntimeTopologyConfig();
     if (!apply) {
-      showSuccess("处理能力设置已保存");
-      setStatus("处理能力设置已保存");
+      showSuccess("拓扑配置已保存");
+      setStatus("拓扑配置已保存");
       return saved;
     }
     const applied = await request(`${API}/runtime/topology-config/apply`, { method: "POST" });
@@ -3879,17 +3865,17 @@ function runtimeTopologyApplyMessage(data) {
   const sources = Array.isArray(data?.source_lifecycle) ? data.source_lifecycle.length : 0;
   const pipeline = data?.pipeline_convergence || {};
   const pipelineText = pipeline.mode === "full_evidence"
-    ? (pipeline.ready ? "，完整分析服务已就绪" : "，完整分析服务仍在启动")
+    ? (pipeline.ready ? "，完整 evidence 链已就绪" : "，完整 evidence 链未收敛")
     : "";
-  return `处理设置已应用：${topologyModeLabel(mode)}，更新 ${actions} 个服务、${sources} 路摄像头${pipelineText}`;
+  return `拓扑已应用：${topologyModeLabel(mode)}，容器动作 ${actions} 个，source ${sources} 路${pipelineText}`;
 }
 
 async function applySavedRuntimeTopology() {
   const desired = desiredRuntimeTopology();
   if (!desired.mode) {
-    throw new Error("尚未获取已保存的处理设置，请先刷新状态");
+    throw new Error("尚未获取已保存的拓扑配置，请先刷新状态");
   }
-  const confirmText = `确认应用已保存的${desired.label}？识别、人员轨迹和证据录像服务将按保存设置切换；正在生成的证据会受到保护。`;
+  const confirmText = `确认应用已保存的${desired.label}？完整链路预设会同时切换 MPS、ROI AdaFace、rolling-cache、source 和 Savant；生成中的证据任务会由服务端保护。`;
   if (!window.confirm(confirmText)) {
     return null;
   }
@@ -3915,7 +3901,7 @@ function runtimeControlActionMessage(data) {
     single_start: "单路链路启动命令已发送",
     single_stop: "单路链路停止命令已发送",
     single_restart: "单路链路重启命令已发送",
-    dual_stop: "摄像头采集与识别已停止，已产生的证据会继续完成",
+    dual_stop: "摄像头采集与双分支推理已停止，已有 evidence 继续收尾",
   };
   const label = labels[data?.runtime_action] || "运行控制命令已发送";
   return `${label}：成功 ${ok} 个，缺失 ${missing} 个，失败 ${failed} 个`;
@@ -3943,7 +3929,7 @@ async function startSingleRuntime() {
   return runRuntimeControlAction(
     `${API}/runtime/control/single/start`,
     "single_start",
-    "确认启动基础分析服务？系统将启动摄像头、识别、告警、人员轨迹和证据生成。若需要多路完整分析，请使用上方快速启动。"
+    "确认启动基础单路链路？会启动数据库、Redis、Replay、Savant、事件/人脸/取证 Worker 和固定源容器。若目标是双路拓扑，请改用“应用已保存拓扑”。"
   );
 }
 
@@ -3967,7 +3953,7 @@ async function stopDualRuntime() {
   const result = await runRuntimeControlAction(
     `${API}/runtime/control/dual/stop`,
     "dual_stop",
-    "确认停止当前完整分析？所有已启用摄像头和识别服务会停止；证据生成会继续运行一段时间，完成已经产生的证据。管理页面和已有证据不受影响。"
+    "确认停止当前完整链路？40 路摄像头输入、A/B 推理、raw fanout、Replay、ROI AdaFace 和 MPS 会停止并停用摄像头；event/media worker 与 rolling-cache 会继续运行一段时间，完成已经产生的 evidence。8090、数据库和已有证据不受影响。"
   );
   if (result) {
     cameras = cameras.map((camera) => ({ ...camera, enabled: false }));
@@ -3982,10 +3968,12 @@ async function stopDualRuntime() {
 function runtimeApplyMessage(data) {
   const started = data.dynamic_sources_started || [];
   const composeStarted = data.compose_sources_started || [];
+  const restarted = data.savant_restarted || "Savant";
+  const replay = data.replay_restarted || "Replay";
   const appliedRules = (data.applied_rules || []).length;
   const skippedRules = (data.skipped_rules || []).length;
   const unsupportedRules = (data.unsupported_rules || []).length;
-  return `运行设置已应用：${composeStarted.length + started.length} 路摄像头已更新；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
+  return `运行时已应用：${composeStarted.length} 个固定源、${started.length} 个动态源，${replay} / ${restarted} 已重启；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
 }
 
 function sourceApplyMessage(data) {
@@ -4029,7 +4017,7 @@ async function recoverRuntimeSources() {
   const names = sources.stopped.slice(0, 4).map(sourceConvergenceName);
   const target = names.length ? names.join("、") : "启用摄像头";
   if (!window.confirm(
-    `确认同步并恢复 ${target} 的视频源？此操作会重新连接对应摄像头，不会主动重启识别服务。`
+    `确认同步并恢复 ${target} 的视频源？此操作会更新生成的源配置并重建或启动对应源适配器，不会主动重启 Savant。`
   )) {
     return null;
   }
@@ -4063,7 +4051,8 @@ async function applyRuntime({ context = "" } = {}) {
 }
 
 function runtimeConfigSyncMessage(data) {
-  return "运行设置已同步，分析服务无需重启";
+  const epoch = data?.runtime_epoch_id_preserved || "--";
+  return `运行配置已同步：保留 epoch ${epoch}，未重启容器`;
 }
 
 async function syncRuntimeConfig({ context = "" } = {}) {
@@ -4086,7 +4075,7 @@ function runtimeRestartMessage(data) {
   const appliedRules = (data.applied_rules || []).length;
   const skippedRules = (data.skipped_rules || []).length;
   const unsupportedRules = (data.unsupported_rules || []).length;
-  return `分析服务已安全重启：${composeStarted.length + started.length} 路摄像头、${workers.length} 个后台服务已恢复；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
+  return `运行时已受控重启：${composeStarted.length} 个固定源、${started.length} 个动态源、${workers.length} 个 worker 已恢复；规则已应用 ${appliedRules}、跳过 ${skippedRules}、未支持 ${unsupportedRules}`;
 }
 
 async function restartRuntime() {
@@ -4652,16 +4641,16 @@ applyRuntimePerformanceBtn?.addEventListener("click", () => {
   saveRuntimePerformanceConfig({ apply: true }).catch((e) => showError(`性能配置应用失败：${apiErrorMessage(e)}`));
 });
 saveRuntimeTopologyBtn?.addEventListener("click", () => {
-  saveRuntimeTopologyConfig().catch((e) => showError(`处理能力设置保存失败：${apiErrorMessage(e)}`));
+  saveRuntimeTopologyConfig().catch((e) => showError(`拓扑配置保存失败：${apiErrorMessage(e)}`));
 });
 applyRuntimeTopologyBtn?.addEventListener("click", () => {
-  saveRuntimeTopologyConfig({ apply: true }).catch((e) => showError(`处理能力设置应用失败：${apiErrorMessage(e)}`));
+  saveRuntimeTopologyConfig({ apply: true }).catch((e) => showError(`拓扑配置应用失败：${apiErrorMessage(e)}`));
 });
 recoverRuntimeSourcesBtn?.addEventListener("click", () => {
   recoverRuntimeSources().catch((e) => showError(`视频源恢复失败：${apiErrorMessage(e)}`));
 });
 applySavedRuntimeTopologyBtn?.addEventListener("click", () => {
-  applySavedRuntimeTopology().catch((e) => showError(`保存设置应用失败：${apiErrorMessage(e)}`));
+  applySavedRuntimeTopology().catch((e) => showError(`拓扑应用失败：${apiErrorMessage(e)}`));
 });
 runtimeTopologyForm?.elements.topology_mode?.addEventListener("change", () => {
   updateRuntimeTopologyFormVisibility();
