@@ -528,6 +528,7 @@ function trajectoryRouteStops(rows) {
     if (last && last.key === key) {
       last.count += 1;
       last.lastIndex = index;
+      last.row = row;
       continue;
     }
     stops.push({ key, row, count: 1, firstIndex: index, lastIndex: index });
@@ -569,11 +570,11 @@ function renderTrajectoryProfile(query) {
     const epoch = trajectoryEpochOf(stop.row);
     const isLast = position === shown.length - 1;
     const isFirst = position === 0 && hidden === 0;
-    const marker = isLast ? `<em>最近</em>` : (isFirst ? `<em>起点</em>` : "");
+    const marker = isLast ? `<em>本页最新</em>` : (isFirst ? `<em>本页最早</em>` : "");
     return (
       (position ? `<li class="route-link" aria-hidden="true"></li>` : "") +
       `<li class="trajectory-route-step">` +
-        `<button type="button" class="route-stop" data-index="${stop.lastIndex}" style="--cam-color:${trajectoryCameraColor(stop.row)}">` +
+        `<button type="button" class="route-stop" data-index="${stop.lastIndex}" title="${trajectoryEscapeHtml(trajectoryCameraName(stop.row))}" style="--cam-color:${trajectoryCameraColor(stop.row)}">` +
           `<span class="route-dot" aria-hidden="true"></span>` +
           `<span class="route-stop-copy"><strong>${trajectoryEscapeHtml(trajectoryCameraName(stop.row))}</strong>` +
           `<small>${trajectoryEscapeHtml(trajectoryShortDateTime(epoch))}${stop.count > 1 ? ` · ${stop.count} 次` : ""}</small></span>` +
@@ -588,21 +589,21 @@ function renderTrajectoryProfile(query) {
       `<div class="trajectory-person">` +
         `<span class="trajectory-avatar">${avatar}</span>` +
         `<div class="trajectory-person-copy">` +
-          `<h2>${trajectoryEscapeHtml(name)}</h2>` +
+          `<h2 title="${trajectoryEscapeHtml(name)}">${trajectoryEscapeHtml(name)}</h2>` +
           `<p>${externalId ? `人员编号 ${trajectoryEscapeHtml(externalId)} · ` : ""}系统编号 ${trajectoryEscapeHtml(query.personId)}</p>` +
           (person?.description ? `<span class="badge alert">${trajectoryEscapeHtml(person.description)}</span>` : "") +
         `</div>` +
       `</div>` +
       `<div class="trajectory-stats">` +
         `<div class="trajectory-stat"><strong>${rows.length}</strong><span>本页出现次数</span></div>` +
-        `<div class="trajectory-stat"><strong>${cameraCounts.size}</strong><span>经过摄像头</span></div>` +
-        `<div class="trajectory-stat"><strong>${trajectoryEscapeHtml(busiest?.name || "--")}</strong><span>最常出现${busiest ? `（${busiest.count} 次）` : ""}</span></div>` +
-        `<div class="trajectory-stat"><strong>${trajectoryEscapeHtml(newest !== null ? trajectoryRelative(newest) || trajectoryShortDateTime(newest) : "--")}</strong><span>最近一次出现</span></div>` +
+        `<div class="trajectory-stat"><strong>${cameraCounts.size}</strong><span>本页经过摄像头</span></div>` +
+        `<div class="trajectory-stat"><strong>${trajectoryEscapeHtml(busiest?.name || "--")}</strong><span>本页最常出现${busiest ? `（${busiest.count} 次）` : ""}</span></div>` +
+        `<div class="trajectory-stat"><strong>${trajectoryEscapeHtml(newest !== null ? trajectoryRelative(newest) || trajectoryShortDateTime(newest) : "--")}</strong><span>本页最近一次出现</span></div>` +
       `</div>` +
       (rows.length
         ? `<div class="trajectory-route">` +
-            `<div class="trajectory-route-label"><span>行动路线 · ${trajectoryEscapeHtml(span)}（按时间先后，相邻同一摄像头合并）</span>` +
-            `${hidden ? `<small>更早还有 ${hidden} 站</small>` : ""}</div>` +
+            `<div class="trajectory-route-label"><span>本页路线 · ${trajectoryEscapeHtml(span)}（按时间先后，相邻同一摄像头合并）</span>` +
+            `${hidden ? `<small>本页更早还有 ${hidden} 站</small>` : ""}</div>` +
             `<ol class="trajectory-route-steps">${routeItems}</ol>` +
           `</div>`
         : "") +
