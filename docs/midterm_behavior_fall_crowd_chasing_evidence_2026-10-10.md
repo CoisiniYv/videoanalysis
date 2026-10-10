@@ -118,7 +118,7 @@ crowd 事件 `track_id=0`（群体事件），锚点只依赖 `source_id`、`cam
 ### 8090 控制面
 
 算法卡片新增：聚集“按身高半径倍数(0=按像素)”、追逐“最低身高速度(0=关闭)”、摔倒“关节顺序判定”。
-registry `default_config` 同步加入新参数。`operator.js`、`evidence.js` 缓存参数追加 `-behavior-20261010`。
+registry `default_config` 同步加入新参数。`operator.js`、`evidence.js` 缓存参数追加 `-behavior-20261010`（与布局重做合并后见“实现状态”）。
 
 ## 非目标
 
@@ -183,7 +183,11 @@ registry `default_config` 同步加入新参数。`operator.js`、`evidence.js` 
 
 ## 实现状态
 
-- 分支 `claude/behavior-algorithms-20261010`，基于 `main` `d5d52c3`；
-- 实现提交：见本节后续补记；
+- 分支 `claude/behavior-algorithms-20261010`，基于 `main` `d5d52c3` 开发；
+- 实现提交：`be349b4`（规则、证据链路、8090、测试与文档）；
+- 合入 `main`：2026-10-10，rebase 到 8090 布局重做（`c353822`、`dda7914`）之后 fast-forward 合入。
+  唯一冲突是 `index.html` 的脚本缓存参数，合并为 `operator.js ...-behavior-20261010`、
+  `trajectory.js ...-ui-20261010`、`evidence.js ...-ui-20261010-behavior-20261010`；
+  合并后全量 harness 仍为 12 failed / 1648 passed（与基线相同的既有环境项），8090 mock 浏览器交互检查全部通过；
 - 验证时间：2026-10-10，离线验证，见“验证”一节；
 - 未完成：现场样本回归与阈值标定；8090 证据播放器按事件高亮相关人员；真机端到端证据生成。

@@ -97,5 +97,8 @@ services/evidence-viewer/app/static/trajectory.js
 ## 实现状态
 
 - 实现提交：`c353822`（分支 `claude/8090-ui-refresh-20261010`，基于 `main` `d5d52c3`）；
+- 合入 `main`：2026-10-10 fast-forward 合入，随后合入行为算法补全
+  （`docs/midterm_behavior_fall_crowd_chasing_evidence_2026-10-10.md`），`evidence.js` 缓存参数变为
+  `...-ui-20261010-behavior-20261010`；
 - 验证时间：2026-10-10，mock 静态验证，见“验证”一节；
 - 未完成：真机 8090 部署后的真实数据复看；证据列表/详情查询性能修复不在本次范围。
