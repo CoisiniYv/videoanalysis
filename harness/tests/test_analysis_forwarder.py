@@ -505,7 +505,7 @@ def test_keyframe_without_credit_is_reported_over_budget() -> None:
     assert sampler.last_decision == "keyframe_over_budget"
 
 
-def test_keyframe_debt_is_bounded() -> None:
+def test_short_keyframe_flood_is_fully_repaid() -> None:
     sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
     pts = 0
     for _ in range(120):  # five seconds of keyframe-only video
@@ -514,9 +514,10 @@ def test_keyframe_debt_is_bounded() -> None:
     resume_pts = pts
     while not sampler.admit(_Frame("cam", pts=pts)):
         pts += 41_708_333
-    # Debt is capped at two intervals: non-keyframes resume within
-    # three 250 ms intervals of content.
-    assert pts - resume_pts <= 750_000_000
+    # 119 extra admissions borrowed ~29.75 s of budget against ~5 s earned;
+    # the ~24.8 s of debt is inside the 60 s window and is repaid in full
+    # before non-keyframes resume.
+    assert 24.0 <= (pts - resume_pts) / 1e9 <= 26.0
 
 
 def _message(source: str, name: str, *, keyframe: bool = False, video: bool = True):
@@ -652,3 +653,120 @@ def test_forwarder_counts_over_budget_keyframes_and_queue_drops() -> None:
     # dropped still equals the queue depth.
     assert 'va_forwarder_frames_dropped_total{source_id="cam"} 2' in metrics
     assert "va_forwarder_queue_head_age_ms" in metrics
+
+
+# --- Review follow-up (2026-10-11): debt window and keyframe identity -----
+
+
+def _clustered_keyframe_frames(seconds: int, *, period: int = 240, burst: int = 27):
+    """No regular GOP: every ``period`` frames (~10 s) a burst of ``burst``
+    consecutive keyframes, i.e. ~2.7 keyframes/s on average but clustered."""
+    for index in range(int(seconds * 24000 / 1001)):
+        yield index, index % period < burst, round(index * FILM_FRAME_NS)
+
+
+def test_clustered_keyframes_do_not_push_average_over_budget() -> None:
+    seconds = 600
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
+    admitted, keyframes, keyframes_admitted = _admitted(
+        sampler, _clustered_keyframe_frames(seconds)
+    )
+
+    assert keyframes_admitted == keyframes
+    assert 2.5 < keyframes / seconds < 3.0
+    # Keyframe debt from a burst is repaid by later non-keyframes, so the
+    # long-run average stays within the budget.
+    assert admitted <= 4 * seconds + 3
+
+
+def test_short_debt_window_reproduces_review_overshoot() -> None:
+    seconds = 600
+    sampler = sampler_mod.AnalysisFrameSampler(
+        enabled=True, max_fps="4/1", keyframe_debt_s=0.5
+    )
+    admitted, _keyframes, _ = _admitted(sampler, _clustered_keyframe_frames(seconds))
+
+    # A two-interval debt cap forgives most of each burst (review finding).
+    assert admitted / seconds > 4.4
+
+
+def test_debt_window_bounds_starvation_after_keyframe_flood() -> None:
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
+    pts = 0
+    for _ in range(int(120 * 24000 / 1001)):  # two minutes of keyframes only
+        assert sampler.admit(_Frame("cam", pts=pts, keyframe=True)) is True
+        pts += round(FILM_FRAME_NS)
+    resume_pts = pts
+    while not sampler.admit(_Frame("cam", pts=pts)):
+        pts += round(FILM_FRAME_NS)
+    waited_s = (pts - resume_pts) / 1e9
+    # Debt is capped at keyframe_debt_s (60 s of budget by default), so
+    # non-keyframes come back after at most about that much content.
+    assert 50.0 < waited_s <= 61.0
+
+
+@dataclass
+class _UuidFrame:
+    source_id: str
+    pts: int
+    uuid: str
+    keyframe_uuid: str
+    keyframe: object = None
+    time_base: tuple[int, int] = (1, 1_000_000_000)
+    content: _Content = field(default_factory=_Content)
+
+
+def test_keyframe_identity_is_shared_by_sampler_and_queue_item() -> None:
+    main_mod = _load_main_module()
+    config = main_mod.ForwarderConfig(
+        in_endpoint="router+bind:tcp://0.0.0.0:5557",
+        out_endpoint="null://diagnostic",
+        raw_out_endpoint="",
+        analysis_fps="4/1",
+        min_fps="1/1",
+        sampler_enabled=True,
+        queue_max_size=8,
+        receive_timeout_ms=100,
+        receive_hwm=10,
+        send_timeout_ms=100,
+        send_retries=0,
+        send_hwm=10,
+        metrics_port=8081,
+    )
+    forwarder = main_mod.AnalysisForwarder(config)
+
+    def video_message(frame):
+        message = types.SimpleNamespace()
+        message.is_video_frame = lambda: True
+        message.as_video_frame = lambda: frame
+        message.is_end_of_stream = lambda: False
+        message.is_shutdown = lambda: False
+        return types.SimpleNamespace(message=message, content=b"x")
+
+    # No explicit keyframe flag: identified only by uuid == keyframe_uuid.
+    keyframe = _UuidFrame("cam", pts=0, uuid="u0", keyframe_uuid="u0")
+    item = forwarder._build_queue_item(video_message(keyframe))
+    assert sampler_mod.is_keyframe(keyframe) is True
+    assert item is not None and item.keyframe is True
+
+    # After a stale drop the queue must accept this keyframe as the resync point.
+    clock = _Clock()
+    queue = queueing_mod.BoundedDropQueue(10, max_age_s=1.0, clock=clock)
+    queue.push(_message("cam", "old"))
+    clock.now += 5.0
+    queue.push(item)
+    assert queue.pop(timeout_s=0) is item
+
+    metrics = forwarder.metrics.render_prometheus()
+    assert 'va_forwarder_keyframes_seen_total{source_id="cam"} 1' in metrics
+    assert 'va_forwarder_pts_resets_total{source_id="cam"} 1' in metrics
+
+
+def test_forwarder_config_reads_keyframe_debt_window(monkeypatch) -> None:
+    main_mod = _load_main_module()
+    monkeypatch.delenv("FORWARDER_KEYFRAME_DEBT_S", raising=False)
+    assert main_mod.ForwarderConfig.from_env().keyframe_debt_s == 60.0
+    monkeypatch.setenv("FORWARDER_KEYFRAME_DEBT_S", "20")
+    config = main_mod.ForwarderConfig.from_env()
+    assert config.keyframe_debt_s == 20.0
+    assert main_mod.AnalysisForwarder(config).sampler.max_debt_ns == 20_000_000_000

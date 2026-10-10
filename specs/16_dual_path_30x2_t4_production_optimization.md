@@ -257,11 +257,14 @@ Per shard at `ANALYSIS_FPS=F`, 30 streams:
 
 - pose: `30 × F` inferences/s of YOLO26-pose (640² fp16).
 - face: `30 × F / (FACE_INFER_INTERVAL+1)` of YOLOv8-face.
-- Admitted analysis rate must not exceed `F`: keyframes are always admitted for
-  decodability, and before 2026-10-11 they rode on top of the budget (film
-  scene cuts pushed a 4 FPS budget to ~4.3-4.4 FPS on uos157, above Savant
-  capacity, so the queue never drained). The forwarder now charges keyframes
-  against the budget and caps analysis queue age; see
+- Admitted analysis rate must not exceed `F`. Keyframes are always admitted
+  for decodability; before 2026-10-11 any keyframe off the sampling cadence
+  was admitted on top of the budget. On the uos157 one-hour run the formal
+  window forwarded ~4.32 FPS per stream at `F=4` (+8.1%); whether off-GOP
+  keyframes caused that is not yet measured. The forwarder now charges
+  keyframes against the budget (60 s debt window), caps analysis queue age,
+  and exports keyframe counters; `scripts/tools/probe_stream_keyframes.py`
+  measures the pushed stream. See
   `docs/midterm_analysis_budget_lag_cap_2026-10-11.md`.
 - AdaFace: bounded by detected faces × throttle. Since 2026-10-10 the throttle
   is the per-track identity refresh policy (first usable face immediately, then

@@ -15,10 +15,14 @@ class AnalysisFrameSampler:
     Keyframes always pass (a dropped keyframe breaks H.264 decoding until the
     next one). With ``strict_budget`` they still pay for their slot: a
     keyframe that arrives without enough credit borrows it, and the following
-    non-keyframes wait until the debt is repaid. Without this, every extra
-    I-frame (scene cuts in film content) was admitted on top of ``max_fps``;
-    on the 60-stream uos157 run that pushed a 4 FPS budget to ~4.3-4.4 FPS
-    per stream, above Savant capacity, and the analysis queue never drained.
+    non-keyframes wait until the debt is repaid. Without this, any keyframe
+    arriving off the sampling cadence was admitted on top of ``max_fps``.
+
+    Debt is kept for up to ``keyframe_debt_s`` seconds of budget, so keyframe
+    bursts shorter than that are fully repaid and the long-run admitted rate
+    stays at ``max_fps`` whenever the keyframe rate itself is below it. Only
+    keyframe excess sustained beyond that window is forgiven, which bounds
+    how long non-keyframes can be starved after a keyframe-only stretch.
     """
 
     # ``last_decision`` values, exposed for forwarder metrics.
@@ -39,6 +43,7 @@ class AnalysisFrameSampler:
         max_fps: str | float | int = "8/1",
         min_fps: str | float | int | None = "2/1",
         strict_budget: bool = True,
+        keyframe_debt_s: float = 60.0,
     ) -> None:
         self.enabled = _boolish(enabled)
         self.strict_budget = _boolish(strict_budget)
@@ -56,9 +61,11 @@ class AnalysisFrameSampler:
         # wall-clock stream to roughly 4-6 FPS when normal RTSP jitter makes
         # many adjacent intervals 124.x ms instead of exactly 125 ms.
         self.max_credit_ns = self.min_interval_ns * 2
-        # Bounded debt so a keyframe-only stretch cannot starve non-keyframes
-        # forever; if keyframes alone exceed max_fps, only keyframes pass.
-        self.max_debt_ns = self.min_interval_ns * 2
+        try:
+            debt_ns = int(float(keyframe_debt_s) * NANOS_PER_SECOND)
+        except (TypeError, ValueError):
+            debt_ns = 0
+        self.max_debt_ns = max(self.min_interval_ns * 2, debt_ns)
         self._last_accepted_pts_ns_by_source: dict[str, int] = {}
         self._last_observed_pts_ns_by_source: dict[str, int] = {}
         self._credit_ns_by_source: dict[str, int] = {}
@@ -82,7 +89,7 @@ class AnalysisFrameSampler:
         return self._admit_pts(
             source_key,
             pts_ns,
-            force=_is_keyframe(video_frame),
+            force=is_keyframe(video_frame),
         )
 
     def _admit_pts(self, source_key: str, pts_ns: int, *, force: bool) -> bool:
@@ -213,13 +220,17 @@ def _content_is_none(video_frame: Any) -> bool:
     return False
 
 
-def _is_keyframe(video_frame: Any) -> bool:
+def is_keyframe(video_frame: Any) -> bool:
+    """Keyframe test shared by the sampler and the forwarder queue."""
     explicit_keyframe = _bool_or_none(getattr(video_frame, "keyframe", None))
     if explicit_keyframe is True:
         return True
     frame_uuid = _text_or_none(getattr(video_frame, "uuid", None))
     keyframe_uuid = _text_or_none(getattr(video_frame, "keyframe_uuid", None))
     return bool(frame_uuid and keyframe_uuid and frame_uuid == keyframe_uuid)
+
+
+_is_keyframe = is_keyframe
 
 
 def _parse_fps(value: str | float | int | None, *, default: float) -> float:

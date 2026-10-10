@@ -17,7 +17,7 @@ from savant_rs.py.utils.zeromq import ZeroMQSource
 from savant_rs.zmq import BlockingWriter, WriterConfigBuilder
 
 from .queueing import BoundedDropQueue, ForwarderMessage
-from .sampler import AnalysisFrameSampler, MetadataObjectFilter
+from .sampler import AnalysisFrameSampler, MetadataObjectFilter, is_keyframe
 
 
 LOGGER = logging.getLogger("analysis_forwarder")
@@ -45,6 +45,8 @@ class ForwarderConfig:
     require_attribute_name: str = ""
     # Keyframes borrow from the FPS budget instead of riding on top of it.
     strict_fps_budget: bool = True
+    # Seconds of budget a keyframe burst may borrow before excess is forgiven.
+    keyframe_debt_s: float = 60.0
     # Drop analysis frames that waited longer than this (0 = off). Set only
     # on analysis forwarders, never on a raw/evidence fanout.
     max_queue_age_ms: int = 0
@@ -76,6 +78,7 @@ class ForwarderConfig:
                 "FORWARDER_REQUIRE_ATTRIBUTE_NAME", ""
             ),
             strict_fps_budget=_bool_env("FORWARDER_STRICT_FPS_BUDGET", True),
+            keyframe_debt_s=max(_float_env("FORWARDER_KEYFRAME_DEBT_S", 60.0), 0.0),
             max_queue_age_ms=max(_int_env("FORWARDER_MAX_QUEUE_AGE_MS", 0), 0),
         )
 
@@ -134,7 +137,9 @@ class ForwarderMetrics:
                 "raw_send_failures": "va_forwarder_raw_send_failures_total",
                 "raw_dropped": "va_forwarder_raw_frames_dropped_total",
                 "metadata_filtered": "va_forwarder_metadata_filtered_total",
+                "keyframes_seen": "va_forwarder_keyframes_seen_total",
                 "keyframes_over_budget": "va_forwarder_keyframes_over_budget_total",
+                "pts_resets": "va_forwarder_pts_resets_total",
                 "stale_dropped": "va_forwarder_frames_stale_dropped_total",
                 "gop_resync_dropped": "va_forwarder_frames_gop_resync_dropped_total",
             }
@@ -186,6 +191,7 @@ class AnalysisForwarder:
             max_fps=config.analysis_fps,
             min_fps=config.min_fps,
             strict_budget=config.strict_fps_budget,
+            keyframe_debt_s=config.keyframe_debt_s,
         )
         self.metadata_filter = MetadataObjectFilter(
             object_namespace=config.require_object_namespace,
@@ -221,7 +227,7 @@ class AnalysisForwarder:
         sink_mode = "null" if self.metrics.null_sink_enabled else "savant"
         LOGGER.info(
             "starting forwarder in=%s out=%s raw_out=%s sink_mode=%s raw_sink=%s "
-            "analysis_fps=%s strict_fps_budget=%s max_queue_age_ms=%s",
+            "analysis_fps=%s strict_fps_budget=%s keyframe_debt_s=%s max_queue_age_ms=%s",
             self.config.in_endpoint,
             self.config.out_endpoint,
             self.config.raw_out_endpoint or "<disabled>",
@@ -229,6 +235,7 @@ class AnalysisForwarder:
             "enabled" if self.raw_sink_enabled else "disabled",
             self.config.analysis_fps,
             self.config.strict_fps_budget,
+            self.config.keyframe_debt_s,
             self.config.max_queue_age_ms,
         )
         self.reader.start()
@@ -272,13 +279,19 @@ class AnalysisForwarder:
         if message.is_video_frame():
             video_frame = message.as_video_frame()
             source_id = str(video_frame.source_id or "")
+            keyframe = is_keyframe(video_frame)
             self.metrics.inc(source_id, "seen")
+            if keyframe:
+                self.metrics.inc(source_id, "keyframes_seen")
             self._fanout_raw(source_id, message, zmq_message.content or b"")
             if not self.metadata_filter.admit(video_frame):
                 self.metrics.inc(source_id, "metadata_filtered")
                 self.metrics.inc(source_id, "dropped")
                 return None
-            if not self.sampler.admit(video_frame):
+            admitted = self.sampler.admit(video_frame)
+            if self.sampler.last_decision == "session_start":
+                self.metrics.inc(source_id, "pts_resets")
+            if not admitted:
                 self.metrics.inc(source_id, "dropped")
                 return None
             if self.sampler.last_decision == "keyframe_over_budget":
@@ -288,7 +301,7 @@ class AnalysisForwarder:
                 message=message,
                 content=zmq_message.content or b"",
                 source_id=source_id,
-                keyframe=bool(video_frame.keyframe),
+                keyframe=keyframe,
                 video_frame=True,
             )
         if message.is_end_of_stream():
@@ -464,6 +477,13 @@ def main() -> None:
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
     except Exception:
         return default
 

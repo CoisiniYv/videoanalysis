@@ -37,10 +37,10 @@ class BoundedDropQueue:
     ("stale_dropped"), and that source then skips frames until its next
     keyframe ("gop_resync_dropped") so Savant never decodes a GOP whose
     keyframe was dropped. Control messages (EOS, shutdown) are never dropped.
-    Analysis is a sampled side path; evidence uses the full-rate raw branch,
-    so dropping stale analysis frames only skips analysis of frames that are
-    already too late to alert on, as the runtime principle "process the
-    latest frames, drop expired ones" requires.
+    Evidence uses the full-rate raw branch, so this never removes footage,
+    but events visible only in dropped frames are not detected. The cap only
+    bounds time spent in this queue, not end-to-end alert latency. It follows
+    the runtime principle "process the latest frames, drop expired ones".
     """
 
     def __init__(
