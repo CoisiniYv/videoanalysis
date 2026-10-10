@@ -256,6 +256,7 @@ const templates = {
       exit_person_count: 3,
       min_duration_s: 2,
       eps_px: 180,
+      eps_height_ratio: 0,
       require_in_zone: true,
       cooldown_s: 60,
     },
@@ -275,6 +276,7 @@ const templates = {
       min_down_ms: 1500,
       cooldown_s: 60,
       require_transition: true,
+      joint_order_votes: true,
     },
     evidence_policy: {
       snapshot_required: true,
@@ -292,6 +294,7 @@ const templates = {
       min_speed_px_s: 120,
       max_distance_px: 220,
       min_pair_duration_s: 1.5,
+      min_normalized_speed: 0,
       cooldown_s: 30,
     },
     evidence_policy: {
@@ -356,6 +359,7 @@ const operatorAlgorithmMeta = {
 
 const supportStatusLabels = {
   production_ready: "生产可用",
+  evidence_ready: "证据可用",
   event_only: "仅事件",
   config_only: "仅配置",
   unsupported: "未支持",
@@ -1719,17 +1723,20 @@ function renderBehaviorAlgorithmControls(algorithmId, config, disabledAttr) {
       algorithmNumberField("退出人数", "exit_person_count", config.exit_person_count ?? 3, disabledAttr, { min: 0 }) +
       algorithmNumberField("持续秒数", "min_duration_s", config.min_duration_s ?? 2, disabledAttr, { min: 0, step: 0.5, kind: "float" }) +
       algorithmNumberField("聚集半径", "eps_px", config.eps_px ?? 180, disabledAttr, { min: 1, step: 1 }) +
+      algorithmNumberField("按身高半径倍数(0=按像素)", "eps_height_ratio", config.eps_height_ratio ?? 0, disabledAttr, { min: 0, step: 0.1, kind: "float" }) +
       algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 60, disabledAttr, { min: 0 });
   }
   if (algorithmId === "behavior.fall") {
     return algorithmNumberField("倒地毫秒", "min_down_ms", config.min_down_ms ?? 1500, disabledAttr, { min: 1 }) +
       algorithmCheckboxField("要求姿态变化", "require_transition", config.require_transition ?? true, disabledAttr) +
+      algorithmCheckboxField("关节顺序判定", "joint_order_votes", config.joint_order_votes ?? true, disabledAttr) +
       algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 60, disabledAttr, { min: 0 });
   }
   if (algorithmId === "behavior.chasing") {
     return algorithmNumberField("最低速度", "min_speed_px_s", config.min_speed_px_s ?? 120, disabledAttr, { min: 0, step: 1 }) +
       algorithmNumberField("最大距离", "max_distance_px", config.max_distance_px ?? 220, disabledAttr, { min: 1, step: 1 }) +
       algorithmNumberField("持续秒数", "min_pair_duration_s", config.min_pair_duration_s ?? 1.5, disabledAttr, { min: 0, step: 0.5, kind: "float" }) +
+      algorithmNumberField("最低身高速度(0=关闭)", "min_normalized_speed", config.min_normalized_speed ?? 0, disabledAttr, { min: 0, step: 0.1, kind: "float" }) +
       algorithmNumberField("冷却秒数", "cooldown_s", config.cooldown_s ?? 30, disabledAttr, { min: 0 });
   }
   return "";

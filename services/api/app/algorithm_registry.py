@@ -77,7 +77,9 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
             "exit_person_count": 3,
             "min_duration_s": 2,
             "eps_px": 180.0,
+            "eps_height_ratio": 0.0,
             "require_in_zone": True,
+            "max_track_age_ms": 1000,
             "cooldown_s": 60,
         },
         evidence_policy=_policy(),
@@ -107,6 +109,9 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
             "behind_cos_min": 0.50,
             "velocity_window_ms": 700,
             "min_pair_duration_s": 1.5,
+            "min_normalized_speed": 0.0,
+            "pair_gap_tolerance_ms": 500,
+            "max_track_age_ms": 1000,
             "cooldown_s": 30,
         },
         evidence_policy=_policy(),
@@ -128,6 +133,8 @@ _REGISTRY: Dict[str, AlgorithmDefinition] = {
             "head_hip_collapse_ratio": 0.22,
             "min_visible_keypoints": 0,
             "keypoint_threshold": 0.25,
+            "joint_order_votes": True,
+            "keypoint_box_aspect_ratio": 0.90,
         },
         evidence_policy=_policy(),
     ),
@@ -224,12 +231,13 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         per_camera_gate=True,
         runtime_detecting=True,
         event_enabled=True,
-        evidence_enabled=False,
+        evidence_enabled=True,
         production_ready=False,
-        status="event_only",
+        status="evidence_ready",
         status_reason=(
-            "Savant rule is registered and can emit events, but non-intrusion "
-            "behavior evidence still starts as not_implemented"
+            "Savant rule emits events and the event/evidence pipeline "
+            "materializes raw clip + overlay evidence like intrusion; "
+            "thresholds still need on-site validation"
         ),
     ),
     "behavior.fall": _support(
@@ -240,12 +248,13 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         per_camera_gate=True,
         runtime_detecting=True,
         event_enabled=True,
-        evidence_enabled=False,
+        evidence_enabled=True,
         production_ready=False,
-        status="event_only",
+        status="evidence_ready",
         status_reason=(
-            "Savant rule is registered and can emit events, but non-intrusion "
-            "behavior evidence still starts as not_implemented"
+            "Savant rule emits events and the event/evidence pipeline "
+            "materializes raw clip + overlay evidence like intrusion; "
+            "thresholds still need on-site validation"
         ),
     ),
     "behavior.chasing": _support(
@@ -256,12 +265,13 @@ _SUPPORT_MATRIX: Dict[str, AlgorithmSupportDefinition] = {
         per_camera_gate=True,
         runtime_detecting=True,
         event_enabled=True,
-        evidence_enabled=False,
+        evidence_enabled=True,
         production_ready=False,
-        status="event_only",
+        status="evidence_ready",
         status_reason=(
-            "Savant rule is registered and can emit events, but non-intrusion "
-            "behavior evidence still starts as not_implemented"
+            "Savant rule emits events and the event/evidence pipeline "
+            "materializes raw clip + overlay evidence like intrusion; "
+            "thresholds still need on-site validation"
         ),
     ),
     "behavior.loitering": _support(

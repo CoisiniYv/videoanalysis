@@ -63,8 +63,20 @@ class TrackStateStore:
         self.track_timeout_s = track_timeout_s
         self._tracks: Dict[int, TrackState] = {}
 
-    def update(self, observations: List[PersonPoseObservation]) -> None:
-        now_ms = max((o.timestamp_ms for o in observations), default=0)
+    def update(
+        self,
+        observations: List[PersonPoseObservation],
+        now_ms: Optional[int] = None,
+    ) -> None:
+        """Add one frame's observations and evict timed-out tracks.
+
+        *now_ms* is the frame time; pass it for frames without people so
+        departed tracks still time out.
+        """
+        now_ms = max(
+            max((o.timestamp_ms for o in observations), default=0),
+            int(now_ms or 0),
+        )
         for obs in observations:
             tid = obs.track_id
             if not is_valid_track_id(tid):

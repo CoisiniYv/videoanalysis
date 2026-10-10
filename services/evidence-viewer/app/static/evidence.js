@@ -241,6 +241,7 @@ function eventTypeLabel(value) {
     loitering: "徘徊告警",
     crowd_gathering: "聚集告警",
     fall: "跌倒告警",
+    chasing: "追逐告警",
     running: "奔跑告警",
     wall_climb_suspicious: "翻越告警"
   };
@@ -262,7 +263,7 @@ function eventCategoryForType(value) {
   const type = String(value || "");
   if (["watchlist_hit", "live_search_hit"].includes(type)) return "identity";
   if (["intrusion", "wall_climb_suspicious"].includes(type)) return "perimeter";
-  if (["loitering", "running", "fall"].includes(type)) return "behavior";
+  if (["loitering", "running", "fall", "chasing"].includes(type)) return "behavior";
   if (type === "crowd_gathering") return "crowd";
   return "all";
 }

@@ -83,6 +83,9 @@ If a control is visible as an operator switch, the UI must make one of these
 states explicit:
 
 - `production_ready`: the switch controls real runtime detection and evidence;
+- `evidence_ready`: the switch controls runtime detection and the video evidence
+  pipeline (raw clip + overlay sidecar), but thresholds are not yet validated on
+  site samples, so accuracy is not claimed;
 - `event_only`: the switch controls detection/event output, but evidence is not
   enabled by default;
 - `config_only`: the value is saved/exported but does not affect runtime yet;

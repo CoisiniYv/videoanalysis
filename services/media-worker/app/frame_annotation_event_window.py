@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 from statistics import median
 from typing import Any
 
+from libs.evidence_lifecycle import BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES
+
 
 IDENTITY_EVENT_TYPES = {"watchlist_hit", "live_search_hit"}
-SUPPORTED_EVENT_TYPES = IDENTITY_EVENT_TYPES | {"intrusion"}
+SUPPORTED_EVENT_TYPES = IDENTITY_EVENT_TYPES | set(BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES)
 
 
 def extract_evidence_event_anchor(

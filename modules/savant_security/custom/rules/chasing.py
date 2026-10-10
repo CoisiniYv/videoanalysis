@@ -59,6 +59,16 @@ class ChasingConfig:
     velocity_window_ms: int = 700
     min_pair_duration_ms: int = 1500
     cooldown_s: int = 30
+    # Tracks not observed within this many ms of the evaluated frame are
+    # treated as gone, so a departed pair cannot keep accumulating chase
+    # duration from its frozen last velocity. 0 disables.
+    max_track_age_ms: int = 1000
+    # A pair absent from evaluated frames for at most this long (one or two
+    # sampled frames) keeps its start time instead of restarting the timer.
+    pair_gap_tolerance_ms: int = 500
+    # Optional perspective-aware speed floor in body heights per second
+    # (bbox height). 0 disables; min_speed_px_s always applies.
+    min_normalized_speed: float = 0.0
 
     @classmethod
     def from_rule_config(
@@ -117,6 +127,24 @@ class ChasingConfig:
                 "CHASE_COOLDOWN_S",
                 _int_value(cfg.get("cooldown_s"), defaults.cooldown_s),
             ),
+            max_track_age_ms=_env_int(
+                "CHASE_MAX_TRACK_AGE_MS",
+                _int_value(cfg.get("max_track_age_ms"), defaults.max_track_age_ms),
+            ),
+            pair_gap_tolerance_ms=_env_int(
+                "CHASE_PAIR_GAP_TOLERANCE_MS",
+                _int_value(
+                    cfg.get("pair_gap_tolerance_ms"),
+                    defaults.pair_gap_tolerance_ms,
+                ),
+            ),
+            min_normalized_speed=_env_float(
+                "CHASE_MIN_NORMALIZED_SPEED",
+                _float_value(
+                    cfg.get("min_normalized_speed"),
+                    defaults.min_normalized_speed,
+                ),
+            ),
         )
 
 
@@ -126,6 +154,7 @@ class Kinematics:
     position: tuple[float, float]
     velocity: tuple[float, float]
     speed_px_s: float
+    normalized_speed: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -157,12 +186,22 @@ def track_kinematics(track: TrackState, window_ms: int) -> Kinematics | None:
     vx = (x1 - x0) / dt_ms * 1000.0
     vy = (y1 - y0) / dt_ms * 1000.0
     speed = math.hypot(vx, vy)
+    height = last.bbox.height
     return Kinematics(
         track_id=track.track_id,
         position=(x1, y1),
         velocity=(vx, vy),
         speed_px_s=speed,
+        normalized_speed=speed / height if height > 0 else 0.0,
     )
+
+
+def _fast_enough(kin: Kinematics, cfg: ChasingConfig) -> bool:
+    if kin.speed_px_s < cfg.min_speed_px_s:
+        return False
+    if cfg.min_normalized_speed > 0 and kin.normalized_speed < cfg.min_normalized_speed:
+        return False
+    return True
 
 
 def _cos(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -180,7 +219,7 @@ def detect_chase_pairs(
     kinematics = [
         kin
         for kin in (track_kinematics(track, cfg.velocity_window_ms) for track in tracks)
-        if kin is not None and kin.speed_px_s >= cfg.min_speed_px_s
+        if kin is not None and _fast_enough(kin, cfg)
     ]
     pairs: list[ChasePair] = []
     for i in range(len(kinematics)):
@@ -230,6 +269,10 @@ def detect_chase_pairs(
     return pairs
 
 
+def _pair_key(a: int, b: int) -> tuple[int, int]:
+    return (a, b) if a <= b else (b, a)
+
+
 @register_rule("chasing")
 class ChasingRule(FrameBehaviorRule):
     """Fires when a leader/follower chase pair persists."""
@@ -240,7 +283,11 @@ class ChasingRule(FrameBehaviorRule):
             rule_config.config,
             fallback_cooldown_s=rule_config.cooldown_s,
         )
+        # Keyed by the unordered track pair: leader/follower can swap from
+        # frame to frame when two runners are close, which must neither
+        # restart the duration nor open a second cooldown slot.
         self._pair_since: dict[tuple[int, int], int] = {}
+        self._pair_missing_since: dict[tuple[int, int], int] = {}
 
     def evaluate_frame(
         self,
@@ -250,24 +297,31 @@ class ChasingRule(FrameBehaviorRule):
         if not self.config.enabled or not frame_tracks:
             if not frame_tracks:
                 self._pair_since.clear()
+                self._pair_missing_since.clear()
             return []
         frame_ts_ms = frame_ts_ms or max((track.last_seen_ms for track in frame_tracks), default=0)
-        zone_tracks = self._zone_tracks(frame_tracks)
+        zone_tracks = self._zone_tracks(self._present_tracks(frame_tracks, frame_ts_ms))
         pairs = detect_chase_pairs(zone_tracks, self.params)
         camera_id, source_id = self._frame_identity(zone_tracks or frame_tracks)
         active_pairs: set[tuple[int, int]] = set()
         events: list[SecurityEvent] = []
 
         for pair in pairs:
-            pair_key = (pair.leader_track_id, pair.follower_track_id)
+            pair_key = _pair_key(pair.leader_track_id, pair.follower_track_id)
             active_pairs.add(pair_key)
-            started = self._pair_since.setdefault(pair_key, frame_ts_ms)
+            missing_since = self._pair_missing_since.pop(pair_key, None)
+            if pair_key not in self._pair_since or (
+                missing_since is not None
+                and frame_ts_ms - missing_since > self.params.pair_gap_tolerance_ms
+            ):
+                self._pair_since[pair_key] = frame_ts_ms
+            started = self._pair_since[pair_key]
             duration_ms = frame_ts_ms - started
             if duration_ms < self.params.min_pair_duration_ms:
                 continue
             cooldown_key = (
                 f"{camera_id}:chasing:{self.zone.name}:"
-                f"{pair.leader_track_id}:{pair.follower_track_id}"
+                f"{pair_key[0]}:{pair_key[1]}"
             )
             if not self.cooldown.can_emit(cooldown_key, frame_ts_ms):
                 continue
@@ -297,6 +351,7 @@ class ChasingRule(FrameBehaviorRule):
                         "zone_id": self.zone.name,
                         "leader_track_id": pair.leader_track_id,
                         "follower_track_id": pair.follower_track_id,
+                        "member_track_ids": list(pair_key),
                         "distance_px": pair.distance_px,
                         "alignment": pair.alignment,
                         "leader_speed_px_s": pair.leader_speed_px_s,
@@ -307,9 +362,27 @@ class ChasingRule(FrameBehaviorRule):
             )
 
         for pair_key in list(self._pair_since):
-            if pair_key not in active_pairs:
-                del self._pair_since[pair_key]
+            if pair_key in active_pairs:
+                continue
+            missing_since = self._pair_missing_since.setdefault(pair_key, frame_ts_ms)
+            if frame_ts_ms - missing_since > self.params.pair_gap_tolerance_ms:
+                self._pair_since.pop(pair_key, None)
+                self._pair_missing_since.pop(pair_key, None)
         return events
+
+    def _present_tracks(
+        self,
+        frame_tracks: list[TrackState],
+        frame_ts_ms: int,
+    ) -> list[TrackState]:
+        max_age_ms = self.params.max_track_age_ms
+        if max_age_ms <= 0 or frame_ts_ms <= 0:
+            return list(frame_tracks)
+        return [
+            track
+            for track in frame_tracks
+            if track.observations and frame_ts_ms - track.last_seen_ms <= max_age_ms
+        ]
 
     def _zone_tracks(self, frame_tracks: list[TrackState]) -> list[TrackState]:
         if not self.zone.polygon:

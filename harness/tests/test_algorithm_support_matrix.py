@@ -41,6 +41,7 @@ def test_support_matrix_covers_8090_operator_algorithms() -> None:
     }
     assert body["data"]["statuses"] == [
         "production_ready",
+        "evidence_ready",
         "event_only",
         "config_only",
         "unsupported",
@@ -58,9 +59,10 @@ def test_support_matrix_marks_runtime_semantics_explicitly() -> None:
     assert matrix["behavior.intrusion"]["per_camera_gate"] is True
     assert matrix["behavior.intrusion"]["evidence_enabled"] is True
 
-    assert matrix["behavior.fall"]["status"] == "event_only"
+    assert matrix["behavior.fall"]["status"] == "evidence_ready"
     assert matrix["behavior.fall"]["event_enabled"] is True
-    assert matrix["behavior.fall"]["evidence_enabled"] is False
+    assert matrix["behavior.fall"]["evidence_enabled"] is True
+    assert matrix["behavior.fall"]["production_ready"] is False
 
     assert matrix["behavior.loitering"]["status"] == "event_only"
     assert matrix["behavior.loitering"]["configurable"] is True

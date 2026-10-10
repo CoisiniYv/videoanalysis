@@ -659,3 +659,13 @@ distance_px -> distance_m
 - chasing 纯单元测试覆盖 pair 几何、leader/follower、持续、反例。
 - frame-level runtime 测试证明 multi-track 规则每帧只跑一次且不丢事件。
 - 目标 pytest、doctor、compose config、`git diff --check` 通过。
+
+## 12. 实现状态（2026-10-10）
+
+- 三类规则已接入与 intrusion 相同的视频证据链路，support matrix 状态为 `evidence_ready`；
+- fall 加入关节顺序投票（肩低于踝中点、肩低于膝、关键点外接框宽高比），crowd / chasing
+  忽略已离开画面的轨迹，crowd 冷却改为区域级，chasing pair 改为无序对并容忍短暂缺席；
+- 现象、根因、配置开关、回滚、验证与剩余风险见
+  `docs/midterm_behavior_fall_crowd_chasing_evidence_2026-10-10.md`；
+- §9 的现场标定要求仍未完成：反例样本（弯腰、蹲下、坐下、俯卧撑）和按机位的 crowd / chasing
+  阈值标定仍是上线前置条件。

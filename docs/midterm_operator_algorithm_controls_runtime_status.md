@@ -44,9 +44,9 @@
 | `behavior.intrusion` | 已支持 | 已支持 | 已支持 | `production_ready` |
 | `behavior.loitering` | 已支持 | 已支持 | 已支持 | `event_only` |
 | `behavior.running` | 已支持 | 已支持 | 已支持 | `event_only` |
-| `behavior.crowd_gathering` | 已支持 | 已支持 | 已支持 | `event_only` |
-| `behavior.fall` | 已支持 | 已支持 | 已支持 | `event_only` |
-| `behavior.chasing` | 已支持 | 已支持 | 已支持 | `event_only` |
+| `behavior.crowd_gathering` | 已支持 | 已支持 | 已支持 | `evidence_ready`（2026-10-10 起） |
+| `behavior.fall` | 已支持 | 已支持 | 已支持 | `evidence_ready`（2026-10-10 起） |
+| `behavior.chasing` | 已支持 | 已支持 | 已支持 | `evidence_ready`（2026-10-10 起） |
 | `face.watchlist` | 已支持 | 已支持 | 已支持 | `production_ready` |
 | `behavior.wall_climb_suspicious` | 未开放 | 未开放 | 未开放 | `unsupported` |
 
@@ -144,6 +144,7 @@ GET /api/v1/algorithms/support-matrix
 | 状态 | 含义 |
 | --- | --- |
 | `production_ready` | 8090 配置会控制真实运行时检测、事件和证据链路 |
+| `evidence_ready` | 运行时检测、事件和视频证据链路已闭环，但阈值未经现场样本标定，不宣称准确率 |
 | `event_only` | 运行时可以检测/出事件，但默认证据链路不等同于生产 ready |
 | `config_only` | 规则能保存/导出，但当前运行时不消费它作为 gate |
 | `unsupported` | 当前算法未实现或未注册，不能作为有效运行时开关 |
@@ -154,9 +155,9 @@ GET /api/v1/algorithms/support-matrix
 | 算法 | 状态 | 当前解释 |
 | --- | --- | --- |
 | `behavior.intrusion` | `production_ready` | 当前生产基线，Savant 消费规则，事件和证据链路可闭环 |
-| `behavior.crowd_gathering` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
-| `behavior.fall` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
-| `behavior.chasing` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
+| `behavior.crowd_gathering` | `evidence_ready` | 2026-10-10 起与 intrusion 同一证据链路；见 `docs/midterm_behavior_fall_crowd_chasing_evidence_2026-10-10.md` |
+| `behavior.fall` | `evidence_ready` | 同上；规则加入关节顺序投票 |
+| `behavior.chasing` | `evidence_ready` | 同上；8090 证据页新增“追逐告警”标签 |
 | `behavior.loitering` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
 | `behavior.running` | `event_only` | 规则已注册，可出事件，但默认证据链路不是生产 ready |
 | `behavior.wall_climb_suspicious` | `unsupported` | rule module 未注册，运行时会跳过 |

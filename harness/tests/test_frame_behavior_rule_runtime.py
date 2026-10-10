@@ -184,3 +184,26 @@ def test_last_frame_does_not_need_next_frame_to_flush(modules) -> None:
     )
     assert len(evaluations) == 2
     assert rule.calls == [(1000, [1])]
+
+
+def test_empty_frame_timestamp_reaches_frame_rules(modules) -> None:
+    rule = _CountingFrameRule(modules)
+    runtime = _runtime(modules, rule)
+
+    modules["runtime"].evaluate_runtime_frame(runtime, [_obs(modules, 1, 1000)])
+    modules["runtime"].evaluate_runtime_frame(runtime, [], frame_ts_ms=1500)
+
+    # The departed track is still in the store; the frame rule gets the real
+    # frame time so it can judge the track's age itself.
+    assert rule.calls[-1] == (1500, [1])
+
+
+def test_empty_frame_timestamp_evicts_timed_out_tracks(modules) -> None:
+    rule = _CountingFrameRule(modules)
+    runtime = _runtime(modules, rule)
+
+    modules["runtime"].evaluate_runtime_frame(runtime, [_obs(modules, 1, 1000)])
+    modules["runtime"].evaluate_runtime_frame(runtime, [], frame_ts_ms=12_000)
+
+    assert runtime.store.track_count == 0
+    assert rule.calls[-1] == (12_000, [])

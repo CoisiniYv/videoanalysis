@@ -175,7 +175,7 @@ def evaluate_runtime_frame(
     Single-track rules run once per active track. Frame-level rules run once
     per source frame and may return multiple events.
     """
-    runtime.store.update(observations)
+    runtime.store.update(observations, now_ms=frame_ts_ms)
     active_tracks = runtime.store.active_tracks
     evaluations: list[RuleEvaluation] = []
 

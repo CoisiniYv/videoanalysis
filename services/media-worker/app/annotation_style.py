@@ -22,6 +22,7 @@ _BEHAVIOR_EVENT_TYPES = frozenset({
     "crowd_gathering",
     "running",
     "fall",
+    "chasing",
     "perimeter_breach",
 })
 

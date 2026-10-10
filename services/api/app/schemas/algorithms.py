@@ -34,6 +34,7 @@ EVENT_TYPES = (
 SEVERITIES = ("low", "medium", "high", "critical", "info")
 SUPPORT_STATUSES = (
     "production_ready",
+    "evidence_ready",
     "event_only",
     "config_only",
     "unsupported",

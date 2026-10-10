@@ -88,6 +88,7 @@ def algorithms_support_matrix(request_id: str = Depends(_request_id)) -> dict:
             "algorithms": matrix,
             "statuses": [
                 "production_ready",
+                "evidence_ready",
                 "event_only",
                 "config_only",
                 "unsupported",

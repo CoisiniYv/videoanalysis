@@ -14,7 +14,10 @@ from typing import Dict
 import psycopg
 from redis import Redis
 
-from libs.evidence_lifecycle import READY_MATERIALIZATION_STATUSES
+from libs.evidence_lifecycle import (
+    BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES,
+    READY_MATERIALIZATION_STATUSES,
+)
 
 from app.alert_policy import AlertPolicyDecision, AlertPolicyService
 from app.alert_publisher import AlertPublisher
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 shutdown_requested = False
 
-MIDTERM_BEHAVIOR_EVIDENCE_EVENT_TYPES = {"intrusion"}
+MIDTERM_BEHAVIOR_EVIDENCE_EVENT_TYPES = set(BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES)
 MIDTERM_DEFAULT_EVIDENCE_POLICY = {
     "snapshot_required": True,
     "clip_required": True,
@@ -635,7 +638,7 @@ def _requires_evidence(event: dict) -> bool:
 
 
 def _apply_default_evidence_policy(event: dict) -> None:
-    """Enable default intrusion evidence for legacy behavior events."""
+    """Enable default video evidence for behavior events without a policy."""
     event_type = event.get("event_type", "")
     if event_type not in MIDTERM_BEHAVIOR_EVIDENCE_EVENT_TYPES:
         return

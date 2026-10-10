@@ -17,10 +17,11 @@ EVENT_CATEGORY_TYPES = {
         "loitering",
         "running",
         "fall",
+        "chasing",
         "crowd_gathering",
     ),
     "perimeter": ("intrusion", "wall_climb_suspicious"),
-    "behavior": ("loitering", "running", "fall"),
+    "behavior": ("loitering", "running", "fall", "chasing"),
     "crowd": ("crowd_gathering",),
 }
 

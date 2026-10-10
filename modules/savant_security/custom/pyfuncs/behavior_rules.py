@@ -419,7 +419,11 @@ class BehaviorRulesPyFunc(NvDsPyFuncPlugin):
             )
         )
         events_exported = 0
-        for evaluation in evaluate_runtime_frame(runtime, observations):
+        for evaluation in evaluate_runtime_frame(
+            runtime,
+            observations,
+            frame_ts_ms=result.timestamp_ms or None,
+        ):
             # Rules set last_obs.source_id (empty for adapter observations) so
             # re-stamp from the runtime here.
             evaluation.event.source_id = source_id

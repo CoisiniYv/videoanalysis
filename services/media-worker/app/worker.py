@@ -34,6 +34,7 @@ from psycopg.rows import dict_row
 from libs.evidence_lifecycle import (
     ACTIVE_COMPATIBILITY_TASK_STATUSES,
     ACTIVE_MATERIALIZATION_STATUSES,
+    BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES,
     CLAIMABLE_MATERIALIZATION_STATUSES,
     MATERIALIZATION_STATE_CONTRACT_VERSION,
     MaterializationPhase,
@@ -128,6 +129,11 @@ DEFAULT_EVIDENCE_MAX_DURATION_SLACK_SEC = 10.0
 DEFAULT_POST_SAVANT_DURATION_GUARD_SLACK_SEC = 1.0
 DEFAULT_POST_SAVANT_WINDOW_EDGE_SLACK_SEC = 0.75
 DEFAULT_POST_SAVANT_MAX_PTS_GAP_SEC = 2.0
+# Event types whose evidence gets a frame-cache overlay sidecar after the
+# raw clip anchor is resolved: video behaviors plus watchlist hits.
+FRAME_CACHE_SIDECAR_EVENT_TYPES = frozenset(
+    {*BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES, "watchlist_hit"}
+)
 DEFAULT_RUNTIME_EPOCH_STATE_PATH = (
     "/media/replay-sink-output/midterm/.current_epoch.json"
 )
@@ -5285,7 +5291,7 @@ def _finalize_post_savant_evidence_bundle(
         sidecar_config.update(
             {
                 "enabled": True,
-                "event_types": {"intrusion", "watchlist_hit"},
+                "event_types": set(FRAME_CACHE_SIDECAR_EVENT_TYPES),
                 "require_trigger_face": False,
                 "pre_seconds": float(os.getenv("DEFAULT_PRE_SECONDS", "5")),
                 "post_seconds": float(os.getenv("DEFAULT_POST_SECONDS", "5")),

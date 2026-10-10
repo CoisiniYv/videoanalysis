@@ -33,6 +33,8 @@ def modules(monkeypatch):
         "CROWD_EPS_PX",
         "CROWD_REQUIRE_IN_ZONE",
         "CROWD_COOLDOWN_S",
+        "CROWD_MAX_TRACK_AGE_MS",
+        "CROWD_EPS_HEIGHT_RATIO",
     ):
         monkeypatch.delenv(name, raising=False)
     return {
@@ -218,7 +220,7 @@ def test_cluster_identity_survives_small_member_changes(modules) -> None:
     assert events[0].payload["member_track_ids"] == [1, 2, 3, 4, 6]
 
 
-def test_cooldown_key_is_camera_zone_cluster_scoped(modules) -> None:
+def test_cooldown_key_is_camera_zone_scoped(modules) -> None:
     cooldown = modules["cooldown"].CooldownTracker()
     rule_a = _rule(modules, cooldown=cooldown)
     rule_b = _rule(modules, cooldown=cooldown)
@@ -228,3 +230,108 @@ def test_cooldown_key_is_camera_zone_cluster_scoped(modules) -> None:
     assert rule_a.evaluate_frame(_cluster(modules, 3200), 3200)
     assert rule_a.evaluate_frame(_cluster(modules, 3300), 3300) == []
     assert rule_b.evaluate_frame(_cluster(modules, 3200, camera_id="cam_002"), 3200)
+
+
+def _sized_track(modules, track_id, foot_x, foot_y, ts_ms, *, height):
+    pose = modules["pose"]
+    tracks = modules["tracks"]
+    track = tracks.TrackState(track_id=track_id)
+    track.add_observation(
+        pose.PersonPoseObservation(
+            source_id="src_cam_001",
+            camera_id="cam_001",
+            frame_id=ts_ms // 100,
+            timestamp_ms=ts_ms,
+            bbox=pose.BBox(
+                x=foot_x - height / 6.0,
+                y=foot_y - height,
+                width=height / 3.0,
+                height=height,
+            ),
+            confidence=0.9,
+            track_id=track_id,
+        ),
+        window_s=10.0,
+    )
+    return track
+
+
+def test_departed_tracks_do_not_count_toward_crowd(modules) -> None:
+    rule = _rule(modules)
+    assert rule.evaluate_frame(_cluster(modules, 1000), 1000) == []
+    still_here = _cluster(modules, 3100, ids=(1, 2, 3))
+    # Tracks 4 and 5 left the frame at 1000 ms; the track store keeps them
+    # until its timeout, but they must not be counted as present.
+    departed = _cluster(modules, 1000, ids=(4, 5), x0=145.0)
+    assert rule.evaluate_frame(still_here + departed, 3100) == []
+
+
+def test_max_track_age_zero_keeps_legacy_counting(modules) -> None:
+    rule = _rule(modules, config={"max_track_age_ms": 0})
+    assert rule.evaluate_frame(_cluster(modules, 1000), 1000) == []
+    still_here = _cluster(modules, 3100, ids=(1, 2, 3))
+    departed = _cluster(modules, 1000, ids=(4, 5), x0=145.0)
+    assert len(rule.evaluate_frame(still_here + departed, 3100)) == 1
+
+
+def test_brief_detection_miss_still_counts(modules) -> None:
+    rule = _rule(modules)
+    assert rule.evaluate_frame(_cluster(modules, 1000), 1000) == []
+    present = _cluster(modules, 3100, ids=(1, 2, 3, 4))
+    missed_once = _cluster(modules, 2600, ids=(5,), x0=160.0)
+    events = rule.evaluate_frame(present + missed_once, 3100)
+    assert len(events) == 1
+    assert events[0].payload["person_count"] == 5
+
+
+def test_cluster_flicker_does_not_bypass_zone_cooldown(modules) -> None:
+    rule = _rule(modules)
+    assert rule.evaluate_frame(_cluster(modules, 1000), 1000) == []
+    assert len(rule.evaluate_frame(_cluster(modules, 3100), 3100)) == 1
+    # One empty frame drops all cluster state; the same crowd then comes back
+    # under a new cluster id. It must not re-alert inside the cooldown.
+    assert rule.evaluate_frame([], 3300) == []
+    assert rule.evaluate_frame(_cluster(modules, 3500), 3500) == []
+    assert rule.evaluate_frame(_cluster(modules, 5600), 5600) == []
+
+
+def test_zone_cooldown_expires_for_persistent_crowd(modules) -> None:
+    rule = _rule(modules, config={"cooldown_s": 5})
+    rule.evaluate_frame(_cluster(modules, 1000), 1000)
+    assert len(rule.evaluate_frame(_cluster(modules, 3100), 3100)) == 1
+    assert rule.evaluate_frame(_cluster(modules, 7000), 7000) == []
+    assert len(rule.evaluate_frame(_cluster(modules, 8200), 8200)) == 1
+
+
+def test_height_relative_linking_groups_large_near_people(modules) -> None:
+    def near_group(ts_ms):
+        return [
+            _sized_track(modules, idx + 1, 30.0 + idx * 110.0, 450.0, ts_ms, height=300.0)
+            for idx in range(5)
+        ]
+
+    pixel_rule = _rule(modules)
+    pixel_rule.evaluate_frame(near_group(1000), 1000)
+    assert pixel_rule.evaluate_frame(near_group(3100), 3100) == []
+
+    relative_rule = _rule(modules, config={"eps_height_ratio": 0.8})
+    relative_rule.evaluate_frame(near_group(1000), 1000)
+    events = relative_rule.evaluate_frame(near_group(3100), 3100)
+    assert len(events) == 1
+    assert events[0].payload["eps_height_ratio"] == 0.8
+
+
+def test_height_relative_linking_separates_small_far_people(modules) -> None:
+    def far_row(ts_ms):
+        return [
+            _sized_track(modules, idx + 1, 50.0 + idx * 80.0, 200.0, ts_ms, height=40.0)
+            for idx in range(5)
+        ]
+
+    pixel_rule = _rule(modules)
+    pixel_rule.evaluate_frame(far_row(1000), 1000)
+    assert len(pixel_rule.evaluate_frame(far_row(3100), 3100)) == 1
+
+    relative_rule = _rule(modules, config={"eps_height_ratio": 1.0})
+    relative_rule.evaluate_frame(far_row(1000), 1000)
+    assert relative_rule.evaluate_frame(far_row(3100), 3100) == []

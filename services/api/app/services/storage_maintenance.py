@@ -50,7 +50,7 @@ STALE_PENDING_DELETABLE_MEDIA_STATUSES = {
 EVENT_CATEGORY_TYPES = {
     "identity": {"watchlist_hit", "live_search_hit"},
     "perimeter": {"intrusion", "wall_climb_suspicious"},
-    "behavior": {"loitering", "running", "fall"},
+    "behavior": {"loitering", "running", "fall", "chasing"},
     "crowd": {"crowd_gathering"},
 }
 

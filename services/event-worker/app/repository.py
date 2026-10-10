@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 from libs.evidence_lifecycle import (
     ACTIVE_COMPATIBILITY_TASK_STATUSES,
     ACTIVE_MATERIALIZATION_STATUSES,
+    BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES,
     MaterializationPhase,
     NormalizedReason,
     OPERATOR_EVIDENCE_STATES as CANONICAL_OPERATOR_EVIDENCE_STATES,
@@ -466,7 +467,7 @@ def _coverage_merge_event_types() -> set[str]:
     return set(
         _csv_env(
             "EVIDENCE_EVENT_COVERAGE_EVENT_TYPES",
-            "intrusion,watchlist_hit,live_search_hit",
+            "intrusion,fall,crowd_gathering,chasing,watchlist_hit,live_search_hit",
         )
     )
 
@@ -1033,19 +1034,20 @@ def _not_implemented_reason(event: Dict[str, Any]) -> str:
 def _evidence_task_initial_status(event: Dict[str, Any]) -> tuple[str, str]:
     """Return (status, error_message) for a new evidence task.
 
-    For watchlist_hit / live_search_hit and intrusion, the recording
-    pipeline (record_request -> clip-worker -> media-worker) can handle
-    evidence generation, so the task starts as 'pending' with no error.
-    Reserved behavior events still start as 'not_implemented'.
+    For watchlist_hit / live_search_hit and the video behavior types
+    (intrusion, fall, crowd_gathering, chasing), the recording pipeline
+    (record_request -> clip-worker -> media-worker) can handle evidence
+    generation, so the task starts as 'pending' with no error. Reserved
+    behavior events (loitering, running) still start as 'not_implemented'.
     """
     event_type = event.get("event_type", "")
     algorithm_type = event.get("algorithm_type", "")
     if _is_image_only_evidence(event):
         return _materialization_initial_status(event), ""
-    if algorithm_type == "face_intelligence" or event_type in (
-        "watchlist_hit",
-        "live_search_hit",
-        "intrusion",
+    if (
+        algorithm_type == "face_intelligence"
+        or event_type in ("watchlist_hit", "live_search_hit")
+        or event_type in BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES
     ):
         return _materialization_initial_status(event), ""
     return "not_implemented", _MIDTERM_BEHAVIOR_NOT_IMPLEMENTED_REASON
@@ -1531,9 +1533,10 @@ class EventRepository:
     ) -> str | None:
         """Create one idempotent evidence task for an event.
 
-        For watchlist_hit / live_search_hit and intrusion the task starts
-        as 'pending' because the recording pipeline (record_request ->
-        clip-worker -> media-worker) can handle evidence generation.
+        For watchlist_hit / live_search_hit and the video behavior types the
+        task starts as 'pending' because the recording pipeline
+        (record_request -> clip-worker -> media-worker) can handle evidence
+        generation.
         """
         if _is_image_only_evidence(event):
             return self._create_image_only_evidence_task(event, event_id)

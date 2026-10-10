@@ -67,6 +67,14 @@ class CrowdConfig:
     eps_px: float = 180.0
     require_in_zone: bool = True
     cooldown_s: int = 60
+    # Tracks not observed within this many ms of the evaluated frame are
+    # treated as gone. The track store keeps departed tracks for its timeout;
+    # without this they would be counted at their last position. 0 disables.
+    max_track_age_ms: int = 1000
+    # When > 0, two people are linked if their foot points are within this
+    # multiple of their mean bbox height (perspective-aware); eps_px is then
+    # ignored. 0 keeps the fixed pixel distance.
+    eps_height_ratio: float = 0.0
 
     @classmethod
     def from_rule_config(
@@ -113,6 +121,14 @@ class CrowdConfig:
                 "CROWD_COOLDOWN_S",
                 _int_value(cfg.get("cooldown_s"), defaults.cooldown_s),
             ),
+            max_track_age_ms=_env_int(
+                "CROWD_MAX_TRACK_AGE_MS",
+                _int_value(cfg.get("max_track_age_ms"), defaults.max_track_age_ms),
+            ),
+            eps_height_ratio=_env_float(
+                "CROWD_EPS_HEIGHT_RATIO",
+                _float_value(cfg.get("eps_height_ratio"), defaults.eps_height_ratio),
+            ),
         )
 
 
@@ -125,10 +141,13 @@ class CrowdCluster:
 def _cluster_by_proximity(
     points: list[tuple[int, tuple[float, float]]],
     eps_px: float,
+    heights: list[float] | None = None,
+    eps_height_ratio: float = 0.0,
 ) -> list[CrowdCluster]:
     visited: set[int] = set()
     clusters: list[CrowdCluster] = []
     eps2 = eps_px * eps_px
+    relative = eps_height_ratio > 0 and heights is not None
     for start in range(len(points)):
         if start in visited:
             continue
@@ -142,7 +161,12 @@ def _cluster_by_proximity(
             for other_idx, (_, (x1, y1)) in enumerate(points):
                 if other_idx in visited:
                     continue
-                if (x0 - x1) ** 2 + (y0 - y1) ** 2 <= eps2:
+                if relative:
+                    link = eps_height_ratio * (heights[idx] + heights[other_idx]) / 2.0
+                    linked = (x0 - x1) ** 2 + (y0 - y1) ** 2 <= link * link
+                else:
+                    linked = (x0 - x1) ** 2 + (y0 - y1) ** 2 <= eps2
+                if linked:
                     visited.add(other_idx)
                     stack.append(other_idx)
         member_ids = frozenset(points[idx][0] for idx in component)
@@ -154,21 +178,43 @@ def _cluster_by_proximity(
     return clusters
 
 
+def present_tracks(
+    tracks: list[TrackState],
+    frame_ts_ms: int,
+    max_track_age_ms: int,
+) -> list[TrackState]:
+    """Tracks whose last observation is recent enough to count as present."""
+    if max_track_age_ms <= 0 or frame_ts_ms <= 0:
+        return [track for track in tracks if track.observations]
+    return [
+        track
+        for track in tracks
+        if track.observations and frame_ts_ms - track.last_seen_ms <= max_track_age_ms
+    ]
+
+
 def find_crowd_clusters(
     tracks: list[TrackState],
     cfg: CrowdConfig,
     zone_polygon: list[tuple[float, float]] | None = None,
+    frame_ts_ms: int = 0,
 ) -> list[CrowdCluster]:
     points: list[tuple[int, tuple[float, float]]] = []
-    for track in tracks:
-        if not track.observations:
-            continue
-        foot_point = track.observations[-1].bbox.foot_point
+    heights: list[float] = []
+    for track in present_tracks(tracks, frame_ts_ms, cfg.max_track_age_ms):
+        bbox = track.observations[-1].bbox
+        foot_point = bbox.foot_point
         if cfg.require_in_zone and zone_polygon:
             if not point_in_polygon(foot_point, zone_polygon):
                 continue
         points.append((track.track_id, foot_point))
-    return _cluster_by_proximity(points, cfg.eps_px)
+        heights.append(max(float(bbox.height), 0.0))
+    return _cluster_by_proximity(
+        points,
+        cfg.eps_px,
+        heights=heights,
+        eps_height_ratio=cfg.eps_height_ratio,
+    )
 
 
 @register_rule("crowd_gathering")
@@ -195,7 +241,12 @@ class CrowdGatheringRule(FrameBehaviorRule):
             return []
         frame_ts_ms = frame_ts_ms or max((track.last_seen_ms for track in frame_tracks), default=0)
         zone_polygon = self.zone.polygon if self.zone and self.zone.polygon else None
-        clusters = find_crowd_clusters(frame_tracks, self.params, zone_polygon)
+        clusters = find_crowd_clusters(
+            frame_tracks,
+            self.params,
+            zone_polygon,
+            frame_ts_ms=frame_ts_ms,
+        )
         camera_id, source_id = self._frame_identity(frame_tracks)
 
         events: list[SecurityEvent] = []
@@ -228,7 +279,10 @@ class CrowdGatheringRule(FrameBehaviorRule):
             if duration_ms < self.params.min_duration_ms:
                 continue
 
-            cooldown_key = f"{camera_id}:crowd_gathering:{self.zone.name}:{cluster_id}"
+            # Zone-scoped: cluster ids are ephemeral (an empty or partial
+            # frame re-creates them), so a cluster-scoped key would let the
+            # same crowd re-alert after every flicker.
+            cooldown_key = f"{camera_id}:crowd_gathering:{self.zone.name}"
             if not self.cooldown.can_emit(cooldown_key, frame_ts_ms):
                 continue
             self.cooldown.record_emit(cooldown_key, self.params.cooldown_s, frame_ts_ms)
@@ -266,6 +320,8 @@ class CrowdGatheringRule(FrameBehaviorRule):
                             "y": cluster.centroid[1],
                         },
                         "eps_px": self.params.eps_px,
+                        "eps_height_ratio": self.params.eps_height_ratio,
+                        "max_track_age_ms": self.params.max_track_age_ms,
                     },
                 )
             )

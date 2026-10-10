@@ -289,3 +289,163 @@ def test_cooldown_suppresses_duplicate_fall(modules) -> None:
     )
     assert rule.evaluate(track) is not None
     assert rule.evaluate(track) is None
+
+
+# --- full-skeleton cases: joint-order votes ------------------------------
+#
+# The five-point fixtures above have no knees or ankles, so they exercise
+# only the original shape votes. The cases below use full COCO-17 skeletons
+# (image y grows downward) to pin the joint-order cues: shoulders at or below
+# ankle level, shoulders below a knee, and the keypoint-box aspect.
+
+FULL_POSTURES = {
+    # Standing, legs stacked under the hips.
+    "standing": {
+        "bbox": (100, 100, 60, 400),
+        "points": {
+            "nose": (130, 110),
+            "left_shoulder": (115, 180), "right_shoulder": (145, 180),
+            "left_hip": (118, 300), "right_hip": (142, 300),
+            "left_knee": (120, 400), "right_knee": (140, 400),
+            "left_ankle": (120, 495), "right_ankle": (140, 495),
+        },
+    },
+    # Same standing skeleton seen from a high camera: the detector box is
+    # wide (aspect 0.75) although the joints are still stacked upright.
+    "standing_high_angle": {
+        "bbox": (40, 100, 300, 400),
+        "points": {
+            "nose": (130, 110),
+            "left_shoulder": (115, 180), "right_shoulder": (145, 180),
+            "left_hip": (118, 300), "right_hip": (142, 300),
+            "left_knee": (120, 400), "right_knee": (140, 400),
+            "left_ankle": (120, 495), "right_ankle": (140, 495),
+        },
+    },
+    # Lying with the head toward the camera and the feet away from it: the
+    # body is foreshortened, so the box is tall and the torso looks vertical,
+    # but the shoulders are below the ankles in the image.
+    "lying_head_toward_camera": {
+        "bbox": (100, 290, 60, 190),
+        "points": {
+            "nose": (130, 470),
+            "left_shoulder": (115, 430), "right_shoulder": (145, 430),
+            "left_hip": (118, 380), "right_hip": (142, 380),
+            "left_knee": (120, 340), "right_knee": (140, 340),
+            "left_ankle": (120, 300), "right_ankle": (140, 300),
+        },
+    },
+    # Sitting side-on: thighs horizontal, shins vertical. The old C++ rule's
+    # thigh-angle condition fires on this; it must never count as lying.
+    "sitting": {
+        "bbox": (190, 100, 160, 310),
+        "points": {
+            "nose": (240, 120),
+            "left_shoulder": (215, 180), "right_shoulder": (225, 180),
+            "left_hip": (210, 300), "right_hip": (220, 300),
+            "left_knee": (320, 300), "right_knee": (330, 305),
+            "left_ankle": (330, 400), "right_ankle": (335, 400),
+        },
+    },
+    # Squatting and leaning forward: the box is nearly square and the torso
+    # is past 45 degrees, which is two of the original three lying votes,
+    # but the shoulders stay above the knees and the ankles.
+    "leaning_squat": {
+        "bbox": (120, 320, 120, 140),
+        "points": {
+            "nose": (230, 345),
+            "left_shoulder": (190, 330), "right_shoulder": (205, 332),
+            "left_hip": (130, 380), "right_hip": (140, 382),
+            "left_knee": (190, 360), "right_knee": (200, 362),
+            "left_ankle": (150, 450), "right_ankle": (160, 450),
+        },
+    },
+}
+
+
+def _full_obs(modules, track_id: int, ts_ms: int, posture: str, *, extra=None):
+    pose = modules["pose"]
+    spec = FULL_POSTURES[posture]
+    x, y, w, h = spec["bbox"]
+    keypoints = [
+        pose.Keypoint(x=px, y=py, confidence=0.9, name=name)
+        for name, (px, py) in spec["points"].items()
+    ]
+    keypoints.extend(extra or [])
+    return pose.PersonPoseObservation(
+        source_id="src_001",
+        camera_id="cam_001",
+        frame_id=ts_ms // 100,
+        timestamp_ms=ts_ms,
+        bbox=pose.BBox(x=x, y=y, width=w, height=h),
+        confidence=0.92,
+        track_id=track_id,
+        keypoints=keypoints,
+    )
+
+
+def _sequence(modules, before: str, after: str):
+    return _track(
+        modules,
+        [
+            _full_obs(modules, 9, 0, before),
+            _full_obs(modules, 9, 500, after),
+            _full_obs(modules, 9, 1300, after),
+            _full_obs(modules, 9, 1800, after),
+        ],
+    )
+
+
+def test_lying_head_toward_camera_is_detected_by_joint_order(modules) -> None:
+    rule = _rule(modules)
+    event = rule.evaluate(_sequence(modules, "standing", "lying_head_toward_camera"))
+    assert event is not None
+    posture = event.payload["posture"]
+    assert posture["shoulders_below_ankles"] is True
+    assert posture["shoulders_below_knees"] is True
+    assert posture["is_lying"] is True
+
+
+def test_high_angle_standing_still_counts_as_upright_before_a_fall(modules) -> None:
+    rule = _rule(modules)
+    event = rule.evaluate(
+        _sequence(modules, "standing_high_angle", "lying_head_toward_camera")
+    )
+    assert event is not None
+    assert event.payload["posture"]["is_upright_before"] is True
+
+
+@pytest.mark.parametrize("posture", ["sitting", "leaning_squat"])
+def test_sitting_and_leaning_squat_do_not_alert(modules, posture) -> None:
+    rule = _rule(modules)
+    assert rule.evaluate(_sequence(modules, "standing", posture)) is None
+
+
+def test_leaning_squat_is_not_lying_although_two_shape_votes_say_so(modules) -> None:
+    fall = importlib.import_module("custom.rules.fall")
+    signals = fall.posture_signals(
+        _full_obs(modules, 9, 0, "leaning_squat"),
+        fall.FallConfig(),
+    )
+    assert signals.aspect_ratio >= fall.FallConfig().lying_aspect_ratio
+    assert signals.torso_angle_deg >= fall.FallConfig().torso_horizontal_deg
+    assert signals.shoulders_below_ankles is False
+    assert signals.is_lying is False
+
+
+def test_low_confidence_keypoints_are_ignored_by_joint_order(modules) -> None:
+    pose = modules["pose"]
+    fall = importlib.import_module("custom.rules.fall")
+    # Occluded ankles come back with a guessed position near the top of the
+    # frame and a near-zero score; they must not make a standing person
+    # look like their shoulders are below their feet.
+    standing = _full_obs(modules, 9, 0, "standing")
+    standing.keypoints = [
+        kp for kp in standing.keypoints if kp.name not in ("left_ankle", "right_ankle")
+    ] + [
+        pose.Keypoint(x=120, y=40, confidence=0.05, name="left_ankle"),
+        pose.Keypoint(x=140, y=40, confidence=0.05, name="right_ankle"),
+    ]
+    signals = fall.posture_signals(standing, fall.FallConfig())
+    assert signals.shoulders_below_ankles is None
+    assert signals.is_lying is False

@@ -77,6 +77,9 @@ class FallConfig:
     head_hip_collapse_ratio: float = 0.22
     min_visible_keypoints: int = 0
     keypoint_threshold: float = 0.25
+    joint_order_votes: bool = True
+    keypoint_box_aspect_ratio: float = 0.90
+    keypoint_box_min_points: int = 6
 
     @classmethod
     def from_rule_config(cls, config: dict[str, Any], fallback_cooldown_s: int) -> "FallConfig":
@@ -134,6 +137,24 @@ class FallConfig:
                 "FALL_KEYPOINT_THRESHOLD",
                 _float_value(cfg.get("keypoint_threshold"), defaults.keypoint_threshold),
             ),
+            joint_order_votes=_env_bool(
+                "FALL_JOINT_ORDER_VOTES",
+                _bool_value(cfg.get("joint_order_votes"), defaults.joint_order_votes),
+            ),
+            keypoint_box_aspect_ratio=_env_float(
+                "FALL_KEYPOINT_BOX_ASPECT_RATIO",
+                _float_value(
+                    cfg.get("keypoint_box_aspect_ratio"),
+                    defaults.keypoint_box_aspect_ratio,
+                ),
+            ),
+            keypoint_box_min_points=_env_int(
+                "FALL_KEYPOINT_BOX_MIN_POINTS",
+                _int_value(
+                    cfg.get("keypoint_box_min_points"),
+                    defaults.keypoint_box_min_points,
+                ),
+            ),
         )
 
 
@@ -146,13 +167,25 @@ class PostureSignals:
     is_lying: bool
     is_upright: bool
     pose_quality_mode: str
+    shoulders_below_ankles: bool | None = None
+    shoulders_below_knees: bool | None = None
+    keypoint_box_aspect_ratio: float | None = None
+    legs_stacked_upright: bool = False
+    lying_weight: int = 0
+    total_weight: int = 0
 
     def payload(self, *, is_upright_before: bool) -> dict[str, Any]:
         return {
             "aspect_ratio": self.aspect_ratio,
             "torso_angle_deg": self.torso_angle_deg,
             "head_hip_ratio": self.head_hip_ratio,
+            "keypoint_box_aspect_ratio": self.keypoint_box_aspect_ratio,
+            "shoulders_below_ankles": self.shoulders_below_ankles,
+            "shoulders_below_knees": self.shoulders_below_knees,
+            "legs_stacked_upright": self.legs_stacked_upright,
             "available_votes": self.available_votes,
+            "lying_weight": self.lying_weight,
+            "total_weight": self.total_weight,
             "is_lying": self.is_lying,
             "is_upright_before": is_upright_before,
         }
@@ -207,41 +240,137 @@ def head_above_hip_ratio(
     return (hip[1] - nose.y) / bbox.height
 
 
+# Joint-order cues compare image heights of body parts (y grows downward).
+# Only keypoints at or above the confidence threshold take part: pose models
+# return a guessed position with a near-zero score for occluded joints, and
+# those guesses must not decide whether someone is lying.
+
+
+def shoulders_below_ankles(kp: dict[str, Keypoint]) -> bool | None:
+    """Highest shoulder at or below ankle height: no upright posture does this."""
+
+    left, right = kp.get("left_shoulder"), kp.get("right_shoulder")
+    ankle = _midpoint(kp.get("left_ankle"), kp.get("right_ankle"))
+    if left is None or right is None or ankle is None:
+        return None
+    return min(left.y, right.y) >= ankle[1]
+
+
+def shoulders_below_knees(kp: dict[str, Keypoint]) -> bool | None:
+    """Lower shoulder below the higher knee."""
+
+    left, right = kp.get("left_shoulder"), kp.get("right_shoulder")
+    knees = [k for k in (kp.get("left_knee"), kp.get("right_knee")) if k is not None]
+    if left is None or right is None or not knees:
+        return None
+    return max(left.y, right.y) > min(knee.y for knee in knees)
+
+
+def keypoint_box_aspect_ratio(kp: dict[str, Keypoint], min_points: int) -> float | None:
+    """Width/height of the box around confident keypoints.
+
+    Detector boxes carry padding and clip at the frame edge; the keypoint box
+    follows the body itself. Needs enough points that a few joints spread
+    sideways (raised arms) cannot make a short box look wide.
+    """
+
+    if len(kp) < max(2, min_points):
+        return None
+    xs = [point.x for point in kp.values()]
+    ys = [point.y for point in kp.values()]
+    height = max(ys) - min(ys)
+    if height <= 0:
+        return None
+    return (max(xs) - min(xs)) / height
+
+
+def legs_stacked_upright(kp: dict[str, Keypoint]) -> bool:
+    """Shoulders above hips above knees above ankles, each by a clear margin.
+
+    A high camera foreshortens a standing person so the detector box is no
+    longer narrow; the stacked joints still show they are upright. Sitting
+    (knee at hip height) and squatting (hip at or below the knee) fail the
+    margin, so neither is mistaken for standing.
+    """
+
+    shoulder = _midpoint(kp.get("left_shoulder"), kp.get("right_shoulder"))
+    hip = _midpoint(kp.get("left_hip"), kp.get("right_hip"))
+    knee = _midpoint(kp.get("left_knee"), kp.get("right_knee"))
+    ankle = _midpoint(kp.get("left_ankle"), kp.get("right_ankle"))
+    if shoulder is None or hip is None or knee is None or ankle is None:
+        return False
+    body = ankle[1] - shoulder[1]
+    if body <= 0:
+        return False
+    margin = 0.15 * body
+    return (
+        hip[1] - shoulder[1] >= margin
+        and knee[1] - hip[1] >= margin
+        and ankle[1] - knee[1] >= margin
+    )
+
+
 def posture_signals(obs: PersonPoseObservation, cfg: FallConfig) -> PostureSignals:
     aspect = _aspect_ratio(obs.bbox)
     torso = torso_angle_from_vertical_deg(obs.keypoints, cfg.keypoint_threshold)
     head_hip = head_above_hip_ratio(obs.keypoints, obs.bbox, cfg.keypoint_threshold)
+    kp = _keypoints_by_name(obs.keypoints, cfg.keypoint_threshold)
 
-    votes = 0
-    lying_votes = 0
+    below_ankles: bool | None = None
+    below_knees: bool | None = None
+    kp_aspect: float | None = None
+    if cfg.joint_order_votes:
+        below_ankles = shoulders_below_ankles(kp)
+        below_knees = shoulders_below_knees(kp)
+        kp_aspect = keypoint_box_aspect_ratio(kp, cfg.keypoint_box_min_points)
+
+    # (says lying, weight). Shoulders at or below ankle height weighs double:
+    # standing, sitting, squatting and bending all keep the shoulders well
+    # above the feet, so it is the strongest single cue in the set.
+    votes: list[tuple[bool, int]] = []
     if aspect is not None:
-        votes += 1
-        if aspect >= cfg.lying_aspect_ratio:
-            lying_votes += 1
+        votes.append((aspect >= cfg.lying_aspect_ratio, 1))
     if torso is not None:
-        votes += 1
-        if torso >= cfg.torso_horizontal_deg:
-            lying_votes += 1
+        votes.append((torso >= cfg.torso_horizontal_deg, 1))
     if head_hip is not None:
-        votes += 1
-        if head_hip < cfg.head_hip_collapse_ratio:
-            lying_votes += 1
+        votes.append((head_hip < cfg.head_hip_collapse_ratio, 1))
+    if kp_aspect is not None:
+        votes.append((kp_aspect >= cfg.keypoint_box_aspect_ratio, 1))
+    if below_knees is not None:
+        votes.append((below_knees, 1))
+    if below_ankles is not None:
+        votes.append((below_ankles, 2))
+
+    total_weight = sum(weight for _says, weight in votes)
+    lying_weight = sum(weight for says, weight in votes if says)
+    # Up to the three original shape votes a tie still counts as lying, as it
+    # always has. Once joint-order votes join, a tie no longer does: one
+    # ambiguous cue must not tip a crouch or a lean into a fall.
+    if total_weight <= 3:
+        is_lying = total_weight > 0 and lying_weight * 2 >= total_weight
+    else:
+        is_lying = lying_weight * 2 > total_weight
 
     pose_quality_mode = "keypoints" if torso is not None or head_hip is not None else "bbox_only"
-    is_lying = votes > 0 and lying_votes * 2 >= votes
-    is_upright = (
-        aspect is not None
-        and aspect <= cfg.upright_aspect_ratio
-        and (torso is None or torso < cfg.torso_horizontal_deg)
+    stacked = cfg.joint_order_votes and legs_stacked_upright(kp)
+    torso_upright = torso is None or torso < cfg.torso_horizontal_deg
+    is_upright = torso_upright and (
+        (aspect is not None and aspect <= cfg.upright_aspect_ratio) or stacked
     )
     return PostureSignals(
         aspect_ratio=aspect,
         torso_angle_deg=torso,
         head_hip_ratio=head_hip,
-        available_votes=votes,
+        available_votes=len(votes),
         is_lying=is_lying,
         is_upright=is_upright,
         pose_quality_mode=pose_quality_mode,
+        shoulders_below_ankles=below_ankles,
+        shoulders_below_knees=below_knees,
+        keypoint_box_aspect_ratio=kp_aspect,
+        legs_stacked_upright=stacked,
+        lying_weight=lying_weight,
+        total_weight=total_weight,
     )
 
 

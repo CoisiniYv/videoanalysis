@@ -29,6 +29,14 @@ except ImportError:  # Final is typing-only and was added in Python 3.8.
 
 MATERIALIZATION_STATE_CONTRACT_VERSION: Final = "evidence-materialization-v2"
 
+# Behavior event types whose evidence is a Replay/rolling-cache raw clip plus
+# frame-cache overlay sidecar. Event-worker task creation, media-worker anchor
+# extraction and the sidecar gate all read this set; loitering and running
+# still start as not_implemented.
+BEHAVIOR_VIDEO_EVIDENCE_EVENT_TYPES: Final = frozenset(
+    {"intrusion", "fall", "crowd_gathering", "chasing"}
+)
+
 
 class MaterializationStatus(StrEnum):
     MANIFEST_READY = "manifest_ready"

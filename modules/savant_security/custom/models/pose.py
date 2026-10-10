@@ -62,6 +62,9 @@ class AdapterResult:
     skipped_untracked_person_count: int = 0
     skipped_no_keypoints_count: int = 0
     skipped_invalid_keypoints_count: int = 0
+    # Frame time in the same domain as observation timestamps; set even when
+    # the frame has no people so rules can advance time on empty frames.
+    timestamp_ms: int = 0
 
 
 @dataclass(frozen=True)

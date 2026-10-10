@@ -158,4 +158,5 @@ def build_person_pose_observations(
         skipped_untracked_person_count=skipped_untracked,
         skipped_no_keypoints_count=skipped_no_kpts,
         skipped_invalid_keypoints_count=skipped_invalid_kpts,
+        timestamp_ms=timestamp_ms,
     )
