@@ -9945,7 +9945,9 @@
     "temperature_min_c": null,
     "temperature_max_c": null,
     "clock_event_reason_counts": {},
-    "power_limit_w": null
+    "power_limit_w": null,
+    "telemetry_available": false,
+    "note": "No valid GPU temperature/clock/power samples were retained for this hour. Do not interpret null bounds as measured temperatures or use later host readings as substitutes. Final GPU compute-process shutdown was separately verified on the host."
   },
   "formal_video_deadline": {
     "required": 2589,
@@ -68393,5 +68395,178 @@
       ]
     }
   },
-  "main_merged": false
+  "main_merged": false,
+  "background_reader_isolation_followup": {
+    "observed_in_later_guard_run_at_seoul": "2026-10-11T05:06:56.595317+09:00",
+    "later_guard_run_running_readers": 100,
+    "prior_run_startup_snapshot_audit": {
+      "run_id": "pressure60_budget7ea424f_t4_4fps_1h_20261011",
+      "force_runtime_restart": true,
+      "no_quiesce_before_guard": false,
+      "running_legacy_readers_in_before_snapshot": 40,
+      "readers": [
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_27",
+          "started_at": "2026-10-10T16:21:54.618589412Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_01",
+          "started_at": "2026-10-10T16:21:54.242352275Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_14",
+          "started_at": "2026-10-10T16:21:53.825892133Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_26",
+          "started_at": "2026-10-10T16:21:53.407979224Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_22",
+          "started_at": "2026-10-10T16:21:52.978507673Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_17",
+          "started_at": "2026-10-10T16:21:52.563220067Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_36",
+          "started_at": "2026-10-10T16:21:52.139429226Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_12",
+          "started_at": "2026-10-10T16:21:51.69853719Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_15",
+          "started_at": "2026-10-10T16:21:51.227760301Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_24",
+          "started_at": "2026-10-10T16:21:50.838097226Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_10",
+          "started_at": "2026-10-10T16:21:50.44682812Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_18",
+          "started_at": "2026-10-10T16:21:50.026844228Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_34",
+          "started_at": "2026-10-10T16:21:49.575311663Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_37",
+          "started_at": "2026-10-10T16:21:49.148780281Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_32",
+          "started_at": "2026-10-10T16:21:48.737506993Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_02",
+          "started_at": "2026-10-10T16:21:48.327540632Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_08",
+          "started_at": "2026-10-10T16:21:47.906252484Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_30",
+          "started_at": "2026-10-10T16:21:47.487936674Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_09",
+          "started_at": "2026-10-10T16:21:47.026694653Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_13",
+          "started_at": "2026-10-10T16:21:46.607819232Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_11",
+          "started_at": "2026-10-10T16:21:45.961196581Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_31",
+          "started_at": "2026-10-10T16:21:45.495074957Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_16",
+          "started_at": "2026-10-10T16:21:44.744171086Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_19",
+          "started_at": "2026-10-10T16:21:43.578660378Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_21",
+          "started_at": "2026-10-10T16:21:43.176389201Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_03",
+          "started_at": "2026-10-10T16:21:42.677621553Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_38",
+          "started_at": "2026-10-10T16:21:41.93907797Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_29",
+          "started_at": "2026-10-10T16:21:41.43945553Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_07",
+          "started_at": "2026-10-10T16:21:41.078192485Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_39",
+          "started_at": "2026-10-10T16:21:40.596657928Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_05",
+          "started_at": "2026-10-10T16:21:40.169644574Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_35",
+          "started_at": "2026-10-10T16:21:38.280976057Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_00",
+          "started_at": "2026-10-10T16:21:37.785085578Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_28",
+          "started_at": "2026-10-10T16:21:36.976288298Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_20",
+          "started_at": "2026-10-10T16:21:36.519078744Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_23",
+          "started_at": "2026-10-10T16:21:36.086730436Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_04",
+          "started_at": "2026-10-10T16:21:35.657826695Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_25",
+          "started_at": "2026-10-10T16:21:35.236268262Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_06",
+          "started_at": "2026-10-10T16:21:34.765588432Z"
+        },
+        {
+          "name": "/video-analytics-source-prod_t4_currentcode_pressure40_4fps_5s5s_600s_rerun_20260714T1335CST_33",
+          "started_at": "2026-10-10T16:21:34.354820885Z"
+        }
+      ]
+    },
+    "note": "The prior run used the same force-restart path that skips source quiescence. Forty readers were running before it, but a full-interval reader inventory was not retained. Its existing metrics and timestamps are preserved; do not call it an isolated 60-reader capacity acceptance."
+  }
 }
