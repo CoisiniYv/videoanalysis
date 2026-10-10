@@ -192,6 +192,9 @@ trajectory-detail-pane     sticky 出现画面 + 摄像头/时间角标 + 相似
 
 每个摄像头按 id 稳定映射到 `--cam-1..8` 颜色，时间线节点、路线站点和画面角标同色。
 键盘 ↑ ↓ 在时间线内切换（焦点在输入框时不拦截）；点击路线站点选中对应记录。
+路线合并节点显示并打开该节点内最新一条记录；“本页最早/本页最新”仅描述当前页，
+不代表人员完整轨迹的起终点。出现次数、摄像头数、最常出现和最近一次也都是本页统计。
+长姓名在标题中省略并保留完整 title；长摄像头名称在路线节点中省略。
 
 筛选：
 
@@ -237,6 +240,7 @@ annotated frame -> full frame -> face crop -> thumbnail
 ```
 
 主图加载失败后最多回退一次 thumbnail，再显示错误空态。
+无图片和重置时，`img[hidden]` 必须保持 `display: none`，不能被图片样式覆盖。
 
 ## 5. 证据管理页面
 
@@ -261,6 +265,8 @@ evidence-detail-pane
 ```
 
 列表因选择而重绘时保留滚动位置；换页、换分类和刷新时回到顶部。
+录像状态与详情证据状态保持一致：`generated_unverified` 显示待复核，
+生成中或缺图不显示“已验证/图片已就绪”；生成异常不再露出原始状态枚举。
 
 ### 5.2 分类
 
@@ -327,6 +333,7 @@ playback_kind!=image
 identity bundle 只有存在 `person_id` 时才显示/执行“查看此人轨迹”。调用
 `operatorTrajectory.openForPerson(person_id)`，而不是使用姓名或 external id 作为 URL
 path。
+缺少 `person_id` 的旧记录保留图片证据详情入口，不提示或尝试轨迹跳转。
 
 ## 6. Runtime 页面
 

@@ -339,6 +339,7 @@ function evidenceStateLabel(bundle = {}) {
     materialized: "可查看",
     generated_unverified: "待复核",
     materialization_skipped: "未生成",
+    generated_corrupt: "录像需复核",
     materialization_failed: "生成失败",
     materialization_deadline_expired: "生成超时",
     ready: "可查看",
@@ -714,6 +715,7 @@ function renderBundleList() {
 
     const category = eventCategoryForType(bundle.event_type);
     const isIdentity = category === "identity";
+    const canOpenTrajectory = isIdentity && Boolean(matchedPersonForBundle(bundle).personId);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "bundle-item bundle-card";
@@ -767,13 +769,15 @@ function renderBundleList() {
 
     const tags = document.createElement("span");
     tags.className = "bundle-tags";
-    if (isIdentity) {
+    if (canOpenTrajectory) {
       tags.appendChild(bundleTag("点击查看此人轨迹", "info"));
     } else {
       tags.appendChild(bundleTag(clipStatusLabel(bundle.clip_status), clipStatusTone(bundle.clip_status)));
     }
     const visualStatus = evidenceStatusLabel(bundle.visual_evidence_status);
-    if (visualStatus && visualStatus !== "-") {
+    const showVisualStatus = Boolean(bundle.raw_clip_available || bundle.image_available) &&
+      bundle.clip_status !== "generated_corrupt";
+    if (showVisualStatus && visualStatus && visualStatus !== "-" && visualStatus !== clipStatusLabel(bundle.clip_status)) {
       tags.appendChild(bundleTag(visualStatus, bundle.visual_evidence_status === "verified" ? "" : "warn"));
     }
     const evidenceStateText = isIdentity ? "" : evidenceStateLabel(bundle);
@@ -787,7 +791,7 @@ function renderBundleList() {
     if (textOrNull(bundle.evidence_reason)) button.title = "该证据生成异常，请查看提示";
     button.append(thumb, body);
     button.addEventListener("click", () => {
-      if (isIdentity && openPersonTrajectoryFromBundle(bundle)) {
+      if (canOpenTrajectory && openPersonTrajectoryFromBundle(bundle)) {
         return;
       }
       selectBundle(bundle.event_id);
@@ -1954,10 +1958,24 @@ function renderDetails() {
   const media = metadata.media || {};
   const status = metadata.status || {};
   const validation = media.clip_validation || {};
-  const clipStatus = status.clip_status || summary.clip_status || "unknown";
+  const clipStatus = status.clip_status || summary.clip_status ||
+    state.manifest?.materialization_status || media.materialization_status || "unknown";
   const isImageEvidence = playbackKind() === "image";
   const decodeWarnings = Number(validation.decode_error_count || 0);
   const corrupt = clipStatus === "generated_corrupt" || decodeWarnings > 0;
+  const visualStatus = state.manifest?.visual_evidence_status || summary.visual_evidence_status ||
+    summary.sidecar_summary?.visual_binding_status;
+  const unverified = clipStatus === "generated_unverified" || visualStatus === "unverified";
+  let validationLabel = clipStatusLabel(clipStatus);
+  if (isImageEvidence) {
+    validationLabel = Object.values(imageEvidenceUrls()).some(Boolean) ? "图片已就绪" : "图片暂不可用";
+  } else if (corrupt) {
+    validationLabel = "录像已生成，画面质量需复核";
+  } else if (unverified && state.manifest?.raw_clip_url) {
+    validationLabel = "录像已生成，画面待复核";
+  } else if (["ready", "materialized"].includes(clipStatus) && state.manifest?.raw_clip_url) {
+    validationLabel = "已验证";
+  }
 
   const eventTypeValue = event.event_type || summary.event_type || state.manifest?.event_type;
   const cameraName = cameraDisplayName({
@@ -1989,7 +2007,7 @@ function renderDetails() {
       .join(" · ")
   });
   setText("rawClipStatus", isImageEvidence ? "图片证据" : clipStatusLabel(clipStatus));
-  setText("clipValidation", isImageEvidence ? "图片已就绪" : (corrupt ? `录像已生成，画面质量需复核` : "已验证"));
+  setText("clipValidation", validationLabel);
   setText("firstVideoPts", isImageEvidence ? "-" : state.firstVideoFramePts);
   setText("sourceSize", `${state.sourceWidth}x${state.sourceHeight}`);
   setText("annotationLines", summary.annotation_lines ?? state.annotations.length);
@@ -2001,10 +2019,10 @@ function renderDetails() {
   setText("unknownObjects", summary.unknown_objects);
   setText("colorsUsed", Array.isArray(summary.colors_used) ? summary.colors_used.join(", ") : "");
 
-  dom.clipWarning.hidden = isImageEvidence || !corrupt;
+  dom.clipWarning.hidden = isImageEvidence || (!corrupt && !unverified);
   dom.clipWarning.textContent = corrupt
     ? "录像需复核"
-    : "";
+    : (unverified ? "画面待复核" : "");
 }
 
 function updateDebug(active, objectCount) {

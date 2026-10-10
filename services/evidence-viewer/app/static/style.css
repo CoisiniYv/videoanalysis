@@ -3559,6 +3559,7 @@ button.primary {
 
 .trajectory-query-pane.pane {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-area: query;
   gap: 12px;
   max-height: none;
@@ -3588,6 +3589,7 @@ button.primary {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .trajectory-profile.pane {
@@ -3613,7 +3615,7 @@ button.primary {
 
 .trajectory-profile-grid {
   display: grid;
-  grid-template-columns: minmax(240px, auto) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
   gap: 16px 24px;
   align-items: center;
 }
@@ -3652,15 +3654,21 @@ button.primary {
 }
 
 .trajectory-person-copy h2 {
+  overflow: hidden;
   font-size: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .trajectory-person-copy p {
   margin-top: 3px;
+  overflow-wrap: anywhere;
 }
 
 .trajectory-person-copy .badge {
+  max-width: 100%;
   margin-top: 6px;
+  overflow-wrap: anywhere;
 }
 
 .trajectory-stats {
@@ -3707,6 +3715,7 @@ button.primary {
 
 .trajectory-route-label {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 10px;
   color: var(--muted);
@@ -3727,6 +3736,8 @@ button.primary {
 .trajectory-route-step {
   display: flex;
   flex: none;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .route-link {
@@ -3750,6 +3761,7 @@ button.primary {
 
 .route-stop {
   display: inline-flex;
+  max-width: 100%;
   align-items: center;
   gap: 8px;
   min-height: 0;
@@ -3775,11 +3787,15 @@ button.primary {
 
 .route-stop-copy {
   display: grid;
+  min-width: 0;
+  max-width: 200px;
   line-height: 1.25;
 }
 
 .route-stop-copy strong {
+  overflow: hidden;
   font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -3791,6 +3807,7 @@ button.primary {
 }
 
 .route-stop em {
+  flex: none;
   padding: 1px 6px;
   color: var(--cam-color);
   font-size: 10px;
@@ -4029,6 +4046,10 @@ button.primary {
   object-fit: contain;
 }
 
+.trajectory-inline-stage img[hidden] {
+  display: none;
+}
+
 .trajectory-stage-tag {
   position: absolute;
   bottom: 12px;
@@ -4036,6 +4057,7 @@ button.primary {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: calc(100% - 24px);
   padding: 6px 12px 6px 10px;
   color: #f8fafc;
   font-size: 12px;
@@ -4057,8 +4079,16 @@ button.primary {
 }
 
 .trajectory-stage-tag-time {
+  flex: none;
   color: #cbd5e1;
   font-variant-numeric: tabular-nums;
+}
+
+.trajectory-stage-tag > span:first-of-type {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .trajectory-detail-pane .trajectory-detail-card {
