@@ -1,10 +1,16 @@
 /* ------------------------------------------------------------------ */
 /*  Registered-person trajectory page                                 */
 /*  Persisted, DB-backed hits only; images render inline on the page.   */
+/*  Person-centric layout: profile + route banner, a day-grouped        */
+/*  sighting timeline and a sticky preview stage.                       */
 /* ------------------------------------------------------------------ */
 
 const TRAJECTORY_PAGE_SIZE = 50;
 const TRAJECTORY_MIN_SIMILARITY = 0.6;
+const TRAJECTORY_CAMERA_COLORS = 8;
+const TRAJECTORY_ROUTE_MAX_STOPS = 12;
+// A pause this long between two sightings is called out in the timeline.
+const TRAJECTORY_GAP_NOTICE_MS = 30 * 60 * 1000;
 
 const trajectoryDom = {
   view: document.getElementById("trajectory-view"),
@@ -21,9 +27,13 @@ const trajectoryDom = {
   next: document.getElementById("trajectory-next"),
   pageStatus: document.getElementById("trajectory-page-status"),
   summary: document.getElementById("trajectory-search-summary"),
+  profile: document.getElementById("trajectory-profile"),
   list: document.getElementById("trajectory-list"),
   detailImage: document.getElementById("trajectory-detail-image"),
   detailEmpty: document.getElementById("trajectory-detail-empty"),
+  stageTag: document.getElementById("trajectory-stage-tag"),
+  newerItem: document.getElementById("trajectory-newer-item"),
+  olderItem: document.getElementById("trajectory-older-item"),
   detail: document.getElementById("trajectory-detail"),
 };
 
@@ -40,6 +50,8 @@ const trajectoryState = {
   selectedIndex: -1,
   requestId: 0,
 };
+
+const TRAJECTORY_PROFILE_PLACEHOLDER = trajectoryDom.profile?.innerHTML || "";
 
 function trajectoryEscapeHtml(value) {
   return String(value ?? "")
@@ -74,6 +86,14 @@ function trajectoryTimestamp(row) {
   return row?.event_ts_ms ?? row?.observation_timestamp_ms ?? row?.event_created_at ?? "";
 }
 
+function trajectoryEpochOf(row) {
+  const value = trajectoryTimestamp(row);
+  if (value === undefined || value === null || value === "") return null;
+  const numeric = Number(value);
+  const epoch = Number.isFinite(numeric) ? numeric : new Date(String(value)).getTime();
+  return Number.isFinite(epoch) ? epoch : null;
+}
+
 function trajectoryFormatTime(value) {
   if (value === undefined || value === null || value === "") return "--";
   const numeric = Number(value);
@@ -81,9 +101,93 @@ function trajectoryFormatTime(value) {
   return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString();
 }
 
+function trajectoryPad(number) {
+  return String(number).padStart(2, "0");
+}
+
+function trajectoryClock(epoch) {
+  if (epoch === null) return "--:--";
+  const date = new Date(epoch);
+  return `${trajectoryPad(date.getHours())}:${trajectoryPad(date.getMinutes())}:${trajectoryPad(date.getSeconds())}`;
+}
+
+function trajectoryShortDateTime(epoch) {
+  if (epoch === null) return "--";
+  const date = new Date(epoch);
+  return `${date.getMonth() + 1}/${date.getDate()} ${trajectoryPad(date.getHours())}:${trajectoryPad(date.getMinutes())}`;
+}
+
+function trajectoryDayKey(epoch) {
+  if (epoch === null) return "unknown";
+  const date = new Date(epoch);
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function trajectoryDayLabel(epoch) {
+  if (epoch === null) return "时间未知";
+  const date = new Date(epoch);
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  const label = `${date.getMonth() + 1}月${date.getDate()}日 ${weekday}`;
+  if (trajectoryDayKey(epoch) === trajectoryDayKey(today.getTime())) return `今天 · ${label}`;
+  if (trajectoryDayKey(epoch) === trajectoryDayKey(yesterday.getTime())) return `昨天 · ${label}`;
+  return label;
+}
+
+function trajectoryDuration(ms) {
+  const minutes = Math.max(0, Math.round(ms / 60000));
+  if (minutes < 1) return "不到 1 分钟";
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours < 24) return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天 ${hours % 24} 小时`;
+}
+
+function trajectoryRelative(epoch) {
+  if (epoch === null) return "";
+  const delta = Date.now() - epoch;
+  if (delta < 0) return "";
+  if (delta < 60 * 1000) return "刚刚";
+  return `${trajectoryDuration(delta)}前`;
+}
+
+function trajectoryRelativeShort(epoch) {
+  // Timeline column variant: one unit only so it fits beside the clock.
+  if (epoch === null) return "";
+  const delta = Date.now() - epoch;
+  if (delta < 0) return "";
+  const minutes = Math.floor(delta / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
 function trajectoryFormatPercent(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? `${Math.round(numeric * 100)}%` : "--";
+}
+
+function trajectorySimilarityTone(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "low";
+  if (numeric >= 0.8) return "high";
+  if (numeric >= 0.7) return "mid";
+  return "low";
+}
+
+function trajectorySimilarityBar(value, extraClass = "") {
+  const numeric = Number(value);
+  const pct = Number.isFinite(numeric) ? Math.max(0, Math.min(100, Math.round(numeric * 100))) : 0;
+  return (
+    `<span class="similarity-bar ${extraClass}" data-tone="${trajectorySimilarityTone(value)}">` +
+      `<i style="width:${pct}%"></i>` +
+    `</span>`
+  );
 }
 
 function trajectoryThumbnailUrl(row) {
@@ -106,8 +210,32 @@ function trajectorySourceLabel(source) {
   return labels[source] || source || "轨迹";
 }
 
+function trajectorySourceTone(source) {
+  const tones = {
+    watchlist_event: "alert",
+    live_search_hit: "observation",
+    gallery_observation: "observation",
+  };
+  return tones[source] || "neutral";
+}
+
 function trajectoryCameraName(row) {
   return row?.camera_name || row?.source_id || row?.camera_id || "未知摄像头";
+}
+
+function trajectoryCameraKey(row) {
+  return String(row?.camera_id || row?.source_id || row?.camera_name || "unknown");
+}
+
+function trajectoryCameraColor(row) {
+  // Stable per-camera colour so a timeline node can be matched to its stop
+  // on the route strip at a glance.
+  const key = trajectoryCameraKey(row);
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return `var(--cam-${(hash % TRAJECTORY_CAMERA_COLORS) + 1})`;
 }
 
 function trajectoryPersonByInput(rawValue) {
@@ -119,6 +247,10 @@ function trajectoryPersonByInput(rawValue) {
   )) || null;
 }
 
+function trajectoryPersonById(personId) {
+  return trajectoryState.people.find((item) => String(item.person_id) === String(personId)) || null;
+}
+
 function resolveTrajectoryPersonId(rawValue) {
   const value = String(rawValue || "").trim();
   const matched = trajectoryPersonByInput(value);
@@ -128,7 +260,7 @@ function resolveTrajectoryPersonId(rawValue) {
 }
 
 function trajectoryPersonLabel(personId) {
-  const person = trajectoryState.people.find((item) => String(item.person_id) === String(personId));
+  const person = trajectoryPersonById(personId);
   if (!person) return `人员 ${personId}`;
   const identity = person.name || person.external_person_id || `人员 ${personId}`;
   return `${identity}（ID ${personId}）`;
@@ -213,6 +345,13 @@ function trajectoryQuery(offset) {
   return { personId, cameraId, startTsMs, endTsMs, params };
 }
 
+function updateTrajectoryStageNav() {
+  const index = trajectoryState.selectedIndex;
+  const count = trajectoryState.rows.length;
+  if (trajectoryDom.newerItem) trajectoryDom.newerItem.disabled = index <= 0;
+  if (trajectoryDom.olderItem) trajectoryDom.olderItem.disabled = index < 0 || index >= count - 1;
+}
+
 function clearTrajectoryDetail(message = "请选择一条轨迹记录") {
   trajectoryState.selectedIndex = -1;
   if (trajectoryDom.detailImage) {
@@ -221,28 +360,36 @@ function clearTrajectoryDetail(message = "请选择一条轨迹记录") {
     delete trajectoryDom.detailImage.dataset.fallbackUrl;
     delete trajectoryDom.detailImage.dataset.fallbackTried;
   }
+  if (trajectoryDom.stageTag) trajectoryDom.stageTag.hidden = true;
   if (trajectoryDom.detailEmpty) {
     trajectoryDom.detailEmpty.hidden = false;
     trajectoryDom.detailEmpty.textContent = message;
   }
   if (trajectoryDom.detail) trajectoryDom.detail.textContent = "暂无选中的轨迹记录。";
+  updateTrajectoryStageNav();
 }
 
-function renderTrajectoryDetail(row, index) {
+function renderTrajectoryDetail(row, index, options = {}) {
   if (!row) {
     clearTrajectoryDetail();
     return;
   }
   trajectoryState.selectedIndex = index;
   trajectoryDom.list?.querySelectorAll(".trajectory-result-card").forEach((card) => {
-    card.classList.toggle("active", Number(card.dataset.index) === index);
+    const active = Number(card.dataset.index) === index;
+    card.classList.toggle("active", active);
+    card.setAttribute("aria-current", active ? "true" : "false");
+    if (active && options.scroll) card.scrollIntoView({ block: "nearest", behavior: "smooth" });
   });
+  updateTrajectoryStageNav();
 
+  const epoch = trajectoryEpochOf(row);
+  const cameraName = trajectoryCameraName(row);
   const previewUrl = trajectoryPreviewUrl(row);
   const thumbnailUrl = trajectoryThumbnailUrl(row);
   if (trajectoryDom.detailImage && previewUrl) {
     trajectoryDom.detailImage.hidden = false;
-    trajectoryDom.detailImage.alt = `${trajectoryCameraName(row)} 轨迹画面`;
+    trajectoryDom.detailImage.alt = `${cameraName} 轨迹画面`;
     trajectoryDom.detailImage.dataset.fallbackUrl = previewUrl !== thumbnailUrl ? thumbnailUrl : "";
     trajectoryDom.detailImage.dataset.fallbackTried = "false";
     trajectoryDom.detailImage.src = previewUrl;
@@ -258,19 +405,73 @@ function renderTrajectoryDetail(row, index) {
     }
   }
 
+  if (trajectoryDom.stageTag) {
+    trajectoryDom.stageTag.hidden = false;
+    trajectoryDom.stageTag.style.setProperty("--cam-color", trajectoryCameraColor(row));
+    trajectoryDom.stageTag.innerHTML =
+      `<i aria-hidden="true"></i>` +
+      `<span>${trajectoryEscapeHtml(cameraName)}</span>` +
+      `<span class="trajectory-stage-tag-time">${trajectoryEscapeHtml(trajectoryShortDateTime(epoch))}</span>`;
+  }
+
   if (trajectoryDom.detail) {
     const personName = row.person_name || trajectoryPersonLabel(row.person_id || trajectoryState.personId);
+    const relative = trajectoryRelative(epoch);
+    const face = thumbnailUrl
+      ? `<img class="trajectory-detail-face" src="${trajectoryEscapeHtml(thumbnailUrl)}" alt="人脸" loading="lazy" decoding="async" />`
+      : `<span class="trajectory-detail-face trajectory-detail-face--empty" aria-hidden="true"></span>`;
     trajectoryDom.detail.innerHTML =
-      `<h3>${trajectoryEscapeHtml(personName)}</h3>` +
+      `<div class="trajectory-detail-head" style="--cam-color:${trajectoryCameraColor(row)}">` +
+        face +
+        `<div class="trajectory-detail-heading">` +
+          `<h3>${trajectoryEscapeHtml(cameraName)}</h3>` +
+          `<p>${trajectoryEscapeHtml(trajectoryFormatTime(trajectoryTimestamp(row)))}` +
+            `${relative ? ` · ${trajectoryEscapeHtml(relative)}` : ""}</p>` +
+        `</div>` +
+        `<span class="badge ${trajectorySourceTone(row.trajectory_source)}">${trajectoryEscapeHtml(trajectorySourceLabel(row.trajectory_source))}</span>` +
+      `</div>` +
+      `<div class="similarity-meter">` +
+        `<span>匹配相似度</span>` +
+        trajectorySimilarityBar(row.similarity, "similarity-bar--large") +
+        `<strong>${trajectoryEscapeHtml(trajectoryFormatPercent(row.similarity))}</strong>` +
+      `</div>` +
       `<dl class="trajectory-detail-grid">` +
-        `<dt>系统编号</dt><dd>${trajectoryEscapeHtml(row.person_id || trajectoryState.personId || "--")}</dd>` +
+        `<dt>人员</dt><dd>${trajectoryEscapeHtml(personName)}</dd>` +
         `<dt>人员编号</dt><dd>${trajectoryEscapeHtml(row.external_person_id || "--")}</dd>` +
-        `<dt>摄像头</dt><dd>${trajectoryEscapeHtml(trajectoryCameraName(row))}</dd>` +
-        `<dt>出现时间</dt><dd>${trajectoryEscapeHtml(trajectoryFormatTime(trajectoryTimestamp(row)))}</dd>` +
-        `<dt>匹配相似度</dt><dd>${trajectoryEscapeHtml(trajectoryFormatPercent(row.similarity))}</dd>` +
-        `<dt>轨迹来源</dt><dd>${trajectoryEscapeHtml(trajectorySourceLabel(row.trajectory_source))}</dd>` +
+        `<dt>系统编号</dt><dd>${trajectoryEscapeHtml(row.person_id || trajectoryState.personId || "--")}</dd>` +
+        `<dt>记录位置</dt><dd>第 ${trajectoryState.offset + index + 1} 条</dd>` +
       `</dl>`;
   }
+}
+
+function selectTrajectoryIndex(index, options = {}) {
+  const rows = trajectoryState.rows;
+  if (!rows.length) return;
+  const bounded = Math.max(0, Math.min(rows.length - 1, index));
+  renderTrajectoryDetail(rows[bounded], bounded, options);
+}
+
+function trajectoryTimelineItem(row, index) {
+  const epoch = trajectoryEpochOf(row);
+  const thumbnailUrl = trajectoryThumbnailUrl(row);
+  const thumbnail = thumbnailUrl
+    ? `<img src="${trajectoryEscapeHtml(thumbnailUrl)}" alt="轨迹缩略图" loading="lazy" decoding="async" />`
+    : `<span class="trajectory-result-thumb-empty">无图片</span>`;
+  return (
+    `<button type="button" class="trajectory-result-card" data-index="${index}" style="--cam-color:${trajectoryCameraColor(row)}">` +
+      `<span class="trajectory-result-time">` +
+        `<strong>${trajectoryEscapeHtml(trajectoryClock(epoch))}</strong>` +
+        `<small>${trajectoryEscapeHtml(trajectoryRelativeShort(epoch))}</small>` +
+      `</span>` +
+      `<span class="trajectory-node" aria-hidden="true"></span>` +
+      `<span class="trajectory-result-thumb">${thumbnail}</span>` +
+      `<span class="trajectory-result-copy">` +
+        `<strong>${trajectoryEscapeHtml(trajectoryCameraName(row))}</strong>` +
+        `<span class="similarity">${trajectorySimilarityBar(row.similarity)}${trajectoryEscapeHtml(trajectoryFormatPercent(row.similarity))}</span>` +
+        `<small class="badge ${trajectorySourceTone(row.trajectory_source)}">${trajectoryEscapeHtml(trajectorySourceLabel(row.trajectory_source))}</small>` +
+      `</span>` +
+    `</button>`
+  );
 }
 
 function renderTrajectoryRows() {
@@ -282,31 +483,136 @@ function renderTrajectoryRows() {
     return;
   }
 
-  trajectoryDom.list.innerHTML = rows.map((row, index) => {
-    const thumbnailUrl = trajectoryThumbnailUrl(row);
-    const thumbnail = thumbnailUrl
-      ? `<img src="${trajectoryEscapeHtml(thumbnailUrl)}" alt="轨迹缩略图" loading="lazy" decoding="async" />`
-      : `<span class="trajectory-result-thumb-empty">无图片</span>`;
-    const personName = row.person_name || trajectoryPersonLabel(row.person_id || trajectoryState.personId);
-    return (
-      `<button type="button" class="trajectory-result-card" data-index="${index}">` +
-        `<span class="trajectory-result-thumb">${thumbnail}</span>` +
-        `<span class="trajectory-result-copy">` +
-          `<strong>${trajectoryEscapeHtml(trajectoryCameraName(row))}</strong>` +
-          `<span>${trajectoryEscapeHtml(trajectoryFormatTime(trajectoryTimestamp(row)))}</span>` +
-          `<span>${trajectoryEscapeHtml(personName)} · ${trajectoryEscapeHtml(trajectoryFormatPercent(row.similarity))}</span>` +
-          `<small>${trajectoryEscapeHtml(trajectorySourceLabel(row.trajectory_source))}</small>` +
-        `</span>` +
-      `</button>`
-    );
-  }).join("");
+  const dayCounts = new Map();
+  for (const row of rows) {
+    const key = trajectoryDayKey(trajectoryEpochOf(row));
+    dayCounts.set(key, (dayCounts.get(key) || 0) + 1);
+  }
+
+  const parts = [];
+  let previousDay = null;
+  let previousEpoch = null;
+  rows.forEach((row, index) => {
+    const epoch = trajectoryEpochOf(row);
+    const day = trajectoryDayKey(epoch);
+    if (day !== previousDay) {
+      parts.push(
+        `<div class="timeline-day"><span>${trajectoryEscapeHtml(trajectoryDayLabel(epoch))}</span>` +
+        `<small>${dayCounts.get(day)} 次出现</small></div>`
+      );
+      previousDay = day;
+    } else if (previousEpoch !== null && epoch !== null && previousEpoch - epoch >= TRAJECTORY_GAP_NOTICE_MS) {
+      parts.push(`<div class="trajectory-gap">间隔 ${trajectoryEscapeHtml(trajectoryDuration(previousEpoch - epoch))}</div>`);
+    }
+    parts.push(trajectoryTimelineItem(row, index));
+    previousEpoch = epoch;
+  });
+  trajectoryDom.list.innerHTML = parts.join("");
 
   trajectoryDom.list.querySelectorAll(".trajectory-result-card").forEach((card) => {
     card.addEventListener("click", () => {
-      renderTrajectoryDetail(rows[Number(card.dataset.index)], Number(card.dataset.index));
+      selectTrajectoryIndex(Number(card.dataset.index));
     });
   });
   renderTrajectoryDetail(rows[0], 0);
+}
+
+function trajectoryRouteStops(rows) {
+  // Rows arrive newest first; the route reads oldest -> newest and merges
+  // consecutive sightings at the same camera into one stop.
+  const stops = [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    const key = trajectoryCameraKey(row);
+    const last = stops[stops.length - 1];
+    if (last && last.key === key) {
+      last.count += 1;
+      last.lastIndex = index;
+      continue;
+    }
+    stops.push({ key, row, count: 1, firstIndex: index, lastIndex: index });
+  }
+  return stops;
+}
+
+function renderTrajectoryProfile(query) {
+  if (!trajectoryDom.profile) return;
+  const rows = trajectoryState.rows;
+  const person = trajectoryPersonById(query.personId);
+  const firstRow = rows[0] || {};
+  const name = person?.name || firstRow.person_name || `人员 ${query.personId}`;
+  const externalId = person?.external_person_id || firstRow.external_person_id || "";
+  const avatarUrl = person?.primary_registered_crop_url || trajectoryThumbnailUrl(firstRow);
+  const avatar = avatarUrl
+    ? `<img src="${trajectoryEscapeHtml(avatarUrl)}" alt="${trajectoryEscapeHtml(name)}" decoding="async" />`
+    : trajectoryEscapeHtml(String(name).slice(0, 1));
+
+  const epochs = rows.map(trajectoryEpochOf).filter((value) => value !== null);
+  const newest = epochs.length ? Math.max(...epochs) : null;
+  const oldest = epochs.length ? Math.min(...epochs) : null;
+  const cameraCounts = new Map();
+  for (const row of rows) {
+    const key = trajectoryCameraKey(row);
+    const entry = cameraCounts.get(key) || { name: trajectoryCameraName(row), count: 0 };
+    entry.count += 1;
+    cameraCounts.set(key, entry);
+  }
+  const busiest = [...cameraCounts.values()].sort((a, b) => b.count - a.count)[0];
+  const span = newest !== null && oldest !== null
+    ? `${trajectoryShortDateTime(oldest)} – ${trajectoryShortDateTime(newest)}`
+    : "--";
+
+  const stops = trajectoryRouteStops(rows);
+  const hidden = Math.max(0, stops.length - TRAJECTORY_ROUTE_MAX_STOPS);
+  const shown = stops.slice(-TRAJECTORY_ROUTE_MAX_STOPS);
+  const routeItems = shown.map((stop, position) => {
+    const epoch = trajectoryEpochOf(stop.row);
+    const isLast = position === shown.length - 1;
+    const isFirst = position === 0 && hidden === 0;
+    const marker = isLast ? `<em>最近</em>` : (isFirst ? `<em>起点</em>` : "");
+    return (
+      (position ? `<li class="route-link" aria-hidden="true"></li>` : "") +
+      `<li class="trajectory-route-step">` +
+        `<button type="button" class="route-stop" data-index="${stop.lastIndex}" style="--cam-color:${trajectoryCameraColor(stop.row)}">` +
+          `<span class="route-dot" aria-hidden="true"></span>` +
+          `<span class="route-stop-copy"><strong>${trajectoryEscapeHtml(trajectoryCameraName(stop.row))}</strong>` +
+          `<small>${trajectoryEscapeHtml(trajectoryShortDateTime(epoch))}${stop.count > 1 ? ` · ${stop.count} 次` : ""}</small></span>` +
+          marker +
+        `</button>` +
+      `</li>`
+    );
+  }).join("");
+
+  trajectoryDom.profile.innerHTML =
+    `<div class="trajectory-profile-grid">` +
+      `<div class="trajectory-person">` +
+        `<span class="trajectory-avatar">${avatar}</span>` +
+        `<div class="trajectory-person-copy">` +
+          `<h2>${trajectoryEscapeHtml(name)}</h2>` +
+          `<p>${externalId ? `人员编号 ${trajectoryEscapeHtml(externalId)} · ` : ""}系统编号 ${trajectoryEscapeHtml(query.personId)}</p>` +
+          (person?.description ? `<span class="badge alert">${trajectoryEscapeHtml(person.description)}</span>` : "") +
+        `</div>` +
+      `</div>` +
+      `<div class="trajectory-stats">` +
+        `<div class="trajectory-stat"><strong>${rows.length}</strong><span>本页出现次数</span></div>` +
+        `<div class="trajectory-stat"><strong>${cameraCounts.size}</strong><span>经过摄像头</span></div>` +
+        `<div class="trajectory-stat"><strong>${trajectoryEscapeHtml(busiest?.name || "--")}</strong><span>最常出现${busiest ? `（${busiest.count} 次）` : ""}</span></div>` +
+        `<div class="trajectory-stat"><strong>${trajectoryEscapeHtml(newest !== null ? trajectoryRelative(newest) || trajectoryShortDateTime(newest) : "--")}</strong><span>最近一次出现</span></div>` +
+      `</div>` +
+      (rows.length
+        ? `<div class="trajectory-route">` +
+            `<div class="trajectory-route-label"><span>行动路线 · ${trajectoryEscapeHtml(span)}（按时间先后，相邻同一摄像头合并）</span>` +
+            `${hidden ? `<small>更早还有 ${hidden} 站</small>` : ""}</div>` +
+            `<ol class="trajectory-route-steps">${routeItems}</ol>` +
+          `</div>`
+        : "") +
+    `</div>`;
+
+  trajectoryDom.profile.querySelectorAll(".route-stop").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectTrajectoryIndex(Number(button.dataset.index), { scroll: true });
+    });
+  });
 }
 
 function renderTrajectoryPagination() {
@@ -355,6 +661,7 @@ async function searchTrajectory({ offset = 0 } = {}) {
     renderTrajectoryRows();
     renderTrajectoryPagination();
     renderTrajectorySummary(query);
+    renderTrajectoryProfile(query);
     trajectorySetStatus(trajectoryState.rows.length ? "轨迹查询完成" : "未找到轨迹");
   } catch (error) {
     if (requestId === trajectoryState.requestId && trajectoryDom.summary) {
@@ -379,6 +686,7 @@ function resetTrajectoryPage() {
   if (trajectoryDom.list) {
     trajectoryDom.list.innerHTML = `<div class="empty-state">请先按人员编号查询轨迹。</div>`;
   }
+  if (trajectoryDom.profile) trajectoryDom.profile.innerHTML = TRAJECTORY_PROFILE_PLACEHOLDER;
   if (trajectoryDom.pageStatus) trajectoryDom.pageStatus.textContent = "尚未查询";
   if (trajectoryDom.previous) trajectoryDom.previous.disabled = true;
   if (trajectoryDom.next) trajectoryDom.next.disabled = true;
@@ -388,6 +696,12 @@ function resetTrajectoryPage() {
     trajectoryDom.summary.textContent = "输入人员编号后查询，系统会按时间倒序显示轨迹画面。";
   }
   clearTrajectoryDetail();
+}
+
+function trajectoryKeyboardTarget(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return true;
+  return !target.closest("input, select, textarea, [contenteditable='true']");
 }
 
 function bindTrajectoryEvents() {
@@ -408,6 +722,21 @@ function bindTrajectoryEvents() {
   trajectoryDom.next?.addEventListener("click", () => {
     searchTrajectory({ offset: trajectoryState.offset + TRAJECTORY_PAGE_SIZE })
       .catch(trajectoryReportError);
+  });
+  trajectoryDom.newerItem?.addEventListener("click", () => {
+    selectTrajectoryIndex(trajectoryState.selectedIndex - 1, { scroll: true });
+  });
+  trajectoryDom.olderItem?.addEventListener("click", () => {
+    selectTrajectoryIndex(trajectoryState.selectedIndex + 1, { scroll: true });
+  });
+  document.addEventListener("keydown", (event) => {
+    if (trajectoryDom.view?.hidden || !trajectoryState.rows.length) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || !trajectoryKeyboardTarget(event)) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      selectTrajectoryIndex(trajectoryState.selectedIndex + step, { scroll: true });
+    }
   });
   trajectoryDom.detailImage?.addEventListener("error", () => {
     const fallbackUrl = trajectoryDom.detailImage.dataset.fallbackUrl || "";

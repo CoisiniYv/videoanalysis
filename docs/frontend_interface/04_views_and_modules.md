@@ -180,11 +180,18 @@ DOM root：`trajectory-view`
 
 ### 4.1 页面结构
 
+以人员为中心（2026-10-10 起，见 `docs/midterm_8090_ui_refresh_2026-10-10.md`）：
+
 ```text
-trajectory-filter-pane
-trajectory-list-pane
-trajectory-detail-pane
+trajectory-query-pane      全宽查询条（人员 / 摄像头 / 起止时间）
+trajectory-profile         人员概况：头像、本页出现次数、经过摄像头、最常出现、
+                           最近一次；行动路线（时间正序，相邻同一摄像头合并，最多 12 站）
+trajectory-list-pane       按天分组的出现时间线；间隔 >= 30 分钟显示间隔提示
+trajectory-detail-pane     sticky 出现画面 + 摄像头/时间角标 + 相似度条 + 较新/较早
 ```
+
+每个摄像头按 id 稳定映射到 `--cam-1..8` 颜色，时间线节点、路线站点和画面角标同色。
+键盘 ↑ ↓ 在时间线内切换（焦点在输入框时不拦截）；点击路线站点选中对应记录。
 
 筛选：
 
@@ -239,15 +246,21 @@ DOM root：`evidence-view`
 
 ### 5.1 页面结构
 
+复核台布局（2026-10-10 起）：
+
 ```text
-evidence-filters
-evidence-list-pane
+evidence-sidebar (sticky)
+  -> evidence-filters      分类彩色 chip + 摄像头/人员筛选
+  -> evidence-list-pane    分页 + 按天分组的告警卡片（缩略图、类型色、状态 tag）
 evidence-detail-pane
+  -> evidence-stage-header 类型图标 + 告警类型标题 + 摄像头/报警时间/人员副标题
   -> video + canvas
   -> imageEvidence
-  -> overlay controls
-  -> event/identity/diagnostic details
+  -> overlay controls      单行开关 chip
+  -> event/identity/diagnostic details（三列卡片）
 ```
+
+列表因选择而重绘时保留滚动位置；换页、换分类和刷新时回到顶部。
 
 ### 5.2 分类
 

@@ -11,7 +11,7 @@
         }
       } catch (_err) {}
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=runtime-nav-20260715-operator-copy" />
+    <link rel="stylesheet" href="/static/style.css?v=runtime-nav-20260715-operator-copy-ui-20261010" />
   </head>
   <body>
     <div class="app-shell">
@@ -26,14 +26,17 @@
 
         <nav class="top-tabs" aria-label="操作台模块">
           <button class="top-tab active" data-view="cameras">
+            <i class="top-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2" /><path d="m16 11 5-3v8l-5-3" /></svg></i>
             <span>配置</span>
             <small>摄像头与人员</small>
           </button>
           <button class="top-tab" data-view="evidence">
+            <i class="top-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.4 3.4 8 8 9 4.6-1 8-4.6 8-9V6l-8-3Z" /><path d="m9 12 2 2 4-4" /></svg></i>
             <span>证据</span>
             <small>录像与轨迹</small>
           </button>
           <button class="top-tab" data-view="runtime">
+            <i class="top-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4" /></svg></i>
             <span>运维控制</span>
             <small>启动、状态与维护</small>
           </button>
@@ -351,16 +354,19 @@
         </main>
 
         <main id="trajectory-view" class="operator-view trajectory-workspace" hidden>
-          <section class="pane trajectory-filter-pane">
-            <div class="pane-title">
+          <section class="pane trajectory-query-pane" aria-label="轨迹搜索">
+            <div class="trajectory-query-title">
+              <span class="view-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>
+              </span>
               <div>
                 <h2>轨迹搜索</h2>
-                <p>按人员编号、时间范围和摄像头查询</p>
+                <p>按人员、摄像头和时间范围查找此人出现过的位置</p>
               </div>
             </div>
             <form id="trajectory-search-form" class="trajectory-search-form">
-              <label>人员编号
-                <input id="trajectory-person-id" name="person_id" type="search" inputmode="numeric" list="trajectory-person-options" placeholder="输入人员编号" autocomplete="off" required />
+              <label class="trajectory-field-person">人员编号
+                <input id="trajectory-person-id" name="person_id" type="search" inputmode="numeric" list="trajectory-person-options" placeholder="输入人员编号或从候选中选择" autocomplete="off" required />
                 <datalist id="trajectory-person-options"></datalist>
               </label>
               <label>摄像头
@@ -379,41 +385,58 @@
                 <button id="trajectory-reset" type="button">重置</button>
               </div>
             </form>
-            <div id="trajectory-search-summary" class="result-card trajectory-search-summary">
+            <div id="trajectory-search-summary" class="trajectory-search-summary">
               输入人员编号后查询，系统会按时间倒序显示轨迹画面。
             </div>
           </section>
 
-          <section class="pane trajectory-list-pane">
-            <div class="pane-title">
+          <section id="trajectory-profile" class="pane trajectory-profile" aria-live="polite">
+            <div class="trajectory-profile-placeholder">
+              <span class="view-icon view-icon--large" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5" /><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5" /></svg>
+              </span>
               <div>
-                <h2>轨迹列表</h2>
-                <p>按时间倒序展示，每页 50 条</p>
+                <h2>人员行动概况</h2>
+                <p>查询后在这里显示此人的出现次数、经过的摄像头和按时间先后连成的行动路线。</p>
               </div>
-              <button id="trajectory-refresh" type="button">刷新</button>
             </div>
-            <div class="pagination-bar" aria-label="轨迹分页">
-              <button id="trajectory-previous" type="button" disabled>上一页</button>
-              <span id="trajectory-page-status">尚未查询</span>
-              <button id="trajectory-next" type="button" disabled>下一页</button>
+          </section>
+
+          <section class="pane trajectory-list-pane">
+            <div class="pane-title trajectory-list-title">
+              <div>
+                <h2>出现时间线</h2>
+                <p>按时间倒序，每页 50 条</p>
+              </div>
+              <div class="pagination-bar trajectory-pagination" aria-label="轨迹分页">
+                <button id="trajectory-previous" type="button" disabled aria-label="上一页">‹</button>
+                <span id="trajectory-page-status">尚未查询</span>
+                <button id="trajectory-next" type="button" disabled aria-label="下一页">›</button>
+                <button id="trajectory-refresh" type="button">刷新</button>
+              </div>
             </div>
-            <div id="trajectory-list" class="trajectory-result-list">
+            <div id="trajectory-list" class="trajectory-result-list trajectory-timeline">
               <div class="empty-state">请先按人员编号查询轨迹。</div>
             </div>
           </section>
 
           <section class="pane trajectory-detail-pane">
-            <div class="pane-title">
+            <div class="pane-title trajectory-stage-title">
               <div>
-                <h2>轨迹画面</h2>
-                <p>选择左侧记录后在此查看，不再打开弹窗</p>
+                <h2>出现画面</h2>
+                <p>在时间线中选择记录；也可以用键盘 ↑ ↓ 切换</p>
+              </div>
+              <div class="trajectory-stage-nav">
+                <button id="trajectory-newer-item" type="button" disabled>较新</button>
+                <button id="trajectory-older-item" type="button" disabled>较早</button>
               </div>
             </div>
             <div id="trajectory-inline-stage" class="trajectory-inline-stage">
               <img id="trajectory-detail-image" alt="轨迹画面" hidden />
+              <div id="trajectory-stage-tag" class="trajectory-stage-tag" hidden></div>
               <div id="trajectory-detail-empty" class="trajectory-detail-empty">请选择一条轨迹记录</div>
             </div>
-            <div id="trajectory-detail" class="profile-card trajectory-detail-card">
+            <div id="trajectory-detail" class="trajectory-detail-card">
               暂无选中的轨迹记录。
             </div>
           </section>
@@ -748,7 +771,8 @@
         </main>
 
         <main id="evidence-view" class="operator-view evidence-workspace" hidden>
-          <section class="pane evidence-filters">
+          <aside class="pane evidence-sidebar" aria-label="告警证据列表">
+          <section class="evidence-filters">
             <div class="pane-title">
               <div>
                 <h2>告警分类</h2>
@@ -757,7 +781,7 @@
               <button id="refreshBundles" type="button">刷新</button>
             </div>
             <div class="alert-category-tabs" role="group" aria-label="告警分类">
-              <button class="category-chip active" type="button" data-event-category="all">告警证据</button>
+              <button class="category-chip active" type="button" data-event-category="all">全部告警</button>
               <button class="category-chip" type="button" data-event-category="perimeter">周界入侵</button>
               <button class="category-chip" type="button" data-event-category="behavior">行为异常</button>
               <button class="category-chip" type="button" data-event-category="crowd">聚集风险</button>
@@ -773,26 +797,26 @@
             </div>
           </section>
 
-          <section class="pane evidence-list-pane">
-            <div class="pane-title">
-              <div>
-                <h2>证据列表</h2>
-                <p>选择告警查看原始录像和画面标注</p>
-              </div>
-            </div>
+          <section class="evidence-list-pane">
             <div class="pagination-bar" aria-label="证据分页">
-              <button id="previousBundles" type="button" disabled>上一页</button>
+              <button id="previousBundles" type="button" disabled aria-label="上一页">‹</button>
               <span id="bundlePageStatus">第 0-0 条 / 共 0 条</span>
-              <button id="nextBundles" type="button" disabled>下一页</button>
+              <button id="nextBundles" type="button" disabled aria-label="下一页">›</button>
             </div>
             <div id="bundleList" class="scroll-list evidence-list"></div>
           </section>
+          </aside>
 
           <section class="pane evidence-detail-pane">
-            <div class="pane-title">
-              <div>
-                <h2>证据复核</h2>
-                <p>视频告警、人员框和画面标注结果</p>
+            <div class="evidence-stage-header">
+              <div class="evidence-title-block">
+                <span id="evidenceTypeBadge" class="evidence-type-badge" data-category="none" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m16 10 5-3v10l-5-3" /></svg>
+                </span>
+                <div class="evidence-title-copy">
+                  <h2 id="evidenceTitle">证据复核</h2>
+                  <p id="evidenceSubtitle">从左侧列表选择一条告警，查看原始录像和画面标注</p>
+                </div>
               </div>
               <div class="status-row">
                 <span class="status-pill" id="healthStatus">证据服务检查中</span>
@@ -811,13 +835,8 @@
               <div id="imageEvidence" class="image-evidence" hidden></div>
             </div>
 
-            <section class="sub-section overlay-controls">
-              <div class="pane-title">
-                <div>
-                  <h3>画面标注</h3>
-                  <p>控制人脸框、关键点和标签显示</p>
-                </div>
-              </div>
+            <section class="overlay-controls" aria-label="画面标注">
+              <span class="overlay-controls-label">画面标注</span>
               <label class="internal-debug" hidden>annotation source
                 <select id="annotationSource">
                   <option value="auto" selected>Auto (production sidecar)</option>
@@ -825,12 +844,12 @@
                 </select>
               </label>
               <div class="toggle-grid">
-                <label class="inline"><input id="showPersons" type="checkbox" checked /> 显示人员框</label>
-                <label class="inline"><input id="showMatched" type="checkbox" checked /> 显示命中人脸</label>
-                <label class="inline"><input id="showUnknown" type="checkbox" checked /> 显示未识别人脸</label>
-                <label class="inline"><input id="showTrajectories" type="checkbox" checked /> 显示轨迹</label>
-                <label class="inline"><input id="showLandmarks" type="checkbox" checked /> 显示关键点</label>
-                <label class="inline"><input id="showLabels" type="checkbox" checked /> 显示标签</label>
+                <label class="inline overlay-toggle" data-tone="person"><input id="showPersons" type="checkbox" checked /> 人员框</label>
+                <label class="inline overlay-toggle" data-tone="matched"><input id="showMatched" type="checkbox" checked /> 命中人脸</label>
+                <label class="inline overlay-toggle" data-tone="unknown"><input id="showUnknown" type="checkbox" checked /> 未识别人脸</label>
+                <label class="inline overlay-toggle" data-tone="track"><input id="showTrajectories" type="checkbox" checked /> 轨迹</label>
+                <label class="inline overlay-toggle"><input id="showLandmarks" type="checkbox" checked /> 关键点</label>
+                <label class="inline overlay-toggle"><input id="showLabels" type="checkbox" checked /> 标签</label>
               </div>
               <label class="internal-debug" hidden>hold ms<input id="holdMs" type="number" min="0" step="50" value="0" /></label>
               <label class="internal-debug" hidden>time tolerance ms<input id="toleranceMs" type="number" min="0" step="25" value="150" /></label>
@@ -991,8 +1010,8 @@
       </section>
     </div>
     <script src="/static/operator.js?v=runtime-nav-latency-20260715-operator-copy"></script>
-    <script src="/static/trajectory.js?v=trajectory-page-20260712-operator-copy"></script>
-    <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712-state-labels-20260712-operator-copy"></script>
+    <script src="/static/trajectory.js?v=trajectory-page-20260712-operator-copy-ui-20261010"></script>
+    <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712-state-labels-20260712-operator-copy-ui-20261010"></script>
     <script src="/static/maintenance.js?v=maintenance-execute-control-20260627-operator-copy"></script>
   </body>
 </html>

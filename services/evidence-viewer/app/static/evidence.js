@@ -627,6 +627,7 @@ async function loadBundles() {
     return loadBundles();
   }
   dom.bundleCount.textContent = `证据 ${state.bundleTotal}`;
+  dom.bundleList.scrollTop = 0;
   renderBundleList();
   updateBundlePagination();
   const selectionStillVisible = Boolean(bundleByEventId(state.selectedEventId));
@@ -637,49 +638,153 @@ async function loadBundles() {
   persistEvidenceState();
 }
 
+const CATEGORY_ICON_PATHS = {
+  perimeter: '<path d="M4 20V9l8-5 8 5v11" /><path d="M9 20v-6h6v6" /><path d="M2 20h20" />',
+  behavior: '<circle cx="13" cy="4.5" r="2" /><path d="m9 21 2.5-6.5L14 17v4" /><path d="m7 11 3-3.5 3.5 1 2 3.5 3 1" /><path d="M11.5 14.5 10 8" />',
+  crowd: '<circle cx="8" cy="8" r="2.5" /><circle cx="16" cy="8" r="2.5" /><path d="M3 19c.6-3 2.5-4.5 5-4.5s4.4 1.5 5 4.5" /><path d="M13.5 15.2c.7-.5 1.5-.7 2.5-.7 2.5 0 4.4 1.5 5 4.5" />',
+  identity: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" /><circle cx="12" cy="10.5" r="3" /><path d="M7.5 17c1-2 2.6-3 4.5-3s3.5 1 4.5 3" />',
+  all: '<rect x="3" y="6" width="13" height="12" rx="2" /><path d="m16 10 5-3v10l-5-3" />'
+};
+
+function categoryIconSvg(category) {
+  const paths = CATEGORY_ICON_PATHS[category] || CATEGORY_ICON_PATHS.all;
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
+}
+
+function bundleThumbnailUrl(bundle = {}) {
+  return textOrNull(bundle.face_crop_url) ||
+    textOrNull(bundle.annotated_frame_url) ||
+    textOrNull(bundle.full_frame_url);
+}
+
+function bundleTimeParts(bundle = {}) {
+  const date = dateFromAlarmMachineTime(bundle.alarm_machine_time);
+  if (!date) return { dayKey: "unknown", dayLabel: "时间未知", clock: "--:--" };
+  const pad = number => String(number).padStart(2, "0");
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  const key = value => `${value.getFullYear()}-${value.getMonth()}-${value.getDate()}`;
+  const base = `${date.getMonth() + 1}月${date.getDate()}日`;
+  let dayLabel = base;
+  if (key(date) === key(today)) dayLabel = `今天 · ${base}`;
+  else if (key(date) === key(yesterday)) dayLabel = `昨天 · ${base}`;
+  return {
+    dayKey: key(date),
+    dayLabel,
+    clock: `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  };
+}
+
+function bundleTag(text, tone = "") {
+  const tag = document.createElement("span");
+  tag.className = tone ? `tag ${tone}` : "tag";
+  tag.textContent = text;
+  return tag;
+}
+
+function clipStatusTone(value) {
+  if (["ready", "image_ready", "materialized"].includes(value)) return "ok";
+  if (["failed", "generated_corrupt", "image_missing", "materialization_failed"].includes(value)) return "bad";
+  return "warn";
+}
+
 function renderBundleList() {
+  // Re-rendering on every selection must not throw the reviewer back to the
+  // top of the list they are working through.
+  const previousScrollTop = dom.bundleList.scrollTop;
   dom.bundleList.innerHTML = "";
   if (!state.bundles.length) {
     const empty = document.createElement("div");
-    empty.className = "bundle-sub";
+    empty.className = "empty-state";
     empty.textContent = "未找到证据。";
     dom.bundleList.appendChild(empty);
     return;
   }
+  let previousDay = null;
   for (const bundle of state.bundles) {
+    const timeParts = bundleTimeParts(bundle);
+    if (timeParts.dayKey !== previousDay) {
+      const divider = document.createElement("div");
+      divider.className = "list-divider";
+      divider.textContent = timeParts.dayLabel;
+      dom.bundleList.appendChild(divider);
+      previousDay = timeParts.dayKey;
+    }
+
+    const category = eventCategoryForType(bundle.event_type);
+    const isIdentity = category === "identity";
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "bundle-item";
+    button.className = "bundle-item bundle-card";
+    button.dataset.category = category;
     if (bundle.event_id === state.selectedEventId) {
       button.classList.add("active");
     }
+
+    const thumb = document.createElement("span");
+    thumb.className = "bundle-thumb";
+    const thumbUrl = bundleThumbnailUrl(bundle);
+    if (thumbUrl) {
+      const img = document.createElement("img");
+      img.src = thumbUrl;
+      img.alt = "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.addEventListener("error", () => {
+        thumb.innerHTML = categoryIconSvg(category);
+      });
+      thumb.appendChild(img);
+    } else {
+      thumb.innerHTML = categoryIconSvg(category);
+    }
+    if (bundle.raw_clip_available) {
+      const play = document.createElement("span");
+      play.className = "bundle-thumb-play";
+      play.setAttribute("aria-hidden", "true");
+      thumb.appendChild(play);
+    }
+
+    const body = document.createElement("span");
+    body.className = "bundle-body";
+    const head = document.createElement("span");
+    head.className = "bundle-head";
     const main = document.createElement("span");
     main.className = "bundle-main";
     main.textContent = eventTypeLabel(bundle.event_type) || "事件";
+    const time = document.createElement("span");
+    time.className = "bundle-time";
+    time.textContent = timeParts.clock;
+    head.append(main, time);
+
     const sub = document.createElement("span");
     sub.className = "bundle-sub";
-    const alarmTime = formatAlarmMachineTime(bundle.alarm_machine_time);
-    const evidenceStateText = evidenceStateLabel(bundle);
-    const isIdentity = eventCategoryForType(bundle.event_type) === "identity";
     const personLabel = isIdentity ? matchedPersonLabel(bundle) : "";
     sub.textContent = [
-      eventCategoryLabel(bundle.event_type),
-      personLabel ? `人员 ${personLabel}` : "",
       cameraDisplayName(bundle),
-      alarmTime ? `报警 ${alarmTime}` : "",
-      isIdentity ? "点击查看此人轨迹" : clipStatusLabel(bundle.clip_status),
-      evidenceStateText,
-      evidenceStatusLabel(bundle.visual_evidence_status),
-      `人脸 ${Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0)}`
-    ].filter(Boolean).join(" | ");
-    if (textOrNull(bundle.evidence_reason)) button.title = "该证据生成异常，请查看提示";
-    button.append(main, sub);
+      personLabel ? `人员 ${personLabel}` : eventCategoryLabel(bundle.event_type)
+    ].filter(Boolean).join(" · ");
+
+    const tags = document.createElement("span");
+    tags.className = "bundle-tags";
     if (isIdentity) {
-      const action = document.createElement("span");
-      action.className = "bundle-action";
-      action.textContent = "查看此人轨迹";
-      button.appendChild(action);
+      tags.appendChild(bundleTag("点击查看此人轨迹", "info"));
+    } else {
+      tags.appendChild(bundleTag(clipStatusLabel(bundle.clip_status), clipStatusTone(bundle.clip_status)));
     }
+    const visualStatus = evidenceStatusLabel(bundle.visual_evidence_status);
+    if (visualStatus && visualStatus !== "-") {
+      tags.appendChild(bundleTag(visualStatus, bundle.visual_evidence_status === "verified" ? "" : "warn"));
+    }
+    const evidenceStateText = isIdentity ? "" : evidenceStateLabel(bundle);
+    if (evidenceStateText && evidenceStateText !== clipStatusLabel(bundle.clip_status)) {
+      tags.appendChild(bundleTag(evidenceStateText, textOrNull(bundle.evidence_reason) ? "bad" : ""));
+    }
+    const faces = Number(bundle.matched_objects || 0) + Number(bundle.unknown_objects || 0);
+    if (faces > 0) tags.appendChild(bundleTag(`人脸 ${faces}`));
+
+    body.append(head, sub, tags);
+    if (textOrNull(bundle.evidence_reason)) button.title = "该证据生成异常，请查看提示";
+    button.append(thumb, body);
     button.addEventListener("click", () => {
       if (isIdentity && openPersonTrajectoryFromBundle(bundle)) {
         return;
@@ -688,6 +793,17 @@ function renderBundleList() {
     });
     dom.bundleList.appendChild(button);
   }
+  dom.bundleList.scrollTop = previousScrollTop;
+}
+
+function setEvidenceTitle({ category = "none", title = "证据复核", subtitle = "" } = {}) {
+  const badge = document.getElementById("evidenceTypeBadge");
+  if (badge) {
+    badge.dataset.category = category;
+    badge.innerHTML = categoryIconSvg(category === "none" ? "all" : category);
+  }
+  setText("evidenceTitle", title);
+  setText("evidenceSubtitle", subtitle || "从左侧列表选择一条告警，查看原始录像和画面标注");
 }
 
 function updateEvidenceDeleteButton() {
@@ -779,6 +895,7 @@ function resetBundleSelection() {
   ]) {
     setText(id, "-");
   }
+  setEvidenceTitle();
   dom.clipWarning.hidden = true;
   updateEvidenceDeleteButton();
   renderWarnings();
@@ -835,6 +952,14 @@ function clearBundleDetailForLoading(eventId) {
     setText(id, "-");
   }
   setText("eventId", eventId);
+  const pending = bundleByEventId(eventId);
+  setEvidenceTitle(pending
+    ? {
+        category: eventCategoryForType(pending.event_type),
+        title: eventTypeLabel(pending.event_type),
+        subtitle: `${cameraDisplayName(pending)} · 正在加载证据…`
+      }
+    : { title: "正在加载证据…" });
   dom.clipWarning.hidden = true;
   updateEvidenceDeleteButton();
 }
@@ -1833,16 +1958,13 @@ function renderDetails() {
   const decodeWarnings = Number(validation.decode_error_count || 0);
   const corrupt = clipStatus === "generated_corrupt" || decodeWarnings > 0;
 
-  setText("eventId", event.event_id || state.selectedEventId);
-  setText("eventType", eventTypeLabel(event.event_type || summary.event_type));
-  setText("sourceId", cameraDisplayName({
+  const eventTypeValue = event.event_type || summary.event_type || state.manifest?.event_type;
+  const cameraName = cameraDisplayName({
     camera_name: state.manifest?.camera_name || event.camera_name || metadata.camera_name || summary.camera_name,
-    source_id: event.source_id || summary.source_id,
-    camera_id: event.camera_id || summary.camera_id
-  }));
-  setText("sourceRawId", event.source_id || summary.source_id);
-  setText("cameraId", event.camera_id || summary.camera_id);
-  setText("alarmMachineTime", formatAlarmMachineTime(
+    source_id: event.source_id || summary.source_id || state.manifest?.source_id,
+    camera_id: event.camera_id || summary.camera_id || state.manifest?.camera_id
+  });
+  const alarmTime = formatAlarmMachineTime(
     state.manifest?.alarm_machine_time ||
     event.alarm_machine_time ||
     event.created_at ||
@@ -1850,7 +1972,21 @@ function renderDetails() {
     metadata.created_at ||
     summary.alarm_machine_time ||
     summary.event_created_at
-  ));
+  );
+  setText("eventId", event.event_id || state.selectedEventId);
+  setText("eventType", eventTypeLabel(eventTypeValue));
+  setText("sourceId", cameraName);
+  setText("sourceRawId", event.source_id || summary.source_id);
+  setText("cameraId", event.camera_id || summary.camera_id);
+  setText("alarmMachineTime", alarmTime);
+  const personLabel = matchedPersonLabel(state.manifest || {});
+  setEvidenceTitle({
+    category: eventCategoryForType(eventTypeValue),
+    title: eventTypeLabel(eventTypeValue),
+    subtitle: [cameraName, alarmTime ? `报警 ${alarmTime}` : "", personLabel ? `人员 ${personLabel}` : ""]
+      .filter(Boolean)
+      .join(" · ")
+  });
   setText("rawClipStatus", isImageEvidence ? "图片证据" : clipStatusLabel(clipStatus));
   setText("clipValidation", isImageEvidence ? "图片已就绪" : (corrupt ? `录像已生成，画面质量需复核` : "已验证"));
   setText("firstVideoPts", isImageEvidence ? "-" : state.firstVideoFramePts);
