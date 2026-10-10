@@ -1914,6 +1914,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg,
             sources_path=pressure_sources_path,
         )
+        report["pressure_source_isolation"] = assert_pressure_source_isolation(cfg)
 
         after_prefill = None
         if cfg.rolling_cache_evidence and cfg.rolling_cache_prefill_s > 0:
@@ -2778,11 +2779,13 @@ def prepare_evidence_guard(conn, cfg: PressureConfig, report: dict[str, Any]) ->
             {"name": "existing_sources_quiesced_before_evidence_reset"}
         )
         return wait_for_evidence_guard_clear(conn, cfg)
-    if cfg.force_runtime_restart:
-        return before
     if not cfg.no_quiesce_before_guard:
         quiesce_existing_sources(conn, cfg)
         report["steps"].append({"name": "existing_sources_quiesced"})
+    if cfg.force_runtime_restart:
+        # Force permits proceeding past active evidence; it must not leave old
+        # RTSP readers consuming publisher/network capacity during the test.
+        return before
     return wait_for_evidence_guard_clear(conn, cfg)
 
 
@@ -2797,6 +2800,41 @@ def quiesce_existing_sources(conn, cfg: PressureConfig) -> None:
             (f"{cfg.run_id}_%",),
         )
     apply_sources_only(cfg, "runtime_sources_apply_quiesce_before_guard.json")
+
+
+def assert_pressure_source_isolation(cfg: PressureConfig) -> dict[str, Any]:
+    """Verify Docker readers as well as the run-scoped analysis source count."""
+    completed = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=DOCKER_SOURCE_INSPECT_TIMEOUT_S,
+    )
+    running = {
+        name.strip()
+        for name in completed.stdout.splitlines()
+        if name.startswith(("video-analytics-source-", "video-analytics-midterm-source-adapter"))
+    }
+    expected = {f"video-analytics-source-{source}" for source in pressure_source_ids(cfg)}
+    summary = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "expected_count": len(expected),
+        "running_adapter_count": len(running),
+        "unexpected_running_adapters": sorted(running - expected),
+        "missing_adapters": sorted(expected - running),
+        "isolated": running == expected,
+    }
+    write_json(cfg.artifact_dir / "pressure_source_isolation.json", summary)
+    if not summary["isolated"]:
+        raise RuntimeError(
+            "pressure source isolation failed: "
+            f"unexpected={summary['unexpected_running_adapters']} "
+            f"missing={summary['missing_adapters']}; "
+            "quiesce background source adapters before starting a measured run"
+        )
+    return summary
 
 
 def wait_for_evidence_guard_clear(conn, cfg: PressureConfig) -> dict[str, Any]:
@@ -15577,7 +15615,31 @@ def nvidia_smi_csv() -> str:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            timeout=5,
         ).stdout
+    except FileNotFoundError:
+        # The CPU-only API helper has Docker access but no NVIDIA runtime mount.
+        # Read NVML through an existing inference container; never create a GPU
+        # container or change its runtime just to collect telemetry.
+        errors = []
+        for name in (
+            "video-analytics-midterm-savant-a",
+            "video-analytics-midterm-savant-b",
+            "video-analytics-midterm-savant-security",
+            "video-analytics-midterm-savant",
+        ):
+            try:
+                return subprocess.run(
+                    ["docker", "exec", name, "nvidia-smi", f"--query-gpu={query}", "--format=csv"],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=5,
+                ).stdout
+            except Exception as exc:
+                errors.append(f"{name}: {type(exc).__name__}")
+        return "nvidia-smi failed: helper binary missing; " + "; ".join(errors) + "\n"
     except Exception as exc:
         return f"nvidia-smi failed: {exc}\n"
 

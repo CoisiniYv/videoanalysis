@@ -1957,6 +1957,109 @@ def test_evidence_reset_quiesces_even_when_force_restart_is_enabled(
     ]
 
 
+def test_force_restart_quiesces_background_readers_without_deleting_evidence(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path, force_runtime_restart=True)
+    before = {"active_count": 2, "blocking_count": 2, "tasks": []}
+    calls = []
+    monkeypatch.setattr(module, "active_evidence_tasks", lambda _conn: before)
+    monkeypatch.setattr(module, "quiesce_existing_sources", lambda *_: calls.append("quiesced"))
+    monkeypatch.setattr(module, "wait_for_evidence_guard_clear", lambda *_: pytest.fail("force skips waiting"))
+    report = {"steps": []}
+    assert module.prepare_evidence_guard(object(), cfg, report) == before
+    assert calls == ["quiesced"]
+
+
+@pytest.mark.parametrize("extra", ["video-analytics-source-legacy_00", "video-analytics-midterm-source-adapter"])
+def test_source_isolation_rejects_unrelated_running_readers(monkeypatch, tmp_path: Path, extra: str) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    stdout = "\n".join(["video-analytics-source-pressure60_test_00", "video-analytics-source-pressure60_test_01", extra])
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout=stdout))
+    with pytest.raises(RuntimeError, match="pressure source isolation failed"):
+        module.assert_pressure_source_isolation(cfg)
+    audit = json.loads((tmp_path / "pressure_source_isolation.json").read_text())
+    assert audit["unexpected_running_adapters"] == [extra]
+    assert audit["missing_adapters"] == []
+    assert audit["running_adapter_count"] == 3
+
+
+def test_source_isolation_accepts_exact_readers_and_rejects_missing(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    names = ["video-analytics-source-pressure60_test_00", "video-analytics-source-pressure60_test_01", "video-analytics-midterm-api"]
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="\n".join(names)))
+    assert module.assert_pressure_source_isolation(cfg)["isolated"]
+    names.remove("video-analytics-source-pressure60_test_01")
+    with pytest.raises(RuntimeError, match="missing="):
+        module.assert_pressure_source_isolation(cfg)
+    audit = json.loads((tmp_path / "pressure_source_isolation.json").read_text())
+    assert audit["missing_adapters"] == ["video-analytics-source-pressure60_test_01"]
+
+
+def test_source_isolation_fails_closed_when_docker_unavailable(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module()
+    cfg = _config(module, artifact_dir=tmp_path)
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0])
+    monkeypatch.setattr(module.subprocess, "run", unavailable)
+    with pytest.raises(subprocess.CalledProcessError):
+        module.assert_pressure_source_isolation(cfg)
+
+
+def test_gpu_query_uses_existing_binary_without_docker(monkeypatch) -> None:
+    module = _load_module()
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["timeout"] == 5
+        return subprocess.CompletedProcess(command, 0, stdout="name\nTesla T4\n")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module.nvidia_smi_csv() == "name\nTesla T4\n"
+    assert len(calls) == 1 and calls[0][0] == "nvidia-smi"
+
+
+def test_gpu_query_from_cpu_helper_falls_back_to_running_inference(monkeypatch) -> None:
+    module = _load_module()
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[0] == "nvidia-smi":
+            raise FileNotFoundError("nvidia-smi")
+        assert command[:2] == ["docker", "exec"]
+        if command[2].endswith("savant-a"):
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0, stdout="name\nTesla T4\n")
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module.nvidia_smi_csv() == "name\nTesla T4\n"
+    assert len(calls) == 3
+    assert calls[-1][2] == "video-analytics-midterm-savant-b"
+
+
+def test_gpu_query_keeps_driver_error_visible(monkeypatch) -> None:
+    module = _load_module()
+    calls = []
+    def fail(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(module.subprocess, "run", fail)
+    assert module.nvidia_smi_csv().startswith("nvidia-smi failed:")
+    assert len(calls) == 1
+
+
+def test_gpu_query_reports_missing_helper_and_unavailable_containers(monkeypatch) -> None:
+    module = _load_module()
+    calls = []
+    def fail(command, **kwargs):
+        calls.append(command)
+        raise FileNotFoundError(command[0])
+    monkeypatch.setattr(module.subprocess, "run", fail)
+    assert "helper binary missing" in module.nvidia_smi_csv()
+    assert len(calls) == 5
+
+
 def test_pressure_camera_name_is_readable_and_one_based() -> None:
     module = _load_module()
 
