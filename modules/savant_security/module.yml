@@ -185,9 +185,12 @@ pipeline:
 
     # ------------------------------------------------------------------
     # FaceRoiExporterPyFunc — optional asynchronous AdaFace input path.
-    # Runs the embedding-independent quality/cadence gate, aligns eligible
-    # faces on the already-decoded GPU frame, and publishes only a bounded
-    # 112x112 JPEG crop plus identity metadata. Disabled by default.
+    # Runs the embedding-independent quality gate and the per-track identity
+    # refresh policy (first usable face immediately; afterwards a clear face
+    # every FACE_IDENTITY_REFRESH_MS), aligns eligible faces on the
+    # already-decoded GPU frame, and publishes only a bounded 112x112 JPEG crop
+    # plus identity metadata. Disabled by default; the 8090 dual-branch
+    # presets enable it.
     # ------------------------------------------------------------------
     - element: pyfunc
       name: face_roi_exporter
@@ -200,6 +203,10 @@ pipeline:
         min_confidence: ${oc.decode:${oc.env:FACE_REID_MIN_CONFIDENCE, 0.45}}
         min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
         min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
+        identity_refresh_ms: ${oc.decode:${oc.env:FACE_IDENTITY_REFRESH_MS, 5000}}
+        clear_min_face_size: ${oc.decode:${oc.env:FACE_CLEAR_MIN_SIZE_PX, 64}}
+        clear_min_confidence: ${oc.decode:${oc.env:FACE_CLEAR_MIN_CONFIDENCE, 0.6}}
+        clear_max_yaw_ratio: ${oc.decode:${oc.env:FACE_CLEAR_MAX_YAW_RATIO, 0.35}}
 
     # ------------------------------------------------------------------
     # AdaFace — face embedding attribute model.
@@ -233,8 +240,9 @@ pipeline:
             - name: feature
 
     # ------------------------------------------------------------------
-    # FaceReidGatePyFunc — quality gate + per-track throttle.
-    # Evaluates face quality and embedding eligibility for ReID.
+    # FaceReidGatePyFunc — quality gate + per-track identity refresh policy.
+    # Evaluates face quality and embedding eligibility for ReID. With inline
+    # AdaFace this limits exports and face-worker searches, not embeddings.
     # Attaches reid_allowed / reid_skip_reason / reid_quality_score.
     # Does NOT emit face observations to Redis.
     # ------------------------------------------------------------------
@@ -250,6 +258,10 @@ pipeline:
         face_reid_min_face_size: ${oc.decode:${oc.env:FACE_REID_MIN_FACE_SIZE, 40.0}}
         face_reid_min_interval_ms: ${oc.decode:${oc.env:FACE_REID_MIN_INTERVAL_MS, 1000}}
         face_reid_norm_tolerance: ${oc.decode:${oc.env:FACE_REID_NORM_TOLERANCE, 0.10}}
+        identity_refresh_ms: ${oc.decode:${oc.env:FACE_IDENTITY_REFRESH_MS, 5000}}
+        clear_min_face_size: ${oc.decode:${oc.env:FACE_CLEAR_MIN_SIZE_PX, 64}}
+        clear_min_confidence: ${oc.decode:${oc.env:FACE_CLEAR_MIN_CONFIDENCE, 0.6}}
+        clear_max_yaw_ratio: ${oc.decode:${oc.env:FACE_CLEAR_MAX_YAW_RATIO, 0.35}}
 
     # ------------------------------------------------------------------
     # FaceObservationExporterPyFunc — Redis face observation producer.

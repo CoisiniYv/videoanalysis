@@ -1,8 +1,12 @@
 """FaceReidGatePyFunc — quality gate + throttle before Redis.
 
-Runs after AdaFace embedding. Evaluates face quality and per-track
-throttle to decide if the embedding is eligible for downstream Redis
-storage.
+Runs after AdaFace embedding. Evaluates face quality and the per-track
+identity refresh policy (first usable face, then a clear face every
+identity_refresh_ms) to decide if the embedding is eligible for downstream
+Redis storage. When AdaFace runs inline on every detected face (single-branch
+path without the candidate gate), this cuts face observations and face-worker
+searches but not AdaFace GPU work; the ROI exporter and candidate gate apply
+the same policy before AdaFace.
 
 Does NOT:
 - write to Redis security.face_observations
@@ -17,9 +21,13 @@ from typing import Any, Optional
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
+from custom.services.face_identity_refresh import (
+    IdentityRefreshConfig,
+    IdentityRefreshPolicy,
+    count_decision,
+)
 from custom.services.face_reid_gate import (
     ReIDGateInput,
-    ReIDThrottleMap,
     evaluate_reid_gate,
 )
 from custom.services.time_utils import normalize_pts_to_ms
@@ -38,6 +46,10 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
         face_reid_norm_tolerance: float = 0.10,
         face_element_name: str = "",
         cameras_config_path: str = "",
+        identity_refresh_ms: int | None = None,
+        clear_min_face_size: float | None = None,
+        clear_min_confidence: float | None = None,
+        clear_max_yaw_ratio: float | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -52,8 +64,14 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
             "face_reid_min_face_size": float(face_reid_min_face_size),
             "face_reid_norm_tolerance": float(face_reid_norm_tolerance),
         }
-        self._throttle = ReIDThrottleMap(
-            min_interval_ms=int(face_reid_min_interval_ms),
+        self._identity = IdentityRefreshPolicy(
+            IdentityRefreshConfig.from_env(
+                min_interval_ms=face_reid_min_interval_ms,
+                refresh_ms=identity_refresh_ms,
+                clear_min_face_size=clear_min_face_size,
+                clear_min_confidence=clear_min_confidence,
+                clear_max_yaw_ratio=clear_max_yaw_ratio,
+            )
         )
         self._camera_bundle = self._load_camera_bundle(cameras_config_path)
         self._counters = {
@@ -118,17 +136,28 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
                 self._counters["detector_confidence_rejected"] += 1
             result = evaluate_reid_gate(inp, self._config)
 
-            # Throttle check (only if gate passed)
+            # Identity refresh cadence (only if gate passed)
             if result.allowed:
                 ts = inp.timestamp_ms or self._frame_count
-                if not self._throttle.is_allowed(result.throttle_key, ts):
+                clarity = self._identity.assess(
+                    face_width=inp.face_width,
+                    face_height=inp.face_height,
+                    face_confidence=inp.face_confidence,
+                    landmarks=inp.landmarks,
+                )
+                decision = self._identity.decide(
+                    result.throttle_key, ts, clarity.clear
+                )
+                count_decision(self._counters, decision)
+                result.clear = clarity.clear
+                result.clarity_score = clarity.score
+                result.identity_reason = decision.reason
+                if not decision.allowed:
                     result.allowed = False
                     result.skip_reason = "throttled"
-                    result.next_allowed_at_ms = self._throttle.next_allowed_at(
-                        result.throttle_key,
-                    )
+                    result.next_allowed_at_ms = decision.next_allowed_at_ms
                 else:
-                    self._throttle.record(result.throttle_key, ts)
+                    self._identity.record(result.throttle_key, ts, clarity.clear)
 
             # Attach metadata to face object
             self._attach_gate_meta(obj, result)
@@ -271,6 +300,18 @@ class FaceReidGatePyFunc(NvDsPyFuncPlugin):
             f"reid_min_confidence={self._config['face_reid_min_confidence']:.3f} "
             f"reid_min_face_size={self._config['face_reid_min_face_size']:.1f} "
             f"reid_norm_tolerance={self._config['face_reid_norm_tolerance']:.3f}",
+            flush=True,
+        )
+        identity = " ".join(
+            f"{key}={value}"
+            for key, value in sorted(self._counters.items())
+            if key.startswith("identity_")
+        )
+        print(
+            "[face_reid_gate_identity] "
+            f"identity_tracks={self._identity.tracked_count} "
+            f"identity_refresh_ms={self._identity.config.refresh_ms} "
+            f"{identity}",
             flush=True,
         )
 

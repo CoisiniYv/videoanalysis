@@ -616,6 +616,7 @@
                   <label>人体识别间隔<input name="pose_infer_interval" type="number" min="0" max="30" step="1" /></label>
                   <label>人脸检测间隔<input name="face_infer_interval" type="number" min="0" max="30" step="1" /></label>
                   <label>人脸特征间隔<input name="face_embedding_infer_interval" type="number" min="0" max="30" step="1" /></label>
+                  <label>人脸复识别间隔 ms<input name="face_identity_refresh_ms" type="number" min="0" max="600000" step="500" /></label>
                   <label>批量等待（微秒）<input name="batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
                 </div>
               </fieldset>
@@ -703,6 +704,7 @@
                       <label>识别帧率<input name="a.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
                       <label>识别最低帧率<input name="a.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                       <label>批量推送等待 us<input name="a.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                      <label>人脸复识别间隔 ms<input name="a.face_identity_refresh_ms" type="number" min="0" max="600000" step="500" /></label>
                     </div>
                   </fieldset>
                   <fieldset class="runtime-topology-branch" id="runtime-topology-branch-b">
@@ -720,6 +722,7 @@
                       <label>识别帧率<input name="b.savant_max_fps" type="text" inputmode="decimal" placeholder="8/1" /></label>
                       <label>识别最低帧率<input name="b.savant_min_fps" type="text" inputmode="decimal" placeholder="2/1" /></label>
                       <label>批量推送等待 us<input name="b.batched_push_timeout" type="number" min="0" max="1000000" step="1000" /></label>
+                      <label>人脸复识别间隔 ms<input name="b.face_identity_refresh_ms" type="number" min="0" max="600000" step="500" /></label>
                     </div>
                   </fieldset>
                 </div>
@@ -1009,7 +1012,7 @@
         </div>
       </section>
     </div>
-    <script src="/static/operator.js?v=runtime-nav-latency-20260715-operator-copy-behavior-20261010"></script>
+    <script src="/static/operator.js?v=runtime-nav-latency-20260715-operator-copy-behavior-20261010-face-refresh-20261010"></script>
     <script src="/static/trajectory.js?v=trajectory-page-20260712-operator-copy-ui-20261010-compat-20261010"></script>
     <script src="/static/evidence.js?v=evidence-overlay-seek-20260709-trajectory-page-20260712-state-labels-20260712-operator-copy-ui-20261010-behavior-20261010-compat-20261010"></script>
     <script src="/static/maintenance.js?v=maintenance-execute-control-20260627-operator-copy"></script>

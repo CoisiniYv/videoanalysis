@@ -130,6 +130,7 @@ class BranchConfig:
     savant_max_fps: str
     savant_min_fps: str
     batched_push_timeout: int
+    face_identity_refresh_ms: int = 5000
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,7 @@ DEFAULT_BRANCH = {
     "savant_max_fps": "8/1",
     "savant_min_fps": "2/1",
     "batched_push_timeout": 40000,
+    "face_identity_refresh_ms": 5000,
 }
 
 
@@ -260,6 +262,7 @@ RUNTIME_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
             "savant_max_fps": "4/1",
             "savant_min_fps": "99/25",
             "batched_push_timeout": 10000,
+            "face_identity_refresh_ms": 5000,
         },
     },
     "local_4090_60": {
@@ -292,6 +295,7 @@ RUNTIME_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
             "savant_max_fps": "8/1",
             "savant_min_fps": "198/25",
             "batched_push_timeout": 40000,
+            "face_identity_refresh_ms": 5000,
         },
     },
 }
@@ -354,6 +358,7 @@ BRANCH_FIELDS = [
     {"key": "savant_max_fps", "kind": "fps", "label": "Savant FPS"},
     {"key": "savant_min_fps", "kind": "fps", "label": "Savant 最小 FPS"},
     {"key": "batched_push_timeout", "kind": "int", "label": "Batched push timeout", "min": 0, "max": 1000000},
+    {"key": "face_identity_refresh_ms", "kind": "int", "label": "人脸复识别间隔 ms", "min": 0, "max": 600000},
 ]
 
 
@@ -1505,6 +1510,7 @@ def _branch_config(branch_id: str, raw: dict[str, Any], *, gpu_id: int) -> Branc
         savant_max_fps=str(raw.get("savant_max_fps", "8/1")),
         savant_min_fps=str(raw.get("savant_min_fps", "2/1")),
         batched_push_timeout=int(raw.get("batched_push_timeout", 40000)),
+        face_identity_refresh_ms=int(raw.get("face_identity_refresh_ms", 5000)),
     )
 
 
@@ -1637,6 +1643,9 @@ def _savant_env(
         "FACE_EMBEDDING_BATCH_SIZE": str(branch_config["face_embedding_batch_size"]),
         "FACE_INFER_INTERVAL": str(branch_config["face_infer_interval"]),
         "FACE_EMBEDDING_INFER_INTERVAL": str(branch_config["face_infer_interval"]),
+        "FACE_IDENTITY_REFRESH_MS": str(
+            int(branch_config.get("face_identity_refresh_ms", 5000))
+        ),
         "MAX_PARALLEL_STREAMS": str(branch_config["max_parallel_streams"]),
         "BATCHED_PUSH_TIMEOUT": str(branch_config["batched_push_timeout"]),
         "MAX_FPS": str(branch_config["savant_max_fps"]),

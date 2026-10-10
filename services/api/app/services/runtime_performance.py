@@ -231,6 +231,16 @@ FIELDS: tuple[PerformanceField, ...] = (
         max_value=30,
     ),
     PerformanceField(
+        key="face_identity_refresh_ms",
+        env="FACE_IDENTITY_REFRESH_MS",
+        target="savant",
+        kind="int",
+        default=5000,
+        label="人脸复识别间隔 ms",
+        min_value=0,
+        max_value=600000,
+    ),
+    PerformanceField(
         key="savant_redis_socket_timeout_ms",
         env="SAVANT_REDIS_EXPORTER_SOCKET_TIMEOUT_MS",
         target="savant",

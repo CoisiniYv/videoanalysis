@@ -3799,6 +3799,7 @@ function runtimeTopologyFormBody() {
     "savant_max_fps",
     "savant_min_fps",
     "batched_push_timeout",
+    "face_identity_refresh_ms",
   ];
   const body = {
     runtime_profile: runtimeTopologyForm.elements.runtime_profile?.value || "custom",

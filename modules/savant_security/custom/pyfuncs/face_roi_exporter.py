@@ -14,9 +14,14 @@ from typing import Any
 
 from savant.deepstream.pyfunc import NvDsPyFuncPlugin
 
+from custom.services.face_identity_refresh import (
+    IdentityRefreshConfig,
+    IdentityRefreshPolicy,
+    count_decision,
+    identity_counter_names,
+)
 from custom.services.face_reid_gate import (
     ReIDGateInput,
-    ReIDThrottleMap,
     evaluate_reid_candidate,
 )
 from custom.services.face_roi_stream import FaceRoiEnvelope, epoch_ms
@@ -40,6 +45,10 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
         min_confidence: float = 0.45,
         min_face_size: float = 40.0,
         min_interval_ms: int = 1000,
+        identity_refresh_ms: int | None = None,
+        clear_min_face_size: float | None = None,
+        clear_min_confidence: float | None = None,
+        clear_max_yaw_ratio: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -50,7 +59,18 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             "face_reid_min_confidence": float(min_confidence),
             "face_reid_min_face_size": float(min_face_size),
         }
-        self._throttle = ReIDThrottleMap(min_interval_ms=int(min_interval_ms))
+        # Per-track recognition cadence: first usable face immediately, then
+        # only a clear face after identity_refresh_ms (see
+        # custom.services.face_identity_refresh).
+        self._identity = IdentityRefreshPolicy(
+            IdentityRefreshConfig.from_env(
+                min_interval_ms=min_interval_ms,
+                refresh_ms=identity_refresh_ms,
+                clear_min_face_size=clear_min_face_size,
+                clear_min_confidence=clear_min_confidence,
+                clear_max_yaw_ratio=clear_max_yaw_ratio,
+            )
+        )
         self._camera_bundle = self._load_camera_bundle(cameras_config_path)
         self._writer = None
         self._aligner = None
@@ -71,7 +91,9 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             "encode_errors": 0,
             "enqueued": 0,
             "queue_dropped": 0,
+            "identity_tracks": 0,
         }
+        self._counters.update({name: 0 for name in identity_counter_names()})
         if self._enabled:
             self._init_runtime()
 
@@ -145,9 +167,22 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
             if not verdict.allowed:
                 self._counters["gate_rejected"] += 1
                 continue
-            if not self._throttle.is_allowed(verdict.throttle_key, timestamp_ms):
+            clarity = self._identity.assess(
+                face_width=inp.face_width,
+                face_height=inp.face_height,
+                face_confidence=inp.face_confidence,
+                landmarks=inp.landmarks,
+            )
+            decision = self._identity.decide(
+                verdict.throttle_key, timestamp_ms, clarity.clear
+            )
+            count_decision(self._counters, decision)
+            if not decision.allowed:
                 self._counters["throttled"] += 1
                 continue
+            verdict.clear = clarity.clear
+            verdict.clarity_score = clarity.score
+            verdict.identity_reason = decision.reason
             eligible.append((face_index, obj, inp, verdict))
 
         if eligible:
@@ -164,6 +199,7 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
 
         if self._frame_count % self._log_every == 1:
             self._counters["crop_queue_depth"] = self._crop_queue.qsize()
+            self._counters["identity_tracks"] = self._identity.tracked_count
             print(
                 "stage=face_roi_exporter "
                 + " ".join(f"{key}={value}" for key, value in self._counters.items()),
@@ -233,7 +269,9 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
                 self._drop_crop_batch(eligible)
                 return
             for _, _, inp, verdict, _ in aligned_faces:
-                self._throttle.record(verdict.throttle_key, inp.timestamp_ms)
+                self._identity.record(
+                    verdict.throttle_key, inp.timestamp_ms, bool(verdict.clear)
+                )
             self._counters["crop_queue_depth"] = self._crop_queue.qsize()
 
     def _crop_worker(self) -> None:
@@ -280,8 +318,11 @@ class FaceRoiExporterPyFunc(NvDsPyFuncPlugin):
         dropped = len(eligible)
         self._counters["queue_dropped"] += dropped
         self._counters["crop_queue_dropped"] += dropped
+        # Back off a dropped track as if an unclear face had been sent: a
+        # clear face may retry after the minimum interval, an unclear one
+        # waits for the refresh interval.
         for _, _, inp, verdict in eligible:
-            self._throttle.record(verdict.throttle_key, inp.timestamp_ms)
+            self._identity.record(verdict.throttle_key, inp.timestamp_ms, False)
 
     def on_stop(self) -> None:
         if self._crop_queue is not None and self._crop_thread is not None:

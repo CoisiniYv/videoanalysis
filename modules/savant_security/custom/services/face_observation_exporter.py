@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from typing import Optional
 
 from custom.models.face_events import FaceObservationEventDraft
+from custom.services.face_reid_gate import ReIDThrottleMap
 from custom.services.redis_stream_writer import (
     DEFAULT_CONNECT_TIMEOUT_MS,
     DEFAULT_QUEUE_MAXSIZE,
@@ -23,33 +24,22 @@ from custom.services.redis_stream_writer import (
 )
 
 
-class ExportThrottleMap:
+class ExportThrottleMap(ReIDThrottleMap):
     """In-memory per-track throttle for export rate limiting.
 
-    Defensive safety net — primary throttle is in ReIDThrottleMap.
-    Tracks the last exported timestamp_ms for each throttle_key.
+    Defensive safety net — the primary cadence is decided before AdaFace
+    (identity refresh policy) and in the ReID gate. Shares ReIDThrottleMap's
+    bounded, per-source-pruned state.
     """
 
-    def __init__(self, min_interval_ms: int = 1000):
-        self._min_interval_ms = max(min_interval_ms, 0)
-        self._last_exported: Dict[str, int] = {}
+    def __init__(self, min_interval_ms: int = 1000, state_ttl_ms: int = 60000):
+        super().__init__(min_interval_ms=min_interval_ms, state_ttl_ms=state_ttl_ms)
 
     def is_allowed(self, throttle_key: str, timestamp_ms: int) -> bool:
         """Check if this throttle_key is allowed at timestamp_ms."""
         if self._min_interval_ms <= 0:
             return True
-        last = self._last_exported.get(throttle_key)
-        if last is None:
-            return True
-        return (timestamp_ms - last) >= self._min_interval_ms
-
-    def record(self, throttle_key: str, timestamp_ms: int) -> None:
-        """Record that this throttle_key was exported at timestamp_ms."""
-        self._last_exported[throttle_key] = timestamp_ms
-
-    def clear(self) -> None:
-        """Reset all throttle state."""
-        self._last_exported.clear()
+        return super().is_allowed(throttle_key, timestamp_ms)
 
 
 class FaceObservationExporter(ABC):

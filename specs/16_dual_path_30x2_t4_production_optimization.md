@@ -257,7 +257,11 @@ Per shard at `ANALYSIS_FPS=F`, 30 streams:
 
 - pose: `30 × F` inferences/s of YOLO26-pose (640² fp16).
 - face: `30 × F / (FACE_INFER_INTERVAL+1)` of YOLOv8-face.
-- AdaFace: bounded by detected faces × throttle.
+- AdaFace: bounded by detected faces × throttle. Since 2026-10-10 the throttle
+  is the per-track identity refresh policy (first usable face immediately, then
+  a clear face every `FACE_IDENTITY_REFRESH_MS`, default 5000; 0 restores the
+  1 s cadence), applied before AdaFace on the ROI path. See
+  `docs/midterm_face_identity_refresh_2026-10-10.md`.
 
 Required pose throughput `≥ 30 × F`. Measured pose engine throughput at batch
 `B` = `B / latency_B`. **Derive `B` and `F` from measurement** (Task P5.2):

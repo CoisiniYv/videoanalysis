@@ -42,11 +42,17 @@ class ReIDGateResult:
     skip_reason: Optional[str] = None
     throttle_key: str = ""
     next_allowed_at_ms: Optional[int] = None
+    # Set by pyfuncs that apply the identity refresh policy
+    # (custom.services.face_identity_refresh).
+    clear: Optional[bool] = None
+    clarity_score: Optional[float] = None
+    identity_reason: Optional[str] = None
 
 
 _DEFAULT_MIN_CONFIDENCE = 0.6
 _DEFAULT_MIN_FACE_SIZE = 40.0
 _DEFAULT_MIN_INTERVAL_MS = 1000
+_DEFAULT_STATE_TTL_MS = 60000
 _DEFAULT_NORM_TOLERANCE = 0.10
 _EXPECTED_FEATURE_DIM = 512
 
@@ -211,27 +217,52 @@ def _quality_score(
 class ReIDThrottleMap:
     """In-memory per-camera per-track throttle.
 
-    Tracks the last allowed timestamp_ms for each throttle_key.
+    Tracks the last allowed timestamp_ms for each throttle_key
+    (``camera:source:track``). Entries are forgotten ``state_ttl_ms`` after
+    their last record, judged per ``camera:source`` because sources do not
+    share a time domain; without this the map grew by one entry per track
+    for the lifetime of the process.
     """
 
-    def __init__(self, min_interval_ms: int = _DEFAULT_MIN_INTERVAL_MS):
+    def __init__(
+        self,
+        min_interval_ms: int = _DEFAULT_MIN_INTERVAL_MS,
+        state_ttl_ms: int = _DEFAULT_STATE_TTL_MS,
+    ):
         self._min_interval_ms = max(min_interval_ms, 0)
-        self._last_allowed: Dict[str, int] = {}
+        self._state_ttl_ms = max(int(state_ttl_ms), self._min_interval_ms, 1)
+        self._last_allowed: Dict[str, Dict[str, int]] = {}
+        self._last_prune_ms: Dict[str, int] = {}
+
+    @property
+    def tracked_count(self) -> int:
+        return sum(len(keys) for keys in self._last_allowed.values())
+
+    @staticmethod
+    def _scope(throttle_key: str) -> str:
+        head, sep, _tail = str(throttle_key).rpartition(":")
+        return head if sep else ""
+
+    def _get(self, throttle_key: str) -> Optional[int]:
+        return self._last_allowed.get(self._scope(throttle_key), {}).get(throttle_key)
 
     def is_allowed(self, throttle_key: str, timestamp_ms: int) -> bool:
         """Check if this throttle_key is allowed at timestamp_ms."""
-        last = self._last_allowed.get(throttle_key)
+        self._maybe_prune(self._scope(throttle_key), timestamp_ms)
+        last = self._get(throttle_key)
         if last is None:
             return True
         return (timestamp_ms - last) >= self._min_interval_ms
 
     def record(self, throttle_key: str, timestamp_ms: int) -> None:
         """Record that this throttle_key was allowed at timestamp_ms."""
-        self._last_allowed[throttle_key] = timestamp_ms
+        scope = self._scope(throttle_key)
+        self._maybe_prune(scope, timestamp_ms)
+        self._last_allowed.setdefault(scope, {})[throttle_key] = timestamp_ms
 
     def next_allowed_at(self, throttle_key: str) -> Optional[int]:
         """Return the earliest next allowed timestamp, or None."""
-        last = self._last_allowed.get(throttle_key)
+        last = self._get(throttle_key)
         if last is None:
             return None
         return last + self._min_interval_ms
@@ -239,3 +270,21 @@ class ReIDThrottleMap:
     def clear(self) -> None:
         """Reset all throttle state."""
         self._last_allowed.clear()
+        self._last_prune_ms.clear()
+
+    def _maybe_prune(self, scope: str, timestamp_ms: int) -> None:
+        ts = int(timestamp_ms)
+        last = self._last_prune_ms.get(scope)
+        if last is None:
+            self._last_prune_ms[scope] = ts
+            return
+        if abs(ts - last) < self._state_ttl_ms:
+            return
+        self._last_prune_ms[scope] = ts
+        keys = self._last_allowed.get(scope)
+        if not keys:
+            return
+        for key in [k for k, seen in keys.items() if abs(ts - seen) > self._state_ttl_ms]:
+            del keys[key]
+        if not keys:
+            del self._last_allowed[scope]
