@@ -163,4 +163,6 @@ uos157 隔离复测（60 路 × 4 FPS × 1 h，报告
 
 ## 实现状态
 
-- 实现提交：见本文件提交记录（提交后补写 hash）。
+- 实现提交：`6828fbc`（Wake the media-worker scheduler when lane work finishes）。
+- 开发机验证时间：2026-10-11（KST），结果见上文"验证（开发机）"。
+- 未完成：uos157 运行验证（上文第 1–4 步）；分支未合入 main。
