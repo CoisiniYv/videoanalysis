@@ -69,6 +69,7 @@ from savant.utils.source_info import (
 from custom.savant_stage_metrics import SavantStageMetrics
 
 from .buffer_processor import NvDsBufferProcessor, create_buffer_processor
+from .decoded_frame_guard import add_decoded_frame_guard
 from .element_factory import NvDsElementFactory
 from .metadata import (
     nvds_attr_meta_output_converter,
@@ -667,7 +668,9 @@ class NvDsPipeline(GstPipeline):
             assert new_pad.link(savant_rs_add_frames_sink) == Gst.PadLinkReturn.OK
             new_pad = savant_rs_add_frames.get_static_pad('src')
 
-        add_pad_probe_to_move_frame(new_pad, self._video_pipeline, 'source-convert')
+        add_decoded_frame_guard(
+            new_pad, self._video_pipeline, source_info.source_id, self._logger
+        )
 
         nv_video_converter_props = {}
         if self._stream_buffer_pool_size is not None:

@@ -586,7 +586,7 @@ def test_midterm_savant_source_reset_patch_is_wired() -> None:
     assert (patch_root / "README.md").is_file()
     assert _md5(patch_root / "buffer_processor.py") == "556af89b356401efa1dc9d5c2c4d3c68"
     assert _md5(patch_root / "nvinfer_processor.py") == "9615f7cd134f623a3950b65e5ad71fb1"
-    assert _md5(patch_root / "pipeline.py") == "d2a5581899765f173fdfc6e2f1515b2d"
+    assert _md5(patch_root / "pipeline.py") == "524b53c51e959387ebe7034ab7754433"
 
 
 def test_midterm_production_savant_hot_path_excludes_debug_and_unused_encoding() -> None:

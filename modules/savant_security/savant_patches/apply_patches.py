@@ -43,8 +43,17 @@ PATCHES = (
         "deepstream/pipeline.py",
         "pipeline.py",
         "5c418afd69e9d478a43cc1a123513837",
-        "d2a5581899765f173fdfc6e2f1515b2d",
+        "524b53c51e959387ebe7034ab7754433",
     ),
+)
+
+# The prior project overlay is also a known baseline for in-place container
+# restarts. Unknown framework files still fail before any patch is installed.
+UPGRADE_BASELINES = {
+    "deepstream/pipeline.py": {"d2a5581899765f173fdfc6e2f1515b2d"},
+}
+ADDITIONS = (
+    ("deepstream/decoded_frame_guard.py", "decoded_frame_guard.py", "25fd6e01bb780176a3ac8613f82a6129"),
 )
 
 
@@ -98,6 +107,7 @@ def main() -> int:
     print(f"savant_patches: savant package at {package_root}", flush=True)
 
     failures = 0
+    pending = []
     for rel_target, patch_name, original_md5, patched_md5 in PATCHES:
         target = package_root / rel_target
         patch_file = PATCH_DIR / patch_name
@@ -123,7 +133,7 @@ def main() -> int:
         if current == patched_md5:
             print(f"savant_patches: already patched: {rel_target}", flush=True)
             continue
-        if current != original_md5:
+        if current not in {original_md5, *UPGRADE_BASELINES.get(rel_target, set())}:
             print(
                 f"savant_patches: ERROR {rel_target} md5={current} does not "
                 f"match v0.6.0 baseline {original_md5}; refusing to patch an "
@@ -133,6 +143,25 @@ def main() -> int:
             failures += 1
             continue
 
+        pending.append((rel_target, target, patch_file, patched_md5))
+
+    for rel_target, patch_name, patched_md5 in ADDITIONS:
+        target = package_root / rel_target
+        patch_file = PATCH_DIR / patch_name
+        if not patch_file.is_file() or _md5(patch_file) != patched_md5:
+            print(f"savant_patches: ERROR missing or corrupted addition: {patch_name}", flush=True)
+            failures += 1
+        elif target.exists() and (not target.is_file() or _md5(target) != patched_md5):
+            print(f"savant_patches: ERROR unknown existing addition: {rel_target}", flush=True)
+            failures += 1
+        elif not target.exists():
+            pending.insert(0, (rel_target, target, patch_file, patched_md5))
+
+    if failures:
+        print(f"savant_patches: {failures} preflight failure(s); no files changed", flush=True)
+        return 1 if enforce else 0
+
+    for rel_target, target, patch_file, patched_md5 in pending:
         shutil.copyfile(patch_file, target)
         _drop_stale_pyc(target)
         if _md5(target) != patched_md5:
