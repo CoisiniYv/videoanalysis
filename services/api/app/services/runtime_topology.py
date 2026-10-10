@@ -131,6 +131,7 @@ class BranchConfig:
     savant_min_fps: str
     batched_push_timeout: int
     face_identity_refresh_ms: int = 5000
+    analysis_max_lag_ms: int = 30000
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,7 @@ DEFAULT_BRANCH = {
     "savant_min_fps": "2/1",
     "batched_push_timeout": 40000,
     "face_identity_refresh_ms": 5000,
+    "analysis_max_lag_ms": 30000,
 }
 
 
@@ -263,6 +265,7 @@ RUNTIME_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
             "savant_min_fps": "99/25",
             "batched_push_timeout": 10000,
             "face_identity_refresh_ms": 5000,
+            "analysis_max_lag_ms": 30000,
         },
     },
     "local_4090_60": {
@@ -296,6 +299,7 @@ RUNTIME_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
             "savant_min_fps": "198/25",
             "batched_push_timeout": 40000,
             "face_identity_refresh_ms": 5000,
+            "analysis_max_lag_ms": 30000,
         },
     },
 }
@@ -359,6 +363,7 @@ BRANCH_FIELDS = [
     {"key": "savant_min_fps", "kind": "fps", "label": "Savant 最小 FPS"},
     {"key": "batched_push_timeout", "kind": "int", "label": "Batched push timeout", "min": 0, "max": 1000000},
     {"key": "face_identity_refresh_ms", "kind": "int", "label": "人脸复识别间隔 ms", "min": 0, "max": 600000},
+    {"key": "analysis_max_lag_ms", "kind": "int", "label": "分析最大延迟 ms", "min": 0, "max": 600000},
 ]
 
 
@@ -1511,6 +1516,7 @@ def _branch_config(branch_id: str, raw: dict[str, Any], *, gpu_id: int) -> Branc
         savant_min_fps=str(raw.get("savant_min_fps", "2/1")),
         batched_push_timeout=int(raw.get("batched_push_timeout", 40000)),
         face_identity_refresh_ms=int(raw.get("face_identity_refresh_ms", 5000)),
+        analysis_max_lag_ms=int(raw.get("analysis_max_lag_ms", 30000)),
     )
 
 
@@ -1699,6 +1705,12 @@ def _forwarder_env(
     env = {
         "ANALYSIS_FPS": str(branch_config["analysis_fps"]),
         "ANALYSIS_MIN_FPS": str(branch_config["analysis_min_fps"]),
+        # This container samples the analysis branch in both modes; its raw
+        # evidence output uses a separate queue that is never age-capped.
+        "FORWARDER_STRICT_FPS_BUDGET": "true",
+        "FORWARDER_MAX_QUEUE_AGE_MS": str(
+            int(branch_config.get("analysis_max_lag_ms", 30000))
+        ),
     }
     if full_pipeline:
         env.update(

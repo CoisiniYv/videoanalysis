@@ -425,6 +425,11 @@ services:
       FORWARDER_SEND_TIMEOUT_MS: "${FORWARDER_SEND_TIMEOUT_MS:-2000}"
       FORWARDER_SEND_RETRIES: "${FORWARDER_SEND_RETRIES:-3}"
       FORWARDER_SEND_HWM: "${FORWARDER_SEND_HWM:-1000}"
+      # Analysis branch only: keyframes borrow from the FPS budget, and frames
+      # that waited longer than this are dropped (keyframe resync) so detection
+      # lag stays bounded. Never set on replay-raw-fanout (evidence path).
+      FORWARDER_STRICT_FPS_BUDGET: "${ANALYSIS_FORWARDER_STRICT_FPS_BUDGET:-true}"
+      FORWARDER_MAX_QUEUE_AGE_MS: "${ANALYSIS_FORWARDER_MAX_QUEUE_AGE_MS:-30000}"
       FORWARDER_METRICS_PORT: "8081"
     ports:
       - "${FORWARDER_METRICS_HOST_PORT:-18081}:8081"
@@ -465,6 +470,11 @@ services:
       FORWARDER_SEND_TIMEOUT_MS: "${FORWARDER_SEND_TIMEOUT_MS:-2000}"
       FORWARDER_SEND_RETRIES: "${FORWARDER_SEND_RETRIES:-3}"
       FORWARDER_SEND_HWM: "${FORWARDER_SEND_HWM:-1000}"
+      # Analysis branch only: keyframes borrow from the FPS budget, and frames
+      # that waited longer than this are dropped (keyframe resync) so detection
+      # lag stays bounded. Never set on replay-raw-fanout (evidence path).
+      FORWARDER_STRICT_FPS_BUDGET: "${ANALYSIS_FORWARDER_STRICT_FPS_BUDGET:-true}"
+      FORWARDER_MAX_QUEUE_AGE_MS: "${ANALYSIS_FORWARDER_MAX_QUEUE_AGE_MS:-30000}"
       FORWARDER_METRICS_PORT: "8081"
     ports:
       - "${FORWARDER_A_METRICS_HOST_PORT:-18182}:8081"
@@ -507,6 +517,11 @@ services:
       FORWARDER_SEND_TIMEOUT_MS: "${FORWARDER_SEND_TIMEOUT_MS:-2000}"
       FORWARDER_SEND_RETRIES: "${FORWARDER_SEND_RETRIES:-3}"
       FORWARDER_SEND_HWM: "${FORWARDER_SEND_HWM:-1000}"
+      # Analysis branch only: keyframes borrow from the FPS budget, and frames
+      # that waited longer than this are dropped (keyframe resync) so detection
+      # lag stays bounded. Never set on replay-raw-fanout (evidence path).
+      FORWARDER_STRICT_FPS_BUDGET: "${ANALYSIS_FORWARDER_STRICT_FPS_BUDGET:-true}"
+      FORWARDER_MAX_QUEUE_AGE_MS: "${ANALYSIS_FORWARDER_MAX_QUEUE_AGE_MS:-30000}"
       FORWARDER_METRICS_PORT: "8081"
     ports:
       - "${FORWARDER_B_METRICS_HOST_PORT:-18183}:8081"

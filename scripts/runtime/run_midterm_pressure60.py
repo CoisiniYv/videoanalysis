@@ -488,6 +488,8 @@ class PressureConfig:
     adaface_decoupled_sharded: bool = False
     adaface_roi_redis: bool = False
     adaface_roi_batch_timeout_ms: int = 10
+    # Analysis forwarder lag cap (FORWARDER_MAX_QUEUE_AGE_MS); 0 disables.
+    analysis_max_queue_age_ms: int = 30000
     media_worker_materialization_max_active: int = 4
     media_worker_rolling_remux_workers: int = 1
     media_worker_segment_index_io_concurrency: int = 2
@@ -879,6 +881,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=10,
         help="Maximum ROI aggregation wait for the batch16 AdaFace worker.",
+    )
+    parser.add_argument(
+        "--analysis-max-queue-age-ms",
+        type=int,
+        default=30000,
+        help=(
+            "Drop analysis frames that waited longer than this in the sampling "
+            "forwarder (keyframe resync); 0 disables. Evidence is unaffected."
+        ),
     )
     parser.add_argument("--rtsp-uri", default=DEFAULT_RTSP_URI)
     parser.add_argument("--run-id")
@@ -1511,6 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
         adaface_roi_batch_timeout_ms=max(
             1, int(args.adaface_roi_batch_timeout_ms)
         ),
+        analysis_max_queue_age_ms=max(0, int(args.analysis_max_queue_age_ms)),
         media_worker_materialization_max_active=int(
             args.media_worker_materialization_max_active
         ),
@@ -3198,6 +3210,8 @@ def write_dual_shard_same_gpu_compose_override(cfg: PressureConfig) -> Path:
                     "FORWARDER_SAMPLER_ENABLED": "true",
                     "ANALYSIS_FPS": cfg.fps,
                     "ANALYSIS_MIN_FPS": cfg.min_fps,
+                    "FORWARDER_STRICT_FPS_BUDGET": "true",
+                    "FORWARDER_MAX_QUEUE_AGE_MS": str(cfg.analysis_max_queue_age_ms),
                     "FORWARDER_QUEUE_MAX_SIZE": "8192",
                     "FORWARDER_RECEIVE_HWM": "10000",
                     "FORWARDER_SEND_TIMEOUT_MS": "2000",

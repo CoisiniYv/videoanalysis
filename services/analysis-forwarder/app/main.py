@@ -43,6 +43,11 @@ class ForwarderConfig:
     require_object_label: str = ""
     require_attribute_namespace: str = ""
     require_attribute_name: str = ""
+    # Keyframes borrow from the FPS budget instead of riding on top of it.
+    strict_fps_budget: bool = True
+    # Drop analysis frames that waited longer than this (0 = off). Set only
+    # on analysis forwarders, never on a raw/evidence fanout.
+    max_queue_age_ms: int = 0
 
     @classmethod
     def from_env(cls) -> "ForwarderConfig":
@@ -70,6 +75,8 @@ class ForwarderConfig:
             require_attribute_name=os.getenv(
                 "FORWARDER_REQUIRE_ATTRIBUTE_NAME", ""
             ),
+            strict_fps_budget=_bool_env("FORWARDER_STRICT_FPS_BUDGET", True),
+            max_queue_age_ms=max(_int_env("FORWARDER_MAX_QUEUE_AGE_MS", 0), 0),
         )
 
 
@@ -78,6 +85,7 @@ class ForwarderMetrics:
         self._lock = threading.Lock()
         self._by_source: dict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.queue_depth = 0
+        self.queue_head_age_ms = 0
         self.raw_queue_depth = 0
         self.running = 1
         self.null_sink_enabled = 0
@@ -90,6 +98,10 @@ class ForwarderMetrics:
         with self._lock:
             self.queue_depth = max(int(value), 0)
 
+    def set_queue_head_age_ms(self, value: float) -> None:
+        with self._lock:
+            self.queue_head_age_ms = max(int(value), 0)
+
     def set_raw_queue_depth(self, value: int) -> None:
         with self._lock:
             self.raw_queue_depth = max(int(value), 0)
@@ -100,6 +112,9 @@ class ForwarderMetrics:
                 "# HELP va_forwarder_queue_depth Current analysis-forwarder queue depth.",
                 "# TYPE va_forwarder_queue_depth gauge",
                 f"va_forwarder_queue_depth {self.queue_depth}",
+                "# HELP va_forwarder_queue_head_age_ms Wait time of the oldest queued analysis frame.",
+                "# TYPE va_forwarder_queue_head_age_ms gauge",
+                f"va_forwarder_queue_head_age_ms {self.queue_head_age_ms}",
                 "# HELP va_forwarder_raw_queue_depth Current raw evidence branch queue depth.",
                 "# TYPE va_forwarder_raw_queue_depth gauge",
                 f"va_forwarder_raw_queue_depth {self.raw_queue_depth}",
@@ -119,6 +134,9 @@ class ForwarderMetrics:
                 "raw_send_failures": "va_forwarder_raw_send_failures_total",
                 "raw_dropped": "va_forwarder_raw_frames_dropped_total",
                 "metadata_filtered": "va_forwarder_metadata_filtered_total",
+                "keyframes_over_budget": "va_forwarder_keyframes_over_budget_total",
+                "stale_dropped": "va_forwarder_frames_stale_dropped_total",
+                "gop_resync_dropped": "va_forwarder_frames_gop_resync_dropped_total",
             }
             for key, prom_name in metric_names.items():
                 lines.append(f"# TYPE {prom_name} counter")
@@ -159,11 +177,15 @@ class AnalysisForwarder:
     def __init__(self, config: ForwarderConfig) -> None:
         self.config = config
         self.metrics = ForwarderMetrics()
-        self.queue = BoundedDropQueue(config.queue_max_size)
+        self.queue = BoundedDropQueue(
+            config.queue_max_size,
+            max_age_s=max(int(config.max_queue_age_ms or 0), 0) / 1000.0,
+        )
         self.sampler = AnalysisFrameSampler(
             enabled=config.sampler_enabled,
             max_fps=config.analysis_fps,
             min_fps=config.min_fps,
+            strict_budget=config.strict_fps_budget,
         )
         self.metadata_filter = MetadataObjectFilter(
             object_namespace=config.require_object_namespace,
@@ -198,12 +220,16 @@ class AnalysisForwarder:
     def run(self) -> None:
         sink_mode = "null" if self.metrics.null_sink_enabled else "savant"
         LOGGER.info(
-            "starting forwarder in=%s out=%s raw_out=%s sink_mode=%s raw_sink=%s",
+            "starting forwarder in=%s out=%s raw_out=%s sink_mode=%s raw_sink=%s "
+            "analysis_fps=%s strict_fps_budget=%s max_queue_age_ms=%s",
             self.config.in_endpoint,
             self.config.out_endpoint,
             self.config.raw_out_endpoint or "<disabled>",
             sink_mode,
             "enabled" if self.raw_sink_enabled else "disabled",
+            self.config.analysis_fps,
+            self.config.strict_fps_budget,
+            self.config.max_queue_age_ms,
         )
         self.reader.start()
         self.raw_writer.start()
@@ -255,6 +281,8 @@ class AnalysisForwarder:
             if not self.sampler.admit(video_frame):
                 self.metrics.inc(source_id, "dropped")
                 return None
+            if self.sampler.last_decision == "keyframe_over_budget":
+                self.metrics.inc(source_id, "keyframes_over_budget")
             return ForwarderMessage(
                 topic=source_id,
                 message=message,
@@ -348,9 +376,16 @@ class AnalysisForwarder:
             return
         self.metrics.inc(item.source_id or "_unknown_source", "raw_forwarded")
 
+    def _on_queue_drop(self, item: ForwarderMessage, reason: str) -> None:
+        # Counted in frames_dropped_total as well, so seen - forwarded -
+        # dropped keeps matching the queue depth.
+        self.metrics.inc(item.source_id, reason)
+        self.metrics.inc(item.source_id, "dropped")
+
     def _write_loop(self) -> None:
         while not self.stop_event.is_set():
-            item = self.queue.pop(timeout_s=0.2)
+            item = self.queue.pop(timeout_s=0.2, on_drop=self._on_queue_drop)
+            self.metrics.set_queue_head_age_ms(self.queue.head_age_s() * 1000.0)
             if item is None:
                 self.metrics.set_queue_depth(len(self.queue))
                 continue

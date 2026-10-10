@@ -10,7 +10,27 @@ NANOS_PER_SECOND = 1_000_000_000
 
 
 class AnalysisFrameSampler:
-    """Admit at most ``max_fps`` frames per source in the frame PTS domain."""
+    """Admit at most ``max_fps`` frames per source in the frame PTS domain.
+
+    Keyframes always pass (a dropped keyframe breaks H.264 decoding until the
+    next one). With ``strict_budget`` they still pay for their slot: a
+    keyframe that arrives without enough credit borrows it, and the following
+    non-keyframes wait until the debt is repaid. Without this, every extra
+    I-frame (scene cuts in film content) was admitted on top of ``max_fps``;
+    on the 60-stream uos157 run that pushed a 4 FPS budget to ~4.3-4.4 FPS
+    per stream, above Savant capacity, and the analysis queue never drained.
+    """
+
+    # ``last_decision`` values, exposed for forwarder metrics.
+    DECISIONS = (
+        "passthrough",
+        "session_start",
+        "keyframe",
+        "keyframe_over_budget",
+        "sampled",
+        "rate_limited",
+        "empty",
+    )
 
     def __init__(
         self,
@@ -18,8 +38,11 @@ class AnalysisFrameSampler:
         enabled: bool = True,
         max_fps: str | float | int = "8/1",
         min_fps: str | float | int | None = "2/1",
+        strict_budget: bool = True,
     ) -> None:
         self.enabled = _boolish(enabled)
+        self.strict_budget = _boolish(strict_budget)
+        self.last_decision = ""
         self.max_fps = _parse_fps(max_fps, default=8.0)
         self.min_fps = _parse_fps(min_fps, default=2.0)
         self.min_interval_ns = (
@@ -33,6 +56,9 @@ class AnalysisFrameSampler:
         # wall-clock stream to roughly 4-6 FPS when normal RTSP jitter makes
         # many adjacent intervals 124.x ms instead of exactly 125 ms.
         self.max_credit_ns = self.min_interval_ns * 2
+        # Bounded debt so a keyframe-only stretch cannot starve non-keyframes
+        # forever; if keyframes alone exceed max_fps, only keyframes pass.
+        self.max_debt_ns = self.min_interval_ns * 2
         self._last_accepted_pts_ns_by_source: dict[str, int] = {}
         self._last_observed_pts_ns_by_source: dict[str, int] = {}
         self._credit_ns_by_source: dict[str, int] = {}
@@ -40,13 +66,16 @@ class AnalysisFrameSampler:
     def admit(self, video_frame: Any) -> bool:
         source_key = _source_key(video_frame)
         if _content_is_none(video_frame):
+            self.last_decision = "empty"
             return False
         if not self.enabled or self.min_interval_ns <= 0:
+            self.last_decision = "passthrough"
             self._accept(source_key, _frame_pts_ns(video_frame))
             return True
 
         pts_ns = _frame_pts_ns(video_frame)
         if pts_ns is None:
+            self.last_decision = "passthrough"
             self._accept(source_key, None)
             return True
 
@@ -62,6 +91,7 @@ class AnalysisFrameSampler:
             # A new source session or PTS rollback starts a fresh rate domain.
             self._last_observed_pts_ns_by_source[source_key] = pts_ns
             self._credit_ns_by_source[source_key] = 0
+            self.last_decision = "session_start"
             self._accept(source_key, pts_ns)
             return True
 
@@ -73,21 +103,26 @@ class AnalysisFrameSampler:
         self._last_observed_pts_ns_by_source[source_key] = pts_ns
 
         if force:
-            self._credit_ns_by_source[source_key] = max(
-                0,
-                credit_ns - self.min_interval_ns,
+            remaining_ns = credit_ns - self.min_interval_ns
+            over_budget = (
+                remaining_ns + self.pts_quantization_slack_ns < 0
             )
+            self.last_decision = "keyframe_over_budget" if over_budget else "keyframe"
+            floor_ns = -self.max_debt_ns if self.strict_budget else 0
+            self._credit_ns_by_source[source_key] = max(floor_ns, remaining_ns)
             self._accept(source_key, pts_ns)
             return True
 
         if credit_ns + self.pts_quantization_slack_ns < self.min_interval_ns:
             self._credit_ns_by_source[source_key] = credit_ns
+            self.last_decision = "rate_limited"
             return False
 
         self._credit_ns_by_source[source_key] = max(
             0,
             credit_ns - self.min_interval_ns,
         )
+        self.last_decision = "sampled"
         self._accept(source_key, pts_ns)
         return True
 

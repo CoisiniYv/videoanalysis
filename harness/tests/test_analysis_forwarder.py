@@ -429,3 +429,226 @@ def test_analysis_forwarder_branch_pressure_probe_is_available() -> None:
     assert '"--payload-bytes"' in text
     assert "docker" in text
     assert "AnalysisForwarder(config)" in text
+
+
+# --- Strict analysis budget and bounded analysis lag (2026-10-11) ---------
+
+FILM_FRAME_NS = 1_000_000_000 * 1001 / 24000
+
+
+def _film_frames(seconds: int, *, gop: int = 12, scene_cut_every: int = 0):
+    """23.976 FPS frames with a keyframe every ``gop`` frames plus extra
+    scene-cut I-frames every ``scene_cut_every`` frames (off-GOP phase)."""
+    for index in range(int(seconds * 24000 / 1001)):
+        keyframe = index % gop == 0 or (
+            scene_cut_every > 0 and index % scene_cut_every == 5
+        )
+        yield index, keyframe, round(index * FILM_FRAME_NS)
+
+
+def _admitted(sampler, frames) -> tuple[int, int, int]:
+    admitted = keyframes = keyframes_admitted = 0
+    for _index, keyframe, pts in frames:
+        ok = sampler.admit(_Frame("cam", pts=pts, keyframe=keyframe))
+        admitted += ok
+        keyframes += keyframe
+        keyframes_admitted += ok and keyframe
+    return admitted, keyframes, keyframes_admitted
+
+
+def test_strict_budget_holds_analysis_fps_with_scene_cut_keyframes() -> None:
+    seconds = 300
+    strict = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
+    admitted, keyframes, keyframes_admitted = _admitted(
+        strict, _film_frames(seconds, scene_cut_every=70)
+    )
+
+    # Keyframes still always pass; the extra ones are paid for by skipping
+    # non-keyframes, so the average stays at the configured 4 FPS.
+    assert keyframes_admitted == keyframes
+    assert keyframes / seconds > 2.3
+    assert admitted <= 4 * seconds + 2
+
+
+def test_legacy_budget_overshoots_with_scene_cut_keyframes() -> None:
+    seconds = 300
+    legacy = sampler_mod.AnalysisFrameSampler(
+        enabled=True, max_fps="4/1", strict_budget=False
+    )
+    admitted, _keyframes, _ = _admitted(
+        legacy, _film_frames(seconds, scene_cut_every=70)
+    )
+
+    # Reproduces the uos157 overshoot (~4.3 FPS per stream at a 4 FPS budget).
+    assert admitted / seconds > 4.2
+
+
+def test_strict_budget_keeps_regular_gop_rate() -> None:
+    seconds = 120
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
+    admitted, keyframes, keyframes_admitted = _admitted(
+        sampler, _film_frames(seconds)
+    )
+
+    assert keyframes_admitted == keyframes
+    assert 4 * seconds - 2 <= admitted <= 4 * seconds + 2
+
+
+def test_keyframe_without_credit_is_reported_over_budget() -> None:
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
+
+    assert sampler.admit(_Frame("cam", pts=0, keyframe=True)) is True
+    assert sampler.last_decision == "session_start"
+    assert sampler.admit(_Frame("cam", pts=41_708_333)) is False
+    assert sampler.last_decision == "rate_limited"
+    assert sampler.admit(_Frame("cam", pts=83_416_666, keyframe=True)) is True
+    assert sampler.last_decision == "keyframe_over_budget"
+
+
+def test_keyframe_debt_is_bounded() -> None:
+    sampler = sampler_mod.AnalysisFrameSampler(enabled=True, max_fps="4/1")
+    pts = 0
+    for _ in range(120):  # five seconds of keyframe-only video
+        assert sampler.admit(_Frame("cam", pts=pts, keyframe=True)) is True
+        pts += 41_708_333
+    resume_pts = pts
+    while not sampler.admit(_Frame("cam", pts=pts)):
+        pts += 41_708_333
+    # Debt is capped at two intervals: non-keyframes resume within
+    # three 250 ms intervals of content.
+    assert pts - resume_pts <= 750_000_000
+
+
+def _message(source: str, name: str, *, keyframe: bool = False, video: bool = True):
+    return queueing_mod.ForwarderMessage(
+        source, name, name.encode(), source, keyframe=keyframe, video_frame=video
+    )
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_queue_drops_stale_frames_and_resyncs_on_next_keyframe() -> None:
+    clock = _Clock()
+    queue = queueing_mod.BoundedDropQueue(100, max_age_s=30.0, clock=clock)
+    for item in (
+        _message("cam", "k0", keyframe=True),
+        _message("cam", "d1"),
+        _message("other", "o1"),
+    ):
+        queue.push(item)
+    clock.now += 31.0
+    for item in (
+        _message("cam", "d2"),  # fresh, but its keyframe k0 was dropped
+        _message("cam", "k3", keyframe=True),
+        _message("cam", "d4"),
+    ):
+        queue.push(item)
+
+    drops: list[tuple[str, str]] = []
+    on_drop = lambda item, reason: drops.append((item.message, reason))  # noqa: E731
+
+    assert queue.pop(timeout_s=0, on_drop=on_drop).message == "k3"
+    assert queue.pop(timeout_s=0, on_drop=on_drop).message == "d4"
+    assert queue.pop(timeout_s=0, on_drop=on_drop) is None
+    assert drops == [
+        ("k0", "stale_dropped"),
+        ("d1", "stale_dropped"),
+        ("o1", "stale_dropped"),
+        ("d2", "gop_resync_dropped"),
+    ]
+
+
+def test_queue_never_drops_control_messages_for_age() -> None:
+    clock = _Clock()
+    queue = queueing_mod.BoundedDropQueue(10, max_age_s=1.0, clock=clock)
+    queue.push(_message("cam", "eos", keyframe=True, video=False))
+    clock.now += 60.0
+    assert queue.pop(timeout_s=0).message == "eos"
+
+
+def test_queue_age_cap_is_off_by_default() -> None:
+    clock = _Clock()
+    queue = queueing_mod.BoundedDropQueue(10, clock=clock)
+    queue.push(_message("cam", "d0"))
+    clock.now += 3600.0
+    assert queue.pop(timeout_s=0).message == "d0"
+
+
+def test_queue_reports_head_age() -> None:
+    clock = _Clock()
+    queue = queueing_mod.BoundedDropQueue(10, clock=clock)
+    assert queue.head_age_s() == 0.0
+    queue.push(_message("cam", "k0", keyframe=True))
+    clock.now += 2.5
+    queue.push(_message("cam", "d1"))
+    assert queue.head_age_s() == 2.5
+
+
+def test_forwarder_config_reads_budget_and_lag_cap(monkeypatch) -> None:
+    main_mod = _load_main_module()
+    monkeypatch.delenv("FORWARDER_STRICT_FPS_BUDGET", raising=False)
+    monkeypatch.delenv("FORWARDER_MAX_QUEUE_AGE_MS", raising=False)
+    defaults = main_mod.ForwarderConfig.from_env()
+    assert defaults.strict_fps_budget is True
+    assert defaults.max_queue_age_ms == 0
+
+    monkeypatch.setenv("FORWARDER_STRICT_FPS_BUDGET", "false")
+    monkeypatch.setenv("FORWARDER_MAX_QUEUE_AGE_MS", "30000")
+    configured = main_mod.ForwarderConfig.from_env()
+    assert configured.strict_fps_budget is False
+    assert configured.max_queue_age_ms == 30000
+
+    forwarder = main_mod.AnalysisForwarder(configured)
+    assert forwarder.sampler.strict_budget is False
+    assert forwarder.queue.max_age_s == 30.0
+
+
+def test_forwarder_counts_over_budget_keyframes_and_queue_drops() -> None:
+    main_mod = _load_main_module()
+    config = main_mod.ForwarderConfig(
+        in_endpoint="router+bind:tcp://0.0.0.0:5557",
+        out_endpoint="null://diagnostic",
+        raw_out_endpoint="",
+        analysis_fps="4/1",
+        min_fps="1/1",
+        sampler_enabled=True,
+        queue_max_size=8,
+        receive_timeout_ms=100,
+        receive_hwm=10,
+        send_timeout_ms=100,
+        send_retries=0,
+        send_hwm=10,
+        metrics_port=8081,
+        max_queue_age_ms=30000,
+    )
+    forwarder = main_mod.AnalysisForwarder(config)
+
+    def video_message(frame):
+        message = types.SimpleNamespace()
+        message.is_video_frame = lambda: True
+        message.as_video_frame = lambda: frame
+        message.is_end_of_stream = lambda: False
+        message.is_shutdown = lambda: False
+        return types.SimpleNamespace(message=message, content=b"x")
+
+    assert forwarder._build_queue_item(video_message(_Frame("cam", pts=0, keyframe=True)))
+    assert forwarder._build_queue_item(
+        video_message(_Frame("cam", pts=83_416_666, keyframe=True))
+    )
+    forwarder._on_queue_drop(_message("cam", "old"), "stale_dropped")
+    forwarder._on_queue_drop(_message("cam", "orphan"), "gop_resync_dropped")
+
+    metrics = forwarder.metrics.render_prometheus()
+    assert 'va_forwarder_keyframes_over_budget_total{source_id="cam"} 1' in metrics
+    assert 'va_forwarder_frames_stale_dropped_total{source_id="cam"} 1' in metrics
+    assert 'va_forwarder_frames_gop_resync_dropped_total{source_id="cam"} 1' in metrics
+    # Queue drops stay inside frames_dropped_total so seen - forwarded -
+    # dropped still equals the queue depth.
+    assert 'va_forwarder_frames_dropped_total{source_id="cam"} 2' in metrics
+    assert "va_forwarder_queue_head_age_ms" in metrics

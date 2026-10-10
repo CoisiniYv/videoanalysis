@@ -107,6 +107,16 @@ FIELDS: tuple[PerformanceField, ...] = (
         max_value=30000,
     ),
     PerformanceField(
+        key="forwarder_max_queue_age_ms",
+        env="FORWARDER_MAX_QUEUE_AGE_MS",
+        target="forwarder",
+        kind="int",
+        default=30000,
+        label="分析最大延迟 ms",
+        min_value=0,
+        max_value=600000,
+    ),
+    PerformanceField(
         key="forwarder_send_retries",
         env="FORWARDER_SEND_RETRIES",
         target="forwarder",
