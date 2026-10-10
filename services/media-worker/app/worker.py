@@ -69,6 +69,8 @@ from app.materialization_scheduler import (
     SourcePermit,
     WorkBudget,
     WorkPermit,
+    rolling_poll_after_wake,
+    scheduler_wait,
 )
 from app.materialization_repository import (
     FinalizerPendingMetrics,
@@ -14642,6 +14644,18 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
     previous_logging_ms = 0
     previous_planned_sleep_ms = 0
     previous_actual_sleep_ms = 0
+    previous_wake_lanes: frozenset[str] = frozenset()
+    # Wake on lane completion instead of sleeping out the tick; false restores
+    # the fixed-tick behaviour (one remux admission per rolling poll).
+    completion_wake_enabled = _env_bool(
+        "MEDIA_WORKER_COMPLETION_WAKE_ENABLED",
+        default=True,
+    )
+    logger.info(
+        "media_worker_completion_wake enabled=%s rolling_poll_interval_s=%.1f",
+        completion_wake_enabled,
+        rolling_cache_poll_interval_s,
+    )
     try:
         while not shutdown_requested:
             tick_started_at = time.monotonic()
@@ -15114,7 +15128,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 "cycle_body_ms=%s cycle_snapshot_ms=%s cycle_logging_ms=%s "
                 "cycle_planned_sleep_ms=%s cycle_actual_sleep_ms=%s "
                 "cycle_accounted_ms=%s cycle_work_ms=%s cycle_total_ms=%s "
-                "cycle_unattributed_ms=%s "
+                "cycle_unattributed_ms=%s wake_lanes=%s "
                 "recovery_due=%s rolling_due=%s general_due=%s "
                 "cleanup_recovery_due=%s cleanup_rows_scanned=%s "
                 "cleanup_recovered=%s cleanup_retry_pending=%s "
@@ -15200,6 +15214,7 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
                 completed_cycle["cycle_work_ms"],
                 completed_cycle["cycle_total_ms"],
                 completed_cycle["cycle_unattributed_ms"],
+                ",".join(sorted(previous_wake_lanes)) or "none",
                 lifecycle_recovery_due,
                 rolling_cache_due,
                 general_due,
@@ -15358,8 +15373,20 @@ def run_worker(cfg: Config, pg_conn: psycopg.Connection) -> None:
             sleep_s = max(0.1, min(1.0, next_due_at - now_monotonic))
             planned_sleep_ms = int(sleep_s * 1000)
             sleep_started_at = time.monotonic()
-            time.sleep(sleep_s)
+            wake_lanes = scheduler_wait(
+                runtime_resources,
+                sleep_s,
+                enabled=completion_wake_enabled,
+            )
             actual_sleep_ms = int((time.monotonic() - sleep_started_at) * 1000)
+            # A freed remux slot is refilled now, not at the next rolling poll.
+            next_rolling_cache_poll_at = rolling_poll_after_wake(
+                next_rolling_cache_poll_at,
+                wake_lanes,
+                now=time.monotonic(),
+                enabled=completion_wake_enabled,
+            )
+            previous_wake_lanes = wake_lanes
             previous_tick_body_ms = tick_duration_ms
             previous_snapshot_ms = snapshot_ms
             previous_logging_ms = logging_ms

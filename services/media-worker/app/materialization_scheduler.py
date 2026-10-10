@@ -11,7 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import Enum
 import logging
-from threading import BoundedSemaphore, Event, Lock, Thread, local
+from threading import BoundedSemaphore, Condition, Event, Lock, Thread, local
 import time
 from typing import Any, Callable, Iterator
 
@@ -273,6 +273,71 @@ class WorkBudget:
             }
 
 
+class CompletionSignal:
+    """Wake the scheduler loop as soon as lane work finishes.
+
+    Admission and completion draining run on scheduler ticks. Without this
+    wake-up a finished job waited for the next timed tick, which capped a
+    one-worker remux lane at one clip per rolling tick (two when a remux
+    crossed a tick boundary) however fast the remux itself was.
+    """
+
+    def __init__(self) -> None:
+        self._condition = Condition()
+        self._lanes: set[str] = set()
+
+    def notify(self, lane: str) -> None:
+        with self._condition:
+            self._lanes.add(str(lane))
+            self._condition.notify_all()
+
+    def wait(self, timeout_s: float) -> frozenset[str]:
+        """Lanes that finished work since the last wait; empty on timeout."""
+
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while not self._lanes:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(remaining)
+            lanes = frozenset(self._lanes)
+            self._lanes.clear()
+        return lanes
+
+
+def scheduler_wait(
+    resources: "MaterializationResources",
+    timeout_s: float,
+    *,
+    enabled: bool,
+) -> frozenset[str]:
+    """The scheduler's idle wait: woken by lane completion, or a plain sleep."""
+
+    if enabled:
+        return resources.completion_signal.wait(timeout_s)
+    time.sleep(max(0.0, float(timeout_s)))
+    return frozenset()
+
+
+def rolling_poll_after_wake(
+    next_rolling_poll_at: float,
+    completed_lanes: frozenset[str],
+    *,
+    now: float,
+    enabled: bool,
+) -> float:
+    """Run rolling admission right away when a remux slot was just freed.
+
+    Finalizer and image completions are drained on every tick, so only a
+    remux completion needs the rolling (remux) admission pulled forward.
+    """
+
+    if enabled and "remux" in completed_lanes:
+        return min(next_rolling_poll_at, now)
+    return next_rolling_poll_at
+
+
 class _LaneTicket:
     def __init__(self, lane: "BoundedExecutorLane") -> None:
         self.lane = lane
@@ -341,6 +406,8 @@ class LaneReservation:
                 self._ticket.release()
 
         future.add_done_callback(release_cancelled)
+        # Runs after the result is set, so the woken scheduler sees done().
+        future.add_done_callback(lambda _done: self._lane._notify_task_done())
         return future
 
     def cancel(self) -> None:
@@ -450,8 +517,10 @@ class BoundedExecutorLane:
         max_workers: int,
         queue_capacity: int = 0,
         executor_factory: Callable[..., Any] = ThreadPoolExecutor,
+        on_task_done: Callable[[str], None] | None = None,
     ) -> None:
         self.name = str(name)
+        self._on_task_done = on_task_done
         self.max_workers = max(1, int(max_workers))
         self.queue_capacity = max(0, int(queue_capacity))
         self.capacity = self.max_workers + self.queue_capacity
@@ -504,6 +573,15 @@ class BoundedExecutorLane:
             if started:
                 self._active = max(0, self._active - 1)
         self._semaphore.release()
+
+    def _notify_task_done(self) -> None:
+        if self._on_task_done is None:
+            return
+        try:
+            self._on_task_done(self.name)
+        except Exception:
+            # A wake-up is an optimization; the timed tick still drains work.
+            logger.exception("media_lane_completion_notify_failed lane=%s", self.name)
 
     def _executor_submit(self, function: Callable[[], Any]) -> Future[Any]:
         with self._lock:
@@ -988,6 +1066,7 @@ class MaterializationResources:
         self._lock = Lock()
         self._shutdown_watch_stop = Event()
         self._shutdown_watch_thread: Thread | None = None
+        self.completion_signal = CompletionSignal()
 
         if self.max_active <= 0:
             return
@@ -1020,16 +1099,19 @@ class MaterializationResources:
                 name="image",
                 max_workers=workers(image_workers),
                 queue_capacity=queue(image_queue_capacity),
+                on_task_done=self.completion_signal.notify,
             )
             self.remux_lane = BoundedExecutorLane(
                 name="remux",
                 max_workers=workers(remux_workers),
                 queue_capacity=queue(remux_queue_capacity),
+                on_task_done=self.completion_signal.notify,
             )
             self.finalizer_lane = BoundedExecutorLane(
                 name="finalizer",
                 max_workers=workers(finalizer_workers),
                 queue_capacity=queue(finalizer_queue_capacity),
+                on_task_done=self.completion_signal.notify,
             )
         except Exception:
             for lane in (self.image_lane, self.remux_lane, self.finalizer_lane):

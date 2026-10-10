@@ -498,6 +498,9 @@ class PressureConfig:
     media_worker_finalizer_process_workers: int = 4
     media_worker_finalizer_queue_capacity: int = 4
     media_worker_rolling_max_per_poll: int = 4
+    # MEDIA_WORKER_COMPLETION_WAKE_ENABLED: refill a freed remux slot at once
+    # instead of at the next 1 s rolling poll.
+    media_worker_completion_wake: bool = True
     pressure_pause_redis_rdb: bool = False
     pressure_tune_postgres_checkpoints: bool = False
     pressure_rolling_cache_host_root: str = ""
@@ -676,6 +679,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Rolling-cache remux lane worker count. Keep at 1 for the Phase 6 "
             "max_active matrix; vary only in a separately labeled remux-lane experiment."
+        ),
+    )
+    parser.add_argument(
+        "--media-worker-completion-wake",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "Wake the media-worker scheduler when lane work finishes (default). "
+            "'off' restores the fixed rolling tick for an A/B comparison."
         ),
     )
     parser.add_argument(
@@ -1545,6 +1557,7 @@ def main(argv: list[str] | None = None) -> int:
         media_worker_rolling_max_per_poll=int(
             args.media_worker_rolling_max_per_poll
         ),
+        media_worker_completion_wake=args.media_worker_completion_wake == "on",
         pressure_pause_redis_rdb=bool(args.pressure_pause_redis_rdb),
         pressure_tune_postgres_checkpoints=bool(
             args.pressure_tune_postgres_checkpoints
@@ -5271,6 +5284,9 @@ def configure_rolling_cache_workers_for_pressure(cfg: PressureConfig) -> dict[st
             cfg.media_worker_finalizer_queue_capacity
         ),
         "MEDIA_WORKER_SCHEDULER_V2_ENABLED": "true",
+        "MEDIA_WORKER_COMPLETION_WAKE_ENABLED": (
+            "true" if cfg.media_worker_completion_wake else "false"
+        ),
         "MEDIA_WORKER_DB_POOL_ENABLED": "true",
         "MEDIA_WORKER_DB_INDEX_IO_CONCURRENCY": str(
             cfg.media_worker_db_index_io_concurrency
