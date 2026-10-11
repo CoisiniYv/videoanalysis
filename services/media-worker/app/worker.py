@@ -11338,7 +11338,17 @@ _FAIR_SOURCE_KEY_SQL = """COALESCE(
                         ''
                     ) AS fair_source_key"""
 
-_FAIR_SOURCE_RANK_SQL = """,
+
+def _source_rank_sql(*, remux: bool = False) -> str:
+    # Remux may inspect several sources for one free slot. Preserve the durable
+    # turn order before age promotion across sources; otherwise an old busy
+    # camera could win every enlarged window and undo cross-poll fairness.
+    age_order = "aged_ready_at ASC NULLS LAST," if remux else ""
+    turn_order = (
+        "array_position(%(turn_sources)s::text[], fair_source_key) ASC NULLS LAST,"
+        if remux else ""
+    )
+    return f""",
             ranked AS (
                 SELECT
                     *,
@@ -11346,6 +11356,7 @@ _FAIR_SOURCE_RANK_SQL = """,
                         PARTITION BY fair_source_key
                         ORDER BY
                             priority DESC,
+                            {age_order}
                             materialization_due_at ASC,
                             rolling_cache_ready_at ASC,
                             task_created_at ASC
@@ -11364,10 +11375,16 @@ _FAIR_SOURCE_RANK_SQL = """,
             ORDER BY
                 priority DESC,
                 source_rank ASC,
+                {turn_order}
+                {age_order}
                 materialization_due_at ASC,
                 rolling_cache_ready_at ASC,
                 task_created_at ASC
             LIMIT %(limit)s"""
+
+
+_FAIR_SOURCE_RANK_SQL = _source_rank_sql()
+_REMUX_SOURCE_RANK_SQL = _source_rank_sql(remux=True)
 
 
 def _fair_source_rank_params(
@@ -12385,7 +12402,7 @@ class _RollingCacheMaterializationRunner:
         self,
         pg_conn: psycopg.Connection,
         cfg: Config,
-        available: int,
+        candidate_limit: int,
     ) -> tuple[str, ...]:
         """Sources to draw candidates from this poll, least recently served first.
 
@@ -12420,7 +12437,7 @@ class _RollingCacheMaterializationRunner:
                 pg_conn,
                 lane=REMUX_LANE,
                 statuses=ROLLING_CACHE_TASK_STATUSES,
-                limit=max(1, int(available)),
+                limit=max(1, int(candidate_limit)),
                 configured_sources=tuple(cfg.rolling_cache_sources or ()),
                 excluded_sources=excluded,
                 task_predicate=(
@@ -12511,33 +12528,25 @@ class _RollingCacheMaterializationRunner:
                     if self._runtime_resources is not None
                     else None
                 )
-                # Which cameras get a turn this poll. Ranking alone is fair
-                # only inside one window; the rotation is what bounds how long
-                # a camera waits when there are more cameras than slots.
-                turn_sources = self._turn_sources(pg_conn, cfg, available)
-                # Rows from a source that already holds all of its slots are
-                # rejected below, so a window sized by free capacity alone can
-                # be spent entirely on them while another camera's ready task
-                # waits out the poll. Each blocked source contributes at most
-                # `per_source_limit` ranked rows and the blocked sources
-                # together hold `max_workers - available` slots, so a window of
-                # `max_workers` leaves room for `available` usable rows.
-                #
-                # That bound holds only for SOURCE-CAP rejections. A row can
-                # also be dropped after the fetch because its footage is not
-                # covered yet; those rows are deferred (their next attempt is
-                # pushed forward) so they leave the candidate set rather than
-                # blocking it, but they can still cost this poll some capacity.
-                #
-                # It is also a per-poll bound, NOT a bound on how long a camera
-                # waits. Ranking is recomputed from scratch every poll and
-                # carries no memory of who was served last, so when there are
-                # more sources than window slots a camera with a deep backlog
-                # keeps supplying the oldest rank-1 row and quiet cameras are
-                # never selected. See the xfail in
-                # harness/tests/test_evidence_source_fairness.py -- closing it
-                # needs cross-poll rotation state.
-                fetch_limit = max(claim_limit, self.max_workers)
+                # A selected row can lose its claim race, fail preparation or
+                # become source-capped before reservation. Look past a bounded
+                # number of these rows in this poll, without increasing claims,
+                # execution slots or retrying indefinitely in the scheduler.
+                lookahead = min(
+                    64,
+                    max(
+                        0,
+                        int(getattr(
+                            cfg, "rolling_cache_materialization_candidate_lookahead", 4,
+                        )),
+                    ),
+                )
+                fetch_limit = max(claim_limit, self.max_workers) + lookahead
+                # Widen BOTH the source turns and candidate rows. Widening just
+                # the SQL LIMIT still leaves a one-slot runner on one camera.
+                # The candidate query retains this source order, and only an
+                # actual submission advances the durable rotation cursor.
+                turn_sources = self._turn_sources(pg_conn, cfg, fetch_limit)
                 with timings.measure("candidate_query"):
                     rows = _rolling_cache_candidate_tasks(
                         pg_conn,
@@ -13404,6 +13413,12 @@ def _rolling_cache_candidate_tasks(
                     et.pre_seconds, et.post_seconds, et.replay_window,
                     et.priority, e.payload, e.frame_uuid, e.created_at,
                     et.created_at AS task_created_at,
+                    CASE
+                        WHEN %(aging_seconds)s > 0
+                         AND et.materialization_ready_at <= now()
+                             - (%(aging_seconds)s * interval '1 second')
+                        THEN et.materialization_ready_at
+                    END AS aged_ready_at,
                     COALESCE(
                         et.materialization_next_attempt_at,
                         et.materialization_ready_at
@@ -13441,7 +13456,7 @@ def _rolling_cache_candidate_tasks(
                   AND eb.event_id IS NULL
             )
             """
-            + _FAIR_SOURCE_RANK_SQL
+            + _REMUX_SOURCE_RANK_SQL
             + """
             """,
             {
@@ -13450,6 +13465,12 @@ def _rolling_cache_candidate_tasks(
                 "sources_empty": not bool(cfg.rolling_cache_sources),
                 "turn_sources": list(turn_sources or ()),
                 "turn_sources_empty": not bool(turn_sources),
+                "aging_seconds": max(
+                    0.0,
+                    float(getattr(
+                        cfg, "rolling_cache_materialization_aging_seconds", 60.0,
+                    )),
+                ),
                 **_fair_source_rank_params(
                     cfg,
                     limit=limit,

@@ -79,6 +79,10 @@ class Config:
     # Number of spawn-based worker processes used for CPU-heavy evidence
     # bundle/sidecar construction. Zero preserves the legacy in-process path.
     materialization_finalizer_process_workers: int = 0
+    # Extra candidates to try when a selected task cannot be claimed/prepared.
+    rolling_cache_materialization_candidate_lookahead: int = 4
+    # Age promotion within a source's turn; zero keeps due-time ordering.
+    rolling_cache_materialization_aging_seconds: float = 60.0
 
 
 def load_config() -> Config:
@@ -249,6 +253,17 @@ def load_config() -> Config:
         rolling_cache_materialization_max_per_poll=max(
             1,
             int(os.getenv("ROLLING_CACHE_MATERIALIZATION_MAX_PER_POLL", "16")),
+        ),
+        rolling_cache_materialization_candidate_lookahead=min(
+            64,
+            max(
+                0,
+                int(os.getenv("ROLLING_CACHE_MATERIALIZATION_CANDIDATE_LOOKAHEAD", "4")),
+            ),
+        ),
+        rolling_cache_materialization_aging_seconds=max(
+            0.0,
+            float(os.getenv("ROLLING_CACHE_MATERIALIZATION_AGING_SECONDS", "60")),
         ),
         rolling_cache_materialization_workers=max(
             1,
