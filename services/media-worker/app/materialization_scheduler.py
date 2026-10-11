@@ -278,8 +278,8 @@ class CompletionSignal:
 
     Admission and completion draining run on scheduler ticks. Without this
     wake-up a finished job waited for the next timed tick, which capped a
-    one-worker remux lane at one clip per rolling tick (two when a remux
-    crossed a tick boundary) however fast the remux itself was.
+    one-worker remux lane at one clip per rolling tick (or two ticks per clip
+    when a remux crossed a tick boundary), even if it finished between ticks.
     """
 
     def __init__(self) -> None:
@@ -327,13 +327,16 @@ def rolling_poll_after_wake(
     now: float,
     enabled: bool,
 ) -> float:
-    """Run rolling admission right away when a remux slot was just freed.
+    """Recheck rolling admission when a lane or shared permit was freed.
 
-    Finalizer and image completions are drained on every tick, so only a
-    remux completion needs the rolling (remux) admission pulled forward.
+    Image and finalizer work also hold the global WIP budget and per-source
+    permits. An idle remux lane can have been blocked by either limit; merely
+    waking completion draining leaves it idle until the next rolling poll.
+    Keep the timed recovery/general polls unchanged and retain normal
+    admission checks and priorities on the newly due rolling poll.
     """
 
-    if enabled and "remux" in completed_lanes:
+    if enabled and completed_lanes.intersection({"remux", "image", "finalizer"}):
         return min(next_rolling_poll_at, now)
     return next_rolling_poll_at
 

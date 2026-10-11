@@ -5,7 +5,7 @@ rolling tick and a one-worker remux lane, a finished remux waited for the next
 tick before the next clip could start, so the lane delivered at most one clip
 per tick (two ticks when a remux crossed a tick boundary). The uos157 60-source
 hour measured ~0.75-0.85 clips/s against 0.82-0.86 clips/s of demand, and the
-evidence backlog grew without bound. See
+evidence backlog grew through the middle of the hour. See
 docs/midterm_evidence_remux_wake_2026-10-11.md.
 """
 
@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -170,10 +171,15 @@ def test_remux_completion_pulls_the_next_rolling_admission_forward() -> None:
     assert worker.rolling_poll_after_wake(
         100.9, frozenset({"remux"}), now=now, enabled=True
     ) == pytest.approx(now)
-    # Other lanes are drained every tick already; they do not force admission.
+    # Other lanes release shared WIP/source permits needed by rolling work.
     assert worker.rolling_poll_after_wake(
         100.9, frozenset({"finalizer", "image"}), now=now, enabled=True
-    ) == pytest.approx(100.9)
+    ) == pytest.approx(now)
+    # Empty/unknown notifications do not create new rolling work or spin.
+    for lanes in (frozenset(), frozenset({"unknown"})):
+        assert worker.rolling_poll_after_wake(
+            100.9, lanes, now=now, enabled=True
+        ) == pytest.approx(100.9)
     # An admission already due is never pushed later.
     assert worker.rolling_poll_after_wake(
         99.5, frozenset({"remux"}), now=now, enabled=True
@@ -251,12 +257,127 @@ def test_one_worker_lane_is_no_longer_capped_at_one_job_per_poll() -> None:
     assert woken < fixed_tick / 2
 
 
-def test_pressure_runner_exposes_the_completion_wake_ab_switch() -> None:
+@pytest.mark.parametrize("completed_lane", ["image", "finalizer"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_shared_budget_release_refills_an_idle_remux_lane(
+    completed_lane: str, enabled: bool
+) -> None:
+    resources = _resources_module()
+    runtime = resources.MaterializationResources(
+        database_url="postgresql://unused", max_active=4, remux_workers=1
+    )
+    release = Event()
+    # Admit images before filling the reserved non-image capacity.
+    completing = runtime.work_budget.try_acquire(completed_lane, owner="finishing")
+    permits = [
+        runtime.work_budget.try_acquire("finalizer", owner=f"busy-{i}")
+        for i in range(3)
+    ]
+    refill = None
+    try:
+        assert all(permits) and completing is not None
+        assert runtime.work_budget.try_acquire("remux", owner="waiting") is None
+        assert runtime.remux_lane.snapshot()["reserved"] == 0
+        lane = getattr(runtime, f"{completed_lane}_lane")
+        reservation = lane.try_reserve()
+        assert reservation is not None
+
+        def finish() -> None:
+            try:
+                assert release.wait(2)
+            finally:
+                # Real image/finalizer jobs release the shared WIP permit
+                # before their Future is marked done and emits the wake.
+                completing.release()
+
+        future = reservation.submit(finish)
+        release.set()
+        lanes = runtime.completion_signal.wait(2)
+        assert lanes == frozenset({completed_lane})
+        future.result(timeout=2)
+        assert runtime.work_budget.snapshot()["active"] == 3
+
+        # The rolling tick was recently attempted while WIP was full. The
+        # remux lane is idle now, but only a non-remux job completed.
+        now = time.monotonic()
+        deadline = now + 60.0
+        next_poll = resources.rolling_poll_after_wake(
+            deadline, lanes, now=now, enabled=enabled
+        )
+        if enabled:
+            assert next_poll <= now
+            refill = runtime.work_budget.try_acquire("remux", owner="waiting")
+            assert refill is not None
+        else:
+            assert next_poll == deadline
+        assert runtime.completion_signal.wait(0) == frozenset()
+    finally:
+        release.set()
+        runtime.close(wait=True)
+        for permit in [*permits, completing, refill]:
+            if permit is not None:
+                permit.release()
+
+
+def _pressure_module():
     spec = importlib.util.spec_from_file_location("pressure60_wake", PRESSURE_SCRIPT)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     sys.modules["pressure60_wake"] = module
     spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("original,requested", [("false", "true"), ("true", "false")])
+def test_pressure_completion_wake_is_verified_and_restored(
+    monkeypatch, tmp_path: Path, original: str, requested: str
+) -> None:
+    module = _pressure_module()
+    key = "MEDIA_WORKER_COMPLETION_WAKE_ENABLED"
+    container_env = {key: original}
+    monkeypatch.setattr(module, "docker_container_env", lambda _name: dict(container_env))
+    before = module.media_worker_rolling_cache_env_snapshot()
+    applied = []
+
+    def recreate(_command, log_path, *, env):
+        # Emulate Docker applying the generated override, while keeping the
+        # real snapshot, verification and restoration code under test.
+        override = module.yaml.safe_load(log_path.with_suffix(".override.yml").read_text())
+        values = override["services"]["media-worker"]["environment"]
+        container_env.update(values)
+        applied.append(values)
+
+    monkeypatch.setattr(module, "run", recreate)
+    cfg = SimpleNamespace(artifact_dir=tmp_path, env_file="unused", compose_file="unused")
+    changed = module.configure_media_worker_rolling_cache(
+        cfg, values={key: requested}, artifact_name="apply.log"
+    )
+    assert changed["observed"][key] == requested
+    restored = module.configure_media_worker_rolling_cache(
+        cfg, values=before, artifact_name="restore.log"
+    )
+    assert restored["observed"][key] == original
+    assert applied[0][key] == requested and applied[1][key] == original
+
+
+@pytest.mark.parametrize("requested", ["true", "false"])
+def test_pressure_completion_wake_rejects_an_unapplied_override(
+    monkeypatch, tmp_path: Path, requested: str
+) -> None:
+    module = _pressure_module()
+    key = "MEDIA_WORKER_COMPLETION_WAKE_ENABLED"
+    observed = "false" if requested == "true" else "true"
+    monkeypatch.setattr(module, "docker_container_env", lambda _name: {key: observed})
+    monkeypatch.setattr(module, "run", lambda *_args, **_kwargs: None)
+    cfg = SimpleNamespace(artifact_dir=tmp_path, env_file="unused", compose_file="unused")
+    with pytest.raises(RuntimeError, match=f"{key} was not applied"):
+        module.configure_media_worker_rolling_cache(
+            cfg, values={key: requested}, artifact_name="mismatch.log"
+        )
+
+
+def test_pressure_runner_exposes_the_completion_wake_ab_switch() -> None:
+    module = _pressure_module()
 
     assert module.PressureConfig.__dataclass_fields__[
         "media_worker_completion_wake"

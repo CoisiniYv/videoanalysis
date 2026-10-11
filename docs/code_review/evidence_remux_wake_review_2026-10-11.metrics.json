@@ -1,0 +1,79 @@
+{
+  "observed_at_seoul": "2026-10-11T09:09:28.230589+09:00",
+  "source": "/data/video-analytics/artifacts/pressure60_isolated_guard_t4_4fps_1h_20261011/pressure_diagnostics.json",
+  "scope": "The harness log-summary capture includes warmup and postfill; it is not a formal-window-only percentile.",
+  "metrics": {
+    "media_ready_to_remux_claim_ms": {
+      "status": "measured",
+      "count": 2996,
+      "min": 75.0,
+      "p50": 88192.0,
+      "p95": 245492.0,
+      "p99": 268254.6,
+      "max": 285463.0
+    },
+    "media_remux_ms": {
+      "status": "measured",
+      "count": 2996,
+      "min": 249.0,
+      "p50": 615.0,
+      "p95": 856.0,
+      "p99": 1029.1,
+      "max": 1942.0
+    },
+    "media_remux_exec_ms": {
+      "status": "measured",
+      "count": 2996,
+      "min": 249.0,
+      "p50": 615.0,
+      "p95": 856.0,
+      "p99": 1029.1,
+      "max": 1942.0
+    },
+    "media_remux_total_ms": {
+      "status": "measured",
+      "count": 2996,
+      "min": 268.0,
+      "p50": 838.0,
+      "p95": 1104.25,
+      "p99": 1320.5,
+      "max": 2379.0
+    },
+    "media_finalizer_pool_wait_ms": {
+      "status": "measured",
+      "count": 2996,
+      "min": 0.0,
+      "p50": 0.0,
+      "p95": 1.0,
+      "p99": 5.0,
+      "max": 14.0
+    },
+    "media_finalizer_lane_service_ms": {
+      "status": "measured",
+      "count": 2996,
+      "min": 677.0,
+      "p50": 1431.0,
+      "p95": 1922.5,
+      "p99": 2558.1,
+      "max": 6596.0
+    },
+    "media_scheduler_tick_duration_ms": {
+      "status": "measured",
+      "count": 6485,
+      "min": 1.0,
+      "p50": 17.0,
+      "p95": 99.0,
+      "p99": 129.16,
+      "max": 4456.0
+    },
+    "media_scheduler_tick_gap_ms": {
+      "status": "measured",
+      "count": 6484,
+      "min": 102.0,
+      "p50": 815.0,
+      "p95": 1001.0,
+      "p99": 1010.0,
+      "max": 4561.0
+    }
+  }
+}
