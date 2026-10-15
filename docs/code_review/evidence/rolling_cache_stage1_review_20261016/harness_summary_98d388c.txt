@@ -1,0 +1,1 @@
+12 failed, 1779 passed, 73 skipped, 1 warning, 7 errors in 58.00s
